@@ -348,6 +348,24 @@ def _gsc_outcome(
     )
 
 
+def resolve_gsc_site_url(settings: Settings) -> str:
+    """Configured site, or the one Composio reports for the connected account.
+
+    `MIA_GSC_SITE_URL` always wins when set. When it is blank, ask Composio rather than
+    running with an empty property. Imported lazily because `composio_discovery` imports
+    this module for the pinned toolkit version.
+    """
+    configured = settings.gsc_site_url.strip()
+    if configured:
+        return configured
+    from app.integrations.composio_discovery import build_discovery, cached_resolve
+
+    discovery = build_discovery(settings)
+    if discovery is None:
+        return ""
+    return cached_resolve("gsc_site_url", discovery.search_console_site)
+
+
 def build_search_console_port(settings: Settings) -> SearchConsolePort:
     api_key = settings.composio_api_key.strip()
     user_id = settings.composio_user_id.strip()
@@ -355,7 +373,7 @@ def build_search_console_port(settings: Settings) -> SearchConsolePort:
         return ComposioSearchConsolePort(
             api_key=api_key,
             user_id=user_id,
-            site_url=settings.gsc_site_url.strip(),
+            site_url=resolve_gsc_site_url(settings),
         )
     return DisabledSearchConsolePort()
 

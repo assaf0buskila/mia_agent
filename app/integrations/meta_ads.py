@@ -783,10 +783,27 @@ def enrich_analytics_ack(
         )
 
 
+def resolve_meta_ads_account_id(settings: Settings) -> str:
+    """Configured ad account, or the one Composio reports. Env var always wins.
+
+    Read-only: this account id only ever reaches `METAADS_GET_INSIGHTS`. Meta writes stay
+    R4 approval-gated regardless of how the id was resolved.
+    """
+    configured = settings.meta_ads_account_id.strip()
+    if configured:
+        return configured
+    from app.integrations.composio_discovery import build_discovery, cached_resolve
+
+    discovery = build_discovery(settings)
+    if discovery is None:
+        return ""
+    return cached_resolve("meta_ads_account_id", discovery.meta_ad_account)
+
+
 def build_meta_ads_port(settings: Settings) -> MetaAdsPort:
     api_key = settings.composio_api_key.strip()
     user_id = settings.composio_user_id.strip()
-    account_id = settings.meta_ads_account_id.strip()
+    account_id = resolve_meta_ads_account_id(settings)
     if api_key and user_id and account_id:
         return ComposioMetaAdsPort(
             api_key=api_key,

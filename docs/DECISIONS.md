@@ -602,3 +602,21 @@ Mia answers freely, chains several reads in one turn, and remembers across conve
 
 **Alternatives considered**
 Hybrid router keeping the classifier as a fast path — rejected; Assaf picked A1, and the classifier's single-task ceiling was the actual complaint. pgvector with an HNSW index — rejected at this scale; pgvector documents exact search as perfect-recall, and its own IVFFlat sizing rule yields a degenerate `lists=3` here. Routing raw audio to an audio-in chat model instead of transcription — rejected; roughly an order of magnitude more expensive per minute and it loses the documented Hebrew language/keyword hints. MarkdownV2 for Telegram — rejected; 18 escape characters under three context-dependent rules, and every id, email and decimal Mia interpolates is a landmine there. Firecrawl crawl as the primary knowledge source — rejected; the site already publishes `llms.txt`/`llms-full.txt`/`pricing.md`, which is cleaner, free, and owner-maintained. Firecrawl stays as the fallback.
+
+### ADR-027 Composio resolves read resource ids instead of env vars
+
+- **Status:** accepted
+- **Date:** 2026-08-24
+- **Assaf:** ADOPT (chat: "i want more thing be handle by composio no need env")
+
+**Context**
+Composio already holds an authenticated connection per toolkit, but the *resource id* — which Search Console property, which GA4 property, which ad account — was still pasted into `mia/prod` by hand. That is the piece most likely to be wrong or stale, and `owner_integrations` on `/health` reported exactly these as missing. Research against the Composio docs confirmed a zero-argument list action for each: `GOOGLE_SEARCH_CONSOLE_LIST_SITES`, `GOOGLE_ANALYTICS_LIST_ACCOUNT_SUMMARIES`, `METAADS_GET_AD_ACCOUNTS`. Composio publishes only the `{data, error, successful}` envelope; the inner provider payload is undocumented.
+
+**Decision**
+Add `app/integrations/composio_discovery.py`. When the env var is blank and `MIA_COMPOSIO_DISCOVERY=true`, resolve the id from Composio, cached once per process. An explicit env var always wins. Parsing is shape-tolerant: documented provider field names first, then a recursive scan for values matching the id pattern, because the inner shape is unverified. `scripts/probe_composio_discovery.py` prints what a live account returns so the parsers can be tightened without exposing the API key.
+
+**Consequences**
+Three env vars become optional. Discovery is opt-in and defaults false, so nothing changes for the running deployment and no network call enters the per-request port-construction path unless enabled. Ambiguity is never resolved by guessing: one candidate resolves, several leave the port disabled — except Search Console, where http/https/www/domain variants of the *configured* website collapse to the domain property, since that is one site rather than a real choice. Failures are swallowed to empty so discovery can never break port construction.
+
+**Alternatives considered**
+Read the resource id from the Connected Accounts API — rejected; that record carries auth material and scopes, never the user's chosen property, so it can only serve as an `ACTIVE` pre-flight gate (implemented as `connected_toolkits()`). Auto-discover the Sheets spreadsheet — rejected; it is a write target and `GOOGLESHEETS_SEARCH_SPREADSHEETS` matches by name, so a near-miss writes to the wrong document. Drop `MIA_LINKEDIN_ACCESS_TOKEN` — impossible; the Composio LinkedIn toolkit exposes organization stats only, and ADR-015 made member analytics direct REST for exactly that reason. Drop `MIA_FIRECRAWL_API_KEY` by adopting Composio's `FIRECRAWL_*` toolkit — pointless, it takes your own key; the `NO_AUTH` `COMPOSIO_SEARCH_*` toolkit would remove the key but changes crawl capability, so it stays a separate product decision.

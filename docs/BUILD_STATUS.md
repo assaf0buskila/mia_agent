@@ -187,3 +187,40 @@ Verified: `uv run ruff check app tests` clean. `uv run pytest` — 112 new tests
 (`test_story_calendar_no_double_book`,
 `test_website_post_message_enriches_seeded_offer_meeting`) are date-dependent and
 pre-existing — they fail on the baseline commit too.
+
+## Sales-ladder fix + Composio resource discovery (2026-08-24)
+
+Not deployed. Working tree only.
+
+**Defect found by probing the live sales flow and fixed.** After Mia offered the WhatsApp
+handoff, the ladder fell back to an unmet discovery rung — so the prospect said "כן נוח לי"
+and got a reflection question instead of the handoff. `website_whatsapp_continuation_ready`
+returns false once `whatsapp_handoff_offered` is set, and nothing carried the offer forward.
+Accepting the offer now sets `owner_required`, which routes to `HANDOFF` with no schema
+change. Three guards keep the broad affirmative tokens honest: a detected objection, a
+conjunction ("but", "אבל"), and confirmation idioms ("that's right", "נכון") — the last
+because "ok that's right" answers a *reflection*, and reading its "ok" as consent derailed
+the clinic funnel one rung before the meeting offer. `website_handoff_v1` turn 4 expected
+`reflect` and was corrected to `handoff`: it had encoded the defect as the expectation.
+
+**Investigated and NOT a defect:** a price question sets `owner_required` and hands off, so
+`ObjectionKind.PRICE_QUESTION` is unreachable on the website path. That is deliberate —
+there is no public price list and Mia must never quote a number — and it is pinned by
+`test_money_complaint_human_and_promise_hand_off`. Now also pinned from the other side in
+`test_sales_ladder_defects.py` so nobody "fixes" it. BUILD_STATUS previously implied the
+PRICE_QUESTION copy was live on this path; it is not.
+
+**Composio resource discovery (ADR-027).** `MIA_GSC_SITE_URL`, `MIA_GA4_PROPERTY_ID` and
+`MIA_META_ADS_ACCOUNT_ID` become optional: with `MIA_COMPOSIO_DISCOVERY=true` Mia asks
+Composio which site / property / ad account the connected account owns, cached once per
+process, env var always winning. Off by default — ports are built per request, so enabling
+it costs one network call per process on first use. Verify with
+`uv run python scripts/probe_composio_discovery.py`, which prints the live response shape
+without printing the key. `MIA_LINKEDIN_ACCESS_TOKEN` and `MIA_SHEETS_SPREADSHEET_ID`
+cannot be removed — see ADR-027 for why.
+
+Verified: `uv run ruff check app tests scripts` clean. `uv run pytest` **2231 total, 2227
+passed**. The 4 failures are pre-existing: three date-dependent calendar fixtures (they fail
+on the baseline commit, and a third joined them when the date rolled to 2026-08-24) and
+`test_env_example_documents_settings_and_adapter_map`, which stays red until
+`docs/brain.env.example` is appended to `.env.example`.

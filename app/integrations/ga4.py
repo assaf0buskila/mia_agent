@@ -359,6 +359,15 @@ def build_ga4_port(settings: Settings) -> Ga4Port:
     if explicit and normalize_ga4_property_id(explicit) is None:
         return DisabledGa4Port()
     property_id = normalize_ga4_property_id(explicit) or ""
+    if not property_id:
+        # No property configured: ask Composio which one the connected account owns.
+        # Lazy import — composio_discovery imports this module for the pinned version.
+        from app.integrations.composio_discovery import build_discovery, cached_resolve
+
+        discovery = build_discovery(settings)
+        if discovery is not None:
+            discovered = cached_resolve("ga4_property_id", discovery.ga4_property)
+            property_id = normalize_ga4_property_id(discovered) or ""
     return ComposioGa4Port(
         api_key=api_key,
         user_id=user_id,

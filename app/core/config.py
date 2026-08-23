@@ -56,6 +56,11 @@ class Settings(BaseSettings):
     composio_api_key: str = Field(default="")
     composio_user_id: str = Field(default="")
     composio_webhook_secret: str = Field(default="")
+    # Ask Composio for resource ids (GSC site, GA4 property, Meta ad account) when the
+    # matching env var is blank. Default false: ports are built per request, so this adds
+    # one network call per process on first use. Verify with
+    # `scripts/probe_composio_discovery.py`, then turn it on.
+    composio_discovery: bool = False
     openai_api_key: str = Field(default="")
     openai_transcribe_model: str = Field(default="gpt-transcribe")
     openai_transcribe_fallback_model: str = Field(default="")
