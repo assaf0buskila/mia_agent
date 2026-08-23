@@ -174,3 +174,63 @@ def test_json_payload_shape_is_the_chat_completions_contract() -> None:
     LlmModelChain([_client("m", handler)]).complete(messages=_messages())
     assert captured["model"] == "m"
     assert captured["messages"] == _messages()
+
+
+# --------------------------------------------------- cross-provider fallback
+
+
+def _settings_with_both() -> object:
+    settings = get_settings()
+    settings.openai_api_key = "k"
+    settings.gemini_api_key = "g"
+    settings.owner_agent_model = "openai-primary"
+    settings.owner_agent_fallback_model = "openai-secondary"
+    settings.owner_agent_gemini_model = "gemini-3.7-flash"
+    settings.extraction_model = "openai-extract"
+    return settings
+
+
+def test_gemini_is_the_last_resort_in_the_agent_chain() -> None:
+    """An OpenAI-side block on every model must not kill the console when Gemini works."""
+    chain = build_agent_client(_settings_with_both())
+    assert chain.models == ("openai-primary", "openai-secondary", "gemini-3.7-flash")
+
+
+def test_extraction_also_falls_over_to_gemini() -> None:
+    from app.domain.owner_brain import build_extraction_client
+
+    chain = build_extraction_client(_settings_with_both())
+    assert chain.models == ("openai-extract", "gemini-3.7-flash")
+
+
+def test_gemini_is_skipped_without_a_key_or_a_model() -> None:
+    settings = _settings_with_both()
+    settings.gemini_api_key = ""
+    assert build_agent_client(settings).models == ("openai-primary", "openai-secondary")
+    settings = _settings_with_both()
+    settings.owner_agent_gemini_model = ""
+    assert build_agent_client(settings).models == ("openai-primary", "openai-secondary")
+
+
+def test_gemini_client_targets_the_openai_compat_endpoint() -> None:
+    """The compat endpoint takes the identical nested `tools` shape, so the loop is unchanged."""
+    from app.domain.owner_brain import _gemini_clients
+    from app.integrations.llm_client import GEMINI_CHAT_URL
+
+    settings = _settings_with_both()
+    clients = _gemini_clients(settings, settings.owner_agent_gemini_model)
+    assert len(clients) == 1
+    assert clients[0]._url == GEMINI_CHAT_URL
+    assert clients[0].model == "gemini-3.7-flash"
+
+
+def test_the_chain_reaches_gemini_when_every_openai_model_is_blocked() -> None:
+    chain = LlmModelChain(
+        [
+            _client("openai-primary", _status(404)),
+            _client("openai-secondary", _status(404)),
+            _client("gemini-3.7-flash", _ok("שלום")),
+        ]
+    )
+    assert chain.complete(messages=_messages()).text == "שלום"
+    assert chain.last_model == "gemini-3.7-flash"

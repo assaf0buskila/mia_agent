@@ -198,6 +198,31 @@ is sent to a customer. Left as a deliberate decision for Assaf.
 
 ---
 
+## 5b. Gemini is now the cross-provider last resort
+
+**Gap found while reviewing:** Gemini was wired for website sales (`sales_reply.py`), the old
+owner paraphraser (`owner_reply.py`) and embeddings — but **not** for the new agent loop or
+memory extraction. `GEMINI_CHAT_URL` sat in `llm_client.py` unused. So an OpenAI-side block on
+every configured model killed the console even though Gemini is connected and demonstrably
+working for sales.
+
+Both chains now end in Gemini:
+
+```
+owner agent : MIA_OWNER_AGENT_MODEL -> MIA_OWNER_AGENT_FALLBACK_MODEL -> MIA_OWNER_AGENT_GEMINI_MODEL
+extraction  : MIA_EXTRACTION_MODEL  -> MIA_OWNER_AGENT_GEMINI_MODEL
+```
+
+Gemini's OpenAI-compat endpoint documents the **identical nested `tools` shape**, so the tool
+loop runs unchanged. It is last on purpose: the compat layer silently ignores parameters it
+does not support, making it a safety net rather than a peer. For extraction specifically,
+raw `response_format: json_schema` is **not documented** on the compat layer — if it is
+ignored, `parse_extraction` validates the payload and returns nothing, so the degradation is
+"no memory written", never "junk memory written".
+
+Set `MIA_OWNER_AGENT_GEMINI_MODEL=gemini-3.7-flash` (suggested). Blank disables it; no other
+behaviour changes.
+
 ## 6. What is NOT fixed, and why
 
 - **Composio tools returning real data** — cannot be verified until the agent actually runs
@@ -214,10 +239,15 @@ is sent to a customer. Left as a deliberate decision for Assaf.
 
 ## 7. Deploy steps
 
+0. **Append `MIA_OWNER_AGENT_GEMINI_MODEL` to `.env.example`** — I cannot edit that file
+   (workspace blocks `.env*`). `test_env_example_documents_settings_and_adapter_map` fails
+   until this is done; it is the ONLY failing test. The documented block is in
+   `docs/brain.env.example`.
 1. **Set the models** (ECS task definition → plain `environment`, not Secrets Manager):
    ```
    MIA_OWNER_AGENT_MODEL          = gpt-5.6-luna
    MIA_OWNER_AGENT_FALLBACK_MODEL = gpt-5.6-terra
+   MIA_OWNER_AGENT_GEMINI_MODEL   = gemini-3.7-flash
    ```
 2. **Run the migration** as a one-off task **before** the new image serves traffic:
    `migrations/20260824_lead_sales_state_headline.sql` adds
@@ -248,4 +278,7 @@ display exactly as before; new website conversations get one on the first substa
 | `tests/unit/test_lead_label.py` (18) | business description → label; filler → none; phones/emails/prices/URLs/digits never survive; length cap; full lead id preserved |
 | `tests/unit/test_website_handoff_brief.py` (11, existing) | markers and no-token/no-price guarantees still hold against the new HTML layout |
 
-Full suite: **2268 passed, 0 failed.**
+| `tests/unit/test_owner_agent_fallback.py` (+5) | Gemini is last in both chains; skipped without key/model; targets the OpenAI-compat URL; chain reaches Gemini when every OpenAI model is blocked |
+
+Full suite: **2273 total, 2272 passed.** The single failure is
+`test_env_example_documents_settings_and_adapter_map`, which stays red until step 0 above.

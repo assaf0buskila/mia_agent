@@ -73,6 +73,12 @@ class Settings(BaseSettings):
     # Recommended values are documented in .env.example.
     owner_agent_model: str = Field(default="")
     owner_agent_fallback_model: str = Field(default="")
+    # Last resort for the owner agent and memory extraction: the Gemini
+    # OpenAI-compatibility endpoint, which documents the same nested `tools` shape, so the
+    # tool loop works unchanged. Without this, an OpenAI-side block on every configured
+    # model drops Telegram back to the keyword classifier even though Gemini is connected
+    # and already serving website sales.
+    owner_agent_gemini_model: str = Field(default="")
     owner_agent_max_steps: int = Field(default=4)
     extraction_model: str = Field(default="")
     embedding_provider: str = Field(default="openai")

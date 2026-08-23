@@ -32,7 +32,12 @@ from app.integrations.ga4 import Ga4Port
 from app.integrations.instagram_insights import InstagramInsightsPort
 from app.integrations.linkedin import LinkedInPort
 from app.integrations.linkedin_analytics import LinkedInAnalyticsPort
-from app.integrations.llm_client import OPENAI_CHAT_URL, LlmClient, LlmModelChain
+from app.integrations.llm_client import (
+    GEMINI_CHAT_URL,
+    OPENAI_CHAT_URL,
+    LlmClient,
+    LlmModelChain,
+)
 from app.integrations.meta_ads import MetaAdsPort
 from app.integrations.research import ResearchPort
 from app.integrations.search_console import SearchConsolePort
@@ -82,20 +87,47 @@ def build_agent_client(settings: Settings) -> LlmModelChain:
     to the keyword classifier instead of trying the secondary.
     """
     chain = model_chain(settings.owner_agent_model, settings.owner_agent_fallback_model)
-    return LlmModelChain(
-        [
-            LlmClient(api_key=settings.openai_api_key, model=name, url=OPENAI_CHAT_URL)
-            for name in chain
-        ]
-    )
+    clients = [
+        LlmClient(api_key=settings.openai_api_key, model=name, url=OPENAI_CHAT_URL)
+        for name in chain
+    ]
+    clients.extend(_gemini_clients(settings, settings.owner_agent_gemini_model))
+    return LlmModelChain(clients)
 
 
-def build_extraction_client(settings: Settings) -> LlmClient:
-    return LlmClient(
-        api_key=settings.openai_api_key,
-        model=settings.extraction_model,
-        url=OPENAI_CHAT_URL,
-    )
+def _gemini_clients(settings: Settings, model: str) -> list[LlmClient]:
+    """Gemini OpenAI-compat as the cross-provider last resort.
+
+    Same `tools` wire shape as Chat Completions, so the agent loop needs no changes. It is
+    last on purpose: the compatibility layer silently ignores parameters it does not
+    support, so it is a safety net for an OpenAI-side outage or model block, not a peer.
+    """
+    key = settings.gemini_api_key.strip()
+    name = model.strip()
+    if not key or not name:
+        return []
+    return [LlmClient(api_key=key, model=name, url=GEMINI_CHAT_URL)]
+
+
+def build_extraction_client(settings: Settings) -> LlmModelChain:
+    """Extraction with the same OpenAI-then-Gemini shape as the agent.
+
+    Gemini's compat layer does not document raw `response_format: json_schema`, so a
+    silently-ignored schema is possible. `parse_extraction` already validates the payload
+    and returns nothing on a mismatch, which is the correct degradation: no memory written
+    rather than junk memory written.
+    """
+    clients = []
+    if settings.extraction_model.strip():
+        clients.append(
+            LlmClient(
+                api_key=settings.openai_api_key,
+                model=settings.extraction_model.strip(),
+                url=OPENAI_CHAT_URL,
+            )
+        )
+    clients.extend(_gemini_clients(settings, settings.owner_agent_gemini_model))
+    return LlmModelChain(clients)
 
 
 def _weights(settings: Settings) -> MemoryScoreWeights:
