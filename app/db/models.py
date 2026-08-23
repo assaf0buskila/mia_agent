@@ -1,4 +1,14 @@
-from sqlalchemy import Boolean, ForeignKey, Index, Integer, String, Text, UniqueConstraint, text
+from sqlalchemy import (
+    Boolean,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -593,3 +603,132 @@ class ConversationControlRow(Base):
     source: Mapped[str] = mapped_column(String(64), default="")
     mia_introduced: Mapped[bool] = mapped_column(Boolean, default=False)
     lead_id: Mapped[str] = mapped_column(String(40), default="")
+
+
+# ---------------------------------------------------------------------------
+# Brain: long-term memory, ingested knowledge, entities, gaps.
+# Portable column types only (String/Text/Integer/Float) and ISO-8601 timestamp
+# strings, so every table below creates identically on SQLite and PostgreSQL and
+# needs no POSTGRES_ONLY entry. Embeddings live in a TEXT column as base64
+# float32 (app/brain/vectors.py), never a dialect-specific vector type.
+# ---------------------------------------------------------------------------
+
+
+class MemoryRow(Base):
+    __tablename__ = "brain_memories"
+    __table_args__ = (
+        Index("ix_brain_memories_live", "subject", "status", "kind"),
+        Index("ix_brain_memories_category", "category", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    memory_id: Mapped[str] = mapped_column(String(40), unique=True, index=True)
+    subject: Mapped[str] = mapped_column(String(64), default="owner", index=True)
+    kind: Mapped[str] = mapped_column(String(16), index=True)
+    category: Mapped[str] = mapped_column(String(32), default="other")
+    text: Mapped[str] = mapped_column(Text)
+    importance: Mapped[int] = mapped_column(Integer, default=1)
+    confidence: Mapped[float] = mapped_column(Float, default=1.0)
+    status: Mapped[str] = mapped_column(String(16), default="active", index=True)
+    source: Mapped[str] = mapped_column(String(32), default="telegram")
+    source_ref: Mapped[str] = mapped_column(String(255), default="")
+    occurred_at: Mapped[str] = mapped_column(String(64), default="")
+    created_at: Mapped[str] = mapped_column(String(64), default="")
+    updated_at: Mapped[str] = mapped_column(String(64), default="")
+    last_used_at: Mapped[str] = mapped_column(String(64), default="")
+    use_count: Mapped[int] = mapped_column(Integer, default=0)
+    superseded_by: Mapped[str] = mapped_column(String(40), default="")
+    entities_json: Mapped[str] = mapped_column(Text, default="[]")
+    embedding: Mapped[str] = mapped_column(Text, default="")
+    embedding_model: Mapped[str] = mapped_column(String(64), default="")
+    embedding_dim: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class KnowledgeSourceRow(Base):
+    __tablename__ = "brain_knowledge_sources"
+    __table_args__ = (
+        UniqueConstraint("source_id", name="uq_brain_knowledge_source"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    source_id: Mapped[str] = mapped_column(String(64), index=True)
+    url: Mapped[str] = mapped_column(String(500), default="")
+    kind: Mapped[str] = mapped_column(String(32), default="")
+    content_hash: Mapped[str] = mapped_column(String(64), default="")
+    fetched_at: Mapped[str] = mapped_column(String(64), default="")
+    chunk_count: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(String(16), default="active")
+    error: Mapped[str] = mapped_column(String(255), default="")
+
+
+class KnowledgeChunkRow(Base):
+    __tablename__ = "brain_knowledge_chunks"
+    __table_args__ = (
+        UniqueConstraint("chunk_id", name="uq_brain_chunk_id"),
+        Index("ix_brain_chunks_source", "source_id", "status"),
+        Index("ix_brain_chunks_category", "category", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    chunk_id: Mapped[str] = mapped_column(String(64), index=True)
+    source_id: Mapped[str] = mapped_column(String(64), index=True)
+    category: Mapped[str] = mapped_column(String(32), default="other")
+    title: Mapped[str] = mapped_column(String(255), default="")
+    text: Mapped[str] = mapped_column(Text)
+    url: Mapped[str] = mapped_column(String(500), default="")
+    ordinal: Mapped[int] = mapped_column(Integer, default=0)
+    content_hash: Mapped[str] = mapped_column(String(64), default="")
+    fetched_at: Mapped[str] = mapped_column(String(64), default="")
+    status: Mapped[str] = mapped_column(String(16), default="active", index=True)
+    embedding: Mapped[str] = mapped_column(Text, default="")
+    embedding_model: Mapped[str] = mapped_column(String(64), default="")
+    embedding_dim: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class KnowledgeEntityRow(Base):
+    __tablename__ = "brain_entities"
+    __table_args__ = (
+        UniqueConstraint("entity_key", name="uq_brain_entity_key"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    entity_id: Mapped[str] = mapped_column(String(40), index=True)
+    entity_key: Mapped[str] = mapped_column(String(160), index=True)
+    kind: Mapped[str] = mapped_column(String(24), default="other")
+    name: Mapped[str] = mapped_column(String(160))
+    aliases_json: Mapped[str] = mapped_column(Text, default="[]")
+    summary: Mapped[str] = mapped_column(Text, default="")
+    mention_count: Mapped[int] = mapped_column(Integer, default=0)
+    first_seen_at: Mapped[str] = mapped_column(String(64), default="")
+    last_seen_at: Mapped[str] = mapped_column(String(64), default="")
+
+
+class MemoryEntityLinkRow(Base):
+    __tablename__ = "brain_memory_entities"
+    __table_args__ = (
+        UniqueConstraint("memory_id", "entity_key", name="uq_brain_memory_entity"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    memory_id: Mapped[str] = mapped_column(String(40), index=True)
+    entity_key: Mapped[str] = mapped_column(String(160), index=True)
+    created_at: Mapped[str] = mapped_column(String(64), default="")
+
+
+class KnowledgeGapRow(Base):
+    __tablename__ = "brain_knowledge_gaps"
+    __table_args__ = (
+        UniqueConstraint("gap_id", name="uq_brain_gap_id"),
+        Index("ix_brain_gaps_status", "status", "priority"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    gap_id: Mapped[str] = mapped_column(String(40), index=True)
+    topic: Mapped[str] = mapped_column(String(160), index=True)
+    question: Mapped[str] = mapped_column(Text)
+    category: Mapped[str] = mapped_column(String(32), default="other")
+    priority: Mapped[int] = mapped_column(Integer, default=1)
+    status: Mapped[str] = mapped_column(String(16), default="open")
+    asked_at: Mapped[str] = mapped_column(String(64), default="")
+    answered_at: Mapped[str] = mapped_column(String(64), default="")
+    created_at: Mapped[str] = mapped_column(String(64), default="")

@@ -1,0 +1,54 @@
+# האתר של אסף בוסקילה
+
+> האתר של אסף בוסקילה, Assaf Buskila. אסף הוא מהנדס פתרונות AI לעסקים קטנים בישראל. הוא בונה עובדים דיגיטליים: אוטומציות עסקיות, סוכני AI בוואטסאפ ובאתר, סוכן קולי בעברית שעונה לטלפון, אפליקציות ופיצ'רים פנימיים, וגם אתרים, דפי נחיתה וכרטיסי ביקור דיגיטליים. כל פרויקט מגיע עם חודש ליווי.
+
+## Main Content
+
+- Homepage: https://www.assafweb.com/
+- Markdown homepage for agents: https://www.assafweb.com/index.md
+- Scope policy: https://www.assafweb.com/pricing.md
+- Agent view: https://www.assafweb.com/agent.html
+- Agent manifest: https://www.assafweb.com/.well-known/agent.json
+- A2A card: https://www.assafweb.com/.well-known/agent-card.json
+- MCP discovery: https://www.assafweb.com/.well-known/mcp.json
+- Sitemap: https://www.assafweb.com/sitemap.xml
+- Schemamap: https://www.assafweb.com/schemamap.xml
+
+## Services
+
+- Business automations: lead follow-up, reminders and syncing between the systems a business already uses.
+- AI agent, a digital worker that answers, qualifies and sells 24/7 on WhatsApp and on the website.
+- Hebrew voice agent that answers the phone after hours, books appointments and sends WhatsApp summaries. A live demo runs on the homepage.
+- Apps and features: internal tools, dashboards and integrations built with Python, FastAPI and Supabase.
+- Websites and landing pages in Hebrew, the original craft, still offered with the same care.
+- Digital business card, a fast entry-level product.
+- Social media and AI content: branded posts, stories and visuals produced with AI at the pace the business needs.
+- Month of guidance after every launch, then further changes by agreed paid update.
+- Proof of depth: Assaf built MYstudio (https://mystudio.pics), a full AI content-generation platform with user accounts, payments and image-generation workflows.
+
+## Contact
+
+- WhatsApp: +972-52-339-3768
+- Email: assaf.buskila10@gmail.com
+- Instagram: https://www.instagram.com/assaf_buskila/
+- LinkedIn: https://www.linkedin.com/in/assaf-buskila-11ab7a347/
+
+## Full content
+
+- Full text version: https://www.assafweb.com/llms-full.txt
+
+## MCP
+
+No MCP server available for this site.
+
+## Agent Instructions
+
+This is a Hebrew-first RTL website for an independent Israeli AI solutions studio. The audience is small business owners in Israel who want a digital worker: automations, AI agents, a Hebrew voice agent, internal apps, or a website that turns attention into inquiries.
+
+Use the homepage JSON-LD, this file, and the scope policy as the authoritative sources. There is no public API, no MCP server and no self-serve signup.
+
+A live Hebrew voice-agent demo runs on the homepage in the #voice section. Agents and users can try it directly at https://www.assafweb.com/#voice.
+
+Do not quote fixed public package prices. Assaf recommends the right scope after a short direction call based on the business, audience, content, goal and timeline.
+
+To start a project, direct people to WhatsApp +972-52-339-3768 or email assaf.buskila10@gmail.com.

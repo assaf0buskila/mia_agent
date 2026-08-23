@@ -64,6 +64,25 @@ class Settings(BaseSettings):
     gemini_api_key: str = Field(default="")
     sales_gemini_model: str = Field(default="")
 
+    # Brain. Model ids stay config, never hard-coded (AGENTS.md build-time model policy).
+    # Recommended values are documented in .env.example.
+    owner_agent_model: str = Field(default="")
+    owner_agent_fallback_model: str = Field(default="")
+    owner_agent_max_steps: int = Field(default=4)
+    extraction_model: str = Field(default="")
+    embedding_provider: str = Field(default="openai")
+    embedding_model: str = Field(default="")
+    embedding_dim: int = Field(default=1536)
+    memory_enabled: bool = True
+    memory_write_enabled: bool = True
+    memory_max_context_chars: int = Field(default=4000)
+    memory_weight_relevance: float = Field(default=1.0)
+    memory_weight_recency: float = Field(default=0.5)
+    memory_weight_importance: float = Field(default=0.3)
+    knowledge_sources: str = Field(
+        default="llms-full.txt,llms.txt,pricing.md",
+    )
+
     whatsapp_verify_token: str = Field(default="")
     whatsapp_owner_phones: str = Field(default="")
     whatsapp_app_secret: str = Field(default="")
@@ -121,6 +140,36 @@ class Settings(BaseSettings):
     def sales_gemini_ready(self) -> bool:
         """True when Gemini fallback key + model id are set. Never returns secrets."""
         return bool(self.gemini_api_key.strip() and self.sales_gemini_model.strip())
+
+    def owner_agent_ready(self) -> bool:
+        """True when the owner tool-calling loop can run. Never returns secrets.
+
+        False keeps the deterministic keyword classifier as the owner path, which is how
+        the test suite and any key-less deployment run.
+        """
+        chain = model_chain(self.owner_agent_model, self.owner_agent_fallback_model)
+        return bool(self.openai_api_key.strip() and chain)
+
+    def embeddings_ready(self) -> bool:
+        """True when semantic retrieval is available. Never returns secrets."""
+        if not self.embedding_model.strip() or self.embedding_dim <= 0:
+            return False
+        if self.embedding_provider.strip().lower() == "gemini":
+            return bool(self.gemini_api_key.strip())
+        return bool(self.openai_api_key.strip())
+
+    def extraction_ready(self) -> bool:
+        """True when memory extraction/consolidation can run. Never returns secrets."""
+        if not self.memory_write_enabled or not self.extraction_model.strip():
+            return False
+        return bool(self.openai_api_key.strip() or self.gemini_api_key.strip())
+
+    def brain_ready(self) -> bool:
+        """True when the brain has any usable retrieval path (semantic or keyword)."""
+        return bool(self.memory_enabled)
+
+    def knowledge_source_list(self) -> list[str]:
+        return [item.strip() for item in self.knowledge_sources.split(",") if item.strip()]
 
     def composio_ready(self) -> bool:
         """True when Composio API key + user id are set. Never returns secrets or ids."""
