@@ -228,6 +228,7 @@ def sales_from_row(row: SalesStateRow) -> SalesState:
         discovery_turns=int(row.discovery_turns or 0),
         asked_actions=_asked_actions_from_row(row.asked_actions),
         explicit_buying_intent=bool(row.explicit_buying_intent),
+        headline=row.headline or "",
     )
 
 
@@ -531,6 +532,7 @@ class LeadStore:
             ][-MAX_ASKED_ACTIONS:]
         )
         row.explicit_buying_intent = sales.explicit_buying_intent
+        row.headline = (sales.headline or "")[:120]
         self.session.flush()
 
     def is_webhook_duplicate(self, *, provider: str, provider_event_id: str) -> bool:

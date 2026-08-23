@@ -5,7 +5,7 @@ from uuid import uuid4
 from app.brain.store import BrainStore
 from app.core.config import get_settings
 from app.core.demo import demo_mode_active
-from app.core.logging import log_comm
+from app.core.logging import log_comm, log_owner_agent
 from app.core.outbound import send_inbound_reply
 from app.db.store import LeadStore
 from app.domain.ai_runs import elapsed_ms, persist_ai_run
@@ -879,6 +879,16 @@ async def process_inbound_texts(
                 research=research_port,
                 meta_ads=meta_ads_port,
                 source_ref=f"{provider}:{item['id']}",
+            )
+            # One line per owner turn saying whether the agent answered and, when it did
+            # not, exactly why. Without this a model the account cannot call is
+            # indistinguishable from normal operation.
+            log_owner_agent(
+                used_agent=brain_result.used_agent,
+                model=brain_result.model,
+                task_type=decision.task_type.value,
+                tools_used=brain_result.tools_used,
+                reason=brain_result.fallback_reason,
             )
             if brain_result.used_agent:
                 ack_text = brain_result.text

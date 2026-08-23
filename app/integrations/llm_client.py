@@ -222,6 +222,71 @@ class LlmClient:
         return tuple(calls)
 
 
+class LlmModelChain:
+    """Try each model in order; advance on a terminal model-level failure.
+
+    A configured-but-unusable model must not silently cost the whole feature. This
+    happened live: the owner agent was pinned to a model the account could not call, every
+    turn raised, and the console fell back to the pre-brain keyword classifier with nothing
+    in the logs to say why.
+
+    Only *model-level* failures advance the chain. A 429 or a 5xx is about load, not about
+    this model being wrong, so it is raised rather than burning the fallback.
+    """
+
+    # 404 unknown or not-permitted model, 403 access denied, 410 retired. Each means
+    # "this model will never work for this key" — try the next one.
+    #
+    # 400 is deliberately NOT here: a malformed payload is rejected identically by every
+    # model, so advancing would just burn the fallback on the same bug. 429/500/503 are
+    # load, not access — they raise so the caller sees a transient failure rather than
+    # silently demoting to a cheaper model on every rate limit.
+    ADVANCE_ON: frozenset[int] = frozenset({403, 404, 410})
+
+    def __init__(self, clients: list[LlmClient]) -> None:
+        self._clients = [client for client in clients if client.enabled()]
+        self.last_model = ""
+        self.errors: list[str] = []
+
+    def enabled(self) -> bool:
+        return bool(self._clients)
+
+    @property
+    def models(self) -> tuple[str, ...]:
+        return tuple(client.model for client in self._clients)
+
+    def complete(self, **kwargs: Any) -> LlmResponse:
+        if not self._clients:
+            raise LlmError("no model configured")
+        self.errors = []
+        last: LlmError | None = None
+        for index, client in enumerate(self._clients):
+            self.last_model = client.model
+            try:
+                return client.complete(**kwargs)
+            except LlmError as exc:
+                self.errors.append(f"{client.model}:{exc}")
+                status = _status_from_error(exc)
+                is_last = index == len(self._clients) - 1
+                if status is not None and status not in self.ADVANCE_ON and not is_last:
+                    # Load or transport problem, not a model problem. Do not spend the
+                    # fallback on it.
+                    raise
+                last = exc
+        raise last or LlmError("all models failed")
+
+
+def _status_from_error(error: LlmError) -> int | None:
+    """Pull the HTTP status back out of the message this client formats."""
+    text = str(error)
+    marker = "HTTP "
+    index = text.rfind(marker)
+    if index < 0:
+        return None
+    digits = text[index + len(marker) :].strip()[:3]
+    return int(digits) if digits.isdigit() else None
+
+
 def parse_tool_arguments(raw: str) -> dict[str, Any]:
     """Decode a tool-call argument string. A malformed payload yields `{}`, never raises."""
     if not raw or not raw.strip():

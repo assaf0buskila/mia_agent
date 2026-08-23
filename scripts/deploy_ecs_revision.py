@@ -58,11 +58,32 @@ def _image_with_tag(image: str, tag: str) -> str:
     return f"{registry}/{name}:{tag}"
 
 
+def _upsert_env(container: dict, pairs: list[tuple[str, str]]) -> None:
+    env = list(container.get("environment") or [])
+    by_name = {row["name"]: row for row in env if "name" in row}
+    for name, value in pairs:
+        by_name[name] = {"name": name, "value": value}
+    container["environment"] = list(by_name.values())
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--tag", required=True)
+    parser.add_argument(
+        "--env",
+        action="append",
+        default=[],
+        metavar="NAME=VALUE",
+        help="Upsert a plaintext container env var. Repeatable.",
+    )
     args = parser.parse_args()
     tag = _normalize_tag(args.tag)
+    extra: list[tuple[str, str]] = []
+    for item in args.env:
+        if "=" not in item:
+            sys.exit(f"expected NAME=VALUE, got {item}")
+        name, value = item.split("=", 1)
+        extra.append((name.strip(), value))
 
     current = _aws("ecs", "describe-task-definition", "--task-definition", FAMILY)
     task_def = current["taskDefinition"]
@@ -71,6 +92,8 @@ def main() -> None:
     payload = {key: task_def[key] for key in MUTABLE_KEYS if key in task_def}
     for container in payload["containerDefinitions"]:
         container["image"] = _image_with_tag(container["image"], tag)
+        if extra:
+            _upsert_env(container, extra)
         print(f"{container['name']} -> {container['image']}")
 
     registered = _aws(

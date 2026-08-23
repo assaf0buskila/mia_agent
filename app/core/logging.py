@@ -70,3 +70,29 @@ def log_comm(
         success,
         automation_mode or "-",
     )
+
+
+_AGENT_LOG = logging.getLogger("mia.agent")
+
+
+def log_owner_agent(
+    *,
+    used_agent: bool,
+    model: str = "",
+    task_type: str = "",
+    tools_used: tuple[str, ...] = (),
+    reason: str = "",
+) -> None:
+    """One line per owner turn: did the agent answer, and if not, why.
+
+    Never includes message text. `reason` carries provider error codes only, which is what
+    makes a misconfigured model id diagnosable from the logs instead of by inference.
+    """
+    _AGENT_LOG.info(
+        "owner_agent used=%s model=%s task=%s tools=%s reason=%s",
+        used_agent,
+        model or "-",
+        task_type or "-",
+        ",".join(tools_used) or "-",
+        reason or "-",
+    )

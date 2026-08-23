@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from app.domain.lead_label import lead_display
 from app.domain.sales import FitLevel, PainLevel, SalesState, manual_step_established
 
 if TYPE_CHECKING:
@@ -53,7 +54,8 @@ def _discovery_depth(sales: SalesState) -> int:
 
 
 def _lead_line(sales: SalesState) -> str:
-    parts = [sales.lead_id]
+    # Lead with who they are. The state flags are the detail, not the identity.
+    parts = [lead_display(sales.lead_id, sales.headline)]
     if sales.workflow_known:
         parts.append("workflow")
     if manual_step_established(sales):

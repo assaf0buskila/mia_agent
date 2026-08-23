@@ -40,7 +40,9 @@ def format_hot_leads_ack(store) -> str:
     return f"לידים חמים: {listed}{extra}"
 
 
-def _notify_telegram(*, brief: str, inbound_id: str, settings: Settings) -> None:
+def _notify_telegram(
+    *, brief: str, inbound_id: str, settings: Settings, parse_mode: str = "HTML"
+) -> None:
     token = settings.telegram_bot_token.strip()
     owner_ids = settings.telegram_owner_user_id_set()
     if not token or not owner_ids:
@@ -50,7 +52,12 @@ def _notify_telegram(*, brief: str, inbound_id: str, settings: Settings) -> None
         with httpx.Client(timeout=10.0) as client:
             client.post(
                 f"{_TELEGRAM_API}/bot{token}/sendMessage",
-                json={"chat_id": chat_id, "text": brief},
+                json={
+                    "chat_id": chat_id,
+                    "text": brief,
+                    "parse_mode": parse_mode,
+                    "link_preview_options": {"is_disabled": True},
+                },
             )
     except httpx.HTTPError:
         return

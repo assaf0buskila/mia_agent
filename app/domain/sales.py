@@ -78,6 +78,8 @@ class SalesState(BaseModel):
     discovery_turns: int = 0
     asked_actions: list[str] = Field(default_factory=list)
     explicit_buying_intent: bool = False
+    # Short human label from the prospect's own words, for owner-facing lists only.
+    headline: str = ""
 
     def has_asked(self, action: "NextAction") -> bool:
         return action.value in self.asked_actions

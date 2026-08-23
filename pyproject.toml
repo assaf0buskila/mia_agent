@@ -18,6 +18,7 @@ mia-due-scan = "app.workers.due_scan:main"
 mia-reconcile = "app.workers.reconcile:main"
 mia-migrate = "app.workers.migrate:main"
 mia-ingest-knowledge = "app.workers.ingest_knowledge:main"
+mia-telegram-webhook = "app.workers.register_telegram_webhook:main"
 
 [dependency-groups]
 dev = [

@@ -14,8 +14,10 @@ from app.core.config import Settings
 from app.core.errors import PolicyDenied
 from app.core.risk import RiskAction, RiskLevel, assert_allowed
 from app.domain.hot_handoff import _notify_telegram
+from app.domain.lead_label import lead_display
 from app.domain.memory import ROLE_MIA, ConversationTurn, counterpart_turns
 from app.domain.sales import PainLevel, SalesState
+from app.integrations.telegram_format import blockquote, bold, esc
 
 KIND_WEBSITE_WHATSAPP = "website_whatsapp_handoff"
 _BRIEF_MAX = 1800
@@ -151,22 +153,34 @@ def format_website_whatsapp_brief(
     sales: SalesState,
     turns: list[ConversationTurn],
 ) -> str:
-    """Owner-facing briefing. No prices, no invented facts, no customer phone."""
+    """Owner-facing briefing, HTML. No prices, no invented facts, no customer phone.
+
+    Short on purpose. The previous version opened with two lines of preamble, then an
+    opaque lead id, then facts one per line, then the whole transcript inline — so the one
+    thing Assaf needs (who is this, and what do I send) was buried under everything else.
+
+    Now: who it is on line one, the facts on a single line, the paste line, and the
+    transcript collapsed into an expandable quote that costs one tap to open.
+    """
     paste = _recommended_first_line(sales=sales, turns=turns)
+    headline = (sales.headline or "").strip()
+    who = lead_display(lead_id, headline)
     blocks = [
-        "ליד מהאתר עבר אליך בוואטסאפ.",
-        "מיה לא תענה שם. תטפל אתה.",
-        lead_id,
+        f"{bold('ליד מהאתר → וואטסאפ')}",
+        esc(who),
+        esc("מיה לא תענה שם. תטפל אתה."),
         "",
-        "מה ידוע:",
-        *[f"- {line}" for line in _fact_lines(sales)],
+        f"{bold('מה ידוע')}: " + esc(" · ".join(_fact_lines(sales))),
         "",
         "השורה שלך:",
-        paste,
+        esc(paste),
     ]
     transcript = _transcript_lines(turns)
     if transcript:
-        blocks.extend(["", "השיחה:", *transcript])
+        # Collapsed by default: the transcript is evidence, not the message.
+        blocks.extend(
+            ["", "השיחה:", blockquote("\n".join(transcript), expandable=True)]
+        )
     return "\n".join(blocks)[:_BRIEF_MAX]
 
 

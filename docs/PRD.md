@@ -45,7 +45,7 @@ A capability is **wired** if it has a typed port and appears in `app/core/capabi
 - `MIA_WHATSAPP_SENDER=composio`, `MIA_WHATSAPP_REQUIRE_BUSINESS_SCOPE=true`
 - `MIA_WHATSAPP_HANDOFF_SEND=false`. WhatsApp prospect send stays off in every automation mode until this flag is true. Official Cloud API inbound is the precondition. Until then the website click opens Assaf and Telegram gets the briefing (ADR-024).
 - `MIA_CALENDAR_WRITE=true` (Assaf ADOPT). Gmail send / Meta write / IG auto-reply **false**. No env knobs for follow-up send, browser crawl, or tool discovery.
-- Region `eu-north-1`. Host `https://mia.assafweb.com`. Live image `mia:15`. Working tree `/health` adds `brain` + `owner_integrations`. Those keys are not on mia:15 yet. `MIA_COMPOSIO_DISCOVERY` defaults false. GSC / GA4 / Meta ads ids are leftover env, optional only when discovery is on. `MIA_SHEETS_SPREADSHEET_ID` and `MIA_LINKEDIN_ACCESS_TOKEN` stay required. Firecrawl is not Composio.
+- Region `eu-north-1`. Host `https://mia.assafweb.com`. Live image `mia:16` (task `mia:18`). `/health` includes `brain` + `owner_integrations`. Brain env: `MIA_OWNER_AGENT_MODEL=gpt-5.6-terra`, `MIA_EXTRACTION_MODEL=gpt-5.6-luna`, `MIA_EMBEDDING_MODEL=text-embedding-3-small`. `MIA_COMPOSIO_DISCOVERY` defaults false. GSC / GA4 / Meta ads ids are leftover env, optional only when discovery is on. `MIA_SHEETS_SPREADSHEET_ID` and `MIA_LINKEDIN_ACCESS_TOKEN` stay required. Firecrawl is not Composio.
 - Widget colours are the scraped `www.assafweb.com` `:root` tokens and nothing else; `test_widget_uses_only_assafweb_palette_colors` fails on drift. The brand mark is inline SVG, not a raster asset
 
 ## Tests

@@ -32,7 +32,7 @@ from app.integrations.ga4 import Ga4Port
 from app.integrations.instagram_insights import InstagramInsightsPort
 from app.integrations.linkedin import LinkedInPort
 from app.integrations.linkedin_analytics import LinkedInAnalyticsPort
-from app.integrations.llm_client import OPENAI_CHAT_URL, LlmClient
+from app.integrations.llm_client import OPENAI_CHAT_URL, LlmClient, LlmModelChain
 from app.integrations.meta_ads import MetaAdsPort
 from app.integrations.research import ResearchPort
 from app.integrations.search_console import SearchConsolePort
@@ -62,6 +62,11 @@ class OwnerBrainResult(NamedTuple):
     tokens_in: int = 0
     tokens_out: int = 0
     memories_written: int = 0
+    # Why the agent did not answer. Empty when it did. This was the missing piece: the
+    # fallback was silent, so a misconfigured model looked exactly like normal operation
+    # for a full day of live testing.
+    fallback_reason: str = ""
+    model: str = ""
 
 
 def agent_allowed_for(task_type: OwnerTaskType) -> bool:
@@ -69,12 +74,19 @@ def agent_allowed_for(task_type: OwnerTaskType) -> bool:
     return task_type not in DETERMINISTIC_TASK_TYPES
 
 
-def build_agent_client(settings: Settings) -> LlmClient:
+def build_agent_client(settings: Settings) -> LlmModelChain:
+    """Every configured model, in order.
+
+    `MIA_OWNER_AGENT_FALLBACK_MODEL` was documented but previously ignored — only
+    `chain[0]` was ever used. A primary the account cannot call therefore dropped straight
+    to the keyword classifier instead of trying the secondary.
+    """
     chain = model_chain(settings.owner_agent_model, settings.owner_agent_fallback_model)
-    return LlmClient(
-        api_key=settings.openai_api_key,
-        model=chain[0] if chain else "",
-        url=OPENAI_CHAT_URL,
+    return LlmModelChain(
+        [
+            LlmClient(api_key=settings.openai_api_key, model=name, url=OPENAI_CHAT_URL)
+            for name in chain
+        ]
     )
 
 
@@ -123,12 +135,13 @@ def answer_owner(
 ) -> OwnerBrainResult:
     """Answer one owner message, preferring the agent and degrading to `fallback_text`."""
     if kill_switch or not settings.brain_ready():
-        return OwnerBrainResult(fallback_text, False, ())
+        return OwnerBrainResult(fallback_text, False, (), fallback_reason="kill_switch_or_disabled")
     if not agent_allowed_for(task_type):
-        return OwnerBrainResult(fallback_text, False, ())
+        # By design: approvals, takeover, scope, preferences never reach the model.
+        return OwnerBrainResult(fallback_text, False, (), fallback_reason="deterministic_intent")
     agent_client = client or build_agent_client(settings)
     if not agent_client.enabled():
-        return OwnerBrainResult(fallback_text, False, ())
+        return OwnerBrainResult(fallback_text, False, (), fallback_reason="no_model_configured")
 
     port = embedding_port or build_embedding_port(settings)
     moment = now or datetime.now(UTC)
@@ -168,14 +181,24 @@ def answer_owner(
         max_steps=max(1, settings.owner_agent_max_steps),
         now_line=hebrew_datetime(moment, timezone=settings.calendar_timezone),
     )
+    model = getattr(agent_client, "last_model", "")
     if not outcome.completed or not outcome.text.strip():
-        return OwnerBrainResult(fallback_text, False, ())
+        reason = outcome.error or "empty_reply"
+        errors = getattr(agent_client, "errors", None)
+        if errors:
+            # Carry the per-model failure so a bad model id is diagnosable from one log
+            # line instead of a day of guessing.
+            reason = f"{reason} [{'; '.join(errors)[:300]}]"
+        return OwnerBrainResult(
+            fallback_text, False, (), fallback_reason=reason, model=model
+        )
     return OwnerBrainResult(
         outcome.text.strip(),
         True,
         outcome.tools_used,
         outcome.tokens_in,
         outcome.tokens_out,
+        model=model,
     )
 
 

@@ -10,6 +10,7 @@ build/
 .coverage
 .env
 !.env.example
+.docker-ecr-login/
 deploy/mia-prod.secret.json
 deploy/local/
 *.db

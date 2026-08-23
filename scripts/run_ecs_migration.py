@@ -33,14 +33,20 @@ def _aws(*args: str) -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--task-definition", required=True)
+    parser.add_argument(
+        "--command",
+        default="mia-migrate",
+        help="Container command to run (default mia-migrate).",
+    )
     args = parser.parse_args()
+    command = args.command.split()
 
     service = _aws(
         "ecs", "describe-services", "--cluster", CLUSTER, "--services", SERVICE
     )["services"][0]
     network = json.dumps(service["networkConfiguration"])
     overrides = json.dumps(
-        {"containerOverrides": [{"name": CONTAINER, "command": ["mia-migrate"]}]}
+        {"containerOverrides": [{"name": CONTAINER, "command": command}]}
     )
 
     started = _aws(
@@ -76,8 +82,8 @@ def main() -> None:
         code = container.get("exitCode")
         print(f"exitCode {code} reason {described.get('stoppedReason')}")
         if code != 0:
-            sys.exit(f"migration task exited {code}")
-        print("migration task completed")
+            sys.exit(f"task {command[0]} exited {code}")
+        print(f"task {command[0]} completed")
         return
     sys.exit("timed out waiting for migration task")
 

@@ -13,6 +13,7 @@ from app.domain.events import (
 )
 from app.domain.extract import extract_sales_signals
 from app.domain.language import reply_language
+from app.domain.lead_label import derive_headline
 from app.domain.memory import repeats_previous_mia_turn
 from app.domain.sales import (
     NextAction,
@@ -158,6 +159,13 @@ def build_graph(store: LeadStore, reply_port: SalesReplyPort | None = None):
         channel = state.get("channel", "website")
         latest_message = state.get("latest_message", "")
         turns = store.list_conversation_turns(conversation_id)
+        # Give the lead a human label the first time the prospect says something
+        # substantive, so owner-facing lists can name it instead of showing an id.
+        if not sales.headline:
+            headline = derive_headline(turns)
+            if headline:
+                sales.headline = headline
+                store.save_sales(sales)
         language = reply_language(latest_message=latest_message, turns=turns)
         canned = reply_for(
             channel, action, sales, language=language, repeat_ask=repeat_ask

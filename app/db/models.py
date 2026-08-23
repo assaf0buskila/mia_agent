@@ -79,6 +79,7 @@ class SalesStateRow(Base):
     discovery_turns: Mapped[int] = mapped_column(Integer, default=0)
     asked_actions: Mapped[str] = mapped_column(Text, default="[]")
     explicit_buying_intent: Mapped[bool] = mapped_column(Boolean, default=False)
+    headline: Mapped[str] = mapped_column(String(120), default="")
     lead: Mapped[LeadRow] = relationship(back_populates="sales_state")
 
 
