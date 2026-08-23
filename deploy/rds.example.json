@@ -1,0 +1,20 @@
+{
+  "DBInstanceIdentifier": "mia",
+  "DBName": "mia",
+  "Engine": "postgres",
+  "EngineVersion": "16",
+  "DBInstanceClass": "db.t4g.micro",
+  "AllocatedStorage": 20,
+  "StorageType": "gp3",
+  "StorageEncrypted": true,
+  "PubliclyAccessible": false,
+  "MultiAZ": false,
+  "BackupRetentionPeriod": 7,
+  "CopyTagsToSnapshot": true,
+  "DeletionProtection": false,
+  "AutoMinorVersionUpgrade": true,
+  "MasterUsername": "mia_admin",
+  "ManageMasterUserPassword": true,
+  "VpcSecurityGroupIds": ["sg-MIA_RDS"],
+  "DBSubnetGroupName": "mia-private"
+}

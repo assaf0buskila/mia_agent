@@ -1,0 +1,1 @@
+ALTER TABLE lead_follow_ups ADD COLUMN draft VARCHAR(500) DEFAULT '';

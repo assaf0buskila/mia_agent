@@ -1,0 +1,19 @@
+{
+  "LoadBalancerArn": "arn:aws:elasticloadbalancing:REGION:ACCOUNT_ID:loadbalancer/app/mia/HASH",
+  "Protocol": "HTTP",
+  "Port": 80,
+  "DefaultActions": [
+    {
+      "Type": "redirect",
+      "Order": 1,
+      "RedirectConfig": {
+        "Protocol": "HTTPS",
+        "Port": "443",
+        "Host": "#{host}",
+        "Path": "/#{path}",
+        "Query": "#{query}",
+        "StatusCode": "HTTP_301"
+      }
+    }
+  ]
+}

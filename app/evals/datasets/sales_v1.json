@@ -1,0 +1,168 @@
+[
+  {
+    "case_id": "cold_workflow_unknown",
+    "sales": {},
+    "expected_action": "understand_workflow",
+    "expected_reply_contains": "יום רגיל בעסק"
+  },
+  {
+    "case_id": "workflow_known_low_pain",
+    "sales": {
+      "workflow_known": true,
+      "pain_level": 1
+    },
+    "expected_action": "deepen_pain",
+    "expected_reply_contains": "ידנית"
+  },
+  {
+    "case_id": "pain_high_impact_unconfirmed",
+    "sales": {
+      "workflow_known": true,
+      "manual_step_known": true,
+      "pain_level": 3,
+      "impact_confirmed": false
+    },
+    "expected_action": "quantify",
+    "expected_reply_contains": "כמה זמן"
+  },
+  {
+    "case_id": "pain_high_manual_step_unknown",
+    "sales": {
+      "workflow_known": true,
+      "pain_level": 3,
+      "impact_confirmed": false
+    },
+    "expected_action": "deepen_pain",
+    "expected_reply_contains": "ידנית"
+  },
+  {
+    "case_id": "impact_confirmed_not_reflected",
+    "sales": {
+      "workflow_known": true,
+      "manual_step_known": true,
+      "pain_level": 3,
+      "impact_confirmed": true,
+      "reflected": false
+    },
+    "expected_action": "reflect",
+    "expected_reply_contains": "זה מדויק"
+  },
+  {
+    "case_id": "poor_fit",
+    "sales": {
+      "workflow_known": true,
+      "fit": "poor"
+    },
+    "expected_action": "disqualify",
+    "expected_reply_contains": "התאמה"
+  },
+  {
+    "case_id": "owner_required",
+    "sales": {
+      "workflow_known": true,
+      "owner_required": true
+    },
+    "expected_action": "handoff",
+    "expected_reply_contains": "אסף"
+  },
+  {
+    "case_id": "ready_for_meeting",
+    "sales": {
+      "workflow_known": true,
+      "pain_level": 3,
+      "impact_confirmed": true,
+      "reflected": true,
+      "hypothesis_offered": true,
+      "buying_reality_known": true,
+      "fit": "good",
+      "willingness_to_meet": true
+    },
+    "expected_action": "offer_meeting",
+    "expected_reply_contains": "אסף"
+  },
+  {
+    "case_id": "declined_meeting",
+    "sales": {
+      "workflow_known": true,
+      "pain_level": 3,
+      "impact_confirmed": true,
+      "reflected": true,
+      "hypothesis_offered": true,
+      "buying_reality_known": true,
+      "fit": "good",
+      "willingness_to_meet": false
+    },
+    "expected_action": "stop",
+    "expected_reply_contains": "משאירה"
+  },
+  {
+    "case_id": "objection_price",
+    "sales": {
+      "workflow_known": true,
+      "active_objection": "price"
+    },
+    "expected_action": "handle_objection",
+    "expected_reply_contains": "יקר"
+  },
+  {
+    "case_id": "objection_reframe_price",
+    "sales": {
+      "workflow_known": true,
+      "impact_confirmed": true,
+      "reflected": true,
+      "pain_level": 3,
+      "active_objection": "price"
+    },
+    "expected_action": "handle_objection",
+    "expected_reply_contains": "החיכוך שתיארת"
+  },
+  {
+    "case_id": "objection_does_not_override_poor_fit",
+    "sales": {
+      "workflow_known": true,
+      "fit": "poor",
+      "active_objection": "price"
+    },
+    "expected_action": "disqualify",
+    "expected_reply_contains": "התאמה"
+  },
+  {"case_id":"workflow_known_pain_0","sales":{"workflow_known":true,"pain_level":0},"expected_action":"deepen_pain","expected_reply_contains":"ידנית"},
+  {"case_id":"workflow_known_pain_2_no_impact","sales":{"workflow_known":true,"manual_step_known":true,"pain_level":2},"expected_action":"quantify","expected_reply_contains":"כמה זמן"},
+  {"case_id":"workflow_known_pain_4_no_impact","sales":{"workflow_known":true,"manual_step_known":true,"pain_level":4},"expected_action":"quantify","expected_reply_contains":"כמה זמן"},
+  {"case_id":"workflow_known_pain_5_no_impact","sales":{"workflow_known":true,"manual_step_known":true,"pain_level":5},"expected_action":"quantify","expected_reply_contains":"כמה זמן"},
+  {"case_id":"pain_1_beats_impact_and_reflect","sales":{"workflow_known":true,"pain_level":1,"impact_confirmed":true,"reflected":true},"expected_action":"deepen_pain","expected_reply_contains":"ידנית"},
+  {"case_id":"quantify_beats_stale_reflected","sales":{"workflow_known":true,"pain_level":3,"impact_confirmed":false,"reflected":true},"expected_action":"quantify","expected_reply_contains":"כמה זמן"},
+  {"case_id":"reflected_needs_hypothesis","sales":{"workflow_known":true,"pain_level":3,"impact_confirmed":true,"reflected":true,"hypothesis_offered":false},"expected_action":"offer_hypothesis","expected_reply_contains":"להוריד ממך"},
+  {"case_id":"hypothesis_pain_2","sales":{"workflow_known":true,"pain_level":2,"impact_confirmed":true,"reflected":true,"hypothesis_offered":false},"expected_action":"offer_hypothesis","expected_reply_contains":"להוריד ממך"},
+  {"case_id":"qualify_after_hypothesis","sales":{"workflow_known":true,"pain_level":3,"impact_confirmed":true,"reflected":true,"hypothesis_offered":true,"buying_reality_known":false},"expected_action":"qualify","expected_reply_contains":"מי צריך"},
+  {"case_id":"qualify_willing_no_workflow","sales":{"willingness_to_meet":true},"expected_action":"qualify","expected_reply_contains":"מי צריך"},
+  {"case_id":"meeting_asked_possible_fit","sales":{"workflow_known":true,"pain_level":3,"impact_confirmed":true,"reflected":true,"hypothesis_offered":true,"buying_reality_known":true,"fit":"possible","willingness_to_meet":true},"expected_action":"offer_meeting","expected_reply_contains":"למפות את האוטומציה"},
+  {"case_id":"qualify_buying_good_unwilling_null","sales":{"workflow_known":true,"pain_level":3,"impact_confirmed":true,"reflected":true,"hypothesis_offered":true,"buying_reality_known":true,"fit":"good"},"expected_action":"qualify","expected_reply_contains":"מי צריך"},
+  {"case_id":"qualify_timeline_field","sales":{"workflow_known":true,"pain_level":3,"impact_confirmed":true,"reflected":true,"hypothesis_offered":true,"buying_reality_known":false,"missing_fields":["timeline","metric"]},"expected_action":"qualify","expected_reply_contains":"מתי זה יהיה"},
+  {"case_id":"qualify_metric_field","sales":{"workflow_known":true,"pain_level":3,"impact_confirmed":true,"reflected":true,"hypothesis_offered":true,"buying_reality_known":false,"missing_fields":["metric"]},"expected_action":"qualify","expected_reply_contains":"מה זה עולה"},
+  {"case_id":"qualify_decision_maker_explicit","sales":{"workflow_known":true,"pain_level":3,"impact_confirmed":true,"reflected":true,"hypothesis_offered":true,"buying_reality_known":false,"missing_fields":["decision_maker","timeline"]},"expected_action":"qualify","expected_reply_contains":"מי צריך"},
+  {"case_id":"ready_for_meeting_p2","sales":{"workflow_known":true,"pain_level":2,"impact_confirmed":true,"reflected":true,"hypothesis_offered":true,"buying_reality_known":true,"fit":"good","willingness_to_meet":true},"expected_action":"offer_meeting","expected_reply_contains":"למפות את האוטומציה"},
+  {"case_id":"ready_for_meeting_p5","sales":{"workflow_known":true,"pain_level":5,"impact_confirmed":true,"reflected":true,"hypothesis_offered":true,"buying_reality_known":true,"fit":"good","willingness_to_meet":true},"expected_action":"offer_meeting","expected_reply_contains":"למפות את האוטומציה"},
+  {"case_id":"ready_for_meeting_with_domain","sales":{"workflow_known":true,"pain_level":3,"impact_confirmed":true,"reflected":true,"hypothesis_offered":true,"buying_reality_known":true,"fit":"good","willingness_to_meet":true,"company_domain":"clinic.example"},"expected_action":"offer_meeting","expected_reply_contains":"למפות את האוטומציה"},
+  {"case_id":"ready_for_meeting_unknown_authority","sales":{"workflow_known":true,"pain_level":3,"impact_confirmed":true,"reflected":true,"hypothesis_offered":true,"buying_reality_known":true,"fit":"good","willingness_to_meet":true,"authority_known":false},"expected_action":"offer_meeting","expected_reply_contains":"למפות את האוטומציה"},
+  {"case_id":"stop_early","sales":{"willingness_to_meet":false},"expected_action":"stop","expected_reply_contains":"משאירה"},
+  {"case_id":"stop_beats_owner_required","sales":{"willingness_to_meet":false,"owner_required":true},"expected_action":"stop","expected_reply_contains":"משאירה"},
+  {"case_id":"stop_beats_objection","sales":{"willingness_to_meet":false,"active_objection":"price"},"expected_action":"stop","expected_reply_contains":"משאירה"},
+  {"case_id":"poor_beats_owner","sales":{"fit":"poor","owner_required":true},"expected_action":"disqualify","expected_reply_contains":"התאמה"},
+  {"case_id":"poor_beats_stop","sales":{"fit":"poor","willingness_to_meet":false},"expected_action":"disqualify","expected_reply_contains":"התאמה"},
+  {"case_id":"poor_cold","sales":{"fit":"poor"},"expected_action":"disqualify","expected_reply_contains":"התאמה"},
+  {"case_id":"handoff_beats_objection","sales":{"owner_required":true,"active_objection":"price"},"expected_action":"handoff","expected_reply_contains":"אעביר"},
+  {"case_id":"handoff_cold","sales":{"owner_required":true},"expected_action":"handoff","expected_reply_contains":"אעביר"},
+  {"case_id":"objection_ai_trust","sales":{"workflow_known":true,"active_objection":"ai_trust"},"expected_action":"handle_objection","expected_reply_contains":"החשש המרכזי"},
+  {"case_id":"objection_no_time","sales":{"workflow_known":true,"active_objection":"no_time"},"expected_action":"handle_objection","expected_reply_contains":"זמן ההטמעה"},
+  {"case_id":"objection_has_vendor","sales":{"workflow_known":true,"active_objection":"has_vendor"},"expected_action":"handle_objection","expected_reply_contains":"מה עובד היום"},
+  {"case_id":"objection_not_urgent","sales":{"workflow_known":true,"active_objection":"not_urgent"},"expected_action":"handle_objection","expected_reply_contains":"אם לא משנים"},
+  {"case_id":"objection_need_partner","sales":{"workflow_known":true,"active_objection":"need_partner"},"expected_action":"handle_objection","expected_reply_contains":"מי עוד"},
+  {"case_id":"objection_reframe_ai_trust","sales":{"workflow_known":true,"impact_confirmed":true,"reflected":true,"pain_level":3,"active_objection":"ai_trust"},"expected_action":"handle_objection","expected_reply_contains":"אישורים על פעולות"},
+  {"case_id":"objection_reframe_no_time","sales":{"workflow_known":true,"impact_confirmed":true,"reflected":true,"pain_level":3,"active_objection":"no_time"},"expected_action":"handle_objection","expected_reply_contains":"פיילוט קטן"},
+  {"case_id":"objection_reframe_has_vendor","sales":{"workflow_known":true,"impact_confirmed":true,"reflected":true,"pain_level":3,"active_objection":"has_vendor"},"expected_action":"handle_objection","expected_reply_contains":"לא מחליפים"},
+  {"case_id":"objection_reframe_not_urgent","sales":{"workflow_known":true,"impact_confirmed":true,"reflected":true,"pain_level":3,"active_objection":"not_urgent"},"expected_action":"handle_objection","expected_reply_contains":"בלי לחץ מלאכותי"},
+  {"case_id":"objection_reframe_need_partner","sales":{"workflow_known":true,"impact_confirmed":true,"reflected":true,"pain_level":3,"active_objection":"need_partner"},"expected_action":"handle_objection","expected_reply_contains":"מי שמחליט"},
+  {"case_id":"reflect_pain_5","sales":{"workflow_known":true,"manual_step_known":true,"pain_level":5,"impact_confirmed":true,"reflected":false},"expected_action":"reflect","expected_reply_contains":"זה מדויק"},
+  {"case_id":"meeting_asked_fit_unknown","sales":{"workflow_known":true,"pain_level":3,"impact_confirmed":true,"reflected":true,"hypothesis_offered":true,"buying_reality_known":true,"willingness_to_meet":true},"expected_action":"offer_meeting","expected_reply_contains":"למפות את האוטומציה"}
+]

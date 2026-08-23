@@ -1,0 +1,8 @@
+{
+  "Name": "mia",
+  "Type": "application",
+  "Scheme": "internet-facing",
+  "IpAddressType": "ipv4",
+  "Subnets": ["subnet-PUBLIC_A", "subnet-PUBLIC_B"],
+  "SecurityGroups": ["sg-MIA_ALB"]
+}

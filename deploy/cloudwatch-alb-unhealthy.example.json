@@ -1,0 +1,17 @@
+{
+  "AlarmName": "mia-unhealthy-hosts",
+  "AlarmDescription": "Mia ALB UnHealthyHostCount Minimum > 0. Console only this slice — no SNS pager.",
+  "Namespace": "AWS/ApplicationELB",
+  "MetricName": "UnHealthyHostCount",
+  "Dimensions": [
+    { "Name": "LoadBalancer", "Value": "app/mia/HASH" },
+    { "Name": "TargetGroup", "Value": "targetgroup/mia/HASH" }
+  ],
+  "Statistic": "Minimum",
+  "Period": 60,
+  "EvaluationPeriods": 2,
+  "DatapointsToAlarm": 2,
+  "Threshold": 0,
+  "ComparisonOperator": "GreaterThanThreshold",
+  "TreatMissingData": "notBreaching"
+}

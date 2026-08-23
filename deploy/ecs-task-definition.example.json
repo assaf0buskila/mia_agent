@@ -1,0 +1,197 @@
+{
+  "family": "mia",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "512",
+  "memory": "1024",
+  "runtimePlatform": {
+    "cpuArchitecture": "X86_64",
+    "operatingSystemFamily": "LINUX"
+  },
+  "executionRoleArn": "arn:aws:iam::ACCOUNT_ID:role/miaTaskExecutionRole",
+  "taskRoleArn": "arn:aws:iam::ACCOUNT_ID:role/miaTaskRole",
+  "containerDefinitions": [
+    {
+      "name": "mia",
+      "image": "ACCOUNT_ID.dkr.ecr.REGION.amazonaws.com/mia:latest",
+      "essential": true,
+      "portMappings": [{ "containerPort": 8000, "protocol": "tcp" }],
+      "environment": [
+        { "name": "MIA_ENV", "value": "prod" },
+        { "name": "MIA_DEMO_MODE", "value": "false" },
+        { "name": "MIA_LOG_LEVEL", "value": "INFO" },
+        { "name": "MIA_APP_NAME", "value": "mia" },
+        { "name": "MIA_KILL_SWITCH", "value": "false" },
+        { "name": "MIA_AUTOMATION_MODE", "value": "auto_approved" },
+        { "name": "MIA_CALENDAR_WRITE", "value": "true" },
+        { "name": "MIA_GMAIL_SEND", "value": "false" },
+        { "name": "MIA_META_WRITE", "value": "false" },
+        { "name": "MIA_AUTO_REPLY_INSTAGRAM", "value": "false" },
+        { "name": "MIA_WEBSITE_URL", "value": "https://www.assafweb.com" },
+        { "name": "MIA_PUBLIC_BASE_URL", "value": "https://mia.assafweb.com" },
+        { "name": "MIA_CORS_ORIGINS", "value": "https://www.assafweb.com,https://assafweb.com" },
+        { "name": "MIA_CALENDAR_TIMEZONE", "value": "Asia/Jerusalem" },
+        { "name": "MIA_SALES_MODEL", "value": "gpt-5.6-luna" },
+        { "name": "MIA_SALES_FALLBACK_MODEL", "value": "gpt-5.6-luna" },
+        { "name": "MIA_SALES_GEMINI_MODEL", "value": "gemini-3.6-flash" },
+        { "name": "MIA_OPENAI_TRANSCRIBE_MODEL", "value": "gpt-transcribe" },
+        { "name": "MIA_WHATSAPP_GRAPH_VERSION", "value": "v25.0" },
+        { "name": "MIA_WHATSAPP_CLICK_TO_CHAT", "value": "972523393768" },
+        { "name": "MIA_INSTAGRAM_SENDER", "value": "direct" },
+        { "name": "MIA_WHATSAPP_SENDER", "value": "composio" },
+        { "name": "MIA_WHATSAPP_REQUIRE_BUSINESS_SCOPE", "value": "true" },
+        { "name": "MIA_INSTAGRAM_GRAPH_HOST", "value": "graph.instagram.com" },
+        { "name": "MIA_INSTAGRAM_GRAPH_VERSION", "value": "v26.0" }
+      ],
+      "secrets": [
+        {
+          "name": "MIA_DATABASE_URL",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mia/prod:MIA_DATABASE_URL::"
+        },
+        {
+          "name": "MIA_OPENAI_API_KEY",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mia/prod:MIA_OPENAI_API_KEY::"
+        },
+        {
+          "name": "MIA_OPENAI_TRANSCRIBE_FALLBACK_MODEL",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mia/prod:MIA_OPENAI_TRANSCRIBE_FALLBACK_MODEL::"
+        },
+        {
+          "name": "MIA_GEMINI_API_KEY",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mia/prod:MIA_GEMINI_API_KEY::"
+        },
+        {
+          "name": "MIA_COMPOSIO_API_KEY",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mia/prod:MIA_COMPOSIO_API_KEY::"
+        },
+        {
+          "name": "MIA_COMPOSIO_USER_ID",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mia/prod:MIA_COMPOSIO_USER_ID::"
+        },
+        {
+          "name": "MIA_COMPOSIO_WEBHOOK_SECRET",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mia/prod:MIA_COMPOSIO_WEBHOOK_SECRET::"
+        },
+        {
+          "name": "MIA_WHATSAPP_VERIFY_TOKEN",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mia/prod:MIA_WHATSAPP_VERIFY_TOKEN::"
+        },
+        {
+          "name": "MIA_WHATSAPP_APP_SECRET",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mia/prod:MIA_WHATSAPP_APP_SECRET::"
+        },
+        {
+          "name": "MIA_WHATSAPP_ACCESS_TOKEN",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mia/prod:MIA_WHATSAPP_ACCESS_TOKEN::"
+        },
+        {
+          "name": "MIA_WHATSAPP_PHONE_NUMBER_ID",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mia/prod:MIA_WHATSAPP_PHONE_NUMBER_ID::"
+        },
+        {
+          "name": "MIA_WHATSAPP_OWNER_PHONES",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mia/prod:MIA_WHATSAPP_OWNER_PHONES::"
+        },
+        {
+          "name": "MIA_INSTAGRAM_VERIFY_TOKEN",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mia/prod:MIA_INSTAGRAM_VERIFY_TOKEN::"
+        },
+        {
+          "name": "MIA_INSTAGRAM_APP_SECRET",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mia/prod:MIA_INSTAGRAM_APP_SECRET::"
+        },
+        {
+          "name": "MIA_INSTAGRAM_ACCESS_TOKEN",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mia/prod:MIA_INSTAGRAM_ACCESS_TOKEN::"
+        },
+        {
+          "name": "MIA_INSTAGRAM_ACCOUNT_ID",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mia/prod:MIA_INSTAGRAM_ACCOUNT_ID::"
+        },
+        {
+          "name": "MIA_MANYCHAT_INGEST_TOKEN",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mia/prod:MIA_MANYCHAT_INGEST_TOKEN::"
+        },
+        {
+          "name": "MIA_SHEETS_SPREADSHEET_ID",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mia/prod:MIA_SHEETS_SPREADSHEET_ID::"
+        },
+        {
+          "name": "MIA_GSC_SITE_URL",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mia/prod:MIA_GSC_SITE_URL::"
+        },
+        {
+          "name": "MIA_GA4_PROPERTY_ID",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mia/prod:MIA_GA4_PROPERTY_ID::"
+        },
+        {
+          "name": "MIA_META_ADS_ACCOUNT_ID",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mia/prod:MIA_META_ADS_ACCOUNT_ID::"
+        },
+        {
+          "name": "MIA_CAMPAIGN_MONTHLY_BUDGET",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mia/prod:MIA_CAMPAIGN_MONTHLY_BUDGET::"
+        },
+        {
+          "name": "MIA_CAMPAIGN_NAME",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mia/prod:MIA_CAMPAIGN_NAME::"
+        },
+        {
+          "name": "MIA_CAMPAIGN_LAUNCH_DATE",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mia/prod:MIA_CAMPAIGN_LAUNCH_DATE::"
+        },
+        {
+          "name": "MIA_CAMPAIGN_OBJECTIVE",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mia/prod:MIA_CAMPAIGN_OBJECTIVE::"
+        },
+        {
+          "name": "MIA_CAMPAIGN_LEAD_PATH",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mia/prod:MIA_CAMPAIGN_LEAD_PATH::"
+        },
+        {
+          "name": "MIA_CAMPAIGN_E2E_TESTED",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mia/prod:MIA_CAMPAIGN_E2E_TESTED::"
+        },
+        {
+          "name": "MIA_LINKEDIN_ACCESS_TOKEN",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mia/prod:MIA_LINKEDIN_ACCESS_TOKEN::"
+        },
+        {
+          "name": "MIA_FIRECRAWL_API_KEY",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mia/prod:MIA_FIRECRAWL_API_KEY::"
+        },
+        {
+          "name": "MIA_TELEGRAM_BOT_TOKEN",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mia/prod:MIA_TELEGRAM_BOT_TOKEN::"
+        },
+        {
+          "name": "MIA_TELEGRAM_WEBHOOK_SECRET",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mia/prod:MIA_TELEGRAM_WEBHOOK_SECRET::"
+        },
+        {
+          "name": "MIA_TELEGRAM_OWNER_USER_IDS",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mia/prod:MIA_TELEGRAM_OWNER_USER_IDS::"
+        }
+      ],
+      "stopTimeout": 60,
+      "healthCheck": {
+        "command": [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live', timeout=4)\""
+        ],
+        "interval": 30,
+        "timeout": 5,
+        "retries": 3,
+        "startPeriod": 90
+      },
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/mia",
+          "awslogs-region": "REGION",
+          "awslogs-stream-prefix": "mia"
+        }
+      }
+    }
+  ]
+}

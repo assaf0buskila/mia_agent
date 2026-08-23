@@ -1,0 +1,9 @@
+{
+  "TargetGroupArn": "arn:aws:elasticloadbalancing:REGION:ACCOUNT_ID:targetgroup/mia/HASH",
+  "Attributes": [
+    {
+      "Key": "deregistration_delay.timeout_seconds",
+      "Value": "30"
+    }
+  ]
+}

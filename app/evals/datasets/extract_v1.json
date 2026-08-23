@@ -1,0 +1,251 @@
+[
+  {
+    "case_id": "ex_workflow_en_1",
+    "user": "We use whatsapp for leads in the morning",
+    "expect": {
+      "workflow_known": true,
+      "pain_level": 1
+    }
+  },
+  {
+    "case_id": "ex_workflow_he_1",
+    "user": "במסעדה שלנו לקוחות פונים בוואטסאפ",
+    "expect": {
+      "workflow_known": true,
+      "pain_level": 1
+    }
+  },
+  {
+    "case_id": "ex_clinic_he_1",
+    "user": "יש לי קליניקה, לקוחות מתקשרים בטלפון",
+    "expect": {
+      "workflow_known": true,
+      "pain_level": 1,
+      "fit": "possible"
+    }
+  },
+  {
+    "case_id": "ex_pain_en_1",
+    "user": "Too many missed calls, we forget follow-ups",
+    "expect": {
+      "workflow_known": true,
+      "pain_level": 2
+    }
+  },
+  {
+    "case_id": "ex_pain_he_1",
+    "user": "עמוס מדי, פספס שיחות ואין זמן",
+    "expect": {
+      "workflow_known": true,
+      "pain_level": 2
+    }
+  },
+  {
+    "case_id": "ex_impact_en_1",
+    "user": "Lost customers every day, hours wasted on chaos",
+    "expect": {
+      "workflow_known": true,
+      "impact_confirmed": true,
+      "pain_level": 3
+    }
+  },
+  {
+    "case_id": "ex_impact_he_1",
+    "user": "כל יום לקוחות נעלמים, שעות של עבודה",
+    "expect": {
+      "workflow_known": true,
+      "impact_confirmed": true,
+      "pain_level": 3
+    }
+  },
+  {
+    "case_id": "ex_p4_same_en_1",
+    "user": "Lost revenue every day, it costs me money",
+    "expect": {
+      "impact_confirmed": true,
+      "pain_level": 4,
+      "metric_known": true
+    }
+  },
+  {
+    "case_id": "ex_p4_prior_he_1",
+    "user": "זה עולה לי כסף בכל חודש",
+    "sales": {
+      "pain_level": 3,
+      "impact_confirmed": true
+    },
+    "expect": {
+      "pain_level": 4,
+      "metric_known": true
+    }
+  },
+  {
+    "case_id": "ex_p5_en_1",
+    "user": "we need it by this quarter",
+    "sales": {
+      "pain_level": 3
+    },
+    "expect": {
+      "pain_level": 5,
+      "timeline_known": true,
+      "buying_reality_known": true
+    }
+  },
+  {
+    "case_id": "ex_p5_he_1",
+    "user": "צריך את זה עד סוף הרבעון",
+    "sales": {
+      "pain_level": 3
+    },
+    "expect": {
+      "pain_level": 5,
+      "timeline_known": true,
+      "buying_reality_known": true
+    }
+  },
+  {
+    "case_id": "ex_meet_en_1",
+    "user": "Can we schedule a meeting next week?",
+    "expect": {
+      "willingness_to_meet": true,
+      "fit": "possible"
+    }
+  },
+  {
+    "case_id": "ex_meet_he_1",
+    "user": "בוא נקבוע פגישה עם הצוות",
+    "expect": {
+      "willingness_to_meet": true,
+      "fit": "possible"
+    }
+  },
+  {
+    "case_id": "ex_good_en_1",
+    "user": "I'm the decision maker on this",
+    "sales": {
+      "fit": "possible",
+      "pain_level": 2,
+      "workflow_known": true
+    },
+    "expect": {
+      "fit": "good",
+      "authority_known": true,
+      "buying_reality_known": true
+    }
+  },
+  {
+    "case_id": "ex_stop_en_1",
+    "user": "Not interested, no thanks",
+    "expect": {
+      "willingness_to_meet": false
+    }
+  },
+  {
+    "case_id": "ex_stop_he_1",
+    "user": "לא מעוניינת, תפסיקי לשלוח הודעות",
+    "expect": {
+      "willingness_to_meet": false
+    }
+  },
+  {
+    "case_id": "ex_poor_en_1",
+    "user": "Just a student with homework",
+    "expect": {
+      "fit": "poor"
+    }
+  },
+  {
+    "case_id": "ex_poor_he_1",
+    "user": "אני סטודנט, זו עבודת בית לבית ספר",
+    "expect": {
+      "fit": "poor"
+    }
+  },
+  {
+    "case_id": "ex_timeline_en_1",
+    "user": "We need it by this quarter for the team",
+    "expect": {
+      "timeline_known": true,
+      "buying_reality_known": true
+    }
+  },
+  {
+    "case_id": "ex_owner_en_1",
+    "user": "Please send me a written proposal",
+    "expect": {
+      "owner_required": true
+    }
+  },
+  {
+    "case_id": "ex_owner_he_1",
+    "user": "תשלחי הצעת מחיר בבקשה",
+    "expect": {
+      "owner_required": true
+    }
+  },
+  {
+    "case_id": "ex_obj_price_en_1",
+    "user": "That's too expensive for our budget",
+    "expect": {
+      "active_objection": "price"
+    }
+  },
+  {
+    "case_id": "ex_obj_ai_he_1",
+    "user": "לא סומך על ai בגלל פרטיות",
+    "expect": {
+      "active_objection": "ai_trust"
+    }
+  },
+  {
+    "case_id": "ex_obj_vendor_en_1",
+    "user": "We already working with someone else",
+    "expect": {
+      "active_objection": "has_vendor"
+    }
+  },
+  {
+    "case_id": "ex_obj_not_urgent_he_1",
+    "user": "לא דחוף, אין דחיפות כרגע",
+    "expect": {
+      "active_objection": "not_urgent"
+    }
+  },
+  {
+    "case_id": "ex_obj_no_time_en_1",
+    "user": "No time for this right now",
+    "expect": {
+      "active_objection": "no_time"
+    }
+  },
+  {
+    "case_id": "ex_domain_en_1",
+    "user": "Our website is clinic.example",
+    "expect": {
+      "company_domain": "clinic.example"
+    }
+  },
+  {
+    "case_id": "ex_domain_he_1",
+    "user": "האתר שלנו clinic.example",
+    "expect": {
+      "company_domain": "clinic.example"
+    }
+  },
+  {
+    "case_id": "ex_noop_short_en_1",
+    "user": "Thanks!",
+    "expect": {
+      "workflow_known": false,
+      "pain_level": 0
+    }
+  },
+  {
+    "case_id": "ex_noop_long_en_1",
+    "user": "I wanted to share some background about our team size and how we operate before we discuss anything further together.",
+    "expect": {
+      "workflow_known": true,
+      "pain_level": 1
+    }
+  }
+]

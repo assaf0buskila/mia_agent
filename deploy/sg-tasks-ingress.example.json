@@ -1,0 +1,13 @@
+{
+  "GroupId": "sg-MIA_TASKS",
+  "IpPermissions": [
+    {
+      "IpProtocol": "tcp",
+      "FromPort": 8000,
+      "ToPort": 8000,
+      "UserIdGroupPairs": [
+        { "GroupId": "sg-MIA_ALB", "Description": "ALB to uvicorn" }
+      ]
+    }
+  ]
+}

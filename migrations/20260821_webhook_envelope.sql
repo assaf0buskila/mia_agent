@@ -1,0 +1,2 @@
+ALTER TABLE webhook_events ADD COLUMN channel VARCHAR(32) DEFAULT '' NOT NULL;
+ALTER TABLE webhook_events ADD COLUMN envelope_kind VARCHAR(16) DEFAULT '' NOT NULL;

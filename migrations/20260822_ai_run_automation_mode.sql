@@ -1,0 +1,1 @@
+ALTER TABLE ai_runs ADD COLUMN automation_mode VARCHAR(32) DEFAULT '' NOT NULL;

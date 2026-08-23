@@ -1,0 +1,5 @@
+{
+  "DomainName": "mia.assafweb.com",
+  "ValidationMethod": "DNS",
+  "IdempotencyToken": "miaprodacm"
+}

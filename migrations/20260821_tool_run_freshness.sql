@@ -1,0 +1,1 @@
+ALTER TABLE tool_runs ADD COLUMN freshness VARCHAR(16) DEFAULT '' NOT NULL;

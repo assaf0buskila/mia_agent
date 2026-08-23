@@ -1,0 +1,33 @@
+{
+  "Name": "mia-reconcile",
+  "Description": "Persist-only reconciliation. Never send, never repair. Create only after GET /health is green.",
+  "State": "ENABLED",
+  "ScheduleExpression": "rate(1 hour)",
+  "ScheduleExpressionTimezone": "Asia/Jerusalem",
+  "FlexibleTimeWindow": {
+    "Mode": "OFF"
+  },
+  "Target": {
+    "Arn": "arn:aws:ecs:REGION:ACCOUNT_ID:cluster/mia",
+    "RoleArn": "arn:aws:iam::ACCOUNT_ID:role/miaSchedulerRole",
+    "RetryPolicy": {
+      "MaximumEventAgeInSeconds": 3600,
+      "MaximumRetryAttempts": 0
+    },
+    "EcsParameters": {
+      "TaskDefinitionArn": "arn:aws:ecs:REGION:ACCOUNT_ID:task-definition/mia",
+      "LaunchType": "FARGATE",
+      "PlatformVersion": "1.4.0",
+      "EnableExecuteCommand": false,
+      "TaskCount": 1,
+      "NetworkConfiguration": {
+        "awsvpcConfiguration": {
+          "AssignPublicIp": "DISABLED",
+          "Subnets": ["subnet-PRIVATE_A", "subnet-PRIVATE_B"],
+          "SecurityGroups": ["sg-MIA_TASKS"]
+        }
+      }
+    },
+    "Input": "{\"containerOverrides\":[{\"name\":\"mia\",\"command\":[\"mia-reconcile\"]}]}"
+  }
+}

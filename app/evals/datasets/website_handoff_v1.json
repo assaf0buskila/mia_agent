@@ -1,0 +1,161 @@
+[
+  {
+    "case_id": "shoe_inventory_sheets",
+    "persona": "shoe_seller_manual_sheets",
+    "turns": [
+      {
+        "user": "היי",
+        "expected_action": "understand_workflow",
+        "expected_reply_contains": "יום רגיל בעסק",
+        "expect": {
+          "discovery_turns": 0
+        }
+      },
+      {
+        "user": "אני מוכר נעליים יש לי עיסוק רק במלאי",
+        "expected_action": "deepen_pain",
+        "expected_reply_contains": "ידנית",
+        "expect": {
+          "workflow_known": true,
+          "fit": "possible",
+          "pain_level": 1,
+          "discovery_turns": 1,
+          "whatsapp_handoff_offered": false
+        }
+      },
+      {
+        "user": "להכניס הכל לשיטס",
+        "expected_action": "quantify",
+        "expected_reply_contains": "כמה זמן",
+        "expect": {
+          "pain_level": 2,
+          "manual_step_known": true,
+          "discovery_turns": 2,
+          "whatsapp_handoff_offered": false
+        }
+      },
+      {
+        "user": "נעליים מידות דגמים",
+        "expected_action": "offer_whatsapp",
+        "expected_reply_contains": "וואטסאפ",
+        "expect": {
+          "discovery_turns": 3,
+          "whatsapp_handoff_offered": true
+        }
+      },
+      {
+        "user": "כן נוח לי",
+        "expected_action": "reflect",
+        "expected_reply_contains": "זה מדויק"
+      }
+    ]
+  },
+  {
+    "case_id": "prelaunch_clothing_website",
+    "persona": "prelaunch_clothing_leads",
+    "turns": [
+      {
+        "user": "היי",
+        "expected_action": "understand_workflow",
+        "expected_reply_contains": "יום רגיל בעסק"
+      },
+      {
+        "user": "אני האמת לא עוסק כרגע אני רוצה לפתוח עסק והייתי רוצה אולי לבנות אתר",
+        "expected_action": "offer_whatsapp",
+        "expected_reply_contains": "וואטסאפ",
+        "expect": {
+          "workflow_known": true,
+          "explicit_buying_intent": true,
+          "fit": "possible",
+          "pain_level": 2,
+          "whatsapp_handoff_offered": true
+        }
+      },
+      {
+        "user": "עסק של בגדים ושהאתר יביא לי לידים כמובן",
+        "expected_action": "deepen_pain",
+        "expected_reply_contains": "ידנית"
+      }
+    ]
+  },
+  {
+    "case_id": "greeting_only_never_offers_whatsapp",
+    "persona": "website_visitor_greeting_only",
+    "turns": [
+      {
+        "user": "היי",
+        "expected_action": "understand_workflow",
+        "expected_reply_contains": "יום רגיל בעסק",
+        "expect": {
+          "whatsapp_handoff_offered": false
+        }
+      },
+      {
+        "user": "אוקיי",
+        "expected_action": "understand_workflow",
+        "expected_reply_contains": "מה העסק עושה",
+        "expect": {
+          "discovery_turns": 0,
+          "whatsapp_handoff_offered": false
+        }
+      }
+    ]
+  },
+  {
+    "case_id": "clinic_missed_calls_website_en",
+    "persona": "clinic_owner_website_en",
+    "turns": [
+      {
+        "user": "We run a clinic and miss calls all day.",
+        "expected_action": "deepen_pain",
+        "expected_reply_contains": "ידנית",
+        "expect": {
+          "impact_confirmed": true,
+          "manual_step_known": false,
+          "whatsapp_handoff_offered": false
+        }
+      },
+      {
+        "user": "we call everyone back by hand from a list",
+        "expected_action": "reflect",
+        "expected_reply_contains": "זה מדויק",
+        "expect": {
+          "manual_step_known": true,
+          "whatsapp_handoff_offered": false
+        }
+      },
+      {
+        "user": "about two hours every day",
+        "expected_action": "offer_whatsapp",
+        "expected_reply_contains": "וואטסאפ",
+        "expect": {
+          "discovery_turns": 3,
+          "whatsapp_handoff_offered": true
+        }
+      }
+    ]
+  },
+  {
+    "case_id": "wants_human_never_offers_whatsapp",
+    "persona": "website_visitor_wants_assaf",
+    "turns": [
+      {
+        "user": "אני מוכר נעליים ומזין הכל ידנית לשיטס כל יום",
+        "expected_action": "reflect",
+        "expected_reply_contains": "זה מדויק",
+        "expect": {
+          "whatsapp_handoff_offered": false
+        }
+      },
+      {
+        "user": "אני רוצה לדבר עם אסף",
+        "expected_action": "handoff",
+        "expected_reply_contains": "אעביר",
+        "expect": {
+          "owner_required": true,
+          "whatsapp_handoff_offered": false
+        }
+      }
+    ]
+  }
+]

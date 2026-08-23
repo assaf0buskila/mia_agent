@@ -1,0 +1,454 @@
+[
+  {
+    "case_id": "shoe_store_inventory_he",
+    "persona": "shoe_retailer_manual_inventory",
+    "turns": [
+      {
+        "user": "אני מוכר נעליים יש לי עיסוק רק במלאי",
+        "expected_action": "deepen_pain",
+        "expected_reply_contains": "ידנית",
+        "expect": {
+          "workflow_known": true,
+          "fit": "possible",
+          "pain_level": 1,
+          "discovery_turns": 1
+        }
+      },
+      {
+        "user": "להכניס הכל לשיטס",
+        "expected_action": "quantify",
+        "expected_reply_contains": "כמה זמן",
+        "expect": {
+          "manual_step_known": true,
+          "pain_level": 2
+        }
+      },
+      {
+        "user": "נעליים מידות דגמים",
+        "expected_action": "reflect",
+        "expected_reply_contains": "זה מדויק",
+        "expect": {
+          "impact_confirmed": true
+        }
+      },
+      {
+        "user": "כל יום בערך שעה",
+        "expected_action": "offer_hypothesis",
+        "expected_reply_contains": "להוריד ממך"
+      },
+      {
+        "user": "אני מחליט לבד",
+        "expected_action": "qualify",
+        "expected_reply_contains": "מתי זה יהיה",
+        "expect": {
+          "authority_known": true,
+          "buying_reality_known": true
+        }
+      }
+    ]
+  },
+  {
+    "case_id": "clinic_missed_calls_en",
+    "persona": "clinic_owner_missed_calls",
+    "turns": [
+      {
+        "user": "We run a clinic and miss calls all day.",
+        "expected_action": "deepen_pain",
+        "expected_reply_contains": "ידנית",
+        "expect": {
+          "fit": "possible",
+          "pain_level": 3,
+          "workflow_known": true,
+          "impact_confirmed": true,
+          "manual_step_known": false
+        }
+      },
+      {
+        "user": "we call everyone back by hand from a list",
+        "expected_action": "reflect",
+        "expected_reply_contains": "זה מדויק",
+        "expect": {
+          "manual_step_known": true
+        }
+      },
+      {
+        "user": "about two hours every day",
+        "expected_action": "offer_hypothesis",
+        "expected_reply_contains": "להוריד ממך"
+      },
+      {
+        "user": "I decide this quarter",
+        "expected_action": "qualify",
+        "expected_reply_contains": "מה זה עולה לך",
+        "expect": {
+          "authority_known": true,
+          "timeline_known": true,
+          "buying_reality_known": true,
+          "fit": "good"
+        }
+      },
+      {
+        "user": "let's book a meeting",
+        "expected_action": "offer_meeting",
+        "expected_reply_contains": "אסף",
+        "expect": {
+          "willingness_to_meet": true
+        }
+      }
+    ]
+  },
+  {
+    "case_id": "ecommerce_support_overload_en",
+    "persona": "ecommerce_support_overload",
+    "turns": [
+      {
+        "user": "We have an online store and support is overwhelming.",
+        "expected_action": "deepen_pain",
+        "expected_reply_contains": "ידנית",
+        "expect": {
+          "fit": "possible",
+          "workflow_known": true
+        }
+      },
+      {
+        "user": "we copy paste order details into a spreadsheet",
+        "expected_action": "quantify",
+        "expected_reply_contains": "כמה זמן",
+        "expect": {
+          "manual_step_known": true
+        }
+      },
+      {
+        "user": "every day, maybe three hours",
+        "expected_action": "reflect",
+        "expected_reply_contains": "זה מדויק",
+        "expect": {
+          "impact_confirmed": true
+        }
+      },
+      {
+        "user": "I decide this quarter",
+        "expected_action": "offer_hypothesis",
+        "expected_reply_contains": "להוריד ממך"
+      }
+    ]
+  },
+  {
+    "case_id": "restaurant_reservations_he",
+    "persona": "restaurant_whatsapp_reservations",
+    "turns": [
+      {
+        "user": "יש לנו מסעדה ווואטסאפ עמוס כל היום",
+        "expected_action": "deepen_pain",
+        "expected_reply_contains": "ידנית",
+        "expect": {
+          "fit": "possible",
+          "pain_level": 3,
+          "workflow_known": true
+        }
+      },
+      {
+        "user": "אני רושם הזמנות ידנית ביומן",
+        "expected_action": "reflect",
+        "expected_reply_contains": "זה מדויק",
+        "expect": {
+          "manual_step_known": true
+        }
+      },
+      {
+        "user": "כל יום, שעתיים",
+        "expected_action": "offer_hypothesis",
+        "expected_reply_contains": "להוריד ממך"
+      },
+      {
+        "user": "אני הבעלים",
+        "expected_action": "qualify",
+        "expected_reply_contains": "מתי זה יהיה",
+        "expect": {
+          "authority_known": true
+        }
+      }
+    ]
+  },
+  {
+    "case_id": "real_estate_leads_en",
+    "persona": "real_estate_slow_followup",
+    "turns": [
+      {
+        "user": "I'm in real estate and I forget to follow up with leads all day.",
+        "expected_action": "deepen_pain",
+        "expected_reply_contains": "ידנית",
+        "expect": {
+          "fit": "possible"
+        }
+      },
+      {
+        "user": "I update the sheet by hand after every call",
+        "expected_action": "reflect",
+        "expected_reply_contains": "זה מדויק",
+        "expect": {
+          "manual_step_known": true
+        }
+      },
+      {
+        "user": "about an hour a day",
+        "expected_action": "offer_hypothesis",
+        "expected_reply_contains": "להוריד ממך"
+      }
+    ]
+  },
+  {
+    "case_id": "one_word_answers_he",
+    "persona": "buyer_one_word_answers",
+    "turns": [
+      {
+        "user": "היי",
+        "expected_action": "understand_workflow",
+        "expected_reply_contains": "יום רגיל בעסק",
+        "expect": {
+          "workflow_known": false,
+          "discovery_turns": 0
+        }
+      },
+      {
+        "user": "מלאי",
+        "expected_action": "deepen_pain",
+        "expected_reply_contains": "ידנית",
+        "expect": {
+          "workflow_known": true,
+          "discovery_turns": 1
+        }
+      },
+      {
+        "user": "כן",
+        "expected_action": "deepen_pain",
+        "expected_reply_contains": "גוזל לך זמן",
+        "expect": {
+          "discovery_turns": 1
+        }
+      },
+      {
+        "user": "לא יודע",
+        "expected_action": "quantify",
+        "expected_reply_contains": "כמה זמן"
+      },
+      {
+        "user": "שיטס",
+        "expected_action": "reflect",
+        "expected_reply_contains": "זה מדויק"
+      }
+    ]
+  },
+  {
+    "case_id": "hebrew_slang",
+    "persona": "buyer_slang_and_typos",
+    "turns": [
+      {
+        "user": "אחי יש לי בלגן שלם עם ההזמנות",
+        "expected_action": "deepen_pain",
+        "expected_reply_contains": "ידנית",
+        "expect": {
+          "workflow_known": true,
+          "pain_level": 2
+        }
+      },
+      {
+        "user": "מעתיק הכל לאקסל בערב",
+        "expected_action": "quantify",
+        "expected_reply_contains": "כמה זמן",
+        "expect": {
+          "manual_step_known": true
+        }
+      },
+      {
+        "user": "כל יום שעה בערך",
+        "expected_action": "reflect",
+        "expected_reply_contains": "זה מדויק",
+        "expect": {
+          "impact_confirmed": true
+        }
+      }
+    ]
+  },
+  {
+    "case_id": "mixed_hebrew_english",
+    "persona": "buyer_mixed_languages",
+    "turns": [
+      {
+        "user": "יש לי online store והכל ידני",
+        "expected_action": "quantify",
+        "expected_reply_contains": "כמה זמן",
+        "expect": {
+          "workflow_known": true,
+          "manual_step_known": true
+        }
+      },
+      {
+        "user": "אני מזין orders לשיטס",
+        "expected_action": "reflect",
+        "expected_reply_contains": "זה מדויק"
+      },
+      {
+        "user": "כל יום",
+        "expected_action": "offer_hypothesis",
+        "expected_reply_contains": "להוריד ממך"
+      }
+    ]
+  },
+  {
+    "case_id": "direct_price_question_he",
+    "persona": "buyer_asks_price_first",
+    "turns": [
+      {
+        "user": "כמה זה עולה?",
+        "expected_action": "handle_objection",
+        "expected_reply_contains": "המחיר תלוי בהיקף",
+        "expect": {
+          "active_objection": "price_question"
+        }
+      }
+    ]
+  },
+  {
+    "case_id": "direct_price_question_en",
+    "persona": "buyer_asks_price_first_en",
+    "turns": [
+      {
+        "user": "how much does it cost?",
+        "expected_action": "handle_objection",
+        "expected_reply_contains": "המחיר תלוי בהיקף",
+        "expect": {
+          "active_objection": "price_question"
+        }
+      }
+    ]
+  },
+  {
+    "case_id": "price_objection_he",
+    "persona": "buyer_price_objection",
+    "turns": [
+      {
+        "user": "זה יקר מדי בשבילי",
+        "expected_action": "handle_objection",
+        "expected_reply_contains": "יקר",
+        "expect": {
+          "active_objection": "price"
+        }
+      }
+    ]
+  },
+  {
+    "case_id": "technical_skeptical",
+    "persona": "technical_skeptical_buyer",
+    "turns": [
+      {
+        "user": "I don't trust AI to talk to my customers.",
+        "expected_action": "handle_objection",
+        "expected_reply_contains": "החשש המרכזי",
+        "expect": {
+          "active_objection": "ai_trust"
+        }
+      }
+    ]
+  },
+  {
+    "case_id": "ai_privacy",
+    "persona": "buyer_afraid_ai_privacy",
+    "turns": [
+      {
+        "user": "I'm worried about privacy",
+        "expected_action": "handle_objection",
+        "expected_reply_contains": "החשש המרכזי",
+        "expect": {
+          "active_objection": "ai_trust"
+        }
+      }
+    ]
+  },
+  {
+    "case_id": "comparing_vendors",
+    "persona": "buyer_comparing_vendors",
+    "turns": [
+      {
+        "user": "we already use another system",
+        "expected_action": "handle_objection",
+        "expected_reply_contains": "מה עובד היום",
+        "expect": {
+          "active_objection": "has_vendor"
+        }
+      }
+    ]
+  },
+  {
+    "case_id": "enterprise_committee",
+    "persona": "enterprise_decision_committee",
+    "turns": [
+      {
+        "user": "I need to ask my partner before any change",
+        "expected_action": "handle_objection",
+        "expected_reply_contains": "מי עוד צריך",
+        "expect": {
+          "active_objection": "need_partner"
+        }
+      }
+    ]
+  },
+  {
+    "case_id": "requests_human_he",
+    "persona": "buyer_wants_a_person",
+    "turns": [
+      {
+        "user": "אני רוצה לדבר עם אסף",
+        "expected_action": "handoff",
+        "expected_reply_contains": "אעביר",
+        "expect": {
+          "owner_required": true
+        }
+      }
+    ]
+  },
+  {
+    "case_id": "ready_to_book",
+    "persona": "buyer_ready_to_book",
+    "turns": [
+      {
+        "user": "let's book a meeting",
+        "expected_action": "qualify",
+        "expected_reply_contains": "מי צריך להיות מעורב",
+        "expect": {
+          "willingness_to_meet": true,
+          "fit": "possible",
+          "workflow_known": false
+        }
+      }
+    ]
+  },
+  {
+    "case_id": "student_non_buyer",
+    "persona": "non_buyer_student",
+    "turns": [
+      {
+        "user": "I'm a student, this is a school project",
+        "expected_action": "disqualify",
+        "expected_reply_contains": "התאמה",
+        "expect": {
+          "fit": "poor"
+        }
+      }
+    ]
+  },
+  {
+    "case_id": "opts_out_he",
+    "persona": "buyer_opts_out",
+    "turns": [
+      {
+        "user": "לא מעוניין תודה",
+        "expected_action": "stop",
+        "expected_reply_contains": "משאירה",
+        "expect": {
+          "willingness_to_meet": false
+        }
+      }
+    ]
+  }
+]

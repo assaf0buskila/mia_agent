@@ -1,0 +1,13 @@
+{
+  "GroupId": "sg-MIA_RDS",
+  "IpPermissions": [
+    {
+      "IpProtocol": "tcp",
+      "FromPort": 5432,
+      "ToPort": 5432,
+      "UserIdGroupPairs": [
+        { "GroupId": "sg-MIA_TASKS", "Description": "Fargate to Postgres" }
+      ]
+    }
+  ]
+}

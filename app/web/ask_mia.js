@@ -1,0 +1,918 @@
+(function () {
+  'use strict';
+  var script = document.currentScript;
+  if (!script || !script.src) return;
+  var api = new URL(script.src).origin;
+  var sessionId = null;
+  var opened = false;
+  var busy = false;
+  var recording = false;
+  var mediaRecorder = null;
+  var audioChunks = [];
+  var recordStarted = 0;
+  var recordStream = null;
+  var MAX_RECORD_MS = 60000;
+  var MIC_IDLE = 'הקלטה';
+  var MIC_LIVE = 'מקליטה… לחצו שוב לשליחה';
+  var MIC_ERR = 'לא שמעתי טוב. נסו שוב או כתבו.';
+  var MIC_PERM = 'לא קיבלתי גישה למיקרופון. אפשר גם לכתוב.';
+  var MIC_NA = 'ההקלטה לא זמינה כאן. כתבו במקום.';
+  var ERR = 'משהו השתבש. נסו שוב.';
+  var WA_NA = 'וואטסאפ לא מוגדר כרגע.';
+  var eventQueue = [];
+  var MAX_QUEUE = 10;
+  var seenSections = {};
+  var formStates = [];
+  var boundForms = [];
+  var formAbandonPosted = false;
+  var formStartedPosted = false;
+  var FORBIDDEN = ['token', 'secret', 'password'];
+  var SLUG_RE = /^[a-zA-Z0-9_\-\u0590-\u05FF]+$/;
+  var SESSION_KEY = 'askMia.sessionId';
+  var TRANSCRIPT_KEY = 'askMia.transcript';
+  var SESSION_RE = /^web_[a-f0-9]{16}$/;
+  var storedTranscript = [];
+  var SVG_NS = 'http://www.w3.org/2000/svg';
+  var MIA_MARK_PATH =
+    'M7 23V8h4.2L16 16.8 20.8 8H25v15h-3.4V13.1L16 21.2l-5.6-8.1V23H7z';
+
+  function svgNode(name, attrs) {
+    var node = document.createElementNS(SVG_NS, name);
+    var key;
+    for (key in attrs) {
+      if (Object.prototype.hasOwnProperty.call(attrs, key)) {
+        node.setAttribute(key, attrs[key]);
+      }
+    }
+    return node;
+  }
+
+  function miaMarkSvg() {
+    if (typeof document.createElementNS !== 'function') return null;
+    var svg = svgNode('svg', { viewBox: '0 0 32 32', focusable: 'false' });
+    svg.setAttribute('aria-hidden', 'true');
+    svg.appendChild(
+      svgNode('path', { fill: 'currentColor', d: MIA_MARK_PATH })
+    );
+    svg.appendChild(
+      svgNode('rect', {
+        x: '8',
+        y: '25.4',
+        width: '16',
+        height: '2.2',
+        rx: '1.1',
+        fill: '#2563eb',
+      })
+    );
+    return svg;
+  }
+
+  function paintBrandMark(host) {
+    host.setAttribute('aria-hidden', 'true');
+    try {
+      var svg = miaMarkSvg();
+      if (svg && svg.namespaceURI === SVG_NS) {
+        host.appendChild(svg);
+        return;
+      }
+    } catch (err) {}
+    host.textContent = 'מ';
+  }
+
+  function sparkSvg() {
+    if (typeof document.createElementNS !== 'function') return null;
+    var svg = svgNode('svg', { viewBox: '0 0 32 32', focusable: 'false' });
+    svg.setAttribute('aria-hidden', 'true');
+    svg.appendChild(
+      svgNode('path', {
+        fill: 'currentColor',
+        d: 'M16 4l2.4 8.1L26 14.5l-7.6 2.4L16 25l-2.4-8.1L6 14.5l7.6-2.4z',
+      })
+    );
+    return svg;
+  }
+
+  function paintSpark(host) {
+    host.setAttribute('aria-hidden', 'true');
+    try {
+      var svg = sparkSvg();
+      if (svg && svg.namespaceURI === SVG_NS) {
+        host.appendChild(svg);
+        return;
+      }
+    } catch (err) {}
+    paintBrandMark(host);
+  }
+
+  function sendPlaneSvg() {
+    if (typeof document.createElementNS !== 'function') return null;
+    var svg = svgNode('svg', { viewBox: '0 0 24 24', focusable: 'false' });
+    svg.setAttribute('aria-hidden', 'true');
+    svg.appendChild(
+      svgNode('path', {
+        fill: 'currentColor',
+        d: 'M3.4 11.2 20.1 4.1c.7-.3 1.4.4 1.1 1.1L14.1 21.8c-.3.7-1.3.7-1.6 0l-2.6-7.1-7.1-2.6c-.7-.3-.7-1.3 0-1.6z',
+      })
+    );
+    return svg;
+  }
+
+  var style = document.createElement('style');
+  style.textContent =
+    '#ask-mia-root{position:fixed;inset-inline-end:1.1rem;bottom:max(1.1rem,env(safe-area-inset-bottom,0px));z-index:9999;display:flex;flex-direction:column-reverse;align-items:flex-end;gap:.55rem;font:16px/1.5 Assistant,system-ui,sans-serif;color:#061b35;color-scheme:light}' +
+    '#ask-mia-launcher{display:inline-flex;align-items:center;justify-content:center;gap:.45rem;border:1px solid #ffffff59;border-radius:999px;padding-block:0;padding-inline-start:.4rem;padding-inline-end:1.05rem;height:56px;min-height:56px;min-width:56px;background:linear-gradient(135deg,#2f5f93,#2563eb);color:#fff;cursor:pointer;box-shadow:0 18px 44px #2563eb59;transition:transform .16s ease,box-shadow .16s ease;font:inherit;font-weight:800;line-height:1}' +
+    '#ask-mia-launcher:hover{transform:translateY(-2px)}' +
+    '#ask-mia-launcher:focus-visible{outline:2px solid #2563eb;outline-offset:2px}' +
+    '#ask-mia-panel[hidden],#ask-mia-wa[hidden]{display:none!important}' +
+    '.whatsapp-fab{display:none!important}' +
+    '.ask-mia-launch-mark{width:2rem;height:2rem;border-radius:999px;background:#d9eeff;color:#061b35;display:inline-flex;align-items:center;justify-content:center;font-weight:700;font-size:1rem;flex:0 0 auto}' +
+    '.ask-mia-launch-mark svg,.ask-mia-avatar svg,.ask-mia-bubble-avatar svg{width:1.2rem;height:1.2rem;display:block}' +
+    '#ask-mia-launch-label{white-space:nowrap;font-size:.92rem;font-weight:800;color:#fff}' +
+    '#ask-mia-panel{width:min(22rem,calc(100vw - 2rem));background:linear-gradient(180deg,#F8FBFF,#eef7ff);color:#061b35;border:1px solid #2f5f9321;border-radius:1rem;box-shadow:0 16px 40px rgba(6,27,53,.22);display:flex;flex-direction:column;overflow:hidden}' +
+    '#ask-mia-header{display:flex;align-items:center;gap:.65rem;padding:.7rem .85rem;background:#061b35;color:#fff;border-bottom:3px solid #2563eb}' +
+    '.ask-mia-avatar{width:2.15rem;height:2.15rem;border-radius:999px;background:#d9eeff;color:#061b35;display:inline-flex;align-items:center;justify-content:center;font-weight:700;flex:0 0 auto}' +
+    '.ask-mia-name{display:block;color:#fff;font-weight:700;font-size:.95rem;line-height:1.2}' +
+    '.ask-mia-sub{display:block;color:#d9eeff;font-size:.72rem;font-weight:500}' +
+    '#ask-mia-transcript{max-height:14rem;overflow:auto;padding:.75rem;display:flex;flex-direction:column;gap:.75rem}' +
+    '.ask-mia-row{display:flex;align-items:flex-end;gap:.5rem;max-width:100%}' +
+    '.ask-mia-row-mia{align-self:flex-start}' +
+    '.ask-mia-row-user{align-self:flex-end;flex-direction:row-reverse}' +
+    '.ask-mia-bubble-avatar{width:2rem;height:2rem;border-radius:999px;flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;font-weight:700;font-size:.72rem}' +
+    '.ask-mia-row-mia .ask-mia-bubble-avatar{background:#d9eeff;color:#061b35}' +
+    '.ask-mia-row-user .ask-mia-bubble-avatar{background:#2f5f93;color:#fff}' +
+    '.ask-mia-msg{padding:.55rem .7rem;border-radius:.65rem;white-space:pre-wrap;word-break:break-word}' +
+    '.ask-mia-mia{background:#eef7ff;color:#061b35;max-width:min(90%,16rem);border:1px solid #2f5f9321;border-end-start-radius:.2rem}' +
+    '.ask-mia-user{background:#2f5f93;color:#fff;max-width:min(90%,16rem);border-end-end-radius:.2rem}' +
+    '.ask-mia-dots{display:inline-flex;align-items:center;gap:.2rem;height:1.1rem}' +
+    '.ask-mia-dots span{width:.35rem;height:.35rem;border-radius:999px;background:#061b35;display:block;animation:ask-mia-bounce .6s ease-in-out infinite}' +
+    '.ask-mia-dots span:nth-child(2){animation-delay:.1s}' +
+    '.ask-mia-dots span:nth-child(3){animation-delay:.2s}' +
+    '@keyframes ask-mia-bounce{0%,100%{transform:translateY(0)}50%{transform:translateY(-4px)}}' +
+    '#ask-mia-compose{display:flex;flex-direction:column;gap:.35rem;padding:.75rem;border-top:1px solid #2f5f9321;background:#F8FBFF}' +
+    '#ask-mia-input{resize:vertical;min-height:2.5rem;max-height:8rem;padding:.55rem .65rem;border:1px solid #7ba7d3;border-radius:.65rem;font:inherit;font-size:16px;color:#061b35;background:#fff}' +
+    '#ask-mia-input:focus{outline:2px solid #2563eb;outline-offset:1px;border-color:#2563eb}' +
+    '#ask-mia-hint{margin:0;font-size:.75rem;color:#2f5f93}' +
+    '#ask-mia-actions{display:flex;gap:.35rem;flex-wrap:wrap}' +
+    '#ask-mia-actions button{border:0;border-radius:.65rem;padding:.45rem .75rem;min-height:44px;cursor:pointer;font:inherit;color:#061b35}' +
+    '#ask-mia-send{background:#2f5f93;color:#fff}' +
+    '#ask-mia-mic{background:#d9eeff;color:#061b35}' +
+    '#ask-mia-mic.recording{background:#b00;color:#fff}' +
+    '#ask-mia-mic:focus-visible{outline:2px solid #2563eb;outline-offset:2px}' +
+    '#ask-mia-wa{background:#25d366;color:#fff}' +
+    '#ask-mia-wa.offer{box-shadow:0 0 0 2px #2563eb}' +
+    '#ask-mia-status{min-height:1rem;padding:0 .75rem .5rem;color:#b00;font-size:.85rem}' +
+    '@media (prefers-reduced-motion:reduce){#ask-mia-launcher,#ask-mia-send,#ask-mia-mic,#ask-mia-wa,#ask-mia-input{transition:none}#ask-mia-launcher:hover{transform:none}.ask-mia-dots span{animation:none}}';
+
+  var root = document.createElement('div');
+  root.id = 'ask-mia-root';
+
+  var launcher = document.createElement('button');
+  launcher.id = 'ask-mia-launcher';
+  launcher.type = 'button';
+  launcher.setAttribute('aria-expanded', 'false');
+  launcher.setAttribute('aria-controls', 'ask-mia-panel');
+  launcher.setAttribute('aria-label', 'שאלו את מיה');
+  var launchMark = document.createElement('span');
+  launchMark.className = 'ask-mia-launch-mark';
+  paintBrandMark(launchMark);
+  var launchLabel = document.createElement('span');
+  launchLabel.id = 'ask-mia-launch-label';
+  launchLabel.textContent = 'שאלו את מיה';
+  launcher.appendChild(launchMark);
+  launcher.appendChild(launchLabel);
+
+  var panel = document.createElement('div');
+  panel.id = 'ask-mia-panel';
+  panel.hidden = true;
+  panel.dir = 'rtl';
+
+  var header = document.createElement('div');
+  header.id = 'ask-mia-header';
+  var avatar = document.createElement('span');
+  avatar.className = 'ask-mia-avatar';
+  paintBrandMark(avatar);
+  var brand = document.createElement('div');
+  var nameEl = document.createElement('strong');
+  nameEl.className = 'ask-mia-name';
+  nameEl.textContent = 'מיה';
+  var subEl = document.createElement('span');
+  subEl.className = 'ask-mia-sub';
+  subEl.textContent = 'AssafWeb';
+  brand.appendChild(nameEl);
+  brand.appendChild(subEl);
+  header.appendChild(avatar);
+  header.appendChild(brand);
+
+  var transcript = document.createElement('div');
+  transcript.id = 'ask-mia-transcript';
+
+  var compose = document.createElement('div');
+  compose.id = 'ask-mia-compose';
+
+  var input = document.createElement('textarea');
+  input.id = 'ask-mia-input';
+  input.setAttribute('rows', '2');
+  input.setAttribute('maxlength', '4000');
+  input.setAttribute('aria-label', 'הודעה למיה');
+  input.setAttribute('aria-describedby', 'ask-mia-hint');
+
+  var hint = document.createElement('p');
+  hint.id = 'ask-mia-hint';
+  hint.textContent = 'תקליטו אותי — זה יותר קל מלכתוב.';
+
+  var actions = document.createElement('div');
+  actions.id = 'ask-mia-actions';
+
+  var sendBtn = document.createElement('button');
+  sendBtn.id = 'ask-mia-send';
+  sendBtn.type = 'button';
+  sendBtn.textContent = 'שליחה';
+
+  var micBtn = document.createElement('button');
+  micBtn.id = 'ask-mia-mic';
+  micBtn.type = 'button';
+  micBtn.setAttribute('aria-label', 'הקלטה למיה');
+  micBtn.setAttribute('aria-pressed', 'false');
+  micBtn.textContent = 'הקלטה';
+
+  var waBtn = document.createElement('button');
+  waBtn.id = 'ask-mia-wa';
+  waBtn.type = 'button';
+  waBtn.hidden = true;
+  waBtn.textContent = 'המשיכו בוואטסאפ';
+
+  var status = document.createElement('div');
+  status.id = 'ask-mia-status';
+
+  function lastMiaText() {
+    var nodes = transcript.querySelectorAll('.ask-mia-mia');
+    var i;
+    for (i = nodes.length - 1; i >= 0; i--) {
+      if (nodes[i].closest('#ask-mia-loading')) continue;
+      return nodes[i].textContent || '';
+    }
+    return '';
+  }
+
+  function bubbleAvatar(role) {
+    var face = document.createElement('span');
+    face.className = 'ask-mia-bubble-avatar';
+    face.setAttribute('aria-hidden', 'true');
+    if (role === 'mia') {
+      paintBrandMark(face);
+    } else {
+      face.textContent = 'א';
+    }
+    return face;
+  }
+
+  function paintMsg(role, text) {
+    var row = document.createElement('div');
+    row.className = 'ask-mia-row ask-mia-row-' + role;
+    var el = document.createElement('div');
+    el.className = 'ask-mia-msg ask-mia-' + role;
+    el.textContent = text;
+    row.appendChild(bubbleAvatar(role));
+    row.appendChild(el);
+    transcript.appendChild(row);
+    transcript.scrollTop = transcript.scrollHeight;
+  }
+
+  function hideLoading() {
+    var el = document.getElementById('ask-mia-loading');
+    if (el && el.parentNode) el.parentNode.removeChild(el);
+  }
+
+  function showLoading() {
+    hideLoading();
+    var row = document.createElement('div');
+    row.id = 'ask-mia-loading';
+    row.className = 'ask-mia-row ask-mia-row-mia';
+    row.setAttribute('aria-label', 'מיה כותבת');
+    var bubble = document.createElement('div');
+    bubble.className = 'ask-mia-msg ask-mia-mia';
+    var dots = document.createElement('span');
+    dots.className = 'ask-mia-dots';
+    dots.setAttribute('aria-hidden', 'true');
+    dots.appendChild(document.createElement('span'));
+    dots.appendChild(document.createElement('span'));
+    dots.appendChild(document.createElement('span'));
+    bubble.appendChild(dots);
+    row.appendChild(bubbleAvatar('mia'));
+    row.appendChild(bubble);
+    transcript.appendChild(row);
+    transcript.scrollTop = transcript.scrollHeight;
+  }
+
+  function persistTranscript() {
+    try {
+      localStorage.setItem(
+        TRANSCRIPT_KEY,
+        JSON.stringify(storedTranscript.slice(-16))
+      );
+    } catch (err) {}
+  }
+
+  function loadStoredSession() {
+    try {
+      var value = localStorage.getItem(SESSION_KEY);
+      if (typeof value === 'string' && SESSION_RE.test(value)) return value;
+    } catch (err) {}
+    return null;
+  }
+
+  function saveStoredSession(id) {
+    try {
+      localStorage.setItem(SESSION_KEY, id);
+    } catch (err) {}
+  }
+
+  function restoreTranscript() {
+    try {
+      var raw = localStorage.getItem(TRANSCRIPT_KEY);
+      var rows = raw ? JSON.parse(raw) : [];
+      if (!Array.isArray(rows)) return false;
+      storedTranscript = [];
+      rows.forEach(function (row) {
+        if (!row || (row.role !== 'mia' && row.role !== 'user')) return;
+        if (typeof row.text !== 'string' || !row.text) return;
+        var text = row.text.slice(0, 4000);
+        storedTranscript.push({ role: row.role, text: text });
+        paintMsg(row.role, text);
+      });
+      return storedTranscript.length > 0;
+    } catch (err) {
+      return false;
+    }
+  }
+
+  function appendMsg(role, text) {
+    if (typeof text !== 'string' || !text) return;
+    if (role === 'mia' && text === lastMiaText()) return;
+    paintMsg(role, text);
+    storedTranscript.push({ role: role, text: text });
+    persistTranscript();
+  }
+
+  function isWaMeUrl(url) {
+    try {
+      var parsed = new URL(url);
+      return parsed.protocol === 'https:' && parsed.hostname === 'wa.me';
+    } catch (err) {
+      return false;
+    }
+  }
+
+  function hasForbiddenSubstring(value) {
+    var lower = value.toLowerCase();
+    for (var i = 0; i < FORBIDDEN.length; i++) {
+      if (lower.indexOf(FORBIDDEN[i]) >= 0) return true;
+    }
+    return false;
+  }
+
+  function validateSlug(value) {
+    if (typeof value !== 'string') return null;
+    var cleaned = value.trim();
+    if (!cleaned) return null;
+    if (cleaned.indexOf('\n') >= 0 || cleaned.indexOf('\r') >= 0) return null;
+    if (cleaned.indexOf('@') >= 0) return null;
+    if (cleaned.indexOf(' ') >= 0) return null;
+    if (hasForbiddenSubstring(cleaned)) return null;
+    if (cleaned.length > 80) cleaned = cleaned.slice(0, 80);
+    if (!SLUG_RE.test(cleaned)) return null;
+    return cleaned;
+  }
+
+  function sendEvent(payload) {
+    if (!sessionId) return;
+    fetch(
+      api + '/v1/website/sessions/' + encodeURIComponent(sessionId) + '/events',
+      {
+        method: 'POST',
+        credentials: 'omit',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      }
+    ).catch(function () {});
+  }
+
+  function postEvent(kind, extra) {
+    var payload = { kind: kind };
+    if (extra) {
+      for (var k in extra) {
+        if (Object.prototype.hasOwnProperty.call(extra, k)) payload[k] = extra[k];
+      }
+    }
+    if (!sessionId) {
+      eventQueue.push(payload);
+      while (eventQueue.length > MAX_QUEUE) eventQueue.shift();
+      return;
+    }
+    sendEvent(payload);
+  }
+
+  function flushEventQueue() {
+    while (eventQueue.length) sendEvent(eventQueue.shift());
+  }
+
+  function sessionQuery() {
+    var q = new URLSearchParams(location.search);
+    var p = new URLSearchParams();
+    ['utm_source', 'utm_medium', 'utm_campaign', 'utm_content'].forEach(function (k) {
+      var v = q.get(k);
+      if (v) p.set(k, v);
+    });
+    p.set('landing_page', location.pathname);
+    if (document.referrer) p.set('referrer', document.referrer);
+    return p.toString();
+  }
+
+  function fetchJson(url, opts) {
+    return fetch(url, Object.assign({ credentials: 'omit' }, opts || {})).then(function (r) {
+      if (!r.ok) {
+        var err = new Error('fail');
+        err.status = r.status;
+        throw err;
+      }
+      return r.json();
+    });
+  }
+
+  function openPanel() {
+    panel.hidden = false;
+    launcher.setAttribute('aria-expanded', 'true');
+    if (!opened) {
+      opened = true;
+      initSession();
+    }
+    input.focus();
+  }
+
+  function closePanel() {
+    if (recording) finishRecording(false);
+    panel.hidden = true;
+    launcher.setAttribute('aria-expanded', 'false');
+  }
+
+  function togglePanel() {
+    if (panel.hidden) openPanel();
+    else closePanel();
+  }
+
+  function createWebsiteSession() {
+    return fetchJson(api + '/v1/website/sessions?' + sessionQuery(), { method: 'POST' }).then(
+      function (data) {
+        if (typeof data.session_id === 'string' && SESSION_RE.test(data.session_id)) {
+          sessionId = data.session_id;
+          saveStoredSession(sessionId);
+        }
+        if (sessionId) {
+          postEvent('page_viewed', { path: location.pathname });
+          flushEventQueue();
+        }
+        return sessionId;
+      }
+    );
+  }
+
+  function initSession() {
+    busy = true;
+    status.textContent = '';
+    fetchJson(api + '/v1/website/config')
+      .then(function (cfg) {
+        var existing = loadStoredSession();
+        var resumed = restoreTranscript();
+        if (!existing && !resumed && typeof cfg.opening === 'string') {
+          appendMsg('mia', cfg.opening);
+        }
+        if (existing) {
+          sessionId = existing;
+          postEvent('page_viewed', { path: location.pathname });
+          flushEventQueue();
+          return existing;
+        }
+        return createWebsiteSession();
+      })
+      .catch(function () {
+        status.textContent = ERR;
+      })
+      .finally(function () {
+        busy = false;
+      });
+  }
+
+  function applyReply(data) {
+    hideLoading();
+    if (typeof data.heard === 'string' && data.heard) {
+      var users = transcript.querySelectorAll('.ask-mia-row-user .ask-mia-user');
+      if (users.length) users[users.length - 1].textContent = data.heard;
+      var lastStored = storedTranscript[storedTranscript.length - 1];
+      if (lastStored && lastStored.role === 'user') {
+        lastStored.text = data.heard;
+        persistTranscript();
+      }
+    }
+    if (typeof data.message === 'string') appendMsg('mia', data.message);
+    if (data.next_action === 'offer_whatsapp') {
+      waBtn.hidden = false;
+      waBtn.classList.add('offer');
+    } else {
+      waBtn.classList.remove('offer');
+    }
+  }
+
+  function retryOnce(run) {
+    return run().catch(function (err) {
+      if (!err || err.status !== 404) throw err;
+      return createWebsiteSession().then(function (id) {
+        if (!id) throw new Error('fail');
+        return run();
+      });
+    });
+  }
+
+  function postText(text) {
+    return fetchJson(
+      api + '/v1/website/sessions/' + encodeURIComponent(sessionId) + '/messages',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: text }),
+      }
+    );
+  }
+
+  function sendMessage() {
+    var text = input.value.trim();
+    if (!text || busy || !sessionId) return;
+    if (text.length > 4000) text = text.slice(0, 4000);
+    busy = true;
+    status.textContent = '';
+    appendMsg('user', text);
+    input.value = '';
+    showLoading();
+    retryOnce(function () {
+      return postText(text);
+    })
+      .then(applyReply)
+      .catch(function () {
+        hideLoading();
+        status.textContent = ERR;
+      })
+      .finally(function () {
+        hideLoading();
+        busy = false;
+      });
+  }
+
+  function postVoice(blob) {
+    var form = new FormData();
+    var mime = blob.type || 'audio/webm';
+    var name = mime.indexOf('mp4') >= 0 ? 'note.mp4' : 'note.webm';
+    form.append('file', blob, name);
+    return fetchJson(
+      api + '/v1/website/sessions/' + encodeURIComponent(sessionId) + '/voice',
+      { method: 'POST', body: form }
+    );
+  }
+
+  function sendVoice(blob) {
+    if (busy || !sessionId || !blob || !blob.size) return;
+    busy = true;
+    status.textContent = '';
+    appendMsg('user', 'הקלטה');
+    showLoading();
+    retryOnce(function () {
+      return postVoice(blob);
+    })
+      .then(applyReply)
+      .catch(function () {
+        hideLoading();
+        status.textContent = MIC_ERR;
+      })
+      .finally(function () {
+        hideLoading();
+        busy = false;
+      });
+  }
+
+  function pickMime() {
+    if (typeof MediaRecorder === 'undefined') return '';
+    var types = ['audio/webm', 'audio/webm;codecs=opus', 'audio/mp4'];
+    var i;
+    if (typeof MediaRecorder.isTypeSupported === 'function') {
+      for (i = 0; i < types.length; i++) {
+        if (MediaRecorder.isTypeSupported(types[i])) return types[i];
+      }
+    }
+    return 'audio/webm';
+  }
+
+  function setMicLive(on) {
+    recording = on;
+    if (on) {
+      micBtn.classList.add('recording');
+      micBtn.textContent = MIC_LIVE;
+      micBtn.setAttribute('aria-pressed', 'true');
+    } else {
+      micBtn.classList.remove('recording');
+      micBtn.textContent = MIC_IDLE;
+      micBtn.setAttribute('aria-pressed', 'false');
+    }
+  }
+
+  function stopTracks() {
+    if (!recordStream) return;
+    recordStream.getTracks().forEach(function (t) {
+      t.stop();
+    });
+    recordStream = null;
+  }
+
+  function finishRecording(send) {
+    var rec = mediaRecorder;
+    if (!rec && !recording) return;
+    recording = false;
+    mediaRecorder = null;
+    if (!rec) {
+      stopTracks();
+      setMicLive(false);
+      return;
+    }
+    rec.ondataavailable = function (e) {
+      if (e.data && e.data.size) audioChunks.push(e.data);
+    };
+    rec.onerror = null;
+    rec.onstop = function () {
+      var chunks = audioChunks;
+      audioChunks = [];
+      stopTracks();
+      setMicLive(false);
+      if (!send) return;
+      if (!chunks.length) {
+        status.textContent = MIC_ERR;
+        return;
+      }
+      var blob = new Blob(chunks, { type: chunks[0].type || 'audio/webm' });
+      if (!blob.size) {
+        status.textContent = MIC_ERR;
+        return;
+      }
+      sendVoice(blob);
+    };
+    try {
+      if (rec.state !== 'inactive') rec.stop();
+      else rec.onstop();
+    } catch (err) {
+      stopTracks();
+      setMicLive(false);
+      if (send) status.textContent = MIC_ERR;
+    }
+  }
+
+  function toggleRecord() {
+    if (busy || !sessionId) return;
+    if (recording) {
+      finishRecording(true);
+      return;
+    }
+    if (
+      typeof MediaRecorder !== 'function' ||
+      !navigator.mediaDevices ||
+      typeof navigator.mediaDevices.getUserMedia !== 'function'
+    ) {
+      status.textContent = MIC_NA;
+      return;
+    }
+    status.textContent = '';
+    var mime = pickMime();
+    navigator.mediaDevices
+      .getUserMedia({ audio: true })
+      .then(function (stream) {
+        if (busy || !sessionId || recording) {
+          stream.getTracks().forEach(function (t) {
+            t.stop();
+          });
+          return;
+        }
+        recordStream = stream;
+        audioChunks = [];
+        try {
+          mediaRecorder = mime
+            ? new MediaRecorder(stream, { mimeType: mime })
+            : new MediaRecorder(stream);
+        } catch (err) {
+          stream.getTracks().forEach(function (t) {
+            t.stop();
+          });
+          recordStream = null;
+          status.textContent = MIC_NA;
+          return;
+        }
+        recordStarted = Date.now();
+        mediaRecorder.ondataavailable = function (e) {
+          if (e.data && e.data.size) audioChunks.push(e.data);
+          if (recording && Date.now() - recordStarted >= MAX_RECORD_MS) {
+            finishRecording(true);
+          }
+        };
+        mediaRecorder.onerror = function () {
+          finishRecording(false);
+          status.textContent = MIC_ERR;
+        };
+        setMicLive(true);
+        try {
+          mediaRecorder.start(1000);
+        } catch (err) {
+          finishRecording(false);
+          status.textContent = MIC_NA;
+        }
+      })
+      .catch(function () {
+        status.textContent = MIC_PERM;
+      });
+  }
+
+  function handoff() {
+    if (busy || !sessionId) return;
+    busy = true;
+    status.textContent = '';
+    fetchJson(
+      api + '/v1/website/sessions/' + encodeURIComponent(sessionId) + '/handoff',
+      { method: 'POST' }
+    )
+      .then(function (data) {
+        if (typeof data.whatsapp_url === 'string' && isWaMeUrl(data.whatsapp_url)) {
+          window.location.assign(data.whatsapp_url);
+        } else {
+          status.textContent = WA_NA;
+        }
+      })
+      .catch(function () {
+        status.textContent = ERR;
+      })
+      .finally(function () {
+        busy = false;
+      });
+  }
+
+  function onCtaClick(e) {
+    if (!e.target || !e.target.closest) return;
+    if (e.target.closest('#ask-mia-root')) return;
+    var el = e.target.closest('[data-mia-cta]');
+    if (!el) return;
+    var slug = validateSlug(el.getAttribute('data-mia-cta'));
+    if (!slug) return;
+    postEvent('cta_click', { cta: slug });
+  }
+
+  function onHostOpenClick(e) {
+    if (!e.target || !e.target.closest) return;
+    if (e.target.closest('#ask-mia-root')) return;
+    if (!e.target.closest('[data-mia-open]')) return;
+    e.preventDefault();
+    openPanel();
+  }
+
+  function bindForm(form) {
+    if (!form || boundForms.indexOf(form) >= 0) return;
+    boundForms.push(form);
+    var state = { dirty: false, submitted: false };
+    formStates.push(state);
+    form.addEventListener('focusin', function (ev) {
+      var t = ev.target;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT')) {
+        state.dirty = true;
+        if (!formStartedPosted) {
+          formStartedPosted = true;
+          postEvent('form_started', {});
+        }
+      }
+    });
+    form.addEventListener('submit', function () {
+      state.submitted = true;
+      state.dirty = false;
+    });
+  }
+
+  function bindForms(rootNode) {
+    if (!rootNode) return;
+    if (rootNode.nodeType === 1 && rootNode.matches && rootNode.matches('form[data-mia-form]')) {
+      bindForm(rootNode);
+    }
+    if (!rootNode.querySelectorAll) return;
+    rootNode.querySelectorAll('form[data-mia-form]').forEach(bindForm);
+  }
+
+  function checkFormAbandon() {
+    if (formAbandonPosted) return;
+    for (var i = 0; i < formStates.length; i++) {
+      if (formStates[i].dirty && !formStates[i].submitted) {
+        formAbandonPosted = true;
+        postEvent('form_abandoned', {});
+        return;
+      }
+    }
+  }
+
+  function observeSection(el, sectionObserver) {
+    if (!el || !sectionObserver) return;
+    sectionObserver.observe(el);
+  }
+
+  function bindSections(rootNode, sectionObserver) {
+    if (!rootNode || !sectionObserver) return;
+    if (rootNode.nodeType === 1 && rootNode.hasAttribute && rootNode.hasAttribute('data-mia-section')) {
+      observeSection(rootNode, sectionObserver);
+    }
+    if (!rootNode.querySelectorAll) return;
+    rootNode.querySelectorAll('[data-mia-section]').forEach(function (el) {
+      observeSection(el, sectionObserver);
+    });
+  }
+
+  function setupFunnelTracking() {
+    document.addEventListener('click', onCtaClick, true);
+    document.addEventListener('click', onHostOpenClick, true);
+    bindForms(document);
+    window.addEventListener('pagehide', checkFormAbandon);
+    document.addEventListener('visibilitychange', function () {
+      if (document.visibilityState === 'hidden') checkFormAbandon();
+    });
+    function onSpaNav() {
+      postEvent('page_viewed', { path: location.pathname });
+    }
+    window.addEventListener('popstate', onSpaNav);
+    window.addEventListener('hashchange', onSpaNav);
+    var sectionObserver = null;
+    if (typeof IntersectionObserver !== 'undefined') {
+      sectionObserver = new IntersectionObserver(
+        function (entries) {
+          entries.forEach(function (entry) {
+            if (!entry.isIntersecting || entry.intersectionRatio <= 0.4) return;
+            var slug = validateSlug(entry.target.getAttribute('data-mia-section'));
+            if (!slug || seenSections[slug]) return;
+            seenSections[slug] = true;
+            postEvent('section_viewed', { section: slug });
+          });
+        },
+        { threshold: [0, 0.4, 1] }
+      );
+      bindSections(document, sectionObserver);
+    }
+    if (typeof MutationObserver !== 'undefined' && document.body) {
+      new MutationObserver(function (mutations) {
+        mutations.forEach(function (m) {
+          m.addedNodes.forEach(function (node) {
+            if (node.nodeType !== 1) return;
+            bindForms(node);
+            if (sectionObserver) bindSections(node, sectionObserver);
+          });
+        });
+      }).observe(document.body, { childList: true, subtree: true });
+    }
+  }
+
+  launcher.addEventListener('click', togglePanel);
+  sendBtn.addEventListener('click', sendMessage);
+  micBtn.addEventListener('click', toggleRecord);
+  waBtn.addEventListener('click', handoff);
+  input.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
+  });
+
+  actions.appendChild(sendBtn);
+  actions.appendChild(micBtn);
+  actions.appendChild(waBtn);
+  compose.appendChild(input);
+  compose.appendChild(hint);
+  compose.appendChild(actions);
+  panel.appendChild(header);
+  panel.appendChild(transcript);
+  panel.appendChild(compose);
+  panel.appendChild(status);
+  root.appendChild(launcher);
+  root.appendChild(panel);
+  function mount() {
+    if (!document.body) {
+      setTimeout(mount, 0);
+      return;
+    }
+    document.head.appendChild(style);
+    document.body.appendChild(root);
+    setupFunnelTracking();
+    fetchJson(api + '/v1/website/config')
+      .then(function (cfg) {
+        if (cfg.demo === true) {
+          launchLabel.textContent = 'שאלו את מיה (דמו)';
+          launcher.setAttribute('aria-label', 'שאלו את מיה (דמו)');
+        }
+      })
+      .catch(function () {});
+  }
+  mount();
+})();

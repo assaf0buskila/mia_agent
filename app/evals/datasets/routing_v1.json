@@ -1,0 +1,122 @@
+[
+  {
+    "case_id": "rt_calendar_en_1",
+    "user": "check my calendar",
+    "expected_type": "calendar",
+    "expected_clarification": false
+  },
+  {
+    "case_id": "rt_calendar_he_1",
+    "user": "תבדוק את היומן",
+    "expected_type": "calendar",
+    "expected_clarification": false
+  },
+  {
+    "case_id": "rt_lead_review_en_id",
+    "user": "lead review lead_a1b2c3d4e5f6",
+    "expected_type": "lead_review",
+    "expected_clarification": false
+  },
+  {
+    "case_id": "rt_lead_review_he_noid",
+    "user": "סקירת ליד",
+    "expected_type": "lead_review",
+    "expected_clarification": true
+  },
+  {
+    "case_id": "rt_content_idea_he",
+    "user": "רעיונות לתוכן",
+    "expected_type": "content_idea",
+    "expected_clarification": false
+  },
+  {
+    "case_id": "rt_gmail_summary_en_noid",
+    "user": "summarize email",
+    "expected_type": "gmail_summary",
+    "expected_clarification": true
+  },
+  {
+    "case_id": "rt_owner_notify_he",
+    "user": "מה נקבע",
+    "expected_type": "owner_notify",
+    "expected_clarification": false
+  },
+  {
+    "case_id": "rt_meeting_brief_he",
+    "user": "תקציר פגישה lead_b1c2d3e4f5a6",
+    "expected_type": "meeting_brief",
+    "expected_clarification": false
+  },
+  {
+    "case_id": "rt_campaign_pause_id",
+    "user": "pause campaign 120339980501",
+    "expected_type": "approval",
+    "expected_clarification": false
+  },
+  {
+    "case_id": "rt_approval_keyword_en",
+    "user": "approve the proposal",
+    "expected_type": "approval",
+    "expected_clarification": false
+  },
+  {
+    "case_id": "rt_human_takeover_en",
+    "user": "human takeover lead_c1d2e3f4a5b6",
+    "expected_type": "human_takeover",
+    "expected_clarification": false
+  },
+  {
+    "case_id": "rt_human_resume_he",
+    "user": "החזר למיאה lead_d1e2f3a4b5c6",
+    "expected_type": "human_takeover_resume",
+    "expected_clarification": false
+  },
+  {
+    "case_id": "rt_preference_en",
+    "user": "never say that again",
+    "expected_type": "preference",
+    "expected_clarification": false
+  },
+  {
+    "case_id": "rt_analytics_en",
+    "user": "analyze instagram content",
+    "expected_type": "analytics",
+    "expected_clarification": false
+  },
+  {
+    "case_id": "rt_research_he",
+    "user": "חפשי על המתחרים",
+    "expected_type": "research",
+    "expected_clarification": false
+  },
+  {
+    "case_id": "rt_linkedin_he",
+    "user": "לינקדאין",
+    "expected_type": "linkedin",
+    "expected_clarification": false
+  },
+  {
+    "case_id": "rt_daily_brief_en",
+    "user": "daily brief",
+    "expected_type": "daily_brief",
+    "expected_clarification": false
+  },
+  {
+    "case_id": "rt_weekly_brief_en",
+    "user": "weekly brief",
+    "expected_type": "weekly_brief",
+    "expected_clarification": false
+  },
+  {
+    "case_id": "rt_note_unclassifiable_en",
+    "user": "totally unrelated phrase here",
+    "expected_type": "note",
+    "expected_clarification": true
+  },
+  {
+    "case_id": "rt_note_clash_mixed",
+    "user": "פגישה follow-up",
+    "expected_type": "note",
+    "expected_clarification": true
+  }
+]

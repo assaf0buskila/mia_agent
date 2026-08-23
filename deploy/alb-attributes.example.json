@@ -1,0 +1,9 @@
+{
+  "LoadBalancerArn": "arn:aws:elasticloadbalancing:REGION:ACCOUNT_ID:loadbalancer/app/mia/HASH",
+  "Attributes": [
+    {
+      "Key": "idle_timeout.timeout_seconds",
+      "Value": "120"
+    }
+  ]
+}

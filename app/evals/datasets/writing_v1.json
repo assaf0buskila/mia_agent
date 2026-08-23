@@ -1,0 +1,322 @@
+[
+  {
+    "case_id": "writing_discovery_he",
+    "category": "discovery",
+    "language": "he",
+    "kind": "buyer",
+    "user": "יש לנו מסעדה ווואטסאפ עמוס כל היום",
+    "expected_action": "deepen_pain",
+    "expected_reply_contains": "ידנית"
+  },
+  {
+    "case_id": "writing_discovery_en",
+    "category": "discovery",
+    "language": "en",
+    "kind": "buyer",
+    "user": "We run a clinic and miss calls all day.",
+    "expected_action": "deepen_pain",
+    "expected_reply_contains": "do by hand"
+  },
+  {
+    "case_id": "writing_short_answer_he",
+    "category": "short_answer",
+    "language": "he",
+    "kind": "buyer",
+    "user": "כן",
+    "expected_action": "understand_workflow",
+    "expected_reply_contains": "יום רגיל בעסק"
+  },
+  {
+    "case_id": "writing_short_answer_en",
+    "category": "short_answer",
+    "language": "en",
+    "kind": "buyer",
+    "user": "ok",
+    "expected_action": "understand_workflow",
+    "expected_reply_contains": "takes up most of your day"
+  },
+  {
+    "case_id": "writing_technical_he",
+    "category": "technical",
+    "language": "he",
+    "kind": "buyer",
+    "user": "אני לא סומך על AI לדבר עם לקוחות",
+    "expected_action": "handle_objection",
+    "expected_reply_contains": "החשש המרכזי"
+  },
+  {
+    "case_id": "writing_technical_en",
+    "category": "technical",
+    "language": "en",
+    "kind": "buyer",
+    "user": "I don't trust AI to talk to my customers.",
+    "expected_action": "handle_objection",
+    "expected_reply_contains": "main worry"
+  },
+  {
+    "case_id": "writing_objection_he",
+    "category": "objection",
+    "language": "he",
+    "kind": "buyer",
+    "user": "זה יקר מדי",
+    "expected_action": "handle_objection",
+    "expected_reply_contains": "יקר"
+  },
+  {
+    "case_id": "writing_objection_en",
+    "category": "objection",
+    "language": "en",
+    "kind": "buyer",
+    "user": "that's too expensive",
+    "expected_action": "handle_objection",
+    "expected_reply_contains": "feels expensive"
+  },
+  {
+    "case_id": "writing_price_question_he",
+    "category": "price_question",
+    "language": "he",
+    "kind": "buyer",
+    "user": "כמה זה עולה?",
+    "expected_action": "handle_objection",
+    "expected_reply_contains": "המחיר תלוי בהיקף"
+  },
+  {
+    "case_id": "writing_price_question_en",
+    "category": "price_question",
+    "language": "en",
+    "kind": "buyer",
+    "user": "how much does it cost?",
+    "expected_action": "handle_objection",
+    "expected_reply_contains": "Pricing depends on scope"
+  },
+  {
+    "case_id": "writing_whatsapp_offer_he",
+    "category": "handoff_offer",
+    "language": "he",
+    "kind": "sales",
+    "sales": {
+      "workflow_known": true,
+      "manual_step_known": true,
+      "pain_level": 2,
+      "fit": "possible",
+      "discovery_turns": 3
+    },
+    "expected_action": "quantify",
+    "expected_reply_contains": "כמה זמן"
+  },
+  {
+    "case_id": "writing_whatsapp_offer_en",
+    "category": "handoff_offer",
+    "language": "en",
+    "kind": "sales",
+    "sales": {
+      "workflow_known": true,
+      "manual_step_known": true,
+      "pain_level": 2,
+      "fit": "possible",
+      "discovery_turns": 3
+    },
+    "expected_action": "quantify",
+    "expected_reply_contains": "How long does that actually take"
+  },
+  {
+    "case_id": "writing_booking_he",
+    "category": "booking",
+    "language": "he",
+    "kind": "sales",
+    "sales": {
+      "workflow_known": true,
+      "pain_level": 3,
+      "impact_confirmed": true,
+      "reflected": true,
+      "hypothesis_offered": true,
+      "buying_reality_known": true,
+      "fit": "good",
+      "willingness_to_meet": true
+    },
+    "expected_action": "offer_meeting",
+    "expected_reply_contains": "אסף"
+  },
+  {
+    "case_id": "writing_booking_en",
+    "category": "booking",
+    "language": "en",
+    "kind": "sales",
+    "sales": {
+      "workflow_known": true,
+      "pain_level": 3,
+      "impact_confirmed": true,
+      "reflected": true,
+      "hypothesis_offered": true,
+      "buying_reality_known": true,
+      "fit": "good",
+      "willingness_to_meet": true
+    },
+    "expected_action": "offer_meeting",
+    "expected_reply_contains": "Assaf"
+  },
+  {
+    "case_id": "writing_follow_up_he",
+    "category": "follow_up",
+    "language": "he",
+    "kind": "follow_up",
+    "expected_action": "follow_up",
+    "expected_reply_contains": "עדיין לא קבענו שיחה"
+  },
+  {
+    "case_id": "writing_owner_report_he",
+    "category": "owner_report",
+    "language": "he",
+    "kind": "owner_brief",
+    "expected_action": "owner_report",
+    "expected_reply_contains": "פגישות נקבעו",
+    "brief": {
+      "brief_date": "2026-08-21",
+      "leads": 5,
+      "meetings_offered": 3,
+      "handoffs": 1,
+      "messages_in": 12,
+      "follow_ups_due": 2,
+      "meetings_booked": 2,
+      "cancellation_requests": 0
+    }
+  },
+  {
+    "case_id": "writing_complaint_he",
+    "category": "complaint",
+    "language": "he",
+    "kind": "buyer",
+    "user": "תשלחי הצעה",
+    "expected_action": "handoff",
+    "expected_reply_contains": "אסף"
+  },
+  {
+    "case_id": "writing_complaint_en",
+    "category": "complaint",
+    "language": "en",
+    "kind": "buyer",
+    "user": "send me a proposal",
+    "expected_action": "handoff",
+    "expected_reply_contains": "Assaf"
+  },
+  {
+    "case_id": "lint_fail_absolutely",
+    "category": "anti_pattern",
+    "language": "n/a",
+    "kind": "lint_fail",
+    "expected_action": "lint_fail",
+    "candidate": "Absolutely!"
+  },
+  {
+    "case_id": "lint_fail_lets_dive_in",
+    "category": "anti_pattern",
+    "language": "n/a",
+    "kind": "lint_fail",
+    "expected_action": "lint_fail",
+    "candidate": "Let's dive in"
+  },
+  {
+    "case_id": "lint_fail_important_to_note",
+    "category": "anti_pattern",
+    "language": "n/a",
+    "kind": "lint_fail",
+    "expected_action": "lint_fail",
+    "candidate": "It's important to note"
+  },
+  {
+    "case_id": "lint_fail_game_changing",
+    "category": "anti_pattern",
+    "language": "n/a",
+    "kind": "lint_fail",
+    "expected_action": "lint_fail",
+    "candidate": "game-changing"
+  },
+  {
+    "case_id": "lint_fail_seamless",
+    "category": "anti_pattern",
+    "language": "n/a",
+    "kind": "lint_fail",
+    "expected_action": "lint_fail",
+    "candidate": "seamless experience"
+  },
+  {
+    "case_id": "lint_fail_leverage",
+    "category": "anti_pattern",
+    "language": "n/a",
+    "kind": "lint_fail",
+    "expected_action": "lint_fail",
+    "candidate": "leverage your data"
+  },
+  {
+    "case_id": "lint_fail_em_dash",
+    "category": "anti_pattern",
+    "language": "n/a",
+    "kind": "lint_fail",
+    "expected_action": "lint_fail",
+    "candidate": "hello — there"
+  },
+  {
+    "case_id": "lint_fail_backslash",
+    "category": "anti_pattern",
+    "language": "n/a",
+    "kind": "lint_fail",
+    "expected_action": "lint_fail",
+    "candidate": "path\\to\\file"
+  },
+  {
+    "case_id": "lint_fail_decorative_slash",
+    "category": "anti_pattern",
+    "language": "n/a",
+    "kind": "lint_fail",
+    "expected_action": "lint_fail",
+    "candidate": "foo / bar"
+  },
+  {
+    "case_id": "lint_fail_four_questions",
+    "category": "anti_pattern",
+    "language": "n/a",
+    "kind": "lint_fail",
+    "expected_action": "lint_fail",
+    "candidate": "a? b? c? d?"
+  },
+  {
+    "case_id": "lint_fail_fake_urgency",
+    "category": "anti_pattern",
+    "language": "n/a",
+    "kind": "lint_fail",
+    "expected_action": "lint_fail",
+    "candidate": "only today"
+  },
+  {
+    "case_id": "lint_fail_unsupported_roi",
+    "category": "anti_pattern",
+    "language": "n/a",
+    "kind": "lint_fail",
+    "expected_action": "lint_fail",
+    "candidate": "Our ROI is proven."
+  },
+  {
+    "case_id": "lint_fail_letter_spacing_en",
+    "category": "anti_pattern",
+    "language": "n/a",
+    "kind": "lint_fail",
+    "expected_action": "lint_fail",
+    "candidate": "W-E-L-C-O-M-E"
+  },
+  {
+    "case_id": "lint_fail_letter_spacing_he",
+    "category": "anti_pattern",
+    "language": "n/a",
+    "kind": "lint_fail",
+    "expected_action": "lint_fail",
+    "candidate": "ש'ל'ו'ם"
+  },
+  {
+    "case_id": "lint_fail_double_dash",
+    "category": "anti_pattern",
+    "language": "n/a",
+    "kind": "lint_fail",
+    "expected_action": "lint_fail",
+    "candidate": "hello -- there"
+  }
+]

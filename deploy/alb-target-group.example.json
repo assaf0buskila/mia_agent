@@ -1,0 +1,18 @@
+{
+  "Name": "mia",
+  "Protocol": "HTTP",
+  "Port": 8000,
+  "VpcId": "vpc-VPC_ID",
+  "TargetType": "ip",
+  "IpAddressType": "ipv4",
+  "HealthCheckProtocol": "HTTP",
+  "HealthCheckPort": "traffic-port",
+  "HealthCheckPath": "/health/live",
+  "HealthCheckIntervalSeconds": 30,
+  "HealthCheckTimeoutSeconds": 5,
+  "HealthyThresholdCount": 2,
+  "UnhealthyThresholdCount": 3,
+  "Matcher": {
+    "HttpCode": "200"
+  }
+}

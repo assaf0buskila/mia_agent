@@ -1,0 +1,1 @@
+ALTER TABLE tool_runs ADD COLUMN correlation_id VARCHAR(64) DEFAULT '' NOT NULL;

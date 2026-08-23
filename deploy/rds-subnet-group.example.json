@@ -1,0 +1,5 @@
+{
+  "DBSubnetGroupName": "mia-private",
+  "DBSubnetGroupDescription": "Mia RDS private subnets",
+  "SubnetIds": ["subnet-PRIVATE_A", "subnet-PRIVATE_B"]
+}

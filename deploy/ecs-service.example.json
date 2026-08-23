@@ -1,0 +1,33 @@
+{
+  "cluster": "mia",
+  "serviceName": "mia",
+  "taskDefinition": "mia",
+  "desiredCount": 1,
+  "launchType": "FARGATE",
+  "platformVersion": "1.4.0",
+  "schedulingStrategy": "REPLICA",
+  "enableExecuteCommand": false,
+  "healthCheckGracePeriodSeconds": 120,
+  "deploymentConfiguration": {
+    "deploymentCircuitBreaker": {
+      "enable": true,
+      "rollback": true
+    },
+    "minimumHealthyPercent": 100,
+    "maximumPercent": 200
+  },
+  "networkConfiguration": {
+    "awsvpcConfiguration": {
+      "assignPublicIp": "DISABLED",
+      "subnets": ["subnet-PRIVATE_A", "subnet-PRIVATE_B"],
+      "securityGroups": ["sg-MIA_TASKS"]
+    }
+  },
+  "loadBalancers": [
+    {
+      "targetGroupArn": "arn:aws:elasticloadbalancing:REGION:ACCOUNT_ID:targetgroup/mia/HASH",
+      "containerName": "mia",
+      "containerPort": 8000
+    }
+  ]
+}

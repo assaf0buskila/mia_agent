@@ -1,0 +1,1 @@
+ALTER TABLE ai_runs ADD COLUMN policy_version VARCHAR(32) DEFAULT '' NOT NULL;

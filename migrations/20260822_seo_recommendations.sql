@@ -1,0 +1,10 @@
+CREATE TABLE IF NOT EXISTS seo_recommendations (
+    id INTEGER PRIMARY KEY,
+    scope VARCHAR(32) NOT NULL DEFAULT 'site',
+    problem VARCHAR(255) DEFAULT '' NOT NULL,
+    evidence VARCHAR(255) DEFAULT '' NOT NULL,
+    why VARCHAR(255) DEFAULT '' NOT NULL,
+    change VARCHAR(255) DEFAULT '' NOT NULL,
+    metric VARCHAR(255) DEFAULT '' NOT NULL,
+    UNIQUE (scope)
+);

@@ -1,0 +1,696 @@
+import inspect
+import json
+
+import httpx
+import pytest
+from app.api.inbound import process_inbound_texts
+from app.core.config import Settings
+from app.db.session import get_session_factory, init_db
+from app.db.store import LeadStore
+from app.domain.content_insights import apply_content_insight_policy
+from app.domain.events import Channel, build_attribution_event
+from app.domain.owner_tasks import OwnerTaskType, ack_for_owner_task, classify_owner_task
+from app.domain.tools import AdapterHttpError
+from app.integrations.base import RecordingMessagePort
+from app.integrations.instagram_insights import (
+    ContentInsight,
+    DisabledInstagramInsightsPort,
+    FakeInstagramInsightsPort,
+    GraphInstagramInsightsPort,
+    build_instagram_insights_port,
+    enrich_content_insights_ack,
+    format_content_insights_line,
+)
+from app.integrations.meta_ads import DisabledMetaAdsPort
+from app.integrations.sheets import (
+    COMPOSIO_GOOGLESHEETS_VERSION,
+    COMPOSIO_UPSERT_ROWS_TOOL,
+    CONTENT_HEADERS,
+    CONTENT_KEY_COLUMN,
+    CONTENT_SHEET_NAME,
+    ContentMirrorRow,
+    FakeSheetsPort,
+    mirror_content,
+)
+
+
+class CountingContentSheetsPort(FakeSheetsPort):
+    def __init__(self) -> None:
+        super().__init__()
+        self.content_calls = 0
+
+    def upsert_content(self, row: ContentMirrorRow) -> None:
+        self.content_calls += 1
+        super().upsert_content(row)
+
+
+OWNER_IG_CONTENT_PHONE = "972509990081"
+OWNER_SHCNT_PHONE = "972509991301"
+MEDIA_ID_1 = "17841400112233445566"
+MEDIA_ID_2 = "17841400998877665544"
+MEDIA_ID_ATTR = "99887766554433221100"
+
+SAMPLE_ITEMS = [
+    ContentInsight(
+        media_id=MEDIA_ID_1,
+        media_type="IMAGE",
+        views="1200",
+        reach="900",
+        likes="45",
+        comments="3",
+        saved="12",
+    ),
+    ContentInsight(
+        media_id=MEDIA_ID_2,
+        media_type="REELS",
+        views="5000",
+        reach="4200",
+        likes="210",
+    ),
+]
+
+
+def test_fake_returns_items_disabled_returns_empty() -> None:
+    fake = FakeInstagramInsightsPort(SAMPLE_ITEMS)
+    disabled = DisabledInstagramInsightsPort()
+    assert fake.list_recent_insights() == SAMPLE_ITEMS
+    assert disabled.list_recent_insights() == []
+
+
+def test_graph_port_parses_media_and_insights_no_urls() -> None:
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        if request.url.path.endswith("/media"):
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {
+                            "id": MEDIA_ID_1,
+                            "media_type": "IMAGE",
+                            "caption": "secret caption",
+                            "permalink": "https://instagram.com/p/abc",
+                            "media_url": "https://cdn.example/photo.jpg",
+                        },
+                        {"id": "bad-id", "media_type": "IMAGE"},
+                        {"id": MEDIA_ID_2, "media_type": "STORY"},
+                    ]
+                },
+            )
+        if request.url.path.endswith("/insights"):
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {"name": "views", "values": [{"value": 1200}]},
+                        {"name": "reach", "total_value": {"value": 900}},
+                        {"name": "likes", "values": [{"value": 45}]},
+                        {"name": "comments", "values": [{"value": 3}]},
+                        {"name": "saved", "values": [{"value": 12}]},
+                    ]
+                },
+            )
+        return httpx.Response(404)
+
+    transport = httpx.MockTransport(handler)
+    client = httpx.Client(transport=transport)
+    port = GraphInstagramInsightsPort(
+        access_token="ig-token",
+        account_id="123456789",
+        graph_version="v26.0",
+        graph_host="graph.instagram.com",
+        client=client,
+    )
+    items = port.list_recent_insights(limit=5)
+    assert len(items) == 1
+    assert items[0].media_id == MEDIA_ID_1
+    assert items[0].media_type == "IMAGE"
+    assert items[0].views == "1200"
+    assert items[0].reach == "900"
+    assert items[0].likes == "45"
+    assert items[0].comments == "3"
+    assert items[0].saved == "12"
+    serialized = json.dumps([item.model_dump() for item in items]).lower()
+    assert "caption" not in serialized
+    assert "permalink" not in serialized
+    assert "media_url" not in serialized
+    assert "http" not in serialized
+    assert any("/media" in call for call in calls)
+    assert any("/insights" in call for call in calls)
+    assert all("access_token" not in call for call in calls)
+
+
+def test_graph_port_media_list_401_raises_adapter_error() -> None:
+    transport = httpx.MockTransport(
+        lambda _request: httpx.Response(401, json={"error": {"message": "unauthorized"}})
+    )
+    client = httpx.Client(transport=transport)
+    port = GraphInstagramInsightsPort(
+        access_token="ig-token",
+        account_id="123456789",
+        graph_version="v26.0",
+        graph_host="graph.instagram.com",
+        client=client,
+    )
+    with pytest.raises(AdapterHttpError) as exc_info:
+        port.list_recent_insights(limit=5)
+    assert exc_info.value.status_code == 401
+
+
+def test_enrich_content_insights_ack_http_401_unauthorized_ack_unchanged() -> None:
+    class HttpErrorInsightsPort:
+        def list_recent_insights(self, *, limit: int = 5) -> list[ContentInsight]:
+            del limit
+            raise AdapterHttpError(401)
+
+    decision = classify_owner_task("analyze instagram content")
+    ack = ack_for_owner_task(decision)
+    enriched, outcome = enrich_content_insights_ack(
+        ack,
+        HttpErrorInsightsPort(),
+        store=None,
+        kill_switch=False,
+    )
+    assert enriched == ack
+    assert outcome.status == "unauthorized"
+    assert outcome.result_count == 0
+    assert "תוכן:" not in enriched
+
+
+def test_graph_port_insights_400_skips_media() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/media"):
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {"id": MEDIA_ID_1, "media_type": "VIDEO"},
+                        {"id": MEDIA_ID_2, "media_type": "VIDEO"},
+                    ]
+                },
+            )
+        if MEDIA_ID_1 in str(request.url):
+            return httpx.Response(400, json={"error": {"message": "unsupported"}})
+        if MEDIA_ID_2 in str(request.url):
+            return httpx.Response(
+                200,
+                json={"data": [{"name": "views", "values": [{"value": 99}]}]},
+            )
+        return httpx.Response(404)
+
+    transport = httpx.MockTransport(handler)
+    client = httpx.Client(transport=transport)
+    port = GraphInstagramInsightsPort(
+        access_token="ig-token",
+        account_id="123456789",
+        graph_version="v26.0",
+        graph_host="graph.instagram.com",
+        client=client,
+    )
+    items = port.list_recent_insights(limit=5)
+    assert len(items) == 1
+    assert items[0].media_id == MEDIA_ID_2
+    assert items[0].views == "99"
+
+
+def test_enrich_appends_hebrew_line_and_persists() -> None:
+    init_db()
+    db = get_session_factory()()
+    try:
+        store = LeadStore(db)
+        decision = classify_owner_task("analyze instagram content")
+        ack = ack_for_owner_task(decision)
+        enriched, outcome = enrich_content_insights_ack(
+            ack,
+            FakeInstagramInsightsPort(SAMPLE_ITEMS),
+            store,
+            kill_switch=False,
+        )
+        db.commit()
+        assert "תוכן: 2 פוסטים, לידים מתוכן 0." in enriched
+        rows = [
+            row
+            for row in store.list_content_insights()
+            if row.media_id in {MEDIA_ID_1, MEDIA_ID_2}
+        ]
+        assert len(rows) == 2
+        first = next(row for row in rows if row.media_id == MEDIA_ID_1)
+        assert first.lead_signals == 0
+        assert outcome.status == "ok"
+        assert outcome.result_count == 2
+    finally:
+        db.close()
+
+
+def test_enrich_content_insights_ack_mirror_extra_outcome(monkeypatch) -> None:
+    monkeypatch.setattr("app.integrations.sheets.elapsed_ms", lambda _started: 12)
+    init_db()
+    db = get_session_factory()()
+    try:
+        store = LeadStore(db)
+        sheets = FakeSheetsPort()
+        settings = Settings()
+        extras: list = []
+        enrich_content_insights_ack(
+            "ack",
+            FakeInstagramInsightsPort(SAMPLE_ITEMS),
+            store,
+            kill_switch=False,
+            sheets=sheets,
+            settings=settings,
+            extra_outcomes=extras,
+            inbound_id="shcnt.1",
+        )
+        content_extras = [o for o in extras if o.tool == "sheets_mirror_content"]
+        assert len(content_extras) == 1
+        outcome = content_extras[0]
+        assert outcome.status == "ok"
+        assert outcome.result_count > 0
+        assert outcome.latency_ms == 12
+    finally:
+        db.close()
+
+
+def test_enrich_content_insights_ack_mirror_claim_fail_skips_extra(monkeypatch) -> None:
+    monkeypatch.setattr("app.integrations.sheets.elapsed_ms", lambda _started: 12)
+    init_db()
+    db = get_session_factory()()
+    try:
+        store = LeadStore(db)
+        sheets = CountingContentSheetsPort()
+        settings = Settings()
+        inbound_id = "shcnt.2"
+        enrich_content_insights_ack(
+            "ack",
+            FakeInstagramInsightsPort(SAMPLE_ITEMS),
+            store,
+            kill_switch=False,
+            sheets=sheets,
+            settings=settings,
+            inbound_id=inbound_id,
+        )
+        assert sheets.content_calls == 2
+        extras: list = []
+        enrich_content_insights_ack(
+            "ack",
+            FakeInstagramInsightsPort(SAMPLE_ITEMS),
+            store,
+            kill_switch=False,
+            sheets=sheets,
+            settings=settings,
+            extra_outcomes=extras,
+            inbound_id=inbound_id,
+        )
+        assert [o.tool for o in extras if o.tool == "sheets_mirror_content"] == []
+        assert sheets.content_calls == 2
+    finally:
+        db.close()
+
+
+def test_attribution_matching_ig_content_id_increments_lead_signals() -> None:
+    init_db()
+    db = get_session_factory()()
+    try:
+        store = LeadStore(db)
+        _customer_id, lead_id = store.open_channel_lead(
+            channel=Channel.INSTAGRAM,
+            external_id="ig_attr_insights_881",
+        )
+        store.save_canonical_event(
+            provider="instagram",
+            event=build_attribution_event(
+                provider="instagram",
+                channel=Channel.INSTAGRAM,
+                lead_id=lead_id,
+                conversation_id="ig_attr_insights_881",
+                payload={"ig_content_id": MEDIA_ID_ATTR},
+            ),
+        )
+        apply_content_insight_policy(
+            store,
+            items=[
+                ContentInsight(media_id=MEDIA_ID_ATTR, media_type="IMAGE", views="10")
+            ],
+            kill_switch=False,
+        )
+        db.commit()
+        rows = store.list_content_insights()
+        matching = [row for row in rows if row.media_id == MEDIA_ID_ATTR]
+        assert len(matching) == 1
+        assert matching[0].lead_signals == 1
+        assert store.count_attribution_for_ig_content(MEDIA_ID_ATTR) == 1
+        assert store.count_attribution_for_ig_content("not-digits") == 0
+    finally:
+        db.close()
+
+
+def test_enrich_kill_switch_denied_no_http() -> None:
+    class RaisingInsightsPort:
+        def list_recent_insights(self, *, limit: int = 5) -> list[ContentInsight]:
+            del limit
+            raise RuntimeError("must not call port when kill switch is on")
+
+    ack = ack_for_owner_task(classify_owner_task("instagram content performance"))
+    enriched, outcome = enrich_content_insights_ack(
+        ack,
+        RaisingInsightsPort(),
+        store=None,
+        kill_switch=True,
+    )
+    assert enriched == ack
+    assert outcome.status == "denied"
+
+
+def test_never_imports_message_port() -> None:
+    import app.integrations.instagram_insights as module
+
+    source = inspect.getsource(module)
+    assert "MessagePort" not in source
+    assert "instagram.py" not in source
+
+
+def test_fake_sheets_port_after_enrich_has_content_rows() -> None:
+    init_db()
+    db = get_session_factory()()
+    try:
+        store = LeadStore(db)
+        sheets = FakeSheetsPort()
+        ack = ack_for_owner_task(classify_owner_task("instagram content performance"))
+        enrich_content_insights_ack(
+            ack,
+            FakeInstagramInsightsPort(SAMPLE_ITEMS),
+            store,
+            kill_switch=False,
+            sheets=sheets,
+            settings=Settings(),
+        )
+        db.commit()
+        assert MEDIA_ID_1 in sheets.content_rows
+        assert sheets.content_rows[MEDIA_ID_1].views == "1200"
+        assert sheets.content_rows[MEDIA_ID_1].lead_signals == 0
+    finally:
+        db.close()
+
+
+def test_mirror_content_sanitizer_rejects_bad_rows() -> None:
+    port = FakeSheetsPort()
+    assert (
+        mirror_content(
+            sheets=port,
+            row=ContentMirrorRow(
+                media_id="not_digits",
+                media_type="IMAGE",
+                views="10",
+            ),
+            kill_switch=False,
+        )
+        is False
+    )
+    assert (
+        mirror_content(
+            sheets=port,
+            row=ContentMirrorRow(
+                media_id=MEDIA_ID_1,
+                media_type="IMAGE",
+                views="https://cdn.example/1.jpg",
+            ),
+            kill_switch=False,
+        )
+        is False
+    )
+    assert port.content_rows == {}
+
+
+def test_classify_analyze_instagram_content_is_analytics() -> None:
+    decision = classify_owner_task("analyze instagram content")
+    assert decision.task_type == OwnerTaskType.ANALYTICS
+    assert decision.needs_clarification is False
+
+
+def test_build_port_live_when_token_and_account_set() -> None:
+    settings = Settings(
+        instagram_access_token="ig-live",
+        instagram_account_id="123456789",
+    )
+    port = build_instagram_insights_port(settings)
+    assert isinstance(port, GraphInstagramInsightsPort)
+
+
+def test_build_port_disabled_when_credentials_missing() -> None:
+    settings = Settings(instagram_access_token="", instagram_account_id="")
+    port = build_instagram_insights_port(settings)
+    assert isinstance(port, DisabledInstagramInsightsPort)
+
+
+def test_format_content_insights_line_empty_when_no_items() -> None:
+    assert format_content_insights_line([]) == ""
+
+
+@pytest.mark.asyncio
+async def test_owner_analytics_inbound_tool_result_instagram_insights() -> None:
+    init_db()
+    db = get_session_factory()()
+    try:
+        store = LeadStore(db)
+        sheets = FakeSheetsPort()
+        port = RecordingMessagePort()
+        await process_inbound_texts(
+            provider="whatsapp",
+            channel=Channel.WHATSAPP,
+            items=[
+                {
+                    "id": "evt.owner.ig.content.1",
+                    "from": OWNER_IG_CONTENT_PHONE,
+                    "text": "analyze instagram content",
+                    "source": "audio",
+                }
+            ],
+            store=store,
+            port=port,
+            kill_switch=False,
+            owner_ids={OWNER_IG_CONTENT_PHONE},
+            sheets=sheets,
+            instagram_insights=FakeInstagramInsightsPort(SAMPLE_ITEMS),
+            meta_ads=DisabledMetaAdsPort(),
+        )
+        db.commit()
+        task = store.get_owner_task(
+            provider="whatsapp", provider_event_id="evt.owner.ig.content.1"
+        )
+        assert task is not None
+        assert task.task_type == "analytics"
+        sent = port.sent[0].text
+        assert "תוכן: 2 פוסטים" in sent
+        tool_row = store.get_canonical_event(
+            provider="whatsapp",
+            provider_event_id="evt.owner.ig.content.1:tool:instagram_insights",
+        )
+        assert tool_row is not None
+        payload = json.loads(tool_row.payload_json)
+        assert payload["status"] == "ok"
+        assert payload["result_count"] == 2
+        assert MEDIA_ID_1 in sheets.content_rows
+        content_row = store.get_tool_run("evt.owner.ig.content.1:tool:sheets_mirror_content")
+        assert content_row is not None
+        assert content_row.status == "ok"
+        assert store.get_tool_run("evt.owner.ig.content.1:tool:sheets_mirror") is None
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_owner_analytics_inbound_persists_content_mirror_tool_run() -> None:
+    init_db()
+    db = get_session_factory()()
+    try:
+        store = LeadStore(db)
+        sheets = FakeSheetsPort()
+        port = RecordingMessagePort()
+        inbound_id = "shcnt.in.1"
+        await process_inbound_texts(
+            provider="whatsapp",
+            channel=Channel.WHATSAPP,
+            items=[
+                {
+                    "id": inbound_id,
+                    "from": OWNER_SHCNT_PHONE,
+                    "text": "analyze instagram content",
+                    "source": "audio",
+                }
+            ],
+            store=store,
+            port=port,
+            kill_switch=False,
+            owner_ids={OWNER_SHCNT_PHONE},
+            sheets=sheets,
+            instagram_insights=FakeInstagramInsightsPort(SAMPLE_ITEMS),
+            meta_ads=DisabledMetaAdsPort(),
+        )
+        db.commit()
+        row = store.get_tool_run(f"{inbound_id}:tool:sheets_mirror_content")
+        assert row is not None
+        assert row.status == "ok"
+        assert row.result_count > 0
+        assert store.get_tool_run(f"{inbound_id}:tool:sheets_mirror") is None
+        payload = json.loads(
+            store.get_canonical_event(
+                provider="whatsapp",
+                provider_event_id=f"{inbound_id}:tool:sheets_mirror_content",
+            ).payload_json
+        )
+        assert payload["tool"] == "sheets_mirror_content"
+        assert "latency_ms" not in payload
+    finally:
+        db.close()
+
+
+def test_composio_sheets_port_content_request_shape() -> None:
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["json"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={"data": {}, "error": None, "successful": True},
+        )
+
+    transport = httpx.MockTransport(handler)
+    client = httpx.Client(transport=transport)
+    from app.integrations.sheets import ComposioSheetsPort
+
+    port = ComposioSheetsPort(
+        api_key="cmp-test",
+        user_id="user-abc",
+        spreadsheet_id="spreadsheet-xyz",
+        client=client,
+    )
+    row = ContentMirrorRow(
+        media_id=MEDIA_ID_1,
+        media_type="IMAGE",
+        views="1200",
+        reach="900",
+        likes="45",
+        comments="3",
+        saved="12",
+        lead_signals=2,
+    )
+    port.upsert_content(row)
+
+    assert str(captured["url"]).endswith(f"/{COMPOSIO_UPSERT_ROWS_TOOL}")
+    body = captured["json"]
+    assert isinstance(body, dict)
+    assert body["version"] == COMPOSIO_GOOGLESHEETS_VERSION
+    arguments = body["arguments"]
+    assert isinstance(arguments, dict)
+    assert arguments["sheetName"] == CONTENT_SHEET_NAME
+    assert arguments["keyColumn"] == CONTENT_KEY_COLUMN
+    assert arguments["headers"] == CONTENT_HEADERS
+    assert arguments["rows"] == [
+        [MEDIA_ID_1, "IMAGE", "1200", "900", "45", "3", "12", 2]
+    ]
+
+
+def test_build_insights_composio_when_sender_composio() -> None:
+    settings = Settings(
+        instagram_sender="composio",
+        composio_api_key="cmp-key",
+        composio_user_id="user-abc",
+        instagram_access_token="ig-live",
+        instagram_account_id="123456789",
+    )
+    from app.integrations.instagram_insights import ComposioInstagramInsightsPort
+
+    port = build_instagram_insights_port(settings)
+    assert isinstance(port, ComposioInstagramInsightsPort)
+
+
+def test_build_insights_direct_keeps_graph_when_token_set() -> None:
+    settings = Settings(
+        instagram_sender="direct",
+        composio_api_key="cmp-key",
+        composio_user_id="user-abc",
+        instagram_access_token="ig-live",
+        instagram_account_id="123456789",
+    )
+    port = build_instagram_insights_port(settings)
+    assert isinstance(port, GraphInstagramInsightsPort)
+
+
+def test_composio_insights_parses_media_no_captions_or_urls() -> None:
+    captured: list[dict] = []
+    urls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        urls.append(str(request.url))
+        body = json.loads(request.content)
+        captured.append(body)
+        slug = str(request.url).rsplit("/", 1)[-1]
+        if slug == "INSTAGRAM_GET_IG_USER_MEDIA":
+            return httpx.Response(
+                200,
+                json={
+                    "successful": True,
+                    "data": {
+                        "data": [
+                            {
+                                "id": MEDIA_ID_1,
+                                "media_type": "IMAGE",
+                                "caption": "secret caption",
+                                "permalink": "https://instagram.com/p/abc",
+                                "media_url": "https://cdn.example/photo.jpg",
+                            },
+                            {"id": "bad-id", "media_type": "IMAGE"},
+                            {"id": MEDIA_ID_2, "media_type": "STORY"},
+                        ]
+                    },
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "successful": True,
+                "data": {
+                    "data": [
+                        {"name": "views", "values": [{"value": 1200}]},
+                        {"name": "reach", "total_value": {"value": 900}},
+                        {"name": "likes", "values": [{"value": 45}]},
+                    ]
+                },
+            },
+        )
+
+    from app.integrations.instagram import (
+        COMPOSIO_GET_MEDIA_INSIGHTS_TOOL,
+        COMPOSIO_GET_USER_MEDIA_TOOL,
+        COMPOSIO_INSTAGRAM_VERSION,
+    )
+    from app.integrations.instagram_insights import ComposioInstagramInsightsPort
+
+    port = ComposioInstagramInsightsPort(
+        api_key="cmp-test",
+        user_id="user-abc",
+        account_id="17841400000000000",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    items = port.list_recent_insights(limit=5)
+    assert len(items) == 1
+    assert items[0].media_id == MEDIA_ID_1
+    assert items[0].views == "1200"
+    assert items[0].reach == "900"
+    serialized = json.dumps([item.model_dump() for item in items])
+    assert "secret caption" not in serialized
+    assert "instagram.com" not in serialized
+    assert "cdn.example" not in serialized
+    assert urls[0].endswith(f"/{COMPOSIO_GET_USER_MEDIA_TOOL}")
+    assert urls[1].endswith(f"/{COMPOSIO_GET_MEDIA_INSIGHTS_TOOL}")
+    assert captured[0]["version"] == COMPOSIO_INSTAGRAM_VERSION
+    media_args = captured[0]["arguments"]
+    assert media_args["fields"] == "id,media_type"
+    assert "caption" not in media_args["fields"]
+    assert media_args["ig_user_id"] == "17841400000000000"
+    insight_args = captured[1]["arguments"]
+    assert insight_args["ig_media_id"] == MEDIA_ID_1
+    assert insight_args["metric"] == ["views", "reach", "likes", "comments", "saved"]
