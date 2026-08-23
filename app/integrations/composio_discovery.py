@@ -32,11 +32,9 @@ import httpx
 
 from app.core.config import Settings
 from app.domain.tools import AdapterHttpError
-from app.integrations.ga4 import COMPOSIO_GA4_VERSION
-from app.integrations.meta_ads import COMPOSIO_METAADS_VERSION
-from app.integrations.search_console import COMPOSIO_GSC_VERSION
 
 COMPOSIO_EXECUTE_BASE = "https://backend.composio.dev/api/v3.1/tools/execute"
+COMPOSIO_TOOLS_BASE = "https://backend.composio.dev/api/v3.1/tools"
 COMPOSIO_CONNECTED_ACCOUNTS_URL = "https://backend.composio.dev/api/v3.1/connected_accounts"
 
 # Zero-argument discovery actions, one per toolkit.
@@ -55,6 +53,8 @@ _GA4_BARE_ID_RE = re.compile(r"^\d{6,}$")
 _META_ACT_RE = re.compile(r"^act_(\d{5,})$")
 # Search Console accepts URL-prefix and domain properties.
 _SITE_RE = re.compile(r"^(https?://\S+|sc-domain:\S+)$")
+# Composio toolkit/tool versions are YYYYMMDD_NN.
+_VERSION_RE = re.compile(r"^\d{8}_\d{2}$")
 
 
 class DiscoveryResult:
@@ -121,6 +121,23 @@ def _scan_strings(payload: Any, *, depth: int = 0) -> list[str]:
         for item in payload[:_MAX_CANDIDATES]:
             found.extend(_scan_strings(item, depth=depth + 1))
     return found
+
+
+def _scan_versions(payload: Any, depth: int = 0) -> list[str]:
+    """Every YYYYMMDD_NN string in a tool record, most likely the tool's own version."""
+    found: list[str] = []
+    if depth > _MAX_SCAN_DEPTH:
+        return found
+    if isinstance(payload, str):
+        if _VERSION_RE.match(payload.strip()):
+            found.append(payload.strip())
+    elif isinstance(payload, dict):
+        for value in payload.values():
+            found.extend(_scan_versions(value, depth + 1))
+    elif isinstance(payload, list):
+        for item in payload[:_MAX_CANDIDATES]:
+            found.extend(_scan_versions(item, depth + 1))
+    return list(dict.fromkeys(found))
 
 
 def _dedupe(values: list[str]) -> tuple[str, ...]:
@@ -233,12 +250,11 @@ class ComposioDiscovery:
     def enabled(self) -> bool:
         return bool(self._api_key.strip() and self._user_id.strip())
 
-    def _execute(self, tool_slug: str, version: str) -> Any:
-        payload = {
-            "user_id": self._user_id,
-            "version": version,
-            "arguments": {},
-        }
+    def _post_execute(self, tool_slug: str, version: str | None) -> Any:
+        """One execute attempt. `version=None` omits the field entirely."""
+        payload: dict[str, Any] = {"user_id": self._user_id, "arguments": {}}
+        if version:
+            payload["version"] = version
         headers = {"x-api-key": self._api_key, "Content-Type": "application/json"}
         url = f"{COMPOSIO_EXECUTE_BASE}/{tool_slug}"
         try:
@@ -256,6 +272,59 @@ class ComposioDiscovery:
         except ValueError:
             return None
 
+    def tool_version(self, tool_slug: str) -> str:
+        """Ask Composio which version this specific tool is on. '' when unknown.
+
+        The version turned out to be the likely cause of the live 404s: the pinned strings
+        were copied from *other* tools in the same toolkit, on the assumption that a
+        version is per-toolkit. Asking the tool itself removes the guess.
+        """
+        headers = {"x-api-key": self._api_key}
+        url = f"{COMPOSIO_TOOLS_BASE}/{tool_slug}"
+        try:
+            if self._client is not None:
+                response = self._client.get(url, headers=headers)
+            else:
+                with httpx.Client(timeout=_TIMEOUT) as client:
+                    response = client.get(url, headers=headers)
+        except httpx.HTTPError:
+            return ""
+        if response.status_code >= 400:
+            return ""
+        try:
+            body = response.json()
+        except ValueError:
+            return ""
+        found = _scan_versions(body)
+        return found[0] if found else ""
+
+    def _execute(self, tool_slug: str, version: str) -> Any:
+        """Execute without pinning a version, recovering on 404 by resolving the real one.
+
+        The live 404s came from putting a **toolkit** version into a **tool**-scoped field.
+        The v3.1 spec calls this field "Tool version to execute", and models a per-tool
+        `available_versions` separately from the toolkit's `meta.available_versions`. A
+        toolkit release bumps the toolkit version, but a tool that did not change in that
+        release is not republished at that string — so the actively-maintained query tools
+        resolve at `20260806_00` while the stable no-argument discovery tools do not, and
+        return a generic 404.
+
+        On v3.1 omitting `version` means "latest" (the `ToolVersionRequiredError` that
+        demands one is an SDK-side guard; this client speaks raw HTTP). These are discovery
+        reads whose output is parsed leniently, so "latest" is the documented right choice.
+        `version` is kept as an override for a caller that needs a reproducible shape.
+        """
+        try:
+            return self._post_execute(tool_slug, version or None)
+        except AdapterHttpError as exc:
+            if exc.status_code != 404:
+                raise
+        # 404 means slug-or-version. Ask Composio what version THIS tool is on and retry.
+        reported = self.tool_version(tool_slug)
+        if not reported or reported == version:
+            raise AdapterHttpError(404)
+        return self._post_execute(tool_slug, reported)
+
     def _resolve(self, tool_slug: str, version: str, extractor) -> DiscoveryResult:
         try:
             payload = self._execute(tool_slug, version)
@@ -272,7 +341,7 @@ class ComposioDiscovery:
         return DiscoveryResult(candidates=candidates)
 
     def search_console_site(self) -> DiscoveryResult:
-        result = self._resolve(GSC_LIST_SITES_TOOL, COMPOSIO_GSC_VERSION, extract_sites)
+        result = self._resolve(GSC_LIST_SITES_TOOL, "", extract_sites)
         if result.resolved or not result.candidates:
             return result
         chosen = choose_site(result.candidates, website_url=self._website_url)
@@ -282,13 +351,13 @@ class ComposioDiscovery:
 
     def ga4_property(self) -> DiscoveryResult:
         return self._resolve(
-            GA4_LIST_ACCOUNT_SUMMARIES_TOOL, COMPOSIO_GA4_VERSION, extract_ga4_properties
+            GA4_LIST_ACCOUNT_SUMMARIES_TOOL, "", extract_ga4_properties
         )
 
     def meta_ad_account(self) -> DiscoveryResult:
         return self._resolve(
             METAADS_GET_AD_ACCOUNTS_TOOL,
-            COMPOSIO_METAADS_VERSION,
+            "",
             extract_meta_ad_accounts,
         )
 

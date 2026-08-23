@@ -263,3 +263,71 @@ def test_discovery_is_off_unless_explicitly_enabled() -> None:
     assert build_discovery(settings) is None
     reset_cache()
     assert resolve_gsc_site_url(settings) == ""
+
+
+# ------------------------------------------------ version recovery on 404
+
+
+def _seq_client(responses: list) -> httpx.Client:
+    """Replays (status, json) in order and records the paths/bodies it saw."""
+    calls: list[tuple[str, dict]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = {}
+        if request.content:
+            import json as _json
+
+            try:
+                body = _json.loads(request.content.decode("utf-8"))
+            except ValueError:
+                body = {}
+        calls.append((str(request.url), body))
+        status, payload = responses[min(len(calls) - 1, len(responses) - 1)]
+        return httpx.Response(status, json=payload)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    client.recorded = calls  # type: ignore[attr-defined]
+    return client
+
+
+def test_discovery_sends_no_version_so_composio_resolves_latest() -> None:
+    """v3.1 documents omission as "latest". Pinning a TOOLKIT version into this
+    TOOL-scoped field is what produced the live 404s."""
+    client = _seq_client(
+        [(200, _ok({"siteEntry": [{"siteUrl": "https://www.assafweb.com/"}]}))]
+    )
+    discovery = ComposioDiscovery(api_key="k", user_id="u", client=client)
+    assert discovery.search_console_site().value == "https://www.assafweb.com/"
+    assert len(client.recorded) == 1
+    assert "version" not in client.recorded[0][1]
+
+
+def test_a_404_recovers_by_resolving_this_tool_own_version() -> None:
+    client = _seq_client(
+        [
+            (404, {"error": {"message": "not found"}}),   # execute, no version
+            (200, {"tool": {"version": "20260901_00"}}),   # GET /tools/{slug}
+            (200, _ok({"siteEntry": [{"siteUrl": "https://a.com/"}]})),
+        ]
+    )
+    discovery = ComposioDiscovery(api_key="k", user_id="u", client=client)
+    assert discovery.search_console_site().value == "https://a.com/"
+    assert "/tools/GOOGLE_SEARCH_CONSOLE_LIST_SITES" in client.recorded[1][0]
+    assert client.recorded[2][1].get("version") == "20260901_00"
+
+
+def test_a_404_with_no_resolvable_version_gives_up_cleanly() -> None:
+    client = _seq_client([(404, {"error": {}}), (404, {"error": {}})])
+    discovery = ComposioDiscovery(api_key="k", user_id="u", client=client)
+    result = discovery.search_console_site()
+    assert result.value == ""
+    assert result.error.startswith("http_")
+
+
+def test_a_non_404_failure_is_not_retried() -> None:
+    """A 400 or 500 is not a version problem; retrying twice would just be noise."""
+    client = _seq_client([(500, {"error": {}})])
+    discovery = ComposioDiscovery(api_key="k", user_id="u", client=client)
+    result = discovery.search_console_site()
+    assert result.value == ""
+    assert len(client.recorded) == 1
