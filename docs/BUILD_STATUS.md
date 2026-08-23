@@ -1,6 +1,6 @@
 # BUILD_STATUS
 
-**Last updated:** 2026-08-23  
+**Last updated:** 2026-08-24  
 **Region:** eu-north-1 (ADR-019). Live host `https://mia.assafweb.com`. Live image **mia:15** (task `mia:16`, ADR-022). `mia:10`–`mia:14` remain in ECR for rollback.
 
 ## Alive (v1)
@@ -13,7 +13,7 @@ Not on live **mia:15** yet. Working tree only.
 
 Telegram owner agent can call pinned **reads**: `gmail_summary`, `seo_snapshot`, `linkedin_snapshot`, `instagram_insights`, `research_search`, `ads_snapshot`, plus the existing briefs / leads / calendar / memory tools. Writes (approve, takeover, book, send, Meta) stay on the Python path. Disconnected ports fail closed with a “Not connected” ack — they do not throw.
 
-`GET /health` now includes `brain` (corpus counts) and `owner_integrations` (config readiness, not a live Composio ping). `research_apify` is always false. Blank local settings report missing `MIA_COMPOSIO_API_KEY` / `MIA_COMPOSIO_USER_ID` and `MIA_FIRECRAWL_API_KEY` only. GSC / GA4 / Sheets / LinkedIn profile use the Active Composio connection (LIST_SITES, LIST_ACCOUNT_SUMMARIES, SEARCH_SPREADSHEETS, GET_MY_INFO). Do not add `MIA_GSC_SITE_URL`, `MIA_GA4_PROPERTY_ID`, `MIA_SHEETS_SPREADSHEET_ID`, or `MIA_LINKEDIN_ACCESS_TOKEN`. LinkedIn analytics stays `false` until Composio has a member tool. Firecrawl is not Composio.
+`GET /health` now includes `brain` (corpus counts) and `owner_integrations` (config readiness, not a live Composio ping). `research_apify` is always false. `MIA_COMPOSIO_DISCOVERY` defaults false. Blank settings list Sheets id, LinkedIn token, Firecrawl, and (while discovery is off) GSC / GA4 / Meta ads ids. LinkedIn profile is Composio `GET_MY_INFO`. LinkedIn member analytics stays Direct REST + `MIA_LINKEDIN_ACCESS_TOKEN`. Sheets write target stays `MIA_SHEETS_SPREADSHEET_ID`. Firecrawl is not Composio.
 
 Live `GET https://mia.assafweb.com/health` on mia:15 (23 Aug): `status=ok`, `kill_switch=false`, `composio=true`, `telegram_owner=true`, `sales_llm=true`, `postgres=true`, `whatsapp_handoff_send=false`, `whatsapp_owner=false`, `ops.integration_failures=10`. No `brain` or `owner_integrations` keys until this image ships.
 
@@ -210,19 +210,27 @@ there is no public price list and Mia must never quote a number — and it is pi
 `test_sales_ladder_defects.py` so nobody "fixes" it. BUILD_STATUS previously implied the
 PRICE_QUESTION copy was live on this path; it is not.
 
-**Composio resource discovery (ADR-027).** GSC, GA4, Sheets, and LinkedIn profile resolve
-ids from the Active Composio connection at request time (`LIST_SITES`,
-`LIST_ACCOUNT_SUMMARIES`, `SEARCH_SPREADSHEETS`, `GET_MY_INFO`). Leftover env still wins
-if set. Do not add those IDs for go-live. LinkedIn member analytics has no Composio tool;
-the leftover token is unused. Firecrawl is not Composio — `MIA_FIRECRAWL_API_KEY` stays
-required for research. Experimental `composio_discovery` stays off.
+**Composio resource discovery (ADR-027).** Opt-in, default false. When
+`MIA_COMPOSIO_DISCOVERY=true` and leftover env is blank, GSC / GA4 / Meta ads ids
+resolve from `GOOGLE_SEARCH_CONSOLE_LIST_SITES`, `GOOGLE_ANALYTICS_LIST_ACCOUNT_SUMMARIES`,
+`METAADS_GET_AD_ACCOUNTS` (cached once per process). Explicit env always wins. Sheets
+stays `MIA_SHEETS_SPREADSHEET_ID` — `GOOGLESHEETS_SEARCH_SPREADSHEETS` is not used as a
+write-target picker. LinkedIn member analytics stays Direct REST + `MIA_LINKEDIN_ACCESS_TOKEN`.
+Do not fake personal analytics with org share-stats. Probe first:
+`uv run python scripts/probe_composio_discovery.py`. Live probe on 24 Aug listed 8
+Active connections (`google_search_console`, `google_analytics`, `googlesheets`,
+`instagram`, `linkedin`, `googlecalendar`, `whatsapp`, `gmail`) then all three
+list executes returned **HTTP 404** (no `{data, error, successful}` payload).
+Resolved: GSC no / GA4 no / Meta ads no. Leave `MIA_COMPOSIO_DISCOVERY=false`
+until the execute slug/version 404 is diagnosed. Firecrawl stays required.
 
 **Go-live that remains true:** ship a new image; run `mia-migrate` if brain tables are not
-on prod RDS; one-off `uv run mia-ingest-knowledge`; `GET /health` and read `brain` counts.
-Do not tell Assaf to add env Composio can supply.
+on prod RDS; one-off `uv run mia-ingest-knowledge`; `GET /health` and read `brain` counts
+plus `owner_integrations.missing`. Assaf still sets Sheets id, LinkedIn token, Firecrawl.
+GSC / GA4 / Meta ads ids stay until discovery is flipped after a clean probe.
 
-Verified this slice: `uv run pytest` on health, LinkedIn analytics, owner live tools, GSC,
-GA4, Sheets, deploy secret box; `uv run ruff check` on touched files.
+Verified this slice: focused pytest on discovery / health / LinkedIn / GSC / GA4 / Sheets
+/ owner live tools; `uv run ruff check` on touched files.
 
 ## Reconciliation noise: `handoff_expired` no longer counted as a failure (2026-08-24)
 

@@ -13,6 +13,7 @@ from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
 from app.domain.commitments import ACTION_LOG, TRIGGER_NONE
 from app.domain.events import Channel
+from app.domain.meeting_availability import is_workday_local
 from app.domain.owner_calendar import apply_owner_calendar
 from app.domain.owner_tasks import (
     OwnerTaskType,
@@ -34,11 +35,23 @@ OWNER_EVENT = "evt.owner.cal.inbound.1"
 OWNER_EVENT_KILL = "evt.owner.cal.inbound.2"
 
 
+def _next_workday(local_dt: datetime) -> datetime:
+    """Advance to the next Sun-Thu day, using the product's own workday rule."""
+    for _ in range(7):
+        if is_workday_local(local_dt):
+            return local_dt
+        local_dt = local_dt + timedelta(days=1)
+    return local_dt
+
+
 def _policy_gap(*, now: datetime | None = None) -> TimeSlot:
     clock = now if now is not None else BASE_NOW
     if clock.tzinfo is None:
         clock = clock.replace(tzinfo=UTC)
-    local_date = (clock.astimezone(IL) + timedelta(days=4)).date()
+    # Seed the free window on a real working day. A fixed +4 lands on Friday whenever the
+    # suite runs on a Monday, and the Sun-Thu policy correctly rejects it — which looked
+    # like a broken calendar every Monday instead of a broken fixture.
+    local_date = _next_workday(clock.astimezone(IL) + timedelta(days=4)).date()
     gap_start = datetime(
         local_date.year, local_date.month, local_date.day, 8, 0, tzinfo=IL
     ).astimezone(UTC)

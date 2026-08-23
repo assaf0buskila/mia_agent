@@ -76,10 +76,10 @@ def test_fake_records_calls_disabled_returns_none() -> None:
     assert disabled.get_member_analytics(start=start, end=end) is None
 
 
-def test_build_linkedin_analytics_port_disabled_even_when_token_set() -> None:
+def test_build_linkedin_analytics_port_direct_when_token_set() -> None:
     settings = Settings(linkedin_access_token="li-member-token")
     port = build_linkedin_analytics_port(settings)
-    assert isinstance(port, DisabledLinkedInAnalyticsPort)
+    assert isinstance(port, DirectLinkedInAnalyticsPort)
 
 
 @pytest.mark.parametrize("token", ["", "   "])

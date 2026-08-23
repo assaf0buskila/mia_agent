@@ -22,7 +22,7 @@ from app.integrations.composio_discovery import (
     GA4_LIST_ACCOUNT_SUMMARIES_TOOL,
     GSC_LIST_SITES_TOOL,
     METAADS_GET_AD_ACCOUNTS_TOOL,
-    build_discovery,
+    ComposioDiscovery,
     extract_ga4_properties,
     extract_meta_ad_accounts,
     extract_sites,
@@ -93,10 +93,16 @@ def _probe(discovery, *, label: str, slug: str, version: str, extractor, raw: bo
 def main() -> int:
     raw = "--raw" in sys.argv
     settings = get_settings()
-    discovery = build_discovery(settings)
-    if discovery is None:
+    if not settings.composio_ready():
         print("Composio is not configured (MIA_COMPOSIO_API_KEY / MIA_COMPOSIO_USER_ID).")
         return 2
+    # Probe constructs the client directly. `build_discovery` stays off unless
+    # MIA_COMPOSIO_DISCOVERY=true — that default must not block this diagnostic.
+    discovery = ComposioDiscovery(
+        api_key=settings.composio_api_key.strip(),
+        user_id=settings.composio_user_id.strip(),
+        website_url=settings.website_url,
+    )
 
     print("Composio resource discovery probe. Read-only; no key is printed.")
     active = discovery.connected_toolkits()

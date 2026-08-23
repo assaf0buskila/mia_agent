@@ -412,7 +412,13 @@ async def test_story_owner_empty_voice_does_not_execute() -> None:
 
 
 @pytest.mark.asyncio
-async def test_story_calendar_no_double_book() -> None:
+async def test_story_calendar_no_double_book(monkeypatch: pytest.MonkeyPatch) -> None:
+    # `_slot()` is built from FIXED_NOW, so the clock must be frozen to match. Unfrozen,
+    # the seeded slot slides inside the >=24h notice window as real time passes and the
+    # booking is correctly refused — a rotting fixture, not a double-book regression.
+    from tests.conftest import freeze_mia_clock
+
+    freeze_mia_clock(monkeypatch, FIXED_NOW)
     init_db()
     db = get_session_factory()()
     try:

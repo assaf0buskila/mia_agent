@@ -205,33 +205,71 @@ def test_health_is_alive() -> None:
     assert integrations["composio"] is False
     assert "MIA_COMPOSIO_API_KEY" in integrations["missing"]
     assert integrations["linkedin_analytics"] is False
-    assert "MIA_LINKEDIN_ACCESS_TOKEN" not in integrations["missing"]
-    assert "MIA_GSC_SITE_URL" not in integrations["missing"]
-    assert "MIA_GA4_PROPERTY_ID" not in integrations["missing"]
-    assert "MIA_SHEETS_SPREADSHEET_ID" not in integrations["missing"]
+    assert "MIA_LINKEDIN_ACCESS_TOKEN" in integrations["missing"]
+    assert "MIA_GSC_SITE_URL" in integrations["missing"]
+    assert "MIA_GA4_PROPERTY_ID" in integrations["missing"]
+    assert "MIA_SHEETS_SPREADSHEET_ID" in integrations["missing"]
+    assert "MIA_META_ADS_ACCOUNT_ID" in integrations["missing"]
     assert "MIA_FIRECRAWL_API_KEY" in integrations["missing"]
 
 
-def test_owner_integrations_composio_covers_google_ids_and_linkedin_profile() -> None:
+def test_owner_integrations_discovery_off_lists_ids_honestly() -> None:
     settings = Settings(
         _env_file=None,
         composio_api_key="k",
         composio_user_id="u",
+        composio_discovery=False,
         firecrawl_api_key="",
         gsc_site_url="",
         ga4_property_id="",
+        meta_ads_account_id="",
         sheets_spreadsheet_id="",
         linkedin_access_token="",
     )
     integrations = owner_integrations(settings)
     assert integrations["composio"] is True
-    assert integrations["search_console"] is True
-    assert integrations["ga4"] is True
-    assert integrations["sheets_mirror"] is True
+    assert integrations["search_console"] is False
+    assert integrations["ga4"] is False
+    assert integrations["sheets_mirror"] is False
     assert integrations["linkedin_profile"] is True
     assert integrations["linkedin_analytics"] is False
     assert integrations["research_firecrawl"] is False
-    assert integrations["missing"] == ["MIA_FIRECRAWL_API_KEY"]
+    assert integrations["missing"] == [
+        "MIA_FIRECRAWL_API_KEY",
+        "MIA_SHEETS_SPREADSHEET_ID",
+        "MIA_LINKEDIN_ACCESS_TOKEN",
+        "MIA_GSC_SITE_URL",
+        "MIA_GA4_PROPERTY_ID",
+        "MIA_META_ADS_ACCOUNT_ID",
+    ]
+
+
+def test_owner_integrations_discovery_on_drops_listable_ids() -> None:
+    settings = Settings(
+        _env_file=None,
+        composio_api_key="k",
+        composio_user_id="u",
+        composio_discovery=True,
+        firecrawl_api_key="",
+        gsc_site_url="",
+        ga4_property_id="",
+        meta_ads_account_id="",
+        sheets_spreadsheet_id="",
+        linkedin_access_token="",
+    )
+    integrations = owner_integrations(settings)
+    assert integrations["search_console"] is True
+    assert integrations["ga4"] is True
+    assert integrations["sheets_mirror"] is False
+    assert integrations["linkedin_analytics"] is False
+    assert "MIA_GSC_SITE_URL" not in integrations["missing"]
+    assert "MIA_GA4_PROPERTY_ID" not in integrations["missing"]
+    assert "MIA_META_ADS_ACCOUNT_ID" not in integrations["missing"]
+    assert integrations["missing"] == [
+        "MIA_FIRECRAWL_API_KEY",
+        "MIA_SHEETS_SPREADSHEET_ID",
+        "MIA_LINKEDIN_ACCESS_TOKEN",
+    ]
 
 
 def test_openapi_surface_prod_hides_docs() -> None:

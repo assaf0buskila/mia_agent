@@ -35,7 +35,7 @@ Personal WhatsApp stays human-only. Hot `HANDOFF` stops selling, notifies Telegr
 | Instagram in | Meta webhook (not a v1 sales inbox) |
 | Instagram insights | Graph default; Composio when sender=`composio` |
 | Gmail / Calendar / Sheets / Meta ads read / LinkedIn profile / GSC / GA4 | Composio |
-| LinkedIn member analytics | No Composio member tool; leftover Direct REST unused |
+| LinkedIn member analytics | Direct REST + `MIA_LINKEDIN_ACCESS_TOKEN` (ADR-009). Composio has org share-stats only. |
 | Research | Firecrawl |
 | ManyChat | Not mounted in v1 |
 

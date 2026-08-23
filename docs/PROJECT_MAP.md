@@ -21,8 +21,8 @@ AssafWeb’s production AI Growth & Sales Operator.
 | WhatsApp inbound | Meta Cloud HMAC `app/api/whatsapp.py` |
 | WhatsApp send | Composio `WHATSAPP_SEND_MESSAGE` when `MIA_WHATSAPP_SENDER=composio` (else Graph) |
 | Gmail ingest | Composio webhook `app/api/composio.py` |
-| Calendar / Sheets / Meta ads read / LinkedIn profile / GSC / GA4 | Composio typed ports (ids discovered at request time) |
-| LinkedIn member analytics | Typed port kept; no Composio member tool (org share-stats only) |
+| Calendar / Sheets / Meta ads read / LinkedIn profile / GSC / GA4 | Composio typed ports. GSC / GA4 / Meta ads ids from leftover env, or opt-in `MIA_COMPOSIO_DISCOVERY`. Sheets id stays explicit. |
+| LinkedIn member analytics | Direct REST + `MIA_LINKEDIN_ACCESS_TOKEN`. Composio has org share-stats only. |
 | Research search | Firecrawl |
 | Voice STT | OpenAI transcribe (Telegram + allowed WhatsApp + website widget) |
 | Host | ECS Fargate + RDS + Secrets Manager `mia/prod` + ALB `https://mia.assafweb.com` (`eu-north-1`) |
@@ -77,7 +77,8 @@ Names live in `.env.example` and `app/core/config.py`. Production SECRET keys: A
 | Sender switches (one each) | `MIA_WHATSAPP_SENDER` = `direct` \| `composio`; `MIA_INSTAGRAM_SENDER` = `direct` \| `composio` |
 | Wired write | `MIA_CALENDAR_WRITE` |
 | Fail-closed flags (exist, default false) | `MIA_WHATSAPP_HANDOFF_SEND`, `MIA_GMAIL_SEND`, `MIA_META_WRITE`, `MIA_AUTO_REPLY_INSTAGRAM` |
-| Leftover optional IDs | `MIA_GSC_SITE_URL`, `MIA_GA4_PROPERTY_ID`, `MIA_SHEETS_SPREADSHEET_ID`, `MIA_LINKEDIN_ACCESS_TOKEN` — Composio lists these; do not add them for go-live |
+| Leftover optional IDs | `MIA_GSC_SITE_URL`, `MIA_GA4_PROPERTY_ID`, `MIA_META_ADS_ACCOUNT_ID` — required while `MIA_COMPOSIO_DISCOVERY=false`; skippable after a clean probe + flag on |
+| Still required | `MIA_SHEETS_SPREADSHEET_ID` (write target), `MIA_LINKEDIN_ACCESS_TOKEN` (member analytics) |
 | Required extra (not Composio) | `MIA_FIRECRAWL_API_KEY` for research |
 | Deprecated leftover | `MIA_MANYCHAT_INGEST_TOKEN` may still be in `mia/prod` and ECS injection. **Do not delete the AWS secret.** Code does not read it. |
 

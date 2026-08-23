@@ -2,7 +2,8 @@
 
 Production adapter: Composio ``GOOGLE_ANALYTICS`` toolkit version ``20260721_00``,
 pins ``RUN_PIVOT_REPORT``, ``LIST_CONVERSION_EVENTS``, and ``LIST_ACCOUNT_SUMMARIES``.
-Property id is optional leftover env; otherwise summaries pick AssafWeb. Read-only.
+Property id comes from ``MIA_GA4_PROPERTY_ID`` or opt-in ``composio_discovery``
+(cached, not per request). Read-only.
 """
 
 from __future__ import annotations
@@ -99,23 +100,13 @@ class ComposioGa4Port:
         self._property_id = property_id.strip()
         self._client = client
 
-    def _resolved_property_id(self) -> str:
-        if self._property_id:
-            return self._property_id
-        summaries = _map_ga4_property_summaries(
-            self._execute(COMPOSIO_LIST_ACCOUNT_SUMMARIES_TOOL, {})
-        )
-        picked = pick_ga4_property(summaries)
-        self._property_id = picked or ""
-        return self._property_id
-
     def run_pivot_report(
         self,
         *,
         start_date: str,
         end_date: str,
     ) -> list[Ga4PivotRow]:
-        property_id = self._resolved_property_id()
+        property_id = self._property_id
         if not property_id:
             return []
         arguments: dict[str, Any] = {
@@ -132,7 +123,7 @@ class ComposioGa4Port:
         return _map_pivot_rows(body)
 
     def list_conversion_events(self) -> list[str]:
-        property_id = self._resolved_property_id()
+        property_id = self._property_id
         if not property_id:
             return []
         arguments = {"parent": property_id}

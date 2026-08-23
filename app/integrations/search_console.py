@@ -1,9 +1,9 @@
 """Google Search Console read port.
 
 Production adapter: Composio ``GOOGLE_SEARCH_CONSOLE`` toolkit version ``20260806_00``,
-pins ``SEARCH_ANALYTICS_QUERY``, ``INSPECT_URL``, ``LIST_SITES`` when Composio
-credentials are set. Site URL is optional leftover env; otherwise ``LIST_SITES``
-picks AssafWeb. Read-only — never add sitemap or site.
+pins ``SEARCH_ANALYTICS_QUERY``, ``INSPECT_URL``, and ``LIST_SITES``. Site URL comes
+from ``MIA_GSC_SITE_URL`` or opt-in ``composio_discovery`` (cached, not per request).
+Read-only — never add sitemap or site.
 """
 
 from __future__ import annotations
@@ -125,12 +125,6 @@ class ComposioSearchConsolePort:
         self._site_url = site_url.strip()
         self._client = client
 
-    def _resolved_site_url(self) -> str:
-        if self._site_url:
-            return self._site_url
-        self._site_url = pick_gsc_site(self.list_sites())
-        return self._site_url
-
     def list_sites(self) -> list[str]:
         body = self._execute(COMPOSIO_LIST_SITES_TOOL, {})
         return _map_site_list(body)
@@ -142,7 +136,7 @@ class ComposioSearchConsolePort:
         end_date: str,
         dimensions: list[str],
     ) -> list[SearchAnalyticsRow]:
-        site_url = self._resolved_site_url()
+        site_url = self._site_url
         if not site_url:
             return []
         arguments: dict[str, Any] = {
@@ -159,7 +153,7 @@ class ComposioSearchConsolePort:
         trimmed = url.strip()
         if not trimmed:
             return None
-        site_url = self._resolved_site_url()
+        site_url = self._site_url
         if not site_url:
             return None
         arguments = {

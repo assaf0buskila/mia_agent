@@ -254,7 +254,14 @@ async def test_inbound_disabled_calendar_keeps_static_offer_meeting() -> None:
         db.close()
 
 
-def test_website_post_message_enriches_seeded_offer_meeting() -> None:
+def test_website_post_message_enriches_seeded_offer_meeting(monkeypatch) -> None:
+    # The slot and the asserted label ("Mon 24 Aug") are both derived from FIXED_NOW, so
+    # the clock has to be frozen too. Without it the seeded slot drifts inside the >=24h
+    # notice window as real time passes and the offer comes back with no slots — the test
+    # rotted on a date rather than on a code change.
+    from tests.conftest import freeze_mia_clock
+
+    freeze_mia_clock(monkeypatch, FIXED_NOW)
     init_db()
     db = get_session_factory()()
     try:

@@ -360,21 +360,6 @@ class ComposioSheetsPort:
         self._spreadsheet_id = spreadsheet_id.strip()
         self._client = client
 
-    def _resolved_spreadsheet_id(self) -> str:
-        if self._spreadsheet_id:
-            return self._spreadsheet_id
-        body = self._execute_tool(
-            COMPOSIO_SEARCH_SPREADSHEETS_TOOL,
-            {
-                "query": PREFERRED_SHEET_NAME,
-                "search_type": "name",
-                "max_results": 10,
-            },
-        )
-        picked = pick_spreadsheet_id(_map_spreadsheet_files(body))
-        self._spreadsheet_id = picked
-        return self._spreadsheet_id
-
     def _execute_tool(
         self, tool_slug: str, arguments: dict[str, Any]
     ) -> dict[str, Any] | None:
@@ -432,7 +417,7 @@ class ComposioSheetsPort:
         headers: list[str],
         values: list[list[object]],
     ) -> None:
-        spreadsheet_id = self._resolved_spreadsheet_id()
+        spreadsheet_id = self._spreadsheet_id
         if not spreadsheet_id:
             return
         payload = {
