@@ -381,9 +381,12 @@ class BrainStore:
         self,
         *,
         categories: tuple[KnowledgeCategory, ...] = (),
+        source_id: str = "",
         limit: int = MAX_SCAN_ROWS,
     ) -> list[KnowledgeChunk]:
         stmt = select(KnowledgeChunkRow).where(KnowledgeChunkRow.status == "active")
+        if source_id:
+            stmt = stmt.where(KnowledgeChunkRow.source_id == source_id)
         if categories:
             stmt = stmt.where(
                 KnowledgeChunkRow.category.in_([item.value for item in categories])
@@ -401,13 +404,18 @@ class BrainStore:
         ).all()
         return [self._to_chunk(row) for row in rows]
 
-    def knowledge_vectors(self, *, limit: int = MAX_SCAN_ROWS) -> list[tuple[str, str]]:
-        stmt = (
-            select(KnowledgeChunkRow.chunk_id, KnowledgeChunkRow.embedding)
-            .where(KnowledgeChunkRow.status == "active", KnowledgeChunkRow.embedding != "")
-            .limit(min(limit, MAX_SCAN_ROWS))
+    def knowledge_vectors(
+        self, *, source_id: str = "", limit: int = MAX_SCAN_ROWS
+    ) -> list[tuple[str, str]]:
+        stmt = select(KnowledgeChunkRow.chunk_id, KnowledgeChunkRow.embedding).where(
+            KnowledgeChunkRow.status == "active", KnowledgeChunkRow.embedding != ""
         )
-        return [(row[0], row[1]) for row in self.session.execute(stmt).all()]
+        if source_id:
+            stmt = stmt.where(KnowledgeChunkRow.source_id == source_id)
+        return [
+            (row[0], row[1])
+            for row in self.session.execute(stmt.limit(min(limit, MAX_SCAN_ROWS))).all()
+        ]
 
     def count_knowledge_chunks(self) -> int:
         return int(

@@ -302,12 +302,44 @@ _OWNER_REQUIRED = (
     "רוצה להתחיל",
     "הנחה מיוחדת",
     "משא ומתן",
+    "how much does it cost",
+    "how much is it",
+    "what's the price",
+    "what is the price",
+    "what does it cost",
+    "כמה זה עולה",
+    "מה המחיר",
+    "i want a person",
+    "speak to a human",
+    "real person",
+    "talk to someone",
+    "representative",
+    "רוצה נציג",
+    "בן אדם",
+    "לדבר עם מישהו",
+    "נציג אנושי",
+    "complaint",
+    "i want to complain",
+    "this is unacceptable",
+    "not satisfied",
+    "תלונה",
+    "לא מרוצה",
+    "זה לא מקובל",
+    "רוצה להתלונן",
+    "you promise",
+    "guarantee",
+    "תבטיחו",
+    "אתם מבטיחים",
+    "ייעוץ רפואי",
+    "ייעוץ משפטי",
+    "medical advice",
+    "legal advice",
 )
 
 _OBJECTION_TOKENS: tuple[tuple[ObjectionKind, tuple[str, ...]], ...] = (
     (
-        # Checked before PRICE so "too expensive" still reads as an objection while a
-        # neutral "how much is it?" gets an answer instead of a defensive question.
+        # Checked before PRICE so "too expensive" still reads as an objection.
+        # A price question also sets owner_required and hands off.
         ObjectionKind.PRICE_QUESTION,
         (
             "how much does it cost",

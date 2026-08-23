@@ -9,6 +9,7 @@ from app.domain.booking_voice import (
     BOOKING_RETRY,
     CONFLICT_SLOT_TAKEN,
 )
+from app.domain.conversation_scope import MIA_INTRO_HE
 from app.domain.followup_voice import MEETING_OFFERED_FOLLOW_UP
 from app.domain.humanity import (
     HumanityVerdict,
@@ -101,13 +102,26 @@ def test_typography_fails(text: str) -> None:
     [
         "יום-יום זה נורמלי.",
         "השקעה-עכשיו זה לא נכון.",
+        "מיה מ-AssafWeb",
+    ],
+)
+def test_any_hyphen_fails_typography(text: str) -> None:
+    verdict = lint_customer_reply(text)
+    assert verdict.ok is False
+    assert "typography" in verdict.reasons
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
         "10/2026",
         "Let's go.",
         "ג'ינג'י זה בסדר.",
         "see // comment",
+        "https://meet.google.com/abc-defg-hij and we can talk.",
     ],
 )
-def test_compound_hyphen_and_natural_apostrophe_pass(text: str) -> None:
+def test_dates_apostrophes_and_urls_pass(text: str) -> None:
     assert lint_customer_reply(text).ok is True
 
 
@@ -164,6 +178,7 @@ def _all_canned_customer_replies() -> list[str]:
             CANCELLATION_REQUESTED_REPLY,
             CANCELLATION_DENIED_REPLY,
             MEETING_OFFERED_FOLLOW_UP,
+            MIA_INTRO_HE,
             "זמין:\n1. Sun 01 Jan 10:00\nהשיבו 1 כדי לאשר.",
         )
     )

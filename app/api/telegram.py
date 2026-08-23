@@ -15,9 +15,16 @@ from app.core.webhooks import verify_telegram_secret
 from app.db.store import LeadStore
 from app.domain.ai_runs import elapsed_ms
 from app.domain.events import Channel
+from app.domain.owner_callbacks import resolve_owner_callback
 from app.domain.tools import AdapterHttpError
 from app.integrations.base import MessagePort
-from app.integrations.telegram import TelegramMediaError, parse_telegram_update
+from app.integrations.telegram import (
+    TelegramMediaError,
+    TelegramSendError,
+    parse_telegram_callback,
+    parse_telegram_update,
+)
+from app.integrations.telegram_format import parse_callback_token
 from app.integrations.transcribe import TranscriptionError, TranscriptionPort
 
 router = APIRouter(prefix="/v1/telegram", tags=["telegram"])
@@ -58,6 +65,50 @@ async def _transcribe_telegram_voice(
     return item
 
 
+async def _handle_callback(
+    *,
+    callback: dict[str, str],
+    port: MessagePort,
+    owner_ids: set[str],
+    db: Session,
+) -> dict:
+    """Resolve one inline-button press.
+
+    `answerCallbackQuery` runs first and unconditionally: the client shows a spinner until
+    it lands, so acknowledging before doing the work is what keeps the button feeling
+    instant. The allowlist is still enforced — a callback carries a `from` like any other
+    update and is not privileged.
+
+    Callbacks can be replayed against a message whose buttons are already gone, so the
+    decision path must stay idempotent; `decide_approval` is keyed on the approval id.
+    """
+    answer = getattr(port, "answer_callback_query", None)
+    if callable(answer):
+        try:
+            await answer(callback["callback_query_id"])
+        except (TelegramSendError, AdapterHttpError, RuntimeError):
+            pass
+    if callback["from"] not in owner_ids:
+        return {"processed": 0, "ignored": True, "reason": "unauthorized"}
+    decision, token = parse_callback_token(callback.get("data", ""))
+    if not decision or not token:
+        return {"processed": 0, "ignored": True, "reason": "unrecognized_callback"}
+    store = LeadStore(db)
+    resolved = resolve_owner_callback(store, decision=decision, token=token)
+    edit = getattr(port, "edit_message_text", None)
+    if callable(edit) and callback.get("message_id"):
+        try:
+            await edit(
+                chat_id=callback["chat_id"],
+                message_id=callback["message_id"],
+                text=resolved,
+                parse_mode="HTML",
+            )
+        except (TelegramSendError, AdapterHttpError, RuntimeError):
+            pass
+    return {"processed": 1, "decision": decision, "sent": True}
+
+
 @router.post("/webhook")
 async def receive_webhook(
     request: Request,
@@ -85,10 +136,18 @@ async def receive_webhook(
         return {"processed": 0, "ignored": True}
     if not isinstance(payload, dict):
         return {"processed": 0, "ignored": True}
+    owner_ids = settings.telegram_owner_user_id_set()
+    # An Update carries at most one optional field, so message and callback_query are a
+    # clean either/or. Without this branch a button press produces a spinner that never
+    # resolves and nothing in the logs.
+    callback = parse_telegram_callback(payload)
+    if callback is not None:
+        return await _handle_callback(
+            callback=callback, port=port, owner_ids=owner_ids, db=db
+        )
     parsed = parse_telegram_update(payload)
     if parsed is None:
         return {"processed": 0, "ignored": True}
-    owner_ids = settings.telegram_owner_user_id_set()
     if parsed["from"] not in owner_ids:
         return {"processed": 0, "ignored": True, "reason": "unauthorized"}
     store = LeadStore(db)

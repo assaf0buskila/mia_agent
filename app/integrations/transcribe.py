@@ -11,10 +11,65 @@ from app.core.models import model_chain
 from app.domain.tools import AdapterHttpError
 
 _OPENAI_TRANSCRIPTIONS_URL = "https://api.openai.com/v1/audio/transcriptions"
+# The prompt should match the audio language, so the Hebrew-primary owner channel gets a
+# Hebrew prompt. Product names go in `keywords` for models that support it.
 _ASSAFWEB_STT_PROMPT = (
-    "AssafWeb digital employee sales conversations. "
-    "Hebrew and English business terms."
+    "שיחות עסקיות של AssafWeb על עובדים דיגיטליים, אוטומציות וסוכני AI. "
+    "מונחים עסקיים בעברית ובאנגלית."
 )
+_ASSAFWEB_STT_KEYWORDS: tuple[str, ...] = (
+    "AssafWeb",
+    "Mia",
+    "MYstudio",
+    "עובד דיגיטלי",
+    "אוטומציה",
+    "ליד",
+    "וואטסאפ",
+)
+_DEFAULT_LANGUAGES: tuple[str, ...] = ("he", "en")
+
+
+def transcription_request_fields(
+    *,
+    model: str,
+    prompt: str,
+    languages: tuple[str, ...],
+    keywords: tuple[str, ...],
+) -> dict[str, object]:
+    """Build the multipart fields for one model, per its documented capabilities.
+
+    Three families with genuinely different contracts:
+
+    - `whisper-1` is the only model that supports `verbose_json`, and it takes a singular
+      `language`. It is also the only one returning `language` / `duration` inline.
+    - `gpt-transcribe` takes a plural `languages` array plus `keywords`, and documents
+      `json` and `text` only. Sending `language` alongside `languages` is explicitly
+      called out as wrong: "don't send both fields".
+    - `gpt-4o-*-transcribe` takes singular `language`, and `json` is the ONLY supported
+      response format.
+
+    The previous implementation sent `verbose_json` to `gpt-transcribe` unconditionally,
+    which is unsupported and made every owner voice note fail silently.
+    """
+    name = model.strip().lower()
+    fields: dict[str, object] = {"model": model}
+    if prompt and not name.endswith("-diarize"):
+        fields["prompt"] = prompt
+    if name.startswith("whisper"):
+        fields["response_format"] = "verbose_json"
+        if languages:
+            fields["language"] = languages[0]
+        return fields
+    fields["response_format"] = "json"
+    if name.startswith("gpt-transcribe") or name.startswith("gpt-live-transcribe"):
+        if languages:
+            fields["languages[]"] = list(languages)
+        if keywords:
+            fields["keywords[]"] = list(keywords)
+        return fields
+    if languages:
+        fields["language"] = languages[0]
+    return fields
 
 _STT_PROVIDER_ALLOWLIST = frozenset({"openai", "fake"})
 _STT_MODEL_RE = re.compile(r"^[a-zA-Z0-9._-]{1,64}$")
@@ -82,6 +137,46 @@ def sanitize_confidence(value: object) -> str:
     return formatted[:16]
 
 
+def detected_language(payload: dict) -> str:
+    """Read the detected language from either documented response shape.
+
+    `gpt-transcribe` returns `languages`, an array of `{code}` where an empty array means
+    no reliable detection. `verbose_json` (whisper-1) returns a singular `language`, and
+    its documented example is a language *name* ("english") rather than a code, so it is
+    sanitized and dropped if it is not an ISO code.
+    """
+    if not isinstance(payload, dict):
+        return ""
+    languages = payload.get("languages")
+    if isinstance(languages, list):
+        for item in languages:
+            if isinstance(item, dict):
+                code = sanitize_language(item.get("code"))
+                if code:
+                    return code
+            elif isinstance(item, str):
+                code = sanitize_language(item)
+                if code:
+                    return code
+    if "language" in payload:
+        return sanitize_language(payload.get("language"))
+    return ""
+
+
+def detected_duration_ms(payload: dict) -> int:
+    """Duration from `duration` (verbose_json) or `usage.seconds` (duration billing)."""
+    if not isinstance(payload, dict):
+        return 0
+    if "duration" in payload:
+        duration = duration_ms_from_seconds(payload.get("duration"))
+        if duration:
+            return duration
+    usage = payload.get("usage")
+    if isinstance(usage, dict) and "seconds" in usage:
+        return duration_ms_from_seconds(usage.get("seconds"))
+    return 0
+
+
 def duration_ms_from_seconds(value: object) -> int:
     if isinstance(value, bool):
         return 0
@@ -120,11 +215,20 @@ class OpenAITranscribePort:
         model: str,
         fallback_model: str = "",
         prompt: str = _ASSAFWEB_STT_PROMPT,
+        languages: tuple[str, ...] = _DEFAULT_LANGUAGES,
+        keywords: tuple[str, ...] = _ASSAFWEB_STT_KEYWORDS,
         client: httpx.AsyncClient | None = None,
     ) -> None:
         self._api_key = api_key
         self._models = model_chain(model, fallback_model)
         self._prompt = prompt
+        self._languages = languages
+        # "The API rejects the entire request" on a keyword containing < > CR or LF.
+        self._keywords = tuple(
+            keyword
+            for keyword in keywords
+            if keyword and not any(char in keyword for char in "<>\r\n")
+        )
         self._client = client
 
     async def transcribe(
@@ -149,12 +253,15 @@ class OpenAITranscribePort:
     async def _transcribe_model(
         self, *, model: str, audio: bytes, mime_type: str, filename: str
     ) -> TranscriptResult:
+        # The spec requires "enough format metadata for the file to be identified", so the
+        # filename and content type are always explicit rather than left to the client.
         files = {"file": (filename, audio, mime_type)}
-        data = {
-            "model": model,
-            "prompt": self._prompt,
-            "response_format": "verbose_json",
-        }
+        data = transcription_request_fields(
+            model=model,
+            prompt=self._prompt,
+            languages=self._languages,
+            keywords=self._keywords,
+        )
         headers = {"Authorization": f"Bearer {self._api_key}"}
         try:
             if self._client is not None:
@@ -183,12 +290,10 @@ class OpenAITranscribePort:
         text = payload.get("text", "")
         if not isinstance(text, str) or not text.strip():
             raise TranscriptionError("OpenAI transcription returned empty text")
-        language = ""
-        if "language" in payload:
-            language = sanitize_language(payload.get("language"))
-        duration_ms = 0
-        if "duration" in payload:
-            duration_ms = duration_ms_from_seconds(payload.get("duration"))
+        language = detected_language(payload)
+        duration_ms = detected_duration_ms(payload)
+        # No documented OpenAI transcription response carries a `confidence` field. It is
+        # still read when present so a provider that does supply one is not discarded.
         confidence = ""
         if "confidence" in payload:
             confidence = sanitize_confidence(payload.get("confidence"))

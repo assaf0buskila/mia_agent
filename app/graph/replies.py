@@ -21,8 +21,8 @@ _DOMAIN_QUESTION = "מה כתובת האתר של העסק?"
 
 QUALIFY_REPLIES: dict[str, str] = {
     "decision_maker": _QUALIFY_DECISION_MAKER,
-    "timeline": "מתי זה יהיה חשוב שזה ייפתר?",
-    "metric": "מה זה עולה לך בזמן או בלידים שאבדו?",
+    "timeline": "מתי חשוב שזה ייפתר?",
+    "metric": "מה זה עולה לכם בזמן או בלידים שאבדו?",
 }
 
 QUALIFY_REPLIES_EN: dict[str, str] = {
@@ -33,25 +33,26 @@ QUALIFY_REPLIES_EN: dict[str, str] = {
 
 WEBSITE_REPLIES: dict[NextAction, str] = {
     NextAction.UNDERSTAND_WORKFLOW: (
-        "ספרו לי קצת איך נראה יום רגיל בעסק. במה אתם רוב הזמן עסוקים?"
+        "אני מיה, העוזרת של AssafWeb. ספרו לי קצת איך נראה יום רגיל בעסק. "
+        "במה אתם רוב הזמן עסוקים?"
     ),
     NextAction.DEEPEN_PAIN: "איזה חלק בעבודה הזאת נעשה אצלכם ידנית?",
-    NextAction.QUANTIFY: "כמה זמן זה לוקח לך בפועל?",
+    NextAction.QUANTIFY: "כמה זמן זה לוקח לכם בפועל?",
     NextAction.REFLECT: "אז רוב העבודה הידנית מתרכזת בשלב הזה. זה מדויק?",
     NextAction.OFFER_HYPOTHESIS: (
-        "נשמע כמו משהו שאפשר להוריד ממך. רוצה שאתאר איך זה היה עובד?"
+        "נשמע שאפשר לקחת את זה מכם. רוצים שאסביר איך זה היה עובד?"
     ),
     NextAction.QUALIFY: _QUALIFY_DECISION_MAKER,
     NextAction.OFFER_MEETING: (
-        "אפשר לקבוע שיחה קצרה עם אסף ולמפות את האוטומציה הראשונה. מתאים לך?"
+        "אפשר לקבוע שיחה קצרה עם אסף ולמפות את האוטומציה הראשונה. מתאים לכם?"
     ),
     NextAction.OFFER_WHATSAPP: (
-        "יש פה משהו ששווה לפתוח יותר לעומק. נוח לך שאעביר אותך לאסף בוואטסאפ? "
-        "הוא יקבל את כל מה שסיפרת לי כאן."
+        "יש פה משהו שכדאי להמשיך עליו. נוח לכם שאעביר אתכם לאסף בוואטסאפ? "
+        "הוא יקבל את כל מה שסיפרתם לי כאן."
     ),
-    NextAction.HANDOFF: "את זה עדיף להעביר ישירות לאסף. אעביר לו את ההקשר.",
+    NextAction.HANDOFF: "את זה מעבירים לאסף. אעביר לו מה שדיברנו.",
     NextAction.DISQUALIFY: (
-        "כרגע זה לא נראה כמו התאמה, בלי לחץ. אני כאן אם זה ישתנה."
+        "כרגע אין פה התאמה, בלי לחץ. אני כאן אם זה ישתנה."
     ),
     NextAction.STOP: "אני משאירה את זה אצלכם. כתבו כשתרצו להמשיך.",
 }
@@ -89,12 +90,12 @@ WEBSITE_REPLIES_EN: dict[NextAction, str] = {
 # was not usable. Never send the same line twice; that is the discovery loop.
 WEBSITE_RETRY_REPLIES: dict[NextAction, str] = {
     NextAction.UNDERSTAND_WORKFLOW: "מה העסק עושה בפועל?",
-    NextAction.DEEPEN_PAIN: "מה החלק שהכי גוזל לך זמן שם?",
+    NextAction.DEEPEN_PAIN: "מה החלק שהכי גוזל לכם זמן?",
     NextAction.QUANTIFY: "זה קורה כל יום, או פעם בשבוע?",
     NextAction.REFLECT: "תקנו אותי אם פספסתי משהו.",
-    NextAction.OFFER_HYPOTHESIS: "רוצה שאראה לך איך זה נראה בפועל?",
-    NextAction.QUALIFY: "מה הדבר שהיה עושה לך את ההבדל הגדול פה?",
-    NextAction.OFFER_WHATSAPP: "אפשר להעביר אותך לאסף בוואטסאפ?",
+    NextAction.OFFER_HYPOTHESIS: "רוצים שאראה לכם איך זה נראה בפועל?",
+    NextAction.QUALIFY: "מה הדבר שהיה עושה לכם את ההבדל הגדול?",
+    NextAction.OFFER_WHATSAPP: "אפשר להעביר אתכם לאסף בוואטסאפ?",
 }
 
 WEBSITE_RETRY_REPLIES_EN: dict[NextAction, str] = {
@@ -110,19 +111,19 @@ WEBSITE_RETRY_REPLIES_EN: dict[NextAction, str] = {
 OBJECTION_REPLIES: dict[ObjectionKind, str] = {
     ObjectionKind.PRICE: "מה מרגיש יקר בדיוק?",
     ObjectionKind.PRICE_QUESTION: (
-        "המחיר תלוי בהיקף. במה אתם רוב הזמן עסוקים בעסק?"
+        "אין לי מספר מדויק לתת עכשיו. אעביר את זה לאסף."
     ),
-    ObjectionKind.AI_TRUST: "מה החשש המרכזי שלך סביב זה?",
+    ObjectionKind.AI_TRUST: "מה החשש המרכזי אצלכם מזה?",
     ObjectionKind.NO_TIME: "החשש הוא זמן ההטמעה או שאין ראש לזה עכשיו?",
     ObjectionKind.HAS_VENDOR: "מה עובד היום, ואיפה זה עדיין נתקע?",
-    ObjectionKind.NOT_URGENT: "אם לא משנים כלום, מה ממשיך לעלות לך?",
-    ObjectionKind.NEED_PARTNER: "מי עוד צריך להיות בתמונה כדי להחליט?",
+    ObjectionKind.NOT_URGENT: "אם לא משנים כלום, מה ממשיך לעלות לכם?",
+    ObjectionKind.NEED_PARTNER: "מי עוד צריך להיות בשיחה כדי להחליט?",
 }
 
 OBJECTION_REPLIES_EN: dict[ObjectionKind, str] = {
     ObjectionKind.PRICE: "What exactly feels expensive here?",
     ObjectionKind.PRICE_QUESTION: (
-        "Pricing depends on scope. What takes up most of your day in the business?"
+        "I do not have an exact number to give from here. I will pass this to Assaf."
     ),
     ObjectionKind.AI_TRUST: "What's the main worry for you around that?",
     ObjectionKind.NO_TIME: "Is the worry the setup time, or just no headspace right now?",
@@ -133,24 +134,21 @@ OBJECTION_REPLIES_EN: dict[ObjectionKind, str] = {
 
 REFRAME_REPLIES: dict[ObjectionKind, str] = {
     ObjectionKind.PRICE: (
-        "ההשקעה נמדדת מול החיכוך שתיארת, לא מול כלי באוויר. מה מרגיש יקר?"
+        "המחיר נמדד מול מה שתיארתם, לא במנותק. מה מרגיש יקר?"
     ),
-    ObjectionKind.PRICE_QUESTION: (
-        "המחיר תלוי בהיקף. לפי מה שתיארת מדובר באוטומציה אחת ממוקדת. "
-        "שאעביר את זה לאסף למספר מדויק?"
-    ),
+    ObjectionKind.PRICE_QUESTION: "אין לי מספר מדויק לתת עכשיו. אעביר את זה לאסף.",
     ObjectionKind.AI_TRUST: (
         "מיה עובדת עם אישורים על פעולות רגישות, לא לבד. מה חייב להישאר אצלכם?"
     ),
     ObjectionKind.NO_TIME: (
-        "המסלול הוא פיילוט קטן על השלב שתיארת, לא פרויקט גדול. "
-        "מה נראה לך כצעד ראשון שאפשר לסחוב?"
+        "המסלול הוא פיילוט קטן על השלב שתיארתם, לא פרויקט גדול. "
+        "מה נראה לכם כצעד ראשון שאפשר לסחוב?"
     ),
     ObjectionKind.HAS_VENDOR: (
-        "לא מחליפים לשם החלפה. איפה מה שיש היום משאיר אותך באותו חיכוך?"
+        "אין טעם להחליף סתם. איפה מה שיש היום עדיין תוקע אתכם?"
     ),
     ObjectionKind.NOT_URGENT: (
-        "בלי לחץ מלאכותי: אם נשאר כמו היום, מה ממשיך לקרות בשלב שתיארת?"
+        "בלי לחץ מיותר: אם נשאר כמו היום, מה ממשיך לקרות בשלב שתיארתם?"
     ),
     ObjectionKind.NEED_PARTNER: (
         "אפשר לסכם את מה שברור לשיחה עם מי שמחליט. מי זה?"
@@ -163,8 +161,7 @@ REFRAME_REPLIES_EN: dict[ObjectionKind, str] = {
         "What feels expensive?"
     ),
     ObjectionKind.PRICE_QUESTION: (
-        "Pricing depends on scope. From what you described this is one focused "
-        "automation. Want me to get an exact number from Assaf?"
+        "I do not have an exact number to give from here. I will pass this to Assaf."
     ),
     ObjectionKind.AI_TRUST: (
         "Mia asks for approval on anything sensitive, she doesn't act alone. "

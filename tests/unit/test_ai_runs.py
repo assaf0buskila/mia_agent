@@ -36,7 +36,7 @@ from sqlalchemy import func, select
 PROSPECT_PHONE = "972509994901"
 VISITOR_TEXT = "hi"
 _FROZEN_SYSTEM_PROMPT_SHA256 = (
-    "197d0953df341e430229948168b2430910c282becaa93534596554ecd7f63826"
+    "c83365aac3e47376e217449ef0fb9443d12eab69361ed5254b9319fd4580c341"
 )
 
 def _all_ai_run_values(row: AiRunRow) -> str:
@@ -352,7 +352,7 @@ def test_persist_ai_run_writes_prompt_version() -> None:
         row = store.get_ai_run("run_prompt_ver_1")
         assert row is not None
         assert row.prompt_version == PROMPT_VERSION
-        assert row.prompt_version == "sales_reply_v6"
+        assert row.prompt_version == "sales_reply_v7"
     finally:
         db.close()
 
@@ -441,7 +441,7 @@ def test_sanitize_prompt_version(value: str, expected: str) -> None:
 
 
 def test_prompt_version_constant_from_sales_reply() -> None:
-    assert PROMPT_VERSION == SALES_REPLY_PROMPT_VERSION == "sales_reply_v6"
+    assert PROMPT_VERSION == SALES_REPLY_PROMPT_VERSION == "sales_reply_v7"
 
 
 def test_sales_reply_system_prompt_frozen_hash() -> None:

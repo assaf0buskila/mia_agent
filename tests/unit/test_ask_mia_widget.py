@@ -252,7 +252,7 @@ def test_mic_lives_in_composer_not_launcher() -> None:
 
 def test_voice_hint_and_recording_copy() -> None:
     source = _source()
-    assert "תקליטו אותי — זה יותר קל מלכתוב." in source
+    assert "אפשר גם להקליט. זה יותר קל מלכתוב." in source
     assert "הקלטה למיה" in source
     assert "מקליטה… לחצו שוב לשליחה" in source
     assert "id = 'ask-mia-hint'" in source
@@ -321,5 +321,5 @@ def test_widget_hebrew_addresses_both_genders() -> None:
         assert needle not in source, needle
     assert "שאלו את מיה" in source
     assert "לחצו" in source
-    assert "תקליטו" in source
+    assert "להקליט" in source
     assert "כתבו" in source

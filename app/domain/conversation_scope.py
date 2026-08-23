@@ -12,7 +12,7 @@ SCOPE_SOURCE_WEBSITE_HANDOFF = "website_handoff"
 SCOPE_SOURCE_OWNER = "owner"
 _PHONE_RE = re.compile(r"\d{8,15}")
 
-MIA_INTRO_HE = "היי, זאת מיה מ-AssafWeb 🙂 ממשיכים מכאן."
+MIA_INTRO_HE = "היי, זאת מיה, העוזרת של AssafWeb 🙂 ממשיכים מכאן."
 
 
 class AutomationScope(StrEnum):

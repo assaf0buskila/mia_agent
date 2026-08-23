@@ -99,7 +99,7 @@ _WIDGET_PREVIEW = """<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Ask Mia</title>
 <body style="margin:1rem;background:#fff;color:#1a1a1a;font:16px/1.5 system-ui,sans-serif">
-<p>תצוגת מיה המקומית. הכפתור בפינה. זו לא האתר.</p>
+<p>תצוגת מיה המקומית. הכפתור בפינה. זה לא האתר.</p>
 <script src="/v1/website/widget.js" defer></script>
 </body>
 </html>

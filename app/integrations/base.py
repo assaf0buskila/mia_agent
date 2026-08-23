@@ -9,6 +9,10 @@ class OutboundMessage(BaseModel):
     channel: str
     idempotency_key: str
     reply_to_id: str | None = None
+    # Rendering hints. Optional and defaulted so every existing caller is unchanged;
+    # adapters that do not support them ignore them.
+    parse_mode: str | None = None
+    reply_markup: dict | None = None
 
 
 class MessagePort(Protocol):

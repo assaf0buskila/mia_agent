@@ -16,9 +16,9 @@
   var MIC_LIVE = 'מקליטה… לחצו שוב לשליחה';
   var MIC_ERR = 'לא שמעתי טוב. נסו שוב או כתבו.';
   var MIC_PERM = 'לא קיבלתי גישה למיקרופון. אפשר גם לכתוב.';
-  var MIC_NA = 'ההקלטה לא זמינה כאן. כתבו במקום.';
+  var MIC_NA = 'ההקלטה לא זמינה כאן. אפשר לכתוב.';
   var ERR = 'משהו השתבש. נסו שוב.';
-  var WA_NA = 'וואטסאפ לא מוגדר כרגע.';
+  var WA_NA = 'וואטסאפ לא זמין כרגע.';
   var eventQueue = [];
   var MAX_QUEUE = 10;
   var seenSections = {};
@@ -218,7 +218,7 @@
 
   var hint = document.createElement('p');
   hint.id = 'ask-mia-hint';
-  hint.textContent = 'תקליטו אותי — זה יותר קל מלכתוב.';
+  hint.textContent = 'אפשר גם להקליט. זה יותר קל מלכתוב.';
 
   var actions = document.createElement('div');
   actions.id = 'ask-mia-actions';

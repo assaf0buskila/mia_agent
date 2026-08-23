@@ -2,6 +2,7 @@ from datetime import UTC, datetime
 from time import perf_counter
 from uuid import uuid4
 
+from app.brain.store import BrainStore
 from app.core.config import get_settings
 from app.core.demo import demo_mode_active
 from app.core.logging import log_comm
@@ -60,6 +61,7 @@ from app.domain.learning import (
     propose_owner_instruction,
 )
 from app.domain.meetings import apply_meeting_policy
+from app.domain.owner_brain import answer_owner, learn_from_exchange
 from app.domain.owner_briefs import apply_owner_brief
 from app.domain.owner_calendar import apply_owner_calendar
 from app.domain.owner_followups import needs_data_anchor, routed_owner_text
@@ -852,15 +854,47 @@ async def process_inbound_texts(
                     outcome=analytics_outcome,
                     correlation_id=correlation_id,
                 )
-            phrased = owner_reply_port.compose(
-                task_type=decision.task_type.value,
-                canned=ack_text,
-                owner_message=owner_text,
+            # The agent answers reads and free conversation, with everything the
+            # deterministic chain already computed as its fallback. Write and approval
+            # intents never reach it (DETERMINISTIC_TASK_TYPES). If it is unconfigured or
+            # fails, `brain_result.text` is exactly the canned ack computed above.
+            brain_store = BrainStore(store.session)
+            brain_result = answer_owner(
+                store=store,
+                brain=brain_store,
+                settings=settings,
+                task_type=decision.task_type,
+                owner_text=owner_text,
                 history=tuple(owner_history),
+                fallback_text=ack_text,
                 kill_switch=kill_switch,
+                demo_active=demo_mode_active(settings),
+                calendar=calendar_port,
+                source_ref=f"{provider}:{item['id']}",
             )
-            ack_text = phrased.text
+            if brain_result.used_agent:
+                ack_text = brain_result.text
+            else:
+                phrased = owner_reply_port.compose(
+                    task_type=decision.task_type.value,
+                    canned=ack_text,
+                    owner_message=owner_text,
+                    history=tuple(owner_history),
+                    kill_switch=kill_switch,
+                )
+                ack_text = phrased.text
             last_reply = ack_text
+            # Learn after the reply is settled, never before: memory formation must not
+            # delay or change what Assaf sees this turn.
+            learn_from_exchange(
+                brain=brain_store,
+                settings=settings,
+                owner_text=owner_text,
+                history=tuple(owner_history),
+                source_ref=f"{provider}:{item['id']}",
+                kill_switch=kill_switch,
+                demo_active=demo_mode_active(settings),
+            )
             sent = await send_inbound_reply(
                 port=port,
                 message=_outbound_reply(item, text=ack_text, channel=channel),

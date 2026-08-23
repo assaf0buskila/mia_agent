@@ -382,3 +382,23 @@ def test_hebrew_real_estate_fit_token() -> None:
     state = SalesState(lead_id="lead_he_re")
     updated = extract_sales_signals(state, "יש לנו נדלן")
     assert updated.fit == FitLevel.POSSIBLE
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "how much does it cost",
+        "כמה זה עולה",
+        "I want to complain",
+        "יש לי תלונה",
+        "I want to speak to a human",
+        "רוצה נציג",
+        "do you guarantee results",
+    ],
+)
+def test_money_complaint_human_and_promise_hand_off(message: str) -> None:
+    state = SalesState(lead_id="lead_shop_handoff", workflow_known=True)
+    updated = extract_sales_signals(state, message)
+    assert updated.owner_required is True
+    assert select_next_action(updated) == NextAction.HANDOFF
+    assert "?" not in reply_for("website", NextAction.HANDOFF, updated)

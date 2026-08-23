@@ -7,7 +7,7 @@ Package manager **uv**. Python `>=3.12`. PowerShell: `;` not `&&`. Do not inspec
 
 ## Current
 
-v1 channels (ADR-017) are in code. Live Fargate is **mia:15** (task `mia:16`; ADR-022: `auto_approved` for verified WhatsApp handoff). Customer-facing Hebrew (widget pill, composer, canned sales, WhatsApp paste lines) is 2nd-person plural / impersonal so it addresses men and women; owner Telegram stays masculine. Sales prompt pin is `sales_reply_v6`. Telegram unclassified **text** returns an owner status digest only for greetings, status pings and text of three words or fewer; anything longer gets an Understanding Check. Widget chrome is pinned to the scraped `www.assafweb.com` `:root` tokens, ChatBubble-style rows, and opens only on click. ManyChat route is unmounted.
+v1 channels (ADR-017) are in code. Live Fargate is **mia:15** (task `mia:16`; ADR-022: `auto_approved` for verified WhatsApp handoff). Customer-facing Hebrew (widget pill, composer, canned sales, WhatsApp paste lines) is 2nd-person plural / impersonal so it addresses men and women; owner Telegram stays masculine. Sales prompt pin is `sales_reply_v7`. Telegram unclassified **text** returns an owner status digest only for greetings, status pings and text of three words or fewer; anything longer gets an Understanding Check. Widget chrome is pinned to the scraped `www.assafweb.com` `:root` tokens, ChatBubble-style rows, and opens only on click. ManyChat route is unmounted.
 
 ## Do not redo
 

@@ -34,12 +34,12 @@
       {
         "user": "כל יום בערך שעה",
         "expected_action": "offer_hypothesis",
-        "expected_reply_contains": "להוריד ממך"
+        "expected_reply_contains": "לקחת את זה מכם"
       },
       {
         "user": "אני מחליט לבד",
         "expected_action": "qualify",
-        "expected_reply_contains": "מתי זה יהיה",
+        "expected_reply_contains": "מתי חשוב",
         "expect": {
           "authority_known": true,
           "buying_reality_known": true
@@ -74,12 +74,12 @@
       {
         "user": "about two hours every day",
         "expected_action": "offer_hypothesis",
-        "expected_reply_contains": "להוריד ממך"
+        "expected_reply_contains": "לקחת את זה מכם"
       },
       {
         "user": "I decide this quarter",
         "expected_action": "qualify",
-        "expected_reply_contains": "מה זה עולה לך",
+        "expected_reply_contains": "מה זה עולה לכם",
         "expect": {
           "authority_known": true,
           "timeline_known": true,
@@ -129,7 +129,7 @@
       {
         "user": "I decide this quarter",
         "expected_action": "offer_hypothesis",
-        "expected_reply_contains": "להוריד ממך"
+        "expected_reply_contains": "לקחת את זה מכם"
       }
     ]
   },
@@ -158,12 +158,12 @@
       {
         "user": "כל יום, שעתיים",
         "expected_action": "offer_hypothesis",
-        "expected_reply_contains": "להוריד ממך"
+        "expected_reply_contains": "לקחת את זה מכם"
       },
       {
         "user": "אני הבעלים",
         "expected_action": "qualify",
-        "expected_reply_contains": "מתי זה יהיה",
+        "expected_reply_contains": "מתי חשוב",
         "expect": {
           "authority_known": true
         }
@@ -193,7 +193,7 @@
       {
         "user": "about an hour a day",
         "expected_action": "offer_hypothesis",
-        "expected_reply_contains": "להוריד ממך"
+        "expected_reply_contains": "לקחת את זה מכם"
       }
     ]
   },
@@ -222,7 +222,7 @@
       {
         "user": "כן",
         "expected_action": "deepen_pain",
-        "expected_reply_contains": "גוזל לך זמן",
+        "expected_reply_contains": "גוזל לכם זמן",
         "expect": {
           "discovery_turns": 1
         }
@@ -291,7 +291,7 @@
       {
         "user": "כל יום",
         "expected_action": "offer_hypothesis",
-        "expected_reply_contains": "להוריד ממך"
+        "expected_reply_contains": "לקחת את זה מכם"
       }
     ]
   },
@@ -301,8 +301,8 @@
     "turns": [
       {
         "user": "כמה זה עולה?",
-        "expected_action": "handle_objection",
-        "expected_reply_contains": "המחיר תלוי בהיקף",
+        "expected_action": "handoff",
+        "expected_reply_contains": "אעביר",
         "expect": {
           "active_objection": "price_question"
         }
@@ -315,8 +315,8 @@
     "turns": [
       {
         "user": "how much does it cost?",
-        "expected_action": "handle_objection",
-        "expected_reply_contains": "המחיר תלוי בהיקף",
+        "expected_action": "handoff",
+        "expected_reply_contains": "אעביר",
         "expect": {
           "active_objection": "price_question"
         }

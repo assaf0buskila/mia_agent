@@ -10,9 +10,9 @@ import pytest
 from app.brain.embeddings import FakeEmbeddingPort
 from app.brain.schemas import MemoryCategory, MemoryKind, MemorySource
 from app.brain.store import BrainStore
+from app.core.config import get_settings
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
-from app.core.config import get_settings
 from app.graph.owner_agent import build_messages, run_owner_agent
 from app.integrations.llm_client import LlmClient
 from app.tools.registries.owner_tools import (

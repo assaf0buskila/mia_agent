@@ -22,15 +22,15 @@ _BRIEF_MAX = 1800
 _MAX_TURNS = 10
 _PROSPECT_WINDOW = 4
 
-_GENERIC_LINE = "היי, ראיתי שהגעת מהאתר. בואו נמשיך מפה."
-_MANUAL_LINE = "היי, דיברת באתר על שלב שעדיין נעשה ידנית. בואו נמשיך מפה."
-_INVENTORY_SHEETS_LINE = "היי, דיברת על הזנת מלאי לשיטס. בואו נמשיך מפה."
-_INVENTORY_LINE = "היי, דיברת על העבודה סביב המלאי. בואו נמשיך מפה."
-_SHEETS_LINE = "היי, דיברת על הזנה ידנית לשיטס. בואו נמשיך מפה."
-_WEBSITE_INTENT_LINE = "היי, דיברת באתר על בניית אתר. בואו נמשיך מפה."
-_BUSINESS_INTENT_LINE = "היי, דיברת באתר על לפתוח עסק. בואו נמשיך מפה."
-_INTENT_LINE = "היי, דיברת באתר על מה שרציתם לבנות. בואו נמשיך מפה."
-_PAIN_LINE = "היי, דיברת באתר על משהו שתוקע אותך. בואו נמשיך מפה."
+_GENERIC_LINE = "היי, ראיתי שהגעתם מהאתר. בואו נמשיך מפה."
+_MANUAL_LINE = "היי, דיברתם באתר על שלב שעדיין נעשה ידנית. בואו נמשיך מפה."
+_INVENTORY_SHEETS_LINE = "היי, דיברתם על הזנת מלאי לשיטס. בואו נמשיך מפה."
+_INVENTORY_LINE = "היי, דיברתם על העבודה עם המלאי. בואו נמשיך מפה."
+_SHEETS_LINE = "היי, דיברתם על הזנה ידנית לשיטס. בואו נמשיך מפה."
+_WEBSITE_INTENT_LINE = "היי, דיברתם באתר על בניית אתר. בואו נמשיך מפה."
+_BUSINESS_INTENT_LINE = "היי, דיברתם באתר שרציתם לפתוח עסק. בואו נמשיך מפה."
+_INTENT_LINE = "היי, דיברתם באתר על מה שרציתם לבנות. בואו נמשיך מפה."
+_PAIN_LINE = "היי, דיברתם באתר על משהו שתוקע את העסק. בואו נמשיך מפה."
 
 # Allowlisted topic labels only. Never interpolate prospect text into the paste line.
 _TOPIC_NEEDLES: tuple[tuple[str, str], ...] = (
@@ -60,7 +60,7 @@ _MIA_WILL_REPLY = ("מיה תענה", "מיה תחזיר", "מיה תכתוב")
 def _fact_lines(sales: SalesState) -> list[str]:
     lines: list[str] = []
     if sales.workflow_known:
-        lines.append("יש הקשר עסקי")
+        lines.append("יודעים מה העסק עושה")
     if sales.manual_step_known:
         lines.append("יש שלב ידני ברור")
     if sales.data_source_known:

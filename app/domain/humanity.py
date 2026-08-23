@@ -34,10 +34,12 @@ _UNSUPPORTED_WORD: tuple[re.Pattern[str], ...] = (
     re.compile(r"\broi\b", re.IGNORECASE),
 )
 _LETTER = r"[A-Za-z\u0590-\u05FF]"
-# Backslash, chupchik ('), or hyphen/-- between single letters: ש'ל'ו'ם / W-E-L / a\b\c
+# Backslash or chupchik (') between single letters: ש'ל'ו'ם / a\b\c
 _SPACED_OUT_LETTERS = re.compile(
     rf"(?:{_LETTER}(?:\\|--|['\u05f3\u2019]|\u05be|-)){{2,}}{_LETTER}"
 )
+_URL = re.compile(r"https?://\S+", re.IGNORECASE)
+_HYPHEN_MARKS = ("-", "\u2013", "\u2014", "\u05be", "--")
 
 
 class HumanityVerdict(BaseModel):
@@ -49,12 +51,18 @@ def _fold(text: str) -> str:
     return text.translate(_APOSTROPHES).lower()
 
 
+def _prose(text: str) -> str:
+    """Customer prose only. URLs may legally contain hyphens; the rest may not."""
+    return _URL.sub(" ", text)
+
+
 def _has_bad_typography(text: str) -> bool:
-    if "\u2014" in text or "\u2013" in text:
+    prose = _prose(text)
+    if "\\" in prose or " / " in prose:
         return True
-    if "\\" in text or " / " in text or " - " in text or "--" in text:
+    if any(mark in prose for mark in _HYPHEN_MARKS):
         return True
-    return _SPACED_OUT_LETTERS.search(text) is not None
+    return _SPACED_OUT_LETTERS.search(prose) is not None
 
 
 def lint_customer_reply(text: str) -> HumanityVerdict:

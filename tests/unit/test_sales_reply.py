@@ -179,7 +179,7 @@ def test_openai_port_primary_failure_uses_gemini_host() -> None:
         if "generativelanguage.googleapis.com" in str(request.url):
             return httpx.Response(
                 200,
-                json={"choices": [{"message": {"content": "gemini-ok"}}]},
+                json={"choices": [{"message": {"content": "gemini ok"}}]},
             )
         return httpx.Response(500)
 
@@ -198,7 +198,7 @@ def test_openai_port_primary_failure_uses_gemini_host() -> None:
         channel="website",
         kill_switch=False,
     )
-    assert result.text == "gemini-ok"
+    assert result.text == "gemini ok"
     assert models == ["test-sales-model", "gemini-3.6-flash"]
     assert hosts[0] == "api.openai.com"
     assert hosts[1] == "generativelanguage.googleapis.com"
@@ -214,7 +214,7 @@ def test_openai_port_primary_failure_uses_fallback_model() -> None:
             return httpx.Response(500)
         return httpx.Response(
             200,
-            json={"choices": [{"message": {"content": "fallback-ok"}}]},
+            json={"choices": [{"message": {"content": "fallback ok"}}]},
         )
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
@@ -231,7 +231,7 @@ def test_openai_port_primary_failure_uses_fallback_model() -> None:
         channel="website",
         kill_switch=False,
     )
-    assert result.text == "fallback-ok"
+    assert result.text == "fallback ok"
     assert result.tokens_in == 0
     assert result.tokens_out == 0
     assert models == ["test-sales-model", "test-fallback-model"]
@@ -714,3 +714,8 @@ def test_sales_reply_prompt_requires_mixed_gender_hebrew() -> None:
     assert "אתם" in _SYSTEM_PROMPT
     assert "Never the pronoun אתה" in _SYSTEM_PROMPT
     assert "feminine-you" in _SYSTEM_PROMPT
+    assert "only answer what the shop already knows" in _SYSTEM_PROMPT
+    assert "hyphen" in _SYSTEM_PROMPT
+    assert "If the ask is money" in _SYSTEM_PROMPT
+    assert "After a day of silence" in _SYSTEM_PROMPT
+    assert "AssafWeb's assistant" in _SYSTEM_PROMPT

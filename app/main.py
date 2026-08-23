@@ -12,6 +12,7 @@ from app.api.instagram import router as instagram_router
 from app.api.telegram import router as telegram_router
 from app.api.website import router as website_router
 from app.api.whatsapp import router as whatsapp_router
+from app.brain.store import BrainStore
 from app.core.capabilities import capability_map
 from app.core.config import MiaEnv, get_settings
 from app.core.demo import demo_mode_active
@@ -51,6 +52,87 @@ def _health_ops() -> dict[str, int | None]:
             "failed_sends": None,
             "integration_failures": None,
         }
+
+
+def brain_health(settings) -> dict[str, object]:
+    """Report exactly which brain/voice configuration is missing. Never returns secrets.
+
+    Each feature names the env vars it still needs, so a half-configured deployment is
+    diagnosable from `/health` instead of from silence in the logs.
+    """
+    missing_agent: list[str] = []
+    if not settings.owner_agent_model.strip():
+        missing_agent.append("MIA_OWNER_AGENT_MODEL")
+    if not settings.openai_api_key.strip():
+        missing_agent.append("MIA_OPENAI_API_KEY")
+
+    missing_embeddings: list[str] = []
+    if not settings.embedding_model.strip():
+        missing_embeddings.append("MIA_EMBEDDING_MODEL")
+    if settings.embedding_dim <= 0:
+        missing_embeddings.append("MIA_EMBEDDING_DIM")
+    if settings.embedding_provider.strip().lower() == "gemini":
+        if not settings.gemini_api_key.strip():
+            missing_embeddings.append("MIA_GEMINI_API_KEY")
+    elif not settings.openai_api_key.strip():
+        missing_embeddings.append("MIA_OPENAI_API_KEY")
+
+    missing_extraction: list[str] = []
+    if not settings.extraction_model.strip():
+        missing_extraction.append("MIA_EXTRACTION_MODEL")
+    if not (settings.openai_api_key.strip() or settings.gemini_api_key.strip()):
+        missing_extraction.append("MIA_OPENAI_API_KEY")
+
+    missing_voice: list[str] = []
+    if not settings.openai_api_key.strip():
+        missing_voice.append("MIA_OPENAI_API_KEY")
+    if not settings.openai_transcribe_model.strip():
+        missing_voice.append("MIA_OPENAI_TRANSCRIBE_MODEL")
+    if not settings.telegram_bot_token.strip():
+        missing_voice.append("MIA_TELEGRAM_BOT_TOKEN")
+
+    return {
+        "memory_enabled": settings.memory_enabled,
+        "memory_write_enabled": settings.memory_write_enabled,
+        "owner_agent": {
+            "ready": settings.owner_agent_ready(),
+            "missing": missing_agent,
+            "max_steps": settings.owner_agent_max_steps,
+        },
+        "embeddings": {
+            "ready": settings.embeddings_ready(),
+            "provider": settings.embedding_provider,
+            "dim": settings.embedding_dim,
+            "missing": missing_embeddings,
+        },
+        "memory_extraction": {
+            "ready": settings.extraction_ready(),
+            "missing": missing_extraction,
+        },
+        "voice_in": {
+            "ready": not missing_voice,
+            "missing": missing_voice,
+        },
+        "knowledge_sources": settings.knowledge_source_list(),
+    }
+
+
+def brain_counts() -> dict[str, int | None]:
+    """Live corpus sizes, so an empty brain is visible rather than mysterious."""
+    if not database_ready():
+        return {"memories": None, "knowledge_chunks": None}
+    try:
+        session = get_session_factory()()
+        try:
+            brain = BrainStore(session)
+            return {
+                "memories": brain.count_memories(),
+                "knowledge_chunks": brain.count_knowledge_chunks(),
+            }
+        finally:
+            session.close()
+    except SQLAlchemyError:
+        return {"memories": None, "knowledge_chunks": None}
 
 
 def openapi_surface(*, env: MiaEnv) -> dict[str, str | None]:
@@ -134,6 +216,7 @@ def health() -> dict:
         "whatsapp_handoff_send": live.whatsapp_handoff_send,
         "auto_reply_instagram": live.auto_reply_instagram,
         "ops": _health_ops(),
+        "brain": {**brain_health(live), "corpus": brain_counts()},
         "capabilities": capability_map(),
         "risk": {
             "R4_meta_writes": "approval",

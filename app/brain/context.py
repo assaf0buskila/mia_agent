@@ -46,6 +46,9 @@ DEFAULT_KNOWLEDGE_LIMIT = 5
 # Fraction of the character budget reserved for ingested knowledge; the rest goes to
 # memory. Memory wins ties because it is owner-specific and knowledge is public.
 KNOWLEDGE_BUDGET_SHARE = 0.4
+# Ceiling on the always-on profile as a fraction of the total budget, so retrieval for the
+# current question always has room even when `max_chars` is small.
+PROFILE_BUDGET_SHARE = 0.4
 _CANDIDATE_POOL = 50
 
 
@@ -69,7 +72,7 @@ def _similarity_map(
 
 
 def build_profile_block(
-    store: BrainStore, *, subject: str = "owner"
+    store: BrainStore, *, subject: str = "owner", max_chars: int = MAX_PROFILE_CHARS
 ) -> tuple[str, set[str]]:
     """The stable core: who Assaf is, how he works, what he prefers.
 
@@ -83,12 +86,13 @@ def build_profile_block(
     )
     if not records:
         return "", set()
+    budget = max(0, min(max_chars, MAX_PROFILE_CHARS))
     lines: list[str] = []
     used_ids: set[str] = set()
     used = 0
     for record in records:
         line = f"- {record.text.strip()}"
-        if used + len(line) + 1 > MAX_PROFILE_CHARS or len(lines) >= MAX_PROFILE_FACTS:
+        if used + len(line) + 1 > budget or len(lines) >= MAX_PROFILE_FACTS:
             break
         lines.append(line)
         used_ids.add(record.memory_id)
@@ -198,7 +202,11 @@ def assemble_owner_context(
     recency component meaningful — the decay is defined over last access, not creation.
     """
     score_weights = weights or MemoryScoreWeights()
-    profile, profile_ids = build_profile_block(store)
+    # The profile is always-on, but it must never consume the whole budget or a small
+    # `max_chars` would leave no room for anything retrieved for this actual question.
+    profile, profile_ids = build_profile_block(
+        store, max_chars=int(max_chars * PROFILE_BUDGET_SHARE)
+    )
     profile_cost = len(profile)
     remaining = max(0, max_chars - profile_cost)
     knowledge_budget = int(remaining * KNOWLEDGE_BUDGET_SHARE)

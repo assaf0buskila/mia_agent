@@ -77,8 +77,8 @@
     "language": "he",
     "kind": "buyer",
     "user": "כמה זה עולה?",
-    "expected_action": "handle_objection",
-    "expected_reply_contains": "המחיר תלוי בהיקף"
+    "expected_action": "handoff",
+    "expected_reply_contains": "אעביר"
   },
   {
     "case_id": "writing_price_question_en",
@@ -86,8 +86,8 @@
     "language": "en",
     "kind": "buyer",
     "user": "how much does it cost?",
-    "expected_action": "handle_objection",
-    "expected_reply_contains": "Pricing depends on scope"
+    "expected_action": "handoff",
+    "expected_reply_contains": "straight from Assaf"
   },
   {
     "case_id": "writing_whatsapp_offer_he",

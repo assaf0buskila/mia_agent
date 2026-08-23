@@ -320,7 +320,7 @@ def test_qualify_reply_metric_after_authority_and_timeline() -> None:
         missing_fields=["metric"],
     )
     reply = reply_for("website", NextAction.QUALIFY, sales)
-    assert "מה זה עולה לך" in reply
+    assert "מה זה עולה לכם" in reply
     assert "ומתי" not in reply
 
 

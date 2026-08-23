@@ -346,7 +346,15 @@ async def test_openai_transcribe_port_posts_multipart() -> None:
     assert "/v1/audio/transcriptions" in str(captured["url"])
     assert captured["authorization"] == "Bearer secret-token-value"
     assert "gpt-transcribe" in str(captured["body"])
-    assert "verbose_json" in str(captured["body"])
+    # gpt-transcribe documents `json` and `text` only; `verbose_json` is a whisper-1
+    # format. Sending it made every owner voice note fail with a 400 that the caller
+    # swallowed into "I didn't catch that".
+    body = str(captured["body"])
+    assert "verbose_json" not in body
+    assert "json" in body
+    # It also takes a plural `languages` array and must never receive both forms.
+    assert "languages[]" in body
+    assert '\nlanguage"' not in body
     assert result.text == "hello from audio"
     assert result.stt_provider == "openai"
     assert result.stt_model == "gpt-transcribe"

@@ -211,7 +211,11 @@ async def test_telegram_send_replies_to_message_id() -> None:
         )
     body = json.loads(captured["body"])
     assert body["chat_id"] == OWNER_TG
-    assert body["reply_to_message_id"] == 42
+    # Bot API 7.0 replaced reply_to_message_id with reply_parameters and
+    # disable_web_page_preview with link_preview_options. The old names still work
+    # server-side but are no longer documented.
+    assert body["reply_parameters"]["message_id"] == 42
+    assert body["link_preview_options"] == {"is_disabled": True}
     assert body["text"] == "ack"
 
 

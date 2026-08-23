@@ -75,7 +75,7 @@ Assaf ADOPT: do not chase WhatsApp Cloud API / Composio inbound. Composio cannot
 
 ## Conversation reasoning (2026-08-23)
 
-Website sales prompt is `sales_reply_v6`: reason about the conversion turn, then write; customer Hebrew is mixed-gender plural; Assaf continues on WhatsApp, not Mia. Telegram owner phrasing is `owner_telegram_v2`, wired as a live paraphraser over typed owner results. Python still owns classification, tools, and approvals. The model does not receive a Composio catalog. Kill switch and missing keys stay canned. Live on **mia:14**.
+Website sales prompt is `sales_reply_v7`: reason about the conversion turn, then write; customer Hebrew is mixed-gender plural, native, and dash-free. Mia answers only published facts, matches language, one question, hands off on money/promise/complaint/human request, and does not chase after a day of silence unless the opener is shop-approved. Assaf continues on WhatsApp, not Mia. Telegram owner phrasing is `owner_telegram_v2`, wired as a live paraphraser over typed owner results. Python still owns classification, tools, and approvals. The model does not receive a Composio catalog. Kill switch and missing keys stay canned. Live on **mia:14**.
 
 The always-open chat on assafweb.com is the marketing `ai-hero-chat` in the Vercel hero, not a second bottom inbox. Clients see one bottom control: Ask Mia.
 
@@ -85,7 +85,7 @@ Launcher is a site-matched pill (navy→action gradient, 56px, Assistant 800, vi
 
 ## Mixed-gender customer Hebrew (2026-08-23)
 
-Customer-facing Hebrew now uses 2nd-person plural / impersonal (`שאלו את מיה`, `ספרו`, `אתם`, `כתבו`, `לחצו`, `תקליטו אותי`, `בואו נמשיך`) so it addresses men and women. Owner Telegram stays masculine. Sales prompt pin is `sales_reply_v6`. Booking/reschedule retries use `נסו` / `השיבו` / `בחרו`. Live on **mia:15** (task `mia:16`).
+Customer-facing Hebrew now uses 2nd-person plural / impersonal (`שאלו את מיה`, `ספרו`, `אתם`, `כתבו`, `לחצו`, `אפשר גם להקליט`, `בואו נמשיך`) so it addresses men and women. Owner Telegram stays masculine. Sales prompt pin is `sales_reply_v7`. Booking/reschedule retries use `נסו` / `השיבו` / `בחרו`. Customer Hebrew has no hyphen, en dash, em dash, or double hyphen. Canned sales lines, widget status, local preview, and WhatsApp paste lines were rewritten off English calques (by hand, off the table, in the picture, around inventory, defined WhatsApp). Mia answers only published facts, matches the customer's language, asks one question, hands off on money/promise/complaint/human request, and does not chase after a day of silence unless the opener is shop-approved. Live on **mia:15** (task `mia:16`).
 
 ## Website→WhatsApp owner brief (2026-08-23)
 
@@ -99,7 +99,7 @@ Shipped in **mia:14**. No new RDS migration.
 
 **Telegram.** Transcribed owner voice uses the same routing as typed text. Empty audio replies `לא תפסתי את ההקלטה. אני לא מבצעת כלום.` and does not dump a command menu. Two or more read intents, or a long unmatched sentence, return one `OPERATOR_SNAPSHOT` (daily counts, pending approvals, website conversations, hot leads) and end with `לא כתבתי כלום.` Greetings / ≤3 words / status pings stay `OWNER_STATUS`.
 
-**Website mic.** `#ask-mia-mic` sits next to Send inside the open composer. Hint: `תקליטו אותי — זה יותר קל מלכתוב.` The 56px `שאלו את מיה` pill is unchanged. No TTS. Stale `askMia.sessionId` 404s once, then the widget creates a session and retries.
+**Website mic.** `#ask-mia-mic` sits next to Send inside the open composer. Hint: `אפשר גם להקליט. זה יותר קל מלכתוב.` The 56px `שאלו את מיה` pill is unchanged. No TTS. Stale `askMia.sessionId` 404s once, then the widget creates a session and retries.
 
 **Handoff line.** Telegram brief includes **השורה שלך** (deterministic, allowlisted topics only). First website→WhatsApp click notifies Assaf again; `has_owner_notification` is a real boolean.
 
