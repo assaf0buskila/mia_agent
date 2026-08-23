@@ -392,7 +392,10 @@ def enrich_linkedin_analytics_ack(
 
 
 def build_linkedin_analytics_port(settings: Settings) -> LinkedInAnalyticsPort:
-    token = settings.linkedin_access_token.strip()
-    if token:
-        return DirectLinkedInAnalyticsPort(access_token=token)
+    """Member post analytics is not a Composio tool. Leftover tokens are ignored.
+
+    ``LINKEDIN_GET_SHARE_STATS`` is organization-page stats (ADR-027). Do not
+    treat that as personal member analytics. Profile read stays on ``LinkedInPort``.
+    """
+    del settings
     return DisabledLinkedInAnalyticsPort()

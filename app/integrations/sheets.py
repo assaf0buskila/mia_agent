@@ -14,10 +14,11 @@ Never clear/delete/create-spreadsheet/read tools this slice.
 
 from __future__ import annotations
 
+import json
 import re
 from datetime import UTC, datetime
 from time import perf_counter
-from typing import Protocol
+from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -59,9 +60,12 @@ SHEETS_MIRROR_TABS = frozenset({"sales", "session", "campaign", "content"})
 
 COMPOSIO_GOOGLESHEETS_VERSION = "20260813_00"
 COMPOSIO_UPSERT_ROWS_TOOL = "GOOGLESHEETS_UPSERT_ROWS"
+COMPOSIO_SEARCH_SPREADSHEETS_TOOL = "GOOGLESHEETS_SEARCH_SPREADSHEETS"
+_COMPOSIO_EXECUTE_BASE = "https://backend.composio.dev/api/v3.1/tools/execute"
 _COMPOSIO_EXECUTE_URL = (
-    f"https://backend.composio.dev/api/v3.1/tools/execute/{COMPOSIO_UPSERT_ROWS_TOOL}"
+    f"{_COMPOSIO_EXECUTE_BASE}/{COMPOSIO_UPSERT_ROWS_TOOL}"
 )
+PREFERRED_SHEET_NAME = "mia"
 
 LEADS_SHEET_NAME = "01 Leads"
 LEADS_KEY_COLUMN = "Lead ID"
@@ -348,13 +352,77 @@ class ComposioSheetsPort:
         *,
         api_key: str,
         user_id: str,
-        spreadsheet_id: str,
+        spreadsheet_id: str = "",
         client: httpx.Client | None = None,
     ) -> None:
         self._api_key = api_key
         self._user_id = user_id
-        self._spreadsheet_id = spreadsheet_id
+        self._spreadsheet_id = spreadsheet_id.strip()
         self._client = client
+
+    def _resolved_spreadsheet_id(self) -> str:
+        if self._spreadsheet_id:
+            return self._spreadsheet_id
+        body = self._execute_tool(
+            COMPOSIO_SEARCH_SPREADSHEETS_TOOL,
+            {
+                "query": PREFERRED_SHEET_NAME,
+                "search_type": "name",
+                "max_results": 10,
+            },
+        )
+        picked = pick_spreadsheet_id(_map_spreadsheet_files(body))
+        self._spreadsheet_id = picked
+        return self._spreadsheet_id
+
+    def _execute_tool(
+        self, tool_slug: str, arguments: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        payload = {
+            "user_id": self._user_id,
+            "version": COMPOSIO_GOOGLESHEETS_VERSION,
+            "arguments": arguments,
+        }
+        request_headers = {
+            "x-api-key": self._api_key,
+            "Content-Type": "application/json",
+        }
+        url = f"{_COMPOSIO_EXECUTE_BASE}/{tool_slug}"
+        try:
+            if self._client is not None:
+                response = self._client.post(
+                    url, json=payload, headers=request_headers
+                )
+            else:
+                with httpx.Client(timeout=20.0) as client:
+                    response = client.post(
+                        url, json=payload, headers=request_headers
+                    )
+        except httpx.HTTPError as exc:
+            raise AdapterHttpError(None) from exc
+        if response.status_code >= 400:
+            raise AdapterHttpError(response.status_code)
+        try:
+            body = response.json()
+            if not isinstance(body, dict) or body.get("successful") is not True:
+                return None
+            data = body.get("data")
+            if isinstance(data, str):
+                try:
+                    data = json.loads(data)
+                except json.JSONDecodeError:
+                    return None
+            if isinstance(data, dict):
+                return data
+            return None
+        except (
+            ValueError,
+            KeyError,
+            TypeError,
+            AttributeError,
+            IndexError,
+        ):
+            return None
 
     def _execute_upsert(
         self,
@@ -364,11 +432,14 @@ class ComposioSheetsPort:
         headers: list[str],
         values: list[list[object]],
     ) -> None:
+        spreadsheet_id = self._resolved_spreadsheet_id()
+        if not spreadsheet_id:
+            return
         payload = {
             "user_id": self._user_id,
             "version": COMPOSIO_GOOGLESHEETS_VERSION,
             "arguments": {
-                "spreadsheetId": self._spreadsheet_id,
+                "spreadsheetId": spreadsheet_id,
                 "sheetName": sheet_name,
                 "keyColumn": key_column,
                 "headers": headers,
@@ -1212,14 +1283,57 @@ def maybe_mirror_content_insights(
     return None
 
 
+def pick_spreadsheet_id(
+    files: list[tuple[str, str]], *, preferred: str = ""
+) -> str:
+    explicit = preferred.strip()
+    if explicit:
+        return explicit
+    mia_named = [
+        (file_id, name)
+        for file_id, name in files
+        if PREFERRED_SHEET_NAME in name.lower()
+    ]
+    exact = [
+        file_id
+        for file_id, name in mia_named
+        if name.strip().lower() == PREFERRED_SHEET_NAME
+    ]
+    if len(exact) == 1:
+        return exact[0]
+    if len(mia_named) == 1:
+        return mia_named[0][0]
+    return ""
+
+
+def _map_spreadsheet_files(
+    data: dict[str, Any] | None,
+) -> list[tuple[str, str]]:
+    if data is None:
+        return []
+    entries = data.get("files") or data.get("spreadsheets") or data.get("items")
+    if not isinstance(entries, list):
+        return []
+    mapped: list[tuple[str, str]] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        raw_id = entry.get("id") or entry.get("spreadsheetId")
+        raw_name = entry.get("name") or entry.get("title") or ""
+        file_id = raw_id.strip() if isinstance(raw_id, str) else ""
+        name = raw_name.strip() if isinstance(raw_name, str) else ""
+        if file_id:
+            mapped.append((file_id, name))
+    return mapped
+
+
 def build_sheets_port(settings: Settings) -> SheetsPort:
     api_key = settings.composio_api_key.strip()
     user_id = settings.composio_user_id.strip()
-    spreadsheet_id = settings.sheets_spreadsheet_id.strip()
-    if api_key and user_id and spreadsheet_id:
+    if api_key and user_id:
         return ComposioSheetsPort(
             api_key=api_key,
             user_id=user_id,
-            spreadsheet_id=spreadsheet_id,
+            spreadsheet_id=settings.sheets_spreadsheet_id.strip(),
         )
     return DisabledSheetsPort()

@@ -28,7 +28,7 @@ Proposed is not accepted. Build may follow a proposed default only when `AGENTS.
 | ADR-006 | WhatsApp ingress stays Meta webhook; Composio is not the WhatsApp brain | accepted |
 | ADR-007 | Pick the best adapter per job; do not default to Composio | accepted |
 | ADR-008 | Today-vs-baseline = previous 7 completed local days' daily average | accepted |
-| ADR-009 | Composio LinkedIn profile + direct member post analytics | accepted |
+| ADR-009 | Composio LinkedIn profile + direct member post analytics | superseded |
 | ADR-010 | Explicit company domain for meeting research | accepted |
 | ADR-011 | Calendar create after explicit slot confirmation | accepted |
 | ADR-012 | Meeting availability policy (Sun–Thu IL business hours) | accepted |
@@ -43,7 +43,8 @@ Proposed is not accepted. Build may follow a proposed default only when `AGENTS.
 | ADR-022 | Production live sales test: leave shadow, keep gated writes off | accepted |
 | ADR-023 | Model routing: deterministic decisions, model paraphrases | proposed |
 | ADR-024 | WhatsApp stays human until official Cloud API inbound | accepted |
-| ADR-025 | Conversation reasoning on website and Telegram paraphrasers | accepted |
+| ADR-026 | Mia's brain: long-term memory, knowledge, and an owner tool loop | accepted |
+| ADR-027 | Composio owns Google/LinkedIn connections; no extra IDs | accepted |
 
 ## Template
 

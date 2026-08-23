@@ -229,6 +229,63 @@ _MEET = (
     "נדבר",
     "שיחה עם אסף",
 )
+# Accepting the WhatsApp handoff after Mia offered it. Only consulted when the offer is
+# actually on the table, so a bare "כן" earlier in discovery never triggers a handoff.
+_HANDOFF_ACCEPT = (
+    "yes",
+    "yeah",
+    "sure",
+    "ok",
+    "okay",
+    "please do",
+    "go ahead",
+    "sounds good",
+    "כן",
+    "בסדר",
+    "אוקיי",
+    "אוקי",
+    "בטח",
+    "יאללה",
+    "מעולה",
+    "נשמע טוב",
+    "תעבירי",
+    "תעביר",
+    "בבקשה",
+    "סבבה",
+)
+_HANDOFF_DECLINE = (
+    "no",
+    "not now",
+    "later",
+    "לא",
+    "לא עכשיו",
+    "אחר כך",
+    "לא צריך",
+)
+# A qualifier turns a yes into a conversation, not consent: "ok, but I already have
+# someone". Objection detection catches most of these, but not every phrasing, so the
+# conjunction is checked too rather than relying on the token lists being exhaustive.
+_HANDOFF_QUALIFIER = (
+    "but",
+    "however",
+    "although",
+    "אבל",
+    "רק ש",
+    "בתנאי",
+)
+# Confirming a statement is not consenting to an action. "ok that's right" answers a
+# reflection ("so most of the manual work is at that step, is that accurate?"); reading
+# its "ok" as a yes to the handoff derails the funnel one rung before the meeting offer.
+_HANDOFF_NOT_CONSENT = (
+    "that's right",
+    "thats right",
+    "that is right",
+    "correct",
+    "exactly",
+    "נכון",
+    "מדויק",
+    "בדיוק",
+)
 _STOP = (
     "not interested",
     "no thanks",
@@ -302,6 +359,10 @@ _OWNER_REQUIRED = (
     "רוצה להתחיל",
     "הנחה מיוחדת",
     "משא ומתן",
+    # A price question is owner-required on purpose: there is no public price list, and
+    # Mia must never quote a number. `select_next_action` checks `owner_required` before
+    # `active_objection`, so these phrases hand off rather than becoming a PRICE_QUESTION
+    # objection. Pinned by test_money_complaint_human_and_promise_hand_off.
     "how much does it cost",
     "how much is it",
     "what's the price",
@@ -564,6 +625,22 @@ def extract_sales_signals(state: SalesState, message: str) -> SalesState:
     if _message_has_token(text, _TIMELINE) and updated.pain_level >= PainLevel.P3:
         updated.pain_level = PainLevel.P5
     if _message_has_token(text, _OWNER_REQUIRED):
+        updated.owner_required = True
+    # Follow through on an offer already made. Without this the ladder falls back to an
+    # unmet discovery rung, so Mia offers to pass the prospect to Assaf, they say yes,
+    # and she answers with a reflection question instead of handing off.
+    if (
+        updated.whatsapp_handoff_offered
+        and not updated.owner_required
+        # An objection in the same breath is not an acceptance. "sure, but that's too
+        # expensive" opens a price objection; treating the "sure" as a yes would hand off
+        # instead of answering the concern.
+        and updated.active_objection is None
+        and _message_has_token(text, _HANDOFF_ACCEPT)
+        and not _message_has_token(text, _HANDOFF_DECLINE)
+        and not _message_has_token(text, _HANDOFF_QUALIFIER)
+        and not _message_has_token(text, _HANDOFF_NOT_CONSENT)
+    ):
         updated.owner_required = True
     if (
         updated.buying_reality_known

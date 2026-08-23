@@ -1,8 +1,9 @@
 """Google Search Console read port.
 
 Production adapter: Composio ``GOOGLE_SEARCH_CONSOLE`` toolkit version ``20260806_00``,
-pins ``SEARCH_ANALYTICS_QUERY``, ``INSPECT_URL``, ``LIST_SITES`` only when Composio
-credentials and ``MIA_GSC_SITE_URL`` are set. Read-only — never add sitemap or site.
+pins ``SEARCH_ANALYTICS_QUERY``, ``INSPECT_URL``, ``LIST_SITES`` when Composio
+credentials are set. Site URL is optional leftover env; otherwise ``LIST_SITES``
+picks AssafWeb. Read-only — never add sitemap or site.
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ COMPOSIO_SEARCH_ANALYTICS_TOOL = "GOOGLE_SEARCH_CONSOLE_SEARCH_ANALYTICS_QUERY"
 COMPOSIO_INSPECT_URL_TOOL = "GOOGLE_SEARCH_CONSOLE_INSPECT_URL"
 _COMPOSIO_EXECUTE_BASE = "https://backend.composio.dev/api/v3.1/tools/execute"
 MAX_ANALYTICS_ROWS = 10
+PREFERRED_GSC_HOST = "assafweb.com"
 
 
 class SearchAnalyticsRow(BaseModel):
@@ -115,13 +117,19 @@ class ComposioSearchConsolePort:
         *,
         api_key: str,
         user_id: str,
-        site_url: str,
+        site_url: str = "",
         client: httpx.Client | None = None,
     ) -> None:
         self._api_key = api_key
         self._user_id = user_id
-        self._site_url = site_url
+        self._site_url = site_url.strip()
         self._client = client
+
+    def _resolved_site_url(self) -> str:
+        if self._site_url:
+            return self._site_url
+        self._site_url = pick_gsc_site(self.list_sites())
+        return self._site_url
 
     def list_sites(self) -> list[str]:
         body = self._execute(COMPOSIO_LIST_SITES_TOOL, {})
@@ -134,8 +142,11 @@ class ComposioSearchConsolePort:
         end_date: str,
         dimensions: list[str],
     ) -> list[SearchAnalyticsRow]:
+        site_url = self._resolved_site_url()
+        if not site_url:
+            return []
         arguments: dict[str, Any] = {
-            "siteUrl": self._site_url,
+            "siteUrl": site_url,
             "startDate": start_date,
             "endDate": end_date,
             "dimensions": dimensions[:2],
@@ -148,8 +159,11 @@ class ComposioSearchConsolePort:
         trimmed = url.strip()
         if not trimmed:
             return None
+        site_url = self._resolved_site_url()
+        if not site_url:
+            return None
         arguments = {
-            "siteUrl": self._site_url,
+            "siteUrl": site_url,
             "inspectionUrl": trimmed,
         }
         body = self._execute(COMPOSIO_INSPECT_URL_TOOL, arguments)
@@ -226,6 +240,17 @@ def _map_site_list(data: dict[str, Any] | None) -> list[str]:
         if len(sites) >= MAX_ANALYTICS_ROWS:
             break
     return sites
+
+
+def pick_gsc_site(sites: list[str], *, preferred: str = "") -> str:
+    """Use leftover env if set; else AssafWeb; else the first listed site."""
+    explicit = preferred.strip()
+    if explicit:
+        return explicit
+    for site in sites:
+        if PREFERRED_GSC_HOST in site.lower():
+            return site
+    return sites[0] if sites else ""
 
 
 def _map_analytics_rows(
@@ -326,12 +351,11 @@ def _gsc_outcome(
 def build_search_console_port(settings: Settings) -> SearchConsolePort:
     api_key = settings.composio_api_key.strip()
     user_id = settings.composio_user_id.strip()
-    site_url = settings.gsc_site_url.strip()
-    if api_key and user_id and site_url:
+    if api_key and user_id:
         return ComposioSearchConsolePort(
             api_key=api_key,
             user_id=user_id,
-            site_url=site_url,
+            site_url=settings.gsc_site_url.strip(),
         )
     return DisabledSearchConsolePort()
 

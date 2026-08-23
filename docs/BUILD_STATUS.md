@@ -7,6 +7,24 @@
 
 Website sales + WhatsApp handoff tokens + Telegram owner (status digest on unclassified text) + Gmail ingest/summary + Calendar read/gated write + Sheets mirror + Meta/LinkedIn/research reads + STT + approvals + takeover + Postgres events + Graph Lab evals + Fargate host.
 
+## Owner live reads + health diagnostics (2026-08-23)
+
+Not on live **mia:15** yet. Working tree only.
+
+Telegram owner agent can call pinned **reads**: `gmail_summary`, `seo_snapshot`, `linkedin_snapshot`, `instagram_insights`, `research_search`, `ads_snapshot`, plus the existing briefs / leads / calendar / memory tools. Writes (approve, takeover, book, send, Meta) stay on the Python path. Disconnected ports fail closed with a “Not connected” ack — they do not throw.
+
+`GET /health` now includes `brain` (corpus counts) and `owner_integrations` (config readiness, not a live Composio ping). `research_apify` is always false. Blank local settings report missing `MIA_COMPOSIO_API_KEY`, `MIA_GSC_SITE_URL`, `MIA_GA4_PROPERTY_ID`, `MIA_FIRECRAWL_API_KEY`, `MIA_LINKEDIN_ACCESS_TOKEN`, `MIA_SHEETS_SPREADSHEET_ID`.
+
+Live `GET https://mia.assafweb.com/health` on mia:15 (23 Aug): `status=ok`, `kill_switch=false`, `composio=true`, `telegram_owner=true`, `sales_llm=true`, `postgres=true`, `whatsapp_handoff_send=false`, `whatsapp_owner=false`, `ops.integration_failures=10`. No `brain` or `owner_integrations` keys until this image ships.
+
+Live widget on `https://www.assafweb.com/` (23 Aug, Cursor browser — this repo has no Playwright): clinic path, three distinct discovery replies, no opener restart. WhatsApp offer and numbered meeting slots were not reached by turn three.
+
+Knowledge is broken on live because ingest never ran against prod RDS. Site already publishes `llms-full.txt`. After deploy: `uv run mia-ingest-knowledge` as a one-off task.
+
+Verified: `uv run pytest tests/unit/test_owner_live_tools.py tests/unit/test_health.py tests/unit/test_brain_agent.py` **29 passed**.
+
+Do not enable: WhatsApp send, Gmail send, Meta writes, IG auto-reply, TTS, Apify, Lambda, ManyChat.
+
 ## Website voice input (2026-08-23)
 
 Ask Mia records from a mic **inside the open composer** (`#ask-mia-mic` next to Send). The 56px `שאלו את מיה` pill is unchanged. No TTS. `POST /v1/website/sessions/{session_id}/voice` transcribes via `TranscriptionPort` (16MB cap, same as Telegram) then `process_website_message`, so NBA/sales is unchanged. Kill switch fails closed before STT. Stored `askMia.sessionId` is reused; a stale session 404s once, the widget creates a new session and retries without wiping the visible transcript. Live on **mia:14**.

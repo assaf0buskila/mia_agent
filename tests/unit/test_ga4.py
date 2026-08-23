@@ -14,6 +14,7 @@ from app.integrations.ga4 import (
     Ga4PivotRow,
     build_ga4_port,
     normalize_ga4_property_id,
+    pick_ga4_property,
 )
 
 
@@ -38,6 +39,15 @@ def test_build_ga4_port_live_when_credentials_and_property_set() -> None:
         composio_api_key="cmp-live",
         composio_user_id="user-123",
         ga4_property_id="properties/999",
+    )
+    assert isinstance(build_ga4_port(settings), ComposioGa4Port)
+
+
+def test_build_ga4_port_live_without_property_id() -> None:
+    settings = Settings(
+        composio_api_key="cmp-live",
+        composio_user_id="user-123",
+        ga4_property_id="",
     )
     assert isinstance(build_ga4_port(settings), ComposioGa4Port)
 
@@ -141,3 +151,13 @@ def test_composio_list_conversion_events_url() -> None:
     args = body["arguments"]
     assert isinstance(args, dict)
     assert args["parent"] == "properties/42"
+
+
+def test_pick_ga4_property_prefers_assafweb() -> None:
+    summaries = [
+        ("properties/1", "Cafe Ana"),
+        ("properties/2", "AssafWeb"),
+    ]
+    assert pick_ga4_property(summaries) == "properties/2"
+    assert pick_ga4_property(summaries, preferred="123") == "properties/123"
+    assert pick_ga4_property([]) is None

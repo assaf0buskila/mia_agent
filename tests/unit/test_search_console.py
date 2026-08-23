@@ -15,6 +15,7 @@ from app.integrations.search_console import (
     SearchAnalyticsRow,
     UrlInspectionResult,
     build_search_console_port,
+    pick_gsc_site,
 )
 
 
@@ -30,7 +31,7 @@ def test_fake_returns_rows_disabled_returns_empty() -> None:
     ) == []
 
 
-def test_build_search_console_port_live_when_credentials_and_site_set() -> None:
+def test_build_search_console_port_live_when_credentials_set() -> None:
     settings = Settings(
         composio_api_key="cmp-live",
         composio_user_id="user-123",
@@ -40,20 +41,28 @@ def test_build_search_console_port_live_when_credentials_and_site_set() -> None:
     assert isinstance(port, ComposioSearchConsolePort)
 
 
+def test_build_search_console_port_live_without_site_url() -> None:
+    settings = Settings(
+        composio_api_key="cmp-live",
+        composio_user_id="user-123",
+        gsc_site_url="",
+    )
+    assert isinstance(build_search_console_port(settings), ComposioSearchConsolePort)
+
+
 @pytest.mark.parametrize(
-    "api_key,user_id,site",
+    "api_key,user_id",
     [
-        ("", "", ""),
-        ("cmp", "", "https://www.assafweb.com/"),
-        ("", "user", "https://www.assafweb.com/"),
-        ("cmp", "user", ""),
+        ("", ""),
+        ("cmp", ""),
+        ("", "user"),
     ],
 )
-def test_build_search_console_port_disabled(api_key: str, user_id: str, site: str) -> None:
+def test_build_search_console_port_disabled(api_key: str, user_id: str) -> None:
     settings = Settings(
         composio_api_key=api_key,
         composio_user_id=user_id,
-        gsc_site_url=site,
+        gsc_site_url="https://www.assafweb.com/",
     )
     assert isinstance(build_search_console_port(settings), DisabledSearchConsolePort)
 
@@ -179,3 +188,16 @@ def test_composio_inspect_url_maps_status() -> None:
         coverage_state="Submitted and indexed",
     )
     assert COMPOSIO_INSPECT_URL_TOOL.startswith("GOOGLE_SEARCH_CONSOLE")
+
+
+def test_pick_gsc_site_prefers_assafweb() -> None:
+    sites = [
+        "sc-domain:cafe-ana.com",
+        "sc-domain:assafweb.com",
+        "https://mochi-israel.com/",
+    ]
+    assert pick_gsc_site(sites) == "sc-domain:assafweb.com"
+    assert pick_gsc_site(sites, preferred="https://www.assafweb.com/") == (
+        "https://www.assafweb.com/"
+    )
+    assert pick_gsc_site([]) == ""

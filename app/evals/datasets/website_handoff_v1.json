@@ -45,8 +45,8 @@
       },
       {
         "user": "כן נוח לי",
-        "expected_action": "reflect",
-        "expected_reply_contains": "זה מדויק"
+        "expected_action": "handoff",
+        "expected_reply_contains": "לאסף"
       }
     ]
   },

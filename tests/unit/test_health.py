@@ -1,5 +1,5 @@
 from app.core.config import MiaEnv, Settings
-from app.main import app, openapi_surface
+from app.main import app, openapi_surface, owner_integrations
 from fastapi.testclient import TestClient
 
 
@@ -204,6 +204,34 @@ def test_health_is_alive() -> None:
     assert integrations["research_apify"] is False
     assert integrations["composio"] is False
     assert "MIA_COMPOSIO_API_KEY" in integrations["missing"]
+    assert integrations["linkedin_analytics"] is False
+    assert "MIA_LINKEDIN_ACCESS_TOKEN" not in integrations["missing"]
+    assert "MIA_GSC_SITE_URL" not in integrations["missing"]
+    assert "MIA_GA4_PROPERTY_ID" not in integrations["missing"]
+    assert "MIA_SHEETS_SPREADSHEET_ID" not in integrations["missing"]
+    assert "MIA_FIRECRAWL_API_KEY" in integrations["missing"]
+
+
+def test_owner_integrations_composio_covers_google_ids_and_linkedin_profile() -> None:
+    settings = Settings(
+        _env_file=None,
+        composio_api_key="k",
+        composio_user_id="u",
+        firecrawl_api_key="",
+        gsc_site_url="",
+        ga4_property_id="",
+        sheets_spreadsheet_id="",
+        linkedin_access_token="",
+    )
+    integrations = owner_integrations(settings)
+    assert integrations["composio"] is True
+    assert integrations["search_console"] is True
+    assert integrations["ga4"] is True
+    assert integrations["sheets_mirror"] is True
+    assert integrations["linkedin_profile"] is True
+    assert integrations["linkedin_analytics"] is False
+    assert integrations["research_firecrawl"] is False
+    assert integrations["missing"] == ["MIA_FIRECRAWL_API_KEY"]
 
 
 def test_openapi_surface_prod_hides_docs() -> None:

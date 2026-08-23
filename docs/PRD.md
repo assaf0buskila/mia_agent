@@ -45,7 +45,7 @@ A capability is **wired** if it has a typed port and appears in `app/core/capabi
 - `MIA_WHATSAPP_SENDER=composio`, `MIA_WHATSAPP_REQUIRE_BUSINESS_SCOPE=true`
 - `MIA_WHATSAPP_HANDOFF_SEND=false`. WhatsApp prospect send stays off in every automation mode until this flag is true. Official Cloud API inbound is the precondition. Until then the website click opens Assaf and Telegram gets the briefing (ADR-024).
 - `MIA_CALENDAR_WRITE=true` (Assaf ADOPT). Gmail send / Meta write / IG auto-reply **false**. No env knobs for follow-up send, browser crawl, or tool discovery.
-- Region `eu-north-1`. Host `https://mia.assafweb.com`. Live image `mia:15`
+- Region `eu-north-1`. Host `https://mia.assafweb.com`. Live image `mia:15`. Working tree `/health` adds `brain` + `owner_integrations` (config readiness). Those keys are not on mia:15 yet.
 - Widget colours are the scraped `www.assafweb.com` `:root` tokens and nothing else; `test_widget_uses_only_assafweb_palette_colors` fails on drift. The brand mark is inline SVG, not a raster asset
 
 ## Tests

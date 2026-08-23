@@ -1,8 +1,8 @@
 """Google Analytics 4 read port.
 
 Production adapter: Composio ``GOOGLE_ANALYTICS`` toolkit version ``20260721_00``,
-pins ``RUN_PIVOT_REPORT`` and ``LIST_CONVERSION_EVENTS`` only when Composio
-credentials and ``MIA_GA4_PROPERTY_ID`` are set. Read-only — never Measurement Protocol.
+pins ``RUN_PIVOT_REPORT``, ``LIST_CONVERSION_EVENTS``, and ``LIST_ACCOUNT_SUMMARIES``.
+Property id is optional leftover env; otherwise summaries pick AssafWeb. Read-only.
 """
 
 from __future__ import annotations
@@ -22,8 +22,10 @@ from app.domain.tools import AdapterHttpError, ToolOutcome
 COMPOSIO_GA4_VERSION = "20260721_00"
 COMPOSIO_PIVOT_REPORT_TOOL = "GOOGLE_ANALYTICS_RUN_PIVOT_REPORT"
 COMPOSIO_LIST_CONVERSION_EVENTS_TOOL = "GOOGLE_ANALYTICS_LIST_CONVERSION_EVENTS"
+COMPOSIO_LIST_ACCOUNT_SUMMARIES_TOOL = "GOOGLE_ANALYTICS_LIST_ACCOUNT_SUMMARIES"
 _COMPOSIO_EXECUTE_BASE = "https://backend.composio.dev/api/v3.1/tools/execute"
 MAX_PIVOT_ROWS = 10
+PREFERRED_GA4_NAME = "assafweb"
 _PROPERTY_RE = re.compile(r"^properties/\d+$")
 
 
@@ -89,13 +91,23 @@ class ComposioGa4Port:
         *,
         api_key: str,
         user_id: str,
-        property_id: str,
+        property_id: str = "",
         client: httpx.Client | None = None,
     ) -> None:
         self._api_key = api_key
         self._user_id = user_id
-        self._property_id = property_id
+        self._property_id = property_id.strip()
         self._client = client
+
+    def _resolved_property_id(self) -> str:
+        if self._property_id:
+            return self._property_id
+        summaries = _map_ga4_property_summaries(
+            self._execute(COMPOSIO_LIST_ACCOUNT_SUMMARIES_TOOL, {})
+        )
+        picked = pick_ga4_property(summaries)
+        self._property_id = picked or ""
+        return self._property_id
 
     def run_pivot_report(
         self,
@@ -103,8 +115,11 @@ class ComposioGa4Port:
         start_date: str,
         end_date: str,
     ) -> list[Ga4PivotRow]:
+        property_id = self._resolved_property_id()
+        if not property_id:
+            return []
         arguments: dict[str, Any] = {
-            "property": self._property_id,
+            "property": property_id,
             "dateRanges": [{"startDate": start_date, "endDate": end_date}],
             "dimensions": [{"name": "landingPage"}, {"name": "sessionSource"}],
             "metrics": [{"name": "sessions"}, {"name": "engagedSessions"}],
@@ -117,7 +132,10 @@ class ComposioGa4Port:
         return _map_pivot_rows(body)
 
     def list_conversion_events(self) -> list[str]:
-        arguments = {"parent": self._property_id}
+        property_id = self._resolved_property_id()
+        if not property_id:
+            return []
+        arguments = {"parent": property_id}
         body = self._execute(COMPOSIO_LIST_CONVERSION_EVENTS_TOOL, arguments)
         return _map_conversion_events(body)
 
@@ -163,11 +181,59 @@ def normalize_ga4_property_id(raw: str) -> str | None:
     trimmed = raw.strip()
     if not trimmed:
         return None
+    if trimmed.startswith("properties/"):
+        trimmed = trimmed
+    elif trimmed.isdigit():
+        trimmed = f"properties/{trimmed}"
     if _PROPERTY_RE.fullmatch(trimmed):
         return trimmed
-    if trimmed.isdigit():
-        return f"properties/{trimmed}"
     return None
+
+
+def pick_ga4_property(
+    summaries: list[tuple[str, str]], *, preferred: str = ""
+) -> str | None:
+    explicit = normalize_ga4_property_id(preferred)
+    if explicit:
+        return explicit
+    for property_id, display_name in summaries:
+        blob = f"{property_id} {display_name}".lower()
+        if PREFERRED_GA4_NAME in blob:
+            return normalize_ga4_property_id(property_id)
+    if summaries:
+        return normalize_ga4_property_id(summaries[0][0])
+    return None
+
+
+def _map_ga4_property_summaries(
+    data: dict[str, Any] | None,
+) -> list[tuple[str, str]]:
+    if data is None:
+        return []
+    accounts = data.get("accountSummaries") or data.get("accounts") or []
+    if not isinstance(accounts, list):
+        return []
+    mapped: list[tuple[str, str]] = []
+    for account in accounts:
+        if not isinstance(account, dict):
+            continue
+        properties = (
+            account.get("propertySummaries")
+            or account.get("properties")
+            or []
+        )
+        if not isinstance(properties, list):
+            continue
+        for item in properties:
+            if not isinstance(item, dict):
+                continue
+            raw_id = item.get("property") or item.get("name") or item.get("id")
+            raw_name = item.get("displayName") or item.get("name") or ""
+            property_id = raw_id.strip() if isinstance(raw_id, str) else ""
+            display_name = raw_name.strip() if isinstance(raw_name, str) else ""
+            if property_id:
+                mapped.append((property_id, display_name))
+    return mapped
 
 
 def _metric_str(value: object) -> str | None:
@@ -287,14 +353,17 @@ def _ga4_outcome(
 def build_ga4_port(settings: Settings) -> Ga4Port:
     api_key = settings.composio_api_key.strip()
     user_id = settings.composio_user_id.strip()
-    property_id = normalize_ga4_property_id(settings.ga4_property_id)
-    if api_key and user_id and property_id:
-        return ComposioGa4Port(
-            api_key=api_key,
-            user_id=user_id,
-            property_id=property_id,
-        )
-    return DisabledGa4Port()
+    if not (api_key and user_id):
+        return DisabledGa4Port()
+    explicit = settings.ga4_property_id.strip()
+    if explicit and normalize_ga4_property_id(explicit) is None:
+        return DisabledGa4Port()
+    property_id = normalize_ga4_property_id(explicit) or ""
+    return ComposioGa4Port(
+        api_key=api_key,
+        user_id=user_id,
+        property_id=property_id,
+    )
 
 
 def format_ga4_rows_block(rows: list[Ga4PivotRow]) -> str:

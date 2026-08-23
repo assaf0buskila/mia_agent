@@ -60,6 +60,7 @@ from app.integrations.sheets import (
     mirror_lead,
     mirror_meeting,
     mirror_source,
+    pick_spreadsheet_id,
     sheets_mirror_claim_key,
 )
 from app.main import app
@@ -1181,19 +1182,26 @@ def test_build_sheets_port_live_when_all_three_credentials_set() -> None:
     assert not isinstance(port, DisabledSheetsPort)
 
 
+def test_build_sheets_port_live_without_spreadsheet_id() -> None:
+    settings = Settings(
+        composio_api_key="cmp-live",
+        composio_user_id="user-123",
+        sheets_spreadsheet_id="",
+    )
+    assert isinstance(build_sheets_port(settings), ComposioSheetsPort)
+
+
 @pytest.mark.parametrize(
     "api_key,user_id,spreadsheet_id",
     [
         ("", "", ""),
         ("cmp-live", "", ""),
         ("", "user-123", ""),
-        ("cmp-live", "user-123", ""),
-        ("cmp-live", "user-123", "   "),
         ("   ", "user-123", "sheet-abc"),
         ("cmp-live", "   ", "sheet-abc"),
     ],
 )
-def test_build_sheets_port_disabled_when_any_credential_missing(
+def test_build_sheets_port_disabled_when_composio_credentials_missing(
     api_key: str,
     user_id: str,
     spreadsheet_id: str,
@@ -1205,6 +1213,16 @@ def test_build_sheets_port_disabled_when_any_credential_missing(
     )
     port = build_sheets_port(settings)
     assert isinstance(port, DisabledSheetsPort)
+
+
+def test_pick_spreadsheet_id_requires_unique_mia_name() -> None:
+    files = [
+        ("id-budget", "Budget"),
+        ("id-mia", "Mia"),
+    ]
+    assert pick_spreadsheet_id(files) == "id-mia"
+    assert pick_spreadsheet_id(files, preferred="forced") == "forced"
+    assert pick_spreadsheet_id([("a", "Budget"), ("b", "Sales")]) == ""
 
 
 def test_composio_sheets_port_http_500_raises_adapter_error() -> None:
