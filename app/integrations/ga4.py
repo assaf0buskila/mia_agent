@@ -200,7 +200,7 @@ def pick_ga4_property(
         blob = f"{property_id} {display_name}".lower()
         if PREFERRED_GA4_NAME in blob:
             return normalize_ga4_property_id(property_id)
-    if summaries:
+    if len(summaries) == 1:
         return normalize_ga4_property_id(summaries[0][0])
     return None
 

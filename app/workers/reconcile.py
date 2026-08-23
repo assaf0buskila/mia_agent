@@ -27,6 +27,7 @@ def main() -> None:
             store,
             kill_switch=settings.kill_switch,
             demo_active=demo_mode_active(settings),
+            handoff_send_enabled=settings.whatsapp_handoff_send,
         )
         if inspect_requested:
             inspect_rows = inspect_open_findings(store)

@@ -13,7 +13,7 @@ Not on live **mia:15** yet. Working tree only.
 
 Telegram owner agent can call pinned **reads**: `gmail_summary`, `seo_snapshot`, `linkedin_snapshot`, `instagram_insights`, `research_search`, `ads_snapshot`, plus the existing briefs / leads / calendar / memory tools. Writes (approve, takeover, book, send, Meta) stay on the Python path. Disconnected ports fail closed with a “Not connected” ack — they do not throw.
 
-`GET /health` now includes `brain` (corpus counts) and `owner_integrations` (config readiness, not a live Composio ping). `research_apify` is always false. Blank local settings report missing `MIA_COMPOSIO_API_KEY`, `MIA_GSC_SITE_URL`, `MIA_GA4_PROPERTY_ID`, `MIA_FIRECRAWL_API_KEY`, `MIA_LINKEDIN_ACCESS_TOKEN`, `MIA_SHEETS_SPREADSHEET_ID`.
+`GET /health` now includes `brain` (corpus counts) and `owner_integrations` (config readiness, not a live Composio ping). `research_apify` is always false. Blank local settings report missing `MIA_COMPOSIO_API_KEY` / `MIA_COMPOSIO_USER_ID` and `MIA_FIRECRAWL_API_KEY` only. GSC / GA4 / Sheets / LinkedIn profile use the Active Composio connection (LIST_SITES, LIST_ACCOUNT_SUMMARIES, SEARCH_SPREADSHEETS, GET_MY_INFO). Do not add `MIA_GSC_SITE_URL`, `MIA_GA4_PROPERTY_ID`, `MIA_SHEETS_SPREADSHEET_ID`, or `MIA_LINKEDIN_ACCESS_TOKEN`. LinkedIn analytics stays `false` until Composio has a member tool. Firecrawl is not Composio.
 
 Live `GET https://mia.assafweb.com/health` on mia:15 (23 Aug): `status=ok`, `kill_switch=false`, `composio=true`, `telegram_owner=true`, `sales_llm=true`, `postgres=true`, `whatsapp_handoff_send=false`, `whatsapp_owner=false`, `ops.integration_failures=10`. No `brain` or `owner_integrations` keys until this image ships.
 
@@ -210,17 +210,42 @@ there is no public price list and Mia must never quote a number — and it is pi
 `test_sales_ladder_defects.py` so nobody "fixes" it. BUILD_STATUS previously implied the
 PRICE_QUESTION copy was live on this path; it is not.
 
-**Composio resource discovery (ADR-027).** `MIA_GSC_SITE_URL`, `MIA_GA4_PROPERTY_ID` and
-`MIA_META_ADS_ACCOUNT_ID` become optional: with `MIA_COMPOSIO_DISCOVERY=true` Mia asks
-Composio which site / property / ad account the connected account owns, cached once per
-process, env var always winning. Off by default — ports are built per request, so enabling
-it costs one network call per process on first use. Verify with
-`uv run python scripts/probe_composio_discovery.py`, which prints the live response shape
-without printing the key. `MIA_LINKEDIN_ACCESS_TOKEN` and `MIA_SHEETS_SPREADSHEET_ID`
-cannot be removed — see ADR-027 for why.
+**Composio resource discovery (ADR-027).** GSC, GA4, Sheets, and LinkedIn profile resolve
+ids from the Active Composio connection at request time (`LIST_SITES`,
+`LIST_ACCOUNT_SUMMARIES`, `SEARCH_SPREADSHEETS`, `GET_MY_INFO`). Leftover env still wins
+if set. Do not add those IDs for go-live. LinkedIn member analytics has no Composio tool;
+the leftover token is unused. Firecrawl is not Composio — `MIA_FIRECRAWL_API_KEY` stays
+required for research. Experimental `composio_discovery` stays off.
 
-Verified: `uv run ruff check app tests scripts` clean. `uv run pytest` **2231 total, 2227
-passed**. The 4 failures are pre-existing: three date-dependent calendar fixtures (they fail
-on the baseline commit, and a third joined them when the date rolled to 2026-08-24) and
-`test_env_example_documents_settings_and_adapter_map`, which stays red until
-`docs/brain.env.example` is appended to `.env.example`.
+**Go-live that remains true:** ship a new image; run `mia-migrate` if brain tables are not
+on prod RDS; one-off `uv run mia-ingest-knowledge`; `GET /health` and read `brain` counts.
+Do not tell Assaf to add env Composio can supply.
+
+Verified this slice: `uv run pytest` on health, LinkedIn analytics, owner live tools, GSC,
+GA4, Sheets, deploy secret box; `uv run ruff check` on touched files.
+
+## Reconciliation noise: `handoff_expired` no longer counted as a failure (2026-08-24)
+
+Live `/health` reported `ops.integration_failures: 10`. Traced from the code, not guessed:
+
+`compose_handoff_text` deliberately keeps the token out of the customer's wa.me prefill
+(ADR-024), so the customer never sends it back and `consume_handoff_token` is never
+reached. `HANDOFF_TTL_MINUTES = 60`, and `list_expired_unconsumed_handoffs` has **no
+retention window** — so every website→WhatsApp click became a permanent open
+`handoff_expired` finding an hour later, and no later scan could ever close it. The counter
+only grows, and it buries the finding that actually matters: `webhook_received` means an
+inbound message was claimed and then dropped.
+
+`evaluate_reconciliation` now takes `handoff_send_enabled`; the worker passes
+`settings.whatsapp_handoff_send`. While that flag is false the `handoff_expired` scan is
+skipped, and because `apply_reconciliation_policy` closes findings absent from the current
+scan, the next `mia-reconcile` run **closes the stale rows and drops the live count**.
+`webhook_received` and `sent_without_out` are untouched. When official Cloud API inbound
+lands and the flag flips true, the scan resumes.
+
+To see the live breakdown before/after (read-only, never repairs):
+`mia-reconcile --inspect` as a one-off Fargate task — it prints each open finding's kind,
+subject_key, channel and envelope_kind.
+
+Verified: `uv run ruff check app tests scripts` clean. `uv run pytest` **2236 total, 2233
+passed**; the 3 failures are the date-dependent calendar fixtures.

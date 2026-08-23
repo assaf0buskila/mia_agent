@@ -161,3 +161,7 @@ def test_pick_ga4_property_prefers_assafweb() -> None:
     assert pick_ga4_property(summaries) == "properties/2"
     assert pick_ga4_property(summaries, preferred="123") == "properties/123"
     assert pick_ga4_property([]) is None
+    assert pick_ga4_property(
+        [("properties/1", "Cafe Ana"), ("properties/3", "Mochi")]
+    ) is None
+    assert pick_ga4_property([("properties/9", "Only")]) == "properties/9"

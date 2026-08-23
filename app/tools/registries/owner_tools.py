@@ -663,7 +663,10 @@ _register(
 _register(
     ToolSpec(
         name="linkedin_snapshot",
-        description="Assaf's LinkedIn profile plus personal post analytics. Never posts or DMs.",
+        description=(
+            "Assaf's LinkedIn profile via Composio. Never posts or DMs. Personal post "
+            "analytics is unavailable — Composio has no member analytics tool."
+        ),
         parameters=_NO_ARGS,
         handler=_linkedin_snapshot,
     )

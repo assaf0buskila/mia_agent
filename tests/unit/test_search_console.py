@@ -127,8 +127,9 @@ def test_composio_search_console_analytics_request_shape() -> None:
     assert body["version"] == COMPOSIO_GSC_VERSION
     args = body["arguments"]
     assert isinstance(args, dict)
-    assert args["siteUrl"] == "https://www.assafweb.com/"
-    assert args["startDate"] == "2026-01-01"
+    assert args["site_url"] == "https://www.assafweb.com/"
+    assert args["start_date"] == "2026-01-01"
+    assert args["end_date"] == "2026-01-28"
 
 
 def test_composio_list_sites_execute_url() -> None:
@@ -201,3 +202,5 @@ def test_pick_gsc_site_prefers_assafweb() -> None:
         "https://www.assafweb.com/"
     )
     assert pick_gsc_site([]) == ""
+    assert pick_gsc_site(["sc-domain:cafe-ana.com", "https://mochi-israel.com/"]) == ""
+    assert pick_gsc_site(["https://only.example/"]) == "https://only.example/"

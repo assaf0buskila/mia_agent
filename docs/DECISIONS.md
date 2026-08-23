@@ -236,7 +236,7 @@ Rolling 7d including today — rejected; partial day skews average. Same window 
 
 ### ADR-009 Composio LinkedIn profile + direct member post analytics
 
-- **Status:** accepted
+- **Status:** superseded (ADR-027)
 - **Date:** 2026-08-21
 - **Assaf:** ADOPT
 
@@ -407,7 +407,7 @@ Assaf locked a production supplier map. ADR-007 still forbids dumping catalogs i
 | Calendar | Composio |
 | Sheets mirror | Composio |
 | LinkedIn profile | Composio |
-| LinkedIn personal member post analytics | Direct REST (Composio cannot do this job) |
+| LinkedIn personal member post analytics | No Composio member tool. Typed port kept; leftover Direct REST unused (ADR-027) |
 | Meta Ads **read** | Composio |
 | Research | Firecrawl now; Apify later behind the same `ResearchPort` |
 | ManyChat | Not mounted in v1 (ADR-021). Leftover AWS secret name stays in the box; app ignores it. |
@@ -416,10 +416,10 @@ Assaf locked a production supplier map. ADR-007 still forbids dumping catalogs i
 One Instagram sender per conversation (`direct` or `composio`). Never dual-send Graph + Composio. ManyChat is unmounted (ADR-021).
 
 **Consequences**
-Env/docs/JSON list Meta tokens for WhatsApp and for Instagram **webhook verify**. Composio key+user covers Gmail/Calendar/Sheets/LinkedIn profile/Meta ads/future IG send+insights. `MIA_LINKEDIN_ACCESS_TOKEN` stays for member analytics. Do not add Apify keys until that adapter exists. Do not rip live Graph IG send until the Composio port is tested.
+Env/docs/JSON list Meta tokens for WhatsApp and for Instagram **webhook verify**. Composio key+user covers Gmail/Calendar/Sheets/GSC/GA4/LinkedIn profile/Meta ads/future IG send+insights. Member analytics is not a Composio job (org share-stats only). Do not add Apify keys until that adapter exists. Do not rip live Graph IG send until the Composio port is tested.
 
 **Alternatives considered**
-Composio for WhatsApp or Instagram inbound — rejected; no usable inbound trigger. Composio for LinkedIn member analytics — rejected; org URN tool only. Default-everything-Composio including catalogs in the model — rejected (ADR-007). WhatsApp send via Composio is ADR-016.
+Composio for WhatsApp or Instagram inbound — rejected; no usable inbound trigger. Composio `LINKEDIN_GET_SHARE_STATS` for personal analytics — rejected; org URN only (ADR-027). Default-everything-Composio including catalogs in the model — rejected (ADR-007). WhatsApp send via Composio is ADR-016.
 
 ### ADR-016 WhatsApp inbound stays Meta; Composio may own send
 
@@ -603,20 +603,20 @@ Mia answers freely, chains several reads in one turn, and remembers across conve
 **Alternatives considered**
 Hybrid router keeping the classifier as a fast path — rejected; Assaf picked A1, and the classifier's single-task ceiling was the actual complaint. pgvector with an HNSW index — rejected at this scale; pgvector documents exact search as perfect-recall, and its own IVFFlat sizing rule yields a degenerate `lists=3` here. Routing raw audio to an audio-in chat model instead of transcription — rejected; roughly an order of magnitude more expensive per minute and it loses the documented Hebrew language/keyword hints. MarkdownV2 for Telegram — rejected; 18 escape characters under three context-dependent rules, and every id, email and decimal Mia interpolates is a landmine there. Firecrawl crawl as the primary knowledge source — rejected; the site already publishes `llms.txt`/`llms-full.txt`/`pricing.md`, which is cleaner, free, and owner-maintained. Firecrawl stays as the fallback.
 
-### ADR-027 Composio resolves read resource ids instead of env vars
+### ADR-027 Composio owns Google/LinkedIn connections; no extra IDs
 
 - **Status:** accepted
-- **Date:** 2026-08-24
-- **Assaf:** ADOPT (chat: "i want more thing be handle by composio no need env")
+- **Date:** 2026-08-23
+- **Assaf:** ADOPT (chat: handle LinkedIn via Composio; do not add extra env IDs)
 
 **Context**
-Composio already holds an authenticated connection per toolkit, but the *resource id* — which Search Console property, which GA4 property, which ad account — was still pasted into `mia/prod` by hand. That is the piece most likely to be wrong or stale, and `owner_integrations` on `/health` reported exactly these as missing. Research against the Composio docs confirmed a zero-argument list action for each: `GOOGLE_SEARCH_CONSOLE_LIST_SITES`, `GOOGLE_ANALYTICS_LIST_ACCOUNT_SUMMARIES`, `METAADS_GET_AD_ACCOUNTS`. Composio publishes only the `{data, error, successful}` envelope; the inner provider payload is undocumented.
+Assaf already has Active Composio connections: Gmail, Calendar, LinkedIn (Assaf Buskila, PRIVATE), Instagram, GSC (siteOwner assafweb.com), GA4, Sheets, GitHub. Extra env vars `MIA_GSC_SITE_URL`, `MIA_GA4_PROPERTY_ID`, `MIA_SHEETS_SPREADSHEET_ID`, and `MIA_LINKEDIN_ACCESS_TOKEN` were asked for IDs Composio can list. Firecrawl is not a Composio app. Composio `LINKEDIN_GET_SHARE_STATS` requires `organizationalEntity` (company-page stats), not personal `memberCreatorPostAnalytics`. ADR-009 required a separate LinkedIn member token.
 
 **Decision**
-Add `app/integrations/composio_discovery.py`. When the env var is blank and `MIA_COMPOSIO_DISCOVERY=true`, resolve the id from Composio, cached once per process. An explicit env var always wins. Parsing is shape-tolerant: documented provider field names first, then a recursive scan for values matching the id pattern, because the inner shape is unverified. `scripts/probe_composio_discovery.py` prints what a live account returns so the parsers can be tightened without exposing the API key.
+Composio API key + user id is enough for GSC, GA4, Sheets, and LinkedIn **profile**. Pin discovery tools: `GOOGLE_SEARCH_CONSOLE_LIST_SITES`, `GOOGLE_ANALYTICS_LIST_ACCOUNT_SUMMARIES`, `GOOGLESHEETS_SEARCH_SPREADSHEETS`, `LINKEDIN_GET_MY_INFO`. Prefer AssafWeb / unique spreadsheet named Mia; leftover env still wins if set; never invent IDs. LinkedIn **connected** = Composio profile. Keep typed `LinkedInAnalyticsPort`; do not wire org share-stats as personal analytics; leftover `MIA_LINKEDIN_ACCESS_TOKEN` is unused. Firecrawl stays required for `ResearchPort`. Supercedes ADR-009.
 
 **Consequences**
-Three env vars become optional. Discovery is opt-in and defaults false, so nothing changes for the running deployment and no network call enters the per-request port-construction path unless enabled. Ambiguity is never resolved by guessing: one candidate resolves, several leave the port disabled — except Search Console, where http/https/www/domain variants of the *configured* website collapse to the domain property, since that is one site rather than a real choice. Failures are swallowed to empty so discovery can never break port construction.
+`GET /health` `owner_integrations.missing` lists only env Composio cannot supply (`MIA_COMPOSIO_API_KEY` / `MIA_COMPOSIO_USER_ID`, `MIA_FIRECRAWL_API_KEY`). Personal LinkedIn post analytics stays dark until Composio ships a member tool. Sheets upserts fail closed if SEARCH cannot uniquely pick a Mia spreadsheet. Experimental `composio_discovery` flag stays off; ports discover at request time.
 
 **Alternatives considered**
-Read the resource id from the Connected Accounts API — rejected; that record carries auth material and scopes, never the user's chosen property, so it can only serve as an `ACTIVE` pre-flight gate (implemented as `connected_toolkits()`). Auto-discover the Sheets spreadsheet — rejected; it is a write target and `GOOGLESHEETS_SEARCH_SPREADSHEETS` matches by name, so a near-miss writes to the wrong document. Drop `MIA_LINKEDIN_ACCESS_TOKEN` — impossible; the Composio LinkedIn toolkit exposes organization stats only, and ADR-015 made member analytics direct REST for exactly that reason. Drop `MIA_FIRECRAWL_API_KEY` by adopting Composio's `FIRECRAWL_*` toolkit — pointless, it takes your own key; the `NO_AUTH` `COMPOSIO_SEARCH_*` toolkit would remove the key but changes crawl capability, so it stays a separate product decision.
+Fake personal analytics with `LINKEDIN_GET_SHARE_STATS` — rejected; org URN, wrong job. Keep asking Assaf for GSC/GA4/Sheets IDs — rejected; Active connections already list them. Replace Firecrawl with a Composio search toolkit — rejected; ResearchPort stays Firecrawl. Enable experimental `composio_discovery` as the only path — rejected; opt-in flag would leave production dark.

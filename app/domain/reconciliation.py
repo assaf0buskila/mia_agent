@@ -106,8 +106,27 @@ def is_stale_received(*, claimed_at: str, now: datetime) -> bool:
     return (now - claimed_dt).total_seconds() > STALE_AFTER_SECONDS
 
 
-def evaluate_reconciliation(store, *, now: datetime | None = None) -> list[ReconciliationFinding]:
-    """Read-only scan. Never writes."""
+def evaluate_reconciliation(
+    store,
+    *,
+    now: datetime | None = None,
+    handoff_send_enabled: bool = True,
+) -> list[ReconciliationFinding]:
+    """Read-only scan. Never writes.
+
+    `handoff_send_enabled=False` suppresses `handoff_expired`. Under ADR-024
+    `compose_handoff_text` does not put the token in the customer's wa.me prefill, so the
+    customer never sends it back and `consume_handoff_token` is never reached. Every
+    issued token therefore expires unconsumed an hour later, and
+    `list_expired_unconsumed_handoffs` has no retention window — so each website→WhatsApp
+    click became a permanent open finding that no later scan could close.
+
+    That is the designed outcome of ADR-024, not an integration failure, and counting it
+    as one buries the findings that do matter: `webhook_received` means an inbound message
+    was claimed and then dropped. When official Cloud API inbound lands and
+    `MIA_WHATSAPP_HANDOFF_SEND` flips true, an unconsumed token becomes meaningful again
+    and this scan resumes.
+    """
     effective_now = now or datetime.now(UTC)
     findings: list[ReconciliationFinding] = []
 
@@ -143,6 +162,9 @@ def evaluate_reconciliation(store, *, now: datetime | None = None) -> list[Recon
                 reason="sent_without_out",
             )
         )
+
+    if not handoff_send_enabled:
+        return findings
 
     now_iso = effective_now.isoformat()
     for row in store.list_expired_unconsumed_handoffs(now_iso=now_iso):
@@ -242,8 +264,11 @@ def run_reconciliation(
     kill_switch: bool,
     demo_active: bool,
     now: datetime | None = None,
+    handoff_send_enabled: bool = True,
 ) -> ReconciliationSummary:
-    findings = evaluate_reconciliation(store, now=now)
+    findings = evaluate_reconciliation(
+        store, now=now, handoff_send_enabled=handoff_send_enabled
+    )
     apply_reconciliation_policy(
         store,
         findings=findings,

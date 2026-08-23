@@ -146,11 +146,11 @@ class ComposioSearchConsolePort:
         if not site_url:
             return []
         arguments: dict[str, Any] = {
-            "siteUrl": site_url,
-            "startDate": start_date,
-            "endDate": end_date,
+            "site_url": site_url,
+            "start_date": start_date,
+            "end_date": end_date,
             "dimensions": dimensions[:2],
-            "rowLimit": MAX_ANALYTICS_ROWS,
+            "row_limit": MAX_ANALYTICS_ROWS,
         }
         body = self._execute(COMPOSIO_SEARCH_ANALYTICS_TOOL, arguments)
         return _map_analytics_rows(body, dimensions)
@@ -163,8 +163,8 @@ class ComposioSearchConsolePort:
         if not site_url:
             return None
         arguments = {
-            "siteUrl": site_url,
-            "inspectionUrl": trimmed,
+            "site_url": site_url,
+            "inspection_url": trimmed,
         }
         body = self._execute(COMPOSIO_INSPECT_URL_TOOL, arguments)
         return _map_inspection(trimmed, body)
@@ -223,7 +223,12 @@ def _metric_str(value: object) -> str | None:
 def _map_site_list(data: dict[str, Any] | None) -> list[str]:
     if data is None:
         return []
-    entries = data.get("siteEntry") or data.get("sites") or data.get("items")
+    entries = (
+        data.get("siteEntry")
+        or data.get("siteEntry")
+        or data.get("sites")
+        or data.get("items")
+    )
     if not isinstance(entries, list):
         return []
     sites: list[str] = []
@@ -231,7 +236,11 @@ def _map_site_list(data: dict[str, Any] | None) -> list[str]:
         if isinstance(entry, str):
             site = entry.strip()
         elif isinstance(entry, dict):
-            raw = entry.get("siteUrl") or entry.get("url")
+            raw = (
+                entry.get("siteUrl")
+                or entry.get("siteUrl")
+                or entry.get("url")
+            )
             site = raw.strip() if isinstance(raw, str) else ""
         else:
             site = ""
@@ -243,14 +252,19 @@ def _map_site_list(data: dict[str, Any] | None) -> list[str]:
 
 
 def pick_gsc_site(sites: list[str], *, preferred: str = "") -> str:
-    """Use leftover env if set; else AssafWeb; else the first listed site."""
+    """Leftover env if set; else the AssafWeb property; else the only listed site.
+
+    Do not invent a site URL. Several unrelated properties stay unresolved.
+    """
     explicit = preferred.strip()
     if explicit:
         return explicit
     for site in sites:
         if PREFERRED_GSC_HOST in site.lower():
             return site
-    return sites[0] if sites else ""
+    if len(sites) == 1:
+        return sites[0]
+    return ""
 
 
 def _map_analytics_rows(
@@ -298,10 +312,12 @@ def _map_analytics_rows(
 def _map_inspection(url: str, data: dict[str, Any] | None) -> UrlInspectionResult | None:
     if data is None:
         return None
-    inspection = data.get("inspectionResult")
+    inspection = data.get("inspectionResult") or data.get("inspectionResult")
     if not isinstance(inspection, dict):
         inspection = data
-    index_status = inspection.get("indexStatusResult")
+    index_status = inspection.get("indexStatusResult") or inspection.get(
+        "indexStatusResult"
+    )
     status_text = ""
     coverage = ""
     if isinstance(index_status, dict):
