@@ -870,6 +870,14 @@ async def process_inbound_texts(
                 kill_switch=kill_switch,
                 demo_active=demo_mode_active(settings),
                 calendar=calendar_port,
+                linkedin=linkedin_port,
+                linkedin_analytics=linkedin_analytics_port,
+                search_console=search_console_port,
+                ga4=ga4_port,
+                seo_audit=seo_audit_port,
+                instagram_insights=instagram_insights_port,
+                research=research_port,
+                meta_ads=meta_ads_port,
                 source_ref=f"{provider}:{item['id']}",
             )
             if brain_result.used_agent:

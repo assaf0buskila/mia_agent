@@ -8,6 +8,7 @@ AssafWeb’s AI Growth & Sales Operator.
 | --- | --- |
 | [`AGENTS.md`](AGENTS.md) | Operating rules for coding agents |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | v1 channels and adapters |
+| [`docs/BRAIN_ARCHITECTURE.md`](docs/BRAIN_ARCHITECTURE.md) | Memory, knowledge, retrieval, owner agent, voice |
 | [`docs/PRD.md`](docs/PRD.md) | Short living contract |
 | [`docs/BUILD_STATUS.md`](docs/BUILD_STATUS.md) | What is alive / next |
 | [`docs/DECISIONS.md`](docs/DECISIONS.md) | ADRs |

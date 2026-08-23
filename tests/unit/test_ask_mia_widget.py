@@ -323,3 +323,30 @@ def test_widget_hebrew_addresses_both_genders() -> None:
     assert "לחצו" in source
     assert "להקליט" in source
     assert "כתבו" in source
+
+
+def test_whatsapp_handoff_shows_a_card_instead_of_a_page_redirect() -> None:
+    """The old flow jumped the whole page to a raw wa.me URL with no confirmation.
+
+    A card keeps the conversation on screen, says what Assaf will already know, and opens
+    WhatsApp in a new tab so the visitor can come back.
+    """
+    source = _source()
+    handoff = _function_body(source, "handoff")
+    assert "window.location.assign" not in handoff
+    assert "paintHandoffCard" in handoff
+
+    card = _function_body(source, "paintHandoffCard")
+    assert "_blank" in card
+    assert "noopener" in card
+    # The link is still validated as a wa.me URL before it is ever rendered.
+    assert "isWaMeUrl" in handoff
+
+
+def test_handoff_card_explains_the_context_transfer_in_plural_hebrew() -> None:
+    source = _source()
+    card = _function_body(source, "paintHandoffCard")
+    assert "אסף" in card
+    assert "פתחו" in card
+    # Customer-facing Hebrew stays 2nd-person plural so it addresses men and women.
+    assert "פתח את" not in card

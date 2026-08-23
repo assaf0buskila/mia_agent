@@ -43,8 +43,10 @@ AssafWeb’s production AI Growth & Sales Operator.
 | Path | Look here for |
 | --- | --- |
 | `app/api/` | HTTP ingress (website, Telegram, WhatsApp, Instagram, Composio) |
+| `app/brain/` | Long-term memory, website knowledge, retrieval, extraction (ADR-026) |
+| `app/tools/registries/` | Allowlisted owner tool registry for the agent loop |
 | `app/domain/` | Sales rules, owner tasks, approvals, identity, events |
-| `app/graph/` | LangGraph orchestrator, canned replies |
+| `app/graph/` | LangGraph orchestrator, owner agent loop, canned replies |
 | `app/integrations/` | Typed ports (Composio / Meta / Firecrawl / Telegram) |
 | `app/db/` | SQLAlchemy models + `LeadStore` |
 | `app/evals/` | Graph Lab fixture datasets (local) |

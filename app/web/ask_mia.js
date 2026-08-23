@@ -159,6 +159,13 @@
     '#ask-mia-mic.recording{background:#b00;color:#fff}' +
     '#ask-mia-mic:focus-visible{outline:2px solid #2563eb;outline-offset:2px}' +
     '#ask-mia-wa{background:#25d366;color:#fff}' +
+    '.ask-mia-handoff{display:flex;flex-direction:column;gap:.45rem;max-width:min(90%,16rem)}' +
+    '.ask-mia-handoff-title{font-weight:700;color:#061b35}' +
+    '.ask-mia-handoff-note{font-size:.85rem;color:#2f5f93}' +
+    '.ask-mia-handoff-cta{display:inline-flex;align-items:center;justify-content:center;' +
+    'gap:.35rem;margin-top:.15rem;padding:.5rem .75rem;min-height:44px;border-radius:.65rem;' +
+    'background:#25d366;color:#fff;font-weight:700;text-decoration:none}' +
+    '.ask-mia-handoff-cta:focus-visible{outline:2px solid #2563eb;outline-offset:2px}' +
     '#ask-mia-wa.offer{box-shadow:0 0 0 2px #2563eb}' +
     '#ask-mia-status{min-height:1rem;padding:0 .75rem .5rem;color:#b00;font-size:.85rem}' +
     '@media (prefers-reduced-motion:reduce){#ask-mia-launcher,#ask-mia-send,#ask-mia-mic,#ask-mia-wa,#ask-mia-input{transition:none}#ask-mia-launcher:hover{transform:none}.ask-mia-dots span{animation:none}}';
@@ -734,6 +741,42 @@
       });
   }
 
+  function paintHandoffCard(url) {
+    // A confirmation card instead of an immediate full-page jump: the visitor sees who
+    // they are about to reach and what he will already know, and the chat stays intact
+    // behind them because the link opens in a new tab.
+    var row = document.createElement('div');
+    row.className = 'ask-mia-row ask-mia-row-mia';
+    var avatar = document.createElement('span');
+    avatar.className = 'ask-mia-bubble-avatar';
+    paintBrandMark(avatar);
+    var card = document.createElement('div');
+    card.className = 'ask-mia-msg ask-mia-mia ask-mia-handoff';
+
+    var title = document.createElement('strong');
+    title.className = 'ask-mia-handoff-title';
+    title.textContent = 'ממשיכים עם אסף בוואטסאפ';
+    var note = document.createElement('span');
+    note.className = 'ask-mia-handoff-note';
+    note.textContent = 'אסף מקבל את כל מה שסיפרתם לי כאן, אז אין צורך להתחיל מהתחלה.';
+
+    var link = document.createElement('a');
+    link.className = 'ask-mia-handoff-cta';
+    link.href = url;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    link.textContent = 'פתחו את וואטסאפ';
+
+    card.appendChild(title);
+    card.appendChild(note);
+    card.appendChild(link);
+    row.appendChild(avatar);
+    row.appendChild(card);
+    transcript.appendChild(row);
+    transcript.scrollTop = transcript.scrollHeight;
+    link.focus();
+  }
+
   function handoff() {
     if (busy || !sessionId) return;
     busy = true;
@@ -744,7 +787,9 @@
     )
       .then(function (data) {
         if (typeof data.whatsapp_url === 'string' && isWaMeUrl(data.whatsapp_url)) {
-          window.location.assign(data.whatsapp_url);
+          paintHandoffCard(data.whatsapp_url);
+          waBtn.hidden = true;
+          waBtn.classList.remove('offer');
         } else {
           status.textContent = WA_NA;
         }

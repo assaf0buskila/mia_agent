@@ -198,6 +198,12 @@ def test_health_is_alive() -> None:
     assert body["capabilities"]["canonical_events"] == "alive"
     assert body["capabilities"]["aws_runtime"] == "specified"
     assert "instagram" in body["capabilities"]
+    integrations = body["owner_integrations"]
+    assert integrations["gmail_send"] is False
+    assert integrations["whatsapp_handoff_send"] is False
+    assert integrations["research_apify"] is False
+    assert integrations["composio"] is False
+    assert "MIA_COMPOSIO_API_KEY" in integrations["missing"]
 
 
 def test_openapi_surface_prod_hides_docs() -> None:

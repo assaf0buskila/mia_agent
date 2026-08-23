@@ -36,6 +36,7 @@ from app.core.config import Settings
 from app.db.store import LeadStore
 from app.domain.briefs import apply_owner_meeting_brief
 from app.domain.content_ideas import apply_owner_content_ideas
+from app.domain.gmail_summaries import apply_owner_gmail_summary
 from app.domain.hot_handoff import format_hot_leads_ack
 from app.domain.lead_reviews import apply_owner_lead_review
 from app.domain.owner_briefs import apply_owner_brief
@@ -48,8 +49,23 @@ from app.domain.owner_reads import (
 from app.domain.owner_snapshot import format_operator_snapshot_ack
 from app.domain.owner_status import format_owner_status_ack
 from app.domain.owner_weeklies import apply_owner_weekly
+from app.domain.seo import enrich_seo_ack
 from app.integrations.calendar import CalendarPort
+from app.integrations.ga4 import Ga4Port
+from app.integrations.instagram_insights import (
+    InstagramInsightsPort,
+    enrich_content_insights_ack,
+)
+from app.integrations.linkedin import LinkedInPort, enrich_linkedin_ack
+from app.integrations.linkedin_analytics import (
+    LinkedInAnalyticsPort,
+    enrich_linkedin_analytics_ack,
+)
 from app.integrations.llm_client import function_tool
+from app.integrations.meta_ads import MetaAdsPort, enrich_analytics_ack
+from app.integrations.research import ResearchPort, enrich_research_ack
+from app.integrations.search_console import SearchConsolePort
+from app.integrations.seo_audit import SeoAuditPort
 
 MAX_TOOL_RESULT_CHARS = 3000
 _NO_ARGS: dict[str, Any] = {
@@ -83,6 +99,14 @@ class ToolContext:
     settings: Settings
     embedding_port: EmbeddingPort
     calendar: CalendarPort | None = None
+    linkedin: LinkedInPort | None = None
+    linkedin_analytics: LinkedInAnalyticsPort | None = None
+    search_console: SearchConsolePort | None = None
+    ga4: Ga4Port | None = None
+    seo_audit: SeoAuditPort | None = None
+    instagram_insights: InstagramInsightsPort | None = None
+    research: ResearchPort | None = None
+    meta_ads: MetaAdsPort | None = None
     kill_switch: bool = False
     demo_active: bool = False
     source_ref: str = ""
@@ -349,6 +373,100 @@ def _content_ideas(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     )
 
 
+_NOT_CONNECTED = (
+    "Not connected yet. Assaf needs to finish this integration in Composio / env."
+)
+
+
+def _gmail_summary(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
+    query = str(args.get("query") or "").strip() or "סיכום מייל"
+    ack = apply_owner_gmail_summary(
+        ctx.store,
+        text=query,
+        kill_switch=ctx.kill_switch,
+        demo_active=ctx.demo_active,
+    )
+    return _empty(ack, "No Gmail thread matched. Name a thread: or lead id.")
+
+
+def _seo_snapshot(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
+    del args
+    if ctx.search_console is None or ctx.ga4 is None or ctx.seo_audit is None:
+        return ToolResult(ok=True, text=_NOT_CONNECTED)
+    text, _outcomes = enrich_seo_ack(
+        "",
+        ctx.search_console,
+        ctx.ga4,
+        ctx.seo_audit,
+        kill_switch=ctx.kill_switch,
+        store=ctx.store,
+        settings=ctx.settings,
+        demo_active=ctx.demo_active,
+    )
+    return _empty(text, "SEO ports returned nothing. Check GSC site URL and GA4 property.")
+
+
+def _linkedin_snapshot(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
+    del args
+    if ctx.linkedin is None:
+        return ToolResult(ok=True, text=_NOT_CONNECTED)
+    text, _outcome = enrich_linkedin_ack("", ctx.linkedin, ctx.kill_switch)
+    if ctx.linkedin_analytics is not None:
+        text, _analytics = enrich_linkedin_analytics_ack(
+            text,
+            ctx.linkedin_analytics,
+            ctx.kill_switch,
+            now=ctx.now or datetime.now(UTC),
+            timezone=ctx.timezone(),
+        )
+    return _empty(text, "LinkedIn returned nothing. Reconnect LinkedIn in Composio.")
+
+
+def _instagram_insights(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
+    del args
+    if ctx.instagram_insights is None:
+        return ToolResult(ok=True, text=_NOT_CONNECTED)
+    text, _outcome = enrich_content_insights_ack(
+        "",
+        ctx.instagram_insights,
+        ctx.store,
+        ctx.kill_switch,
+    )
+    return _empty(text, "Instagram insights returned nothing.")
+
+
+def _research_search(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
+    query = str(args.get("query") or "").strip()
+    if not query:
+        return ToolResult(ok=False, error="query is required")
+    if ctx.research is None:
+        return ToolResult(ok=True, text=_NOT_CONNECTED)
+    text, _outcome = enrich_research_ack(
+        "",
+        ctx.research,
+        query=query,
+        kill_switch=ctx.kill_switch,
+    )
+    return _empty(text, "Research search returned nothing. Check the Firecrawl key.")
+
+
+def _ads_snapshot(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
+    del args
+    if ctx.meta_ads is None:
+        return ToolResult(ok=True, text=_NOT_CONNECTED)
+    extras: list[Any] = []
+    text, _outcome = enrich_analytics_ack(
+        "",
+        ctx.meta_ads,
+        ctx.kill_switch,
+        store=ctx.store,
+        settings=ctx.settings,
+        extra_outcomes=extras,
+        inbound_id=ctx.source_ref,
+    )
+    return _empty(text, "Meta ads returned nothing.")
+
+
 _register(
     ToolSpec(
         name="search_memory",
@@ -517,6 +635,61 @@ _register(
         description="Content ideas derived from real conversations and performance.",
         parameters=_NO_ARGS,
         handler=_content_ideas,
+    )
+)
+_register(
+    ToolSpec(
+        name="gmail_summary",
+        description=(
+            "Summarize a Gmail thread already ingested for Assaf. Pass thread:ID or a "
+            "lead id. Read only; never sends."
+        ),
+        parameters=_string_arg(
+            "query",
+            "Thread id, lead id, or the owner's request text.",
+            optional=True,
+        ),
+        handler=_gmail_summary,
+    )
+)
+_register(
+    ToolSpec(
+        name="seo_snapshot",
+        description="Search Console, GA4 and homepage audit. Read only; never edits the site.",
+        parameters=_NO_ARGS,
+        handler=_seo_snapshot,
+    )
+)
+_register(
+    ToolSpec(
+        name="linkedin_snapshot",
+        description="Assaf's LinkedIn profile plus personal post analytics. Never posts or DMs.",
+        parameters=_NO_ARGS,
+        handler=_linkedin_snapshot,
+    )
+)
+_register(
+    ToolSpec(
+        name="instagram_insights",
+        description="Organic Instagram content insights. Never replies or publishes.",
+        parameters=_NO_ARGS,
+        handler=_instagram_insights,
+    )
+)
+_register(
+    ToolSpec(
+        name="research_search",
+        description="Public web search via Firecrawl. Query must be explicit. Never crawls a site.",
+        parameters=_string_arg("query", "Search query, usually a company domain or topic."),
+        handler=_research_search,
+    )
+)
+_register(
+    ToolSpec(
+        name="ads_snapshot",
+        description="Meta ads read snapshot. Never changes budget, bids or launches.",
+        parameters=_NO_ARGS,
+        handler=_ads_snapshot,
     )
 )
 

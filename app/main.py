@@ -117,6 +117,47 @@ def brain_health(settings) -> dict[str, object]:
     }
 
 
+def owner_integrations(settings) -> dict[str, object]:
+    """Which owner-console reads can actually fire. Never returns secrets.
+
+    `ready` is configuration, not a live Composio ping. Assaf still has to keep the
+    matching Composio connected account Active. Apify is intentionally false until a
+    ResearchPort adapter exists.
+    """
+    composio = settings.composio_ready()
+    missing: list[str] = []
+    if not composio:
+        missing.extend(["MIA_COMPOSIO_API_KEY", "MIA_COMPOSIO_USER_ID"])
+    if not settings.gsc_site_url.strip():
+        missing.append("MIA_GSC_SITE_URL")
+    if not settings.ga4_property_id.strip():
+        missing.append("MIA_GA4_PROPERTY_ID")
+    if not settings.firecrawl_api_key.strip():
+        missing.append("MIA_FIRECRAWL_API_KEY")
+    if not settings.linkedin_access_token.strip():
+        missing.append("MIA_LINKEDIN_ACCESS_TOKEN")
+    if not settings.sheets_spreadsheet_id.strip():
+        missing.append("MIA_SHEETS_SPREADSHEET_ID")
+    return {
+        "composio": composio,
+        "gmail_read": composio,
+        "gmail_send": settings.gmail_send,
+        "calendar_read": composio,
+        "calendar_write": settings.calendar_write,
+        "sheets_mirror": composio and bool(settings.sheets_spreadsheet_id.strip()),
+        "linkedin_profile": composio,
+        "linkedin_analytics": bool(settings.linkedin_access_token.strip()),
+        "instagram_insights": composio
+        or bool(settings.instagram_access_token.strip()),
+        "search_console": composio and bool(settings.gsc_site_url.strip()),
+        "ga4": composio and bool(settings.ga4_property_id.strip()),
+        "research_firecrawl": bool(settings.firecrawl_api_key.strip()),
+        "research_apify": False,
+        "whatsapp_handoff_send": settings.whatsapp_handoff_send,
+        "missing": missing,
+    }
+
+
 def brain_counts() -> dict[str, int | None]:
     """Live corpus sizes, so an empty brain is visible rather than mysterious."""
     if not database_ready():
@@ -217,6 +258,7 @@ def health() -> dict:
         "auto_reply_instagram": live.auto_reply_instagram,
         "ops": _health_ops(),
         "brain": {**brain_health(live), "corpus": brain_counts()},
+        "owner_integrations": owner_integrations(live),
         "capabilities": capability_map(),
         "risk": {
             "R4_meta_writes": "approval",

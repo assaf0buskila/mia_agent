@@ -13,7 +13,7 @@ Mia is AssafWeb’s AI Growth & Sales Operator. She turns attention into qualifi
 | Surface | Role |
 | --- | --- |
     | Website | Primary customer sales. One bottom control: visible Ask Mia pill (opens on click). Mic lives in the open composer (voice in, STT, same sales graph). No TTS. No competing WhatsApp FAB. Chat uses sent/received bubbles with avatars. Customer Hebrew is 2nd-person plural / impersonal (men and women), native, and uses no hyphen/dash. Mia answers only published shop facts, one question at a time, hands off on money/promise/complaint/human request, and does not chase after a day of silence unless the opener is approved. WhatsApp offer after real context (ADR-018), typically 3–6 meaningful exchanges. |
-| Telegram | Private owner control. Numeric allowlist. Voice in, text out: transcribed audio uses the same routing as typed text (operator snapshot on unmatched; empty audio does nothing). No TTS. Phrasing is `owner_telegram_v2` over Python results (ADR-025). Tool calls stay in Python. |
+| Telegram | Private owner control. Numeric allowlist. Voice in, text out. No TTS. Free conversation over an allowlisted **read-only** tool loop (`owner_agent_v1`, ADR-026) with long-term memory and website knowledge; writes and approvals stay on the deterministic path. One-tap approve/reject buttons. `parse_mode=HTML`. With `MIA_OWNER_AGENT_MODEL` empty it falls back to the `owner_telegram_v2` classifier (ADR-025). |
 | WhatsApp | Gated until official Cloud API inbound (ADR-024). Click-to-chat opens Assaf. Mia sends him a Telegram briefing with known facts, a short transcript, and a paste-ready first line. She does not reply on WhatsApp while `MIA_WHATSAPP_HANDOFF_SEND=false`. |
 | Gmail | Read / classify / summarize / draft. Send approval-gated (`MIA_GMAIL_SEND` default false). |
 | Calendar | Free/busy + gated create/reschedule (`MIA_CALENDAR_WRITE`). |
@@ -21,6 +21,14 @@ Mia is AssafWeb’s AI Growth & Sales Operator. She turns attention into qualifi
 | Meta ads | Insights read. Writes need Assaf approval (R4). |
 | Instagram | Analytics/insights may remain. **Not** a v1 autonomous sales inbox. |
 | ManyChat | Not a v1 channel (ADR-021). Route unmounted. |
+
+## Brain (ADR-026)
+
+Long-term memory (episodic / semantic / working / preference), website + business knowledge,
+hybrid retrieval, and extraction that decides what is worth remembering. Owner memory is
+written **only** from owner-controlled surfaces; a website visitor can never write it.
+Supersede, never delete: an outdated fact keeps its row with a `superseded_by` pointer.
+Architecture and debugging: `docs/BRAIN_ARCHITECTURE.md`.
 
 ## Hard never
 

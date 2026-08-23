@@ -28,7 +28,15 @@ from app.domain.memory import ConversationTurn
 from app.domain.owner_tasks import OwnerTaskType
 from app.graph.owner_agent import AgentOutcome, run_owner_agent
 from app.integrations.calendar import CalendarPort
+from app.integrations.ga4 import Ga4Port
+from app.integrations.instagram_insights import InstagramInsightsPort
+from app.integrations.linkedin import LinkedInPort
+from app.integrations.linkedin_analytics import LinkedInAnalyticsPort
 from app.integrations.llm_client import OPENAI_CHAT_URL, LlmClient
+from app.integrations.meta_ads import MetaAdsPort
+from app.integrations.research import ResearchPort
+from app.integrations.search_console import SearchConsolePort
+from app.integrations.seo_audit import SeoAuditPort
 from app.integrations.telegram_format import hebrew_datetime
 from app.tools.registries.owner_tools import ToolContext
 
@@ -98,6 +106,16 @@ def answer_owner(
     kill_switch: bool,
     demo_active: bool,
     calendar: CalendarPort | None = None,
+    # Typed read ports, passed straight through to the tool registry. Any left None makes
+    # its tool answer "not connected" instead of failing the turn.
+    linkedin: LinkedInPort | None = None,
+    linkedin_analytics: LinkedInAnalyticsPort | None = None,
+    search_console: SearchConsolePort | None = None,
+    ga4: Ga4Port | None = None,
+    seo_audit: SeoAuditPort | None = None,
+    instagram_insights: InstagramInsightsPort | None = None,
+    research: ResearchPort | None = None,
+    meta_ads: MetaAdsPort | None = None,
     embedding_port: EmbeddingPort | None = None,
     client: LlmClient | None = None,
     source_ref: str = "",
@@ -128,6 +146,14 @@ def answer_owner(
         settings=settings,
         embedding_port=port,
         calendar=calendar,
+        linkedin=linkedin,
+        linkedin_analytics=linkedin_analytics,
+        search_console=search_console,
+        ga4=ga4,
+        seo_audit=seo_audit,
+        instagram_insights=instagram_insights,
+        research=research,
+        meta_ads=meta_ads,
         kill_switch=kill_switch,
         demo_active=demo_active,
         source_ref=source_ref,

@@ -108,3 +108,64 @@ Live verification: `/health` 200; `kill_switch=false`, `whatsapp_handoff_send=fa
 ## Next slice
 
 `AWS_RUNTIME` stays specified. Open medium finding unchanged: `_notify_telegram` notifies only `sorted(owner_ids)[0]`.
+
+## Brain slice — memory, knowledge, owner agent, voice fix (2026-08-23)
+
+Not deployed yet. **WhatsApp was explicitly out of scope.** Full architecture:
+`docs/BRAIN_ARCHITECTURE.md`. Decision: ADR-026.
+
+**New package `app/brain/`.** `vectors` (portable base64 float32, exact cosine in stdlib —
+3000×1536 in ~170 ms, no numpy dependency), `schemas`, `embeddings` (OpenAI/Gemini/Disabled/
+Fake), `store` (`BrainStore`, separate from the 2900-line `LeadStore`), `retrieval` (BM25 +
+cosine fused with RRF at k=60, then the Generative Agents relevance/recency/importance
+re-rank), `extraction` (importance floor, then ADD/UPDATE/DELETE/NOOP reconciliation),
+`knowledge` (heading-split ingestion with ancestry-aware categorisation), `context` (the
+unified layer), plus `app/domain/owner_brain.py` as the wiring.
+
+**Six new tables**, all additive, portable types only, one migration
+(`20260823_brain_memory.sql`) that applies identically on SQLite and Postgres and is
+idempotent. No `POSTGRES_ONLY` entry needed. pgvector deliberately not used — its SQLAlchemy
+type is PostgreSQL-only and would make the suite exercise a different path than production.
+
+**Owner agent loop** (`app/graph/owner_agent.py`, 16 tools in
+`app/tools/registries/owner_tools.py`). All reads plus one owner-scoped memory write. The
+allowlist is enforced server-side on the returned tool name. `DETERMINISTIC_TASK_TYPES`
+keeps approvals, takeover, conversation scope, preferences, outreach and debriefs on the
+original handlers. Empty `MIA_OWNER_AGENT_MODEL` → the old classifier answers, which is how
+the test suite runs.
+
+**Voice bug fixed.** The adapter sent `response_format=verbose_json` with `gpt-transcribe` —
+a whisper-1-only format — and the caller swallowed the error into "לא תפסתי את ההקלטה", so
+**every owner voice note was failing silently in production**. Parameters are now chosen per
+model family (`gpt-transcribe` → `json` + plural `languages[]` + `keywords[]`; `whisper-1` →
+`verbose_json` + singular `language`). Response parsing reads both shapes; the `confidence`
+field, which exists in no documented OpenAI response, is now optional.
+
+**Telegram.** `parse_mode=HTML` (3 escape chars under one rule, versus MarkdownV2's 18 under
+three context-dependent rules — every lead id, email and decimal is a landmine there).
+`reply_parameters` / `link_preview_options` replace the params removed in Bot API 7.0.
+Inline approve/reject buttons with native styles, `callback_query` handling,
+`answerCallbackQuery` first, message edited afterwards. `ALLOWED_UPDATES` is now always sent
+explicitly — it is sticky server-side state, and a stale `["message"]` silently drops every
+button press forever.
+
+**Website handoff card** (C2). The widget no longer jumps the whole page to a raw `wa.me`
+URL; it renders a card saying what Assaf will already know and opens WhatsApp in a new tab.
+
+**Knowledge.** `uv run mia-ingest-knowledge` pulls `llms-full.txt`, `llms.txt` and
+`pricing.md` — the agent-oriented corpus the site already publishes — and chunks them by
+heading into 31 typed chunks across 9 categories. Idempotent on content hash.
+
+**Config validation.** `GET /health` gained a `brain` block naming the exact env vars each
+feature is still missing, plus live corpus counts.
+
+Verified: `uv run ruff check app tests` clean. `uv run pytest` — 112 new tests
+(`test_brain_memory` 30, `test_brain_agent` 14, `test_brain_voice_knowledge` 32,
+`test_telegram_format` 36) all passing; no new failures against the pre-slice baseline.
+
+**Known open:** `.env.example` could not be edited (the workspace blocks `.env*`), so
+`test_deploy_secret_box.py::test_env_example_documents_settings_and_adapter_map` fails until
+`docs/brain.env.example` is appended to it. The two calendar failures
+(`test_story_calendar_no_double_book`,
+`test_website_post_message_enriches_seeded_offer_meeting`) are date-dependent and
+pre-existing — they fail on the baseline commit too.
