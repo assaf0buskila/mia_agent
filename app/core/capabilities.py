@@ -67,6 +67,11 @@ class CapabilityId(StrEnum):
     PRELOADED_TOOLS = "preloaded_tools"
     MODEL_TASK_CLASSES = "model_task_classes"
     FRESHNESS_POLICY = "freshness_policy"
+    BRAIN_MEMORY = "brain_memory"
+    BRAIN_KNOWLEDGE = "brain_knowledge"
+    BRAIN_RETRIEVAL = "brain_retrieval"
+    OWNER_AGENT = "owner_agent"
+    EMBEDDINGS = "embeddings"
 
 
 class WiringStatus(StrEnum):
@@ -461,6 +466,38 @@ CAPABILITIES: tuple[Capability, ...] = (
         prd="Pre-prod Adjustment N",
         status=WiringStatus.ALIVE,
         port="app.domain.policies.freshness",
+    ),
+    # Brain (ADR-026). Storage, retrieval and ingestion are alive with no model keys:
+    # they degrade to keyword search rather than switching off.
+    Capability(
+        id=CapabilityId.BRAIN_MEMORY,
+        prd="ADR-026",
+        status=WiringStatus.ALIVE,
+        port="app.brain.store",
+    ),
+    Capability(
+        id=CapabilityId.BRAIN_KNOWLEDGE,
+        prd="ADR-026",
+        status=WiringStatus.ALIVE,
+        port="app.brain.knowledge",
+    ),
+    Capability(
+        id=CapabilityId.BRAIN_RETRIEVAL,
+        prd="ADR-026",
+        status=WiringStatus.ALIVE,
+        port="app.brain.retrieval",
+    ),
+    Capability(
+        id=CapabilityId.EMBEDDINGS,
+        prd="ADR-026",
+        status=WiringStatus.ALIVE,
+        port="app.brain.embeddings",
+    ),
+    Capability(
+        id=CapabilityId.OWNER_AGENT,
+        prd="ADR-026",
+        status=WiringStatus.ALIVE,
+        port="app.graph.owner_agent",
     ),
 )
 
