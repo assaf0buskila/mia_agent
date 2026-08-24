@@ -1,7 +1,7 @@
 # BUILD_STATUS
 
 **Last updated:** 2026-08-24  
-**Region:** eu-north-1 (ADR-019). Live host `https://mia.assafweb.com`. Live image **mia:16** (task `mia:18`). `mia:15` remains in ECR for rollback.
+**Region:** eu-north-1 (ADR-019). Live host `https://mia.assafweb.com`. Live image **mia:18** (task `mia:20`). Rollback: image `mia:16`, or `MIA_WEBSITE_MEETING_FIRST=false` with no deploy.
 
 ## Alive (v1)
 
@@ -257,3 +257,73 @@ subject_key, channel and envelope_kind.
 
 Verified: `uv run ruff check app tests scripts` clean. `uv run pytest` **2236 total, 2233
 passed**; the 3 failures are the date-dependent calendar fixtures.
+
+## Visitor knowledge, meeting-first exit, funnel, multi-owner (2026-08-24)
+
+Not deployed. Working tree only. ADR-028 and ADR-029. **Needs migration
+`20260824_lead_sales_state_meeting_exit.sql` before the image serves traffic.**
+
+**Website now answers before it asks.** `app/api/website.py` reached nothing in
+`app/brain/`, so the 31 knowledge chunks were readable only from Assaf's Telegram.
+New `assemble_visitor_context` (`app/brain/context.py`) retrieves **knowledge only** and
+is forbidden from touching owner memory — `retrieve_memories`, `build_profile_block`,
+`list_memories`, `memory_vectors`, `touch_memories` and `list_open_gaps` are all off
+limits, and `tests/unit/test_visitor_knowledge.py` proves it with a store whose memory
+methods raise. `ReplyContext` gained `knowledge`; the prompt gained a PUBLISHED FACTS
+section and moved to `sales_reply_v8` (answer-then-ask). `build_graph`'s
+`knowledge_lookup` defaults to `None`, so non-website callers are byte-identical. The
+lookup never runs while the kill switch is set, and any exception it raises is swallowed
+as no knowledge — a brain outage degrades phrasing, never a 500.
+
+**The booked meeting is the website's default exit.** `select_next_action` gained
+`meeting_first` (default **false**; website passes `MIA_WEBSITE_MEETING_FIRST`, default
+**true**). When the existing continuation gate passes and the meeting exit was not
+already offered, the website offers the meeting. WhatsApp stays the fallback and is
+still reached once the meeting is offered and not taken. New persisted
+`SalesState.meeting_exit_offered`. Consequence worth knowing: a meeting can now be
+offered before the `OFFER_HYPOTHESIS` rung, so a meeting brief may carry
+`hypothesis_offered: false` — the old WhatsApp offer had the same property at the same
+gate. `app/core/demo.py`'s scripted funnel was updated to match real behavior.
+
+**The funnel exists.** `app/domain/funnel.py` computes a local-day website funnel from
+counters that already existed, and `app/domain/engine_health.py` +
+`LeadStore.aggregate_ai_runs` report how many replies actually ran, median latency and
+how many were canned. Both land in the owner daily brief and the operator snapshot,
+replacing `format_website_headline`. `_discovery_depth` was promoted to a shared
+`discovery_depth` so the funnel and the owner reads use one definition.
+
+Two limits are documented in the modules, not hidden: `engaged` comes from a
+recency-ordered `list_sales_snapshots` sample because `SalesStateRow` has no timestamp,
+and `aggregate_ai_runs` is **all-time** because `ai_runs` has no timestamp column. Both
+want an additive migration to become exact; deliberately out of scope. Because those
+counters do not share one window, `_pct` clamps to 0..100 — **without the clamp the
+`le=100` field bound raised `ValidationError` from inside the owner daily brief**, which
+was a real crash found by the suite, not a rounding detail.
+
+**Multi-owner notification fixed.** `_notify_telegram` sent only to
+`sorted(owner_ids)[0]`. It is now the public `notify_owners`, fans out to every
+allowlisted id with per-recipient failure isolation, and returns only the ids actually
+delivered — a failed send is never counted as delivered. Both callers updated. This
+clears the long-standing open medium finding.
+
+**Defect found and fixed while merging:** the new migration had a semicolon inside a
+comment line. The runner splits statements on it, so the file failed to apply on SQLite
+with an `OperationalError`. Comments in migrations must not contain a statement
+separator.
+
+Verified: `uv run ruff check app tests scripts` **all checks passed**. `uv run pytest`
+**2287 passed, 1 failed**. The single failure is
+`test_deploy_secret_box.py::test_env_example_documents_settings_and_adapter_map`, which
+cannot be fixed from this workspace: `.env*` access is denied here, and `.env.example`
+is missing `MIA_OWNER_AGENT_GEMINI_MODEL` (**pre-existing at HEAD**, from commit
+`c915f9f`, which documented it in `docs/brain.env.example` for the same reason) and now
+also `MIA_WEBSITE_MEETING_FIRST`. Both names are written up in
+`docs/brain.env.example`; appending that file to `.env.example` closes the test.
+
+**Not in this slice:** the Telegram owner tool-surface expansion (live Gmail
+list/search/read, Sheets read, GA4 as a first-class tool, approval-gated Gmail drafts).
+Assaf asked for it and chose "reads plus gated drafts"; it was scoped but not started.
+Note that the reason Mia does not call tools on Telegram today is **not** the size of
+the allowlist — it is that the owner agent never actually runs in production
+(`docs/TELEGRAM_SLICE_REPORT.md` §1). That is a config plus deploy fix and it is
+independent of this work.

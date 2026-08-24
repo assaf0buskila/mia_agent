@@ -45,6 +45,7 @@ from app.db.models import (
     WebhookEventRow,
 )
 from app.domain.ai_runs import (
+    MODEL_CANNED,
     sanitize_automation_mode,
     sanitize_decision_confidence,
     sanitize_prompt_version,
@@ -84,6 +85,7 @@ from app.domain.deals import (
     STAGE_PROPOSAL,
 )
 from app.domain.debriefs import ALLOWLISTED_NEXT_STEPS, ALLOWLISTED_OUTCOMES
+from app.domain.engine_health import AiRunAggregate
 from app.domain.events import (
     CanonicalEvent,
     Channel,
@@ -229,6 +231,7 @@ def sales_from_row(row: SalesStateRow) -> SalesState:
         asked_actions=_asked_actions_from_row(row.asked_actions),
         explicit_buying_intent=bool(row.explicit_buying_intent),
         headline=row.headline or "",
+        meeting_exit_offered=bool(row.meeting_exit_offered),
     )
 
 
@@ -533,6 +536,7 @@ class LeadStore:
         )
         row.explicit_buying_intent = sales.explicit_buying_intent
         row.headline = (sales.headline or "")[:120]
+        row.meeting_exit_offered = sales.meeting_exit_offered
         self.session.flush()
 
     def is_webhook_duplicate(self, *, provider: str, provider_event_id: str) -> bool:
@@ -2912,3 +2916,61 @@ class LeadStore:
         row.consumed_at = datetime.now(UTC).isoformat()
         self.session.flush()
         return row.lead_id
+
+    def aggregate_ai_runs(
+        self, *, occurred_from: str, occurred_to: str
+    ) -> AiRunAggregate:
+        """All-time aggregate over persisted `AiRunRow`s.
+
+        `occurred_from` / `occurred_to` are accepted for interface parity with the
+        other owner-brief aggregate reads (`count_canonical_events`,
+        `count_behavior_events`) but are NOT applied as a filter: `AiRunRow` has no
+        timestamp column, so there is nothing to filter on. See
+        `app/domain/engine_health.py` for the full explanation. Percentiles are
+        computed in Python over the fetched rows so behavior is identical on
+        SQLite and Postgres (no database-specific percentile function).
+        """
+        _ = occurred_from, occurred_to
+        rows = self.session.execute(
+            select(
+                AiRunRow.model,
+                AiRunRow.latency_ms,
+                AiRunRow.tokens_in,
+                AiRunRow.tokens_out,
+                AiRunRow.cost_usd,
+            )
+        ).all()
+        total_runs = len(rows)
+        canned_runs = sum(1 for row in rows if row.model == MODEL_CANNED)
+        latencies = sorted(int(row.latency_ms) for row in rows)
+        tokens_in = sum(int(row.tokens_in) for row in rows)
+        tokens_out = sum(int(row.tokens_out) for row in rows)
+        cost_usd = sum(int(row.cost_usd) for row in rows)
+        return AiRunAggregate(
+            total_runs=total_runs,
+            canned_runs=canned_runs,
+            median_latency_ms=_latency_percentile(latencies, 50),
+            p95_latency_ms=_latency_percentile(latencies, 95),
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+            cost_usd=cost_usd,
+        )
+
+
+def _latency_percentile(sorted_values: list[int], pct: int) -> int:
+    """Nearest-rank-with-interpolation percentile. Defensive: never raises on an
+    empty list. Pure Python so it behaves identically on SQLite and Postgres.
+    """
+    if not sorted_values:
+        return 0
+    n = len(sorted_values)
+    if n == 1:
+        return int(sorted_values[0])
+    rank = (n - 1) * (pct / 100)
+    lower = int(rank)
+    upper = min(lower + 1, n - 1)
+    if lower == upper:
+        return int(sorted_values[lower])
+    weight = rank - lower
+    interpolated = sorted_values[lower] * (1 - weight) + sorted_values[upper] * weight
+    return int(round(interpolated))

@@ -40,28 +40,40 @@ def format_hot_leads_ack(store) -> str:
     return f"לידים חמים: {listed}{extra}"
 
 
-def _notify_telegram(
+def notify_owners(
     *, brief: str, inbound_id: str, settings: Settings, parse_mode: str = "HTML"
-) -> None:
+) -> tuple[str, ...]:
+    """Best-effort Telegram fan-out to every allowlisted owner id, not just the first.
+
+    One recipient's send failing never stops the rest, and a failed send is never
+    counted as delivered: the return value is exactly the chat ids that were actually
+    sent to, in the same sorted order they were attempted. `inbound_id` is accepted for
+    correlation parity with callers; the notify-once-per-lead idempotency stays where it
+    already lived, in the caller's `store.upsert_owner_notification` /
+    `store.has_owner_notification` bookkeeping, which this function does not touch.
+    """
     token = settings.telegram_bot_token.strip()
     owner_ids = settings.telegram_owner_user_id_set()
     if not token or not owner_ids:
-        return
-    chat_id = sorted(owner_ids)[0]
-    try:
-        with httpx.Client(timeout=10.0) as client:
-            client.post(
-                f"{_TELEGRAM_API}/bot{token}/sendMessage",
-                json={
-                    "chat_id": chat_id,
-                    "text": brief,
-                    "parse_mode": parse_mode,
-                    "link_preview_options": {"is_disabled": True},
-                },
-            )
-    except httpx.HTTPError:
-        return
+        return ()
+    delivered: list[str] = []
+    with httpx.Client(timeout=10.0) as client:
+        for chat_id in sorted(owner_ids):
+            try:
+                client.post(
+                    f"{_TELEGRAM_API}/bot{token}/sendMessage",
+                    json={
+                        "chat_id": chat_id,
+                        "text": brief,
+                        "parse_mode": parse_mode,
+                        "link_preview_options": {"is_disabled": True},
+                    },
+                )
+            except httpx.HTTPError:
+                continue
+            delivered.append(chat_id)
     _ = inbound_id
+    return tuple(delivered)
 
 
 def apply_hot_handoff(
@@ -91,4 +103,4 @@ def apply_hot_handoff(
     )
     sales = store.get_sales(lead_id)
     brief = format_hot_brief(lead_id=lead_id, sales=sales, want=want)
-    _notify_telegram(brief=brief, inbound_id=inbound_id, settings=settings)
+    notify_owners(brief=brief, inbound_id=inbound_id, settings=settings)

@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from typing import Any
 
 from langgraph.graph import END, START, StateGraph
@@ -71,7 +72,22 @@ def _qualification_snapshot(sales: SalesState) -> dict[str, Any]:
     }
 
 
-def build_graph(store: LeadStore, reply_port: SalesReplyPort | None = None):
+def build_graph(
+    store: LeadStore,
+    reply_port: SalesReplyPort | None = None,
+    knowledge_lookup: Callable[[str], tuple[str, ...]] | None = None,
+):
+    """Compile the sales graph.
+
+    `knowledge_lookup` is optional and defaults to `None` -> an empty tuple, which
+    keeps every existing caller (and the ~2268-test suite) byte-identical to today.
+    When provided it must be a pure function from the visitor's latest message to
+    rendered, provenance-tagged knowledge lines (see
+    `app.brain.context.render_visitor_knowledge_block`). It is never allowed to break a
+    turn: any exception it raises is swallowed and treated as no knowledge, and it is
+    never called at all while `kill_switch` is set (no embedding API call on a killed
+    turn).
+    """
     port = reply_port if reply_port is not None else CannedSalesReplyPort()
 
     def sales_next_action(state: GraphState) -> dict:
@@ -82,7 +98,10 @@ def build_graph(store: LeadStore, reply_port: SalesReplyPort | None = None):
         before = _qualification_snapshot(sales)
         sales = extract_sales_signals(sales, state.get("latest_message", ""))
         channel_str = state.get("channel", "website")
-        action = select_next_action(sales, channel=channel_str)
+        meeting_first = state.get("meeting_first", False)
+        action = select_next_action(
+            sales, channel=channel_str, meeting_first=meeting_first
+        )
         repeat_ask = times_asked(sales, action) > 0
         sales = mark_action_delivered(sales, action)
         after = _qualification_snapshot(sales)
@@ -170,12 +189,21 @@ def build_graph(store: LeadStore, reply_port: SalesReplyPort | None = None):
         canned = reply_for(
             channel, action, sales, language=language, repeat_ask=repeat_ask
         )
+        kill_switch = state.get("kill_switch", False)
+        knowledge: tuple[str, ...] = ()
+        if knowledge_lookup is not None and not kill_switch:
+            # A brain outage must degrade phrasing, never 500 a customer: any failure
+            # here (including an embedding-provider error) is swallowed as no knowledge.
+            try:
+                knowledge = knowledge_lookup(latest_message)
+            except Exception:  # noqa: BLE001 - a brain outage degrades phrasing, never a turn
+                knowledge = ()
         composed = port.compose(
             action=action,
             canned=canned,
             latest_message=latest_message,
             channel=channel,
-            kill_switch=state.get("kill_switch", False),
+            kill_switch=kill_switch,
             page_path=state.get("page_path", ""),
             page_section=state.get("page_section", ""),
             context=ReplyContext(
@@ -184,6 +212,7 @@ def build_graph(store: LeadStore, reply_port: SalesReplyPort | None = None):
                 open_questions=tuple(sales.open_questions()),
                 asked_actions=tuple(dict.fromkeys(sales.asked_actions)),
                 language=language,
+                knowledge=knowledge,
             ),
         )
         reply_text = composed.text

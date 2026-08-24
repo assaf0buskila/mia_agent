@@ -44,6 +44,9 @@ class Settings(BaseSettings):
     app_name: str = "mia"
 
     website_url: str = Field(default="https://www.assafweb.com")
+    # ADR-028: the booked meeting is the website's default exit; WhatsApp is the
+    # fallback. Shipping ON — the flag exists so it is reversible without a deploy.
+    website_meeting_first: bool = Field(default=True)
     public_base_url: str = Field(default="http://127.0.0.1:8000")
     cors_origins: str = Field(
         default=(

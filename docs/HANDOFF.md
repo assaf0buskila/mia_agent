@@ -8,13 +8,15 @@ Production keys: AWS Secrets Manager `mia/prod`.
 
 ## Current
 
-Live Fargate is **mia:16** (task `mia:18`). Brain slice (ADR-026) is deployed: migrate, ingest, and Telegram webhook re-register already ran. `/health` → `brain` ready; `knowledge_chunks=31`. Assaf still needs to send a real Telegram message to prove OpenAI accepts `gpt-5.6-terra`.
+Live Fargate is **mia:18** (task `mia:20`). ADR-028/029 deployed. Owner agent is `gpt-5.6-luna`. Meeting-first is on. Send `מה קרה היום?` to prove funnel/engine brief lines.
 
 v1 channels (ADR-017) unchanged. The owner Telegram console now runs an allowlisted
 read-only tool loop with long-term memory and website knowledge when
 `MIA_OWNER_AGENT_MODEL` is set; empty keeps the `owner_telegram_v2` classifier, which is how
-the test suite runs. Writes and approvals never reach the model. Sales prompt pin is still
-`sales_reply_v6`. WhatsApp was out of scope for this slice and is unchanged.
+the test suite runs. Writes and approvals never reach the model. Sales prompt pin is now
+`sales_reply_v8` (ADR-028: answer-then-ask plus visitor knowledge). WhatsApp was out of
+scope for this slice and is unchanged as a channel, though it is now the website's
+fallback exit rather than its default one.
 
 ## Brain deploy (done 2026-08-24)
 
@@ -47,6 +49,7 @@ Needs migration `20260824_lead_sales_state_headline.sql` before the image serves
 2. Run `scripts/probe_owner_agent.py` to confirm which models the key can call.
 3. Assaf live-tests Telegram: a free question (not a keyword), one Approve button, one voice note.
 2. WhatsApp remains deferred — needs a dedicated number and proven Cloud API inbound.
-3. Open medium finding unchanged: `_notify_telegram` notifies only `sorted(owner_ids)[0]`.
+3. ~~Open medium finding: `_notify_telegram` notifies only `sorted(owner_ids)[0]`.~~ **Fixed** (ADR-029): now `notify_owners`, fans out to every allowlisted owner id with per-recipient failure isolation.
+4. Not started: the Telegram owner tool-surface expansion (live Gmail list/search/read, Sheets read, GA4 as a first-class tool, approval-gated Gmail drafts). Assaf chose "reads plus gated drafts". Remember that the reason Mia does not call tools today is the agent never running (§1 of the Telegram slice report), not the allowlist size.
 
 Historical slice notes: `docs/archive/HANDOFF.md`.

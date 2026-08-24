@@ -14,7 +14,7 @@ from app.domain.policies.execution_policy import POLICY_VERSION
 from app.domain.sales import NextAction
 
 GRAPH_VERSION = "sales_v1"
-PROMPT_VERSION = "sales_reply_v7"
+PROMPT_VERSION = "sales_reply_v8"
 MODEL_CANNED = "canned"
 _MAX_LATENCY_MS = 86_400_000
 _MAX_TOKENS = 10_000_000

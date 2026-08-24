@@ -10,9 +10,10 @@ from pydantic import BaseModel, Field, field_validator
 
 from app.core.errors import PolicyDenied
 from app.core.risk import RiskAction, RiskLevel, assert_allowed
+from app.domain.engine_health import compute_engine_health, format_engine_health
 from app.domain.followups import follow_up_due_on, local_day_bounds_utc_iso
+from app.domain.funnel import compute_website_funnel, format_website_funnel
 from app.domain.kpis import KPI_EVENT_TYPES, OWNER_BRIEF_EVENT_TYPES
-from app.domain.owner_reads import format_website_headline
 
 if TYPE_CHECKING:
     from app.db.store import LeadStore
@@ -193,8 +194,16 @@ def apply_owner_brief(
     )
     brief = format_daily_brief(snapshot)
     # "What happened today" should say what the website produced, not only event
-    # counts. The brief stays lead-id free; naming a lead is the drill-down's job.
-    headline = format_website_headline(store)
-    if headline is None:
-        return brief
-    return f"{brief}\n{headline}"
+    # counts. The funnel replaces the older one-line headline: the same lead-id-free
+    # scorecard, but carrying the conversion rates the headline never had. Naming a
+    # specific conversation stays the drill-down's job.
+    lines = [brief]
+    funnel = compute_website_funnel(store, timezone=timezone, now=now)
+    if funnel is not None and funnel.has_signal():
+        lines.append(format_website_funnel(funnel))
+    # The engine line answers "is she actually thinking?". A canned count close to
+    # the total means the real model is failing silently.
+    engine = compute_engine_health(store, timezone=timezone, now=now)
+    if engine is not None and engine.total_runs:
+        lines.append(format_engine_health(engine))
+    return "\n".join(lines)
