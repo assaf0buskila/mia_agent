@@ -538,17 +538,18 @@ async def test_owner_understanding_check_no_due_at() -> None:
             provider="whatsapp", provider_event_id="evt.owner.clarify.due.1"
         )
         assert task is not None
-        # A real unmatched request becomes a grounded snapshot, not a digest and
-        # not an Understanding Check. Writes stay off; no due date is parsed.
-        assert task.status == "logged"
-        assert task.task_type == "operator_snapshot"
+        # Unmatched long text stays a NOTE for the owner agent (ADR-030). Tests
+        # have no model, so the canned fallback is the Understanding Check.
+        # Writes stay off; no due date is parsed; the digest is not dumped.
+        assert task.status == "needs_clarification"
+        assert task.task_type == "note"
         assert task.due_at is None
         assert len(port.sent) == 1
         assert "ל־" not in port.sent[0].text
-        assert "לא כתבתי כלום" in port.sent[0].text
-        assert "מה שהבנתי" not in port.sent[0].text
+        assert "לא כתבתי כלום" not in port.sent[0].text
         assert "קונסולת הבעלים" not in port.sent[0].text
         assert "אפשר לבקש" not in port.sent[0].text
+        assert "משפך" not in port.sent[0].text
     finally:
         db.close()
 
@@ -733,9 +734,9 @@ async def test_owner_text_hmm_understanding_check_no_sales_graph() -> None:
         assert task.task_type == "owner_status"
         assert task.status == "logged"
         ack = port.sent[0].text
-        assert "אני כאן" in ack
-        assert "קונסולת הבעלים" in ack
-        assert "סיכום יומי" in ack
+        assert ack == "היי אסף, אני כאן."
+        assert "קונסולת הבעלים" not in ack
+        assert "סיכום יומי" not in ack
         assert "מה שהבנתי" not in ack
         assert "how the business works" not in ack
         assert "יום רגיל בעסק" not in ack
@@ -970,15 +971,62 @@ def test_empty_audio_stays_on_the_understanding_check() -> None:
     assert "תכתוב בטקסט" not in ack
 
 
-def test_long_unmatched_sentence_promotes_to_operator_snapshot() -> None:
+def test_long_unmatched_sentence_stays_a_note_for_the_agent() -> None:
     text = "תבדקי למה הפניות מהאתר נתקעו"
     decision = classify_owner_task(text)
     promoted = promote_unclassified_text_to_status(
         decision, inbound_source=None, text=text
     )
-    assert promoted.task_type == OwnerTaskType.OPERATOR_SNAPSHOT
-    assert promoted.needs_clarification is False
+    assert promoted.task_type == OwnerTaskType.NOTE
+    assert promoted.needs_clarification is True
     assert promote_unclassified_text_to_status(
         decision, inbound_source="audio", text=text
-    ).task_type == OwnerTaskType.OPERATOR_SNAPSHOT
+    ).task_type == OwnerTaskType.NOTE
+
+
+def test_email_check_is_not_a_snapshot() -> None:
+    text = "אני רוצה שתבדקי את המייל שלי"
+    decision = classify_owner_task(text)
+    promoted = promote_unclassified_text_to_status(
+        decision, inbound_source=None, text=text
+    )
+    assert promoted.task_type == OwnerTaskType.NOTE
+    assert promoted.task_type != OwnerTaskType.OPERATOR_SNAPSHOT
+    assert promoted.task_type != OwnerTaskType.GMAIL_SUMMARY
+
+
+def test_short_mail_paraphrases_stay_notes_for_the_agent() -> None:
+    for text in (
+        "תבדקי את המייל",
+        "check my inbox",
+        "can you look at my emails",
+        "תוכלי להסתכל על המיילים",
+        "יש משהו חדש בתיבה",
+    ):
+        decision = classify_owner_task(text)
+        promoted = promote_unclassified_text_to_status(
+            decision, inbound_source=None, text=text
+        )
+        assert promoted.task_type == OwnerTaskType.NOTE, text
+        assert promoted.task_type != OwnerTaskType.OWNER_STATUS, text
+        assert promoted.task_type != OwnerTaskType.GMAIL_SUMMARY, text
+        assert promoted.task_type != OwnerTaskType.GMAIL_DRAFT, text
+
+
+def test_gmail_draft_classifies() -> None:
+    decision = classify_owner_task("שלח מייל ל dane@example.com נושא: היי והתוכן שלום")
+    assert decision.task_type == OwnerTaskType.GMAIL_DRAFT
+    assert decision.needs_clarification is False
+
+
+def test_greeting_ack_is_a_short_hello() -> None:
+    decision = classify_owner_task("היי מיה")
+    promoted = promote_unclassified_text_to_status(
+        decision, inbound_source=None, text="היי מיה"
+    )
+    assert promoted.task_type == OwnerTaskType.OWNER_STATUS
+    ack = ack_for_owner_task(promoted)
+    assert ack == "היי אסף, אני כאן."
+    assert "אפשר לבקש" not in ack
+    assert "משפך" not in ack
 

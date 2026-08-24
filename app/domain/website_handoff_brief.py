@@ -164,7 +164,7 @@ def format_website_whatsapp_brief(
     """
     paste = _recommended_first_line(sales=sales, turns=turns)
     headline = (sales.headline or "").strip()
-    who = lead_display(lead_id, headline)
+    who = lead_display(lead_id, headline, sales.display_name)
     blocks = [
         f"{bold('ליד מהאתר → וואטסאפ')}",
         esc(who),

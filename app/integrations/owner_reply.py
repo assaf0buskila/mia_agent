@@ -54,6 +54,7 @@ OWNER_CAPABILITIES = (
     "website_conversations",
     "pending_approvals",
     "gmail_summary",
+    "gmail_inbox",
     "calendar",
     "owner_notify",
     "meeting_brief",

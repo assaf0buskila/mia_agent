@@ -1,11 +1,19 @@
 # BUILD_STATUS
 
 **Last updated:** 2026-08-24  
-**Region:** eu-north-1 (ADR-019). Live host `https://mia.assafweb.com`. Live image **mia:18** (task `mia:20`). Rollback: image `mia:16`, or `MIA_WEBSITE_MEETING_FIRST=false` with no deploy.
+**Region:** eu-north-1 (ADR-019). Live host `https://mia.assafweb.com`. Live image **mia:20** (task `mia:22`). ADR-031 owner phrasing. Rollback: image `mia:19` / task `mia:21`, or blank `MIA_OWNER_AGENT_MODEL`.
 
 ## Alive (v1)
 
-Website sales + WhatsApp handoff tokens + Telegram owner (status digest on unclassified text) + Gmail ingest/summary + Calendar read/gated write + Sheets mirror + Meta/LinkedIn/research reads + STT + approvals + takeover + Postgres events + Graph Lab evals + Fargate host.
+Website sales + WhatsApp handoff tokens + Telegram owner (short hello on greetings; agent on unmatched requests; Gmail inbox reads; lead by name/headline) + Gmail ingest/summary/draft + Calendar read/gated write + Sheets mirror + Meta/LinkedIn/research reads + STT + approvals + takeover + Postgres events + Graph Lab evals + Fargate host.
+
+## Owner console (ADR-030, 2026-08-24)
+
+Shipped on image **mia:20**, task **mia:22** (ADR-031 on top of ADR-030). Digest `sha256:ee4fab125c515ac1a6a8001b44b33400e1678817b2bf3cd54529054974beb25d`. Live `/health`: `status=ok`, `kill_switch=false`, `gmail_inbox=alive`, `owner_integrations.gmail_send=false`.
+
+Greetings are `היי אסף, אני כאן.` — no daily/funnel/engine dump. Unmatched Telegram text, including three-word requests like `תבדקי את המייל`, stays a `NOTE` for `owner_agent_v2` (ADR-031). Inbox tools: `gmail_inbox` / `gmail_search` / `gmail_read` (bodies are data). Send is draft + Approve; `MIA_GMAIL_SEND` stays false. `find_leads` matches stated name, headline, or full lead id.
+
+Telegram owner agent pinned reads now also include `gmail_inbox`, `gmail_search`, `gmail_read`, `find_leads`. Writes stay on the Python path. Do not enable Gmail send, WhatsApp send, Meta writes, IG auto-reply, TTS, Apify, Lambda, ManyChat.
 
 ## Brain live (2026-08-24)
 

@@ -9,7 +9,9 @@ from __future__ import annotations
 import pytest
 from app.domain.lead_label import (
     MAX_LABEL_CHARS,
+    derive_display_name,
     derive_headline,
+    extract_stated_name,
     lead_display,
     sanitize_label,
 )
@@ -78,3 +80,21 @@ def test_display_keeps_the_full_lead_id() -> None:
 
 def test_display_degrades_to_the_id_alone() -> None:
     assert lead_display("lead_82f527e3be5e", "") == "lead_82f527e3be5e"
+
+
+def test_display_includes_stated_name_when_present() -> None:
+    shown = lead_display("lead_82f527e3be5e", "מוכר שעונים", "דני")
+    assert shown == "lead_82f527e3be5e · דני · מוכר שעונים"
+
+
+def test_stated_name_is_taken_only_from_name_phrases() -> None:
+    assert extract_stated_name("שמי דני") == "דני"
+    assert extract_stated_name("קוראים לי יעל") == "יעל"
+    assert extract_stated_name("my name is Danny") == "Danny"
+    assert extract_stated_name("אני מוכר שעונים") == ""
+    assert derive_display_name(
+        [Turn(role="prospect", text="אני מוכר שעונים")]
+    ) == ""
+    assert derive_display_name(
+        [Turn(role="prospect", text="שמי דני ואני מוכר שעונים")]
+    ) == "דני"

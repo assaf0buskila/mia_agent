@@ -51,6 +51,7 @@ class CapabilityId(StrEnum):
     OWNER_CALENDAR = "owner_calendar"
     OWNER_NOTIFY = "owner_notify"
     GMAIL_SUMMARY = "gmail_summary"
+    GMAIL_INBOX = "gmail_inbox"
     MEETINGS = "meetings"
     APPROVALS = "approvals"
     DEALS = "deals"
@@ -208,6 +209,12 @@ CAPABILITIES: tuple[Capability, ...] = (
         prd="§18.1",
         status=WiringStatus.ALIVE,
         port="app.domain.gmail_summaries",
+    ),
+    Capability(
+        id=CapabilityId.GMAIL_INBOX,
+        prd="§18 / ADR-030",
+        status=WiringStatus.ALIVE,
+        port="app.integrations.gmail",
     ),
     Capability(
         id=CapabilityId.CALENDAR,

@@ -65,7 +65,7 @@ _discovery_depth = discovery_depth
 
 def _lead_line(sales: SalesState) -> str:
     # Lead with who they are. The state flags are the detail, not the identity.
-    parts = [lead_display(sales.lead_id, sales.headline)]
+    parts = [lead_display(sales.lead_id, sales.headline, sales.display_name)]
     if sales.workflow_known:
         parts.append("workflow")
     if manual_step_established(sales):

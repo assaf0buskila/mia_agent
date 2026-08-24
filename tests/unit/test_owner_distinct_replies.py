@@ -207,12 +207,13 @@ def test_a_real_request_is_never_promoted_to_the_status_digest() -> None:
     promoted = promote_unclassified_text_to_status(
         decision, inbound_source=None, text=text
     )
-    assert promoted.task_type == OwnerTaskType.OPERATOR_SNAPSHOT
-    assert promoted.needs_clarification is False
+    assert promoted.task_type == OwnerTaskType.NOTE
+    assert promoted.needs_clarification is True
     assert "owner_status" not in promoted.matched_types
+    assert promoted.task_type != OwnerTaskType.OPERATOR_SNAPSHOT
 
 
-def test_greetings_and_status_pings_still_get_the_digest() -> None:
+def test_greetings_and_status_pings_still_get_the_hello() -> None:
     for text in ("היי", "מה המצב", "hey", "status?"):
         decision = classify_owner_task(text)
         promoted = promote_unclassified_text_to_status(
@@ -518,9 +519,7 @@ async def test_combined_daily_and_hot_leads_is_one_grounded_reply() -> None:
 
 
 @pytest.mark.asyncio
-async def test_unclassified_long_sentence_gets_snapshot_not_understanding_check() -> (
-    None
-):
+async def test_unclassified_long_sentence_stays_a_note_not_a_snapshot() -> None:
     init_db()
     db = get_session_factory()()
     try:
@@ -535,13 +534,12 @@ async def test_unclassified_long_sentence_gets_snapshot_not_understanding_check(
             provider_event_id="evt.owner.distinct.unclassified.snapshot",
         )
         assert task is not None
-        assert task.task_type == "operator_snapshot"
-        assert task.status == "logged"
-        assert "לא כתבתי כלום" in reply
-        assert "מה שהבנתי" not in reply
+        assert task.task_type == "note"
+        assert task.status == "needs_clarification"
+        assert "מה שהבנתי" in reply
         assert "קונסולת הבעלים" not in reply
         assert "אפשר לבקש" not in reply
-        assert "היום:" in reply or "לידים חמים" in reply or "לאישור" in reply
+        assert "היום:" not in reply
     finally:
         db.close()
 

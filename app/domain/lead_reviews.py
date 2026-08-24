@@ -11,6 +11,7 @@ from app.core.errors import PolicyDenied
 from app.core.risk import RiskAction, RiskLevel, assert_allowed
 from app.domain.approvals import extract_approval_lead_id
 from app.domain.deals import STAGE_MEETING_OFFERED, STAGE_PROPOSAL
+from app.domain.lead_label import lead_display
 from app.domain.meetings import (
     STATUS_BOOKED,
     STATUS_CANCELLATION_REQUESTED,
@@ -86,6 +87,8 @@ class LeadReviewSnapshot(BaseModel):
     meeting_status: str = ""
     deal_stage: str = ""
     conversation_killed: bool = False
+    headline: str = ""
+    display_name: str = ""
 
 
 def _format_iso_date(value: str) -> str:
@@ -135,6 +138,8 @@ def build_lead_review_snapshot(store: LeadStore, *, lead_id: str) -> LeadReviewS
         meeting_status=meeting_status,
         deal_stage=deal_stage,
         conversation_killed=store.is_conversation_killed(lead_id),
+        headline=sales.headline or "",
+        display_name=sales.display_name or "",
     )
 
 
@@ -163,8 +168,9 @@ def format_lead_review(snapshot: LeadReviewSnapshot) -> str:
     if snapshot.deal_stage == "":
         deal_line = "אין"
     killed_line = "כן" if snapshot.conversation_killed else "לא"
+    who = lead_display(snapshot.lead_id, snapshot.headline, snapshot.display_name)
     lines = [
-        f"סקירת ליד {snapshot.lead_id}",
+        f"סקירת ליד {who}",
         f"שלב: {snapshot.stage or ''}",
         f"התאמה: {_FIT_HE.get(snapshot.fit, snapshot.fit)}",
         f"כאב: P{snapshot.pain_level}",
@@ -222,7 +228,13 @@ def apply_owner_lead_review(
         return None
     lead_id = extract_review_lead_id(text)
     if lead_id is None:
-        return None
+        query = _strip_review_phrases(text)
+        if not query:
+            return None
+        hits = store.find_leads(query)
+        if len(hits) != 1:
+            return format_lead_matches(store, query)
+        lead_id = hits[0].lead_id
     snapshot = build_lead_review_snapshot(store, lead_id=lead_id)
     if snapshot is None:
         return (
@@ -235,3 +247,53 @@ def apply_owner_lead_review(
         demo_active=demo_active,
     )
     return format_lead_review(snapshot)
+
+
+def format_lead_matches(store: LeadStore, query: str) -> str:
+    """Name/headline search for the owner console. Never invents a name."""
+    needle = query.strip()
+    hits = store.find_leads(needle) if needle else []
+    if len(hits) == 1:
+        snapshot = build_lead_review_snapshot(store, lead_id=hits[0].lead_id)
+        if snapshot is None:
+            return "לא מצאתי את הליד. אני לא מבצעת כלום."
+        return format_lead_review(snapshot)
+    recent = store.list_sales_snapshots(limit=5)
+    if not hits:
+        lines = [
+            "לא מצאתי ליד בשם הזה. לא ניחשתי.",
+        ]
+        if recent:
+            lines.append("אחרונים:")
+            lines.extend(
+                lead_display(item.lead_id, item.headline, item.display_name)
+                for item in recent
+            )
+        else:
+            lines.append("אין לידים עדיין.")
+        return "\n".join(lines)
+    lines = ["כמה לידים מתאימים:"]
+    lines.extend(
+        lead_display(item.lead_id, item.headline, item.display_name) for item in hits
+    )
+    return "\n".join(lines)
+
+
+def _strip_review_phrases(text: str) -> str:
+    cleaned = text
+    for phrase in (
+        "lead review",
+        "review lead",
+        "tell me about lead",
+        "tell me about the lead",
+        "סקירת ליד",
+        "מה המצב של הליד",
+        "איפה הליד",
+        "תספרי לי על ליד",
+        "תספרי לי על הליד",
+        "ספר לי על הליד",
+        "תספר לי על הליד",
+        "מי זה",
+    ):
+        cleaned = re.sub(re.escape(phrase), " ", cleaned, flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", cleaned).strip()

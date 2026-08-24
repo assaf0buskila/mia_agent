@@ -51,6 +51,10 @@ def _ready_to_meet_state(lead_id: str) -> SalesState:
 
 def _policy_gap(*, now: datetime, days_ahead: int = 4) -> TimeSlot:
     local_date = (now.astimezone(IL_TZ) + timedelta(days=days_ahead)).date()
+    while datetime(
+        local_date.year, local_date.month, local_date.day, tzinfo=IL_TZ
+    ).weekday() not in {6, 0, 1, 2, 3}:
+        local_date += timedelta(days=1)
     gap_start = datetime(
         local_date.year, local_date.month, local_date.day, 10, 0, tzinfo=IL_TZ
     ).astimezone(UTC)
@@ -252,7 +256,7 @@ async def test_inbound_owner_calendar_freshness_persisted() -> None:
             port=port,
             kill_switch=False,
             owner_ids={OWNER_FRESH_PHONE},
-            calendar=FakeCalendarPort([_policy_gap(now=OWNER_NOW)]),
+            calendar=FakeCalendarPort([_policy_gap(now=datetime.now(UTC))]),
         )
         db.commit()
         row = store.get_tool_run("cal.fresh.owner.1:tool:calendar_find_free_slots")

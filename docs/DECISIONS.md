@@ -45,6 +45,9 @@ Proposed is not accepted. Build may follow a proposed default only when `AGENTS.
 | ADR-024 | WhatsApp stays human until official Cloud API inbound | accepted |
 | ADR-026 | Mia's brain: long-term memory, knowledge, and an owner tool loop | accepted |
 | ADR-027 | Opt-in Composio discovery for GSC/GA4/Meta; Sheets and LinkedIn stay explicit | accepted |
+| ADR-028 | Visitor knowledge, answer-then-ask, meeting as default website exit | accepted |
+| ADR-029 | Website conversion funnel, engine truth line, multi-owner notification | accepted |
+| ADR-030 | Owner Telegram: free conversation, typed Gmail reads, lead by name | accepted |
 
 ## Template
 
@@ -656,3 +659,40 @@ The daily brief now answers whether the website converted today instead of only 
 
 **Alternatives considered**
 Compute percentiles in SQL — rejected; PostgreSQL-only functions would make the test suite exercise a different path than production, the same reasoning that rejected pgvector in ADR-026. Add the `ai_runs` timestamp column in this slice — deferred, not refused; it is the correct fix and it is written down here so it does not get lost. Report a rate above 100 percent honestly rather than clamping — rejected; it is meaningless to a reader and it crashed the brief. Leave `_notify_telegram` single-owner because Assaf is the only owner today — rejected; Assaf's decision is that Mia is a product, and a silent single-recipient assumption is exactly the kind of thing that ships to a second customer and fails quietly.
+
+### ADR-030 Owner Telegram: free conversation, typed Gmail reads, lead by name
+
+- **Status:** accepted
+- **Date:** 2026-08-24
+- **Assaf:** ADOPT (chat: go implement)
+
+**Context**
+After mia:18 the Telegram console still dumped funnel/engine/daily on greetings and on real requests like "תבדקי את המייל". Unmatched long text was coerced to `OPERATOR_SNAPSHOT`. Gmail reads could not list the inbox (`GmailPort` only fetched by message id). Leads showed as hashes. Assaf rejected dumping the Composio catalog into the model; he asked for a typed allowlist, inbox list/search/read, send as draft+Approve, and lead lookup by person name when they said it.
+
+**Decision**
+Greetings and ≤3-word chatter stay a one-line hello (`היי אסף, אני כאן.`) and never hit the agent or the digest. Long unmatched text stays `NOTE` so the owner agent answers. Snapshot/funnel/engine only on an explicit brief. Extend `GmailPort` with `list_recent` / `search` / `create_draft` / `send_draft`, pinning `GMAIL_FETCH_EMAILS`, `GMAIL_CREATE_EMAIL_DRAFT`, `GMAIL_SEND_DRAFT` on toolkit `20260817_00`. Agent tools: `gmail_inbox`, `gmail_search`, `gmail_read`, `find_leads`. No send/delete on the agent registry. Draft is a deterministic `gmail_draft` task; send runs only after Approve and `MIA_GMAIL_SEND=true` (stays false). Persist `SalesState.display_name` only from explicit name phrases (`שמי X`, `my name is`); never guess. `find_leads` matches name, headline, or full `lead_…`.
+
+**Consequences**
+"תבדקי את המייל" can reach inbox tools instead of a canned dump. Send cannot happen from the model. Empty names stay empty until stated; headlines still work. Shipped image **mia:19**, task **mia:21** after migrate exit 0. Rollback: image `mia:18` / task `mia:20`, or blank `MIA_OWNER_AGENT_MODEL`.
+
+**Alternatives considered**
+Expose all Composio Gmail tools to the model — rejected (ADR-007). Auto-send after draft — rejected; Approve plus the existing send flag. Infer names from headlines — rejected; Assaf chose stated names only.
+
+### ADR-031 Owner intent: same agent, no sub-agents
+
+- **Status:** accepted
+- **Date:** 2026-08-24
+- **Assaf:** chat — more phrasing understanding HE/EN; asked about transform/plan/execute/sub-agents
+
+**Context**
+mia:19 treated any unmatched text of three words or fewer as a greeting. `תבדקי את המייל` and `check my inbox` never reached the owner agent. The prompt also forced `search_memory` before live reads, so even longer paraphrases burned the four-step budget. Assaf asked for query transform, plan-and-execute, and sub-agents.
+
+**Decision**
+Keep **one** owner agent (`owner_agent_v2`). No sub-agents, no extra model hop. Greetings/acks/status pings stay an exact-set hello. Every other unmatched phrase, including three-word requests, stays `NOTE` so the loop can plan and call pinned tools. The prompt restates Hebrew/English paraphrases as a tool plan and does live reads (inbox, calendar, leads) before memory. Writes stay on the Python path.
+
+**Consequences**
+`תבדקי את המייל` / `can you look at my emails` reach `gmail_inbox`. Cost and safety stay one bounded loop. Shipped image **mia:20**, task **mia:22**. Rollback: image `mia:19` / task `mia:21`.
+
+**Alternatives considered**
+Sub-agent swarm or a separate rewrite model — rejected (AGENTS.md: subgraphs over swarms; extra latency and a second untrusted planner). Growing the keyword list for every Hebrew/English paraphrase — rejected; that is what failed. Dumping the Composio catalog — already rejected ADR-007 / ADR-030.
+

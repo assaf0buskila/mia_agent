@@ -29,6 +29,7 @@ from app.domain.owner_tasks import OwnerTaskType
 from app.graph.owner_agent import AgentOutcome, run_owner_agent
 from app.integrations.calendar import CalendarPort
 from app.integrations.ga4 import Ga4Port
+from app.integrations.gmail import GmailPort
 from app.integrations.instagram_insights import InstagramInsightsPort
 from app.integrations.linkedin import LinkedInPort
 from app.integrations.linkedin_analytics import LinkedInAnalyticsPort
@@ -56,6 +57,8 @@ DETERMINISTIC_TASK_TYPES: frozenset[OwnerTaskType] = frozenset(
         OwnerTaskType.CONVERSATION_SCOPE,
         OwnerTaskType.LEAD_OUTREACH,
         OwnerTaskType.MEETING_DEBRIEF,
+        OwnerTaskType.GMAIL_DRAFT,
+        OwnerTaskType.OWNER_STATUS,
     }
 )
 
@@ -150,6 +153,7 @@ def answer_owner(
     kill_switch: bool,
     demo_active: bool,
     calendar: CalendarPort | None = None,
+    gmail: GmailPort | None = None,
     # Typed read ports, passed straight through to the tool registry. Any left None makes
     # its tool answer "not connected" instead of failing the turn.
     linkedin: LinkedInPort | None = None,
@@ -191,6 +195,7 @@ def answer_owner(
         settings=settings,
         embedding_port=port,
         calendar=calendar,
+        gmail=gmail,
         linkedin=linkedin,
         linkedin_analytics=linkedin_analytics,
         search_console=search_console,

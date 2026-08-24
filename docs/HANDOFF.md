@@ -8,15 +8,20 @@ Production keys: AWS Secrets Manager `mia/prod`.
 
 ## Current
 
-Live Fargate is **mia:18** (task `mia:20`). ADR-028/029 deployed. Owner agent is `gpt-5.6-luna`. Meeting-first is on. Send `מה קרה היום?` to prove funnel/engine brief lines.
+Live Fargate is **mia:20** (task `mia:22`). ADR-031 phrasing fix is on. Digest match
+`sha256:ee4fab125c515ac1a6a8001b44b33400e1678817b2bf3cd54529054974beb25d`. Owner agent
+`gpt-5.6-luna`, fallback `gpt-5.6-terra`. Meeting-first on. `MIA_GMAIL_SEND=false`.
+No new migration. No knowledge re-ingest. Rollback: image `mia:19` / task `mia:21`, or blank
+`MIA_OWNER_AGENT_MODEL`.
 
-v1 channels (ADR-017) unchanged. The owner Telegram console now runs an allowlisted
+Prove in Telegram: `היי מיה` → one line hello; `תבדקי את המייל` / `can you look at my emails`
+→ inbox, not the hello.
+
+v1 channels (ADR-017) unchanged. The owner Telegram console runs an allowlisted
 read-only tool loop with long-term memory and website knowledge when
 `MIA_OWNER_AGENT_MODEL` is set; empty keeps the `owner_telegram_v2` classifier, which is how
-the test suite runs. Writes and approvals never reach the model. Sales prompt pin is now
-`sales_reply_v8` (ADR-028: answer-then-ask plus visitor knowledge). WhatsApp was out of
-scope for this slice and is unchanged as a channel, though it is now the website's
-fallback exit rather than its default one.
+the test suite runs. Writes and approvals never reach the model. Sales prompt pin is
+`sales_reply_v8` (ADR-028). WhatsApp stays the website fallback exit, not the default.
 
 ## Brain deploy (done 2026-08-24)
 
@@ -28,28 +33,16 @@ Adapter map ADR-015, WhatsApp send split ADR-016, first AWS host ADR-014, Region
 ADR-019, brain architecture ADR-026 (portable vectors over pgvector; HTML over MarkdownV2;
 transcription over audio-in chat).
 
-## Telegram slice (2026-08-24, NOT deployed)
+## Telegram slice (2026-08-24, deployed via luna then ADR-030)
 
-**The owner agent has never actually run in production.** `/health` says `ready` because it
-only checks the model string is non-empty. Live replies were the pre-brain keyword
-classifier — proven by Mia quoting the `owner_telegram_v2` fallback prompt verbatim.
-`gpt-5.6-terra` is real and GA; the documented mechanism that fits is a project
-model-permissions allowlist. Full analysis and deploy steps: `docs/TELEGRAM_SLICE_REPORT.md`.
-
-Fixed here: `MIA_OWNER_AGENT_FALLBACK_MODEL` was documented but ignored (only `chain[0]` was
-built); the fallback to the classifier was silent (now `log_owner_agent` prints model +
-status every turn); leads now carry a human headline from the prospect's own words; the
-handoff briefing is ~510 chars with the transcript in an expandable quote.
-
-Needs migration `20260824_lead_sales_state_headline.sql` before the image serves traffic.
+Owner agent runs with `gpt-5.6-luna` (fallback `gpt-5.6-terra`). Inbox tools and
+lead-by-name shipped on **mia:19**. Analysis of the earlier silent classifier fallback:
+`docs/TELEGRAM_SLICE_REPORT.md`.
 
 ## Next
 
-1. Set `MIA_OWNER_AGENT_MODEL=gpt-5.6-luna` (known-good), fallback `gpt-5.6-terra`.
-2. Run `scripts/probe_owner_agent.py` to confirm which models the key can call.
-3. Assaf live-tests Telegram: a free question (not a keyword), one Approve button, one voice note.
+1. Assaf live-tests Telegram: `היי מיה`, `תבדקי את המייל`, a name/headline lookup.
 2. WhatsApp remains deferred — needs a dedicated number and proven Cloud API inbound.
-3. ~~Open medium finding: `_notify_telegram` notifies only `sorted(owner_ids)[0]`.~~ **Fixed** (ADR-029): now `notify_owners`, fans out to every allowlisted owner id with per-recipient failure isolation.
-4. Not started: the Telegram owner tool-surface expansion (live Gmail list/search/read, Sheets read, GA4 as a first-class tool, approval-gated Gmail drafts). Assaf chose "reads plus gated drafts". Remember that the reason Mia does not call tools today is the agent never running (§1 of the Telegram slice report), not the allowlist size.
+3. Do not enable Gmail send, WhatsApp send, Meta writes, IG auto-reply, TTS, or dump the Composio catalog.
 
 Historical slice notes: `docs/archive/HANDOFF.md`.

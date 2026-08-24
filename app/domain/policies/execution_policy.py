@@ -106,6 +106,7 @@ _REGISTRY: dict[str, ActionPolicy] = {
     CapabilityId.GMAIL_SUMMARY.value: _ai_auto(
         CapabilityId.GMAIL_SUMMARY, risk=RiskLevel.R1_LOW_WRITE
     ),
+    CapabilityId.GMAIL_INBOX.value: _det(CapabilityId.GMAIL_INBOX, risk=RiskLevel.R0_READ),
     CapabilityId.CALENDAR.value: _det(
         CapabilityId.CALENDAR, risk=RiskLevel.R2_CUSTOMER_MESSAGE
     ),

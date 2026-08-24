@@ -83,6 +83,8 @@ class SalesState(BaseModel):
     explicit_buying_intent: bool = False
     # Short human label from the prospect's own words, for owner-facing lists only.
     headline: str = ""
+    # Person name only when they said it. Never inferred from the business description.
+    display_name: str = ""
 
     def has_asked(self, action: "NextAction") -> bool:
         return action.value in self.asked_actions

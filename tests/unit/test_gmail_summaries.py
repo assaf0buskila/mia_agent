@@ -371,7 +371,10 @@ def test_gmail_summaries_module_no_send_ports() -> None:
     assert "ComposioGmailPort" not in source
     gmail_module = importlib.import_module("app.integrations.gmail")
     gmail_source = inspect.getsource(gmail_module)
-    assert "GMAIL_SEND" not in gmail_source
+    # Summaries stay read-only. The Gmail port may expose GMAIL_SEND_DRAFT
+    # behind Approve + MIA_GMAIL_SEND (ADR-030); this module must not call it.
+    assert "GMAIL_SEND" not in source
+    assert "send_draft" not in source
     assert "GMAIL_DELETE" not in gmail_source
     assert COMPOSIO_FETCH_MESSAGE_TOOL in gmail_source
 
