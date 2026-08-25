@@ -27,7 +27,7 @@ from app.db.store import LeadStore
 from app.domain.memory import ConversationTurn
 from app.domain.owner_tasks import OwnerTaskType
 from app.graph.owner_agent import AgentOutcome, run_owner_agent
-from app.integrations.calendar import CalendarPort
+from app.integrations.calendar import CalendarAgendaPort, CalendarPort
 from app.integrations.ga4 import Ga4Port
 from app.integrations.gmail import GmailPort
 from app.integrations.instagram_insights import InstagramInsightsPort
@@ -62,6 +62,12 @@ DETERMINISTIC_TASK_TYPES: frozenset[OwnerTaskType] = frozenset(
     }
 )
 
+# The honest failure line for a NOTE turn the agent was allowed to run but could not
+# complete (provider error, refusal, truncation, empty reply, budget/ceiling exhausted).
+# Deliberately not "מה שהבנתי" -- that phrase means "I couldn't classify this", which is
+# false once the agent was actually invoked. One line, no apology, no internals.
+NOTE_AGENT_FAILURE_TEXT = "הבדיקה לא עברה כרגע. תנסה שוב."
+
 
 class OwnerBrainResult(NamedTuple):
     text: str
@@ -75,6 +81,12 @@ class OwnerBrainResult(NamedTuple):
     # for a full day of live testing.
     fallback_reason: str = ""
     model: str = ""
+    # Observability (Task 3), threaded straight from `AgentOutcome` for `log_owner_agent`.
+    # Zero/empty on every early-exit path (kill switch, deterministic intent, no model) --
+    # those never construct an outcome, so there is nothing to report.
+    steps: int = 0
+    tools_failed: tuple[str, ...] = ()
+    completion: str = ""
 
 
 def agent_allowed_for(task_type: OwnerTaskType) -> bool:
@@ -153,6 +165,7 @@ def answer_owner(
     kill_switch: bool,
     demo_active: bool,
     calendar: CalendarPort | None = None,
+    calendar_agenda: CalendarAgendaPort | None = None,
     gmail: GmailPort | None = None,
     # Typed read ports, passed straight through to the tool registry. Any left None makes
     # its tool answer "not connected" instead of failing the turn.
@@ -195,6 +208,7 @@ def answer_owner(
         settings=settings,
         embedding_port=port,
         calendar=calendar,
+        calendar_agenda=calendar_agenda,
         gmail=gmail,
         linkedin=linkedin,
         linkedin_analytics=linkedin_analytics,
@@ -226,8 +240,24 @@ def answer_owner(
             # Carry the per-model failure so a bad model id is diagnosable from one log
             # line instead of a day of guessing.
             reason = f"{reason} [{'; '.join(errors)[:300]}]"
+        # The agent was allowed to run and genuinely failed (as opposed to never being
+        # tried -- kill switch, a deterministic intent, or no model configured, all of
+        # which return above this point). For an unclassified NOTE, the classifier's
+        # "I couldn't classify your message" canned line is dishonest here: the message
+        # WAS understood, or the agent would never have been invoked for it -- the live
+        # read just failed. Every other task type keeps `fallback_text` untouched,
+        # including read types (DAILY_BRIEF, CALENDAR, ...) whose fallback is already a
+        # real computed answer, not a "could not classify" placeholder.
+        text = NOTE_AGENT_FAILURE_TEXT if task_type == OwnerTaskType.NOTE else fallback_text
         return OwnerBrainResult(
-            fallback_text, False, (), fallback_reason=reason, model=model
+            text,
+            False,
+            (),
+            fallback_reason=reason,
+            model=model,
+            steps=outcome.steps_used,
+            tools_failed=outcome.tools_failed,
+            completion=outcome.completion,
         )
     return OwnerBrainResult(
         outcome.text.strip(),
@@ -236,6 +266,9 @@ def answer_owner(
         outcome.tokens_in,
         outcome.tokens_out,
         model=model,
+        steps=outcome.steps_used,
+        tools_failed=outcome.tools_failed,
+        completion=outcome.completion,
     )
 
 

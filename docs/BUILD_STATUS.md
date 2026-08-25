@@ -1,11 +1,23 @@
 # BUILD_STATUS
 
-**Last updated:** 2026-08-24  
+**Last updated:** 2026-08-25  
 **Region:** eu-north-1 (ADR-019). Live host `https://mia.assafweb.com`. Live image **mia:20** (task `mia:22`). ADR-031 owner phrasing. Rollback: image `mia:19` / task `mia:21`, or blank `MIA_OWNER_AGENT_MODEL`.
 
 ## Alive (v1)
 
 Website sales + WhatsApp handoff tokens + Telegram owner (short hello on greetings; agent on unmatched requests; Gmail inbox reads; lead by name/headline) + Gmail ingest/summary/draft + Calendar read/gated write + Sheets mirror + Meta/LinkedIn/research reads + STT + approvals + takeover + Postgres events + Graph Lab evals + Fargate host.
+
+## Owner natural language (ADR-032, 2026-08-25) — BUILT, NOT DEPLOYED
+
+On branch `claude/mia-product-feedback-0bfc90`, on top of the ADR-030/031 checkpoint. **Not on Fargate.** Live is still image `mia:20` / task `mia:22`. Next image is `mia:21` via `scripts/deploy_ecs_revision.py --tag 21`. No migration, no knowledge re-ingest.
+
+Prompt is `owner_agent_v3`: the literal trigger-keyword list is gone, replaced by semantic per-source guidance, a never-printed internal execution plan, query-construction rules and a standalone untrusted-content paragraph. Loop is 8 steps (`MIA_OWNER_AGENT_MAX_STEPS`) with a 16-call ceiling, a duplicate `(tool, arguments)` guard and an empty-result stop; every exit path still gets one tools-free turn so a run ends in prose.
+
+Gmail inbox/search/read now render absolute + relative dates, so time-scoped mail questions are answerable. New read-only `calendar_agenda` tool (`today` / `tomorrow` / `this_week` / `next_7_days`) over the already-pinned `GOOGLECALENDAR_EVENTS_LIST` — no new Composio slug or toolkit version. New `app/domain/gmail_query.py` normalizes conversational Hebrew/English into a Gmail query: pure function, no model, Hebrew-clitic aware, passes existing operators through untouched, never invents an entity. All 27 tool descriptions rewritten.
+
+An unclassified `NOTE` whose agent turn failed now answers `הבדיקה לא עברה כרגע. תנסה שוב.` instead of the classifier's "could not classify" line. Other task types keep their real computed fallback byte for byte. `log_owner_agent` gained `steps=`, `failed=`, `completion=`.
+
+Suite: `uv run ruff check app tests scripts` clean, `uv run pytest` **2437 passed**. Writes unchanged — approvals, drafts, takeover, scope and preference stay off the model; `MIA_GMAIL_SEND` stays false.
 
 ## Owner console (ADR-030, 2026-08-24)
 

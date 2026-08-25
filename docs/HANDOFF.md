@@ -1,6 +1,6 @@
 # Handoff
 
-**Date:** 2026-08-24
+**Date:** 2026-08-25
 **Load:** `docs/PROJECT_MAP.md` → `AGENTS.md` → `docs/ARCHITECTURE.md` → `docs/BRAIN_ARCHITECTURE.md` → `docs/DECISIONS.md` → current tree.
 
 Package manager **uv**. Python `>=3.12`. PowerShell: `;` not `&&`. Do not inspect `.env`.
@@ -14,8 +14,24 @@ Live Fargate is **mia:20** (task `mia:22`). ADR-031 phrasing fix is on. Digest m
 No new migration. No knowledge re-ingest. Rollback: image `mia:19` / task `mia:21`, or blank
 `MIA_OWNER_AGENT_MODEL`.
 
-Prove in Telegram: `היי מיה` → one line hello; `תבדקי את המייל` / `can you look at my emails`
-→ inbox, not the hello.
+## Next up: ADR-032 natural language (built, not deployed)
+
+Branch `claude/mia-product-feedback-0bfc90` is green and deploy-ready but **has not shipped**.
+Live is still `mia:20` / task `mia:22`. Next image `mia:21`:
+`scripts/deploy_ecs_revision.py --tag 21`, linux/amd64, copy current prod env, no migration,
+no knowledge re-ingest. Do not enable Gmail send.
+
+`owner_agent_v3`: no trigger-keyword dictionary, 8-step loop with a call ceiling and
+duplicate/empty guards, Gmail dates, read-only `calendar_agenda`, deterministic Gmail query
+normalization, all 27 tool descriptions rewritten. `uv run pytest` = 2437 passed.
+
+Prove in Telegram after deploy, in natural phrasing, not command phrases:
+`היי` → one line hello. `היי מה יש לי היום` → not the hello.
+`תבדקי רגע מה יש לי במייל`, `did Daniel email me?`, `מה יש לי מחר?`, `מה קרה היום?`,
+`מה קורה עם יוסי כהן?`, and a two-part ask like
+`תבדקי אם דניאל ענה לי ותראי גם מה יש לי מחר`.
+CloudWatch should show `owner_agent used=True` with `tools=`, `steps=`, `failed=`,
+`completion=` on `mia.agent`.
 
 v1 channels (ADR-017) unchanged. The owner Telegram console runs an allowlisted
 read-only tool loop with long-term memory and website knowledge when

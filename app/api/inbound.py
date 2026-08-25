@@ -106,7 +106,12 @@ from app.domain.tools import ToolOutcome
 from app.graph.orchestrator import build_graph
 from app.graph.state import empty_state
 from app.integrations.base import MessagePort, OutboundMessage
-from app.integrations.calendar import CalendarPort, build_calendar_port
+from app.integrations.calendar import (
+    CalendarAgendaPort,
+    CalendarPort,
+    build_calendar_agenda_port,
+    build_calendar_port,
+)
 from app.integrations.calendar_booking import CalendarBookingPort, build_calendar_booking_port
 from app.integrations.ga4 import Ga4Port, build_ga4_port
 from app.integrations.gmail import GmailPort, build_gmail_port
@@ -240,6 +245,7 @@ async def process_inbound_texts(
     kill_switch: bool,
     owner_ids: set[str] | None = None,
     calendar: CalendarPort | None = None,
+    calendar_agenda: CalendarAgendaPort | None = None,
     calendar_booking: CalendarBookingPort | None = None,
     sheets: SheetsPort | None = None,
     meta_ads: MetaAdsPort | None = None,
@@ -261,6 +267,11 @@ async def process_inbound_texts(
     owner_ids = owner_ids or set()
     settings = get_settings()
     calendar_port = calendar if calendar is not None else build_calendar_port(settings)
+    calendar_agenda_port = (
+        calendar_agenda
+        if calendar_agenda is not None
+        else build_calendar_agenda_port(settings)
+    )
     gmail_port = gmail if gmail is not None else build_gmail_port(settings)
     calendar_booking_port = (
         calendar_booking
@@ -931,6 +942,7 @@ async def process_inbound_texts(
                 kill_switch=kill_switch,
                 demo_active=demo_mode_active(settings),
                 calendar=calendar_port,
+                calendar_agenda=calendar_agenda_port,
                 gmail=gmail_port,
                 linkedin=linkedin_port,
                 linkedin_analytics=linkedin_analytics_port,
@@ -951,13 +963,22 @@ async def process_inbound_texts(
                 task_type=decision.task_type.value,
                 tools_used=brain_result.tools_used,
                 reason=brain_result.fallback_reason,
+                steps=brain_result.steps,
+                tools_failed=brain_result.tools_failed,
+                completion=brain_result.completion,
             )
             if brain_result.used_agent:
                 ack_text = brain_result.text
             else:
+                # `brain_result.text` is `ack_text` unchanged on every early-exit path
+                # (kill switch, deterministic intent, no model configured) -- `answer_owner`
+                # only ever substitutes it for a NOTE turn the agent was allowed to run but
+                # failed, replacing the "couldn't classify this" canned line with an honest
+                # one. Composing from it here (instead of the original `ack_text`) is what
+                # makes that substitution actually reach Assaf.
                 phrased = owner_reply_port.compose(
                     task_type=decision.task_type.value,
-                    canned=ack_text,
+                    canned=brain_result.text,
                     owner_message=owner_text,
                     history=tuple(owner_history),
                     kill_switch=kill_switch,

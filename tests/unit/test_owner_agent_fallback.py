@@ -105,7 +105,7 @@ def test_fallback_reason_is_recorded_so_the_failure_is_visible() -> None:
     from app.brain.store import BrainStore
     from app.db.session import get_session_factory, init_db
     from app.db.store import LeadStore
-    from app.domain.owner_brain import answer_owner
+    from app.domain.owner_brain import NOTE_AGENT_FAILURE_TEXT, answer_owner
     from app.domain.owner_tasks import OwnerTaskType
 
     init_db()
@@ -132,7 +132,12 @@ def test_fallback_reason_is_recorded_so_the_failure_is_visible() -> None:
         client=chain,
     )
     assert result.used_agent is False
-    assert result.text == "CANNED"
+    # The text contract moved (see test_brain_end_to_end.py for the full story): a
+    # NOTE turn the agent was allowed to run but failed now gets the honest
+    # NOTE_AGENT_FAILURE_TEXT instead of the caller's canned "CANNED" fallback. The
+    # actual point of this test -- that the failure REASON is recorded and visible,
+    # naming the model and the HTTP status -- is unchanged and asserted below.
+    assert result.text == NOTE_AGENT_FAILURE_TEXT
     # The whole point: the reason names the model and the HTTP status.
     assert "unusable-model" in result.fallback_reason
     assert "404" in result.fallback_reason

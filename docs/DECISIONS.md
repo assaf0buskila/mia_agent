@@ -48,6 +48,8 @@ Proposed is not accepted. Build may follow a proposed default only when `AGENTS.
 | ADR-028 | Visitor knowledge, answer-then-ask, meeting as default website exit | accepted |
 | ADR-029 | Website conversion funnel, engine truth line, multi-owner notification | accepted |
 | ADR-030 | Owner Telegram: free conversation, typed Gmail reads, lead by name | accepted |
+| ADR-031 | Owner intent: same agent, no sub-agents | accepted |
+| ADR-032 | Owner reads: wider tool loop, live dates, agenda, deterministic query normalization | accepted |
 
 ## Template
 
@@ -696,3 +698,21 @@ Keep **one** owner agent (`owner_agent_v2`). No sub-agents, no extra model hop. 
 **Alternatives considered**
 Sub-agent swarm or a separate rewrite model — rejected (AGENTS.md: subgraphs over swarms; extra latency and a second untrusted planner). Growing the keyword list for every Hebrew/English paraphrase — rejected; that is what failed. Dumping the Composio catalog — already rejected ADR-007 / ADR-030.
 
+
+### ADR-032 Owner reads: wider tool loop, live dates, agenda, deterministic query normalization
+
+- **Status:** accepted
+- **Date:** 2026-08-25
+- **Assaf:** chat — talk to Mia like a capable human operator, no dictionary of magic phrases
+
+**Context**
+ADR-030 and ADR-031 fixed routing, and a trace of eleven real owner utterances confirmed it: `תבדקי רגע מה יש לי במייל`, `did Daniel email me?`, `מה יש לי מחר?`, `hey check my inbox` and `היי מה יש לי היום` already reached `run_owner_agent`. Only a bare `היי` was intercepted, correctly. The console still behaved like a keyword bot for five reasons downstream of routing. `max_steps=4` drops tools on its final step, so there were three tool-calling turns; `gmail_search → gmail_read → answer` spent all of them and any multi-source question forced a premature, under-informed answer. `format_inbox_rows` and `format_email_body` captured `InboxRow.timestamp` and never emitted it, so every time-scoped mail question was structurally unanswerable. No tool could list calendar events at all — `calendar_availability` returns free slots in a hard-coded seven-day window — so `מה יש לי מחר?` had no path to an answer. `gmail_search` passed the owner's raw words to Gmail, which AND-matches bare terms, so Hebrew phrasing died on its own function words. And most of the 26 pinned tool descriptions stated purpose only, with three actively wrong: `owner_status` claimed it returns a short hello while its handler dumps the brief, `meeting_brief` documented an 8-character lead id against a 12-character validator, and `search_memory` told the model to check memory first in direct contradiction of ADR-031.
+
+**Decision**
+Keep **one** owner agent. No sub-agent, no router model, no rewrite model, no second final-answer model — ADR-031 stands. Bump the prompt to `owner_agent_v3`: delete the literal trigger-keyword list and replace it with semantic guidance about what each data source is for, an internal execution plan that is never printed or narrated, explicit query-construction rules, and a standalone untrusted-content paragraph. Raise the loop to 8 steps, add a 16-call total ceiling, refuse to re-execute an identical `(tool, arguments)` call, and stop offering a tool after repeated empty results; every termination path still grants one tools-free turn so the run ends in prose. Emit absolute and relative dates in both Gmail formatters. Add a read-only `calendar_agenda` tool over the already-pinned `GOOGLECALENDAR_EVENTS_LIST` — no new Composio slug or toolkit version. Add `app/domain/gmail_query.py`, a pure deterministic Hebrew-clitic-aware normalizer that strips conversational filler, converts relative time to one `newer_than:` operator, passes existing Gmail operators through untouched, and never invents an entity or emits a `from:` for a disguised stopword. Rewrite all 27 tool descriptions to state purpose, when to use, input shape, return shape, the follow-up tool, and the limits. When the agent was allowed to run and failed on an unclassified `NOTE`, answer with an honest one-line failure instead of the classifier's "could not classify this" text. Log `steps`, `failed` and `completion` alongside the existing `used`/`tools`.
+
+**Consequences**
+`תבדקי רגע אם דניאל ענה לי ותראי גם מה יש לי מחר` is answerable end to end: seven tool-calling turns cover search, read, a second source and the answer. Mail answers can finally be time-scoped. The normalizer is a pure function, not a second conversational layer — it runs only on `gmail_search`, and when a normalized query still returns nothing the model is told so it can retry differently rather than being silently starved. Writes are untouched: `DETERMINISTIC_TASK_TYPES` still gates approvals, drafts, takeover, scope and preference away from the model, a greeting still returns exactly `היי אסף, אני כאן.` without reaching it, and `MIA_GMAIL_SEND` stays false. Three tests changed contract deliberately and were made stronger, including a regression guard asserting the trigger-keyword list cannot return; one unrelated pre-existing date-rot fixture was repaired. `MIA_OWNER_AGENT_MAX_STEPS` reverts the budget without a deploy, and blanking `MIA_OWNER_AGENT_MODEL` still falls back to the `owner_telegram_v2` classifier.
+
+**Alternatives considered**
+A rephrase sub-agent or query-rewriting model hop — rejected; ADR-031 already rejected it, and a pure function gets the same recall with no latency, no cost and no second untrusted planner. Growing the prompt's keyword list to cover more paraphrases — rejected; that is the bug being removed, in the prompt as much as in Python. Stripping the deterministic read classifiers so every read goes to the agent — rejected for now; they already act as the fallback when the model is unconfigured or down, and removing them would trade a real availability property for tidiness. Pinning a new Composio calendar slug for the agenda read — unnecessary; `GOOGLECALENDAR_EVENTS_LIST` was already pinned for booking conflict checks. Teaching the model Gmail operator syntax in the prompt instead of normalizing in code — rejected; it is deterministic work that does not belong in the untestable layer.

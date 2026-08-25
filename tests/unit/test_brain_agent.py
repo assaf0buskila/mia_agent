@@ -284,3 +284,224 @@ def test_owner_message_is_labelled_as_data() -> None:
 @pytest.mark.parametrize("name", ["search_memory", "search_knowledge", "remember"])
 def test_brain_tools_are_registered(name: str) -> None:
     assert get_tool(name) is not None
+
+
+# ---------------------------------------------------------- loop safeguards (Task 3)
+
+
+def test_duplicate_tool_call_is_not_re_executed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Cost/latency guard: an exact repeat (same tool, same canonical args) must
+
+    never reach the real handler a second time. Proven by counting real handler
+    invocations, not just by reading the outcome -- the outcome could look right
+    even if the handler quietly ran twice.
+    """
+    from app.graph import owner_agent as owner_agent_module
+
+    session = _session()
+    session.commit()
+    real_execute_tool = owner_agent_module.execute_tool
+    calls: list[tuple[str, dict]] = []
+
+    def counting_execute_tool(name, arguments, ctx):
+        calls.append((name, dict(arguments)))
+        return real_execute_tool(name, arguments, ctx)
+
+    monkeypatch.setattr(owner_agent_module, "execute_tool", counting_execute_tool)
+
+    client, _transport = _client(
+        [
+            _assistant_tool_call("c1", "hot_leads", {}),
+            _assistant_tool_call("c2", "hot_leads", {}),  # exact duplicate
+            _assistant_text("אין לידים חמים."),
+        ]
+    )
+    outcome = run_owner_agent(
+        client=client, ctx=_ctx(session), owner_message="מה חם?", max_steps=4
+    )
+    assert outcome.completed is True
+    # The real handler ran exactly once, despite the model asking for it twice.
+    assert calls == [("hot_leads", {})]
+    assert outcome.tools_used == ("hot_leads",)
+    duplicate_steps = [s for s in outcome.steps if s.tool == "hot_leads" and not s.ok]
+    assert len(duplicate_steps) == 1
+    assert "duplicate" in duplicate_steps[0].detail
+
+
+def test_total_tool_call_ceiling_stops_offering_tools(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The ceiling is independent of step count: once the whole-run total is hit,
+
+    the very next turn must be tools-free, even mid-run (not just on the last step).
+    """
+    from app.graph import owner_agent as owner_agent_module
+
+    monkeypatch.setattr(owner_agent_module, "MAX_TOTAL_TOOL_CALLS", 2)
+
+    session = _session()
+    session.commit()
+    client, transport = _client(
+        [
+            _assistant_tool_call("c1", "hot_leads", {}),
+            _assistant_tool_call("c2", "pending_approvals", {}),
+            _assistant_text("זהו מה שיש."),
+        ]
+    )
+    outcome = run_owner_agent(
+        client=client, ctx=_ctx(session), owner_message="מה המצב?", max_steps=5
+    )
+    assert outcome.completed is True
+    assert outcome.text == "זהו מה שיש."
+    assert outcome.tools_used == ("hot_leads", "pending_approvals")
+    # The third request (after 2 tool calls hit the ceiling of 2) must carry no
+    # tools at all -- the model was forced into a prose-only turn.
+    third_request = transport.requests[2]
+    assert "tools" not in third_request
+
+
+def test_repeated_empty_result_stops_offering_that_tool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tool that keeps coming back empty stops being offered -- past the repeat
+
+    limit, another identical-shaped call is a retry spiral, not investigation.
+    The underlying handler is faked so this is deterministic regardless of
+    whatever other tests have written into the shared in-memory DB.
+    """
+    from app.graph import owner_agent as owner_agent_module
+    from app.tools.registries.owner_tools import ToolResult
+
+    monkeypatch.setattr(owner_agent_module, "EMPTY_RESULT_REPEAT_LIMIT", 1)
+    real_execute_tool = owner_agent_module.execute_tool
+
+    def fake_execute_tool(name, arguments, ctx):
+        if name == "search_memory":
+            return ToolResult(ok=True, text="No stored memory matches that.")
+        return real_execute_tool(name, arguments, ctx)
+
+    monkeypatch.setattr(owner_agent_module, "execute_tool", fake_execute_tool)
+
+    session = _session()
+    session.commit()
+    client, transport = _client(
+        [
+            _assistant_tool_call("c1", "search_memory", {"query": "alpha"}),
+            _assistant_tool_call("c2", "search_memory", {"query": "beta"}),
+            _assistant_text("שום דבר לא נמצא."),
+        ]
+    )
+    outcome = run_owner_agent(
+        client=client, ctx=_ctx(session), owner_message="?", max_steps=5
+    )
+    assert outcome.completed is True
+    third_request = transport.requests[2]
+    offered = [t["function"]["name"] for t in third_request.get("tools", [])]
+    assert "search_memory" not in offered
+
+
+def test_budget_exhaustion_still_yields_a_tools_free_turn_with_prose() -> None:
+    """Every termination path grants one tools-free turn so the model can produce
+
+    prose instead of the run coming back empty. When the model actually uses that
+    turn to answer, that prose is the final result -- not an empty/failed outcome.
+    """
+    session = _session()
+    session.commit()
+    client, transport = _client(
+        [
+            _assistant_tool_call("c1", "hot_leads", {}),
+            _assistant_text("סיכום מה שיש לי עד כה."),
+        ]
+    )
+    outcome = run_owner_agent(
+        client=client, ctx=_ctx(session), owner_message="מה חם?", max_steps=2
+    )
+    assert outcome.completed is True
+    assert outcome.text == "סיכום מה שיש לי עד כה."
+    assert outcome.completion == "answered"
+    assert outcome.steps_used == 2
+    final_request = transport.requests[1]
+    assert "tools" not in final_request
+
+
+def test_completion_reports_provider_error_on_transport_failure() -> None:
+    session = _session()
+    session.commit()
+    transport = _ScriptedTransport([])  # exhausted immediately -> every call 500s
+    http = httpx.Client(transport=transport, base_url="https://api.openai.com")
+    client = LlmClient(api_key="k", model="m", client=http)
+    outcome = run_owner_agent(client=client, ctx=_ctx(session), owner_message="מה קורה?")
+    assert outcome.completed is False
+    assert outcome.completion == "provider_error"
+    assert outcome.steps_used == 1
+    assert outcome.tools_failed == ()
+
+
+def test_completion_reports_budget_exhausted_when_the_model_keeps_calling_tools() -> None:
+    """Same scenario as test_step_budget_is_bounded (kept working unmodified above,
+
+    with a raised default that must not affect its explicit max_steps=2), plus the
+    new completion/steps_used observability fields.
+    """
+    session = _session()
+    session.commit()
+    client, _transport = _client(
+        [_assistant_tool_call(f"c{index}", "hot_leads", {}) for index in range(6)]
+    )
+    outcome = run_owner_agent(
+        client=client, ctx=_ctx(session), owner_message="מה חם?", max_steps=2
+    )
+    assert outcome.completed is False
+    assert outcome.completion == "budget_exhausted"
+    assert outcome.steps_used == 2
+
+
+def test_completion_reports_ceiling_hit_when_a_forced_prose_turn_comes_back_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`ceiling_hit` is distinct from `budget_exhausted`: it fires when the total-call
+
+    ceiling forces a tools-free turn *before* the step budget ran out, and the model
+    still returns nothing usable on that turn.
+    """
+    from app.graph import owner_agent as owner_agent_module
+
+    monkeypatch.setattr(owner_agent_module, "MAX_TOTAL_TOOL_CALLS", 1)
+
+    session = _session()
+    session.commit()
+    client, transport = _client(
+        [
+            _assistant_tool_call("c1", "hot_leads", {}),
+            _assistant_text(""),  # the forced tools-free turn comes back empty
+        ]
+    )
+    outcome = run_owner_agent(
+        client=client, ctx=_ctx(session), owner_message="מה חם?", max_steps=5
+    )
+    assert outcome.completed is False
+    assert outcome.completion == "ceiling_hit"
+    second_request = transport.requests[1]
+    assert "tools" not in second_request
+
+
+def test_tools_failed_captures_a_call_that_returned_ok_false() -> None:
+    """`tools_failed` is new: previously only successful tool names (`tools_used`)
+
+    were ever visible in the outcome, so a failing tool inside an otherwise
+    successful turn was invisible.
+    """
+    session = _session()
+    session.commit()
+    client, _transport = _client(
+        [
+            _assistant_tool_call("c1", "send_whatsapp", {"to": "+972"}),  # not registered
+            _assistant_text("אני לא יכולה לשלוח."),
+        ]
+    )
+    outcome = run_owner_agent(
+        client=client, ctx=_ctx(session), owner_message="שלחי הודעה", max_steps=4
+    )
+    assert outcome.completed is True
+    assert outcome.tools_failed == ("send_whatsapp",)
+    assert outcome.tools_used == ()
+    assert outcome.completion == "answered"

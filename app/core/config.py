@@ -82,7 +82,7 @@ class Settings(BaseSettings):
     # model drops Telegram back to the keyword classifier even though Gemini is connected
     # and already serving website sales.
     owner_agent_gemini_model: str = Field(default="")
-    owner_agent_max_steps: int = Field(default=4)
+    owner_agent_max_steps: int = Field(default=8)
     extraction_model: str = Field(default="")
     embedding_provider: str = Field(default="openai")
     embedding_model: str = Field(default="")

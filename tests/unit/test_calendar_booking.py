@@ -21,6 +21,7 @@ from app.domain.calendar_booking import (
     resolve_meeting_reply,
 )
 from app.domain.events import Channel, EventType, build_meeting_booked_event
+from app.domain.meeting_availability import is_workday_local
 from app.domain.meeting_slots import (
     compute_booking_key,
     is_explicit_slot_selection,
@@ -108,6 +109,32 @@ def _il_gap(*, days_ahead: int, start_hour: int, end_hour: int) -> TimeSlot:
     return TimeSlot(
         start=local_start.astimezone(UTC),
         end=local_end.astimezone(UTC),
+    )
+
+
+def _next_real_business_slot(*, min_days_ahead: int, hour: int, minute: int = 0) -> TimeSlot:
+    """A policy-valid 30m slot computed from the *real* clock, for the one test
+    (`test_website_e2e_booking`) that goes through the live HTTP endpoint without
+    freezing `now` — so the slot it seeds must actually be valid against whatever
+    day the suite happens to run on, not just against FIXED_NOW.
+
+    A fixed `days_ahead` from FIXED_NOW (2026-08-20, a Thursday) rots: the resulting
+    calendar date is static, so as real time passes, that date can land on a Friday
+    or Saturday, and ADR-012's Sun-Thu policy then correctly refuses the booking —
+    which looked like a broken calendar integration rather than a stale fixture.
+    Walking forward from the real "today" to the next Sun-Thu day keeps the slot
+    valid on every day the suite is run, the same fix already applied to the sibling
+    fixture in `tests/unit/test_owner_calendar.py::_next_workday` (commit 094c052).
+    """
+    local_now = datetime.now(UTC).astimezone(IL)
+    candidate = (local_now + timedelta(days=min_days_ahead)).replace(
+        hour=hour, minute=minute, second=0, microsecond=0
+    )
+    while not is_workday_local(candidate):
+        candidate += timedelta(days=1)
+    return TimeSlot(
+        start=candidate.astimezone(UTC),
+        end=(candidate + timedelta(minutes=30)).astimezone(UTC),
     )
 
 
@@ -1278,6 +1305,9 @@ async def test_inbound_e2e_booking_one_reply(monkeypatch) -> None:
 
 
 def test_website_e2e_booking() -> None:
+    # This is the one test in this file that drives the live HTTP endpoint without
+    # freezing the clock (see `_next_real_business_slot`), so the seeded slot must be
+    # computed from the real clock rather than a fixed offset from FIXED_NOW.
     init_db()
     db = get_session_factory()()
     try:
@@ -1285,7 +1315,7 @@ def test_website_e2e_booking() -> None:
         session_id = "web_book_e2e_1"
         _, lead_id = store.open_channel_lead(channel=Channel.WEBSITE, external_id=session_id)
         store.save_sales(_ready_state(lead_id))
-        slot = _slot(5, 15)
+        slot = _next_real_business_slot(min_days_ahead=5, hour=15)
         _seed_offered(store, lead_id, [slot])
         db.commit()
         fake_cal = FakeCalendarPort([slot])
