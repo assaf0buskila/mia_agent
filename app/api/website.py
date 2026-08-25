@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from pathlib import Path
 from time import perf_counter
 from urllib.parse import quote
@@ -17,6 +18,9 @@ from app.api.deps import (
     get_sheets_port,
     get_transcription_port,
 )
+from app.brain.context import assemble_visitor_context, render_visitor_knowledge_block
+from app.brain.embeddings import build_embedding_port
+from app.brain.store import BrainStore
 from app.channels.website import message_to_client_state
 from app.core.config import Settings, get_settings
 from app.core.demo import SYNTHETIC_ATTRIBUTION, demo_mode_active
@@ -321,6 +325,27 @@ def process_website_session(
     return SessionOut(session_id=session_id, lead_id=lead_id, customer_id=customer_id)
 
 
+def _website_knowledge_lookup(
+    store: LeadStore, settings: Settings
+) -> Callable[[str], tuple[str, ...]]:
+    """Knowledge-only lookup for the visitor's latest message (see `app.brain.context`).
+
+    Shares the same SQLAlchemy session as `store` rather than opening a second one.
+    `assemble_visitor_context` never touches owner memory (hard safety invariant); any
+    failure here is the caller's problem to swallow, not this function's.
+    """
+    brain_store = BrainStore(store.session)
+    embedding_port = build_embedding_port(settings)
+
+    def lookup(query: str) -> tuple[str, ...]:
+        context = assemble_visitor_context(
+            brain_store, query=query, embedding_port=embedding_port
+        )
+        return render_visitor_knowledge_block(context)
+
+    return lookup
+
+
 def process_website_message(
     store: LeadStore,
     *,
@@ -393,6 +418,7 @@ def process_website_message(
         store,
         reply_port=build_sales_reply_port(settings),
         settings=settings,
+        knowledge_lookup=_website_knowledge_lookup(store, settings),
     )
     started = perf_counter()
     result = graph.invoke(
@@ -405,6 +431,7 @@ def process_website_message(
             page_path=page_path,
             page_section=page_section,
             inbound_id=provider_event_id,
+            meeting_first=settings.website_meeting_first,
         )
     )
     persist_ai_run(

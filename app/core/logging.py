@@ -82,17 +82,31 @@ def log_owner_agent(
     task_type: str = "",
     tools_used: tuple[str, ...] = (),
     reason: str = "",
+    steps: int = 0,
+    tools_failed: tuple[str, ...] = (),
+    completion: str = "",
 ) -> None:
     """One line per owner turn: did the agent answer, and if not, why.
 
-    Never includes message text. `reason` carries provider error codes only, which is what
-    makes a misconfigured model id diagnosable from the logs instead of by inference.
+    `steps` and `completion` are new (Task 3, ADR-031 follow-up): before this, a run that
+    silently burned its whole step budget or spiralled on a broken integration looked
+    identical in the logs to a clean one-shot answer. `tools_failed` surfaces a tool that
+    returned `ok=False` inside an otherwise-successful turn -- previously invisible, since
+    only the successful tool names (`tools_used`) were ever logged.
+
+    Never includes message text, tool arguments, or model output. `reason` carries provider
+    error codes only, which is what makes a misconfigured model id diagnosable from the
+    logs instead of by inference.
     """
     _AGENT_LOG.info(
-        "owner_agent used=%s model=%s task=%s tools=%s reason=%s",
+        "owner_agent used=%s model=%s task=%s steps=%s tools=%s failed=%s completion=%s "
+        "reason=%s",
         used_agent,
         model or "-",
         task_type or "-",
+        steps or 0,
         ",".join(tools_used) or "-",
+        ",".join(tools_failed) or "-",
+        completion or "-",
         reason or "-",
     )

@@ -1,13 +1,22 @@
-"""Google Calendar free/busy read port.
+"""Google Calendar free/busy read port, plus a read-only event agenda listing.
 
 Production adapter: Composio `GOOGLECALENDAR` toolkit version `20260812_00`,
 pin `GOOGLECALENDAR_FIND_FREE_SLOTS` only when `MIA_COMPOSIO_API_KEY` and
 `MIA_COMPOSIO_USER_ID` are set. Never create/update/delete events this slice.
+
+`CalendarAgendaPort` (added for the owner "what's on my calendar" read) reuses the
+same `GOOGLECALENDAR_EVENTS_LIST` pin that `app.integrations.calendar_booking`
+already uses for booking lookups — same toolkit version, same tool slug, no new
+Composio surface (ADR-007 / ADR-015: pin production tool schemas, no drift). The
+slug is re-declared locally rather than imported from `calendar_booking` because
+that module imports `COMPOSIO_GOOGLECALENDAR_VERSION` from here; importing back
+would be circular.
 """
 
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from time import perf_counter
 from typing import Any, Protocol
@@ -31,9 +40,17 @@ _COMPOSIO_EXECUTE_URL = (
     f"https://backend.composio.dev/api/v3.1/tools/execute/{COMPOSIO_FIND_FREE_SLOTS_TOOL}"
 )
 
+# Same Composio slug as calendar_booking.COMPOSIO_EVENTS_LIST_TOOL (see module
+# docstring for why it is re-declared here instead of imported).
+COMPOSIO_AGENDA_EVENTS_LIST_TOOL = "GOOGLECALENDAR_EVENTS_LIST"
+_AGENDA_EVENTS_LIST_URL = (
+    f"https://backend.composio.dev/api/v3.1/tools/execute/{COMPOSIO_AGENDA_EVENTS_LIST_TOOL}"
+)
+
 DEFAULT_MEETING_MINUTES = 30
 DEFAULT_SEARCH_DAYS = 7
 _FREE_LIST_KEYS = ("free_slots", "freeSlots", "free")
+_MAX_AGENDA_EVENTS = 20
 
 
 class TimeSlot(BaseModel):
@@ -514,3 +531,261 @@ def build_calendar_port(settings: Settings) -> CalendarPort:
     if api_key and user_id:
         return ComposioCalendarPort(api_key=api_key, user_id=user_id)
     return DisabledCalendarPort()
+
+
+# --- Read-only agenda listing (owner "what's on my calendar" reads) -----------------
+#
+# Separate from CalendarPort above: FIND_FREE_SLOTS answers "when am I free", this
+# answers "what do I have" — the owner cannot ask "מה יש לי מחר?" through a
+# free-slots-only port. Additive only; CalendarPort/ComposioCalendarPort/
+# FakeCalendarPort/build_calendar_port above are untouched.
+
+
+@dataclass(frozen=True)
+class CalendarEvent:
+    event_id: str
+    summary: str
+    start: datetime
+    end: datetime
+    all_day: bool = False
+    location: str = ""
+    attendees: tuple[str, ...] = ()
+
+
+class CalendarAgendaPort(Protocol):
+    def list_events(
+        self, *, start: datetime, end: datetime, limit: int = 20
+    ) -> list[CalendarEvent]: ...
+
+
+class ComposioCalendarAgendaPort:
+    """Live Composio adapter over GOOGLECALENDAR_EVENTS_LIST. Read-only: lists events
+    in [start, end); never creates, patches, or deletes. Raises AdapterHttpError on
+    HTTP/transport failure; a malformed or partial event in the payload is skipped,
+    never raised.
+    """
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        user_id: str,
+        client: httpx.Client | None = None,
+    ) -> None:
+        self._api_key = api_key
+        self._user_id = user_id
+        self._client = client
+
+    def list_events(
+        self, *, start: datetime, end: datetime, limit: int = 20
+    ) -> list[CalendarEvent]:
+        window_start = _ensure_aware(start)
+        window_end = _ensure_aware(end)
+        cap = _cap_agenda_limit(limit)
+        payload = {
+            "user_id": self._user_id,
+            "version": COMPOSIO_GOOGLECALENDAR_VERSION,
+            "arguments": {
+                "calendarId": "primary",
+                "timeMin": window_start.isoformat(),
+                "timeMax": window_end.isoformat(),
+                "singleEvents": True,
+                "orderBy": "startTime",
+                "maxResults": cap,
+                "showDeleted": False,
+            },
+        }
+        headers = {
+            "x-api-key": self._api_key,
+            "Content-Type": "application/json",
+        }
+        try:
+            if self._client is not None:
+                response = self._client.post(
+                    _AGENDA_EVENTS_LIST_URL,
+                    json=payload,
+                    headers=headers,
+                )
+            else:
+                with httpx.Client(timeout=20.0) as client:
+                    response = client.post(
+                        _AGENDA_EVENTS_LIST_URL,
+                        json=payload,
+                        headers=headers,
+                    )
+        except httpx.HTTPError as exc:
+            raise AdapterHttpError(None) from exc
+        if response.status_code >= 400:
+            raise AdapterHttpError(response.status_code)
+        try:
+            body = response.json()
+            if not isinstance(body, dict) or body.get("successful") is not True:
+                return []
+            return _parse_agenda_events(body, limit=cap)
+        except (
+            ValueError,
+            KeyError,
+            TypeError,
+            AttributeError,
+            IndexError,
+        ):
+            return []
+
+
+class FakeCalendarAgendaPort:
+    """Test double for read-only agenda listing. Filters/sorts configured events
+    in our code (real Composio responses are already ordered by startTime).
+    """
+
+    def __init__(self, events: list[CalendarEvent] | None = None) -> None:
+        self._events = list(events or [])
+
+    def list_events(
+        self, *, start: datetime, end: datetime, limit: int = 20
+    ) -> list[CalendarEvent]:
+        window_start = _ensure_aware(start)
+        window_end = _ensure_aware(end)
+        matches = [
+            event
+            for event in self._events
+            if _ensure_aware(event.start) < window_end
+            and _ensure_aware(event.end) > window_start
+        ]
+        matches.sort(key=lambda event: _ensure_aware(event.start))
+        return matches[: _cap_agenda_limit(limit)]
+
+
+def build_calendar_agenda_port(settings: Settings) -> CalendarAgendaPort | None:
+    """Mirrors build_calendar_port's credential check; returns None (not a Disabled
+    port) so callers can tell "not configured" apart from "configured, came back
+    empty" without adding a new settings field.
+    """
+    api_key = settings.composio_api_key.strip()
+    user_id = settings.composio_user_id.strip()
+    if api_key and user_id:
+        return ComposioCalendarAgendaPort(api_key=api_key, user_id=user_id)
+    return None
+
+
+def _cap_agenda_limit(limit: int) -> int:
+    return max(1, min(int(limit or _MAX_AGENDA_EVENTS), _MAX_AGENDA_EVENTS))
+
+
+def _unwrap_agenda_response_data(body: dict[str, Any]) -> Any:
+    """Same envelope-unwrapping as calendar_booking._unwrap_response_data for this
+    same tool (GOOGLECALENDAR_EVENTS_LIST): `data` is sometimes a JSON string, and
+    sometimes wraps the real payload one level deeper under `response_data`.
+    Duplicated locally to avoid the circular import described in the module
+    docstring.
+    """
+    data = body.get("data")
+    if isinstance(data, str):
+        try:
+            data = json.loads(data)
+        except json.JSONDecodeError:
+            return None
+    if isinstance(data, dict):
+        nested = data.get("response_data")
+        if nested is not None:
+            if isinstance(nested, str):
+                try:
+                    return json.loads(nested)
+                except json.JSONDecodeError:
+                    return None
+            return nested
+    return data
+
+
+def _parse_agenda_events(body: dict[str, Any], *, limit: int) -> list[CalendarEvent]:
+    data = _unwrap_agenda_response_data(body)
+    if not isinstance(data, dict):
+        return []
+    items = data.get("items")
+    if not isinstance(items, list):
+        return []
+    events: list[CalendarEvent] = []
+    for item in items:
+        event = _parse_agenda_event(item)
+        if event is None:
+            continue
+        events.append(event)
+        if len(events) >= limit:
+            break
+    return events
+
+
+def _parse_agenda_event(item: Any) -> CalendarEvent | None:
+    if not isinstance(item, dict):
+        return None
+    if item.get("status") == "cancelled":
+        return None
+    raw_id = item.get("id")
+    if not isinstance(raw_id, str) or not raw_id.strip():
+        return None
+
+    start_raw = item.get("start")
+    end_raw = item.get("end")
+    if not isinstance(start_raw, dict) or not isinstance(end_raw, dict):
+        return None
+
+    all_day = "dateTime" not in start_raw and "date" in start_raw
+    try:
+        if all_day:
+            start = _parse_agenda_date(start_raw.get("date"))
+            end = _parse_agenda_date(end_raw.get("date"))
+        else:
+            start = _parse_agenda_datetime(start_raw.get("dateTime"))
+            end = _parse_agenda_datetime(end_raw.get("dateTime"))
+    except (ValueError, TypeError, OverflowError, OSError):
+        return None
+    if start is None or end is None:
+        return None
+
+    summary_raw = item.get("summary")
+    summary = summary_raw.strip() if isinstance(summary_raw, str) else ""
+    location_raw = item.get("location")
+    location = location_raw.strip() if isinstance(location_raw, str) else ""
+
+    return CalendarEvent(
+        event_id=raw_id.strip(),
+        summary=summary,
+        start=start,
+        end=end,
+        all_day=all_day,
+        location=location,
+        attendees=_parse_agenda_attendees(item.get("attendees")),
+    )
+
+
+def _parse_agenda_datetime(raw: object) -> datetime | None:
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return _ensure_aware(parsed)
+
+
+def _parse_agenda_date(raw: object) -> datetime | None:
+    """All-day events carry a bare `YYYY-MM-DD`; represent it as UTC midnight."""
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        day = datetime.strptime(raw.strip(), "%Y-%m-%d")
+    except ValueError:
+        return None
+    return day.replace(tzinfo=UTC)
+
+
+def _parse_agenda_attendees(raw: object) -> tuple[str, ...]:
+    if not isinstance(raw, list):
+        return ()
+    emails: list[str] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        email = entry.get("email")
+        if isinstance(email, str) and email.strip():
+            emails.append(email.strip())
+    return tuple(emails)

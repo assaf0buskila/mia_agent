@@ -45,6 +45,9 @@ class Settings(BaseSettings):
 
     website_url: str = Field(default="https://www.assafweb.com")
     website_inactivity_minutes: int = Field(default=30)
+    # ADR-028: the booked meeting is the website's default exit; WhatsApp is the
+    # fallback. Shipping ON — the flag exists so it is reversible without a deploy.
+    website_meeting_first: bool = Field(default=True)
     public_base_url: str = Field(default="http://127.0.0.1:8000")
     cors_origins: str = Field(
         default=(
@@ -80,7 +83,7 @@ class Settings(BaseSettings):
     # model drops Telegram back to the keyword classifier even though Gemini is connected
     # and already serving website sales.
     owner_agent_gemini_model: str = Field(default="")
-    owner_agent_max_steps: int = Field(default=4)
+    owner_agent_max_steps: int = Field(default=8)
     extraction_model: str = Field(default="")
     embedding_provider: str = Field(default="openai")
     embedding_model: str = Field(default="")

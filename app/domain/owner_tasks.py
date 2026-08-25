@@ -6,6 +6,7 @@ from enum import StrEnum
 from pydantic import BaseModel, Field
 
 from app.domain.approvals import CAMPAIGN_ID_RE, LEAD_ID_RE
+from app.domain.gmail_drafts import parse_gmail_send_intent
 from app.domain.gmail_summaries import THREAD_ID_RE
 from app.domain.learning import InstructionKind, classify_instruction_kind
 
@@ -42,6 +43,15 @@ _GMAIL_SUMMARY_PHRASES: tuple[str, ...] = (
     "סיכום מייל",
     "סיכום שרשור",
     "סיכום האימייל",
+)
+
+_GMAIL_DRAFT_PHRASES: tuple[str, ...] = (
+    "send email to",
+    "draft email",
+    "שלח מייל ל",
+    "תשלחי מייל",
+    "כתבי מייל ל",
+    "טיוטת מייל",
 )
 
 _SEO_PHRASES: tuple[str, ...] = (
@@ -310,6 +320,7 @@ _TYPE_LABELS_HE: dict[str, str] = {
     "lead_review": "סקירת ליד",
     "content_idea": "רעיונות לתוכן",
     "gmail_summary": "סיכום מייל",
+    "gmail_draft": "טיוטת מייל",
     "seo": "קידום אתר",
     "calendar": "יומן",
     "owner_notify": "התראות פגישות",
@@ -342,6 +353,7 @@ class OwnerTaskType(StrEnum):
     LEAD_REVIEW = "lead_review"
     CONTENT_IDEA = "content_idea"
     GMAIL_SUMMARY = "gmail_summary"
+    GMAIL_DRAFT = "gmail_draft"
     SEO = "seo"
     CALENDAR = "calendar"
     OWNER_NOTIFY = "owner_notify"
@@ -423,6 +435,13 @@ def _matches_gmail_summary(text: str) -> bool:
     return any(
         _gmail_summary_phrase_in_text(text, phrase)
         for phrase in _GMAIL_SUMMARY_PHRASES
+    )
+
+
+def _matches_gmail_draft(text: str) -> bool:
+    return any(
+        _gmail_summary_phrase_in_text(text, phrase)
+        for phrase in _GMAIL_DRAFT_PHRASES
     )
 
 
@@ -612,6 +631,22 @@ def _dedicated_matches(text: str) -> list[OwnerTaskDecision]:
                 matched_types=["content_idea"],
             )
         )
+    if _matches_gmail_draft(text):
+        matches.append(
+            OwnerTaskDecision(
+                task_type=OwnerTaskType.GMAIL_DRAFT,
+                needs_clarification=False,
+                matched_types=["gmail_draft"],
+            )
+        )
+    if parse_gmail_send_intent(text) is not None:
+        matches.append(
+            OwnerTaskDecision(
+                task_type=OwnerTaskType.APPROVAL,
+                needs_clarification=False,
+                matched_types=["approval"],
+            )
+        )
     if _matches_gmail_summary(text):
         matches.append(
             OwnerTaskDecision(
@@ -770,42 +805,76 @@ def classify_owner_task(text: str) -> OwnerTaskDecision:
     )
 
 
-_STATUS_PHRASES: tuple[str, ...] = (
-    "status",
-    "what's up",
-    "whats up",
-    "מה המצב",
-    "מה קורה",
-    "מה נשמע",
-    "עדכון",
+_STATUS_EXACT: frozenset[str] = frozenset(
+    {
+        "status",
+        "what's up",
+        "whats up",
+        "מה המצב",
+        "מה קורה",
+        "מה נשמע",
+        "עדכון",
+        "מה המצב מיה",
+        "מה קורה מיה",
+        "מה נשמע מיה",
+    }
 )
 
-_MAX_CHATTER_WORDS = 3
+_GREETING_EXACT: frozenset[str] = frozenset(
+    {
+        "היי",
+        "היי מיה",
+        "שלום",
+        "שלום מיה",
+        "hello",
+        "hello mia",
+        "hi",
+        "hi mia",
+        "hey",
+        "hey mia",
+        "yo",
+        "בוקר טוב",
+        "ערב טוב",
+        "צהריים טובים",
+        "תודה",
+        "thanks",
+        "thank you",
+        "ok",
+        "okay",
+        "אוקיי",
+        "סבבה",
+        "יופי",
+        "hmm",
+        "המ",
+    }
+)
+
+
+def _normalize_owner_ping(text: str) -> str:
+    return re.sub(r"[?!.,]+", "", text.strip()).strip().lower()
 
 
 def _looks_like_chatter(text: str) -> bool:
-    """A greeting or a bare status ping. Anything longer is a real request.
+    """True only for a greeting, ack, or status ping.
 
-    Promoting every unmatched sentence to the digest is what made six different
-    owner instructions come back with one identical answer.
+    Word-count chatter was a bug: `תבדקי את המייל` and `check my inbox` are
+    three words and a real request. Those must reach the owner agent.
     """
     stripped = text.strip()
     if not stripped:
         return True
-    lowered = stripped.lower()
-    if any(phrase in lowered for phrase in _STATUS_PHRASES):
-        return True
-    return len(stripped.split()) <= _MAX_CHATTER_WORDS
+    compact = _normalize_owner_ping(stripped)
+    return compact in _STATUS_EXACT or compact in _GREETING_EXACT
 
 
 def promote_unclassified_text_to_status(
     decision: OwnerTaskDecision, *, inbound_source: str | None, text: str | None = None
 ) -> OwnerTaskDecision:
-    """Greetings become a digest. Long unmatched sentences become a snapshot.
+    """Greetings become a short hello. Unmatched requests stay a NOTE.
 
-    Transcribed audio with text is promoted the same way as typed text. Empty or
-    failed audio stays on the Understanding Check so it never dumps a command menu
-    and never executes a write.
+    The agent answers real requests in any phrasing. Snapshot/funnel/engine only
+    fire on an explicit brief. Empty or failed audio stays on the Understanding
+    Check so it never dumps a command menu and never executes a write.
     """
     stripped = (text or "").strip()
     if inbound_source == "audio" and not stripped:
@@ -821,11 +890,7 @@ def promote_unclassified_text_to_status(
                 needs_clarification=False,
                 matched_types=["owner_status"],
             )
-        return OwnerTaskDecision(
-            task_type=OwnerTaskType.OPERATOR_SNAPSHOT,
-            needs_clarification=False,
-            matched_types=["operator_snapshot"],
-        )
+        return decision
     return decision
 
 
@@ -854,6 +919,11 @@ def ack_for_owner_task(
             return (
                 "מה שהבנתי: סיכום מייל. אני לא מבצעת כלום. "
                 "מה מזהה השרשור או הליד?"
+            )
+        if decision.task_type == OwnerTaskType.GMAIL_DRAFT:
+            return (
+                "מה שהבנתי: טיוטת מייל. אני לא שולחת בלי אישור. "
+                "מה המייל, הנושא והתוכן?"
             )
         if decision.task_type == OwnerTaskType.MEETING_BRIEF:
             return (
@@ -900,10 +970,7 @@ def ack_for_owner_task(
             "אני לא מבצעת כלום. תכתוב מה המשימה."
         )
     if decision.task_type == OwnerTaskType.OWNER_STATUS:
-        return (
-            "אני כאן. זו קונסולת הבעלים — לא שיחת מכירות. "
-            "אפשר לבקש: סיכום יומי, לידים חמים, מועדים פנויים, מה נקבע."
-        )
+        return "היי אסף, אני כאן."
     # Placeholders. The inbound handler replaces these with the real read so the
     # answer is data, not a promise to look it up.
     if decision.task_type == OwnerTaskType.OPERATOR_SNAPSHOT:

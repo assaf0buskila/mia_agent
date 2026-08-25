@@ -35,8 +35,10 @@ from sqlalchemy import func, select
 
 PROSPECT_PHONE = "972509994901"
 VISITOR_TEXT = "hi"
+# Bumped with PROMPT_VERSION sales_reply_v8 (ADR-028): the reply shape became
+# answer-then-ask and the prompt gained the PUBLISHED FACTS contract.
 _FROZEN_SYSTEM_PROMPT_SHA256 = (
-    "c83365aac3e47376e217449ef0fb9443d12eab69361ed5254b9319fd4580c341"
+    "096e652c707b036f458ba7c7bdf86c39872725d90f48f2d427c8fe2e1588685b"
 )
 
 def _all_ai_run_values(row: AiRunRow) -> str:
@@ -352,7 +354,7 @@ def test_persist_ai_run_writes_prompt_version() -> None:
         row = store.get_ai_run("run_prompt_ver_1")
         assert row is not None
         assert row.prompt_version == PROMPT_VERSION
-        assert row.prompt_version == "sales_reply_v7"
+        assert row.prompt_version == "sales_reply_v8"
     finally:
         db.close()
 
@@ -441,7 +443,7 @@ def test_sanitize_prompt_version(value: str, expected: str) -> None:
 
 
 def test_prompt_version_constant_from_sales_reply() -> None:
-    assert PROMPT_VERSION == SALES_REPLY_PROMPT_VERSION == "sales_reply_v7"
+    assert PROMPT_VERSION == SALES_REPLY_PROMPT_VERSION == "sales_reply_v8"
 
 
 def test_sales_reply_system_prompt_frozen_hash() -> None:

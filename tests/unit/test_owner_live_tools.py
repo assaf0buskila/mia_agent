@@ -14,6 +14,10 @@ from app.tools.registries.owner_tools import (
 
 _LIVE_READS = (
     "gmail_summary",
+    "gmail_inbox",
+    "gmail_search",
+    "gmail_read",
+    "find_leads",
     "seo_snapshot",
     "linkedin_snapshot",
     "instagram_insights",
@@ -61,6 +65,9 @@ def test_disconnected_live_reads_do_not_raise() -> None:
             assert "Not connected" in result.text
         gmail = execute_tool("gmail_summary", {"query": "what's in my inbox"}, ctx)
         assert gmail.ok is True
+        inbox = execute_tool("gmail_inbox", {}, ctx)
+        assert inbox.ok is True
+        assert "Not connected" in inbox.text
         research = execute_tool("research_search", {"query": "assafweb.com"}, ctx)
         assert research.ok is True
         assert "Not connected" in research.text

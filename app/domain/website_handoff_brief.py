@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from app.core.config import Settings
 from app.core.errors import PolicyDenied
 from app.core.risk import RiskAction, RiskLevel, assert_allowed
-from app.domain.hot_handoff import _notify_telegram
+from app.domain.hot_handoff import notify_owners
 from app.domain.lead_label import lead_display
 from app.domain.memory import ROLE_MIA, ConversationTurn, counterpart_turns
 from app.domain.sales import PainLevel, SalesState
@@ -164,7 +164,7 @@ def format_website_whatsapp_brief(
     """
     paste = _recommended_first_line(sales=sales, turns=turns)
     headline = (sales.headline or "").strip()
-    who = lead_display(lead_id, headline)
+    who = lead_display(lead_id, headline, sales.display_name)
     blocks = [
         f"{bold('ליד מהאתר → וואטסאפ')}",
         esc(who),
@@ -217,5 +217,5 @@ def apply_website_whatsapp_handoff_brief(
         lead_id=lead_id,
         scheduled_at=now_iso,
     )
-    _notify_telegram(brief=brief, inbound_id=session_id, settings=settings)
+    notify_owners(brief=brief, inbound_id=session_id, settings=settings)
     return brief

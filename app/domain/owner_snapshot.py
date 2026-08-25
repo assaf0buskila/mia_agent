@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from app.domain.engine_health import compute_engine_health, format_engine_health
+from app.domain.funnel import compute_website_funnel, format_website_funnel
 from app.domain.hot_handoff import format_hot_leads_ack
 from app.domain.owner_briefs import compute_daily_brief
 from app.domain.owner_notify import (
@@ -13,7 +15,6 @@ from app.domain.owner_notify import (
 from app.domain.owner_reads import (
     format_pending_approvals_ack,
     format_website_conversations_ack,
-    format_website_headline,
 )
 from app.domain.owner_weeklies import compute_weekly_brief
 
@@ -80,9 +81,12 @@ def format_operator_snapshot_ack(
         daily = _daily_counts_line(store, timezone=timezone)
         if daily is not None:
             blocks.append(daily)
-        headline = format_website_headline(store)
-        if headline:
-            blocks.append(headline)
+        funnel = compute_website_funnel(store, timezone=timezone)
+        if funnel is not None and funnel.has_signal():
+            blocks.append(format_website_funnel(funnel))
+        engine = compute_engine_health(store, timezone=timezone)
+        if engine is not None and engine.total_runs:
+            blocks.append(format_engine_health(engine))
     if "weekly_brief" in sections:
         weekly = _weekly_counts_line(store, timezone=timezone)
         if weekly is not None:

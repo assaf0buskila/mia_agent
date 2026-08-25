@@ -37,8 +37,13 @@ def format_pending_approvals_ack(store: LeadStore, *, limit: int = _MAX_LISTED) 
     return "\n".join(lines)
 
 
-def _discovery_depth(sales: SalesState) -> int:
-    """How far one conversation actually got. Used only to rank, never to sell."""
+def discovery_depth(sales: SalesState) -> int:
+    """How far one conversation actually got. Used to rank and to gate 'engaged'.
+
+    The single shared definition: owner reads (this module) and the website
+    conversion funnel (`app/domain/funnel.py`) both call this instead of forking
+    their own scoring. Never used to sell or gate a reply, only to report.
+    """
     depth = 0
     if sales.workflow_known:
         depth += 1
@@ -53,9 +58,14 @@ def _discovery_depth(sales: SalesState) -> int:
     return depth
 
 
+# Thin backward-compat alias: keep the old private name importable in case any
+# other code still reaches for it.
+_discovery_depth = discovery_depth
+
+
 def _lead_line(sales: SalesState) -> str:
     # Lead with who they are. The state flags are the detail, not the identity.
-    parts = [lead_display(sales.lead_id, sales.headline)]
+    parts = [lead_display(sales.lead_id, sales.headline, sales.display_name)]
     if sales.workflow_known:
         parts.append("workflow")
     if manual_step_established(sales):
@@ -76,26 +86,6 @@ def _ranked_snapshots(snapshots: list[SalesState]) -> list[SalesState]:
         snapshots,
         key=lambda item: (_discovery_depth(item), int(item.pain_level)),
         reverse=True,
-    )
-
-
-def format_website_headline(store: LeadStore) -> str | None:
-    """One line for the daily brief: what the website conversations produced.
-
-    Deliberately lead-id free. The brief is a scorecard, and naming a specific
-    conversation is the drill-down's job. Returns None when there is nothing to
-    say, so a day with no website traffic does not grow a line of zeros.
-    """
-    snapshots = store.list_sales_snapshots()
-    if not snapshots:
-        return None
-    total = store.count_sales_snapshots()
-    engaged = [item for item in snapshots if _discovery_depth(item) >= 2]
-    offered = [item for item in snapshots if item.whatsapp_handoff_offered]
-    return (
-        f"באתר: {total} שיחות · "
-        f"discovery משמעותי {len(engaged)} · "
-        f"הוצע וואטסאפ {len(offered)}"
     )
 
 

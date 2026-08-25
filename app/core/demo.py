@@ -15,8 +15,11 @@ SYNTHETIC_ATTRIBUTION: dict[str, str] = {
 SCRIPTED_MESSAGES: tuple[tuple[str, str], ...] = (
     ("We run a clinic and miss calls all day.", "deepen_pain"),
     ("we call everyone back by hand from a list", "reflect"),
-    ("about two hours every day", "offer_whatsapp"),
-    ("I decide this quarter", "offer_hypothesis"),
+    # ADR-028: the continuation gate offers the booked meeting first (the website's
+    # default exit); WhatsApp is offered on the next continuation-ready turn once the
+    # meeting was offered and not taken.
+    ("about two hours every day", "offer_meeting"),
+    ("I decide this quarter", "offer_whatsapp"),
     ("let's book a meeting", "offer_meeting"),
 )
 

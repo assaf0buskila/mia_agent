@@ -18,7 +18,13 @@ from app.core.demo import demo_mode_active
 from app.core.logging import log_comm, log_owner_agent
 from app.core.outbound import send_inbound_reply
 from app.db.store import LeadStore
-from app.domain.approvals import ack_for_approval_result, apply_owner_approval_decision
+from app.domain.approvals import (
+    DECISION_APPROVED,
+    DECISION_REJECTED,
+    OwnerApprovalResult,
+    ack_for_approval_result,
+    apply_owner_approval_decision,
+)
 from app.domain.briefs import apply_owner_meeting_brief
 from app.domain.commitments import TRIGGER_SPEND_THRESHOLD, parse_due_at, plan_owner_commitment
 from app.domain.content_ideas import apply_owner_content_ideas
@@ -35,6 +41,11 @@ from app.domain.events import (
     webhook_envelope_kind,
 )
 from app.domain.feedback import persist_owner_correction
+from app.domain.gmail_drafts import (
+    apply_gmail_send_decision,
+    apply_owner_gmail_draft,
+    execute_approved_gmail_send,
+)
 from app.domain.gmail_summaries import apply_owner_gmail_summary
 from app.domain.handoff import inbound_text_without_token
 from app.domain.hot_handoff import format_hot_leads_ack
@@ -55,7 +66,6 @@ from app.domain.owner_reads import (
     top_website_lead_id,
 )
 from app.domain.owner_snapshot import format_operator_snapshot_ack
-from app.domain.owner_status import format_owner_status_ack
 from app.domain.owner_tasks import (
     OwnerTaskType,
     ack_for_owner_task,
@@ -74,8 +84,14 @@ from app.domain.seo import enrich_seo_ack
 from app.domain.takeover import apply_owner_human_resume, apply_owner_human_takeover
 from app.domain.tools import ToolOutcome
 from app.integrations.base import MessagePort
-from app.integrations.calendar import CalendarPort, build_calendar_port
+from app.integrations.calendar import (
+    CalendarAgendaPort,
+    CalendarPort,
+    build_calendar_agenda_port,
+    build_calendar_port,
+)
 from app.integrations.ga4 import Ga4Port, build_ga4_port
+from app.integrations.gmail import GmailPort, build_gmail_port
 from app.integrations.instagram_insights import (
     InstagramInsightsPort,
     build_instagram_insights_port,
@@ -113,6 +129,8 @@ async def process_owner_item(
     owner_ids: set[str],
     settings: Settings,
     calendar_port: CalendarPort,
+    calendar_agenda_port: CalendarAgendaPort | None,
+    gmail_port: GmailPort,
     sheets_port: SheetsPort,
     meta_ads_port: MetaAdsPort,
     instagram_insights_port: InstagramInsightsPort,
@@ -212,6 +230,7 @@ async def process_owner_item(
             OwnerTaskType.LEAD_REVIEW,
             OwnerTaskType.CONTENT_IDEA,
             OwnerTaskType.GMAIL_SUMMARY,
+            OwnerTaskType.GMAIL_DRAFT,
             OwnerTaskType.SEO,
             OwnerTaskType.CALENDAR,
             OwnerTaskType.OWNER_NOTIFY,
@@ -246,6 +265,8 @@ async def process_owner_item(
     if decision.task_type == OwnerTaskType.CONTENT_IDEA:
         persist_due_at = None
     if decision.task_type == OwnerTaskType.GMAIL_SUMMARY:
+        persist_due_at = None
+    if decision.task_type == OwnerTaskType.GMAIL_DRAFT:
         persist_due_at = None
     if decision.task_type == OwnerTaskType.SEO:
         persist_due_at = None
@@ -332,14 +353,58 @@ async def process_owner_item(
         decision.task_type == OwnerTaskType.APPROVAL
         and not decision.needs_clarification
     ):
-        result = apply_owner_approval_decision(
+        gmail_intent, gmail_draft_id = apply_gmail_send_decision(
             store,
             text=owner_text,
-            channel=channel,
             kill_switch=kill_switch,
         )
-        if result.status != "skipped":
-            ack_text = ack_for_approval_result(result)
+        if gmail_intent == "ambiguous":
+            ack_text = (
+                "יש כמה טיוטות ממתינות. אני לא מאשרת בלי שתגיד איזו. "
+                "לא ביצעתי כלום."
+            )
+        elif gmail_intent is not None and not gmail_draft_id:
+            ack_text = "אין טיוטת מייל ממתינה. לא שלחתי כלום."
+        elif gmail_intent is not None:
+            mapped_status = {
+                DECISION_APPROVED: "decided",
+                DECISION_REJECTED: "decided",
+                "already_decided": "already_decided",
+                "skipped": "skipped",
+                "none": "none",
+            }.get(gmail_intent, "none")
+            result = OwnerApprovalResult(
+                status=mapped_status,  # type: ignore[arg-type]
+                decision=(
+                    gmail_intent
+                    if gmail_intent in (DECISION_APPROVED, DECISION_REJECTED)
+                    else None
+                ),
+                gmail_draft_id=gmail_draft_id or None,
+            )
+            if result.status != "skipped":
+                ack_text = ack_for_approval_result(result)
+            if (
+                gmail_intent == DECISION_APPROVED
+                and gmail_draft_id
+            ):
+                ack_text = execute_approved_gmail_send(
+                    store=store,
+                    settings=settings,
+                    port=gmail_port,
+                    draft_id=gmail_draft_id,
+                    kill_switch=kill_switch,
+                    demo_active=demo_mode_active(settings),
+                )
+        else:
+            result = apply_owner_approval_decision(
+                store,
+                text=owner_text,
+                channel=channel,
+                kill_switch=kill_switch,
+            )
+            if result.status != "skipped":
+                ack_text = ack_for_approval_result(result)
     if (
         decision.task_type == OwnerTaskType.MEETING_DEBRIEF
         and not decision.needs_clarification
@@ -414,6 +479,18 @@ async def process_owner_item(
         )
         if gmail_ack is not None:
             ack_text = gmail_ack
+    if (
+        decision.task_type == OwnerTaskType.GMAIL_DRAFT
+        and not decision.needs_clarification
+    ):
+        ack_text = apply_owner_gmail_draft(
+            store,
+            text=routed_text,
+            channel=channel,
+            port=gmail_port,
+            kill_switch=kill_switch,
+            demo_active=demo_mode_active(settings),
+        )
     if (
         decision.task_type == OwnerTaskType.CALENDAR
         and not decision.needs_clarification
@@ -512,14 +589,6 @@ async def process_owner_item(
         and not decision.needs_clarification
     ):
         ack_text = format_website_conversations_ack(store)
-    if (
-        decision.task_type == OwnerTaskType.OWNER_STATUS
-        and not decision.needs_clarification
-    ):
-        ack_text = format_owner_status_ack(
-            store,
-            timezone=settings.calendar_timezone,
-        )
     if (
         decision.task_type == OwnerTaskType.OPERATOR_SNAPSHOT
         and not decision.needs_clarification
@@ -712,6 +781,8 @@ async def process_owner_item(
             kill_switch=kill_switch,
             demo_active=demo_mode_active(settings),
             calendar=calendar_port,
+            calendar_agenda=calendar_agenda_port,
+            gmail=gmail_port,
             linkedin=linkedin_port,
             linkedin_analytics=linkedin_analytics_port,
             search_console=search_console_port,
@@ -732,13 +803,22 @@ async def process_owner_item(
         task_type=decision.task_type.value,
         tools_used=brain_result.tools_used,
         reason=brain_result.fallback_reason,
+        steps=brain_result.steps,
+        tools_failed=brain_result.tools_failed,
+        completion=brain_result.completion,
     )
     if brain_result.used_agent:
         ack_text = brain_result.text
     else:
+        # `brain_result.text` is `ack_text` unchanged on every early-exit path
+        # (kill switch, deterministic intent, no model configured) -- `answer_owner`
+        # only ever substitutes it for a NOTE turn the agent was allowed to run but
+        # failed, replacing the "couldn't classify this" canned line with an honest
+        # one. Composing from it here (instead of the original `ack_text`) is what
+        # makes that substitution actually reach Assaf.
         phrased = owner_reply_port.compose(
             task_type=decision.task_type.value,
-            canned=ack_text,
+            canned=brain_result.text,
             owner_message=owner_text,
             history=tuple(owner_history),
             kill_switch=kill_switch,
@@ -816,6 +896,7 @@ async def process_owner_texts(
     kill_switch: bool,
     owner_ids: set[str] | None = None,
     calendar: CalendarPort | None = None,
+    calendar_agenda: CalendarAgendaPort | None = None,
     calendar_booking: Any = None,
     sheets: SheetsPort | None = None,
     meta_ads: MetaAdsPort | None = None,
@@ -827,6 +908,7 @@ async def process_owner_texts(
     ga4: Ga4Port | None = None,
     seo_audit: SeoAuditPort | None = None,
     owner_reply: OwnerReplyPort | None = None,
+    gmail: GmailPort | None = None,
 ) -> dict[str, int | bool | str | None]:
     """Owner-only inbound. Prospect WhatsApp/Instagram stay on process_inbound_texts."""
     del calendar_booking
@@ -837,6 +919,12 @@ async def process_owner_texts(
     owner_ids = owner_ids or set()
     settings = get_settings()
     calendar_port = calendar if calendar is not None else build_calendar_port(settings)
+    calendar_agenda_port = (
+        calendar_agenda
+        if calendar_agenda is not None
+        else build_calendar_agenda_port(settings)
+    )
+    gmail_port = gmail if gmail is not None else build_gmail_port(settings)
     sheets_port = sheets if sheets is not None else build_sheets_port(settings)
     meta_ads_port = meta_ads if meta_ads is not None else build_meta_ads_port(settings)
     instagram_insights_port = (
@@ -880,6 +968,8 @@ async def process_owner_texts(
             owner_ids=owner_ids,
             settings=settings,
             calendar_port=calendar_port,
+            calendar_agenda_port=calendar_agenda_port,
+            gmail_port=gmail_port,
             sheets_port=sheets_port,
             meta_ads_port=meta_ads_port,
             instagram_insights_port=instagram_insights_port,

@@ -106,11 +106,55 @@ def short_lead_id(lead_id: str, *, keep: int = 8) -> str:
     return lead_id[: keep + 1]
 
 
-def lead_display(lead_id: str, headline: str) -> str:
-    """`lead_82f527e3be5e · מוכר שעונים`, or just the id when nothing was learned yet.
+def lead_display(lead_id: str, headline: str, display_name: str = "") -> str:
+    """`lead_82f527e3be5e · דני · מוכר שעונים`, or just the id when nothing was learned yet.
 
     The id stays FULL. Assaf references it back to Mia ("תספר לי על lead_..."), so a
-    truncated id would be prettier and useless.
+    truncated id would be prettier and useless. Name is included only when the prospect
+    said it — never guessed from the headline.
     """
+    name = display_name.strip()
     cleaned = headline.strip()
-    return f"{lead_id} · {cleaned}" if cleaned else lead_id
+    parts = [lead_id]
+    if name:
+        parts.append(name)
+    if cleaned:
+        parts.append(cleaned)
+    return " · ".join(parts)
+
+
+_NAME_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"שמי\s+([^\s,]+)"),
+    re.compile(r"קוראים לי\s+([^\s,]+)"),
+    re.compile(r"השם שלי\s+([^\s,]+)"),
+    re.compile(r"\bmy name is\s+([A-Za-z][A-Za-z'-]{1,30})", re.IGNORECASE),
+    re.compile(r"\bi(?:'m| am)\s+([A-Z][a-z]{1,30})\b"),
+)
+
+
+def extract_stated_name(text: str) -> str:
+    """A person name only when they said it. Empty if this is just a business line."""
+    if not text:
+        return ""
+    for pattern in _NAME_PATTERNS:
+        match = pattern.search(text)
+        if match is None:
+            continue
+        candidate = sanitize_label(match.group(1))
+        if not candidate:
+            continue
+        if candidate.casefold() in _STOPWORDS:
+            continue
+        if len(candidate.split()) > 3:
+            continue
+        return candidate[:40]
+    return ""
+
+
+def derive_display_name(turns: list[ConversationTurn]) -> str:
+    """Best stated name from the prospect's own words. Never inferred."""
+    for turn in counterpart_turns(turns)[:_MAX_TURNS_SCANNED]:
+        name = extract_stated_name(turn.text)
+        if name:
+            return name
+    return ""

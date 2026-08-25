@@ -175,7 +175,7 @@ def test_apply_skips_kill_switch_and_demo(monkeypatch) -> None:
     sent: list[str] = []
     monkeypatch.setattr(
         brief_mod,
-        "_notify_telegram",
+        "notify_owners",
         lambda **kwargs: sent.append(kwargs["brief"]),
     )
     store = _FakeStore()
@@ -205,7 +205,7 @@ def test_apply_persists_once_per_lead(monkeypatch) -> None:
     sent: list[str] = []
     monkeypatch.setattr(
         brief_mod,
-        "_notify_telegram",
+        "notify_owners",
         lambda **kwargs: sent.append(kwargs["brief"]),
     )
     store = _FakeStore()

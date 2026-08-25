@@ -1,15 +1,37 @@
 # BUILD_STATUS
 
 **Last updated:** 2026-08-25  
-**Region:** eu-north-1 (ADR-019). Live host `https://mia.assafweb.com`. Live image **mia:18** (task `mia:20`). Rollback: image `mia:16`, or `MIA_WEBSITE_MEETING_FIRST=false` with no deploy.
+**Region:** eu-north-1 (ADR-019). Live host `https://mia.assafweb.com`. Live image **mia:20** (task `mia:22`). ADR-031 owner phrasing. Rollback: image `mia:19` / task `mia:21`, or blank `MIA_OWNER_AGENT_MODEL`.
+
+Earlier rung on the same ladder: image `mia:18` (task `mia:20`) carried ADR-028 meeting-first + ADR-029 funnel; its no-deploy rollback was `MIA_WEBSITE_MEETING_FIRST=false`.
 
 ## Apify research fallback (2026-08-25)
 
-Not deployed. ADR-030: pin `apify/google-search-scraper` behind `ResearchPort` via httpx run-sync. Firecrawl stays primary. `MIA_APIFY_TOKEN` selects Apify only when Firecrawl is empty. Production `mia/prod` must gain the empty `MIA_APIFY_TOKEN` key **before** an ECS revision that injects it, or the task fails to start. Do not dump the Actor catalog into the model. No `apify-client`.
+Not deployed. ADR-035: pin `apify/google-search-scraper` behind `ResearchPort` via httpx run-sync. Firecrawl stays primary. `MIA_APIFY_TOKEN` selects Apify only when Firecrawl is empty. Production `mia/prod` must gain the empty `MIA_APIFY_TOKEN` key **before** an ECS revision that injects it, or the task fails to start. Do not dump the Actor catalog into the model. No `apify-client`.
 
 ## Alive (v1)
 
-Website sales + WhatsApp handoff tokens + Telegram owner (status digest on unclassified text) + Gmail ingest/summary + Calendar read/gated write + Sheets mirror + Meta/LinkedIn/research reads + STT + approvals + takeover + Postgres events + Graph Lab evals + Fargate host.
+Website sales + WhatsApp handoff tokens + Telegram owner (short hello on greetings; agent on unmatched requests; Gmail inbox reads; lead by name/headline) + Gmail ingest/summary/draft + Calendar read/gated write + Sheets mirror + Meta/LinkedIn/research reads + STT + approvals + takeover + Postgres events + Graph Lab evals + Fargate host.
+
+## Owner natural language (ADR-032, 2026-08-25) — BUILT, NOT DEPLOYED
+
+On branch `claude/mia-product-feedback-0bfc90`, on top of the ADR-030/031 checkpoint. **Not on Fargate.** Live is still image `mia:20` / task `mia:22`. Next image is `mia:21` via `scripts/deploy_ecs_revision.py --tag 21`. No migration, no knowledge re-ingest.
+
+Prompt is `owner_agent_v3`: the literal trigger-keyword list is gone, replaced by semantic per-source guidance, a never-printed internal execution plan, query-construction rules and a standalone untrusted-content paragraph. Loop is 8 steps (`MIA_OWNER_AGENT_MAX_STEPS`) with a 16-call ceiling, a duplicate `(tool, arguments)` guard and an empty-result stop; every exit path still gets one tools-free turn so a run ends in prose.
+
+Gmail inbox/search/read now render absolute + relative dates, so time-scoped mail questions are answerable. New read-only `calendar_agenda` tool (`today` / `tomorrow` / `this_week` / `next_7_days`) over the already-pinned `GOOGLECALENDAR_EVENTS_LIST` — no new Composio slug or toolkit version. New `app/domain/gmail_query.py` normalizes conversational Hebrew/English into a Gmail query: pure function, no model, Hebrew-clitic aware, passes existing operators through untouched, never invents an entity. All 27 tool descriptions rewritten.
+
+An unclassified `NOTE` whose agent turn failed now answers `הבדיקה לא עברה כרגע. תנסה שוב.` instead of the classifier's "could not classify" line. Other task types keep their real computed fallback byte for byte. `log_owner_agent` gained `steps=`, `failed=`, `completion=`.
+
+Suite: `uv run ruff check app tests scripts` clean, `uv run pytest` **2437 passed**. Writes unchanged — approvals, drafts, takeover, scope and preference stay off the model; `MIA_GMAIL_SEND` stays false.
+
+## Owner console (ADR-030, 2026-08-24)
+
+Shipped on image **mia:20**, task **mia:22** (ADR-031 on top of ADR-030). Digest `sha256:ee4fab125c515ac1a6a8001b44b33400e1678817b2bf3cd54529054974beb25d`. Live `/health`: `status=ok`, `kill_switch=false`, `gmail_inbox=alive`, `owner_integrations.gmail_send=false`.
+
+Greetings are `היי אסף, אני כאן.` — no daily/funnel/engine dump. Unmatched Telegram text, including three-word requests like `תבדקי את המייל`, stays a `NOTE` for `owner_agent_v2` (ADR-031). Inbox tools: `gmail_inbox` / `gmail_search` / `gmail_read` (bodies are data). Send is draft + Approve; `MIA_GMAIL_SEND` stays false. `find_leads` matches stated name, headline, or full lead id.
+
+Telegram owner agent pinned reads now also include `gmail_inbox`, `gmail_search`, `gmail_read`, `find_leads`. Writes stay on the Python path. Do not enable Gmail send, WhatsApp send, Meta writes, IG auto-reply, TTS, Apify, Lambda, ManyChat.
 
 ## Brain live (2026-08-24)
 
@@ -261,3 +283,73 @@ subject_key, channel and envelope_kind.
 
 Verified: `uv run ruff check app tests scripts` clean. `uv run pytest` **2236 total, 2233
 passed**; the 3 failures are the date-dependent calendar fixtures.
+
+## Visitor knowledge, meeting-first exit, funnel, multi-owner (2026-08-24)
+
+Not deployed. Working tree only. ADR-028 and ADR-029. **Needs migration
+`20260824_lead_sales_state_meeting_exit.sql` before the image serves traffic.**
+
+**Website now answers before it asks.** `app/api/website.py` reached nothing in
+`app/brain/`, so the 31 knowledge chunks were readable only from Assaf's Telegram.
+New `assemble_visitor_context` (`app/brain/context.py`) retrieves **knowledge only** and
+is forbidden from touching owner memory — `retrieve_memories`, `build_profile_block`,
+`list_memories`, `memory_vectors`, `touch_memories` and `list_open_gaps` are all off
+limits, and `tests/unit/test_visitor_knowledge.py` proves it with a store whose memory
+methods raise. `ReplyContext` gained `knowledge`; the prompt gained a PUBLISHED FACTS
+section and moved to `sales_reply_v8` (answer-then-ask). `build_graph`'s
+`knowledge_lookup` defaults to `None`, so non-website callers are byte-identical. The
+lookup never runs while the kill switch is set, and any exception it raises is swallowed
+as no knowledge — a brain outage degrades phrasing, never a 500.
+
+**The booked meeting is the website's default exit.** `select_next_action` gained
+`meeting_first` (default **false**; website passes `MIA_WEBSITE_MEETING_FIRST`, default
+**true**). When the existing continuation gate passes and the meeting exit was not
+already offered, the website offers the meeting. WhatsApp stays the fallback and is
+still reached once the meeting is offered and not taken. New persisted
+`SalesState.meeting_exit_offered`. Consequence worth knowing: a meeting can now be
+offered before the `OFFER_HYPOTHESIS` rung, so a meeting brief may carry
+`hypothesis_offered: false` — the old WhatsApp offer had the same property at the same
+gate. `app/core/demo.py`'s scripted funnel was updated to match real behavior.
+
+**The funnel exists.** `app/domain/funnel.py` computes a local-day website funnel from
+counters that already existed, and `app/domain/engine_health.py` +
+`LeadStore.aggregate_ai_runs` report how many replies actually ran, median latency and
+how many were canned. Both land in the owner daily brief and the operator snapshot,
+replacing `format_website_headline`. `_discovery_depth` was promoted to a shared
+`discovery_depth` so the funnel and the owner reads use one definition.
+
+Two limits are documented in the modules, not hidden: `engaged` comes from a
+recency-ordered `list_sales_snapshots` sample because `SalesStateRow` has no timestamp,
+and `aggregate_ai_runs` is **all-time** because `ai_runs` has no timestamp column. Both
+want an additive migration to become exact; deliberately out of scope. Because those
+counters do not share one window, `_pct` clamps to 0..100 — **without the clamp the
+`le=100` field bound raised `ValidationError` from inside the owner daily brief**, which
+was a real crash found by the suite, not a rounding detail.
+
+**Multi-owner notification fixed.** `_notify_telegram` sent only to
+`sorted(owner_ids)[0]`. It is now the public `notify_owners`, fans out to every
+allowlisted id with per-recipient failure isolation, and returns only the ids actually
+delivered — a failed send is never counted as delivered. Both callers updated. This
+clears the long-standing open medium finding.
+
+**Defect found and fixed while merging:** the new migration had a semicolon inside a
+comment line. The runner splits statements on it, so the file failed to apply on SQLite
+with an `OperationalError`. Comments in migrations must not contain a statement
+separator.
+
+Verified: `uv run ruff check app tests scripts` **all checks passed**. `uv run pytest`
+**2287 passed, 1 failed**. The single failure is
+`test_deploy_secret_box.py::test_env_example_documents_settings_and_adapter_map`, which
+cannot be fixed from this workspace: `.env*` access is denied here, and `.env.example`
+is missing `MIA_OWNER_AGENT_GEMINI_MODEL` (**pre-existing at HEAD**, from commit
+`c915f9f`, which documented it in `docs/brain.env.example` for the same reason) and now
+also `MIA_WEBSITE_MEETING_FIRST`. Both names are written up in
+`docs/brain.env.example`; appending that file to `.env.example` closes the test.
+
+**Not in this slice:** the Telegram owner tool-surface expansion (live Gmail
+list/search/read, Sheets read, GA4 as a first-class tool, approval-gated Gmail drafts).
+Assaf asked for it and chose "reads plus gated drafts"; it was scoped but not started.
+Note that the reason Mia does not call tools on Telegram today is **not** the size of
+the allowlist — it is that the owner agent never actually runs in production
+(`docs/TELEGRAM_SLICE_REPORT.md` §1). That is a config plus deploy fix and it is
+independent of this work.

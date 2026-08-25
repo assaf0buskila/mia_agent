@@ -17,6 +17,7 @@ from app.domain.sales import SalesState
 ACTION_PROPOSAL_HANDOFF = "proposal_handoff"
 ACTION_CAMPAIGN_WRITE = "campaign_write"
 ACTION_WEBSITE_EDIT = "website_edit"
+ACTION_GMAIL_SEND = "gmail_send"
 DECISION_PENDING = "pending"
 DECISION_APPROVED = "approved"
 DECISION_REJECTED = "rejected"
@@ -25,6 +26,7 @@ RISK_R4 = "R4"
 RESOURCE_LEAD = "lead"
 RESOURCE_CAMPAIGN = "campaign"
 RESOURCE_WEBSITE = "website"
+RESOURCE_GMAIL = "gmail"
 WEBSITE_RESOURCE_ID = "assafweb-home"
 APPROVAL_TTL = timedelta(hours=24)
 _NEXT_ACTION = "handoff"
@@ -94,6 +96,7 @@ class OwnerApprovalResult(BaseModel):
     lead_id: str | None = None
     campaign_id: str | None = None
     website_id: str | None = None
+    gmail_draft_id: str | None = None
 
 
 def new_approval_id() -> str:
@@ -792,6 +795,8 @@ def apply_owner_approval_decision(
 def ack_for_approval_result(result: OwnerApprovalResult) -> str:
     if result.status == "queued" and result.website_id is not None:
         return "רשמתי בקשת אישור לשינוי באתר. לא שיניתי קבצים."
+    if result.status == "queued" and result.gmail_draft_id is not None:
+        return "רשמתי בקשת אישור לשליחת מייל. לא שלחתי."
     if result.status == "queued":
         return "רשמתי בקשת אישור לקמפיין. לא שיניתי מודעות במטא."
     if result.status == "none":
@@ -808,12 +813,16 @@ def ack_for_approval_result(result: OwnerApprovalResult) -> str:
             )
         if result.campaign_id is not None:
             return "רשמתי אישור לקמפיין. לא שיניתי מודעות במטא."
+        if result.gmail_draft_id is not None:
+            return "רשמתי אישור לשליחת המייל. לא שלחתי עדיין."
         return "רשמתי אישור להצעה. לא שלחתי אותה — זה לטיפול ידני."
     if result.status == "decided" and result.decision == DECISION_REJECTED:
         if result.website_id is not None:
             return "רשמתי דחייה לשינוי באתר. לא שיניתי קבצים."
         if result.campaign_id is not None:
             return "רשמתי דחייה לקמפיין. לא שיניתי מודעות במטא."
+        if result.gmail_draft_id is not None:
+            return "רשמתי דחייה לשליחת המייל. לא שלחתי כלום."
         return "רשמתי דחייה לבקשת ההצעה. לא שלחתי כלום."
     if result.status == "already_decided":
         return "הבקשה כבר טופלה. לא שיניתי כלום."

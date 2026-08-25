@@ -3,7 +3,7 @@ import re
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.db.models import (
@@ -45,12 +45,14 @@ from app.db.models import (
     WebhookEventRow,
 )
 from app.domain.ai_runs import (
+    MODEL_CANNED,
     sanitize_automation_mode,
     sanitize_decision_confidence,
     sanitize_prompt_version,
 )
 from app.domain.approvals import (
     ACTION_CAMPAIGN_WRITE,
+    ACTION_GMAIL_SEND,
     ACTION_PROPOSAL_HANDOFF,
     ACTION_WEBSITE_EDIT,
     DECISION_APPROVED,
@@ -58,6 +60,7 @@ from app.domain.approvals import (
     DECISION_REJECTED,
     LEAD_ID_RE,
     RESOURCE_CAMPAIGN,
+    RESOURCE_GMAIL,
     RESOURCE_LEAD,
     RESOURCE_WEBSITE,
     RISK_R3,
@@ -84,6 +87,7 @@ from app.domain.deals import (
     STAGE_PROPOSAL,
 )
 from app.domain.debriefs import ALLOWLISTED_NEXT_STEPS, ALLOWLISTED_OUTCOMES
+from app.domain.engine_health import AiRunAggregate
 from app.domain.events import (
     CanonicalEvent,
     Channel,
@@ -230,6 +234,8 @@ def sales_from_row(row: SalesStateRow) -> SalesState:
         asked_actions=_asked_actions_from_row(row.asked_actions),
         explicit_buying_intent=bool(row.explicit_buying_intent),
         headline=row.headline or "",
+        display_name=row.display_name or "",
+        meeting_exit_offered=bool(row.meeting_exit_offered),
     )
 
 
@@ -453,6 +459,38 @@ class LeadStore:
         ).all()
         return [sales_from_row(row) for row in rows]
 
+    def find_leads(self, query: str, *, limit: int = 8) -> list[SalesState]:
+        """Match a lead by id, stated name, or headline. No fuzzy guessing."""
+        needle = query.strip()
+        if not needle:
+            return []
+        cap = max(1, min(int(limit or 8), 8))
+        if LEAD_ID_RE.fullmatch(needle):
+            try:
+                return [self.get_sales(needle)]
+            except KeyError:
+                return []
+        escaped = (
+            needle.casefold()
+            .replace("\\", "\\\\")
+            .replace("%", "\\%")
+            .replace("_", "\\_")
+        )
+        pattern = f"%{escaped}%"
+        rows = self.session.scalars(
+            select(SalesStateRow)
+            .where(
+                or_(
+                    func.lower(SalesStateRow.lead_id).like(pattern, escape="\\"),
+                    func.lower(SalesStateRow.display_name).like(pattern, escape="\\"),
+                    func.lower(SalesStateRow.headline).like(pattern, escape="\\"),
+                )
+            )
+            .order_by(SalesStateRow.lead_id.desc())
+            .limit(cap)
+        ).all()
+        return [sales_from_row(row) for row in rows]
+
     def count_pending_approvals(self) -> int:
         return int(
             self.session.scalar(
@@ -534,6 +572,8 @@ class LeadStore:
         )
         row.explicit_buying_intent = sales.explicit_buying_intent
         row.headline = (sales.headline or "")[:120]
+        row.display_name = (sales.display_name or "")[:80]
+        row.meeting_exit_offered = sales.meeting_exit_offered
         self.session.flush()
 
     def is_webhook_duplicate(self, *, provider: str, provider_event_id: str) -> bool:
@@ -1794,6 +1834,71 @@ class LeadStore:
             row.proposed_parameters = params
         self.session.flush()
 
+    def upsert_gmail_approval(
+        self,
+        *,
+        channel: str,
+        action: str,
+        risk: str,
+        payload_hash: str,
+        decision: str,
+        resource_type: str,
+        resource_id: str,
+        expires_at: str,
+    ) -> None:
+        if (
+            action != ACTION_GMAIL_SEND
+            or risk != RISK_R3
+            or decision != DECISION_PENDING
+        ):
+            return
+        if resource_type != RESOURCE_GMAIL:
+            return
+        if not resource_id or len(resource_id) > 40 or not expires_at:
+            return
+        try:
+            datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+        except ValueError:
+            return
+        params = proposed_parameters_json(
+            action=action,
+            risk=risk,
+            channel=channel,
+            resource_type=resource_type,
+            resource_id=resource_id,
+        )
+        row = self.get_approval_by_resource(
+            RESOURCE_GMAIL, resource_id, ACTION_GMAIL_SEND
+        )
+        if row is None:
+            self.session.add(
+                ApprovalRow(
+                    lead_id=None,
+                    channel=channel,
+                    action=action,
+                    risk=risk,
+                    payload_hash=payload_hash,
+                    decision=decision,
+                    approver="",
+                    resource_type=resource_type,
+                    resource_id=resource_id,
+                    expires_at=expires_at,
+                    approval_id=new_approval_id(),
+                    proposed_parameters=params,
+                )
+            )
+        elif row.decision == DECISION_PENDING:
+            row.channel = channel
+            row.risk = risk
+            row.payload_hash = payload_hash
+            row.decision = decision
+            row.approver = ""
+            row.resource_type = resource_type
+            row.resource_id = resource_id
+            row.expires_at = expires_at
+            row.proposed_parameters = params
+        self.session.flush()
+
     def upsert_website_approval(
         self,
         *,
@@ -1901,6 +2006,30 @@ class LeadStore:
             return False
         row = self.get_approval_by_resource(
             RESOURCE_CAMPAIGN, resource_id, ACTION_CAMPAIGN_WRITE
+        )
+        if row is None or row.decision != DECISION_PENDING:
+            return False
+        effective_now = now if now is not None else datetime.now(UTC)
+        if effective_now.tzinfo is None:
+            effective_now = effective_now.replace(tzinfo=UTC)
+        row.decision = decision
+        row.approver = ""
+        if decision == DECISION_APPROVED:
+            row.approved_at = effective_now.isoformat()
+        self.session.flush()
+        return True
+
+    def decide_gmail_approval(
+        self,
+        *,
+        resource_id: str,
+        decision: str,
+        now: datetime | None = None,
+    ) -> bool:
+        if decision not in (DECISION_APPROVED, DECISION_REJECTED):
+            return False
+        row = self.get_approval_by_resource(
+            RESOURCE_GMAIL, resource_id, ACTION_GMAIL_SEND
         )
         if row is None or row.decision != DECISION_PENDING:
             return False
@@ -2998,3 +3127,61 @@ class LeadStore:
         row.consumed_at = datetime.now(UTC).isoformat()
         self.session.flush()
         return row.lead_id
+
+    def aggregate_ai_runs(
+        self, *, occurred_from: str, occurred_to: str
+    ) -> AiRunAggregate:
+        """All-time aggregate over persisted `AiRunRow`s.
+
+        `occurred_from` / `occurred_to` are accepted for interface parity with the
+        other owner-brief aggregate reads (`count_canonical_events`,
+        `count_behavior_events`) but are NOT applied as a filter: `AiRunRow` has no
+        timestamp column, so there is nothing to filter on. See
+        `app/domain/engine_health.py` for the full explanation. Percentiles are
+        computed in Python over the fetched rows so behavior is identical on
+        SQLite and Postgres (no database-specific percentile function).
+        """
+        _ = occurred_from, occurred_to
+        rows = self.session.execute(
+            select(
+                AiRunRow.model,
+                AiRunRow.latency_ms,
+                AiRunRow.tokens_in,
+                AiRunRow.tokens_out,
+                AiRunRow.cost_usd,
+            )
+        ).all()
+        total_runs = len(rows)
+        canned_runs = sum(1 for row in rows if row.model == MODEL_CANNED)
+        latencies = sorted(int(row.latency_ms) for row in rows)
+        tokens_in = sum(int(row.tokens_in) for row in rows)
+        tokens_out = sum(int(row.tokens_out) for row in rows)
+        cost_usd = sum(int(row.cost_usd) for row in rows)
+        return AiRunAggregate(
+            total_runs=total_runs,
+            canned_runs=canned_runs,
+            median_latency_ms=_latency_percentile(latencies, 50),
+            p95_latency_ms=_latency_percentile(latencies, 95),
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+            cost_usd=cost_usd,
+        )
+
+
+def _latency_percentile(sorted_values: list[int], pct: int) -> int:
+    """Nearest-rank-with-interpolation percentile. Defensive: never raises on an
+    empty list. Pure Python so it behaves identically on SQLite and Postgres.
+    """
+    if not sorted_values:
+        return 0
+    n = len(sorted_values)
+    if n == 1:
+        return int(sorted_values[0])
+    rank = (n - 1) * (pct / 100)
+    lower = int(rank)
+    upper = min(lower + 1, n - 1)
+    if lower == upper:
+        return int(sorted_values[lower])
+    weight = rank - lower
+    interpolated = sorted_values[lower] * (1 - weight) + sorted_values[upper] * weight
+    return int(round(interpolated))

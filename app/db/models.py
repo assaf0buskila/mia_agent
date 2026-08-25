@@ -80,6 +80,8 @@ class SalesStateRow(Base):
     asked_actions: Mapped[str] = mapped_column(Text, default="[]")
     explicit_buying_intent: Mapped[bool] = mapped_column(Boolean, default=False)
     headline: Mapped[str] = mapped_column(String(120), default="")
+    display_name: Mapped[str] = mapped_column(String(80), default="")
+    meeting_exit_offered: Mapped[bool] = mapped_column(Boolean, default=False)
     lead: Mapped[LeadRow] = relationship(back_populates="sales_state")
 
 

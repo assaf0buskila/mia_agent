@@ -18,11 +18,11 @@ from app.core.config import Settings
 from app.core.errors import MiaError
 from app.db.store import LeadStore
 from app.domain.hot_handoff import apply_hot_handoff
+from app.domain.website_handoff_brief import KIND_WEBSITE_WHATSAPP
 from app.graph.orchestrator import build_graph
 from app.graph.state import empty_state
 from app.integrations.sales_reply import SalesReplyPort
 from app.services.finalization import KIND, qualify_and_finalize
-from app.domain.website_handoff_brief import KIND_WEBSITE_WHATSAPP
 
 ClientRespond = Callable[[ClientState], dict]
 
@@ -53,15 +53,20 @@ def compile_client_graph(
     respond: ClientRespond | None = None,
     settings: Settings | None = None,
     now: datetime | None = None,
+    knowledge_lookup: Callable[[str], tuple[str, ...]] | None = None,
 ):
     """Compile the client LangGraph.
 
     Production closes over LeadStore, settings, and the sales reply port. The inner
-    sales orchestrator is reused until that node is inlined (ADR-031 strangler).
+    sales orchestrator is reused until that node is inlined (ADR-036 strangler).
     Knowledge retrieve and conversation complete/finalize are graph nodes so looking
     at ClientGraph matches what Mia actually does.
     """
-    inner = build_graph(store, reply_port=reply_port) if store is not None else None
+    inner = (
+        build_graph(store, reply_port=reply_port, knowledge_lookup=knowledge_lookup)
+        if store is not None
+        else None
+    )
 
     def load_conversation(state: ClientState) -> dict:
         errors = list(state.get("errors", []))
@@ -111,6 +116,7 @@ def compile_client_graph(
                 page_path=state.get("page_path", ""),
                 page_section=state.get("page_section", ""),
                 knowledge_hits=list(state.get("knowledge_hits") or []),
+                meeting_first=bool(state.get("meeting_first", False)),
             )
         )
         return {

@@ -60,9 +60,15 @@ from app.domain.ownership_freshness import (
 from app.domain.sales import NextAction
 from app.domain.shadow import persist_shadow_decision, should_skip_prospect_send
 from app.integrations.base import MessagePort
-from app.integrations.calendar import CalendarPort, build_calendar_port
+from app.integrations.calendar import (
+    CalendarAgendaPort,
+    CalendarPort,
+    build_calendar_agenda_port,
+    build_calendar_port,
+)
 from app.integrations.calendar_booking import CalendarBookingPort, build_calendar_booking_port
 from app.integrations.ga4 import Ga4Port, build_ga4_port
+from app.integrations.gmail import GmailPort, build_gmail_port
 from app.integrations.instagram_insights import (
     InstagramInsightsPort,
     build_instagram_insights_port,
@@ -147,6 +153,7 @@ async def process_inbound_texts(
     kill_switch: bool,
     owner_ids: set[str] | None = None,
     calendar: CalendarPort | None = None,
+    calendar_agenda: CalendarAgendaPort | None = None,
     calendar_booking: CalendarBookingPort | None = None,
     sheets: SheetsPort | None = None,
     meta_ads: MetaAdsPort | None = None,
@@ -158,6 +165,7 @@ async def process_inbound_texts(
     ga4: Ga4Port | None = None,
     seo_audit: SeoAuditPort | None = None,
     owner_reply: OwnerReplyPort | None = None,
+    gmail: GmailPort | None = None,
 ) -> dict[str, int | bool | str | None]:
     processed = 0
     duplicates = 0
@@ -167,6 +175,12 @@ async def process_inbound_texts(
     owner_ids = owner_ids or set()
     settings = get_settings()
     calendar_port = calendar if calendar is not None else build_calendar_port(settings)
+    calendar_agenda_port = (
+        calendar_agenda
+        if calendar_agenda is not None
+        else build_calendar_agenda_port(settings)
+    )
+    gmail_port = gmail if gmail is not None else build_gmail_port(settings)
     calendar_booking_port = (
         calendar_booking
         if calendar_booking is not None
@@ -216,6 +230,8 @@ async def process_inbound_texts(
                 owner_ids=owner_ids,
                 settings=settings,
                 calendar_port=calendar_port,
+                calendar_agenda_port=calendar_agenda_port,
+                gmail_port=gmail_port,
                 sheets_port=sheets_port,
                 meta_ads_port=meta_ads_port,
                 instagram_insights_port=instagram_insights_port,

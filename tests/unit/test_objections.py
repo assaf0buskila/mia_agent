@@ -189,7 +189,11 @@ def test_website_funnel_price_objection_after_reflect_uses_reframe() -> None:
             json={"text": "about two hours every day"},
         )
         assert msg3.status_code == 200
-        assert msg3.json()["next_action"] == "offer_whatsapp"
+        # ADR-028: the continuation gate now offers the booked meeting first, not
+        # WhatsApp. The point of this test is objection handling (reframe copy),
+        # which fires from `active_objection` and pre-empts the gate either way, so
+        # only the gate's own action needs updating here.
+        assert msg3.json()["next_action"] == "offer_meeting"
         msg4 = client.post(
             f"/v1/website/sessions/{session_id}/messages",
             json={"text": "sure, but that's too expensive"},
