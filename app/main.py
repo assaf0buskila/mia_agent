@@ -156,7 +156,7 @@ def owner_integrations(settings) -> dict[str, object]:
         "sheets_mirror": composio and bool(sheets_id),
         "linkedin_profile": composio,
         # Member analytics stays optional Direct REST. Profile is Composio; do not
-        # list the leftover token as a go-live miss (ADR-028).
+        # list the leftover token as a go-live miss (ADR-034).
         "linkedin_analytics": bool(linkedin_token),
         "instagram_insights": composio
         or bool(settings.instagram_access_token.strip()),

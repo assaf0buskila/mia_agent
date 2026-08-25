@@ -14,6 +14,7 @@ def message_to_client_state(
     page_section: str = "",
     inbound_id: str = "",
     turn_kind: str = "message",
+    meeting_first: bool = False,
 ) -> ClientState:
     return empty_client_state(
         run_id=run_id,
@@ -26,4 +27,5 @@ def message_to_client_state(
         page_section=page_section,
         inbound_id=inbound_id,
         turn_kind=turn_kind,
+        meeting_first=meeting_first,
     )

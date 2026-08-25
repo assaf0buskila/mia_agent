@@ -33,7 +33,7 @@ class ChannelIdentityRow(Base):
     channel: Mapped[str] = mapped_column(String(32), index=True)
     external_id: Mapped[str] = mapped_column(String(255), index=True)
     verified: Mapped[bool] = mapped_column(Boolean, default=False)
-    # Unused leftover columns (ManyChat removed, ADR-032). Do not write. Keep for existing DBs.
+    # Unused leftover columns (ManyChat removed, ADR-037). Do not write. Keep for existing DBs.
     manychat_subscriber_id: Mapped[str] = mapped_column(String(255), default="")
     manychat_conversation_id: Mapped[str] = mapped_column(String(255), default="")
     customer: Mapped[CustomerRow] = relationship(back_populates="identities")

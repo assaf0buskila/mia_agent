@@ -467,7 +467,7 @@ CAPABILITIES: tuple[Capability, ...] = (
         status=WiringStatus.ALIVE,
         port="app.domain.policies.freshness",
     ),
-    # Brain (ADR-026 / ADR-031). Memory counts on /health are alive. Knowledge ingest is
+    # Brain (ADR-026 / ADR-036). Memory counts on /health are alive. Knowledge ingest is
     # CLI-only. Embeddings, retrieval, and the owner agent stay wired-but-gated until
     # model ids are configured — do not call that ALIVE.
     Capability(

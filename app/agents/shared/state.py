@@ -32,6 +32,8 @@ class ClientState(TypedDict):
     inbound_id: NotRequired[str]
     page_path: NotRequired[str]
     page_section: NotRequired[str]
+    # ADR-028: the booked meeting is the website's default exit, WhatsApp the fallback.
+    meeting_first: NotRequired[bool]
     knowledge_hits: NotRequired[list[dict[str, str]]]
     tools_used: NotRequired[list[str]]
     next_action: NotRequired[str]
@@ -82,6 +84,7 @@ def empty_client_state(
     channel: str = "website",
     turn_kind: str = "message",
     inbound_id: str = "",
+    meeting_first: bool = False,
 ) -> ClientState:
     return {
         "run_id": run_id,
@@ -95,6 +98,7 @@ def empty_client_state(
         "inbound_id": inbound_id,
         "page_path": page_path,
         "page_section": page_section,
+        "meeting_first": meeting_first,
         "knowledge_hits": [],
         "tools_used": [],
         "finalized": False,
