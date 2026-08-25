@@ -74,7 +74,7 @@ def _call(client: httpx.Client, key: str, model: str) -> bool:
     payload = {
         "model": model,
         "messages": [{"role": "user", "content": "ping"}],
-        "max_completion_tokens": 1,
+        "max_completion_tokens": 32,
     }
     try:
         response = client.post(CHAT_URL, json=payload, headers=_headers(key))

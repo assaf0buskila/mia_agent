@@ -1,7 +1,11 @@
 # BUILD_STATUS
 
-**Last updated:** 2026-08-24  
-**Region:** eu-north-1 (ADR-019). Live host `https://mia.assafweb.com`. Live image **mia:16** (task `mia:18`). `mia:15` remains in ECR for rollback.
+**Last updated:** 2026-08-25  
+**Region:** eu-north-1 (ADR-019). Live host `https://mia.assafweb.com`. Live image **mia:18** (task `mia:20`). Rollback: image `mia:16`, or `MIA_WEBSITE_MEETING_FIRST=false` with no deploy.
+
+## Apify research fallback (2026-08-25)
+
+Not deployed. ADR-030: pin `apify/google-search-scraper` behind `ResearchPort` via httpx run-sync. Firecrawl stays primary. `MIA_APIFY_TOKEN` selects Apify only when Firecrawl is empty. Production `mia/prod` must gain the empty `MIA_APIFY_TOKEN` key **before** an ECS revision that injects it, or the task fails to start. Do not dump the Actor catalog into the model. No `apify-client`.
 
 ## Alive (v1)
 
@@ -9,21 +13,21 @@ Website sales + WhatsApp handoff tokens + Telegram owner (status digest on uncla
 
 ## Brain live (2026-08-24)
 
-Shipped on image **mia:16**, task **mia:18**. `mia-migrate` ran on `mia:17` (exit 0) before the service moved. Knowledge ingest and Telegram webhook re-register ran as one-offs on `mia:18` (both exit 0).
+Shipped on image **mia:18**, task **mia:20** (ADR-028 meeting-first + ADR-029 funnel). `mia-migrate` ran on `mia:20` (exit 0) before the service moved. Digest `sha256:b7a967c9ee882b18f24ff5a526c906894aa3d51b44b3f654e13b7855e78bc31e` matches the locally built `mia:18`. Owner agent primary is `gpt-5.6-luna`; fallback is `gpt-5.6-terra`. `MIA_WEBSITE_MEETING_FIRST=true`.
 
-ECS plaintext env (next to `MIA_SALES_MODEL`): `MIA_OWNER_AGENT_MODEL=gpt-5.6-terra`, `MIA_EXTRACTION_MODEL=gpt-5.6-luna`, `MIA_EMBEDDING_MODEL=text-embedding-3-small`. `/health` only checks that those names are set, not that OpenAI accepts them.
+ECS plaintext env (next to `MIA_SALES_MODEL`): `MIA_OWNER_AGENT_MODEL=gpt-5.6-luna`, `MIA_OWNER_AGENT_FALLBACK_MODEL=gpt-5.6-terra`, `MIA_EXTRACTION_MODEL=gpt-5.6-luna`, `MIA_EMBEDDING_MODEL=text-embedding-3-small`. `/health` only checks that those names are set, not that OpenAI accepts them.
 
-Live `GET https://mia.assafweb.com/health` (24 Aug): `status=ok`, `kill_switch=false`, `whatsapp_handoff_send=false`. `brain.owner_agent` / `embeddings` / `memory_extraction` all `{ready: true, missing: []}`. `brain.corpus.knowledge_chunks=31`, `memories=0`. Telegram webhook `allowed_updates` is `message`, `edited_message`, `callback_query`; `pending_update_count=0`. Owner conversation as Assaf is still the real proof that the model ids exist.
+Live `GET https://mia.assafweb.com/health` (24 Aug, post `mia:20`): `status=ok`, `kill_switch=false`, `whatsapp_handoff_send=false`. `brain.owner_agent` ready. Clinic funnel live: turn 3 `offer_meeting` with numbered slots; `I decide this quarter` then `offer_whatsapp`. Probe: `gpt-5.6-luna` CALL ok; `gpt-5.6-terra` also CALL ok with a real token budget. Telegram funnel/engine brief lines still need Assaf to send `מה קרה היום?`.
 
 Telegram owner agent can call pinned **reads**: `gmail_summary`, `seo_snapshot`, `linkedin_snapshot`, `instagram_insights`, `research_search`, `ads_snapshot`, plus the existing briefs / leads / calendar / memory tools. Writes stay on the Python path.
 
-`owner_integrations` is config readiness, not a live Composio ping. Live missing list: `MIA_LINKEDIN_ACCESS_TOKEN`, `MIA_META_ADS_ACCOUNT_ID`. LinkedIn member analytics stays Direct REST. Sheets write target stays `MIA_SHEETS_SPREADSHEET_ID`. Firecrawl is not Composio.
+`owner_integrations` is config readiness, not a live Composio ping. This image still lists `MIA_LINKEDIN_ACCESS_TOKEN` when blank (worktree health). Meeting-first is ADR-028 on this slice; LinkedIn member analytics stays optional Direct REST. Sheets write target stays `MIA_SHEETS_SPREADSHEET_ID`. Firecrawl is not Composio.
 
 Live widget on `https://www.assafweb.com/` (23 Aug, Cursor browser — this repo has no Playwright): clinic path, three distinct discovery replies, no opener restart. WhatsApp offer and numbered meeting slots were not reached by turn three.
 
 Verified: `uv run pytest tests/unit/test_owner_live_tools.py tests/unit/test_health.py tests/unit/test_brain_agent.py` **29 passed**.
 
-Do not enable: WhatsApp send, Gmail send, Meta writes, IG auto-reply, TTS, Apify, Lambda, ManyChat.
+Do not enable: WhatsApp send, Gmail send, Meta writes, IG auto-reply, TTS, Lambda, ManyChat. Apify search is a ResearchPort fallback, not a model tool.
 
 ## Website voice input (2026-08-23)
 

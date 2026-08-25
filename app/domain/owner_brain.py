@@ -12,16 +12,24 @@ answer the deterministic path already produced. Assaf never sees an error from t
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import NamedTuple
 
+from app.agents.owner.graph import compile_owner_graph
+from app.agents.shared.state import empty_owner_state
 from app.brain.context import assemble_owner_context
 from app.brain.embeddings import EmbeddingPort, build_embedding_port
 from app.brain.extraction import consolidate, extract_candidates
 from app.brain.retrieval import MemoryScoreWeights
 from app.brain.schemas import MemorySource
 from app.brain.store import BrainStore
+from app.capabilities.knowledge import knowledge_handlers
+from app.capabilities.memory import memory_handlers
+from app.capabilities.policy import execute_capability
+from app.capabilities.types import GraphName
 from app.core.config import Settings
+from app.core.errors import MiaError
 from app.core.models import model_chain
 from app.db.store import LeadStore
 from app.domain.memory import ConversationTurn
@@ -232,6 +240,139 @@ def answer_owner(
         outcome.tokens_out,
         model=model,
     )
+
+
+def _compact_hits(raw: object) -> list[dict[str, str]]:
+    if not isinstance(raw, list):
+        return []
+    hits: list[dict[str, str]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        hits.append(
+            {
+                "id": str(item.get("id") or ""),
+                "label": str(item.get("label") or ""),
+                "text": str(item.get("text") or "")[:500],
+            }
+        )
+    return hits
+
+
+def retrieve_owner_context(
+    state: dict,
+    *,
+    brain: BrainStore,
+    settings: Settings,
+    embedding_port: EmbeddingPort | None = None,
+) -> dict:
+    """OwnerGraph retrieve node: memory.search + knowledge.search through policy."""
+    query = (state.get("latest_message") or "").strip()
+    tools = list(state.get("tools_used") or [])
+    memory_hits: list[dict[str, str]] = []
+    knowledge_hits: list[dict[str, str]] = []
+    if not query or bool(state.get("kill_switch")):
+        return {
+            "tools_used": tools,
+            "memory_hits": memory_hits,
+            "knowledge_hits": knowledge_hits,
+        }
+    port = embedding_port or build_embedding_port(settings)
+    try:
+        memory_out = execute_capability(
+            "memory.search",
+            graph=GraphName.OWNER,
+            args={"query": query},
+            handlers=memory_handlers(
+                brain=brain,
+                embedding_port=port,
+                weights=MemoryScoreWeights(
+                    relevance=settings.memory_weight_relevance,
+                    recency=settings.memory_weight_recency,
+                    importance=settings.memory_weight_importance,
+                ),
+            ),
+            kill_switch=bool(state.get("kill_switch")),
+        )
+        memory_hits = _compact_hits(memory_out.get("hits"))
+        if "memory.search" not in tools:
+            tools.append("memory.search")
+    except MiaError:
+        pass
+    try:
+        knowledge_out = execute_capability(
+            "knowledge.search",
+            graph=GraphName.OWNER,
+            args={"query": query},
+            handlers=knowledge_handlers(brain=brain, embedding_port=port),
+            kill_switch=bool(state.get("kill_switch")),
+        )
+        knowledge_hits = _compact_hits(knowledge_out.get("hits"))
+        if "knowledge.search" not in tools:
+            tools.append("knowledge.search")
+    except MiaError:
+        pass
+    return {
+        "tools_used": tools,
+        "memory_hits": memory_hits,
+        "knowledge_hits": knowledge_hits,
+    }
+
+
+def run_owner_turn(
+    *,
+    owner_id: str,
+    telegram_chat_id: str,
+    run_id: str,
+    latest_message: str,
+    kill_switch: bool,
+    produce: Callable[[], OwnerBrainResult],
+    source: str = "text",
+    brain: BrainStore | None = None,
+    settings: Settings | None = None,
+    embedding_port: EmbeddingPort | None = None,
+) -> OwnerBrainResult:
+    """Run the owner reply through OwnerGraph. Ports stay in the closure, not in state."""
+    captured: list[OwnerBrainResult] = []
+
+    def retrieve(state: dict) -> dict:
+        if brain is None or settings is None:
+            return {}
+        return retrieve_owner_context(
+            state,
+            brain=brain,
+            settings=settings,
+            embedding_port=embedding_port,
+        )
+
+    def respond(state: dict) -> dict:
+        result = produce()
+        used = list(state.get("tools_used") or [])
+        for name in result.tools_used:
+            if name not in used:
+                used.append(name)
+        captured.append(result._replace(tools_used=tuple(used)))
+        return {
+            "reply": result.text,
+            "tools_used": used,
+            "tokens_in": result.tokens_in,
+            "tokens_out": result.tokens_out,
+        }
+
+    compile_owner_graph(respond=respond, retrieve=retrieve).invoke(
+        empty_owner_state(
+            run_id=run_id,
+            owner_id=owner_id,
+            telegram_chat_id=telegram_chat_id,
+            thread_id=f"tg:{owner_id}",
+            latest_message=latest_message,
+            source=source,
+            kill_switch=kill_switch,
+        )
+    )
+    if captured:
+        return captured[0]
+    return produce()
 
 
 def learn_from_exchange(

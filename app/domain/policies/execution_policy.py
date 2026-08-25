@@ -101,7 +101,6 @@ _REGISTRY: dict[str, ActionPolicy] = {
     CapabilityId.TELEGRAM.value: _det(CapabilityId.TELEGRAM, risk=RiskLevel.R1_LOW_WRITE),
     CapabilityId.VOICE_STT.value: _ai_auto(CapabilityId.VOICE_STT, risk=RiskLevel.R0_READ),
     CapabilityId.INSTAGRAM.value: _det(CapabilityId.INSTAGRAM, risk=RiskLevel.R1_LOW_WRITE),
-    CapabilityId.MANYCHAT.value: _det(CapabilityId.MANYCHAT, risk=RiskLevel.R1_LOW_WRITE),
     CapabilityId.GMAIL.value: _det(CapabilityId.GMAIL, risk=RiskLevel.R0_READ),
     CapabilityId.GMAIL_SUMMARY.value: _ai_auto(
         CapabilityId.GMAIL_SUMMARY, risk=RiskLevel.R1_LOW_WRITE

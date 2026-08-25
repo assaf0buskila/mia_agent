@@ -174,7 +174,7 @@ def test_health_is_alive() -> None:
     assert body["capabilities"]["whatsapp"] == "alive"
     assert body["capabilities"]["voice_stt"] == "alive"
     assert body["capabilities"]["instagram"] == "alive"
-    assert body["capabilities"]["manychat"] == "specified"
+    assert "manychat" not in body["capabilities"]
     assert body["capabilities"]["gmail"] == "alive"
     assert body["capabilities"]["calendar"] == "alive"
     assert body["capabilities"]["sheets_mirror"] == "alive"
@@ -197,6 +197,11 @@ def test_health_is_alive() -> None:
     assert body["capabilities"]["tool_runs"] == "alive"
     assert body["capabilities"]["canonical_events"] == "alive"
     assert body["capabilities"]["aws_runtime"] == "specified"
+    assert body["capabilities"]["brain_memory"] == "alive"
+    assert body["capabilities"]["brain_knowledge"] == "wired"
+    assert body["capabilities"]["brain_retrieval"] == "wired"
+    assert body["capabilities"]["embeddings"] == "wired"
+    assert body["capabilities"]["owner_agent"] == "wired"
     assert "instagram" in body["capabilities"]
     integrations = body["owner_integrations"]
     assert integrations["gmail_send"] is False
@@ -205,7 +210,7 @@ def test_health_is_alive() -> None:
     assert integrations["composio"] is False
     assert "MIA_COMPOSIO_API_KEY" in integrations["missing"]
     assert integrations["linkedin_analytics"] is False
-    assert "MIA_LINKEDIN_ACCESS_TOKEN" in integrations["missing"]
+    assert "MIA_LINKEDIN_ACCESS_TOKEN" not in integrations["missing"]
     assert "MIA_GSC_SITE_URL" in integrations["missing"]
     assert "MIA_GA4_PROPERTY_ID" in integrations["missing"]
     assert "MIA_SHEETS_SPREADSHEET_ID" in integrations["missing"]
@@ -237,7 +242,6 @@ def test_owner_integrations_discovery_off_lists_ids_honestly() -> None:
     assert integrations["missing"] == [
         "MIA_FIRECRAWL_API_KEY",
         "MIA_SHEETS_SPREADSHEET_ID",
-        "MIA_LINKEDIN_ACCESS_TOKEN",
         "MIA_GSC_SITE_URL",
         "MIA_GA4_PROPERTY_ID",
         "MIA_META_ADS_ACCOUNT_ID",
@@ -268,8 +272,55 @@ def test_owner_integrations_discovery_on_drops_listable_ids() -> None:
     assert integrations["missing"] == [
         "MIA_FIRECRAWL_API_KEY",
         "MIA_SHEETS_SPREADSHEET_ID",
-        "MIA_LINKEDIN_ACCESS_TOKEN",
     ]
+
+
+def test_owner_integrations_linkedin_token_only_enables_analytics() -> None:
+    settings = Settings(
+        _env_file=None,
+        composio_api_key="k",
+        composio_user_id="u",
+        composio_discovery=True,
+        firecrawl_api_key="fc",
+        sheets_spreadsheet_id="sheet",
+        linkedin_access_token="li-token",
+    )
+    integrations = owner_integrations(settings)
+    assert integrations["linkedin_profile"] is True
+    assert integrations["linkedin_analytics"] is True
+    assert integrations["missing"] == []
+
+
+def test_owner_integrations_apify_covers_research_without_firecrawl() -> None:
+    settings = Settings(
+        _env_file=None,
+        composio_api_key="k",
+        composio_user_id="u",
+        composio_discovery=True,
+        firecrawl_api_key="",
+        apify_token="apify-token",
+        sheets_spreadsheet_id="sheet",
+    )
+    integrations = owner_integrations(settings)
+    assert integrations["research_firecrawl"] is False
+    assert integrations["research_apify"] is True
+    assert integrations["missing"] == []
+
+
+def test_owner_integrations_firecrawl_hides_apify_flag() -> None:
+    settings = Settings(
+        _env_file=None,
+        composio_api_key="k",
+        composio_user_id="u",
+        composio_discovery=True,
+        firecrawl_api_key="fc",
+        apify_token="apify-token",
+        sheets_spreadsheet_id="sheet",
+    )
+    integrations = owner_integrations(settings)
+    assert integrations["research_firecrawl"] is True
+    assert integrations["research_apify"] is False
+    assert integrations["missing"] == []
 
 
 def test_openapi_surface_prod_hides_docs() -> None:
@@ -302,7 +353,7 @@ def test_docs_available_in_test_env() -> None:
     assert response.status_code == 200
 
 
-def test_manychat_ingest_route_is_unmounted() -> None:
+def test_manychat_route_is_gone() -> None:
     client = TestClient(app)
     response = client.post("/v1/manychat/external-request", json={})
     assert response.status_code == 404

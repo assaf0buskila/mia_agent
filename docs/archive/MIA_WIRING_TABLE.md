@@ -28,8 +28,9 @@ Live: 68 capabilities · `kill_switch=false` · `ops.integration_failures=0`.
 
 | Capability | Missing | Effect |
 |---|---|---|
-| LinkedIn **member post analytics** | `MIA_LINKEDIN_ACCESS_TOKEN` | `linkedin_analytics=false`. Composio cannot substitute — its toolkit has org page stats only (ADR-015) |
-| Meta ads insights | `MIA_META_ADS_ACCOUNT_ID` | `ads_snapshot` returns "not connected" |
+| Meta ads insights | `MIA_META_ADS_ACCOUNT_ID` | `ads_snapshot` returns "not connected" until leftover env or discovery |
+
+LinkedIn **member post analytics** stays off without `MIA_LINKEDIN_ACCESS_TOKEN`. That is optional leftover, not a go-live miss. Profile is Composio. Do not fake member stats with org share-stats (ADR-028).
 
 ## Gated OFF on purpose — leave them
 
@@ -42,7 +43,7 @@ Live: 68 capabilities · `kill_switch=false` · `ops.integration_failures=0`.
 | `MIA_COMPOSIO_DISCOVERY` | false | Turn on only after the discovery probe passes |
 | TTS / voice output | absent | Hard never |
 | ManyChat | unmounted | Not a v1 channel (ADR-021) |
-| Apify | `research_apify=false` | Adapter does not exist; do not add keys |
+| Apify | `research_apify` true only when Firecrawl is empty and `MIA_APIFY_TOKEN` is set | Pinned `apify/google-search-scraper` behind `ResearchPort`. Not a model catalog. |
 
 ## Unproven — configured but never demonstrated live
 

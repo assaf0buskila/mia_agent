@@ -22,7 +22,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from app.brain.context import retrieve_knowledge, retrieve_memories
 from app.brain.embeddings import EmbeddingPort
 from app.brain.retrieval import MemoryScoreWeights
 from app.brain.schemas import (
@@ -32,7 +31,13 @@ from app.brain.schemas import (
     clamp_importance,
 )
 from app.brain.store import BrainStore
+from app.capabilities.knowledge import knowledge_handlers
+from app.capabilities.memory import memory_handlers
+from app.capabilities.policy import execute_capability
+from app.capabilities.research import research_handlers
+from app.capabilities.types import GraphName
 from app.core.config import Settings
+from app.core.errors import PermissionDenied
 from app.db.store import LeadStore
 from app.domain.briefs import apply_owner_meeting_brief
 from app.domain.content_ideas import apply_owner_content_ideas
@@ -63,7 +68,7 @@ from app.integrations.linkedin_analytics import (
 )
 from app.integrations.llm_client import function_tool
 from app.integrations.meta_ads import MetaAdsPort, enrich_analytics_ack
-from app.integrations.research import ResearchPort, enrich_research_ack
+from app.integrations.research import ResearchPort, ResearchSnippet, format_sources_block
 from app.integrations.search_console import SearchConsolePort
 from app.integrations.seo_audit import SeoAuditPort
 
@@ -166,18 +171,28 @@ def _search_memory(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     query = str(args.get("query") or "").strip()
     if not query:
         return ToolResult(ok=False, error="query is required")
-    hits = retrieve_memories(
-        ctx.brain,
-        query=query,
-        embedding_port=ctx.embedding_port,
-        weights=ctx.weights(),
-        limit=8,
-        now=ctx.now,
-    )
+    try:
+        out = execute_capability(
+            "memory.search",
+            graph=GraphName.OWNER,
+            args={"query": query},
+            handlers=memory_handlers(
+                brain=ctx.brain,
+                embedding_port=ctx.embedding_port,
+                weights=ctx.weights(),
+                now=ctx.now,
+            ),
+            kill_switch=ctx.kill_switch,
+        )
+    except PermissionDenied:
+        return ToolResult(ok=False, error="memory search denied")
+    hits = out.get("hits") or []
     if not hits:
         return ToolResult(ok=True, text="No stored memory matches that.")
-    ctx.brain.touch_memories([hit.item_id for hit in hits])
-    lines = [f"- [{hit.label or 'memory'}] {hit.text}" for hit in hits]
+    ids = [str(hit.get("id") or "") for hit in hits if hit.get("id")]
+    if ids:
+        ctx.brain.touch_memories(ids)
+    lines = [f"- [{hit.get('label') or 'memory'}] {hit.get('text') or ''}" for hit in hits]
     return ToolResult(ok=True, text="\n".join(lines))
 
 
@@ -185,12 +200,23 @@ def _search_knowledge(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     query = str(args.get("query") or "").strip()
     if not query:
         return ToolResult(ok=False, error="query is required")
-    hits = retrieve_knowledge(
-        ctx.brain, query=query, embedding_port=ctx.embedding_port, limit=5
-    )
+    try:
+        out = execute_capability(
+            "knowledge.search",
+            graph=GraphName.OWNER,
+            args={"query": query},
+            handlers=knowledge_handlers(
+                brain=ctx.brain,
+                embedding_port=ctx.embedding_port,
+            ),
+            kill_switch=ctx.kill_switch,
+        )
+    except PermissionDenied:
+        return ToolResult(ok=False, error="knowledge search denied")
+    hits = out.get("hits") or []
     if not hits:
         return ToolResult(ok=True, text="Nothing in the website knowledge base matches that.")
-    lines = [f"- [{hit.label or 'site'}] {hit.text}" for hit in hits]
+    lines = [f"- [{hit.get('label') or 'site'}] {hit.get('text') or ''}" for hit in hits]
     return ToolResult(ok=True, text="\n".join(lines))
 
 
@@ -441,12 +467,27 @@ def _research_search(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
         return ToolResult(ok=False, error="query is required")
     if ctx.research is None:
         return ToolResult(ok=True, text=_NOT_CONNECTED)
-    text, _outcome = enrich_research_ack(
-        "",
-        ctx.research,
-        query=query,
-        kill_switch=ctx.kill_switch,
-    )
+    try:
+        out = execute_capability(
+            "research.search",
+            graph=GraphName.OWNER,
+            args={"query": query},
+            handlers=research_handlers(ctx.research),
+            kill_switch=ctx.kill_switch,
+        )
+    except PermissionDenied:
+        return ToolResult(ok=True, text=_NOT_CONNECTED)
+    hits = out.get("hits") or []
+    snippets = [
+        ResearchSnippet(
+            title=str(item.get("title") or ""),
+            url=str(item.get("url") or ""),
+            excerpt=str(item.get("excerpt") or ""),
+        )
+        for item in hits
+        if isinstance(item, dict)
+    ]
+    text = format_sources_block(snippets)
     return _empty(text, "Research search returned nothing. Check the Firecrawl key.")
 
 
@@ -682,7 +723,7 @@ _register(
 _register(
     ToolSpec(
         name="research_search",
-        description="Public web search via Firecrawl. Query must be explicit. Never crawls a site.",
+        description="Public web search snippets. Query must be explicit. Never crawls a site.",
         parameters=_string_arg("query", "Search query, usually a company domain or topic."),
         handler=_research_search,
     )

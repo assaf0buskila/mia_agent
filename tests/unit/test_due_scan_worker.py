@@ -200,6 +200,7 @@ def test_run_due_scan_calls_both_scans(monkeypatch: pytest.MonkeyPatch) -> None:
             "follow_ups_send_ready": 0,
             "owner_tasks_scanned": 0,
             "owner_tasks_due_ready": 0,
+            "website_conversations_finalized": 0,
         }
         assert calls["follow_ups"] == {
             "timezone": "Asia/Jerusalem",
@@ -307,6 +308,7 @@ def test_main_stdout_counts_only(capsys: pytest.CaptureFixture[str]) -> None:
         "follow_ups_send_ready",
         "owner_tasks_scanned",
         "owner_tasks_due_ready",
+        "website_conversations_finalized",
     }
     for value in body.values():
         assert isinstance(value, int)

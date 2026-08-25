@@ -6,8 +6,10 @@ from datetime import UTC, datetime, timedelta
 from time import perf_counter
 from zoneinfo import ZoneInfoNotFoundError
 
-from app.core.errors import PolicyDenied
-from app.core.risk import RiskAction, RiskLevel, assert_allowed
+from app.capabilities.calendar import calendar_handlers
+from app.capabilities.policy import execute_capability
+from app.capabilities.types import GraphName
+from app.core.errors import PermissionDenied, PolicyDenied
 from app.domain.ai_runs import elapsed_ms
 from app.domain.meeting_availability import carve_policy_slots
 from app.domain.tools import AdapterHttpError, ToolOutcome
@@ -15,6 +17,7 @@ from app.integrations.calendar import (
     DEFAULT_MEETING_MINUTES,
     DEFAULT_SEARCH_DAYS,
     CalendarPort,
+    TimeSlot,
     calendar_availability_outcome,
     format_slot_time,
 )
@@ -40,32 +43,33 @@ def apply_owner_calendar(
     if demo_active:
         return ack, None
 
-    try:
-        assert_allowed(
-            RiskAction(name="calendar_read", risk=RiskLevel.R0_READ),
-            kill_switch=kill_switch,
-        )
-    except PolicyDenied:
-        return ack, ToolOutcome(
-            tool="calendar_find_free_slots",
-            status="denied",
-            result_count=0,
-            freshness="",
-        )
-
     clock = _ensure_aware(now or datetime.now(UTC))
     time_min = clock
     time_max = clock + timedelta(days=DEFAULT_SEARCH_DAYS)
 
     try:
         started = perf_counter()
-        slots = calendar.find_free_slots(
-            time_min=time_min,
-            time_max=time_max,
-            duration_minutes=DEFAULT_MEETING_MINUTES,
-            timezone=timezone,
+        payload = execute_capability(
+            "calendar.get_schedule",
+            graph=GraphName.OWNER,
+            args={
+                "time_min": time_min.isoformat(),
+                "time_max": time_max.isoformat(),
+                "duration_minutes": DEFAULT_MEETING_MINUTES,
+                "timezone": timezone,
+            },
+            handlers=calendar_handlers(calendar),
+            kill_switch=kill_switch,
         )
         latency = elapsed_ms(started)
+        slots = [
+            TimeSlot(
+                start=datetime.fromisoformat(str(item["start"])),
+                end=datetime.fromisoformat(str(item["end"])),
+            )
+            for item in payload.get("slots") or []
+            if isinstance(item, dict) and item.get("start") and item.get("end")
+        ]
         if not slots:
             return _EMPTY_ACK, calendar_availability_outcome(
                 base_status="empty",
@@ -100,6 +104,13 @@ def apply_owner_calendar(
             result_count=len(included),
             latency_ms=latency,
             now=clock,
+        )
+    except PermissionDenied:
+        return ack, ToolOutcome(
+            tool="calendar_find_free_slots",
+            status="denied",
+            result_count=0,
+            freshness="",
         )
     except AdapterHttpError as exc:
         return ack, calendar_availability_outcome(

@@ -79,7 +79,7 @@ Names live in `.env.example` and `app/core/config.py`. Production SECRET keys: A
 | Fail-closed flags (exist, default false) | `MIA_WHATSAPP_HANDOFF_SEND`, `MIA_GMAIL_SEND`, `MIA_META_WRITE`, `MIA_AUTO_REPLY_INSTAGRAM` |
 | Leftover optional IDs | `MIA_GSC_SITE_URL`, `MIA_GA4_PROPERTY_ID`, `MIA_META_ADS_ACCOUNT_ID` — required while `MIA_COMPOSIO_DISCOVERY=false`; skippable after a clean probe + flag on |
 | Still required | `MIA_SHEETS_SPREADSHEET_ID` (write target), `MIA_LINKEDIN_ACCESS_TOKEN` (member analytics) |
-| Required extra (not Composio) | `MIA_FIRECRAWL_API_KEY` for research |
+| Required extra (not Composio) | `MIA_FIRECRAWL_API_KEY` for research (primary). `MIA_APIFY_TOKEN` selects pinned `apify/google-search-scraper` only when Firecrawl is empty |
 | Deprecated leftover | `MIA_MANYCHAT_INGEST_TOKEN` may still be in `mia/prod` and ECS injection. **Do not delete the AWS secret.** Code does not read it. |
 
 R4 approval and R5 deny are not env knobs.

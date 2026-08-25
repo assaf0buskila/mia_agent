@@ -4,7 +4,7 @@
 **Status:** Gate F partial (this file + named-flag table + first-live ALB metric alarms without SNS). Dashboards, SNS pager, LangSmith, and automated paging are **not** in this repo.  
 **Not a grant of write access.** Does not enable Gmail send, Meta writes, follow-up send, instruction activation, Lambda/SQS/AgentCore, or `app.infra`.
 
-Go-live order: `docs/PRODUCTION_BUILD.md`. Related: `.env.example`, `docs/ARCHITECTURE.md`, `docs/PROJECT_MAP.md`.
+Go-live order: `docs/PRODUCTION_BUILD.md`. Related: `.env.example`, `docs/PRODUCT.md`, `docs/ARCHITECTURE.md`.
 
 Package manager is **uv**. PowerShell: use `;` not `&&`. Restart the API process after env edits.
 
@@ -115,7 +115,7 @@ Highest operational risk if Graph and Composio both send.
 
 - Set **exactly one** of `MIA_INSTAGRAM_SENDER=direct` or `composio`. Production default is `direct`. Flip to `composio` only after staging send is tested (ADR-015).
 - Instagram inbound stays Meta HMAC webhook. Not a v1 sales inbox (ADR-017). `MIA_AUTO_REPLY_INSTAGRAM=false`.
-- ManyChat is not mounted. A leftover `MIA_MANYCHAT_INGEST_TOKEN` in Secrets Manager is unused — do not delete it from AWS without Assaf.
+- ManyChat is removed from the app (ADR-032). Do not inject `MIA_MANYCHAT_INGEST_TOKEN`. If that name still exists in AWS Secrets Manager, leave it unused — this repo does not read it.
 
 ---
 

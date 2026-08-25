@@ -87,6 +87,7 @@ from app.domain.debriefs import ALLOWLISTED_NEXT_STEPS, ALLOWLISTED_OUTCOMES
 from app.domain.events import (
     CanonicalEvent,
     Channel,
+    EventType,
     build_lead_created_event,
     sanitize_webhook_channel,
     sanitize_webhook_envelope_kind,
@@ -2561,6 +2562,35 @@ class LeadStore:
         )
         self.session.flush()
 
+    def try_insert_owner_notification(
+        self,
+        *,
+        kind: str,
+        lead_id: str,
+        scheduled_at: str,
+    ) -> bool:
+        """Insert once. False on duplicate (kind, lead_id) — used for finalization idempotency."""
+        if not kind or not lead_id or not scheduled_at:
+            return False
+        existing = self.session.scalars(
+            select(OwnerNotificationRow).where(
+                OwnerNotificationRow.kind == kind,
+                OwnerNotificationRow.lead_id == lead_id,
+            )
+        ).one_or_none()
+        if existing is not None:
+            return False
+        self.session.add(
+            OwnerNotificationRow(
+                kind=kind,
+                lead_id=lead_id,
+                scheduled_at=scheduled_at,
+                seen_at="",
+            )
+        )
+        self.session.flush()
+        return True
+
     def list_unseen_owner_notifications(
         self, *, kinds: tuple[str, ...], limit: int = 3
     ) -> list[OwnerNotificationRow]:
@@ -2847,6 +2877,62 @@ class LeadStore:
             .order_by(LeadRow.id)
         ).first()
         return lead.id if lead is not None else None
+
+    def has_website_prospect_message(self, lead_id: str) -> bool:
+        if not lead_id:
+            return False
+        row = self.session.scalars(
+            select(CanonicalEventRow)
+            .where(
+                CanonicalEventRow.lead_id == lead_id,
+                CanonicalEventRow.provider == Channel.WEBSITE.value,
+                CanonicalEventRow.event_type == EventType.MESSAGE_IN.value,
+                CanonicalEventRow.actor_role == "prospect",
+            )
+            .limit(1)
+        ).first()
+        return row is not None
+
+    def list_inactive_website_conversations(
+        self,
+        *,
+        cutoff_iso: str,
+        skip_kinds: tuple[str, ...],
+        limit: int = 50,
+    ) -> list[tuple[str, str]]:
+        """Website session_id + lead_id whose last visitor message is at or before cutoff."""
+        if not cutoff_iso or limit <= 0:
+            return []
+        last_in = (
+            select(
+                CanonicalEventRow.lead_id,
+                func.max(CanonicalEventRow.occurred_at).label("last_at"),
+            )
+            .where(
+                CanonicalEventRow.provider == Channel.WEBSITE.value,
+                CanonicalEventRow.event_type == EventType.MESSAGE_IN.value,
+                CanonicalEventRow.actor_role == "prospect",
+            )
+            .group_by(CanonicalEventRow.lead_id)
+            .subquery()
+        )
+        query = (
+            select(ChannelIdentityRow.external_id, LeadRow.id)
+            .join(LeadRow, LeadRow.customer_id == ChannelIdentityRow.customer_id)
+            .join(last_in, last_in.c.lead_id == LeadRow.id)
+            .where(
+                ChannelIdentityRow.channel == Channel.WEBSITE.value,
+                last_in.c.last_at <= cutoff_iso,
+            )
+            .limit(limit)
+        )
+        if skip_kinds:
+            notified = select(OwnerNotificationRow.lead_id).where(
+                OwnerNotificationRow.kind.in_(skip_kinds)
+            )
+            query = query.where(LeadRow.id.notin_(notified))
+        rows = self.session.execute(query)
+        return [(str(session_id), str(lead_id)) for session_id, lead_id in rows]
 
     def issue_handoff_token(
         self, lead_id: str, website_session_id: str

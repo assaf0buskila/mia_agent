@@ -21,6 +21,7 @@ class GraphState(TypedDict):
     tokens_out: NotRequired[int]
     page_path: NotRequired[str]
     page_section: NotRequired[str]
+    knowledge_hits: NotRequired[list[dict[str, str]]]
     errors: list[str]
     cost: dict[str, Any]
 
@@ -35,6 +36,7 @@ def empty_state(
     kill_switch: bool = False,
     page_path: str = "",
     page_section: str = "",
+    knowledge_hits: list[dict[str, str]] | None = None,
 ) -> GraphState:
     state: GraphState = {
         "run_id": run_id,
@@ -51,6 +53,7 @@ def empty_state(
         "cost": {},
         "page_path": page_path,
         "page_section": page_section,
+        "knowledge_hits": list(knowledge_hits or []),
     }
     if lead_id:
         state["lead_id"] = lead_id

@@ -8,6 +8,8 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from app.agents.client.graph import compile_client_graph
+from app.agents.shared.state import empty_client_state
 from app.api.deps import (
     get_calendar_booking_port,
     get_calendar_port,
@@ -15,6 +17,7 @@ from app.api.deps import (
     get_sheets_port,
     get_transcription_port,
 )
+from app.channels.website import message_to_client_state
 from app.core.config import Settings, get_settings
 from app.core.demo import SYNTHETIC_ATTRIBUTION, demo_mode_active
 from app.core.logging import log_comm
@@ -40,13 +43,12 @@ from app.domain.events import (
 )
 from app.domain.followups import apply_follow_up_policy
 from app.domain.handoff import click_to_chat_digits, compose_handoff_text
-from app.domain.hot_handoff import apply_hot_handoff
 from app.domain.meetings import apply_meeting_policy
 from app.domain.sales import NextAction
-from app.domain.website_handoff_brief import apply_website_whatsapp_handoff_brief
-from app.graph.orchestrator import build_graph
+from app.domain.website_handoff_brief import (
+    apply_website_whatsapp_handoff_brief,
+)
 from app.graph.replies import WEBSITE_REPLIES
-from app.graph.state import empty_state
 from app.integrations.calendar import CalendarPort
 from app.integrations.calendar_booking import CalendarBookingPort
 from app.integrations.research import build_research_port
@@ -150,6 +152,11 @@ class BehaviorEventIn(BaseModel):
 class BehaviorEventOut(BaseModel):
     accepted: bool
     kind: str
+
+
+class EndSessionOut(BaseModel):
+    accepted: bool
+    finalized: bool
 
 
 def _normalize_voice_mime(content_type: str | None) -> str:
@@ -382,18 +389,22 @@ def process_website_message(
     section_payload = store.latest_behavior_payload(session_id, "section_viewed")
     page_path = page_payload.get("path", "") if page_payload else ""
     page_section = section_payload.get("section", "") if section_payload else ""
-    graph = build_graph(store, reply_port=build_sales_reply_port(settings))
+    graph = compile_client_graph(
+        store,
+        reply_port=build_sales_reply_port(settings),
+        settings=settings,
+    )
     started = perf_counter()
     result = graph.invoke(
-        empty_state(
+        message_to_client_state(
             run_id=run_id,
-            thread_id=session_id,
-            channel="website",
+            session_id=session_id,
             lead_id=lead_id,
-            latest_message=text,
+            text=text,
             kill_switch=settings.kill_switch,
             page_path=page_path,
             page_section=page_section,
+            inbound_id=provider_event_id,
         )
     )
     persist_ai_run(
@@ -634,15 +645,6 @@ def process_website_message(
             lead_id=lead_id,
             payload={"kind": "whatsapp_handoff_offered"},
         )
-    if result.get("next_action") == NextAction.HANDOFF.value:
-        apply_hot_handoff(
-            store,
-            lead_id=lead_id,
-            inbound_id=provider_event_id,
-            want=text,
-            kill_switch=settings.kill_switch,
-            settings=settings,
-        )
     log_comm(
         channel=Channel.WEBSITE.value,
         provider="website",
@@ -777,6 +779,30 @@ def post_behavior_event(
         payload=payload,
     )
     return BehaviorEventOut(accepted=True, kind=body.kind)
+
+
+@router.post("/sessions/{session_id}/end", response_model=EndSessionOut)
+def end_session(
+    session_id: str,
+    db: Session = Depends(get_db),
+) -> EndSessionOut:
+    store = LeadStore(db)
+    lead_id = store.get_website_lead_id(session_id)
+    if lead_id is None:
+        raise HTTPException(status_code=404, detail="session not found")
+    result = compile_client_graph(store, settings=get_settings()).invoke(
+        empty_client_state(
+            run_id=f"end:{session_id}",
+            conversation_id=session_id,
+            visitor_id=session_id,
+            lead_id=lead_id,
+            turn_kind="session_end",
+        )
+    )
+    return EndSessionOut(
+        accepted=True,
+        finalized=bool(result.get("finalized")),
+    )
 
 
 @router.post("/sessions/{session_id}/messages", response_model=MessageOut)

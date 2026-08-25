@@ -39,12 +39,16 @@ Proposed is not accepted. Build may follow a proposed default only when `AGENTS.
 | ADR-017 | v1 communication operating model | accepted |
 | ADR-018 | Website offers WhatsApp after first real friction | accepted |
 | ADR-019 | Selected Region is eu-north-1 | accepted |
-| ADR-021 | Documentation core set; ManyChat not a v1 runtime channel | accepted |
+| ADR-021 | Documentation core set; ManyChat not a v1 runtime channel | superseded (docs set → ADR-031; ManyChat still unmounted) |
 | ADR-022 | Production live sales test: leave shadow, keep gated writes off | accepted |
 | ADR-023 | Model routing: deterministic decisions, model paraphrases | proposed |
 | ADR-024 | WhatsApp stays human until official Cloud API inbound | accepted |
 | ADR-026 | Mia's brain: long-term memory, knowledge, and an owner tool loop | accepted |
 | ADR-027 | Opt-in Composio discovery for GSC/GA4/Meta; Sheets and LinkedIn stay explicit | accepted |
+| ADR-028 | LinkedIn v1 is Composio profile; member-analytics token is optional | accepted |
+| ADR-030 | Apify google-search-scraper behind ResearchPort | accepted |
+| ADR-031 | VNext two graphs + canonical docs | accepted |
+| ADR-032 | Delete ManyChat from the product | accepted |
 
 ## Template
 
@@ -409,14 +413,14 @@ Assaf locked a production supplier map. ADR-007 still forbids dumping catalogs i
 | LinkedIn profile | Composio |
 | LinkedIn personal member post analytics | Direct REST + `MIA_LINKEDIN_ACCESS_TOKEN` (ADR-009). Composio has org share-stats only. |
 | Meta Ads **read** | Composio |
-| Research | Firecrawl now; Apify later behind the same `ResearchPort` |
+| Research | Firecrawl primary; Apify `google-search-scraper` behind the same `ResearchPort` when Firecrawl is unset (ADR-030) |
 | ManyChat | Not mounted in v1 (ADR-021). Leftover AWS secret name stays in the box; app ignores it. |
 | Composio WhatsApp toolkit | Send pin `WHATSAPP_SEND_MESSAGE` only when sender=`composio`. No inbound trigger. Template send not wired. |
 
 One Instagram sender per conversation (`direct` or `composio`). Never dual-send Graph + Composio. ManyChat is unmounted (ADR-021).
 
 **Consequences**
-Env/docs/JSON list Meta tokens for WhatsApp and for Instagram **webhook verify**. Composio key+user covers Gmail/Calendar/Sheets/GSC/GA4/LinkedIn profile/Meta ads/future IG send+insights. Member analytics stays Direct REST (ADR-009); Composio has org share-stats only. GSC/GA4/Meta ads resource ids are leftover env, optional only when `MIA_COMPOSIO_DISCOVERY=true` (ADR-027). Sheets id stays explicit. Do not add Apify keys until that adapter exists. Do not rip live Graph IG send until the Composio port is tested.
+Env/docs/JSON list Meta tokens for WhatsApp and for Instagram **webhook verify**. Composio key+user covers Gmail/Calendar/Sheets/GSC/GA4/LinkedIn profile/Meta ads/future IG send+insights. Member analytics stays Direct REST (ADR-009); Composio has org share-stats only. GSC/GA4/Meta ads resource ids are leftover env, optional only when `MIA_COMPOSIO_DISCOVERY=true` (ADR-027). Sheets id stays explicit. Apify token is `MIA_APIFY_TOKEN` (ADR-030). Do not rip live Graph IG send until the Composio port is tested.
 
 **Alternatives considered**
 Composio for WhatsApp or Instagram inbound — rejected; no usable inbound trigger. Composio `LINKEDIN_GET_SHARE_STATS` for personal analytics — rejected; org URN only (ADR-027). Default-everything-Composio including catalogs in the model — rejected (ADR-007). WhatsApp send via Composio is ADR-016.
@@ -495,9 +499,10 @@ Move the project to an account that can use `il-central-1` — rejected; live ho
 
 ### ADR-021 Documentation core set; ManyChat not a v1 runtime channel
 
-- **Status:** accepted
+- **Status:** superseded
 - **Date:** 2026-08-23
 - **Assaf:** ADOPT (chat: `/goal` simplify repository without breaking v1)
+- **Superseded by:** ADR-031 (living agent docs). ManyChat remains unmounted.
 
 **Context**
 The repo accumulated overlapping MD files (PRD dump, HANDOFF, playbooks, gap reports) that burned agent context. ManyChat was an optional Instagram sidecar, not part of the ADR-017 v1 channel set.
@@ -619,4 +624,82 @@ Assaf already has Active Composio connections: Gmail, Calendar, LinkedIn (Assaf 
 `GET /health` `owner_integrations.missing` is honest: Sheets id and LinkedIn token stay listed when blank. GSC / GA4 / Meta ads ids are listed only while discovery is off. Parsers in `app/integrations/composio_discovery.py` are shape-tolerant and unverified against Assaf’s live `{data, error, successful}` envelope until `uv run python scripts/probe_composio_discovery.py` is run. Production stays dark for those three ids until Assaf sets the leftover env or flips the flag after a clean probe.
 
 **Alternatives considered**
-Fake personal analytics with `LINKEDIN_GET_SHARE_STATS` — rejected; org URN, wrong job. Auto-pick a Sheets write target by name — rejected; near-miss writes the wrong document. Always-on request-time LIST_* — rejected; discovery must not fire on every port build. Remove the LinkedIn member token — rejected; Composio has no member analytics tool. Replace Firecrawl with a Composio search toolkit — rejected; ResearchPort stays Firecrawl.
+Fake personal analytics with `LINKEDIN_GET_SHARE_STATS` — rejected; org URN, wrong job. Auto-pick a Sheets write target by name — rejected; near-miss writes the wrong document. Always-on request-time LIST_* — rejected; discovery must not fire on every port build. Treat LinkedIn member token as a go-live requirement — superseded by ADR-028: v1 LinkedIn is Composio profile; the analytics token is optional leftover. Replace Firecrawl with a Composio search toolkit — rejected; ResearchPort stays Firecrawl.
+
+### ADR-028 LinkedIn v1 is Composio profile; member-analytics token is optional
+
+- **Status:** accepted
+- **Date:** 2026-08-24
+- **Assaf:** ADOPT (deploy: LinkedIn through Composio, no access-token key)
+
+**Context**
+ADR-009 still describes how member post analytics would work (direct REST + `MIA_LINKEDIN_ACCESS_TOKEN`). Composio still has no member analytics tool. Assaf's live LinkedIn connection is the profile toolkit. Requiring the leftover token listed it on `/health` as missing even though profile reads already work.
+
+**Decision**
+v1 owner LinkedIn is Composio `LINKEDIN_GET_MY_INFO`. Do not add `MIA_LINKEDIN_ACCESS_TOKEN` to go live. `/health` `owner_integrations.missing` does not list that token. `linkedin_analytics` stays false until a real member token exists. Do not fake member stats with org share-stats.
+
+**Consequences**
+Telegram can answer LinkedIn profile questions via the existing Composio port. Member analytics stays dark unless Assaf later supplies the leftover token. ADR-009 remains the analytics adapter if that token appears.
+
+**Alternatives considered**
+Keep listing the token as missing — rejected; it blocked a clean health picture for a capability Assaf is not shipping. Wire `LINKEDIN_GET_SHARE_STATS` as analytics — rejected; org URN, wrong job.
+
+### ADR-030 Apify google-search-scraper behind ResearchPort
+
+- **Status:** accepted
+- **Date:** 2026-08-25
+- **Assaf:** ADOPT (chat: wire the Apify token as a research supplier)
+
+**Context**
+ADR-015 left Apify for later behind the same typed `ResearchPort`. Assaf added an Apify API token. Dumping the Actor Store or arbitrary runs into the owner model would violate ADR-007. `apify/rag-web-browser` is Playwright page crawl, not search snippets. `apify-client.call()` waits indefinitely by default.
+
+**Decision**
+Pin **`apify/google-search-scraper`** only. Call `POST /v2/actors/apify~google-search-scraper/run-sync-get-dataset-items` with httpx (`timeout=60`, `maxTotalChargeUsd=0.02`, client timeout 70s). Adapter-owned input: one query, one SERP page, add-ons off. Map `organicResults` to `{title, url, excerpt}` (cap 2). Firecrawl stays primary when `MIA_FIRECRAWL_API_KEY` is set; `MIA_APIFY_TOKEN` selects this adapter only when Firecrawl is empty. Do not retry HTTP 408 (the run keeps billing). No Actor catalog, no `apify-client`, no Composio Apify toolkit.
+
+**Consequences**
+`research_search` and meeting-brief research stay one port. `/health` `research_apify` is true only when Apify is the selected adapter. Production `mia/prod` must include `MIA_APIFY_TOKEN` (empty until Assaf pastes the token) before an ECS revision that injects it. SEO audit scrape stays Firecrawl.
+
+**Alternatives considered**
+`apify/rag-web-browser` — rejected; full-page crawl/browser, not SERP snippets. `apify-client` — rejected; extra package, unbounded wait. Firecrawl replacement while its key is set — rejected; live production search stays Firecrawl. Model-owned actor id or input knobs — rejected (ADR-007).
+
+### ADR-031 VNext two graphs + canonical docs
+
+- **Status:** accepted
+- **Date:** 2026-08-25
+- **Assaf:** ADOPT (chat: `/goal` rebuild per `MIA_REBUILD.MD`)
+
+**Context**
+The live app is one FastAPI process with a one-node sales LangGraph and a custom owner tool loop inside `process_inbound_texts`. Documentation required agents to load PROJECT_MAP, PRD, BUILD_STATUS, HANDOFF, and more. Brain code is on the HTTP path but semantic memory is gated on empty default model ids. There is no conversation-finalization → Telegram summary (only WhatsApp-click briefing).
+
+**Decision**
+1. Two compiled LangGraph entry points: `OwnerGraph` (Telegram) and `ClientGraph` (website). Shared core; separate state, prompts, tools, permissions.
+2. Channels stay thin adapters. Capability layer + Python policy sit in front of Composio. Website visitors cannot execute owner capabilities even under prompt injection.
+3. Canonical agent reading: `AGENTS.md`, `docs/PRODUCT.md`, `docs/ARCHITECTURE.md`, `docs/DECISIONS.md`. Operator files `docs/RUNBOOK.md` and `docs/PRODUCTION_BUILD.md` remain for humans/tests, not required agent reading. ADR-021’s living-doc list is superseded; ManyChat stays unmounted.
+4. Reuse `app/brain/`, STT, Postgres, risk policy. Strangle `inbound.py` — do not delete until the new path is tested.
+5. Add explicit website conversation finalization with idempotent Telegram notify.
+6. Do not auto-deploy. Do not add pgvector. Do not declare brain embeddings/extraction ALIVE when model ids are empty.
+
+**Consequences**
+Owner and client reasoning no longer share one inbound mega-handler. Prospect Meta/Gmail inbound compiles ClientGraph (same NBA, not a third graph). New integrations plug in as capability + policy + adapter + graph allowlist. Old classifier remains fallback until OwnerGraph is proven. Production still needs `MIA_OWNER_AGENT_MODEL` / `MIA_EXTRACTION_MODEL` / `MIA_EMBEDDING_MODEL` plus a one-off `mia-ingest-knowledge` for a non-empty corpus.
+
+**Alternatives considered**
+Keep one ReAct loop for both users — rejected (rebuild §36). Rewrite brain onto pgvector — rejected (ADR-026). Delete WhatsApp/Gmail webhooks in this slice — rejected; preserve production contracts until replaced.
+
+### ADR-032 Delete ManyChat from the product
+
+- **Status:** accepted
+- **Date:** 2026-08-25
+- **Assaf:** ADOPT (chat: delete all ManyChat integration)
+
+**Context**
+ManyChat was never mounted in v1 (ADR-021). Assaf asked to remove it from the product, not leave it as a deferred sidecar. The app still declared `manychat` specified, injected `MIA_MANYCHAT_INGEST_TOKEN` in the ECS example, and documented a leftover AWS secret.
+
+**Decision**
+Remove ManyChat from runtime code, capability map, health, `.env.example`, and ECS/secret examples. Instagram senders stay `direct` | `composio`. Unused `channel_identities` columns remain in Postgres so existing databases do not need a drop migration. This repo does not read or delete a leftover AWS secret name.
+
+**Consequences**
+`POST /v1/manychat/external-request` stays gone (404). New task revisions must not inject `MIA_MANYCHAT_INGEST_TOKEN`. Do not remount ManyChat.
+
+**Alternatives considered**
+Keep the unused AWS secret documented forever — rejected for new deploys; the live box is not touched from this repo. Drop leftover identity columns now — rejected; avoid a production schema change for empty columns.
+

@@ -17,7 +17,7 @@ Mia is AssafWeb’s AI Growth & Sales Operator. She turns attention into qualifi
 | WhatsApp | Gated until official Cloud API inbound (ADR-024). Click-to-chat opens Assaf. Mia sends him a Telegram briefing with known facts, a short transcript, and a paste-ready first line. She does not reply on WhatsApp while `MIA_WHATSAPP_HANDOFF_SEND=false`. |
 | Gmail | Read / classify / summarize / draft. Send approval-gated (`MIA_GMAIL_SEND` default false). |
 | Calendar | Free/busy + gated create/reschedule (`MIA_CALENDAR_WRITE`). |
-| LinkedIn | Profile via Composio (`LINKEDIN_GET_MY_INFO`). Personal post analytics is Direct REST + `MIA_LINKEDIN_ACCESS_TOKEN` (ADR-009). Composio has org share-stats only — do not fake member analytics. No posts/DMs. |
+| LinkedIn | Profile via Composio (`LINKEDIN_GET_MY_INFO`). Personal post analytics is optional Direct REST + `MIA_LINKEDIN_ACCESS_TOKEN` (ADR-009/028). Composio has org share-stats only — do not fake member analytics. No posts/DMs. |
 | Meta ads | Insights read. Writes need Assaf approval (R4). |
 | Instagram | Analytics/insights may remain. **Not** a v1 autonomous sales inbox. |
 | ManyChat | Not a v1 channel (ADR-021). Route unmounted. |
@@ -45,7 +45,7 @@ A capability is **wired** if it has a typed port and appears in `app/core/capabi
 - `MIA_WHATSAPP_SENDER=composio`, `MIA_WHATSAPP_REQUIRE_BUSINESS_SCOPE=true`
 - `MIA_WHATSAPP_HANDOFF_SEND=false`. WhatsApp prospect send stays off in every automation mode until this flag is true. Official Cloud API inbound is the precondition. Until then the website click opens Assaf and Telegram gets the briefing (ADR-024).
 - `MIA_CALENDAR_WRITE=true` (Assaf ADOPT). Gmail send / Meta write / IG auto-reply **false**. No env knobs for follow-up send, browser crawl, or tool discovery.
-- Region `eu-north-1`. Host `https://mia.assafweb.com`. Live image `mia:16` (task `mia:18`). `/health` includes `brain` + `owner_integrations`. Brain env: `MIA_OWNER_AGENT_MODEL=gpt-5.6-terra`, `MIA_EXTRACTION_MODEL=gpt-5.6-luna`, `MIA_EMBEDDING_MODEL=text-embedding-3-small`. `MIA_COMPOSIO_DISCOVERY` defaults false. GSC / GA4 / Meta ads ids are leftover env, optional only when discovery is on. `MIA_SHEETS_SPREADSHEET_ID` and `MIA_LINKEDIN_ACCESS_TOKEN` stay required. Firecrawl is not Composio.
+- `MIA_COMPOSIO_DISCOVERY` defaults false. `MIA_SHEETS_SPREADSHEET_ID` stays required. Firecrawl is not Composio. Research: Firecrawl primary; Apify `google-search-scraper` fallback via `MIA_APIFY_TOKEN` when Firecrawl is empty (ADR-030).
 - Widget colours are the scraped `www.assafweb.com` `:root` tokens and nothing else; `test_widget_uses_only_assafweb_palette_colors` fails on drift. The brand mark is inline SVG, not a raster asset
 
 ## Tests

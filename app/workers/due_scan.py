@@ -13,6 +13,7 @@ from app.db.store import LeadStore
 from app.domain.commitments import scan_due_owner_tasks
 from app.domain.followups import scan_due_follow_ups
 from app.domain.pacing import parse_monthly_budget
+from app.services.finalization import scan_inactive_website_conversations
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +23,7 @@ class DueScanSummary(BaseModel):
     follow_ups_send_ready: int
     owner_tasks_scanned: int
     owner_tasks_due_ready: int
+    website_conversations_finalized: int
 
 
 def run_due_scan(
@@ -51,11 +53,17 @@ def run_due_scan(
         monthly_budget=parse_monthly_budget(settings.campaign_monthly_budget),
         spend_mtd=spend_mtd,
     )
+    website_finalized = scan_inactive_website_conversations(
+        store,
+        settings=settings,
+        now=effective_now,
+    )
     return DueScanSummary(
         follow_ups_scanned=len(follow_up_results),
         follow_ups_send_ready=sum(1 for item in follow_up_results if item.allowed),
         owner_tasks_scanned=len(owner_task_results),
         owner_tasks_due_ready=sum(1 for item in owner_task_results if item.due_ready),
+        website_conversations_finalized=website_finalized,
     )
 
 
@@ -81,11 +89,13 @@ def main() -> None:
     print(json.dumps(counts))
     logger.info(
         "due_scan complete follow_ups_scanned=%s follow_ups_send_ready=%s "
-        "owner_tasks_scanned=%s owner_tasks_due_ready=%s",
+        "owner_tasks_scanned=%s owner_tasks_due_ready=%s "
+        "website_conversations_finalized=%s",
         counts["follow_ups_scanned"],
         counts["follow_ups_send_ready"],
         counts["owner_tasks_scanned"],
         counts["owner_tasks_due_ready"],
+        counts["website_conversations_finalized"],
     )
 
 

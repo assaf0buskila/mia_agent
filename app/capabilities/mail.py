@@ -1,0 +1,29 @@
+"""Owner mail.read — Gmail fetch behind capability/policy, not a Composio slug in the graph."""
+
+from __future__ import annotations
+
+from typing import Any
+
+from app.core.errors import InvalidArguments
+from app.integrations.gmail import GmailPort, InboundEmail
+
+
+def mail_read(port: GmailPort, args: dict[str, Any]) -> dict[str, Any]:
+    message_id = str(args.get("message_id") or "").strip()
+    if not message_id:
+        raise InvalidArguments("message_id is required")
+    email: InboundEmail | None = port.fetch_message(message_id)
+    if email is None:
+        return {"found": False, "message_id": message_id}
+    return {
+        "found": True,
+        "message_id": email.message_id,
+        "thread_id": email.thread_id,
+        "subject": email.subject,
+        "sender": email.sender,
+        "text": email.text[:2000],
+    }
+
+
+def mail_handlers(port: GmailPort) -> dict[str, Any]:
+    return {"mail.read": lambda args: mail_read(port, args)}

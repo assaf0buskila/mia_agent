@@ -21,6 +21,7 @@ from app.domain.calendar_booking import (
     resolve_meeting_reply,
 )
 from app.domain.events import Channel, EventType, build_meeting_booked_event
+from app.domain.meeting_availability import is_workday_local
 from app.domain.meeting_slots import (
     compute_booking_key,
     is_explicit_slot_selection,
@@ -86,6 +87,19 @@ def _slot(days_ahead: int, hour: int, minute: int = 0) -> TimeSlot:
     return TimeSlot(start=start, end=start + timedelta(minutes=30))
 
 
+def _bookable_slot_from_now(*, hour: int = 15) -> TimeSlot:
+    """A slot that is still bookable against the live clock, not FIXED_NOW."""
+    clock = datetime.now(UTC)
+    local = clock.astimezone(IL) + timedelta(days=2)
+    for _ in range(10):
+        candidate = local.replace(hour=hour, minute=0, second=0, microsecond=0)
+        if is_workday_local(candidate):
+            start = candidate.astimezone(UTC)
+            return TimeSlot(start=start, end=start + timedelta(minutes=30))
+        local = local + timedelta(days=1)
+    raise AssertionError("no bookable workday slot in the next 12 days")
+
+
 def _il_gap(*, days_ahead: int, start_hour: int, end_hour: int) -> TimeSlot:
     local_now = FIXED_NOW.astimezone(IL)
     local_date = (local_now + timedelta(days=days_ahead)).date()
@@ -134,7 +148,13 @@ def _ready_state(lead_id: str) -> SalesState:
     )
 
 
-def _seed_offered(store: LeadStore, lead_id: str, slots: list[TimeSlot]) -> None:
+def _seed_offered(
+    store: LeadStore,
+    lead_id: str,
+    slots: list[TimeSlot],
+    *,
+    now: datetime | None = None,
+) -> None:
     apply_meeting_policy(
         store,
         lead_id=lead_id,
@@ -145,7 +165,7 @@ def _seed_offered(store: LeadStore, lead_id: str, slots: list[TimeSlot]) -> None
     store.save_offered_slots(
         lead_id=lead_id,
         slots=slots,
-        now=FIXED_NOW,
+        now=now or FIXED_NOW,
         timezone="Asia/Jerusalem",
     )
 
@@ -1285,8 +1305,8 @@ def test_website_e2e_booking() -> None:
         session_id = "web_book_e2e_1"
         _, lead_id = store.open_channel_lead(channel=Channel.WEBSITE, external_id=session_id)
         store.save_sales(_ready_state(lead_id))
-        slot = _slot(5, 15)
-        _seed_offered(store, lead_id, [slot])
+        slot = _bookable_slot_from_now()
+        _seed_offered(store, lead_id, [slot], now=datetime.now(UTC))
         db.commit()
         fake_cal = FakeCalendarPort([slot])
         fake_book = FakeCalendarBookingPort()

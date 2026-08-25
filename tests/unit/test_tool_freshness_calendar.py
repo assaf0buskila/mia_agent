@@ -8,6 +8,7 @@ from app.api.inbound import process_inbound_texts
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
 from app.domain.events import Channel
+from app.domain.meeting_availability import is_workday_local
 from app.domain.owner_calendar import apply_owner_calendar
 from app.domain.owner_tasks import ack_for_owner_task, classify_owner_task
 from app.domain.sales import FitLevel, NextAction, PainLevel, SalesState
@@ -50,12 +51,16 @@ def _ready_to_meet_state(lead_id: str) -> SalesState:
 
 
 def _policy_gap(*, now: datetime, days_ahead: int = 4) -> TimeSlot:
-    local_date = (now.astimezone(IL_TZ) + timedelta(days=days_ahead)).date()
+    local = now.astimezone(IL_TZ) + timedelta(days=max(days_ahead, 2))
+    for _ in range(8):
+        if is_workday_local(local):
+            break
+        local = local + timedelta(days=1)
     gap_start = datetime(
-        local_date.year, local_date.month, local_date.day, 10, 0, tzinfo=IL_TZ
+        local.year, local.month, local.day, 10, 0, tzinfo=IL_TZ
     ).astimezone(UTC)
     gap_end = datetime(
-        local_date.year, local_date.month, local_date.day, 12, 0, tzinfo=IL_TZ
+        local.year, local.month, local.day, 12, 0, tzinfo=IL_TZ
     ).astimezone(UTC)
     return TimeSlot(start=gap_start, end=gap_end)
 
@@ -252,7 +257,7 @@ async def test_inbound_owner_calendar_freshness_persisted() -> None:
             port=port,
             kill_switch=False,
             owner_ids={OWNER_FRESH_PHONE},
-            calendar=FakeCalendarPort([_policy_gap(now=OWNER_NOW)]),
+            calendar=FakeCalendarPort([_policy_gap(now=datetime.now(UTC))]),
         )
         db.commit()
         row = store.get_tool_run("cal.fresh.owner.1:tool:calendar_find_free_slots")

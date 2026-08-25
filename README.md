@@ -2,21 +2,18 @@
 
 AssafWeb’s AI Growth & Sales Operator.
 
-**Start here:** [`docs/PROJECT_MAP.md`](docs/PROJECT_MAP.md)
+**Start here:** [`AGENTS.md`](AGENTS.md) → [`docs/PRODUCT.md`](docs/PRODUCT.md) → [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) → [`docs/DECISIONS.md`](docs/DECISIONS.md)
 
 | Doc | Use |
 | --- | --- |
-| [`AGENTS.md`](AGENTS.md) | Operating rules for coding agents |
-| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | v1 channels and adapters |
-| [`docs/BRAIN_ARCHITECTURE.md`](docs/BRAIN_ARCHITECTURE.md) | Memory, knowledge, retrieval, owner agent, voice |
-| [`docs/PRD.md`](docs/PRD.md) | Short living contract |
-| [`docs/BUILD_STATUS.md`](docs/BUILD_STATUS.md) | What is alive / next |
-| [`docs/DECISIONS.md`](docs/DECISIONS.md) | ADRs |
-| [`docs/RUNBOOK.md`](docs/RUNBOOK.md) | Kill switch, flags, health |
-| [`docs/PRODUCTION_BUILD.md`](docs/PRODUCTION_BUILD.md) | AWS go-live sequence |
-| [`docs/HANDOFF.md`](docs/HANDOFF.md) | Current slice only |
+| [`AGENTS.md`](AGENTS.md) | How to work in this repo |
+| [`docs/PRODUCT.md`](docs/PRODUCT.md) | What Mia is |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Two graphs, channels, policy |
+| [`docs/DECISIONS.md`](docs/DECISIONS.md) | ADRs that still constrain |
+| [`docs/RUNBOOK.md`](docs/RUNBOOK.md) | Operator: kill switch, flags, health |
+| [`docs/PRODUCTION_BUILD.md`](docs/PRODUCTION_BUILD.md) | Operator: AWS go-live |
 
-Do not read `docs/archive/` unless you need history.
+Do not read `docs/archive/` unless you need history. The VNext rebuild spec is `docs/archive/MIA_REBUILD.MD`.
 
 ## Local
 
@@ -28,5 +25,3 @@ uv run uvicorn app.main:app --reload
 ```
 
 Fill `.env` from `.env.example`. Never commit `.env`. Never copy it onto Fargate.
-
-Live: `https://mia.assafweb.com` (eu-north-1).

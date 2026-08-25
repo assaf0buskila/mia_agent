@@ -178,6 +178,7 @@ def build_graph(store: LeadStore, reply_port: SalesReplyPort | None = None):
             kill_switch=state.get("kill_switch", False),
             page_path=state.get("page_path", ""),
             page_section=state.get("page_section", ""),
+            knowledge_hits=list(state.get("knowledge_hits") or []),
             context=ReplyContext(
                 turns=tuple(turns),
                 known_facts=tuple(sales.known_facts()),

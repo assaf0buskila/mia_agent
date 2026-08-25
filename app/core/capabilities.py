@@ -21,7 +21,6 @@ class CapabilityId(StrEnum):
     VOICE_STT = "voice_stt"
     TELEGRAM = "telegram"
     INSTAGRAM = "instagram"
-    MANYCHAT = "manychat"
     GMAIL = "gmail"
     CALENDAR = "calendar"
     SHEETS_MIRROR = "sheets_mirror"
@@ -87,7 +86,7 @@ class Capability(BaseModel):
     port: str = Field(description="Module that owns this capability's contract")
 
 
-# Keep in sync with docs/PRD.md Feature wiring and docs/PROJECT_MAP.md.
+# Keep in sync with docs/PRODUCT.md and docs/ARCHITECTURE.md.
 CAPABILITIES: tuple[Capability, ...] = (
     Capability(
         id=CapabilityId.HTTP_API,
@@ -190,12 +189,6 @@ CAPABILITIES: tuple[Capability, ...] = (
         prd="§16",
         status=WiringStatus.ALIVE,
         port="app.integrations.instagram",
-    ),
-    Capability(
-        id=CapabilityId.MANYCHAT,
-        prd="ADR-021",
-        status=WiringStatus.SPECIFIED,
-        port="deferred",
     ),
     Capability(
         id=CapabilityId.GMAIL,
@@ -467,8 +460,9 @@ CAPABILITIES: tuple[Capability, ...] = (
         status=WiringStatus.ALIVE,
         port="app.domain.policies.freshness",
     ),
-    # Brain (ADR-026). Storage, retrieval and ingestion are alive with no model keys:
-    # they degrade to keyword search rather than switching off.
+    # Brain (ADR-026 / ADR-031). Memory counts on /health are alive. Knowledge ingest is
+    # CLI-only. Embeddings, retrieval, and the owner agent stay wired-but-gated until
+    # model ids are configured — do not call that ALIVE.
     Capability(
         id=CapabilityId.BRAIN_MEMORY,
         prd="ADR-026",
@@ -478,25 +472,25 @@ CAPABILITIES: tuple[Capability, ...] = (
     Capability(
         id=CapabilityId.BRAIN_KNOWLEDGE,
         prd="ADR-026",
-        status=WiringStatus.ALIVE,
+        status=WiringStatus.WIRED,
         port="app.brain.knowledge",
     ),
     Capability(
         id=CapabilityId.BRAIN_RETRIEVAL,
         prd="ADR-026",
-        status=WiringStatus.ALIVE,
+        status=WiringStatus.WIRED,
         port="app.brain.retrieval",
     ),
     Capability(
         id=CapabilityId.EMBEDDINGS,
         prd="ADR-026",
-        status=WiringStatus.ALIVE,
+        status=WiringStatus.WIRED,
         port="app.brain.embeddings",
     ),
     Capability(
         id=CapabilityId.OWNER_AGENT,
         prd="ADR-026",
-        status=WiringStatus.ALIVE,
+        status=WiringStatus.WIRED,
         port="app.graph.owner_agent",
     ),
 )

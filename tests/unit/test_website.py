@@ -66,6 +66,8 @@ def test_website_widget_js_served() -> None:
         assert "/v1/website/config" in body
         assert "/v1/website/sessions" in body
         assert "/handoff" in body
+        assert "/end" in body
+        assert "sendBeacon" in body
         assert "שאלו את מיה" in body
         assert "cfg.demo" in body
         assert "form_started" in body
@@ -153,6 +155,14 @@ def test_website_api_session_and_message() -> None:
         body = reply.json()
         assert body["next_action"] == "understand_workflow"
         assert "יום רגיל בעסק" in body["message"]
+        empty_end = client.post(f"/v1/website/sessions/{session_id}/end")
+        # session already has a visitor message from the turn above
+        assert empty_end.status_code == 200
+        first_end = empty_end.json()
+        assert first_end["accepted"] is True
+        assert first_end["finalized"] is True
+        second_end = client.post(f"/v1/website/sessions/{session_id}/end")
+        assert second_end.json()["finalized"] is False
     db = get_session_factory()()
     try:
         rows = list(
@@ -199,6 +209,15 @@ def test_website_api_session_and_message() -> None:
         assert json.loads(out_rows[0].payload_json)["text"] == body["message"]
     finally:
         db.close()
+
+
+def test_website_end_skips_session_without_visitor_message() -> None:
+    with TestClient(app) as client:
+        created = client.post("/v1/website/sessions")
+        session_id = created.json()["session_id"]
+        ended = client.post(f"/v1/website/sessions/{session_id}/end")
+        assert ended.status_code == 200
+        assert ended.json()["finalized"] is False
 
 
 def test_website_inquiries_answer_moves_past_opening() -> None:

@@ -44,6 +44,7 @@ class Settings(BaseSettings):
     app_name: str = "mia"
 
     website_url: str = Field(default="https://www.assafweb.com")
+    website_inactivity_minutes: int = Field(default=30)
     public_base_url: str = Field(default="http://127.0.0.1:8000")
     cors_origins: str = Field(
         default=(
@@ -127,6 +128,7 @@ class Settings(BaseSettings):
     campaign_lead_path: str = Field(default="")
     campaign_e2e_tested: str = Field(default="")
     firecrawl_api_key: str = Field(default="")
+    apify_token: str = Field(default="")
     linkedin_access_token: str = Field(default="")
     gsc_site_url: str = Field(default="")
     ga4_property_id: str = Field(default="")
