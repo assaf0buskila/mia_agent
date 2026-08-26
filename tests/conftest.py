@@ -1,6 +1,11 @@
 """Isolate unit tests from the live-test .env Assaf fills locally."""
 
 import os
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
+
+import pytest
 
 os.environ["MIA_ENV"] = "test"
 os.environ["MIA_AUTOMATION_MODE"] = "auto_approved"
@@ -70,4 +75,56 @@ def freeze_mia_clock(monkeypatch, frozen) -> None:
         "app.domain.policies.freshness.datetime",
     ):
         monkeypatch.setattr(path, FrozenDateTime)
+
+
+# Existing website tests post without Origin (TestClient is not a browser).
+# Production fail-closed rejects that. Inject the live widget origin unless a
+# test opts out, so the suite still exercises the sales path.
+_SUPPRESS_WEBSITE_ORIGIN = ContextVar("_suppress_website_origin", default=False)
+_WIDGET_ORIGIN = "https://www.assafweb.com"
+
+
+@contextmanager
+def without_injected_website_origin() -> Iterator[None]:
+    token = _SUPPRESS_WEBSITE_ORIGIN.set(True)
+    try:
+        yield
+    finally:
+        _SUPPRESS_WEBSITE_ORIGIN.reset(token)
+
+
+def _headers_have_origin(headers: object) -> bool:
+    if headers is None:
+        return False
+    if hasattr(headers, "keys"):
+        return any(str(key).lower() == "origin" for key in headers.keys())
+    for item in headers:
+        if str(item[0]).lower() == "origin":
+            return True
+    return False
+
+
+@pytest.fixture(autouse=True)
+def _website_origin_and_limiter(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.core.public_website import reset_public_website_limiter
+    from starlette.testclient import TestClient
+
+    reset_public_website_limiter()
+    original = TestClient.request
+
+    def request(self, method: str, url, **kwargs):  # noqa: ANN001
+        path = str(url)
+        if (
+            not _SUPPRESS_WEBSITE_ORIGIN.get()
+            and method.upper() == "POST"
+            and "/v1/website/sessions" in path
+            and not _headers_have_origin(kwargs.get("headers"))
+        ):
+            headers = dict(kwargs.get("headers") or {})
+            headers["Origin"] = _WIDGET_ORIGIN
+            kwargs["headers"] = headers
+        return original(self, method, url, **kwargs)
+
+    monkeypatch.setattr(TestClient, "request", request)
+
 
