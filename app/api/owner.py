@@ -696,9 +696,13 @@ async def process_owner_item(
         run_id=correlation_id,
         latest_message=owner_text,
         kill_switch=kill_switch,
+        # Voice and text enter the identical graph; only the tag differs.
+        source=str(item.get("source") or "text"),
         brain=brain_store,
         settings=settings,
-        produce=lambda: answer_owner(
+        # What Assaf gets if OwnerGraph itself breaks. Never a second model call.
+        fallback_text=ack_text,
+        produce=lambda state: answer_owner(
             store=store,
             brain=brain_store,
             settings=settings,
@@ -718,6 +722,9 @@ async def process_owner_item(
             instagram_insights=instagram_insights_port,
             research=research_port,
             source_ref=f"{provider}:{item['id']}",
+            # Retrieval already ran in the graph's retrieve node. Passing the state is
+            # what stops `answer_owner` paying for the identical retrieval a second time.
+            graph_state=state,
         ),
     )
     # One line per owner turn saying whether the agent answered and, when it did

@@ -186,7 +186,7 @@ def test_owner_retrieve_uses_owner_policy(monkeypatch) -> None:
             kill_switch=False,
             brain=brain,
             settings=Settings(),
-            produce=lambda: OwnerBrainResult("pong", True, ("search_memory",), 1, 2),
+            produce=lambda state: OwnerBrainResult("pong", True, ("search_memory",), 1, 2),
         )
         assert result.text == "pong"
         assert ("memory.search", GraphName.OWNER) in names
