@@ -190,6 +190,22 @@ def lead_recent_messages_outcome(*, present: bool, now: datetime) -> ToolOutcome
     )
 
 
+def website_session_events_outcome(*, present: bool, now: datetime) -> ToolOutcome:
+    base_status = "ok" if present else "empty"
+    stamp = stamp_freshness(
+        "website_session_events",
+        present=present,
+        fetched_at=now,
+        now=now,
+    )
+    return ToolOutcome(
+        tool="website_session_events",
+        status=overlay_stale(base_status=base_status, stamp=stamp),
+        result_count=1 if present else 0,
+        freshness=stamp.status,
+    )
+
+
 def scan_due_follow_ups(
     store,
     *,

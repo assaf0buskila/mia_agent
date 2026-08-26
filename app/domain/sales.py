@@ -73,6 +73,9 @@ class SalesState(BaseModel):
     missing_fields: list[str] = Field(default_factory=list)
     company_domain: str = ""
     whatsapp_handoff_offered: bool = False
+    # ADR-028: the booked meeting is the website's default exit; WhatsApp is the
+    # fallback once the meeting offer has already been made and not taken.
+    meeting_exit_offered: bool = False
     manual_step_known: bool = False
     data_source_known: bool = False
     discovery_turns: int = 0
@@ -80,6 +83,8 @@ class SalesState(BaseModel):
     explicit_buying_intent: bool = False
     # Short human label from the prospect's own words, for owner-facing lists only.
     headline: str = ""
+    # Person name only when they said it. Never inferred from the business description.
+    display_name: str = ""
 
     def has_asked(self, action: "NextAction") -> bool:
         return action.value in self.asked_actions
@@ -213,7 +218,9 @@ def discovery_ladder(state: SalesState) -> list[NextAction]:
     return rungs
 
 
-def select_next_action(state: SalesState, *, channel: str | None = None) -> NextAction:
+def select_next_action(
+    state: SalesState, *, channel: str | None = None, meeting_first: bool = False
+) -> NextAction:
     """Deterministic next-best-action. Not a script. Not an LLM.
 
     Omit `channel` for Graph Lab / inbound WhatsApp / owner review so the
@@ -222,6 +229,13 @@ def select_next_action(state: SalesState, *, channel: str | None = None) -> Next
     A discovery question is never selected more than `MAX_REPEATS_PER_QUESTION` times.
     Once a rung is exhausted the ladder advances, which is what stops the website loop
     when keyword extraction cannot confirm a short answer.
+
+    `meeting_first` (ADR-028, default False so every existing caller keeps today's
+    behavior): once the website continuation gate passes, the booked meeting is the
+    measurable, closable exit, so it is offered before WhatsApp. WhatsApp stays the
+    fallback: once the meeting has already been offered (`meeting_exit_offered`) and
+    the visitor did not take it, or the visitor explicitly asks for WhatsApp, the next
+    continuation-ready turn offers WhatsApp exactly as it always has.
     """
     if state.fit == FitLevel.POOR:
         return NextAction.DISQUALIFY
@@ -238,6 +252,8 @@ def select_next_action(state: SalesState, *, channel: str | None = None) -> Next
             return NextAction.QUALIFY
         return NextAction.OFFER_MEETING
     if channel == "website" and website_whatsapp_continuation_ready(state):
+        if meeting_first and not state.meeting_exit_offered:
+            return NextAction.OFFER_MEETING
         return NextAction.OFFER_WHATSAPP
     for rung in discovery_ladder(state):
         if times_asked(state, rung) < MAX_REPEATS_PER_QUESTION:
@@ -260,5 +276,7 @@ def mark_action_delivered(state: SalesState, action: NextAction) -> SalesState:
         updated.hypothesis_offered = True
     elif action == NextAction.OFFER_WHATSAPP:
         updated.whatsapp_handoff_offered = True
+    elif action == NextAction.OFFER_MEETING:
+        updated.meeting_exit_offered = True
     updated.asked_actions = [*updated.asked_actions, action.value][-MAX_ASKED_ACTIONS:]
     return updated

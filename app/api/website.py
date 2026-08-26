@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from pathlib import Path
 from time import perf_counter
 from urllib.parse import quote
@@ -8,6 +9,8 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from app.agents.client.graph import compile_client_graph
+from app.agents.shared.state import empty_client_state
 from app.api.deps import (
     get_calendar_booking_port,
     get_calendar_port,
@@ -15,6 +18,11 @@ from app.api.deps import (
     get_sheets_port,
     get_transcription_port,
 )
+from app.brain.context import assemble_visitor_context, render_visitor_knowledge_block
+from app.brain.embeddings import build_embedding_port
+from app.brain.store import BrainStore
+from app.capabilities.types import Principal
+from app.channels.website import message_to_client_state
 from app.core.config import Settings, get_settings
 from app.core.demo import SYNTHETIC_ATTRIBUTION, demo_mode_active
 from app.core.logging import log_comm
@@ -41,13 +49,12 @@ from app.domain.events import (
 )
 from app.domain.followups import apply_follow_up_policy
 from app.domain.handoff import click_to_chat_digits, compose_handoff_text
-from app.domain.hot_handoff import apply_hot_handoff
 from app.domain.meetings import apply_meeting_policy
 from app.domain.sales import NextAction
-from app.domain.website_handoff_brief import apply_website_whatsapp_handoff_brief
-from app.graph.orchestrator import build_graph
+from app.domain.website_handoff_brief import (
+    apply_website_whatsapp_handoff_brief,
+)
 from app.graph.replies import WEBSITE_REPLIES
-from app.graph.state import empty_state
 from app.integrations.calendar import CalendarPort
 from app.integrations.calendar_booking import CalendarBookingPort
 from app.integrations.research import build_research_port
@@ -151,6 +158,11 @@ class BehaviorEventIn(BaseModel):
 class BehaviorEventOut(BaseModel):
     accepted: bool
     kind: str
+
+
+class EndSessionOut(BaseModel):
+    accepted: bool
+    finalized: bool
 
 
 def _normalize_voice_mime(content_type: str | None) -> str:
@@ -315,6 +327,33 @@ def process_website_session(
     return SessionOut(session_id=session_id, lead_id=lead_id, customer_id=customer_id)
 
 
+def _website_knowledge_lookup(
+    store: LeadStore, settings: Settings
+) -> Callable[[str], tuple[str, ...]]:
+    """Knowledge-only lookup for the visitor's latest message (see `app.brain.context`).
+
+    Shares the same SQLAlchemy session as `store` rather than opening a second one.
+    `assemble_visitor_context` never touches owner memory (hard safety invariant); any
+    failure here is the caller's problem to swallow, not this function's.
+    """
+    brain_store = BrainStore(store.session)
+    embedding_port = build_embedding_port(settings)
+
+    def lookup(query: str) -> tuple[str, ...]:
+        context = assemble_visitor_context(
+            brain_store, query=query, embedding_port=embedding_port
+        )
+        return render_visitor_knowledge_block(context)
+
+    return lookup
+
+
+def _refuse_killed(settings: Settings) -> None:
+    """Website chat and voice share one fail-closed stop. 503, no graph, no STT."""
+    if settings.kill_switch:
+        raise HTTPException(status_code=503, detail="killed")
+
+
 def process_website_message(
     store: LeadStore,
     *,
@@ -327,6 +366,7 @@ def process_website_message(
     audio_meta: TranscriptResult | None = None,
     stt_latency_ms: int = 0,
 ) -> MessageOut:
+    _refuse_killed(settings)
     turn_started = perf_counter()
     _customer_id, lead_id = store.open_channel_lead(channel=Channel.WEBSITE, external_id=session_id)
     run_id = f"run_{uuid4().hex[:12]}"
@@ -383,18 +423,26 @@ def process_website_message(
     section_payload = store.latest_behavior_payload(session_id, "section_viewed")
     page_path = page_payload.get("path", "") if page_payload else ""
     page_section = section_payload.get("section", "") if section_payload else ""
-    graph = build_graph(store, reply_port=build_sales_reply_port(settings))
+    # Website visitors are client trust, always. Derived here, at the transport edge.
+    graph = compile_client_graph(
+        store,
+        principal=Principal.client(source="website", actor_id=session_id),
+        reply_port=build_sales_reply_port(settings),
+        settings=settings,
+        knowledge_lookup=_website_knowledge_lookup(store, settings),
+    )
     started = perf_counter()
     result = graph.invoke(
-        empty_state(
+        message_to_client_state(
             run_id=run_id,
-            thread_id=session_id,
-            channel="website",
+            session_id=session_id,
             lead_id=lead_id,
-            latest_message=text,
+            text=text,
             kill_switch=settings.kill_switch,
             page_path=page_path,
             page_section=page_section,
+            inbound_id=provider_event_id,
+            meeting_first=settings.website_meeting_first,
         )
     )
     persist_ai_run(
@@ -635,15 +683,6 @@ def process_website_message(
             lead_id=lead_id,
             payload={"kind": "whatsapp_handoff_offered"},
         )
-    if result.get("next_action") == NextAction.HANDOFF.value:
-        apply_hot_handoff(
-            store,
-            lead_id=lead_id,
-            inbound_id=provider_event_id,
-            want=text,
-            kill_switch=settings.kill_switch,
-            settings=settings,
-        )
     log_comm(
         channel=Channel.WEBSITE.value,
         provider="website",
@@ -789,6 +828,41 @@ def post_behavior_event(
 
 
 @router.post(
+    "/sessions/{session_id}/end",
+    response_model=EndSessionOut,
+    # Same bind as the other public POSTs: /end is unauthenticated and triggers
+    # finalization -- a summary plus a Telegram push to Assaf. Left open it is both a
+    # spam vector into his phone and unmetered work per request.
+    dependencies=[Depends(public_website_guard("end"))],
+)
+def end_session(
+    session_id: str,
+    db: Session = Depends(get_db),
+) -> EndSessionOut:
+    store = LeadStore(db)
+    lead_id = store.get_website_lead_id(session_id)
+    if lead_id is None:
+        raise HTTPException(status_code=404, detail="session not found")
+    result = compile_client_graph(
+        store,
+        settings=get_settings(),
+        principal=Principal.client(source="website", actor_id=session_id),
+    ).invoke(
+        empty_client_state(
+            run_id=f"end:{session_id}",
+            conversation_id=session_id,
+            visitor_id=session_id,
+            lead_id=lead_id,
+            turn_kind="session_end",
+        )
+    )
+    return EndSessionOut(
+        accepted=True,
+        finalized=bool(result.get("finalized")),
+    )
+
+
+@router.post(
     "/sessions/{session_id}/messages",
     response_model=MessageOut,
     dependencies=[Depends(public_website_guard("message"))],
@@ -802,6 +876,7 @@ def post_message(
     sheets: SheetsPort = Depends(get_sheets_port),
 ) -> MessageOut:
     settings = get_settings()
+    _refuse_killed(settings)
     store = LeadStore(db)
     if store.get_website_lead_id(session_id) is None:
         raise HTTPException(status_code=404, detail="session not found")
@@ -831,8 +906,7 @@ async def post_voice(
     file: UploadFile = File(...),
 ) -> VoiceMessageOut:
     settings = get_settings()
-    if settings.kill_switch:
-        raise HTTPException(status_code=503, detail="killed")
+    _refuse_killed(settings)
     store = LeadStore(db)
     if store.get_website_lead_id(session_id) is None:
         raise HTTPException(status_code=404, detail="session not found")

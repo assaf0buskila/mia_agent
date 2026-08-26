@@ -21,14 +21,11 @@ from app.core.config import get_settings
 from app.integrations.composio_discovery import (
     GA4_LIST_ACCOUNT_SUMMARIES_TOOL,
     GSC_LIST_SITES_TOOL,
-    METAADS_GET_AD_ACCOUNTS_TOOL,
     ComposioDiscovery,
     extract_ga4_properties,
-    extract_meta_ad_accounts,
     extract_sites,
 )
 from app.integrations.ga4 import COMPOSIO_GA4_VERSION
-from app.integrations.meta_ads import COMPOSIO_METAADS_VERSION
 from app.integrations.search_console import COMPOSIO_GSC_VERSION
 
 MAX_PRINT_CHARS = 2000
@@ -125,16 +122,8 @@ def main() -> int:
         extractor=extract_ga4_properties,
         raw=raw,
     )
-    ok += _probe(
-        discovery,
-        label="Meta ad account  (replaces MIA_META_ADS_ACCOUNT_ID)",
-        slug=METAADS_GET_AD_ACCOUNTS_TOOL,
-        version=COMPOSIO_METAADS_VERSION,
-        extractor=extract_meta_ad_accounts,
-        raw=raw,
-    )
 
-    print(f"\n{ok}/3 discovery actions returned usable candidates.")
+    print(f"\n{ok}/2 discovery actions returned usable candidates.")
     print("Re-run with --raw to see the payloads if a parser found nothing.")
     return 0
 

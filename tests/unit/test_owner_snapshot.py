@@ -1,5 +1,6 @@
 """Operator snapshot: grounded Postgres facts, no command menu, no writes."""
 
+from app.capabilities.types import Principal
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
 from app.domain.owner_snapshot import format_operator_snapshot_ack
@@ -11,8 +12,16 @@ def test_operator_snapshot_has_facts_and_no_menu() -> None:
     db = get_session_factory()()
     try:
         store = LeadStore(db)
-        ack = format_operator_snapshot_ack(store, timezone="Asia/Jerusalem")
-        digest = format_owner_status_ack(store, timezone="Asia/Jerusalem")
+        ack = format_operator_snapshot_ack(
+            store,
+            principal=Principal.owner(source="test"),
+            timezone="Asia/Jerusalem",
+        )
+        digest = format_owner_status_ack(
+            store,
+            principal=Principal.owner(source="test"),
+            timezone="Asia/Jerusalem",
+        )
         assert "לא כתבתי כלום" in ack
         assert "אפשר לבקש" not in ack
         assert "קונסולת הבעלים" not in ack
@@ -31,6 +40,7 @@ def test_combined_snapshot_includes_only_asked_read_facts() -> None:
         store = LeadStore(db)
         ack = format_operator_snapshot_ack(
             store,
+            principal=Principal.owner(source="test"),
             timezone="Asia/Jerusalem",
             matched_types=["daily_brief", "hot_leads"],
         )

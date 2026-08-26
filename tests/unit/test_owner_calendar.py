@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 from app.api.inbound import process_inbound_texts
+from app.capabilities.types import Principal
 from app.core.capabilities import CapabilityId, require_alive
 from app.core.errors import PolicyDenied
 from app.db.models import CanonicalEventRow, OwnerTaskRow, ToolRunRow
@@ -173,6 +174,7 @@ def test_apply_owner_calendar_numbered_slots() -> None:
     enriched, outcome = apply_owner_calendar(
         ack,
         FakeCalendarPort([_policy_gap()]),
+        principal=Principal.owner(source="test"),
         kill_switch=False,
         timezone="Asia/Jerusalem",
         now=BASE_NOW,
@@ -192,6 +194,7 @@ def test_apply_owner_calendar_empty_disabled() -> None:
         enriched, outcome = apply_owner_calendar(
             ack,
             port,
+            principal=Principal.owner(source="test"),
             kill_switch=False,
             timezone="Asia/Jerusalem",
             now=BASE_NOW,
@@ -208,6 +211,7 @@ def test_apply_owner_calendar_kill_switch() -> None:
     enriched, outcome = apply_owner_calendar(
         ack,
         RaisingCalendarPort(),
+        principal=Principal.owner(source="test"),
         kill_switch=True,
         timezone="Asia/Jerusalem",
         now=BASE_NOW,
@@ -223,6 +227,7 @@ def test_apply_owner_calendar_demo_skips_port() -> None:
     enriched, outcome = apply_owner_calendar(
         ack,
         RaisingCalendarPort(),
+        principal=Principal.owner(source="test"),
         kill_switch=False,
         timezone="Asia/Jerusalem",
         now=BASE_NOW,

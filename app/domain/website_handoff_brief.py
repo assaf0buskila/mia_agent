@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from app.core.config import Settings
 from app.core.errors import PolicyDenied
 from app.core.risk import RiskAction, RiskLevel, assert_allowed
-from app.domain.hot_handoff import _notify_telegram
+from app.domain.hot_handoff import notify_owners
 from app.domain.lead_label import lead_display
 from app.domain.memory import ROLE_MIA, ConversationTurn, counterpart_turns
 from app.domain.sales import PainLevel, SalesState
@@ -164,7 +164,7 @@ def format_website_whatsapp_brief(
     """
     paste = _recommended_first_line(sales=sales, turns=turns)
     headline = (sales.headline or "").strip()
-    who = lead_display(lead_id, headline)
+    who = lead_display(lead_id, headline, sales.display_name)
     blocks = [
         f"{bold('ליד מהאתר → וואטסאפ')}",
         esc(who),
@@ -201,21 +201,22 @@ def apply_website_whatsapp_handoff_brief(
         )
     except PolicyDenied:
         return None
-    already = store.has_owner_notification(
-        kind=KIND_WEBSITE_WHATSAPP, lead_id=lead_id
-    )
     sales = store.get_sales(lead_id)
     turns = store.list_conversation_turns(session_id)
     brief = format_website_whatsapp_brief(
         lead_id=lead_id, sales=sales, turns=turns
     )
-    if already:
-        return brief
+    # The claim, not a prior read, decides whether we send. A read-then-send left two
+    # concurrent /handoff clicks both seeing "not yet notified" and both pushing the
+    # brief. Lead-scoped on purpose: one WhatsApp handoff brief per lead, not per
+    # conversation, so conversation_id stays empty here.
     now_iso = datetime.now(UTC).replace(microsecond=0).isoformat()
-    store.upsert_owner_notification(
+    claimed = store.try_insert_owner_notification(
         kind=KIND_WEBSITE_WHATSAPP,
         lead_id=lead_id,
         scheduled_at=now_iso,
     )
-    _notify_telegram(brief=brief, inbound_id=session_id, settings=settings)
+    if not claimed:
+        return brief
+    notify_owners(brief=brief, inbound_id=session_id, settings=settings)
     return brief

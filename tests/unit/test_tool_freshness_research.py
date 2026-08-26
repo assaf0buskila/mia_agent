@@ -8,7 +8,6 @@ from app.domain.events import Channel
 from app.domain.owner_tasks import ack_for_owner_task, classify_owner_task
 from app.domain.tools import AdapterHttpError
 from app.integrations.base import RecordingMessagePort
-from app.integrations.meta_ads import DisabledMetaAdsPort
 from app.integrations.research import (
     DisabledResearchPort,
     FakeResearchPort,
@@ -129,7 +128,6 @@ async def test_inbound_research_freshness_persisted() -> None:
             kill_switch=False,
             owner_ids={OWNER_FRESH_RESEARCH_INBOUND_PHONE},
             sheets=FakeSheetsPort(),
-            meta_ads=DisabledMetaAdsPort(),
             research=FakeResearchPort(SAMPLE_SNIPPETS),
         )
         db.commit()

@@ -244,6 +244,49 @@ def assemble_owner_context(
     )
 
 
+def assemble_visitor_context(
+    store: BrainStore,
+    *,
+    query: str,
+    embedding_port: EmbeddingPort,
+    max_chars: int = 1200,
+    knowledge_limit: int = 3,
+) -> BrainContext:
+    """Knowledge-only context for a website visitor.
+
+    HARD SAFETY INVARIANT: this retrieves published website/business knowledge ONLY. It
+    must never call `retrieve_memories`, `build_profile_block`, `store.list_memories`,
+    `store.memory_vectors`, `store.touch_memories`, or `store.list_open_gaps`. A website
+    visitor must never be able to read owner memory (`docs/PRD.md`: "a website visitor
+    can never write it" — the read side of that same boundary is enforced here). The
+    returned context always has an empty `profile`, empty `memories`, and empty
+    `open_questions`; only `knowledge` is ever populated.
+    """
+    knowledge = retrieve_knowledge(
+        store, query=query, embedding_port=embedding_port, limit=knowledge_limit
+    )
+    knowledge, knowledge_used = fit_to_budget(knowledge, max_chars=max(0, max_chars))
+    return BrainContext(
+        profile="",
+        memories=(),
+        knowledge=tuple(knowledge),
+        open_questions=(),
+        used_chars=knowledge_used,
+        degraded=not embedding_port.enabled(),
+    )
+
+
+def render_visitor_knowledge_block(context: BrainContext) -> tuple[str, ...]:
+    """One rendered, provenance-tagged line per knowledge item. `()` when empty.
+
+    Same line style as the knowledge section of `render_context_block`, so the two
+    surfaces (owner Telegram, website visitor) read the same published facts identically.
+    """
+    return tuple(
+        f"- [{item.label or 'site'}] {item.text}" for item in context.knowledge
+    )
+
+
 def render_context_block(context: BrainContext) -> str:
     """Render the context for a prompt, with provenance on every retrieved line.
 

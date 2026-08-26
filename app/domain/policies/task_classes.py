@@ -127,7 +127,7 @@ _REGISTRY: dict[str, TaskClassPin] = {
         owner="code",
         model_source="none",
         benchmark_later=True,
-        notes="app.domain.campaigns",
+        notes="no live owner; campaign analysis modules dropped in Phase L",
     ),
     TaskClass.DEEP_RESEARCH.value: _pin(
         TaskClass.DEEP_RESEARCH,

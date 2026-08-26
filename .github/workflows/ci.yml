@@ -3,6 +3,7 @@ name: ci
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 jobs:
   test:
@@ -12,6 +13,7 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           python-version: "3.12"
+      - run: python scripts/assert_origin_bind.py
       - run: uv sync --group dev
       - run: uv run ruff check app tests
       - run: uv run pytest
@@ -20,4 +22,23 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - run: python3 scripts/assert_origin_bind.py
       - run: docker build -f deploy/Dockerfile -t mia:ci .
+
+  deploy:
+    needs: [test, image]
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 scripts/assert_origin_bind.py
+      - name: Fail closed without AWS
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        run: |
+          if [ -z "${AWS_ACCESS_KEY_ID}" ]; then
+            echo "fail-closed: AWS credentials missing; refusing deploy"
+            exit 1
+          fi
+          echo "AWS present. This workflow still does not update ECS. Operator cut is scripts/deploy_ecs_revision.py after a green CI SHA."
+          exit 1

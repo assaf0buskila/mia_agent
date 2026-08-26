@@ -1,4 +1,4 @@
-"""Catalog of currently pinned Composio execute tools and one direct LinkedIn read.
+"""Catalog of currently pinned Composio execute tools.
 
 Versions are imported from adapter constants — single source of truth.
 No dynamic Composio catalog discovery; customer graph has zero Composio tools.
@@ -38,11 +38,6 @@ from app.integrations.linkedin import (
     COMPOSIO_GET_MY_INFO_TOOL,
     COMPOSIO_LINKEDIN_VERSION,
 )
-from app.integrations.linkedin_analytics import LINKEDIN_API_VERSION
-from app.integrations.meta_ads import (
-    COMPOSIO_GET_INSIGHTS_TOOL,
-    COMPOSIO_METAADS_VERSION,
-)
 from app.integrations.search_console import (
     COMPOSIO_GSC_VERSION,
     COMPOSIO_INSPECT_URL_TOOL,
@@ -53,14 +48,12 @@ from app.integrations.sheets import (
     COMPOSIO_GOOGLESHEETS_VERSION,
     COMPOSIO_UPSERT_ROWS_TOOL,
 )
-from app.integrations.whatsapp import (
+
+# Aliased: app.integrations.instagram exports the same COMPOSIO_SEND_TEXT_TOOL name.
+from app.integrations.whatsapp import (  # isort: skip
     COMPOSIO_SEND_TEXT_TOOL as COMPOSIO_WHATSAPP_SEND_TEXT_TOOL,
 )
-from app.integrations.whatsapp import (
-    COMPOSIO_WHATSAPP_VERSION,
-)
-
-_MEMBER_POST_ANALYTICS = "member_post_analytics"
+from app.integrations.whatsapp import COMPOSIO_WHATSAPP_VERSION  # isort: skip
 
 
 class PreloadedTool(BaseModel):
@@ -140,14 +133,6 @@ PRELOADED_TOOLS: tuple[PreloadedTool, ...] = (
         enabled=True,
     ),
     PreloadedTool(
-        name=COMPOSIO_GET_INSIGHTS_TOOL,
-        toolkit="METAADS",
-        version=COMPOSIO_METAADS_VERSION,
-        risk="R0",
-        write=False,
-        enabled=True,
-    ),
-    PreloadedTool(
         name=COMPOSIO_SEND_TEXT_TOOL,
         toolkit="INSTAGRAM",
         version=COMPOSIO_INSTAGRAM_VERSION,
@@ -155,6 +140,9 @@ PRELOADED_TOOLS: tuple[PreloadedTool, ...] = (
         write=True,
         enabled=True,
     ),
+    # ADR-016 mandates this pin: outbound WhatsApp has one owner selected by
+    # MIA_WHATSAPP_SENDER, and production runs `composio`. WHATSAPP_SEND_TEMPLATE_MESSAGE
+    # stays unpinned on purpose — ADR-016 leaves it unwired (no mass outreach).
     PreloadedTool(
         name=COMPOSIO_WHATSAPP_SEND_TEXT_TOOL,
         toolkit="WHATSAPP",
@@ -223,14 +211,6 @@ PRELOADED_TOOLS: tuple[PreloadedTool, ...] = (
         name=COMPOSIO_LIST_CONVERSION_EVENTS_TOOL,
         toolkit="GOOGLE_ANALYTICS",
         version=COMPOSIO_GA4_VERSION,
-        risk="R0",
-        write=False,
-        enabled=True,
-    ),
-    PreloadedTool(
-        name=_MEMBER_POST_ANALYTICS,
-        toolkit="linkedin_direct",
-        version=LINKEDIN_API_VERSION,
         risk="R0",
         write=False,
         enabled=True,

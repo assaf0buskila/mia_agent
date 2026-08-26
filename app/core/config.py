@@ -44,6 +44,10 @@ class Settings(BaseSettings):
     app_name: str = "mia"
 
     website_url: str = Field(default="https://www.assafweb.com")
+    website_inactivity_minutes: int = Field(default=30)
+    # ADR-028: the booked meeting is the website's default exit; WhatsApp is the
+    # fallback. Shipping ON — the flag exists so it is reversible without a deploy.
+    website_meeting_first: bool = Field(default=True)
     public_base_url: str = Field(default="http://127.0.0.1:8000")
     cors_origins: str = Field(
         default=(
@@ -56,10 +60,10 @@ class Settings(BaseSettings):
     composio_api_key: str = Field(default="")
     composio_user_id: str = Field(default="")
     composio_webhook_secret: str = Field(default="")
-    # Ask Composio for resource ids (GSC site, GA4 property, Meta ad account) when the
-    # matching env var is blank. Default false: ports are built per request, so this adds
-    # one network call per process on first use. Verify with
-    # `scripts/probe_composio_discovery.py`, then turn it on.
+    # Ask Composio for resource ids (GSC site, GA4 property) when the matching env var is
+    # blank. Default false: ports are built per request, so this adds one network call per
+    # process on first use. Verify with `scripts/probe_composio_discovery.py`, then turn
+    # it on.
     composio_discovery: bool = False
     openai_api_key: str = Field(default="")
     openai_transcribe_model: str = Field(default="gpt-transcribe")
@@ -79,7 +83,7 @@ class Settings(BaseSettings):
     # model drops Telegram back to the keyword classifier even though Gemini is connected
     # and already serving website sales.
     owner_agent_gemini_model: str = Field(default="")
-    owner_agent_max_steps: int = Field(default=4)
+    owner_agent_max_steps: int = Field(default=8)
     extraction_model: str = Field(default="")
     embedding_provider: str = Field(default="openai")
     embedding_model: str = Field(default="")
@@ -119,15 +123,8 @@ class Settings(BaseSettings):
 
     calendar_timezone: str = Field(default="Asia/Jerusalem")
     sheets_spreadsheet_id: str = Field(default="")
-    meta_ads_account_id: str = Field(default="")
-    campaign_monthly_budget: str = Field(default="")
-    campaign_name: str = Field(default="")
-    campaign_launch_date: str = Field(default="")
-    campaign_objective: str = Field(default="")
-    campaign_lead_path: str = Field(default="")
-    campaign_e2e_tested: str = Field(default="")
     firecrawl_api_key: str = Field(default="")
-    linkedin_access_token: str = Field(default="")
+    apify_token: str = Field(default="")
     gsc_site_url: str = Field(default="")
     ga4_property_id: str = Field(default="")
 

@@ -1,10 +1,10 @@
 # Operator runbook — Mia
 
 **Date:** 2026-08-23  
-**Status:** Gate F partial (this file + named-flag table + first-live ALB metric alarms without SNS). Dashboards, SNS pager, LangSmith, and automated paging are **not** in this repo.  
+**Status:** Gate F partial (this file + named-flag table + ALB 5xx alarm that can page when `MIA_ALB_5XX_SNS_TOPIC_ARN` is stamped). Dashboards, LangSmith, and live paging are **not** turned on by this repo. Origin-bind must be present on the SHA before `scripts/deploy_ecs_revision.py` registers an image.  
 **Not a grant of write access.** Does not enable Gmail send, Meta writes, follow-up send, instruction activation, Lambda/SQS/AgentCore, or `app.infra`.
 
-Go-live order: `docs/PRODUCTION_BUILD.md`. Related: `.env.example`, `docs/ARCHITECTURE.md`, `docs/PROJECT_MAP.md`.
+Go-live order: `docs/PRODUCTION_BUILD.md`. Related: `.env.example`, `docs/PRODUCT.md`, `docs/ARCHITECTURE.md`.
 
 Package manager is **uv**. PowerShell: use `;` not `&&`. Restart the API process after env edits.
 
@@ -43,9 +43,9 @@ The only live emergency env stop is **`MIA_KILL_SWITCH`**. R4 stays approval and
 | --- | --- |
 | Telegram owner webhook | Secret still verified, then **early return** `{killed: true}` — no owner classify, no send |
 | WhatsApp / Instagram / Composio (Gmail) webhooks | Signature still verified, then **early return** `{killed: true, processed: 0}` — no graph, no send, no claim |
-| Website Ask Mia | Graph still runs; compose is canned; gated writes (Sheets, calendar create) skip |
+| Website Ask Mia | Chat and voice return **503** `killed` — no graph, no STT |
 | Named write flags | Ignored — kill switch wins |
-| `mia-due-scan` | Follow-up send-readiness denied (`kill_switch`); still **never sends** |
+| `mia-due-scan` | Follow-up send-readiness denied; prospect still **never customer-sends**; owner due reminder skipped |
 | `mia-reconcile` | Skips persist (same as demo) |
 | Owner WhatsApp / Telegram (including takeover) | **Not processed** — webhook returns killed before classify. Park the thread in the provider inbox. |
 
@@ -115,7 +115,7 @@ Highest operational risk if Graph and Composio both send.
 
 - Set **exactly one** of `MIA_INSTAGRAM_SENDER=direct` or `composio`. Production default is `direct`. Flip to `composio` only after staging send is tested (ADR-015).
 - Instagram inbound stays Meta HMAC webhook. Not a v1 sales inbox (ADR-017). `MIA_AUTO_REPLY_INSTAGRAM=false`.
-- ManyChat is not mounted. A leftover `MIA_MANYCHAT_INGEST_TOKEN` in Secrets Manager is unused — do not delete it from AWS without Assaf.
+- ManyChat is removed from the app (ADR-032). Do not inject `MIA_MANYCHAT_INGEST_TOKEN`. If that name still exists in AWS Secrets Manager, leave it unused — this repo does not read it.
 
 ---
 

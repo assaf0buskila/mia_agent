@@ -187,13 +187,22 @@ def test_fake_sheets_port_after_offer_meeting_has_meeting_row_empty_fields() -> 
 
 
 def test_env_kill_switch_skips_meeting_persist(monkeypatch) -> None:
+    """Env kill switch 503s website chat, so the funnel never persists a meeting."""
     monkeypatch.setenv("MIA_KILL_SWITCH", "true")
     init_db()
     with TestClient(app) as client:
         session_id = client.post("/v1/website/sessions").json()["session_id"]
-        lead_id = _run_clinic_funnel_to_meeting(client, session_id)
+        response = client.post(
+            f"/v1/website/sessions/{session_id}/messages",
+            json={"text": "We run a clinic and miss calls all day."},
+        )
+        assert response.status_code == 503
+        assert response.json()["detail"] == "killed"
     db = get_session_factory()()
     try:
+        store = LeadStore(db)
+        lead_id = store.get_website_lead_id(session_id)
+        assert lead_id
         assert _meeting_for_lead(db, lead_id) is None
     finally:
         db.close()

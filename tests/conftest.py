@@ -27,26 +27,18 @@ os.environ["MIA_OPENAI_TRANSCRIBE_FALLBACK_MODEL"] = ""
 os.environ["MIA_WHATSAPP_ACCESS_TOKEN"] = ""
 os.environ["MIA_WHATSAPP_APP_SECRET"] = ""
 os.environ["MIA_WHATSAPP_VERIFY_TOKEN"] = ""
-os.environ["MIA_WHATSAPP_SENDER"] = "direct"
 os.environ["MIA_GMAIL_SEND"] = "false"
 os.environ["MIA_META_WRITE"] = "false"
 os.environ["MIA_AUTO_REPLY_INSTAGRAM"] = "false"
 os.environ["MIA_FIRECRAWL_API_KEY"] = ""
+os.environ["MIA_APIFY_TOKEN"] = ""
 os.environ["MIA_COMPOSIO_API_KEY"] = ""
 os.environ["MIA_COMPOSIO_USER_ID"] = ""
 os.environ["MIA_COMPOSIO_WEBHOOK_SECRET"] = ""
-os.environ["MIA_LINKEDIN_ACCESS_TOKEN"] = ""
 os.environ["MIA_SHEETS_SPREADSHEET_ID"] = ""
-os.environ["MIA_META_ADS_ACCOUNT_ID"] = ""
 os.environ["MIA_GSC_SITE_URL"] = ""
 os.environ["MIA_GA4_PROPERTY_ID"] = ""
 os.environ["MIA_COMPOSIO_DISCOVERY"] = "false"
-os.environ["MIA_CAMPAIGN_MONTHLY_BUDGET"] = ""
-os.environ["MIA_CAMPAIGN_NAME"] = ""
-os.environ["MIA_CAMPAIGN_LAUNCH_DATE"] = ""
-os.environ["MIA_CAMPAIGN_OBJECTIVE"] = ""
-os.environ["MIA_CAMPAIGN_LEAD_PATH"] = ""
-os.environ["MIA_CAMPAIGN_E2E_TESTED"] = ""
 os.environ["MIA_CALENDAR_WRITE"] = "true"
 os.environ["MIA_WHATSAPP_REQUIRE_BUSINESS_SCOPE"] = "false"
 os.environ["MIA_TELEGRAM_BOT_TOKEN"] = ""
@@ -70,6 +62,10 @@ def freeze_mia_clock(monkeypatch, frozen) -> None:
         "app.domain.calendar_booking.datetime",
         "app.domain.meeting_changes.datetime",
         "app.domain.owner_calendar.datetime",
+        # The VNext capability layer reads the clock too. owner_calendar now routes
+        # through it, so leaving it out meant a frozen test silently read the real
+        # clock here and every seeded slot rotted into the past overnight.
+        "app.capabilities.calendar.datetime",
         "app.integrations.calendar.datetime",
         "app.domain.meeting_availability.datetime",
         "app.domain.meeting_slots.datetime",

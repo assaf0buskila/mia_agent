@@ -254,8 +254,8 @@ def test_telegram_hi_returns_owner_status_not_loop(monkeypatch) -> None:
         assert response.json()["processed"] == 1
         assert port.sent
         ack = port.sent[0].text
-        assert "אני כאן" in ack
-        assert "קונסולת הבעלים" in ack
+        assert ack == "היי אסף, אני כאן."
+        assert "קונסולת הבעלים" not in ack
         assert "לא הצלחתי לסווג" not in ack
         assert "יום רגיל בעסק" not in ack
     finally:

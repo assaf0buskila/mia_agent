@@ -121,32 +121,28 @@ def owner_integrations(settings) -> dict[str, object]:
     """Which owner-console reads can actually fire. Never returns secrets.
 
     `ready` is configuration, not a live Composio ping. Assaf still has to keep the
-    matching Composio connected account Active. Apify is intentionally false until a
-    ResearchPort adapter exists.
+    matching Composio connected account Active. Apify is a ResearchPort fallback
+    (pinned ``apify/google-search-scraper``) when Firecrawl is unset.
     """
     composio = settings.composio_ready()
     discovery = bool(settings.composio_discovery) and composio
     sheets_id = settings.sheets_spreadsheet_id.strip()
-    linkedin_token = settings.linkedin_access_token.strip()
     gsc_site = settings.gsc_site_url.strip()
     ga4_property = settings.ga4_property_id.strip()
-    meta_ads = settings.meta_ads_account_id.strip()
+    firecrawl = bool(settings.firecrawl_api_key.strip())
+    apify = bool(settings.apify_token.strip())
     missing: list[str] = []
     if not composio:
         missing.extend(["MIA_COMPOSIO_API_KEY", "MIA_COMPOSIO_USER_ID"])
-    if not settings.firecrawl_api_key.strip():
+    if not firecrawl and not apify:
         missing.append("MIA_FIRECRAWL_API_KEY")
     if not sheets_id:
         missing.append("MIA_SHEETS_SPREADSHEET_ID")
-    if not linkedin_token:
-        missing.append("MIA_LINKEDIN_ACCESS_TOKEN")
     if not discovery:
         if not gsc_site:
             missing.append("MIA_GSC_SITE_URL")
         if not ga4_property:
             missing.append("MIA_GA4_PROPERTY_ID")
-        if not meta_ads:
-            missing.append("MIA_META_ADS_ACCOUNT_ID")
     return {
         "composio": composio,
         "gmail_read": composio,
@@ -155,13 +151,12 @@ def owner_integrations(settings) -> dict[str, object]:
         "calendar_write": settings.calendar_write,
         "sheets_mirror": composio and bool(sheets_id),
         "linkedin_profile": composio,
-        "linkedin_analytics": bool(linkedin_token),
         "instagram_insights": composio
         or bool(settings.instagram_access_token.strip()),
         "search_console": composio and (bool(gsc_site) or discovery),
         "ga4": composio and (bool(ga4_property) or discovery),
-        "research_firecrawl": bool(settings.firecrawl_api_key.strip()),
-        "research_apify": False,
+        "research_firecrawl": firecrawl,
+        "research_apify": (not firecrawl) and apify,
         "whatsapp_handoff_send": settings.whatsapp_handoff_send,
         "missing": missing,
     }

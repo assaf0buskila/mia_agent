@@ -14,6 +14,7 @@ _ALLOWED_WRITE_PINS = frozenset(
         "GOOGLECALENDAR_PATCH_EVENT",
         "GOOGLESHEETS_UPSERT_ROWS",
         "INSTAGRAM_SEND_TEXT_MESSAGE",
+        # ADR-016: one outbound WhatsApp owner, production is composio.
         "WHATSAPP_SEND_MESSAGE",
     }
 )

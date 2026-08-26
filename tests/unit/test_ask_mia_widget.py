@@ -350,3 +350,32 @@ def test_handoff_card_explains_the_context_transfer_in_plural_hebrew() -> None:
     assert "פתחו" in card
     # Customer-facing Hebrew stays 2nd-person plural so it addresses men and women.
     assert "פתח את" not in card
+
+
+def test_widget_open_send_uses_textcontent_and_wa_me_href_only() -> None:
+    """Playwright is not in this repo. Same guarantees from the widget source.
+
+    Open paints the panel. Send writes bubble text via textContent, never innerHTML.
+    The handoff CTA href is assigned only after isWaMeUrl accepts an https wa.me URL.
+    """
+    source = _source()
+    assert "innerHTML" not in source
+    open_fn = _function_body(source, "openPanel")
+    assert "panel.hidden = false" in open_fn
+    assert "initSession()" in open_fn
+    send = _function_body(source, "sendMessage")
+    assert "appendMsg('user', text)" in send
+    assert "postText(text)" in send
+    assert "applyReply" in send
+    paint = _function_body(source, "paintMsg")
+    assert "el.textContent = text" in paint
+    assert "innerHTML" not in paint
+    handoff = _function_body(source, "handoff")
+    assert "isWaMeUrl(data.whatsapp_url)" in handoff
+    assert "paintHandoffCard(data.whatsapp_url)" in handoff
+    card = _function_body(source, "paintHandoffCard")
+    assert "link.href = url" in card
+    wa = _function_body(source, "isWaMeUrl")
+    assert "parsed.protocol === 'https:'" in wa
+    assert "parsed.hostname === 'wa.me'" in wa
+

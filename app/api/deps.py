@@ -11,11 +11,6 @@ from app.integrations.instagram_insights import (
     build_instagram_insights_port,
 )
 from app.integrations.linkedin import LinkedInPort, build_linkedin_port
-from app.integrations.linkedin_analytics import (
-    LinkedInAnalyticsPort,
-    build_linkedin_analytics_port,
-)
-from app.integrations.meta_ads import MetaAdsPort, build_meta_ads_port
 from app.integrations.research import ResearchPort, build_research_port
 from app.integrations.sheets import SheetsPort, build_sheets_port
 from app.integrations.telegram import build_telegram_port
@@ -72,10 +67,6 @@ def get_sheets_port() -> SheetsPort:
     return build_sheets_port(get_settings())
 
 
-def get_meta_ads_port() -> MetaAdsPort:
-    return build_meta_ads_port(get_settings())
-
-
 def get_instagram_insights_port() -> InstagramInsightsPort:
     return build_instagram_insights_port(get_settings())
 
@@ -86,7 +77,3 @@ def get_research_port() -> ResearchPort:
 
 def get_linkedin_port() -> LinkedInPort:
     return build_linkedin_port(get_settings())
-
-
-def get_linkedin_analytics_port() -> LinkedInAnalyticsPort:
-    return build_linkedin_analytics_port(get_settings())

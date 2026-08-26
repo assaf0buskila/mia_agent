@@ -261,13 +261,44 @@ def test_disqualify_does_not_create_deal() -> None:
 
 
 def test_kill_switch_skips_deal_persist(monkeypatch) -> None:
+    """Env kill switch 503s website chat, so the funnel never persists a deal."""
     monkeypatch.setenv("MIA_KILL_SWITCH", "true")
     init_db()
     with TestClient(app) as client:
         session_id = client.post("/v1/website/sessions").json()["session_id"]
-        lead_id = _run_clinic_funnel_to_meeting(client, session_id)
+        response = client.post(
+            f"/v1/website/sessions/{session_id}/messages",
+            json={"text": "We run a clinic and miss calls all day."},
+        )
+        assert response.status_code == 503
+        assert response.json()["detail"] == "killed"
     db = get_session_factory()()
     try:
+        store = LeadStore(db)
+        lead_id = store.get_website_lead_id(session_id)
+        assert lead_id
+        assert _deal_for_lead(db, lead_id) is None
+        assert _deal_events_for_lead(db, lead_id) == []
+    finally:
+        db.close()
+
+
+def test_apply_deal_policy_skips_persist_when_killed() -> None:
+    init_db()
+    db = get_session_factory()()
+    try:
+        store = LeadStore(db)
+        _, lead_id = store.open_channel_lead(
+            channel=Channel.WEBSITE, external_id="web_deal_kill_policy_997264"
+        )
+        apply_deal_policy(
+            store,
+            lead_id=lead_id,
+            channel=Channel.WEBSITE,
+            action=NextAction.OFFER_MEETING.value,
+            kill_switch=True,
+        )
+        db.commit()
         assert _deal_for_lead(db, lead_id) is None
         assert _deal_events_for_lead(db, lead_id) == []
     finally:

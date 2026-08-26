@@ -92,7 +92,13 @@ def test_website_clinic_funnel_creates_meeting_brief() -> None:
         assert isinstance(payload["pain_level"], int)
         assert isinstance(payload["missing_fields"], list)
         assert isinstance(payload["owner_questions"], list)
-        assert payload["hypothesis_offered"] is True
+        # ADR-028: the website continuation gate now offers the booked meeting before
+        # WhatsApp, and that gate can fire before the OFFER_HYPOTHESIS rung of the
+        # discovery ladder is reached (the pre-ADR-028 WhatsApp offer had this same
+        # property — it also fired at the gate without a hypothesis having been
+        # delivered). This clinic funnel reaches the meeting through the gate, so no
+        # hypothesis was offered along the way.
+        assert payload["hypothesis_offered"] is False
         assert payload["next_action"] == "offer_meeting"
         assert set(payload.keys()) == _MEETING_BRIEF_PAYLOAD_KEYS
         serialized = row.payload_json.lower()

@@ -21,7 +21,6 @@ class CapabilityId(StrEnum):
     VOICE_STT = "voice_stt"
     TELEGRAM = "telegram"
     INSTAGRAM = "instagram"
-    MANYCHAT = "manychat"
     GMAIL = "gmail"
     CALENDAR = "calendar"
     SHEETS_MIRROR = "sheets_mirror"
@@ -51,6 +50,7 @@ class CapabilityId(StrEnum):
     OWNER_CALENDAR = "owner_calendar"
     OWNER_NOTIFY = "owner_notify"
     GMAIL_SUMMARY = "gmail_summary"
+    GMAIL_INBOX = "gmail_inbox"
     MEETINGS = "meetings"
     APPROVALS = "approvals"
     DEALS = "deals"
@@ -87,7 +87,7 @@ class Capability(BaseModel):
     port: str = Field(description="Module that owns this capability's contract")
 
 
-# Keep in sync with docs/PRD.md Feature wiring and docs/PROJECT_MAP.md.
+# Keep in sync with docs/PRODUCT.md and docs/ARCHITECTURE.md.
 CAPABILITIES: tuple[Capability, ...] = (
     Capability(
         id=CapabilityId.HTTP_API,
@@ -192,12 +192,6 @@ CAPABILITIES: tuple[Capability, ...] = (
         port="app.integrations.instagram",
     ),
     Capability(
-        id=CapabilityId.MANYCHAT,
-        prd="ADR-021",
-        status=WiringStatus.SPECIFIED,
-        port="deferred",
-    ),
-    Capability(
         id=CapabilityId.GMAIL,
         prd="§18",
         status=WiringStatus.ALIVE,
@@ -208,6 +202,12 @@ CAPABILITIES: tuple[Capability, ...] = (
         prd="§18.1",
         status=WiringStatus.ALIVE,
         port="app.domain.gmail_summaries",
+    ),
+    Capability(
+        id=CapabilityId.GMAIL_INBOX,
+        prd="§18 / ADR-030",
+        status=WiringStatus.ALIVE,
+        port="app.integrations.gmail",
     ),
     Capability(
         id=CapabilityId.CALENDAR,
@@ -224,8 +224,8 @@ CAPABILITIES: tuple[Capability, ...] = (
     Capability(
         id=CapabilityId.META_ADS,
         prd="§20",
-        status=WiringStatus.ALIVE,
-        port="app.integrations.meta_ads",
+        status=WiringStatus.SPECIFIED,
+        port="",
     ),
     Capability(
         id=CapabilityId.CONTENT_PERFORMANCE,
@@ -242,20 +242,20 @@ CAPABILITIES: tuple[Capability, ...] = (
     Capability(
         id=CapabilityId.CAMPAIGN_ANALYSIS,
         prd="§20.2",
-        status=WiringStatus.ALIVE,
-        port="app.domain.campaigns",
+        status=WiringStatus.SPECIFIED,
+        port="",
     ),
     Capability(
         id=CapabilityId.CAMPAIGN_PACING,
         prd="§19.2 / §20",
-        status=WiringStatus.ALIVE,
-        port="app.domain.pacing",
+        status=WiringStatus.SPECIFIED,
+        port="",
     ),
     Capability(
         id=CapabilityId.CAMPAIGN_PRELAUNCH,
         prd="§20.3",
-        status=WiringStatus.ALIVE,
-        port="app.domain.prelaunch",
+        status=WiringStatus.SPECIFIED,
+        port="",
     ),
     Capability(
         id=CapabilityId.RESEARCH,
@@ -467,8 +467,9 @@ CAPABILITIES: tuple[Capability, ...] = (
         status=WiringStatus.ALIVE,
         port="app.domain.policies.freshness",
     ),
-    # Brain (ADR-026). Storage, retrieval and ingestion are alive with no model keys:
-    # they degrade to keyword search rather than switching off.
+    # Brain (ADR-026 / ADR-036). Memory counts on /health are alive. Knowledge ingest is
+    # CLI-only. Embeddings, retrieval, and the owner agent stay wired-but-gated until
+    # model ids are configured — do not call that ALIVE.
     Capability(
         id=CapabilityId.BRAIN_MEMORY,
         prd="ADR-026",
@@ -478,25 +479,25 @@ CAPABILITIES: tuple[Capability, ...] = (
     Capability(
         id=CapabilityId.BRAIN_KNOWLEDGE,
         prd="ADR-026",
-        status=WiringStatus.ALIVE,
+        status=WiringStatus.WIRED,
         port="app.brain.knowledge",
     ),
     Capability(
         id=CapabilityId.BRAIN_RETRIEVAL,
         prd="ADR-026",
-        status=WiringStatus.ALIVE,
+        status=WiringStatus.WIRED,
         port="app.brain.retrieval",
     ),
     Capability(
         id=CapabilityId.EMBEDDINGS,
         prd="ADR-026",
-        status=WiringStatus.ALIVE,
+        status=WiringStatus.WIRED,
         port="app.brain.embeddings",
     ),
     Capability(
         id=CapabilityId.OWNER_AGENT,
         prd="ADR-026",
-        status=WiringStatus.ALIVE,
+        status=WiringStatus.WIRED,
         port="app.graph.owner_agent",
     ),
 )

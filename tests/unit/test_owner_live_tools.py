@@ -2,6 +2,7 @@
 
 from app.brain.embeddings import FakeEmbeddingPort
 from app.brain.store import BrainStore
+from app.capabilities.types import Principal
 from app.core.config import get_settings
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
@@ -14,11 +15,14 @@ from app.tools.registries.owner_tools import (
 
 _LIVE_READS = (
     "gmail_summary",
+    "gmail_inbox",
+    "gmail_search",
+    "gmail_read",
+    "find_leads",
     "seo_snapshot",
     "linkedin_snapshot",
     "instagram_insights",
     "research_search",
-    "ads_snapshot",
 )
 
 
@@ -29,6 +33,7 @@ def _session():
 
 def _ctx(session) -> ToolContext:
     return ToolContext(
+        principal=Principal.owner(source="test"),
         store=LeadStore(session),
         brain=BrainStore(session),
         settings=get_settings(),
@@ -54,13 +59,15 @@ def test_disconnected_live_reads_do_not_raise() -> None:
             "seo_snapshot",
             "linkedin_snapshot",
             "instagram_insights",
-            "ads_snapshot",
         ):
             result = execute_tool(name, {}, ctx)
             assert result.ok is True
             assert "Not connected" in result.text
         gmail = execute_tool("gmail_summary", {"query": "what's in my inbox"}, ctx)
         assert gmail.ok is True
+        inbox = execute_tool("gmail_inbox", {}, ctx)
+        assert inbox.ok is True
+        assert "Not connected" in inbox.text
         research = execute_tool("research_search", {"query": "assafweb.com"}, ctx)
         assert research.ok is True
         assert "Not connected" in research.text

@@ -32,7 +32,8 @@
         { "name": "MIA_CORS_ORIGINS", "value": "https://www.assafweb.com,https://assafweb.com" },
         { "name": "MIA_CALENDAR_TIMEZONE", "value": "Asia/Jerusalem" },
         { "name": "MIA_SALES_MODEL", "value": "gpt-5.6-luna" },
-        { "name": "MIA_OWNER_AGENT_MODEL", "value": "gpt-5.6-terra" },
+        { "name": "MIA_OWNER_AGENT_MODEL", "value": "gpt-5.6-luna" },
+        { "name": "MIA_OWNER_AGENT_FALLBACK_MODEL", "value": "gpt-5.6-terra" },
         { "name": "MIA_EXTRACTION_MODEL", "value": "gpt-5.6-luna" },
         { "name": "MIA_EMBEDDING_MODEL", "value": "text-embedding-3-small" },
         { "name": "MIA_SALES_FALLBACK_MODEL", "value": "gpt-5.6-luna" },
@@ -112,10 +113,6 @@
           "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mia/prod:MIA_INSTAGRAM_ACCOUNT_ID::"
         },
         {
-          "name": "MIA_MANYCHAT_INGEST_TOKEN",
-          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mia/prod:MIA_MANYCHAT_INGEST_TOKEN::"
-        },
-        {
           "name": "MIA_SHEETS_SPREADSHEET_ID",
           "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mia/prod:MIA_SHEETS_SPREADSHEET_ID::"
         },
@@ -128,40 +125,12 @@
           "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mia/prod:MIA_GA4_PROPERTY_ID::"
         },
         {
-          "name": "MIA_META_ADS_ACCOUNT_ID",
-          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mia/prod:MIA_META_ADS_ACCOUNT_ID::"
-        },
-        {
-          "name": "MIA_CAMPAIGN_MONTHLY_BUDGET",
-          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mia/prod:MIA_CAMPAIGN_MONTHLY_BUDGET::"
-        },
-        {
-          "name": "MIA_CAMPAIGN_NAME",
-          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mia/prod:MIA_CAMPAIGN_NAME::"
-        },
-        {
-          "name": "MIA_CAMPAIGN_LAUNCH_DATE",
-          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mia/prod:MIA_CAMPAIGN_LAUNCH_DATE::"
-        },
-        {
-          "name": "MIA_CAMPAIGN_OBJECTIVE",
-          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mia/prod:MIA_CAMPAIGN_OBJECTIVE::"
-        },
-        {
-          "name": "MIA_CAMPAIGN_LEAD_PATH",
-          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mia/prod:MIA_CAMPAIGN_LEAD_PATH::"
-        },
-        {
-          "name": "MIA_CAMPAIGN_E2E_TESTED",
-          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mia/prod:MIA_CAMPAIGN_E2E_TESTED::"
-        },
-        {
-          "name": "MIA_LINKEDIN_ACCESS_TOKEN",
-          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mia/prod:MIA_LINKEDIN_ACCESS_TOKEN::"
-        },
-        {
           "name": "MIA_FIRECRAWL_API_KEY",
           "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mia/prod:MIA_FIRECRAWL_API_KEY::"
+        },
+        {
+          "name": "MIA_APIFY_TOKEN",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mia/prod:MIA_APIFY_TOKEN::"
         },
         {
           "name": "MIA_TELEGRAM_BOT_TOKEN",

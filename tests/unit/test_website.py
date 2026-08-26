@@ -66,6 +66,8 @@ def test_website_widget_js_served() -> None:
         assert "/v1/website/config" in body
         assert "/v1/website/sessions" in body
         assert "/handoff" in body
+        assert "/end" in body
+        assert "sendBeacon" in body
         assert "שאלו את מיה" in body
         assert "cfg.demo" in body
         assert "form_started" in body
@@ -153,6 +155,14 @@ def test_website_api_session_and_message() -> None:
         body = reply.json()
         assert body["next_action"] == "understand_workflow"
         assert "יום רגיל בעסק" in body["message"]
+        empty_end = client.post(f"/v1/website/sessions/{session_id}/end")
+        # session already has a visitor message from the turn above
+        assert empty_end.status_code == 200
+        first_end = empty_end.json()
+        assert first_end["accepted"] is True
+        assert first_end["finalized"] is True
+        second_end = client.post(f"/v1/website/sessions/{session_id}/end")
+        assert second_end.json()["finalized"] is False
     db = get_session_factory()()
     try:
         rows = list(
@@ -201,6 +211,15 @@ def test_website_api_session_and_message() -> None:
         db.close()
 
 
+def test_website_end_skips_session_without_visitor_message() -> None:
+    with TestClient(app) as client:
+        created = client.post("/v1/website/sessions")
+        session_id = created.json()["session_id"]
+        ended = client.post(f"/v1/website/sessions/{session_id}/end")
+        assert ended.status_code == 200
+        assert ended.json()["finalized"] is False
+
+
 def test_website_inquiries_answer_moves_past_opening() -> None:
     with TestClient(app) as client:
         session_id = client.post("/v1/website/sessions").json()["session_id"]
@@ -228,7 +247,8 @@ def test_website_kill_switch_persists_sheets_tool_denied(monkeypatch) -> None:
             f"/v1/website/sessions/{session_id}/messages",
             json={"text": "hi"},
         )
-        assert reply.status_code == 200
+        assert reply.status_code == 503
+        assert reply.json()["detail"] == "killed"
     db = get_session_factory()()
     try:
         rows = list(
@@ -239,10 +259,9 @@ def test_website_kill_switch_persists_sheets_tool_denied(monkeypatch) -> None:
                 )
             )
         )
-        assert len(rows) == 2
-        for row in rows:
-            payload = json.loads(row.payload_json)
-            assert payload == {"tool": "sheets_mirror", "status": "denied", "result_count": 0}
+        assert len(rows) == 1
+        payload = json.loads(rows[0].payload_json)
+        assert payload == {"tool": "sheets_mirror", "status": "denied", "result_count": 0}
         out_rows = list(
             db.scalars(
                 select(CanonicalEventRow).where(
@@ -251,7 +270,7 @@ def test_website_kill_switch_persists_sheets_tool_denied(monkeypatch) -> None:
                 )
             )
         )
-        assert len(out_rows) == 1
+        assert out_rows == []
     finally:
         db.close()
 
@@ -392,10 +411,9 @@ def test_website_kill_switch_sheets_mirror_latency(monkeypatch) -> None:
             f"/v1/website/sessions/{session_id}/messages",
             json={"text": "hi"},
         )
-        assert reply.status_code == 200
+        assert reply.status_code == 503
     db = get_session_factory()()
     try:
-        store = LeadStore(db)
         in_rows = list(
             db.scalars(
                 select(CanonicalEventRow).where(
@@ -404,21 +422,7 @@ def test_website_kill_switch_sheets_mirror_latency(monkeypatch) -> None:
                 )
             )
         )
-        assert len(in_rows) == 1
-        provider_event_id = in_rows[0].provider_event_id
-        sales_tool = db.scalar(
-            select(CanonicalEventRow).where(
-                CanonicalEventRow.provider_event_id
-                == f"{provider_event_id}:tool:sheets_mirror"
-            )
-        )
-        assert sales_tool is not None
-        payload = json.loads(sales_tool.payload_json)
-        assert payload == {"tool": "sheets_mirror", "status": "denied", "result_count": 0}
-        assert "latency_ms" not in payload
-        row = store.get_tool_run(f"{provider_event_id}:tool:sheets_mirror")
-        assert row is not None
-        assert row.latency_ms == 12
+        assert in_rows == []
     finally:
         db.close()
 
@@ -686,7 +690,7 @@ def test_website_post_cta_click_invalid_accepted_false() -> None:
         db.close()
 
 
-def test_website_kill_switch_still_persists_message_out(monkeypatch) -> None:
+def test_website_kill_switch_stops_chat_like_voice(monkeypatch) -> None:
     monkeypatch.setenv("MIA_KILL_SWITCH", "true")
     init_db()
     with TestClient(app) as client:
@@ -696,9 +700,8 @@ def test_website_kill_switch_still_persists_message_out(monkeypatch) -> None:
             f"/v1/website/sessions/{session_id}/messages",
             json={"text": "hi"},
         )
-        assert reply.status_code == 200
-        body = reply.json()
-        assert body["message"]
+        assert reply.status_code == 503
+        assert reply.json()["detail"] == "killed"
     db = get_session_factory()()
     try:
         rows = list(
@@ -709,8 +712,9 @@ def test_website_kill_switch_still_persists_message_out(monkeypatch) -> None:
             )
         )
         out_rows = [row for row in rows if row.event_type == "message_out"]
-        assert len(out_rows) == 1
-        assert json.loads(out_rows[0].payload_json)["text"] == body["message"]
+        in_rows = [row for row in rows if row.event_type == "message_in"]
+        assert out_rows == []
+        assert in_rows == []
     finally:
         db.close()
 
@@ -737,19 +741,34 @@ def test_website_funnel_reflect_hypothesis_qualify_meeting() -> None:
             json={"text": "about two hours every day"},
         )
         assert msg3.status_code == 200
-        assert msg3.json()["next_action"] == "offer_whatsapp"
+        # ADR-028: the continuation gate now offers the booked meeting first, the
+        # website's default exit, instead of WhatsApp.
+        assert msg3.json()["next_action"] == "offer_meeting"
+        assert "WhatsApp" not in msg3.json()["message"]
+        # The meeting offer was not taken (no acceptance token in the next message),
+        # so the very next continuation-ready turn proves WhatsApp is still the
+        # reachable fallback (ADR-028), exactly as it always was after the gate.
         msg4 = client.post(
             f"/v1/website/sessions/{session_id}/messages",
             json={"text": "I decide this quarter"},
         )
         assert msg4.status_code == 200
-        assert msg4.json()["next_action"] == "offer_hypothesis"
+        assert msg4.json()["next_action"] == "offer_whatsapp"
+        assert "WhatsApp" in msg4.json()["message"]
+        # WhatsApp has now been offered, so the gate is closed and the ladder
+        # resumes at the next unmet rung, same as pre-ADR-028.
         msg5 = client.post(
+            f"/v1/website/sessions/{session_id}/messages",
+            json={"text": "I'd like to understand the process a bit more first"},
+        )
+        assert msg5.status_code == 200
+        assert msg5.json()["next_action"] == "offer_hypothesis"
+        msg6 = client.post(
             f"/v1/website/sessions/{session_id}/messages",
             json={"text": "let's book a meeting"},
         )
-        assert msg5.status_code == 200
-        assert msg5.json()["next_action"] == "offer_meeting"
+        assert msg6.status_code == 200
+        assert msg6.json()["next_action"] == "offer_meeting"
 
 
 def test_website_shoe_conversation_offers_whatsapp_without_looping() -> None:
@@ -783,10 +802,21 @@ def test_website_shoe_conversation_offers_whatsapp_without_looping() -> None:
         )
         assert sizes.status_code == 200
         # Enough context to be useful: retailer, inventory work, manual sheet entry,
-        # models and sizes. Offer WhatsApp before this becomes an interview.
-        assert sizes.json()["next_action"] == "offer_whatsapp"
-        assert "וואטסאפ" in sizes.json()["message"]
+        # models and sizes. ADR-028: the continuation gate now offers the booked
+        # meeting first (the website's default exit), not WhatsApp.
+        assert sizes.json()["next_action"] == "offer_meeting"
+        assert "וואטסאפ" not in sizes.json()["message"]
         assert "יום רגיל בעסק" not in sizes.json()["message"]
+        # The meeting offer was not taken, so the next continuation-ready turn proves
+        # WhatsApp is still reachable as the fallback (ADR-028).
+        more = client.post(
+            f"/v1/website/sessions/{session_id}/messages",
+            json={"text": "אשמח לשמוע פרטים נוספים על זה"},
+        )
+        assert more.status_code == 200
+        assert more.json()["next_action"] == "offer_whatsapp"
+        assert "וואטסאפ" in more.json()["message"]
+        assert "יום רגיל בעסק" not in more.json()["message"]
     db = get_session_factory()()
     try:
         rows = _behavior_rows(db, session_id)
@@ -839,9 +869,21 @@ def test_website_prelaunch_wants_site_offers_whatsapp() -> None:
             },
         )
         assert opened.status_code == 200
-        assert opened.json()["next_action"] == "offer_whatsapp"
-        assert "וואטסאפ" in opened.json()["message"]
+        # ADR-028: stated buying intent still clears the continuation gate on the
+        # first substantive answer, but the gate now offers the booked meeting first.
+        assert opened.json()["next_action"] == "offer_meeting"
+        assert "וואטסאפ" not in opened.json()["message"]
         assert "יום רגיל בעסק" not in opened.json()["message"]
+        # The meeting offer was not taken, so the next continuation-ready turn proves
+        # WhatsApp is still reachable as the fallback (ADR-028).
+        more = client.post(
+            f"/v1/website/sessions/{session_id}/messages",
+            json={"text": "אשמח להבין את התהליך טוב יותר"},
+        )
+        assert more.status_code == 200
+        assert more.json()["next_action"] == "offer_whatsapp"
+        assert "וואטסאפ" in more.json()["message"]
+        assert "יום רגיל בעסק" not in more.json()["message"]
         bye = client.post(
             f"/v1/website/sessions/{session_id}/messages",
             json={"text": "בי תודה"},

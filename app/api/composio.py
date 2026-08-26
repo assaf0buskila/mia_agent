@@ -22,7 +22,6 @@ from app.integrations.gmail import (
     hydrate_gmail_item,
     parse_sender_email,
 )
-from app.integrations.whatsapp import parse_composio_whatsapp_inbound
 
 router = APIRouter(prefix="/v1/composio", tags=["composio"])
 
@@ -96,7 +95,6 @@ async def receive_webhook(request: Request, db: Session = Depends(get_db)) -> di
         return {"processed": 0, "ignored": True}
     trigger_slug = extract_trigger_slug(payload)
     if trigger_slug.startswith("WHATSAPP_"):
-        parse_composio_whatsapp_inbound(payload)
         return {"processed": 0, "ignored": True}
     if trigger_slug != GMAIL_NEW_MESSAGE_TRIGGER:
         return {"processed": 0, "ignored": True}

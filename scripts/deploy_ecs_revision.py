@@ -10,6 +10,7 @@ import argparse
 import json
 import subprocess
 import sys
+from pathlib import Path
 
 FAMILY = "mia"
 MUTABLE_KEYS = (
@@ -67,6 +68,11 @@ def _upsert_env(container: dict, pairs: list[tuple[str, str]]) -> None:
 
 
 def main() -> None:
+    # Gate F: do not register a revision unless this SHA still has origin-bind.
+    gate = Path(__file__).resolve().parent / "assert_origin_bind.py"
+    checked = subprocess.run([sys.executable, str(gate)], check=False)
+    if checked.returncode != 0:
+        sys.exit("origin-bind gate failed; refusing to register a revision")
     parser = argparse.ArgumentParser()
     parser.add_argument("--tag", required=True)
     parser.add_argument(

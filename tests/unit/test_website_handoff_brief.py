@@ -44,8 +44,29 @@ class _FakeStore:
     def __init__(self, *, already: bool = False) -> None:
         self.already = already
         self.upserts: list[dict[str, str]] = []
+        self.claims: set[tuple[str, str, str]] = set()
         self.sales = _inventory_sales()
         self.turns = _inventory_turns()
+
+    def try_insert_owner_notification(
+        self, *, kind: str, lead_id: str, scheduled_at: str, conversation_id: str = ""
+    ) -> bool:
+        """Model the DB's atomic claim: the first caller wins, duplicates lose.
+
+        This double stands in for the database, not for the code under test. What is
+        being tested is whether the caller gates its Telegram send on this result --
+        a read-then-send let two concurrent /handoff clicks both push the brief.
+        """
+        if self.already:
+            return False
+        key = (kind, lead_id, conversation_id)
+        if key in self.claims:
+            return False
+        self.claims.add(key)
+        self.upserts.append(
+            {"kind": kind, "lead_id": lead_id, "scheduled_at": scheduled_at}
+        )
+        return True
 
     def has_owner_notification(self, *, kind: str, lead_id: str) -> bool:
         if self.already:
@@ -175,7 +196,7 @@ def test_apply_skips_kill_switch_and_demo(monkeypatch) -> None:
     sent: list[str] = []
     monkeypatch.setattr(
         brief_mod,
-        "_notify_telegram",
+        "notify_owners",
         lambda **kwargs: sent.append(kwargs["brief"]),
     )
     store = _FakeStore()
@@ -205,7 +226,7 @@ def test_apply_persists_once_per_lead(monkeypatch) -> None:
     sent: list[str] = []
     monkeypatch.setattr(
         brief_mod,
-        "_notify_telegram",
+        "notify_owners",
         lambda **kwargs: sent.append(kwargs["brief"]),
     )
     store = _FakeStore()

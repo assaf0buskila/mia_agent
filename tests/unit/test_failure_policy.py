@@ -28,14 +28,7 @@ def test_voice_transcribe_retries_one_fallback_empty() -> None:
     assert policy.fail_closed is True
 
 
-def test_meta_ads_insights_fallback_omit_retries_zero() -> None:
-    policy = failure_policy_for("meta_ads_insights")
-    assert policy.fallback == "omit"
-    assert policy.maximum_retries == 0
-    assert policy.fail_closed is True
-
-
-def test_calendar_create_fallback_deny() -> None:
+def test_calendar_create_fail_closed_deny() -> None:
     policy = failure_policy_for("calendar_create")
     assert policy.fallback == "deny"
     assert policy.fail_closed is True

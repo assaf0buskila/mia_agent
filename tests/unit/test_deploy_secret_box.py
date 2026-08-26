@@ -19,8 +19,9 @@ def test_secret_example_keys_match_ecs_injection() -> None:
     assert example["MIA_OPENAI_API_KEY"] == ""
     assert "sslmode=verify-full" in example["MIA_DATABASE_URL"]
     assert "rds-global-bundle.pem" in example["MIA_DATABASE_URL"]
-    assert "MIA_APIFY" not in example
-    assert "MIA_LINKEDIN_ACCESS_TOKEN" in example
+    assert example["MIA_APIFY_TOKEN"] == ""
+    assert "MIA_LINKEDIN_ACCESS_TOKEN" not in example
+    assert "MIA_META_ADS_ACCOUNT_ID" not in example
 
 
 def test_env_example_documents_settings_and_adapter_map() -> None:
@@ -37,7 +38,9 @@ def test_env_example_documents_settings_and_adapter_map() -> None:
     assert "MIA_INSTAGRAM_SENDER=composio" not in text
     assert "MIA_WHATSAPP_SENDER=composio" in text
     assert "MIA_WHATSAPP_SENDER=direct" not in text
-    assert "MIA_APIFY" not in text
+    assert "MIA_META_ADS_ACCOUNT_ID" not in text
+    assert "MIA_LINKEDIN_ACCESS_TOKEN" not in text
+    assert "MIA_APIFY_TOKEN=" in text
     assert "ADR-015" in text
     assert not (ROOT / "deploy/Caddyfile").exists()
     assert not (ROOT / "deploy/mia.service").exists()
@@ -91,6 +94,9 @@ def test_pyproject_readme_is_inline_for_docker_context() -> None:
     assert "--forwarded-allow-ips" in dockerfile
     assert '"--timeout-keep-alive", "130"' in dockerfile
     assert "PYTHONUNBUFFERED=1" in dockerfile
+    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    assert "apify-client" not in pyproject
+    assert "apify>=" not in pyproject
 
 
 def test_ci_builds_production_image() -> None:
@@ -315,7 +321,16 @@ def test_production_build_creates_alb_then_migrate_then_service() -> None:
     assert unhealthy["Statistic"] == "Minimum"
     assert five["MetricName"] == "HTTPCode_ELB_5XX_Count"
     assert "AlarmActions" not in unhealthy
-    assert "AlarmActions" not in five
+    assert five["AlarmActions"] == [
+        "arn:aws:sns:REGION:ACCOUNT_ID:mia-alb-5xx"
+    ]
+    example_env = (ROOT / ".env.example").read_text(encoding="utf-8")
+    assert "MIA_ALB_5XX_SNS_TOPIC_ARN=" in example_env
+    ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    assert "scripts/assert_origin_bind.py" in ci
+    assert "workflow_dispatch" in ci
+    deploy_script = (ROOT / "scripts/deploy_ecs_revision.py").read_text(encoding="utf-8")
+    assert "assert_origin_bind.py" in deploy_script
 
 
 def test_fill_placeholders_script_skips_secrets_and_aws() -> None:
@@ -375,9 +390,6 @@ def test_fill_placeholders_replaces_tokens_on_windows() -> None:
     }
     assert secrets["MIA_INSTAGRAM_ACCOUNT_ID"].endswith(
         "mia/prod:MIA_INSTAGRAM_ACCOUNT_ID::"
-    )
-    assert secrets["MIA_META_ADS_ACCOUNT_ID"].endswith(
-        "mia/prod:MIA_META_ADS_ACCOUNT_ID::"
     )
     assert task["containerDefinitions"][0]["logConfiguration"]["options"][
         "awslogs-region"

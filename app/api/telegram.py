@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, Header, Request
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db, get_telegram_port, get_transcription_port
-from app.api.inbound import process_inbound_texts
+from app.api.owner import process_owner_texts
 from app.core.config import get_settings
 from app.core.webhooks import verify_telegram_secret
 from app.db.store import LeadStore
@@ -170,7 +170,7 @@ async def receive_webhook(
         "confidence": item.get("confidence", ""),
         "stt_latency_ms": item.get("stt_latency_ms", "0"),
     }
-    return await process_inbound_texts(
+    return await process_owner_texts(
         provider="telegram",
         channel=Channel.TELEGRAM,
         items=[inbound],

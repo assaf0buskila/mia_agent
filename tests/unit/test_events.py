@@ -94,8 +94,8 @@ def test_sheets_mirror_outcome_stamps_latency() -> None:
 
 
 def test_sheets_tab_mirror_outcome_stamps_latency() -> None:
-    ok = sheets_tab_mirror_outcome("sheets_mirror_campaign", 2, latency_ms=12)
-    assert ok.tool == "sheets_mirror_campaign"
+    ok = sheets_tab_mirror_outcome("sheets_mirror_content", 2, latency_ms=12)
+    assert ok.tool == "sheets_mirror_content"
     assert ok.status == "ok"
     assert ok.result_count == 2
     assert ok.latency_ms == 12
@@ -104,10 +104,12 @@ def test_sheets_tab_mirror_outcome_stamps_latency() -> None:
     assert denied.status == "denied"
     assert denied.result_count == 0
     assert denied.latency_ms == 12
-    default = sheets_tab_mirror_outcome("sheets_mirror_campaign", 1)
+    default = sheets_tab_mirror_outcome("sheets_mirror_content", 1)
     assert default.latency_ms == 0
     with pytest.raises(ValueError, match="unknown sheets tab tool"):
         sheets_tab_mirror_outcome("sheets_mirror", 1)
+    with pytest.raises(ValueError, match="unknown sheets tab tool"):
+        sheets_tab_mirror_outcome("sheets_mirror_campaign", 1)
 
 
 @pytest.mark.asyncio

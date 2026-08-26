@@ -40,8 +40,6 @@ def test_read_pins_are_not_writes() -> None:
         upper = tool.name.upper()
         if any(marker in upper for marker in _READ_NAME_MARKERS):
             assert tool.write is False, tool.name
-        if tool.name == "member_post_analytics":
-            assert tool.write is False
 
 
 def test_calendar_create_and_patch_are_writes() -> None:
@@ -54,6 +52,9 @@ def test_calendar_create_and_patch_are_writes() -> None:
 def test_no_send_delete_pause_in_pin_names() -> None:
     for name in PRELOADED_TOOL_NAMES:
         upper = name.upper()
+        # ADR-016: WhatsApp outbound has one owner selected by MIA_WHATSAPP_SENDER, and
+        # production runs `composio`, so this send pin is expected. It is invoked by the
+        # adapter, never offered to the owner model. Exemption matches production.
         if name == "INSTAGRAM_SEND_TEXT_MESSAGE" or name == "WHATSAPP_SEND_MESSAGE":
             continue
         assert "SEND" not in upper
@@ -68,17 +69,6 @@ def test_instagram_send_pin_is_write_not_publish() -> None:
     assert send.risk == "R2"
     assert preloaded_tool("INSTAGRAM_CREATE_POST") is None
     assert preloaded_tool("INSTAGRAM_CREATE_MEDIA_CONTAINER") is None
-
-
-def test_whatsapp_send_pin_is_write_not_template() -> None:
-    from app.integrations.whatsapp import COMPOSIO_WHATSAPP_VERSION
-
-    send = preloaded_tool("WHATSAPP_SEND_MESSAGE")
-    assert send is not None
-    assert send.write is True
-    assert send.risk == "R2"
-    assert send.version == COMPOSIO_WHATSAPP_VERSION
-    assert preloaded_tool("WHATSAPP_SEND_TEMPLATE_MESSAGE") is None
 
 
 def test_unknown_preloaded_tool_is_none() -> None:

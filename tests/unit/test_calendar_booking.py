@@ -21,6 +21,7 @@ from app.domain.calendar_booking import (
     resolve_meeting_reply,
 )
 from app.domain.events import Channel, EventType, build_meeting_booked_event
+from app.domain.meeting_availability import is_workday_local
 from app.domain.meeting_slots import (
     compute_booking_key,
     is_explicit_slot_selection,
@@ -86,6 +87,19 @@ def _slot(days_ahead: int, hour: int, minute: int = 0) -> TimeSlot:
     return TimeSlot(start=start, end=start + timedelta(minutes=30))
 
 
+def _bookable_slot_from_now(*, hour: int = 15) -> TimeSlot:
+    """A slot that is still bookable against the live clock, not FIXED_NOW."""
+    clock = datetime.now(UTC)
+    local = clock.astimezone(IL) + timedelta(days=2)
+    for _ in range(10):
+        candidate = local.replace(hour=hour, minute=0, second=0, microsecond=0)
+        if is_workday_local(candidate):
+            start = candidate.astimezone(UTC)
+            return TimeSlot(start=start, end=start + timedelta(minutes=30))
+        local = local + timedelta(days=1)
+    raise AssertionError("no bookable workday slot in the next 12 days")
+
+
 def _il_gap(*, days_ahead: int, start_hour: int, end_hour: int) -> TimeSlot:
     local_now = FIXED_NOW.astimezone(IL)
     local_date = (local_now + timedelta(days=days_ahead)).date()
@@ -108,6 +122,32 @@ def _il_gap(*, days_ahead: int, start_hour: int, end_hour: int) -> TimeSlot:
     return TimeSlot(
         start=local_start.astimezone(UTC),
         end=local_end.astimezone(UTC),
+    )
+
+
+def _next_real_business_slot(*, min_days_ahead: int, hour: int, minute: int = 0) -> TimeSlot:
+    """A policy-valid 30m slot computed from the *real* clock, for the one test
+    (`test_website_e2e_booking`) that goes through the live HTTP endpoint without
+    freezing `now` — so the slot it seeds must actually be valid against whatever
+    day the suite happens to run on, not just against FIXED_NOW.
+
+    A fixed `days_ahead` from FIXED_NOW (2026-08-20, a Thursday) rots: the resulting
+    calendar date is static, so as real time passes, that date can land on a Friday
+    or Saturday, and ADR-012's Sun-Thu policy then correctly refuses the booking —
+    which looked like a broken calendar integration rather than a stale fixture.
+    Walking forward from the real "today" to the next Sun-Thu day keeps the slot
+    valid on every day the suite is run, the same fix already applied to the sibling
+    fixture in `tests/unit/test_owner_calendar.py::_next_workday` (commit 094c052).
+    """
+    local_now = datetime.now(UTC).astimezone(IL)
+    candidate = (local_now + timedelta(days=min_days_ahead)).replace(
+        hour=hour, minute=minute, second=0, microsecond=0
+    )
+    while not is_workday_local(candidate):
+        candidate += timedelta(days=1)
+    return TimeSlot(
+        start=candidate.astimezone(UTC),
+        end=(candidate + timedelta(minutes=30)).astimezone(UTC),
     )
 
 
@@ -134,7 +174,13 @@ def _ready_state(lead_id: str) -> SalesState:
     )
 
 
-def _seed_offered(store: LeadStore, lead_id: str, slots: list[TimeSlot]) -> None:
+def _seed_offered(
+    store: LeadStore,
+    lead_id: str,
+    slots: list[TimeSlot],
+    *,
+    now: datetime | None = None,
+) -> None:
     apply_meeting_policy(
         store,
         lead_id=lead_id,
@@ -145,7 +191,7 @@ def _seed_offered(store: LeadStore, lead_id: str, slots: list[TimeSlot]) -> None
     store.save_offered_slots(
         lead_id=lead_id,
         slots=slots,
-        now=FIXED_NOW,
+        now=now or FIXED_NOW,
         timezone="Asia/Jerusalem",
     )
 
@@ -1277,10 +1323,16 @@ async def test_inbound_e2e_booking_one_reply(monkeypatch) -> None:
         db.close()
 
 
-def test_website_e2e_booking(monkeypatch) -> None:
-    from tests.conftest import freeze_mia_clock
-
-    freeze_mia_clock(monkeypatch, FIXED_NOW)
+def test_website_e2e_booking() -> None:
+    # This is the one test in this file that drives the live HTTP endpoint without
+    # freezing the clock, so the seeded slot must be computed from the real clock
+    # rather than a fixed offset from FIXED_NOW.
+    #
+    # Master fixed the same date-rot by freezing the clock to FIXED_NOW instead. Both
+    # fixes work in isolation, but not together: the body below seeds its slot from
+    # the real clock, so freezing "now" back to 2026-08-20 would leave the app
+    # judging a slot six days past a frozen present. Kept the real-clock version,
+    # which is self-consistent end to end.
     init_db()
     db = get_session_factory()()
     try:
@@ -1288,8 +1340,8 @@ def test_website_e2e_booking(monkeypatch) -> None:
         session_id = "web_book_e2e_1"
         _, lead_id = store.open_channel_lead(channel=Channel.WEBSITE, external_id=session_id)
         store.save_sales(_ready_state(lead_id))
-        slot = _slot(5, 15)
-        _seed_offered(store, lead_id, [slot])
+        slot = _bookable_slot_from_now()
+        _seed_offered(store, lead_id, [slot], now=datetime.now(UTC))
         db.commit()
         fake_cal = FakeCalendarPort([slot])
         fake_book = FakeCalendarBookingPort()

@@ -16,6 +16,7 @@ _REDACT_KEYS = {
     "composio_api_key",
     "composio_webhook_secret",
     "firecrawl_api_key",
+    "apify_token",
     "database_url",
     "phone",
     "email",

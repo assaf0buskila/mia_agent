@@ -1,3 +1,4 @@
+
 """Model fallback chain, and the observability that was missing.
 
 Live symptom this covers: the owner agent was pinned to a model the account could not
@@ -11,6 +12,7 @@ import json
 
 import httpx
 import pytest
+from app.capabilities.types import Principal
 from app.core.config import get_settings
 from app.domain.owner_brain import build_agent_client
 from app.integrations.llm_client import LlmClient, LlmError, LlmModelChain
@@ -105,7 +107,7 @@ def test_fallback_reason_is_recorded_so_the_failure_is_visible() -> None:
     from app.brain.store import BrainStore
     from app.db.session import get_session_factory, init_db
     from app.db.store import LeadStore
-    from app.domain.owner_brain import answer_owner
+    from app.domain.owner_brain import NOTE_AGENT_FAILURE_TEXT, answer_owner
     from app.domain.owner_tasks import OwnerTaskType
 
     init_db()
@@ -119,6 +121,7 @@ def test_fallback_reason_is_recorded_so_the_failure_is_visible() -> None:
 
     chain = LlmModelChain([_client("unusable-model", _status(404))])
     result = answer_owner(
+        principal=Principal.owner(source="test"),
         store=LeadStore(session),
         brain=BrainStore(session),
         settings=settings,
@@ -132,7 +135,12 @@ def test_fallback_reason_is_recorded_so_the_failure_is_visible() -> None:
         client=chain,
     )
     assert result.used_agent is False
-    assert result.text == "CANNED"
+    # The text contract moved (see test_brain_end_to_end.py for the full story): a
+    # NOTE turn the agent was allowed to run but failed now gets the honest
+    # NOTE_AGENT_FAILURE_TEXT instead of the caller's canned "CANNED" fallback. The
+    # actual point of this test -- that the failure REASON is recorded and visible,
+    # naming the model and the HTTP status -- is unchanged and asserted below.
+    assert result.text == NOTE_AGENT_FAILURE_TEXT
     # The whole point: the reason names the model and the HTTP status.
     assert "unusable-model" in result.fallback_reason
     assert "404" in result.fallback_reason
@@ -150,6 +158,7 @@ def test_a_deterministic_intent_reports_that_reason_not_a_failure() -> None:
     session = get_session_factory()()
     session.commit()
     result = answer_owner(
+        principal=Principal.owner(source="test"),
         store=LeadStore(session),
         brain=BrainStore(session),
         settings=get_settings(),

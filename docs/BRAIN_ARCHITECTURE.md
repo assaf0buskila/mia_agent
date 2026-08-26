@@ -1,7 +1,7 @@
 # Mia's brain — architecture
 
 **Status:** implemented 2026-08-23. **WhatsApp is out of scope for this slice.**
-Plan and research trail: `docs/BRAIN_PLAN.md`. Decisions: ADR-026 in `docs/DECISIONS.md`.
+Plan and research trail: `docs/archive/BRAIN_PLAN.md`. Decisions: ADR-026 in `docs/DECISIONS.md`.
 
 Mia was a keyword switchboard: a phrase table picked one of ~25 task types, a 700-line
 `if` chain ran one Python function, and the model only rephrased the result. Off-list

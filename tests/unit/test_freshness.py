@@ -13,16 +13,13 @@ from app.domain.policies.freshness import (
 
 _LIVE_ONLY_FACTS = (
     "calendar_availability",
-    "campaign_budget_status",
     "conversation_ownership",
     "owner_permissions",
     "opt_out_status",
 )
 
 _SHORT_CACHE_FACTS = (
-    "campaign_metrics",
     "instagram_content_metrics",
-    "linkedin_content_metrics",
     "linkedin_profile",
     "gmail_results",
     "research_snippets",
@@ -43,9 +40,7 @@ _VERSIONED_FACTS = (
 )
 
 _SHORT_CACHE_TTLS = {
-    "campaign_metrics": 300,
     "instagram_content_metrics": 300,
-    "linkedin_content_metrics": 300,
     "linkedin_profile": 300,
     "gmail_results": 300,
     "research_snippets": 300,
@@ -138,7 +133,7 @@ def test_short_cache_within_ttl_is_cached() -> None:
     now = datetime(2026, 8, 21, 12, 0, 0, tzinfo=UTC)
     fetched_at = now - timedelta(seconds=120)
     stamp = stamp_freshness(
-        "campaign_metrics",
+        "instagram_content_metrics",
         present=True,
         fetched_at=fetched_at,
         now=now,
@@ -150,7 +145,7 @@ def test_short_cache_past_ttl_is_stale() -> None:
     now = datetime(2026, 8, 21, 12, 0, 0, tzinfo=UTC)
     fetched_at = now - timedelta(seconds=301)
     stamp = stamp_freshness(
-        "campaign_metrics",
+        "instagram_content_metrics",
         present=True,
         fetched_at=fetched_at,
         now=now,

@@ -5,9 +5,11 @@ from zoneinfo import ZoneInfo
 import httpx
 import pytest
 from app.api.inbound import process_inbound_texts
+from app.capabilities.types import Principal
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
 from app.domain.events import Channel
+from app.domain.meeting_availability import is_workday_local
 from app.domain.owner_calendar import apply_owner_calendar
 from app.domain.owner_tasks import ack_for_owner_task, classify_owner_task
 from app.domain.sales import FitLevel, NextAction, PainLevel, SalesState
@@ -50,12 +52,16 @@ def _ready_to_meet_state(lead_id: str) -> SalesState:
 
 
 def _policy_gap(*, now: datetime, days_ahead: int = 4) -> TimeSlot:
-    local_date = (now.astimezone(IL_TZ) + timedelta(days=days_ahead)).date()
+    local = now.astimezone(IL_TZ) + timedelta(days=max(days_ahead, 2))
+    for _ in range(8):
+        if is_workday_local(local):
+            break
+        local = local + timedelta(days=1)
     gap_start = datetime(
-        local_date.year, local_date.month, local_date.day, 10, 0, tzinfo=IL_TZ
+        local.year, local.month, local.day, 10, 0, tzinfo=IL_TZ
     ).astimezone(UTC)
     gap_end = datetime(
-        local_date.year, local_date.month, local_date.day, 12, 0, tzinfo=IL_TZ
+        local.year, local.month, local.day, 12, 0, tzinfo=IL_TZ
     ).astimezone(UTC)
     return TimeSlot(start=gap_start, end=gap_end)
 
@@ -138,6 +144,7 @@ def test_apply_owner_calendar_fake_freshness_live() -> None:
     enriched, outcome = apply_owner_calendar(
         ack,
         FakeCalendarPort([_policy_gap(now=OWNER_NOW)]),
+        principal=Principal.owner(source="test"),
         kill_switch=False,
         timezone="Asia/Jerusalem",
         now=OWNER_NOW,
@@ -155,6 +162,7 @@ def test_apply_owner_calendar_empty_freshness_unverified() -> None:
         enriched, outcome = apply_owner_calendar(
             ack,
             port,
+            principal=Principal.owner(source="test"),
             kill_switch=False,
             timezone="Asia/Jerusalem",
             now=OWNER_NOW,
@@ -174,6 +182,7 @@ def test_apply_owner_calendar_kill_switch_freshness_empty() -> None:
     enriched, outcome = apply_owner_calendar(
         ack,
         RaisingCalendarPort(),
+        principal=Principal.owner(source="test"),
         kill_switch=True,
         timezone="Asia/Jerusalem",
         now=OWNER_NOW,
@@ -255,6 +264,9 @@ async def test_inbound_owner_calendar_freshness_persisted(monkeypatch) -> None:
             port=port,
             kill_switch=False,
             owner_ids={OWNER_FRESH_PHONE},
+            # Seed against the SAME clock the app is frozen to. Seeding from the
+            # real clock put the slot outside the frozen search window, so the
+            # port returned nothing and freshness read 'unverified'.
             calendar=FakeCalendarPort([_policy_gap(now=OWNER_NOW)]),
         )
         db.commit()

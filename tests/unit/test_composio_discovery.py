@@ -17,12 +17,10 @@ from app.integrations.composio_discovery import (
     cached_resolve,
     choose_site,
     extract_ga4_properties,
-    extract_meta_ad_accounts,
     extract_sites,
     reset_cache,
 )
 from app.integrations.ga4 import DisabledGa4Port, build_ga4_port
-from app.integrations.meta_ads import resolve_meta_ads_account_id
 from app.integrations.search_console import resolve_gsc_site_url
 
 
@@ -73,16 +71,10 @@ def test_ga4_accepts_a_bare_numeric_id() -> None:
     assert extract_ga4_properties({"propertyId": "987654321"}) == ("987654321",)
 
 
-def test_meta_accounts_accept_both_id_forms() -> None:
-    payload = {"data": [{"id": "act_1234567890", "account_id": "1234567890"}]}
-    assert extract_meta_ad_accounts(payload) == ("1234567890",)
-
-
 @pytest.mark.parametrize("payload", [None, {}, {"data": []}, "not json", 42])
 def test_parsers_never_raise_on_junk(payload: object) -> None:
     assert extract_sites(payload) == ()
     assert extract_ga4_properties(payload) == ()
-    assert extract_meta_ad_accounts(payload) == ()
 
 
 # ----------------------------------------------------------------- ambiguity
@@ -201,11 +193,9 @@ def test_discovery_is_skipped_entirely_without_composio_credentials() -> None:
     settings.composio_user_id = ""
     settings.composio_discovery = True
     settings.gsc_site_url = ""
-    settings.meta_ads_account_id = ""
     reset_cache()
     assert build_discovery(settings) is None
     assert resolve_gsc_site_url(settings) == ""
-    assert resolve_meta_ads_account_id(settings) == ""
 
 
 def test_resolution_is_cached_per_process() -> None:

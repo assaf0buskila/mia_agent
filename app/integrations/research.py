@@ -1,7 +1,8 @@
 """Public research search read port.
 
-Production adapter: Firecrawl search API behind typed port when API key is set.
-Snippets are untrusted data — never instructions. No browser, crawl, or LLM this slice.
+Production adapters: Firecrawl search when its key is set; otherwise pinned Apify
+``apify/google-search-scraper`` run-sync when ``MIA_APIFY_TOKEN`` is set.
+Snippets are untrusted data — never instructions. No browser, crawl, catalog, or LLM.
 """
 
 from __future__ import annotations
@@ -23,6 +24,13 @@ from app.domain.policies.freshness import overlay_stale, stamp_freshness
 from app.domain.tools import AdapterHttpError, ToolOutcome
 
 _FIRECRAWL_SEARCH_URL = "https://api.firecrawl.dev/v2/search"
+_APIFY_ACTOR_ID = "apify~google-search-scraper"
+_APIFY_RUN_SYNC_URL = (
+    f"https://api.apify.com/v2/actors/{_APIFY_ACTOR_ID}/run-sync-get-dataset-items"
+)
+_APIFY_HTTP_TIMEOUT = 70.0
+_APIFY_RUN_TIMEOUT_S = 60
+_APIFY_MAX_CHARGE_USD = 0.02
 
 MAX_TITLE_LEN = 80
 MAX_EXCERPT_LEN = 160
@@ -123,6 +131,72 @@ class FirecrawlSearchPort:
             return []
 
 
+class ApifySearchPort:
+    """Pinned ``apify/google-search-scraper`` run-sync. Adapter-owned input only."""
+
+    def __init__(
+        self,
+        *,
+        token: str,
+        client: httpx.Client | None = None,
+    ) -> None:
+        self._token = token
+        self._client = client
+
+    def search(self, query: str) -> list[ResearchSnippet]:
+        trimmed = query.strip()
+        if not trimmed:
+            return []
+
+        payload = {
+            "queries": trimmed[:MAX_QUERY_LEN],
+            "maxPagesPerQuery": 1,
+            "saveHtml": False,
+            "saveHtmlToKeyValueStore": False,
+            "focusOnPaidAds": False,
+            "maximumLeadsEnrichmentRecords": 0,
+        }
+        headers = {
+            "Authorization": f"Bearer {self._token}",
+            "Content-Type": "application/json",
+        }
+        params = {
+            "timeout": _APIFY_RUN_TIMEOUT_S,
+            "format": "json",
+            "clean": "1",
+            "maxTotalChargeUsd": _APIFY_MAX_CHARGE_USD,
+        }
+        try:
+            if self._client is not None:
+                response = self._client.post(
+                    _APIFY_RUN_SYNC_URL,
+                    params=params,
+                    json=payload,
+                    headers=headers,
+                )
+            else:
+                with httpx.Client(timeout=_APIFY_HTTP_TIMEOUT) as client:
+                    response = client.post(
+                        _APIFY_RUN_SYNC_URL,
+                        params=params,
+                        json=payload,
+                        headers=headers,
+                    )
+            if response.status_code >= 400:
+                raise AdapterHttpError(response.status_code)
+            return _map_apify_items(response.json())
+        except httpx.HTTPError as exc:
+            raise AdapterHttpError(None) from exc
+        except (
+            ValueError,
+            KeyError,
+            TypeError,
+            AttributeError,
+            IndexError,
+        ):
+            return []
+
+
 def _map_web_items(web: list[Any]) -> list[ResearchSnippet]:
     snippets: list[ResearchSnippet] = []
     for item in web:
@@ -144,6 +218,40 @@ def _map_web_items(web: list[Any]) -> list[ResearchSnippet]:
                 excerpt=description,
             )
         )
+    return snippets
+
+
+def _map_apify_items(payload: Any) -> list[ResearchSnippet]:
+    if not isinstance(payload, list) or not payload:
+        return []
+    page = payload[0]
+    if not isinstance(page, dict):
+        return []
+    organic = page.get("organicResults")
+    if not isinstance(organic, list):
+        return []
+    snippets: list[ResearchSnippet] = []
+    for item in organic:
+        if not isinstance(item, dict):
+            continue
+        url = item.get("url")
+        if not isinstance(url, str) or not url.strip():
+            continue
+        title = item.get("title", "")
+        if not isinstance(title, str):
+            title = ""
+        description = item.get("description", "")
+        if not isinstance(description, str):
+            description = ""
+        snippets.append(
+            ResearchSnippet(
+                title=title,
+                url=url.strip(),
+                excerpt=description,
+            )
+        )
+        if len(snippets) >= MAX_SNIPPETS_IN_ACK:
+            break
     return snippets
 
 
@@ -307,4 +415,6 @@ def enrich_research_ack(
 def build_research_port(settings: Settings) -> ResearchPort:
     if settings.firecrawl_api_key.strip():
         return FirecrawlSearchPort(api_key=settings.firecrawl_api_key.strip())
+    if settings.apify_token.strip():
+        return ApifySearchPort(token=settings.apify_token.strip())
     return DisabledResearchPort()

@@ -28,12 +28,16 @@ LIMITS_PER_IP = {
     "message": 40,
     "voice": 12,
     "handoff": 8,
+    # /end triggers finalization: a summary plus a Telegram push to Assaf. The widget
+    # fires it once per session on pagehide, so real traffic is far under this.
+    "end": 20,
 }
 
 LIMITS_PER_SESSION = {
     "message": 40,
     "voice": 8,
     "handoff": 4,
+    "end": 4,
 }
 
 
@@ -118,6 +122,19 @@ def enforce_public_website(request: Request, *, bucket: str) -> None:
 
 
 def public_website_guard(bucket: str):
+    """Build the per-route guard, failing at import time on an unknown bucket.
+
+    `enforce_public_website` indexes LIMITS_PER_IP directly, so a typo used to raise
+    KeyError inside the request and surface as a 500 on a public endpoint -- the guard
+    itself becoming the outage. Routes are declared at import, so validate here and
+    let a bad bucket break startup loudly instead.
+    """
+    if bucket not in LIMITS_PER_IP:
+        raise KeyError(
+            f"unknown public-website rate-limit bucket {bucket!r}; "
+            f"add it to LIMITS_PER_IP (known: {sorted(LIMITS_PER_IP)})"
+        )
+
     def _guard(request: Request) -> None:
         enforce_public_website(request, bucket=bucket)
 

@@ -1,3 +1,4 @@
+
 """End-to-end owner flow: does Mia actually behave better?
 
 Drives `answer_owner` and `learn_from_exchange` — the two functions `app/api/inbound.py`
@@ -15,6 +16,7 @@ import httpx
 from app.brain.embeddings import FakeEmbeddingPort
 from app.brain.schemas import MemoryCategory, MemoryKind, MemorySource
 from app.brain.store import BrainStore
+from app.capabilities.types import Principal
 from app.core.config import get_settings
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
@@ -122,6 +124,7 @@ def test_owner_question_uses_memory_and_answers_in_hebrew() -> None:
         ]
     )
     result = answer_owner(
+        principal=Principal.owner(source="test"),
         store=LeadStore(session),
         brain=brain,
         settings=_settings(),
@@ -224,6 +227,7 @@ def test_approval_intents_never_reach_the_model() -> None:
     for task_type in DETERMINISTIC_TASK_TYPES:
         assert agent_allowed_for(task_type) is False
         result = answer_owner(
+        principal=Principal.owner(source="test"),
             store=LeadStore(session),
             brain=BrainStore(session),
             settings=_settings(),
@@ -248,6 +252,7 @@ def test_kill_switch_stops_the_agent_and_the_learning() -> None:
     session.commit()
     client, script = _client([_text("nope")])
     result = answer_owner(
+        principal=Principal.owner(source="test"),
         store=LeadStore(session),
         brain=brain,
         settings=_settings(),
@@ -283,6 +288,7 @@ def test_without_a_configured_model_the_deterministic_answer_is_kept() -> None:
     session = _session()
     session.commit()
     result = answer_owner(
+        principal=Principal.owner(source="test"),
         store=LeadStore(session),
         brain=BrainStore(session),
         settings=_settings(owner_agent_model="", openai_api_key=""),
@@ -298,11 +304,24 @@ def test_without_a_configured_model_the_deterministic_answer_is_kept() -> None:
     assert result.text == FALLBACK
 
 
-def test_model_failure_degrades_to_the_deterministic_answer() -> None:
+def test_model_failure_on_a_note_degrades_to_the_honest_failure_line() -> None:
+    """NOTE + a failing model used to fall back to the caller's canned FALLBACK text
+
+    ("נרשם כמשימה. לא ביצעתי אותה." -- "recorded as a task, I did not act on it"),
+    which was dishonest here: an unclassified NOTE was genuinely understood well
+    enough that the agent was invoked, and it was the live model call that failed,
+    not the classification. `answer_owner` now substitutes the honest
+    NOTE_AGENT_FAILURE_TEXT ("הבדיקה לא עברה כרגע. תנסה שוב." -- "the check did not
+    go through right now, try again") instead, but only for NOTE. See the sibling
+    test below, which pins that every other task type is unaffected.
+    """
+    from app.domain.owner_brain import NOTE_AGENT_FAILURE_TEXT
+
     session = _session()
     session.commit()
     client, _script = _client([])  # every call 500s
     result = answer_owner(
+        principal=Principal.owner(source="test"),
         store=LeadStore(session),
         brain=BrainStore(session),
         settings=_settings(),
@@ -316,7 +335,40 @@ def test_model_failure_degrades_to_the_deterministic_answer() -> None:
         client=client,
     )
     assert result.used_agent is False
-    assert result.text == FALLBACK
+    assert result.text == NOTE_AGENT_FAILURE_TEXT
+    assert result.text != FALLBACK
+
+
+def test_model_failure_on_a_non_note_task_still_returns_its_real_fallback_verbatim() -> None:
+    """The narrow half of the contract: NOTE_AGENT_FAILURE_TEXT must never eat a good
+
+    deterministic answer. A read task type (DAILY_BRIEF here) that reaches the agent
+    always carries a real, already-computed `fallback_text` -- not a "could not
+    classify this" placeholder -- so on model failure it must come back byte for
+    byte, exactly as before this change.
+    """
+    real_computed_answer = (
+        "3 לידים חדשים היום, 2 פגישות נקבעו, 0 ממתינים לאישור."  # a real scorecard
+    )
+    session = _session()
+    session.commit()
+    client, _script = _client([])  # every call 500s
+    result = answer_owner(
+        principal=Principal.owner(source="test"),
+        store=LeadStore(session),
+        brain=BrainStore(session),
+        settings=_settings(),
+        task_type=OwnerTaskType.DAILY_BRIEF,
+        owner_text="מה קרה היום?",
+        history=(),
+        fallback_text=real_computed_answer,
+        kill_switch=False,
+        demo_active=False,
+        embedding_port=FakeEmbeddingPort(),
+        client=client,
+    )
+    assert result.used_agent is False
+    assert result.text == real_computed_answer
 
 
 def test_history_is_passed_as_data_not_instructions() -> None:
@@ -324,6 +376,7 @@ def test_history_is_passed_as_data_not_instructions() -> None:
     session.commit()
     client, script = _client([_text("בסדר.")])
     answer_owner(
+        principal=Principal.owner(source="test"),
         store=LeadStore(session),
         brain=BrainStore(session),
         settings=_settings(),
@@ -348,6 +401,7 @@ def test_current_time_reaches_the_model_so_dates_are_not_guessed() -> None:
     session.commit()
     client, script = _client([_text("בסדר.")])
     answer_owner(
+        principal=Principal.owner(source="test"),
         store=LeadStore(session),
         brain=BrainStore(session),
         settings=_settings(),
@@ -364,3 +418,62 @@ def test_current_time_reaches_the_model_so_dates_are_not_guessed() -> None:
     assert "CURRENT TIME:" in system
     # Rendered in Hebrew, not as an ISO string.
     assert "יום" in system
+
+
+async def test_grounded_agent_answer_reaches_the_owner_verbatim(monkeypatch) -> None:
+    """Pins the 'no post-answer damage' contract end to end: once the agent has
+
+    produced a grounded, tool-backed answer, nothing downstream may paraphrase it,
+    wrap it, replace it with a greeting, or dump the operator funnel over it.
+    Driven through `process_inbound_texts` with a real Telegram-shaped recording
+    port -- the strongest form, since it also proves that `app/api/inbound.py`
+    passes the agent's text straight through as `ack_text` (skipping
+    `owner_reply_port.compose` entirely on the used_agent path -- see the comment
+    at that call site) rather than only exercising `answer_owner` in isolation.
+    """
+    from app.api.inbound import process_inbound_texts
+    from app.domain import owner_brain as owner_brain_module
+    from app.domain.events import Channel
+
+    from tests.unit.test_comm_operating_model import RecordingTelegramPort
+
+    session = _session()
+    session.commit()
+    settings = _settings()
+    settings.memory_enabled = True
+
+    grounded_answer = (
+        "יש לך פגישה עם דניאל היום ב-14:00, ומייל חדש אחד מרועי בנושא הצעת מחיר."
+    )
+    client, _script = _client(
+        [
+            _tool_call("c1", "gmail_inbox", {}),
+            _text(grounded_answer),
+        ]
+    )
+    # answer_owner() is called with no `client=` from process_inbound_texts, so it
+    # builds its own via build_agent_client(settings) -- patch that construction
+    # point to inject the scripted client, the same way production wires a real
+    # OpenAI/Gemini client from settings.
+    monkeypatch.setattr(owner_brain_module, "build_agent_client", lambda settings: client)
+
+    owner_id = "555000111"
+    port = RecordingTelegramPort()
+    result = await process_inbound_texts(
+        provider="telegram",
+        channel=Channel.TELEGRAM,
+        items=[{"id": "evt.grounded.1", "from": owner_id, "text": "מה יש לי במייל?"}],
+        store=LeadStore(session),
+        port=port,
+        kill_switch=False,
+        owner_ids={owner_id},
+    )
+    session.commit()
+    assert result["processed"] == 1
+    assert len(port.sent) == 1
+    reply = port.sent[0].text
+    # Byte-for-byte, not paraphrased, not wrapped, not replaced.
+    assert reply == grounded_answer
+    assert "מה שהבנתי" not in reply
+    assert "היי אסף" not in reply  # no greeting bleed
+    assert "בודקת תמונת מצב" not in reply  # no funnel/snapshot dump

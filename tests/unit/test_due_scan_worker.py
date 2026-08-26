@@ -200,6 +200,8 @@ def test_run_due_scan_calls_both_scans(monkeypatch: pytest.MonkeyPatch) -> None:
             "follow_ups_send_ready": 0,
             "owner_tasks_scanned": 0,
             "owner_tasks_due_ready": 0,
+            "website_conversations_finalized": 0,
+            "owner_reminders_sent": 0,
         }
         assert calls["follow_ups"] == {
             "timezone": "Asia/Jerusalem",
@@ -216,16 +218,7 @@ def test_run_due_scan_calls_both_scans(monkeypatch: pytest.MonkeyPatch) -> None:
         db.close()
 
 
-def test_run_due_scan_spend_threshold_with_pacing(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from app.core.config import Settings
-
-    monkeypatch.setattr(
-        due_scan_module,
-        "get_settings",
-        lambda: Settings(campaign_monthly_budget="5000"),
-    )
+def test_run_due_scan_spend_threshold_stays_blocked_without_campaign_pacing() -> None:
     init_db()
     db = get_session_factory()()
     try:
@@ -253,13 +246,12 @@ def test_run_due_scan_spend_threshold_with_pacing(
             now=_FIXED_NOW,
         )
         assert summary.owner_tasks_scanned >= 1
-        assert summary.owner_tasks_due_ready >= 1
         owner_row = store.get_owner_task(
             provider="whatsapp", provider_event_id=OWNER_SPEND_EVENT_ID
         )
         assert owner_row is not None
-        assert owner_row.due_ready is True
-        assert owner_row.block_reason == "spend_reached"
+        assert owner_row.due_ready is False
+        assert owner_row.block_reason == "no_budget"
     finally:
         pacing = store.get_campaign_pacing()
         if pacing is not None:
@@ -272,6 +264,78 @@ def test_run_due_scan_never_imports_message_port() -> None:
     source = inspect.getsource(due_scan_module)
     assert "MessagePort" not in source
     assert "app.integrations.base" not in source
+
+
+def test_due_scan_sends_one_unprompted_owner_reminder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sent: list[str] = []
+
+    def fake_send(*, text: str, settings, transport=None) -> bool:
+        del settings, transport
+        sent.append(text)
+        return True
+
+    monkeypatch.setattr(due_scan_module, "send_owner_telegram", fake_send)
+    reminder_now = datetime(2026, 8, 22, 12, 0, tzinfo=ZoneInfo("Asia/Jerusalem"))
+    init_db()
+    db = get_session_factory()()
+    try:
+        store = LeadStore(db)
+        due_at = follow_up_due_on(
+            now=reminder_now, timezone="Asia/Jerusalem", offset_days=0
+        )
+        _seed_owner_task(
+            store, provider_event_id="evt.owner.scan.worker.remind", due_at=due_at
+        )
+        db.commit()
+        first = run_due_scan(
+            store,
+            timezone="Asia/Jerusalem",
+            kill_switch=False,
+            now=reminder_now,
+        )
+        assert first.owner_tasks_due_ready >= 1
+        assert first.owner_reminders_sent == 1
+        assert sent == [f"יש {first.owner_tasks_due_ready} משימות שמחכות לטיפול."]
+        second = run_due_scan(
+            store,
+            timezone="Asia/Jerusalem",
+            kill_switch=False,
+            now=reminder_now,
+        )
+        assert second.owner_reminders_sent == 0
+        assert len(sent) == 1
+    finally:
+        db.close()
+
+
+def test_due_scan_kill_switch_skips_owner_reminder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def boom(*, text: str, settings, transport=None) -> bool:
+        del text, settings, transport
+        raise AssertionError("kill switch must not ping the owner")
+
+    monkeypatch.setattr(due_scan_module, "send_owner_telegram", boom)
+    init_db()
+    db = get_session_factory()()
+    try:
+        store = LeadStore(db)
+        due_at = follow_up_due_on(
+            now=_FIXED_NOW, timezone="Asia/Jerusalem", offset_days=0
+        )
+        _seed_owner_task(store, provider_event_id="evt.owner.scan.worker.killed", due_at=due_at)
+        db.commit()
+        summary = run_due_scan(
+            store,
+            timezone="Asia/Jerusalem",
+            kill_switch=True,
+            now=_FIXED_NOW,
+        )
+        assert summary.owner_reminders_sent == 0
+    finally:
+        db.close()
 
 
 def test_require_alive_due_scan() -> None:
@@ -307,6 +371,8 @@ def test_main_stdout_counts_only(capsys: pytest.CaptureFixture[str]) -> None:
         "follow_ups_send_ready",
         "owner_tasks_scanned",
         "owner_tasks_due_ready",
+        "website_conversations_finalized",
+        "owner_reminders_sent",
     }
     for value in body.values():
         assert isinstance(value, int)

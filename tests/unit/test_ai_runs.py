@@ -1,4 +1,5 @@
 import hashlib
+import inspect
 import json
 
 import pytest
@@ -21,23 +22,29 @@ from app.domain.events import Channel, persist_tool_outcome
 from app.domain.policies import POLICY_VERSION
 from app.domain.sales import NextAction
 from app.domain.tools import ToolOutcome
+from app.graph.orchestrator import build_graph
 from app.integrations.base import RecordingMessagePort
 from app.integrations.calendar import DisabledCalendarPort
 from app.integrations.calendar_booking import DisabledCalendarBookingPort
-from app.integrations.sales_reply import _SYSTEM_PROMPT
+from app.integrations.sales_reply import _SYSTEM_PROMPT, ReplyContext, build_user_content
 from app.integrations.sales_reply import (
     PROMPT_VERSION as SALES_REPLY_PROMPT_VERSION,
 )
 from app.integrations.sheets import DisabledSheetsPort
 from app.main import app
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
 PROSPECT_PHONE = "972509994901"
 VISITOR_TEXT = "hi"
+# Bumped with PROMPT_VERSION sales_reply_v9: the merge of the two v8 prompts. The reply
+# shape is answer-then-ask over PUBLISHED ASSAFWEB FACTS (ADR-028) *and* the prompt now
+# carries the PROSPECT TONE delivery contract, so neither v8 hash is valid any more.
 _FROZEN_SYSTEM_PROMPT_SHA256 = (
-    "c83365aac3e47376e217449ef0fb9443d12eab69361ed5254b9319fd4580c341"
+    "f4c6ee0db000a09f8888e3cc177484eae548253ed9f65c6ffb5c5f99c1b98feb"
 )
+
 
 def _all_ai_run_values(row: AiRunRow) -> str:
     return json.dumps(
@@ -129,7 +136,7 @@ def test_website_second_message_persists_second_ai_run() -> None:
         db.close()
 
 
-def test_kill_switch_still_persists_ai_run() -> None:
+def test_kill_switch_stops_website_chat_without_ai_run() -> None:
     init_db()
     db = get_session_factory()()
     try:
@@ -139,19 +146,20 @@ def test_kill_switch_still_persists_ai_run() -> None:
         )
         db.commit()
         settings = get_settings().model_copy(update={"kill_switch": True})
-        process_website_message(
-            store,
-            session_id="web_kill_switch",
-            text=VISITOR_TEXT,
-            settings=settings,
-            calendar=DisabledCalendarPort(),
-            calendar_booking=DisabledCalendarBookingPort(),
-            sheets=DisabledSheetsPort(),
-        )
+        with pytest.raises(HTTPException) as exc:
+            process_website_message(
+                store,
+                session_id="web_kill_switch",
+                text=VISITOR_TEXT,
+                settings=settings,
+                calendar=DisabledCalendarPort(),
+                calendar_booking=DisabledCalendarBookingPort(),
+                sheets=DisabledSheetsPort(),
+            )
+        assert exc.value.status_code == 503
         db.commit()
-        row = db.scalars(select(AiRunRow).where(AiRunRow.lead_id == lead_id)).one()
-        assert row.kill_switch is True
-        assert row.model == MODEL_CANNED
+        rows = list(db.scalars(select(AiRunRow).where(AiRunRow.lead_id == lead_id)))
+        assert rows == []
     finally:
         db.close()
 
@@ -352,7 +360,7 @@ def test_persist_ai_run_writes_prompt_version() -> None:
         row = store.get_ai_run("run_prompt_ver_1")
         assert row is not None
         assert row.prompt_version == PROMPT_VERSION
-        assert row.prompt_version == "sales_reply_v7"
+        assert row.prompt_version == "sales_reply_v9"
     finally:
         db.close()
 
@@ -441,13 +449,70 @@ def test_sanitize_prompt_version(value: str, expected: str) -> None:
 
 
 def test_prompt_version_constant_from_sales_reply() -> None:
-    assert PROMPT_VERSION == SALES_REPLY_PROMPT_VERSION == "sales_reply_v7"
+    assert PROMPT_VERSION == SALES_REPLY_PROMPT_VERSION == "sales_reply_v9"
 
 
 def test_sales_reply_system_prompt_frozen_hash() -> None:
     # If this fails, bump PROMPT_VERSION in sales_reply.py and ai_runs.py and update the hash.
     digest = hashlib.sha256(_SYSTEM_PROMPT.encode("utf-8")).hexdigest()
     assert digest == _FROZEN_SYSTEM_PROMPT_SHA256
+
+
+def test_v9_system_prompt_carries_both_contracts() -> None:
+    """ADR-040: one version, two contracts. Losing either half is the merge bug."""
+    # Answer-then-ask (ADR-028), the shipped production contract.
+    assert "16. Answer then ask." in _SYSTEM_PROMPT
+    assert "PUBLISHED ASSAFWEB FACTS covers it" in _SYSTEM_PROMPT
+    # Prospect tone (ADR-040), delivery only.
+    assert "5b. PROSPECT TONE" in _SYSTEM_PROMPT
+    assert "instruction about delivery and nothing else" in _SYSTEM_PROMPT
+    # Tone loses every conflict with answer-then-ask, and buys no silence.
+    assert "A listed PROSPECT TONE buys no exemption here" in _SYSTEM_PROMPT
+    # No manufactured empathy when the detector found nothing.
+    assert "When no PROSPECT TONE is listed, do not invent a feeling" in _SYSTEM_PROMPT
+
+
+def test_v9_user_content_omits_tone_block_entirely_without_cues() -> None:
+    """A neutral visitor gets no PROSPECT TONE section at all, not an empty header."""
+    content = build_user_content(
+        action=NextAction.UNDERSTAND_WORKFLOW,
+        canned="fallback",
+        latest_message="we run a bakery in haifa",
+        channel="website",
+        context=ReplyContext(
+            knowledge=("- [published] Every launch includes a month of guidance.",)
+        ),
+    )
+    assert "PROSPECT TONE" not in content
+    assert "PUBLISHED ASSAFWEB FACTS" in content
+
+
+def test_v9_user_content_renders_knowledge_and_tone_together() -> None:
+    """Both blocks reach the model, and tone reaches it as an instruction, not a label."""
+    content = build_user_content(
+        action=NextAction.HANDLE_OBJECTION,
+        canned="fallback",
+        latest_message="How long does a launch take? This is getting ridiculous.",
+        channel="website",
+        context=ReplyContext(
+            knowledge=("- [published] Every launch includes a month of guidance.",),
+            emotional_cues=("frustrated", "overwhelmed"),
+        ),
+    )
+    assert "PUBLISHED ASSAFWEB FACTS" in content
+    assert "PROSPECT TONE" in content
+    assert "frustrated, overwhelmed" in content
+    assert "This is how to deliver, not what to say" in content
+    assert "Tone never decides whether you answer their question." in content
+
+
+def test_v9_orchestrator_passes_both_knowledge_and_tone() -> None:
+    """ADR-040 wiring: dropping either kwarg from ReplyContext is the bug."""
+    source = inspect.getsource(build_graph)
+    assert "infer_emotional_cues(" in source
+    assert "emotional_cues=emotional_cues" in source
+    assert "knowledge=knowledge" in source
+
 
 
 def test_persist_ai_run_writes_policy_version() -> None:

@@ -39,12 +39,26 @@ Proposed is not accepted. Build may follow a proposed default only when `AGENTS.
 | ADR-017 | v1 communication operating model | accepted |
 | ADR-018 | Website offers WhatsApp after first real friction | accepted |
 | ADR-019 | Selected Region is eu-north-1 | accepted |
-| ADR-021 | Documentation core set; ManyChat not a v1 runtime channel | accepted |
+| ADR-021 | Documentation core set; ManyChat not a v1 runtime channel | superseded (docs set → ADR-031; ManyChat still unmounted) |
 | ADR-022 | Production live sales test: leave shadow, keep gated writes off | accepted |
 | ADR-023 | Model routing: deterministic decisions, model paraphrases | proposed |
 | ADR-024 | WhatsApp stays human until official Cloud API inbound | accepted |
 | ADR-026 | Mia's brain: long-term memory, knowledge, and an owner tool loop | accepted |
 | ADR-027 | Opt-in Composio discovery for GSC/GA4/Meta; Sheets and LinkedIn stay explicit | accepted |
+| ADR-028 | Visitor knowledge, answer-then-ask, meeting as default website exit | accepted |
+| ADR-029 | Website conversion funnel, engine truth line, multi-owner notification | accepted |
+| ADR-030 | Owner Telegram: free conversation, typed Gmail reads, lead by name | accepted |
+| ADR-031 | Owner intent: same agent, no sub-agents | accepted |
+| ADR-032 | Owner reads: wider tool loop, live dates, agenda, deterministic query normalization | accepted |
+| ADR-033 | reserved — Gmail send after Approve (in flight on `claude/mia-adr033-wip`, not yet merged) | proposed |
+| ADR-034 | LinkedIn v1 is Composio profile; member-analytics token is optional | accepted |
+| ADR-035 | Apify google-search-scraper behind ResearchPort | accepted |
+| ADR-036 | VNext two graphs + canonical docs | accepted |
+| ADR-037 | Delete ManyChat from the product | accepted |
+| ADR-038 | Graphs own retrieve and conversation complete | accepted |
+| ADR-039 | Drop Meta ads, LinkedIn post analytics, campaigns, pacing and prelaunch | accepted |
+| ADR-040 | Prospect tone awareness in the website sales prompt | accepted |
+| ADR-041 | The permission principal is derived from the request | accepted |
 
 ## Template
 
@@ -409,14 +423,14 @@ Assaf locked a production supplier map. ADR-007 still forbids dumping catalogs i
 | LinkedIn profile | Composio |
 | LinkedIn personal member post analytics | Direct REST + `MIA_LINKEDIN_ACCESS_TOKEN` (ADR-009). Composio has org share-stats only. |
 | Meta Ads **read** | Composio |
-| Research | Firecrawl now; Apify later behind the same `ResearchPort` |
+| Research | Firecrawl primary; Apify `google-search-scraper` behind the same `ResearchPort` when Firecrawl is unset (ADR-030) |
 | ManyChat | Not mounted in v1 (ADR-021). Leftover AWS secret name stays in the box; app ignores it. |
 | Composio WhatsApp toolkit | Send pin `WHATSAPP_SEND_MESSAGE` only when sender=`composio`. No inbound trigger. Template send not wired. |
 
 One Instagram sender per conversation (`direct` or `composio`). Never dual-send Graph + Composio. ManyChat is unmounted (ADR-021).
 
 **Consequences**
-Env/docs/JSON list Meta tokens for WhatsApp and for Instagram **webhook verify**. Composio key+user covers Gmail/Calendar/Sheets/GSC/GA4/LinkedIn profile/Meta ads/future IG send+insights. Member analytics stays Direct REST (ADR-009); Composio has org share-stats only. GSC/GA4/Meta ads resource ids are leftover env, optional only when `MIA_COMPOSIO_DISCOVERY=true` (ADR-027). Sheets id stays explicit. Do not add Apify keys until that adapter exists. Do not rip live Graph IG send until the Composio port is tested.
+Env/docs/JSON list Meta tokens for WhatsApp and for Instagram **webhook verify**. Composio key+user covers Gmail/Calendar/Sheets/GSC/GA4/LinkedIn profile/Meta ads/future IG send+insights. Member analytics stays Direct REST (ADR-009); Composio has org share-stats only. GSC/GA4/Meta ads resource ids are leftover env, optional only when `MIA_COMPOSIO_DISCOVERY=true` (ADR-027). Sheets id stays explicit. Apify token is `MIA_APIFY_TOKEN` (ADR-030). Do not rip live Graph IG send until the Composio port is tested.
 
 **Alternatives considered**
 Composio for WhatsApp or Instagram inbound — rejected; no usable inbound trigger. Composio `LINKEDIN_GET_SHARE_STATS` for personal analytics — rejected; org URN only (ADR-027). Default-everything-Composio including catalogs in the model — rejected (ADR-007). WhatsApp send via Composio is ADR-016.
@@ -495,9 +509,10 @@ Move the project to an account that can use `il-central-1` — rejected; live ho
 
 ### ADR-021 Documentation core set; ManyChat not a v1 runtime channel
 
-- **Status:** accepted
+- **Status:** superseded
 - **Date:** 2026-08-23
 - **Assaf:** ADOPT (chat: `/goal` simplify repository without breaking v1)
+- **Superseded by:** ADR-031 (living agent docs). ManyChat remains unmounted.
 
 **Context**
 The repo accumulated overlapping MD files (PRD dump, HANDOFF, playbooks, gap reports) that burned agent context. ManyChat was an optional Instagram sidecar, not part of the ADR-017 v1 channel set.
@@ -619,4 +634,274 @@ Assaf already has Active Composio connections: Gmail, Calendar, LinkedIn (Assaf 
 `GET /health` `owner_integrations.missing` is honest: Sheets id and LinkedIn token stay listed when blank. GSC / GA4 / Meta ads ids are listed only while discovery is off. Parsers in `app/integrations/composio_discovery.py` are shape-tolerant and unverified against Assaf’s live `{data, error, successful}` envelope until `uv run python scripts/probe_composio_discovery.py` is run. Production stays dark for those three ids until Assaf sets the leftover env or flips the flag after a clean probe.
 
 **Alternatives considered**
-Fake personal analytics with `LINKEDIN_GET_SHARE_STATS` — rejected; org URN, wrong job. Auto-pick a Sheets write target by name — rejected; near-miss writes the wrong document. Always-on request-time LIST_* — rejected; discovery must not fire on every port build. Remove the LinkedIn member token — rejected; Composio has no member analytics tool. Replace Firecrawl with a Composio search toolkit — rejected; ResearchPort stays Firecrawl.
+Fake personal analytics with `LINKEDIN_GET_SHARE_STATS` — rejected; org URN, wrong job. Auto-pick a Sheets write target by name — rejected; near-miss writes the wrong document. Always-on request-time LIST_* — rejected; discovery must not fire on every port build. Treat LinkedIn member token as a go-live requirement — superseded by ADR-034: v1 LinkedIn is Composio profile; the analytics token is optional leftover. Replace Firecrawl with a Composio search toolkit — rejected; ResearchPort stays Firecrawl as primary (ADR-035 adds Apify only as the fallback when Firecrawl is unset).
+
+### ADR-034 LinkedIn v1 is Composio profile; member-analytics token is optional
+
+> Renumbered from ADR-028 when the VNext rebuild was merged with the shipped
+> `mia:20` branch, which had already used 028–032 for different decisions.
+> Production's ids win because they are cited in shipped code.
+
+- **Status:** accepted
+- **Date:** 2026-08-24
+- **Assaf:** ADOPT (deploy: LinkedIn through Composio, no access-token key)
+
+**Context**
+ADR-009 still describes how member post analytics would work (direct REST + `MIA_LINKEDIN_ACCESS_TOKEN`). Composio still has no member analytics tool. Assaf's live LinkedIn connection is the profile toolkit. Requiring the leftover token listed it on `/health` as missing even though profile reads already work.
+
+**Decision**
+v1 owner LinkedIn is Composio `LINKEDIN_GET_MY_INFO`. Do not add `MIA_LINKEDIN_ACCESS_TOKEN` to go live. `/health` `owner_integrations.missing` does not list that token. `linkedin_analytics` stays false until a real member token exists. Do not fake member stats with org share-stats.
+
+**Consequences**
+Telegram can answer LinkedIn profile questions via the existing Composio port. Member analytics stays dark unless Assaf later supplies the leftover token. ADR-009 remains the analytics adapter if that token appears.
+
+**Alternatives considered**
+Keep listing the token as missing — rejected; it blocked a clean health picture for a capability Assaf is not shipping. Wire `LINKEDIN_GET_SHARE_STATS` as analytics — rejected; org URN, wrong job.
+
+### ADR-035 Apify google-search-scraper behind ResearchPort
+
+> Renumbered from ADR-030 in the `mia:20` merge (see ADR-034).
+
+- **Status:** accepted
+- **Date:** 2026-08-25
+- **Assaf:** ADOPT (chat: wire the Apify token as a research supplier)
+
+**Context**
+ADR-015 left Apify for later behind the same typed `ResearchPort`. Assaf added an Apify API token. Dumping the Actor Store or arbitrary runs into the owner model would violate ADR-007. `apify/rag-web-browser` is Playwright page crawl, not search snippets. `apify-client.call()` waits indefinitely by default.
+
+**Decision**
+Pin **`apify/google-search-scraper`** only. Call `POST /v2/actors/apify~google-search-scraper/run-sync-get-dataset-items` with httpx (`timeout=60`, `maxTotalChargeUsd=0.02`, client timeout 70s). Adapter-owned input: one query, one SERP page, add-ons off. Map `organicResults` to `{title, url, excerpt}` (cap 2). Firecrawl stays primary when `MIA_FIRECRAWL_API_KEY` is set; `MIA_APIFY_TOKEN` selects this adapter only when Firecrawl is empty. Do not retry HTTP 408 (the run keeps billing). No Actor catalog, no `apify-client`, no Composio Apify toolkit.
+
+**Consequences**
+`research_search` and meeting-brief research stay one port. `/health` `research_apify` is true only when Apify is the selected adapter. Production `mia/prod` must include `MIA_APIFY_TOKEN` (empty until Assaf pastes the token) before an ECS revision that injects it. SEO audit scrape stays Firecrawl.
+
+**Env var name is settled: `MIA_APIFY_TOKEN`.**
+A parallel, abandoned implementation of this same decision exists on branch
+`claude/mia-adr033-wip` (`e21a29c`) using `MIA_APIFY_API_TOKEN` and the legacy
+`/v2/acts/` path. Assaf chose `MIA_APIFY_TOKEN` (2026-08-26, chat: "for apify
+choose one name and apply it"). That name is the one wired through
+`app/core/config.py` (`apify_token`), `app/core/redact.py`, `app/main.py`,
+`.env.example`, `deploy/ecs-task-definition.example.json`,
+`deploy/mia-prod.secret.example.json` and `tests/conftest.py`. Do not
+reintroduce `MIA_APIFY_API_TOKEN`; if that WIP branch is ever revived, rename
+it on the way in. The AWS secret has not been set yet — no migration cost.
+
+**Alternatives considered**
+`MIA_APIFY_API_TOKEN` (the `claude/mia-adr033-wip` spelling) — rejected; the shorter name was already wired and tested across eight files, and Apify's own "API token" wording does not justify churn on a key that is not yet in Secrets Manager. `apify/rag-web-browser` — rejected; full-page crawl/browser, not SERP snippets. `apify-client` — rejected; extra package, unbounded wait. Firecrawl replacement while its key is set — rejected; live production search stays Firecrawl. Model-owned actor id or input knobs — rejected (ADR-007).
+
+### ADR-036 VNext two graphs + canonical docs
+
+> Renumbered from ADR-031 in the `mia:20` merge (see ADR-034).
+
+- **Status:** accepted
+- **Date:** 2026-08-25
+- **Assaf:** ADOPT (chat: `/goal` rebuild per `MIA_REBUILD.MD`)
+
+**Context**
+The live app is one FastAPI process with a one-node sales LangGraph and a custom owner tool loop inside `process_inbound_texts`. Documentation required agents to load PROJECT_MAP, PRD, BUILD_STATUS, HANDOFF, and more. Brain code is on the HTTP path but semantic memory is gated on empty default model ids. There is no conversation-finalization → Telegram summary (only WhatsApp-click briefing).
+
+**Decision**
+1. Two compiled LangGraph entry points: `OwnerGraph` (Telegram) and `ClientGraph` (website). Shared core; separate state, prompts, tools, permissions.
+2. Channels stay thin adapters. Capability layer + Python policy sit in front of Composio. Website visitors cannot execute owner capabilities even under prompt injection.
+3. Canonical agent reading: `AGENTS.md`, `docs/PRODUCT.md`, `docs/ARCHITECTURE.md`, `docs/DECISIONS.md`. Operator files `docs/RUNBOOK.md` and `docs/PRODUCTION_BUILD.md` remain for humans/tests, not required agent reading. ADR-021’s living-doc list is superseded; ManyChat stays unmounted.
+4. Reuse `app/brain/`, STT, Postgres, risk policy. Strangle `inbound.py` — do not delete until the new path is tested.
+5. Add explicit website conversation finalization with idempotent Telegram notify.
+6. Do not auto-deploy. Do not add pgvector. Do not declare brain embeddings/extraction ALIVE when model ids are empty.
+
+**Consequences**
+Owner and client reasoning no longer share one inbound mega-handler. Prospect Meta/Gmail inbound compiles ClientGraph (same NBA, not a third graph). New integrations plug in as capability + policy + adapter + graph allowlist. Old classifier remains fallback until OwnerGraph is proven. Production still needs `MIA_OWNER_AGENT_MODEL` / `MIA_EXTRACTION_MODEL` / `MIA_EMBEDDING_MODEL` plus a one-off `mia-ingest-knowledge` for a non-empty corpus.
+
+**Alternatives considered**
+Keep one ReAct loop for both users — rejected (rebuild §36). Rewrite brain onto pgvector — rejected (ADR-026). Delete WhatsApp/Gmail webhooks in this slice — rejected; preserve production contracts until replaced.
+
+### ADR-037 Delete ManyChat from the product
+
+> Renumbered from ADR-032 in the `mia:20` merge (see ADR-034).
+
+- **Status:** accepted
+- **Date:** 2026-08-25
+- **Assaf:** ADOPT (chat: delete all ManyChat integration)
+
+**Context**
+ManyChat was never mounted in v1 (ADR-021). Assaf asked to remove it from the product, not leave it as a deferred sidecar. The app still declared `manychat` specified, injected `MIA_MANYCHAT_INGEST_TOKEN` in the ECS example, and documented a leftover AWS secret.
+
+**Decision**
+Remove ManyChat from runtime code, capability map, health, `.env.example`, and ECS/secret examples. Instagram senders stay `direct` | `composio`. Unused `channel_identities` columns remain in Postgres so existing databases do not need a drop migration. This repo does not read or delete a leftover AWS secret name.
+
+**Consequences**
+`POST /v1/manychat/external-request` stays gone (404). New task revisions must not inject `MIA_MANYCHAT_INGEST_TOKEN`. Do not remount ManyChat.
+
+**Alternatives considered**
+Keep the unused AWS secret documented forever — rejected for new deploys; the live box is not touched from this repo. Drop leftover identity columns now — rejected; avoid a production schema change for empty columns.
+
+### ADR-028 Visitor knowledge on the website path, answer-then-ask, and the meeting as default exit
+
+- **Status:** accepted
+- **Date:** 2026-08-24
+- **Assaf:** ADOPT (chat: go ambitious, it is our product)
+
+**Context**
+Three findings from a product review of the live system. First, `app/api/website.py` imported nothing from `app/brain/`, and `ReplyContext` carried turns, known facts and asked actions but no retrieved knowledge — so the 31 ingested knowledge chunks (services, portfolio, FAQ, pricing, testimonials) were reachable only from Assaf's Telegram owner agent. The person with questions could not reach the knowledge; the person who already knows everything could. Second, Mia ran a cold-call discovery script on a warm inbound surface: she took before she gave, so a visitor asking whether we build online stores got the next ladder rung instead of an answer. Third, `MIA_CALENDAR_WRITE=true` was already live and booking was deterministic and measurable, yet the website's top exit was `OFFER_WHATSAPP` into a human inbox, and ADR-024 deliberately keeps the token out of the `wa.me` prefill — so nothing linked a website conversation to what happened next and the funnel was structurally unclosable.
+
+**Decision**
+Add `assemble_visitor_context` to `app/brain/context.py`: knowledge-only retrieval for the website path, with a hard invariant that it never calls `retrieve_memories`, `build_profile_block`, `list_memories`, `memory_vectors`, `touch_memories` or `list_open_gaps`. Owner memory is owner-only in both directions — the PRD already said a visitor can never write it, and the read side of that boundary is now enforced in code and pinned by a test using a store whose memory methods raise. Add `knowledge` to `ReplyContext` and a PUBLISHED ASSAFWEB FACTS section to the turn prompt. Move the reply shape to answer-then-ask at `sales_reply_v8`: when the visitor asks something the published facts cover, answer it in one sentence, then serve INTENT with its one question; when they do not cover it, say so plainly. `select_next_action` stays fully deterministic — this is a paraphrase-layer change only. Separately, add `meeting_first` to `select_next_action` (default **false**, so every non-website caller is unchanged) and `MIA_WEBSITE_MEETING_FIRST` (default **true**): when the existing WhatsApp continuation gate passes and the meeting exit was not already offered, the website offers the booked meeting. WhatsApp stays the fallback, reachable once the meeting was offered and not taken, or on an explicit request. New persisted `SalesState.meeting_exit_offered` plus migration `20260824_lead_sales_state_meeting_exit.sql`.
+
+**Consequences**
+The visitor can finally get an answer from the published corpus, and the measurable exit is now the default one. `build_graph`'s `knowledge_lookup` defaults to `None`, so every existing caller is byte-identical. The lookup is skipped entirely while the kill switch is set (no embedding call on a killed turn) and any exception it raises is swallowed as no knowledge — a brain outage degrades phrasing, it never 500s a customer. The canned/no-model path is unchanged. **A meeting can now be offered before the `OFFER_HYPOTHESIS` rung is reached**, so a meeting brief may carry `hypothesis_offered: false`; the pre-ADR-028 WhatsApp offer had exactly this same property, since it fired at the same gate. Price questions still hand off and still quote no number — pinned from both sides. `MIA_WEBSITE_MEETING_FIRST=false` reproduces the old behavior without a deploy.
+
+**Alternatives considered**
+Give the website path the full `assemble_owner_context` — rejected outright; it would expose owner memory to anonymous visitors, which is the one thing this design must never allow. Make answer-then-ask a new `NextAction` — rejected; the next-best-action must stay deterministic and testable in code, and this is a phrasing concern. Loosen `lint_customer_reply` to allow a second question mark — rejected; the answer half is a statement, so the one-question rule still holds, and weakening the linter to fit a prompt is backwards. Drop the WhatsApp exit entirely now that the meeting is default — rejected; WhatsApp is still the right escape hatch for someone who wants a human, and removing it would strand that visitor. Put the handoff token back in the `wa.me` prefill to close attribution — rejected here, that is ADR-024's call and it made the handoff look broken; the meeting exit closes the loop without reopening it.
+
+### ADR-029 Website conversion funnel, engine truth line, and multi-owner notification
+
+- **Status:** accepted
+- **Date:** 2026-08-24
+- **Assaf:** ADOPT (chat: go ambitious, it is our product)
+
+**Context**
+Mia is a sales operator that could not report whether she converts. `AiRunRow` was written on every turn with latency and tokens, and the only read anywhere in the codebase was `get_ai_run(run_id)` — one row at a time, never aggregated. `owner_reads.py` ranked conversations by discovery depth but counted almost nothing. The single aggregate that ever reached `/health` was `ops.integration_failures`, which turned out to be noise from expired handoff tokens. Separately, `/health` reported `owner_agent: ready` because `owner_agent_ready()` only checked that a model string was non-empty; the owner agent silently ran the pre-brain keyword classifier in production for a full day and only Assaf's gut caught it. And `_notify_telegram` sent to `sorted(owner_ids)[0]` only, so a second owner id was never notified — a listed open finding, and a blocker on selling Mia as a product.
+
+**Decision**
+Add `app/domain/funnel.py`: a read-only local-day website funnel built from counters that already existed (`mia_opened`, `conversation_started`, `meeting_offered`, `whatsapp_handoff_offered`, `whatsapp_handoff`, `meeting_booked`, `handoff`) plus derived integer-percent rates, rendered lead-id free into the owner daily brief and the operator snapshot, replacing the older one-line `format_website_headline`. Promote `_discovery_depth` to a shared public `discovery_depth` so the funnel and the owner reads use one definition rather than forking it. Add `app/domain/engine_health.py` and `LeadStore.aggregate_ai_runs`, with percentiles computed in Python so SQLite and Postgres behave identically, and surface a line reporting how many replies actually ran, the median latency, and how many were canned — a canned count near the total is the signal that the model is failing silently. Rename `_notify_telegram` to `notify_owners`, fan out to every allowlisted owner id with per-recipient failure isolation, and return only the ids actually delivered.
+
+**Consequences**
+The daily brief now answers whether the website converted today instead of only how many events fired. Two limits are deliberate and documented in the modules rather than hidden: `engaged` comes from `list_sales_snapshots`, a recency-ordered sample, because `SalesStateRow` carries no timestamp — it is directional, not a same-day count; and `aggregate_ai_runs` is **all-time**, not day-scoped, because `ai_runs` has no timestamp column either. Both need an additive migration to become exact, deliberately out of scope here. Because those counters do not share one window a numerator can exceed its denominator, so `_pct` clamps to 0..100 — without the clamp the `le=100` bound raised `ValidationError` from inside the owner's daily brief, which is a crash, not a rounding detail. Attribution past the WhatsApp click stays open: ADR-024 keeps the token out of the `wa.me` prefill, so nothing links a website conversation to the WhatsApp thread that follows. The meeting exit from ADR-028 is the path that does close.
+
+**Alternatives considered**
+Compute percentiles in SQL — rejected; PostgreSQL-only functions would make the test suite exercise a different path than production, the same reasoning that rejected pgvector in ADR-026. Add the `ai_runs` timestamp column in this slice — deferred, not refused; it is the correct fix and it is written down here so it does not get lost. Report a rate above 100 percent honestly rather than clamping — rejected; it is meaningless to a reader and it crashed the brief. Leave `_notify_telegram` single-owner because Assaf is the only owner today — rejected; Assaf's decision is that Mia is a product, and a silent single-recipient assumption is exactly the kind of thing that ships to a second customer and fails quietly.
+
+### ADR-030 Owner Telegram: free conversation, typed Gmail reads, lead by name
+
+- **Status:** accepted
+- **Date:** 2026-08-24
+- **Assaf:** ADOPT (chat: go implement)
+
+**Context**
+After mia:18 the Telegram console still dumped funnel/engine/daily on greetings and on real requests like "תבדקי את המייל". Unmatched long text was coerced to `OPERATOR_SNAPSHOT`. Gmail reads could not list the inbox (`GmailPort` only fetched by message id). Leads showed as hashes. Assaf rejected dumping the Composio catalog into the model; he asked for a typed allowlist, inbox list/search/read, send as draft+Approve, and lead lookup by person name when they said it.
+
+**Decision**
+Greetings and ≤3-word chatter stay a one-line hello (`היי אסף, אני כאן.`) and never hit the agent or the digest. Long unmatched text stays `NOTE` so the owner agent answers. Snapshot/funnel/engine only on an explicit brief. Extend `GmailPort` with `list_recent` / `search` / `create_draft` / `send_draft`, pinning `GMAIL_FETCH_EMAILS`, `GMAIL_CREATE_EMAIL_DRAFT`, `GMAIL_SEND_DRAFT` on toolkit `20260817_00`. Agent tools: `gmail_inbox`, `gmail_search`, `gmail_read`, `find_leads`. No send/delete on the agent registry. Draft is a deterministic `gmail_draft` task; send runs only after Approve and `MIA_GMAIL_SEND=true` (stays false). Persist `SalesState.display_name` only from explicit name phrases (`שמי X`, `my name is`); never guess. `find_leads` matches name, headline, or full `lead_…`.
+
+**Consequences**
+"תבדקי את המייל" can reach inbox tools instead of a canned dump. Send cannot happen from the model. Empty names stay empty until stated; headlines still work. Shipped image **mia:19**, task **mia:21** after migrate exit 0. Rollback: image `mia:18` / task `mia:20`, or blank `MIA_OWNER_AGENT_MODEL`.
+
+**Alternatives considered**
+Expose all Composio Gmail tools to the model — rejected (ADR-007). Auto-send after draft — rejected; Approve plus the existing send flag. Infer names from headlines — rejected; Assaf chose stated names only.
+
+### ADR-031 Owner intent: same agent, no sub-agents
+
+- **Status:** accepted
+- **Date:** 2026-08-24
+- **Assaf:** chat — more phrasing understanding HE/EN; asked about transform/plan/execute/sub-agents
+
+**Context**
+mia:19 treated any unmatched text of three words or fewer as a greeting. `תבדקי את המייל` and `check my inbox` never reached the owner agent. The prompt also forced `search_memory` before live reads, so even longer paraphrases burned the four-step budget. Assaf asked for query transform, plan-and-execute, and sub-agents.
+
+**Decision**
+Keep **one** owner agent (`owner_agent_v2`). No sub-agents, no extra model hop. Greetings/acks/status pings stay an exact-set hello. Every other unmatched phrase, including three-word requests, stays `NOTE` so the loop can plan and call pinned tools. The prompt restates Hebrew/English paraphrases as a tool plan and does live reads (inbox, calendar, leads) before memory. Writes stay on the Python path.
+
+**Consequences**
+`תבדקי את המייל` / `can you look at my emails` reach `gmail_inbox`. Cost and safety stay one bounded loop. Shipped image **mia:20**, task **mia:22**. Rollback: image `mia:19` / task `mia:21`.
+
+**Alternatives considered**
+Sub-agent swarm or a separate rewrite model — rejected (AGENTS.md: subgraphs over swarms; extra latency and a second untrusted planner). Growing the keyword list for every Hebrew/English paraphrase — rejected; that is what failed. Dumping the Composio catalog — already rejected ADR-007 / ADR-030.
+
+
+### ADR-032 Owner reads: wider tool loop, live dates, agenda, deterministic query normalization
+
+- **Status:** accepted
+- **Date:** 2026-08-25
+- **Assaf:** chat — talk to Mia like a capable human operator, no dictionary of magic phrases
+
+**Context**
+ADR-030 and ADR-031 fixed routing, and a trace of eleven real owner utterances confirmed it: `תבדקי רגע מה יש לי במייל`, `did Daniel email me?`, `מה יש לי מחר?`, `hey check my inbox` and `היי מה יש לי היום` already reached `run_owner_agent`. Only a bare `היי` was intercepted, correctly. The console still behaved like a keyword bot for five reasons downstream of routing. `max_steps=4` drops tools on its final step, so there were three tool-calling turns; `gmail_search → gmail_read → answer` spent all of them and any multi-source question forced a premature, under-informed answer. `format_inbox_rows` and `format_email_body` captured `InboxRow.timestamp` and never emitted it, so every time-scoped mail question was structurally unanswerable. No tool could list calendar events at all — `calendar_availability` returns free slots in a hard-coded seven-day window — so `מה יש לי מחר?` had no path to an answer. `gmail_search` passed the owner's raw words to Gmail, which AND-matches bare terms, so Hebrew phrasing died on its own function words. And most of the 26 pinned tool descriptions stated purpose only, with three actively wrong: `owner_status` claimed it returns a short hello while its handler dumps the brief, `meeting_brief` documented an 8-character lead id against a 12-character validator, and `search_memory` told the model to check memory first in direct contradiction of ADR-031.
+
+**Decision**
+Keep **one** owner agent. No sub-agent, no router model, no rewrite model, no second final-answer model — ADR-031 stands. Bump the prompt to `owner_agent_v3`: delete the literal trigger-keyword list and replace it with semantic guidance about what each data source is for, an internal execution plan that is never printed or narrated, explicit query-construction rules, and a standalone untrusted-content paragraph. Raise the loop to 8 steps, add a 16-call total ceiling, refuse to re-execute an identical `(tool, arguments)` call, and stop offering a tool after repeated empty results; every termination path still grants one tools-free turn so the run ends in prose. Emit absolute and relative dates in both Gmail formatters. Add a read-only `calendar_agenda` tool over the already-pinned `GOOGLECALENDAR_EVENTS_LIST` — no new Composio slug or toolkit version. Add `app/domain/gmail_query.py`, a pure deterministic Hebrew-clitic-aware normalizer that strips conversational filler, converts relative time to one `newer_than:` operator, passes existing Gmail operators through untouched, and never invents an entity or emits a `from:` for a disguised stopword. Rewrite all 27 tool descriptions to state purpose, when to use, input shape, return shape, the follow-up tool, and the limits. When the agent was allowed to run and failed on an unclassified `NOTE`, answer with an honest one-line failure instead of the classifier's "could not classify this" text. Log `steps`, `failed` and `completion` alongside the existing `used`/`tools`.
+
+**Consequences**
+`תבדקי רגע אם דניאל ענה לי ותראי גם מה יש לי מחר` is answerable end to end: seven tool-calling turns cover search, read, a second source and the answer. Mail answers can finally be time-scoped. The normalizer is a pure function, not a second conversational layer — it runs only on `gmail_search`, and when a normalized query still returns nothing the model is told so it can retry differently rather than being silently starved. Writes are untouched: `DETERMINISTIC_TASK_TYPES` still gates approvals, drafts, takeover, scope and preference away from the model, a greeting still returns exactly `היי אסף, אני כאן.` without reaching it, and `MIA_GMAIL_SEND` stays false. Three tests changed contract deliberately and were made stronger, including a regression guard asserting the trigger-keyword list cannot return; one unrelated pre-existing date-rot fixture was repaired. `MIA_OWNER_AGENT_MAX_STEPS` reverts the budget without a deploy, and blanking `MIA_OWNER_AGENT_MODEL` still falls back to the `owner_telegram_v2` classifier.
+
+**Alternatives considered**
+A rephrase sub-agent or query-rewriting model hop — rejected; ADR-031 already rejected it, and a pure function gets the same recall with no latency, no cost and no second untrusted planner. Growing the prompt's keyword list to cover more paraphrases — rejected; that is the bug being removed, in the prompt as much as in Python. Stripping the deterministic read classifiers so every read goes to the agent — rejected for now; they already act as the fallback when the model is unconfigured or down, and removing them would trade a real availability property for tidiness. Pinning a new Composio calendar slug for the agenda read — unnecessary; `GOOGLECALENDAR_EVENTS_LIST` was already pinned for booking conflict checks. Teaching the model Gmail operator syntax in the prompt instead of normalizing in code — rejected; it is deterministic work that does not belong in the untestable layer.
+### ADR-038 Graphs own retrieve and conversation complete
+
+> Renumbered from ADR-033 when the Phase L cleanup was merged: 028–032 belong to
+> shipped production decisions and 033 is reserved for the in-flight Gmail-send
+> slice on `claude/mia-adr033-wip`.
+
+- **Status:** accepted
+- **Date:** 2026-08-25
+- **Assaf:** ADOPT (chat: graphs must include the functions Mia needs to be functional)
+
+**Context**
+OwnerGraph was `load_owner_context → respond`. ClientGraph was `load_conversation → sales_turn`. Knowledge search, hot handoff, and website finalization (widget close, inactivity, human handoff) ran in HTTP handlers and `mia-due-scan` after `graph.invoke`. Looking at the graphs did not match what Mia did, so those product functions were easy to miss or skip.
+
+**Decision**
+1. ClientGraph nodes: `load_conversation` → `retrieve_knowledge` (`knowledge.search` as `GraphName.CLIENT`) → `sales_turn` or skip on `session_end` / `inactivity` → `complete_turn` (hot handoff + website finalize).
+2. Website `/end` and due-scan inactivity invoke ClientGraph with `turn_kind`, they do not call the finalization service as a side path.
+3. OwnerGraph nodes: `load_owner_context` → `retrieve_owner_knowledge` (`memory.search` + `knowledge.search` as owner) → `respond`. Mail, calendar, leads, and research stay allowlisted tools inside `respond`.
+4. Channels stay thin. STT, HMAC, and Sheets mirror stay outside LangGraph. Graph state stays serializable. Website visitors still cannot execute owner capabilities.
+
+**Consequences**
+Published AssafWeb facts from `knowledge.search` are passed into sales compose as labelled data. Conversation-complete pings still use the same idempotent finalization service; the graph is the caller. Do not dump the Composio catalog into extra graph nodes.
+
+**Alternatives considered**
+Leave retrieve/finalize in HTTP and due-scan — rejected; the graphs would not include the functions. One LangGraph node per Composio slug — rejected (ADR-036).
+
+### ADR-039 Drop Meta ads, LinkedIn post analytics, campaigns, pacing and prelaunch
+
+- **Status:** accepted
+- **Date:** 2026-08-26
+- **Assaf:** ADOPT (chat: "Drop them — accept the deletion")
+
+**Context**
+A Phase L cleanup pass removed five capability modules — `app/integrations/meta_ads.py`, `app/integrations/linkedin_analytics.py`, `app/domain/campaigns.py`, `app/domain/pacing.py`, `app/domain/prelaunch.py` — plus ~4,275 lines of their tests. They were shipped in image `mia:20` and advertised to the owner agent as the `ads_snapshot` tool and the analytics half of `linkedin_snapshot`, but they were **dormant in production**: `MIA_META_ADS_ACCOUNT_ID` and `MIA_LINKEDIN_ACCESS_TOKEN` are both on the live `/health` missing list and the campaign env vars are blank. Meta member analytics also has no Composio tool (ADR-009, ADR-034), so that half was structurally dark.
+
+**Decision**
+Drop all five, with their tests and their wiring: the `ANALYTICS` owner-task branch, the prelaunch gate, the `ads_snapshot` tool, the analytics enrichment inside `linkedin_snapshot`, the campaign Sheets mirror tab, the campaign eval in `app/evals/harness.py`, and the freshness/failure-policy pins that named them. `linkedin_snapshot` survives as a **profile-only** read and its description must stop promising post analytics. The four `app/core/capabilities.py` entries move to `SPECIFIED` with an empty port.
+
+**Consequences**
+Mia can no longer answer "how is the campaign spend" or report LinkedIn post reach. Meta Ads and LinkedIn analytics leave the product surface until they are deliberately rebuilt behind the capability layer (§35: capability → policy → adapter → allowlist → tests). Roughly 10k lines leave the repo, which is the first real movement toward §39's "meaningfully smaller". Everything is recoverable from git — the pre-deletion state is `c35d005` and the shipped state is `claude/mia-product-feedback-0bfc90` (`7433abf`).
+
+**Explicitly NOT dropped in the same pass**
+The cleanup also removed the Composio WhatsApp outbound sender (`ComposioWhatsAppPort`, `MIA_WHATSAPP_SENDER`) and rewrote `.env.example` to cite **ADR-016** as justification for Meta-only outbound — the opposite of what ADR-016 decides, and contrary to production, which runs `MIA_WHATSAPP_SENDER=composio`. That removal was **rejected and reverted**; ADR-016 stands unchanged. A cleanup pass is not the place to reverse an accepted ADR.
+
+**Alternatives considered**
+Keep everything — rejected; dormant, unconfigured integrations are exactly the dead weight §36 warns against, and their 4,275 test lines slowed every run. Keep Meta, drop LinkedIn — considered; rejected because Meta ads is the larger surface (813 lines plus campaigns and pacing) and nothing needs it until Assaf actually runs paid campaigns through Mia. Leave them dark but present — rejected; the tools stayed advertised to the model, so Mia offered a capability that could not work.
+
+### ADR-040 Prospect tone awareness in the website sales prompt
+
+- **Status:** accepted
+- **Date:** 2026-08-26
+- **Assaf:** ADOPT (chat: "keep it, make sure it wire correct and help mia use")
+
+**Context**
+The same cleanup pass introduced `app/domain/emotion.py`: 192 lines of deterministic keyword matching over Hebrew and English that infers one of eight prospect tones (frustrated, overwhelmed, stressed, skeptical, excited, tired, worried, uncertain), with carry-forward from the previous turn when the current message is a short non-substantive answer. No LLM call. It was wired into the live customer sales prompt and took the `PROMPT_VERSION` string `v8` — which production's shipped answer-then-ask contract (ADR-028) already owned. Two different `v8` prompts existed, and the frozen prompt hash pinned in `tests/unit/test_ai_runs.py` disagreed on both sides.
+
+**Decision**
+Keep the feature and wire it properly. One prompt version, **`sales_reply_v9`**, carries BOTH contracts: production's answer-then-ask over `PUBLISHED ASSAFWEB FACTS`, and a prospect-tone block. `ReplyContext` carries both `knowledge` and `emotional_cues`; `app/graph/orchestrator.py` passes both. Tone changes **delivery only** — when a visitor asks a direct question while sounding frustrated, Mia still answers the question first. The tone block is omitted entirely when no cues are detected, so neutral messages get no invented empathy. The frozen prompt hash is recomputed from the merged prompt, never copied from either side.
+
+**Consequences**
+Live Hebrew customer copy changes: Mia acknowledges tone before continuing. Because detection is deterministic keyword matching, it is testable and cheap, but it will miss paraphrases and can false-positive on quoted text — it must never be the basis of a business decision, only of phrasing. `sales_reply_v8` is retired on both lineages; anything citing `v8` is stale.
+
+**Alternatives considered**
+Drop it — rejected by Assaf; the behavior is wanted. Ship it behind a default-off flag — rejected; a flag that is never turned on is dead code, and Assaf asked for Mia to actually use it. Keep two prompt versions — impossible; one string, one prompt. Infer tone with a model call — rejected; a second untrusted inference per turn for a phrasing hint, against §7 ("do not create LLM calls for deterministic work").
+
+### ADR-041 The permission principal is derived from the request
+
+- **Status:** accepted
+- **Date:** 2026-08-26
+- **Assaf:** ADOPT (chat: take the rebuild to 9-10)
+
+**Context**
+`app/capabilities/policy.py` enforced the per-graph capability allowlist correctly, but the value it checked was a `graph=GraphName.OWNER` literal typed at each of the 8 call sites. The guarded code chose its own trust level. Owner/client isolation therefore held only because of module topology -- the owner tool registry happened to be reachable only from the Telegram route, behind the numeric allowlist. Any new code path calling an owner helper from a web-triggered path would have inherited owner trust silently, and no test could have detected it.
+
+**Decision**
+Trust is established once, at the channel entry point, and passed down as a frozen `Principal` (graph + source + actor_id). `Principal.owner()` is minted in `app/api/owner.py` only after the numeric owner allowlist has matched; `Principal.client()` is minted in `app/api/website.py` and `app/api/inbound.py`. `authorize()` and `execute_capability()` take `principal=`. No module outside `capabilities/types.py` (the constructors) and `capabilities/registry.py` (the allowlists) may name a graph. That invariant is enforced by `tests/unit/test_vnext_principal.py::test_no_module_names_its_own_trust_level`, which walks `app/` with `ast` and fails on any module that names its own trust.
+
+**Consequences**
+Adding a capability call means threading the principal you were given, not choosing one. A new web-reachable path cannot silently acquire owner rights: it would have to name a graph, and the guard test fails on that. If a genuine client-to-owner crossing ever appears (client activity needing an owner capability, not merely an owner notification), it must be introduced as a named, reasoned escalation rather than a literal -- one was written for the hot-handoff path and removed again once that path proved not to use a capability at all.
+
+**Alternatives considered**
+Keep `graph=` literals and rely on code review -- rejected; that is the status quo that produced a boundary no test could verify. A full auth framework with roles and scopes -- rejected as far more machinery than two trust levels need. Deriving trust inside the policy layer by inspecting a call stack or context var -- rejected; implicit ambient authority is harder to read and to test than an argument that must be passed.

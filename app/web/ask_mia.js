@@ -32,6 +32,7 @@
   var TRANSCRIPT_KEY = 'askMia.transcript';
   var SESSION_RE = /^web_[a-f0-9]{16}$/;
   var storedTranscript = [];
+  var sessionEnded = false;
   var SVG_NS = 'http://www.w3.org/2000/svg';
   var MIA_MARK_PATH =
     'M7 23V8h4.2L16 16.8 20.8 8H25v15h-3.4V13.1L16 21.2l-5.6-8.1V23H7z';
@@ -404,6 +405,26 @@
     ).catch(function () {});
   }
 
+  function hasUserTurn() {
+    for (var i = 0; i < storedTranscript.length; i++) {
+      if (storedTranscript[i] && storedTranscript[i].role === 'user') return true;
+    }
+    return false;
+  }
+
+  function endSession() {
+    if (sessionEnded || !sessionId || !hasUserTurn()) return;
+    sessionEnded = true;
+    var url = api + '/v1/website/sessions/' + encodeURIComponent(sessionId) + '/end';
+    try {
+      if (navigator.sendBeacon) {
+        navigator.sendBeacon(url, new Blob([], { type: 'text/plain' }));
+        return;
+      }
+    } catch (err) {}
+    fetch(url, { method: 'POST', keepalive: true, credentials: 'omit' }).catch(function () {});
+  }
+
   function postEvent(kind, extra) {
     var payload = { kind: kind };
     if (extra) {
@@ -460,6 +481,7 @@
     if (recording) finishRecording(false);
     panel.hidden = true;
     launcher.setAttribute('aria-expanded', 'false');
+    endSession();
   }
 
   function togglePanel() {
@@ -881,7 +903,10 @@
     document.addEventListener('click', onCtaClick, true);
     document.addEventListener('click', onHostOpenClick, true);
     bindForms(document);
-    window.addEventListener('pagehide', checkFormAbandon);
+    window.addEventListener('pagehide', function () {
+      checkFormAbandon();
+      endSession();
+    });
     document.addEventListener('visibilitychange', function () {
       if (document.visibilityState === 'hidden') checkFormAbandon();
     });

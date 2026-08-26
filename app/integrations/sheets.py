@@ -56,7 +56,7 @@ from app.domain.sales import NextAction
 from app.domain.tools import AdapterHttpError, ToolOutcome
 
 SHEETS_MIRROR_SCOPE = "sheets_mirror"
-SHEETS_MIRROR_TABS = frozenset({"sales", "session", "campaign", "content"})
+SHEETS_MIRROR_TABS = frozenset({"sales", "session", "content"})
 
 COMPOSIO_GOOGLESHEETS_VERSION = "20260813_00"
 COMPOSIO_UPSERT_ROWS_TOOL = "GOOGLESHEETS_UPSERT_ROWS"
@@ -1165,66 +1165,6 @@ def mirror_performance(
     except (AdapterHttpError, PolicyDenied, RuntimeError):
         return False
 
-
-def maybe_mirror_campaign_control(
-    *,
-    store: LeadStore,
-    sheets: SheetsPort,
-    settings: Settings,
-    kill_switch: bool,
-    inbound_id: str = "",
-) -> ToolOutcome | None:
-    if demo_mode_active(settings):
-        return None
-    if inbound_id:
-        if not claim_sheets_mirror(store=store, inbound_id=inbound_id, tab="campaign"):
-            return None
-    started = perf_counter()
-    written_count = 0
-    pacing = store.get_campaign_pacing()
-    if pacing is not None:
-        if mirror_budget(
-            sheets=sheets,
-            row=BudgetMirrorRow(
-                campaign=pacing.campaign,
-                monthly_budget=pacing.monthly_budget,
-                spend=pacing.spend,
-                expected_spend=pacing.expected_spend,
-                remaining=pacing.remaining,
-                projected=pacing.projected,
-                over_under=pacing.over_under,
-                status=pacing.status,
-            ),
-            kill_switch=kill_switch,
-        ):
-            written_count += 1
-    performance = store.get_campaign_performance()
-    if performance is not None:
-        if mirror_performance(
-            sheets=sheets,
-            row=PerformanceMirrorRow(
-                campaign=performance.campaign,
-                spend=performance.spend,
-                ctr=performance.ctr,
-                cpc=performance.cpc,
-                cpl=performance.cpl,
-                qualified_cpl=performance.qualified_cpl,
-                meetings=performance.meetings,
-                deals=performance.deals,
-                revenue=performance.revenue,
-                roas=performance.roas,
-            ),
-            kill_switch=kill_switch,
-        ):
-            written_count += 1
-    if inbound_id:
-        complete_sheets_mirror(store=store, inbound_id=inbound_id, tab="campaign")
-        return sheets_tab_mirror_outcome(
-            "sheets_mirror_campaign",
-            written_count,
-            latency_ms=elapsed_ms(started),
-        )
-    return None
 
 
 def maybe_mirror_content_insights(
