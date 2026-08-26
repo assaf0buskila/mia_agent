@@ -1,7 +1,13 @@
 # BUILD_STATUS
 
-**Last updated:** 2026-08-24  
+**Last updated:** 2026-08-26  
 **Region:** eu-north-1 (ADR-019). Live host `https://mia.assafweb.com`. Live image **mia:16** (task `mia:18`). `mia:15` remains in ECR for rollback.
+
+## Public Ask Mia origin bind + rate limit (2026-08-26)
+
+Not deployed. Working tree / PR only.
+
+`POST /v1/website/sessions`, `.../messages`, `.../voice`, and `.../handoff` now fail closed unless `Origin` is on `MIA_CORS_ORIGINS` (plus the public host so same-origin preview still works). Allowed origins are also capped per IP and per session. Browser CORS is unchanged; the widget still uses `credentials: 'omit'`. Config, widget.js, preview, and `/events` are not in this bind.
 
 ## Alive (v1)
 

@@ -18,6 +18,7 @@ from app.api.deps import (
 from app.core.config import Settings, get_settings
 from app.core.demo import SYNTHETIC_ATTRIBUTION, demo_mode_active
 from app.core.logging import log_comm
+from app.core.public_website import public_website_guard
 from app.db.store import LeadStore
 from app.domain.ai_runs import elapsed_ms, persist_ai_run
 from app.domain.approvals import apply_approval_policy
@@ -694,7 +695,11 @@ def website_config() -> WebsiteConfigOut:
     )
 
 
-@router.post("/sessions", response_model=SessionOut)
+@router.post(
+    "/sessions",
+    response_model=SessionOut,
+    dependencies=[Depends(public_website_guard("session"))],
+)
 def create_session(
     db: Session = Depends(get_db),
     sheets: SheetsPort = Depends(get_sheets_port),
@@ -720,7 +725,11 @@ def create_session(
     )
 
 
-@router.post("/sessions/{session_id}/handoff", response_model=HandoffOut)
+@router.post(
+    "/sessions/{session_id}/handoff",
+    response_model=HandoffOut,
+    dependencies=[Depends(public_website_guard("handoff"))],
+)
 def create_handoff(
     session_id: str,
     db: Session = Depends(get_db),
@@ -779,7 +788,11 @@ def post_behavior_event(
     return BehaviorEventOut(accepted=True, kind=body.kind)
 
 
-@router.post("/sessions/{session_id}/messages", response_model=MessageOut)
+@router.post(
+    "/sessions/{session_id}/messages",
+    response_model=MessageOut,
+    dependencies=[Depends(public_website_guard("message"))],
+)
 def post_message(
     session_id: str,
     body: MessageIn,
@@ -803,7 +816,11 @@ def post_message(
     )
 
 
-@router.post("/sessions/{session_id}/voice", response_model=VoiceMessageOut)
+@router.post(
+    "/sessions/{session_id}/voice",
+    response_model=VoiceMessageOut,
+    dependencies=[Depends(public_website_guard("voice"))],
+)
 async def post_voice(
     session_id: str,
     db: Session = Depends(get_db),
