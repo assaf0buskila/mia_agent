@@ -352,6 +352,14 @@ def test_handoff_card_explains_the_context_transfer_in_plural_hebrew() -> None:
     assert "פתח את" not in card
 
 
+def test_widget_offers_whatsapp_on_handoff_as_well_as_offer_whatsapp() -> None:
+    """HANDOFF used to claim a transfer with no CTA. The visitor had no way to reach Assaf."""
+    apply = _function_body(_source(), "applyReply")
+    assert "offer_whatsapp" in apply
+    assert "handoff" in apply
+    assert "waBtn.hidden = false" in apply
+
+
 def test_widget_open_send_uses_textcontent_and_wa_me_href_only() -> None:
     """Playwright is not in this repo. Same guarantees from the widget source.
 

@@ -50,7 +50,7 @@ WEBSITE_REPLIES: dict[NextAction, str] = {
         "יש פה משהו שכדאי להמשיך עליו. נוח לכם שאעביר אתכם לאסף בוואטסאפ? "
         "הוא יקבל את כל מה שסיפרתם לי כאן."
     ),
-    NextAction.HANDOFF: "את זה מעבירים לאסף. אעביר לו מה שדיברנו.",
+    NextAction.HANDOFF: "אסף צריך לקחת את זה מכאן.",
     NextAction.DISQUALIFY: (
         "כרגע אין פה התאמה, בלי לחץ. אני כאן אם זה ישתנה."
     ),
@@ -79,12 +79,32 @@ WEBSITE_REPLIES_EN: dict[NextAction, str] = {
         "There's something here worth going deeper on. Want me to pass you to Assaf "
         "on WhatsApp? He'll get everything you've told me."
     ),
-    NextAction.HANDOFF: "This one is better straight from Assaf. I'll pass on the context.",
+    NextAction.HANDOFF: "Assaf needs to take this from here.",
     NextAction.DISQUALIFY: (
         "This doesn't look like a fit right now, no pressure. I'm here if that changes."
     ),
     NextAction.STOP: "I'll leave it with you. Write whenever you want to pick it up.",
 }
+
+# Visitor copy after a website HANDOFF. complete_turn overwrites the canned/paraphrased
+# line with one of these so Mia cannot claim a transfer Telegram never accepted.
+HANDOFF_OWNER_NOTIFIED = "אסף קיבל את מה שסיפרתם כאן. הוא ייקח את זה מכאן."
+HANDOFF_OWNER_UNREACHABLE = (
+    "לא הצלחתי להעביר את זה לאסף עכשיו. כתבו שוב עוד רגע."
+)
+HANDOFF_OWNER_NOTIFIED_EN = "Assaf received what you shared here. He'll take it from here."
+HANDOFF_OWNER_UNREACHABLE_EN = (
+    "I could not pass this to Assaf just now. Please write again in a moment."
+)
+
+# Phrases that claim a completed transfer. Fail-closed copy must never contain these.
+HANDOFF_LIE_MARKERS = (
+    "מעבירים לאסף",
+    "אעביר לו",
+    "העברה כבר בוצעה",
+    "I'll pass on the context",
+    "I'll pass you",
+)
 
 # Second phrasing for a rung that has to be asked again because the previous answer
 # was not usable. Never send the same line twice; that is the discovery loop.

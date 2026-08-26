@@ -105,7 +105,7 @@
     "user": "send me a proposal",
     "sales": {},
     "expected_action": "handoff",
-    "expected_reply_contains": "אעביר",
+    "expected_reply_contains": "צריך לקחת",
     "forbidden": [],
     "expect": {"owner_required": true}
   },

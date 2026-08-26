@@ -77,8 +77,39 @@ DETERMINISTIC_TASK_TYPES: frozenset[OwnerTaskType] = frozenset(
 # The honest failure line for a NOTE turn the agent was allowed to run but could not
 # complete (provider error, refusal, truncation, empty reply, budget/ceiling exhausted).
 # Deliberately not "מה שהבנתי" -- that phrase means "I couldn't classify this", which is
-# false once the agent was actually invoked. One line, no apology, no internals.
+# false once the agent was actually invoked. One line, no apology, no internals, no
+# secrets. The parenthetical is a failure *class* Assaf can report (provider / empty /
+# timeout), never a model id or key.
 NOTE_AGENT_FAILURE_TEXT = "הבדיקה לא עברה כרגע. תנסה שוב."
+
+_NOTE_FAILURE_CLASSES: tuple[tuple[str, str], ...] = (
+    ("empty_reply", "תשובה ריקה"),
+    ("empty reply", "תשובה ריקה"),
+    ("timeout", "תם הזמן"),
+    ("timed out", "תם הזמן"),
+    ("http 429", "עומס ספק"),
+    ("refused", "סירוב מודל"),
+    ("truncated", "תשובה נחתכה"),
+    ("budget_exhausted", "תקציב צעדים"),
+    ("ceiling_hit", "תקציב צעדים"),
+    ("provider_error", "שגיאת ספק"),
+    ("http ", "שגיאת ספק"),
+    ("llm request failed", "שגיאת ספק"),
+)
+
+
+def classify_note_agent_failure(reason: str, completion: str = "") -> str:
+    """Map a fallback_reason onto a short Hebrew class. Never returns secrets."""
+    blob = f"{completion} {reason}".lower()
+    for needle, label in _NOTE_FAILURE_CLASSES:
+        if needle in blob:
+            return label
+    return "שגיאה"
+
+
+def format_note_agent_failure(reason: str, completion: str = "") -> str:
+    label = classify_note_agent_failure(reason, completion)
+    return f"הבדיקה לא עברה כרגע ({label}). תנסה שוב."
 
 # Same channel as `log_owner_agent`, so a graph failure lands next to the turn it broke.
 _LOG = logging.getLogger("mia.agent")
@@ -121,8 +152,17 @@ def build_agent_client(settings: Settings) -> LlmModelChain:
     `MIA_OWNER_AGENT_FALLBACK_MODEL` was documented but previously ignored — only
     `chain[0]` was ever used. A primary the account cannot call therefore dropped straight
     to the keyword classifier instead of trying the secondary.
+
+    The live sales model is appended after the dedicated owner ids: website Ask Mia
+    already proves that pair is callable, so a broken owner-agent id must not take the
+    whole Telegram console down with it.
     """
-    chain = model_chain(settings.owner_agent_model, settings.owner_agent_fallback_model)
+    chain = model_chain(
+        settings.owner_agent_model,
+        settings.owner_agent_fallback_model,
+        settings.sales_model,
+        settings.sales_fallback_model,
+    )
     clients = [
         LlmClient(api_key=settings.openai_api_key, model=name, url=OPENAI_CHAT_URL)
         for name in chain
@@ -278,7 +318,11 @@ def answer_owner(
         # read just failed. Every other task type keeps `fallback_text` untouched,
         # including read types (DAILY_BRIEF, CALENDAR, ...) whose fallback is already a
         # real computed answer, not a "could not classify" placeholder.
-        text = NOTE_AGENT_FAILURE_TEXT if task_type == OwnerTaskType.NOTE else fallback_text
+        text = (
+            format_note_agent_failure(reason, outcome.completion)
+            if task_type == OwnerTaskType.NOTE
+            else fallback_text
+        )
         return OwnerBrainResult(
             text,
             False,

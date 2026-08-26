@@ -302,7 +302,7 @@
       {
         "user": "כמה זה עולה?",
         "expected_action": "handoff",
-        "expected_reply_contains": "אעביר",
+        "expected_reply_contains": "צריך לקחת",
         "expect": {
           "active_objection": "price_question"
         }
@@ -316,7 +316,7 @@
       {
         "user": "how much does it cost?",
         "expected_action": "handoff",
-        "expected_reply_contains": "אעביר",
+        "expected_reply_contains": "צריך לקחת",
         "expect": {
           "active_objection": "price_question"
         }
@@ -400,7 +400,7 @@
       {
         "user": "אני רוצה לדבר עם אסף",
         "expected_action": "handoff",
-        "expected_reply_contains": "אעביר",
+        "expected_reply_contains": "צריך לקחת",
         "expect": {
           "owner_required": true
         }

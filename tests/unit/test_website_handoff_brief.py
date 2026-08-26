@@ -109,6 +109,20 @@ def test_handoff_brief_names_the_lead_and_tells_assaf_to_take_over() -> None:
     assert "mia1_" not in brief.split("השורה שלך:", 1)[1].split("השיחה:", 1)[0]
 
 
+def test_human_handoff_brief_includes_the_conversation_and_is_not_a_whatsapp_claim() -> None:
+    from app.domain.website_handoff_brief import format_website_human_handoff_brief
+
+    brief = format_website_human_handoff_brief(
+        lead_id="lead_abc123def456",
+        sales=_inventory_sales(),
+        turns=_inventory_turns(),
+    )
+    assert "צריך אותך" in brief
+    assert "שעתיים כל פעם" in brief
+    assert "וואטסאפ" not in brief
+    assert "מיה לא תענה שם" not in brief
+
+
 def test_recommended_line_is_generic_when_nothing_concrete_is_known() -> None:
     sales = SalesState(lead_id="lead_early1234567", fit=FitLevel.UNKNOWN)
     turns = [

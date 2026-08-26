@@ -543,7 +543,7 @@
       }
     }
     if (typeof data.message === 'string') appendMsg('mia', data.message);
-    if (data.next_action === 'offer_whatsapp') {
+    if (data.next_action === 'offer_whatsapp' || data.next_action === 'handoff') {
       waBtn.hidden = false;
       waBtn.classList.add('offer');
     } else {

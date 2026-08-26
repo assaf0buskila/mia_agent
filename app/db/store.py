@@ -2752,6 +2752,18 @@ class LeadStore:
             is not None
         )
 
+    def release_owner_notification_claim(
+        self, *, kind: str, lead_id: str, conversation_id: str = ""
+    ) -> None:
+        """Drop a claim that never produced a Telegram delivery so a later turn can retry."""
+        if not kind or not lead_id:
+            return
+        row = self.session.get(
+            OwnerNotificationClaimRow, (kind, lead_id, conversation_id or "")
+        )
+        if row is not None:
+            self.session.delete(row)
+
     def try_insert_owner_notification(
         self,
         *,

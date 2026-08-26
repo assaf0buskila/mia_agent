@@ -154,9 +154,22 @@ class Settings(BaseSettings):
 
         False keeps the deterministic keyword classifier as the owner path, which is how
         the test suite and any key-less deployment run.
+
+        The live chain also tries the sales models: a blank or broken
+        `MIA_OWNER_AGENT_MODEL` must not report the console down when Ask Mia's
+        model is already answering on the website.
         """
-        chain = model_chain(self.owner_agent_model, self.owner_agent_fallback_model)
-        return bool(self.openai_api_key.strip() and chain)
+        chain = model_chain(
+            self.owner_agent_model,
+            self.owner_agent_fallback_model,
+            self.sales_model,
+            self.sales_fallback_model,
+        )
+        openai_ok = bool(self.openai_api_key.strip() and chain)
+        gemini_ok = bool(
+            self.gemini_api_key.strip() and self.owner_agent_gemini_model.strip()
+        )
+        return openai_ok or gemini_ok
 
     def embeddings_ready(self) -> bool:
         """True when semantic retrieval is available. Never returns secrets."""
