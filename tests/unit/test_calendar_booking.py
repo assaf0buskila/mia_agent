@@ -1325,8 +1325,14 @@ async def test_inbound_e2e_booking_one_reply(monkeypatch) -> None:
 
 def test_website_e2e_booking() -> None:
     # This is the one test in this file that drives the live HTTP endpoint without
-    # freezing the clock (see `_next_real_business_slot`), so the seeded slot must be
-    # computed from the real clock rather than a fixed offset from FIXED_NOW.
+    # freezing the clock, so the seeded slot must be computed from the real clock
+    # rather than a fixed offset from FIXED_NOW.
+    #
+    # Master fixed the same date-rot by freezing the clock to FIXED_NOW instead. Both
+    # fixes work in isolation, but not together: the body below seeds its slot from
+    # the real clock, so freezing "now" back to 2026-08-20 would leave the app
+    # judging a slot six days past a frozen present. Kept the real-clock version,
+    # which is self-consistent end to end.
     init_db()
     db = get_session_factory()()
     try:

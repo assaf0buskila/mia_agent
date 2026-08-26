@@ -241,7 +241,10 @@ async def test_inbound_offer_meeting_freshness_persisted(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_inbound_owner_calendar_freshness_persisted() -> None:
+async def test_inbound_owner_calendar_freshness_persisted(monkeypatch) -> None:
+    from tests.conftest import freeze_mia_clock
+
+    freeze_mia_clock(monkeypatch, OWNER_NOW)
     init_db()
     db = get_session_factory()()
     try:
@@ -261,7 +264,10 @@ async def test_inbound_owner_calendar_freshness_persisted() -> None:
             port=port,
             kill_switch=False,
             owner_ids={OWNER_FRESH_PHONE},
-            calendar=FakeCalendarPort([_policy_gap(now=datetime.now(UTC))]),
+            # Seed against the SAME clock the app is frozen to. Seeding from the
+            # real clock put the slot outside the frozen search window, so the
+            # port returned nothing and freshness read 'unverified'.
+            calendar=FakeCalendarPort([_policy_gap(now=OWNER_NOW)]),
         )
         db.commit()
         row = store.get_tool_run("cal.fresh.owner.1:tool:calendar_find_free_slots")

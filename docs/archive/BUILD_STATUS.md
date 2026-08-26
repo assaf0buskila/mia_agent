@@ -1,13 +1,28 @@
 # BUILD_STATUS
 
-**Last updated:** 2026-08-25  
+**Last updated:** 2026-08-26  
 **Region:** eu-north-1 (ADR-019). Live host `https://mia.assafweb.com`. Live image **mia:20** (task `mia:22`). ADR-031 owner phrasing. Rollback: image `mia:19` / task `mia:21`, or blank `MIA_OWNER_AGENT_MODEL`.
 
 Earlier rung on the same ladder: image `mia:18` (task `mia:20`) carried ADR-028 meeting-first + ADR-029 funnel; its no-deploy rollback was `MIA_WEBSITE_MEETING_FIRST=false`.
 
+> `master` recorded `mia:16` / task `mia:18` here as of 2026-08-26. That line is stale,
+> not a rollback: `master` never carried the mia:18 or mia:20 deploys, which shipped from
+> `claude/mia-product-feedback-0bfc90`. The mia:20 digest is recorded under "Owner console"
+> below. Settle it against the running task's `imageDigest` before trusting either.
+
 ## Apify research fallback (2026-08-25)
 
 Not deployed. ADR-035: pin `apify/google-search-scraper` behind `ResearchPort` via httpx run-sync. Firecrawl stays primary. `MIA_APIFY_TOKEN` selects Apify only when Firecrawl is empty. Production `mia/prod` must gain the empty `MIA_APIFY_TOKEN` key **before** an ECS revision that injects it, or the task fails to start. Do not dump the Actor catalog into the model. No `apify-client`.
+
+## Master CI test job (2026-08-26)
+
+Not a product change. Master `test` job on SHA `0b6369d` (PR #1 merge) failed 3 tests. Fixes: freeze ADR-012 clocks on website booking + owner calendar freshness (wall date had moved past the Aug 20/21 fixtures); document `MIA_OWNER_AGENT_GEMINI_MODEL` in `.env.example`.
+
+## Public Ask Mia origin bind + rate limit (2026-08-26)
+
+Not deployed. Working tree / PR only.
+
+`POST /v1/website/sessions`, `.../messages`, `.../voice`, and `.../handoff` now fail closed unless `Origin` is on `MIA_CORS_ORIGINS` (plus the public host so same-origin preview still works). Allowed origins are also capped per IP and per session. Browser CORS is unchanged; the widget still uses `credentials: 'omit'`. Config, widget.js, preview, and `/events` are not in this bind.
 
 ## Alive (v1)
 
