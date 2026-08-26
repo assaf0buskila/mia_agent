@@ -1,3 +1,4 @@
+
 """Model fallback chain, and the observability that was missing.
 
 Live symptom this covers: the owner agent was pinned to a model the account could not
@@ -11,6 +12,7 @@ import json
 
 import httpx
 import pytest
+from app.capabilities.types import Principal
 from app.core.config import get_settings
 from app.domain.owner_brain import build_agent_client
 from app.integrations.llm_client import LlmClient, LlmError, LlmModelChain
@@ -119,6 +121,7 @@ def test_fallback_reason_is_recorded_so_the_failure_is_visible() -> None:
 
     chain = LlmModelChain([_client("unusable-model", _status(404))])
     result = answer_owner(
+        principal=Principal.owner(source="test"),
         store=LeadStore(session),
         brain=BrainStore(session),
         settings=settings,
@@ -155,6 +158,7 @@ def test_a_deterministic_intent_reports_that_reason_not_a_failure() -> None:
     session = get_session_factory()()
     session.commit()
     result = answer_owner(
+        principal=Principal.owner(source="test"),
         store=LeadStore(session),
         brain=BrainStore(session),
         settings=get_settings(),

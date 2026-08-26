@@ -21,6 +21,7 @@ from app.api.deps import (
 from app.brain.context import assemble_visitor_context, render_visitor_knowledge_block
 from app.brain.embeddings import build_embedding_port
 from app.brain.store import BrainStore
+from app.capabilities.types import Principal
 from app.channels.website import message_to_client_state
 from app.core.config import Settings, get_settings
 from app.core.demo import SYNTHETIC_ATTRIBUTION, demo_mode_active
@@ -414,8 +415,10 @@ def process_website_message(
     section_payload = store.latest_behavior_payload(session_id, "section_viewed")
     page_path = page_payload.get("path", "") if page_payload else ""
     page_section = section_payload.get("section", "") if section_payload else ""
+    # Website visitors are client trust, always. Derived here, at the transport edge.
     graph = compile_client_graph(
         store,
+        principal=Principal.client(source="website", actor_id=session_id),
         reply_port=build_sales_reply_port(settings),
         settings=settings,
         knowledge_lookup=_website_knowledge_lookup(store, settings),
@@ -817,7 +820,11 @@ def end_session(
     lead_id = store.get_website_lead_id(session_id)
     if lead_id is None:
         raise HTTPException(status_code=404, detail="session not found")
-    result = compile_client_graph(store, settings=get_settings()).invoke(
+    result = compile_client_graph(
+        store,
+        settings=get_settings(),
+        principal=Principal.client(source="website", actor_id=session_id),
+    ).invoke(
         empty_client_state(
             run_id=f"end:{session_id}",
             conversation_id=session_id,

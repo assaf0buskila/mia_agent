@@ -22,7 +22,7 @@ import pytest
 from app.agents.owner.graph import compile_owner_graph
 from app.agents.shared.state import empty_owner_state
 from app.brain.store import BrainStore
-from app.capabilities.types import GraphName
+from app.capabilities.types import GraphName, Principal
 from app.core.config import Settings
 from app.db.session import get_session_factory, init_db
 from app.domain import owner_brain
@@ -140,6 +140,7 @@ def test_the_answer_is_read_from_the_returned_graph_state(monkeypatch) -> None:
     produce = _Producer()
 
     result = run_owner_turn(
+        principal=Principal.owner(source="test"),
         owner_id="111",
         telegram_chat_id="111",
         run_id="run_state",
@@ -164,9 +165,11 @@ def test_produce_receives_the_graph_state_it_must_answer_from(monkeypatch) -> No
     """
     hits = [{"id": "m1", "label": "working", "text": "Assaf ships Mia on Fridays"}]
 
-    def fake_execute(name, *, graph, args, handlers, kill_switch=False, preapproved=False):
+    def fake_execute(
+        name, *, principal, args, handlers, kill_switch=False, preapproved=False
+    ):
         del handlers, kill_switch, preapproved
-        assert graph is GraphName.OWNER
+        assert principal.graph is GraphName.OWNER
         assert args["query"] == "מה קרה במייל?"
         return {"hits": hits if name == "memory.search" else []}
 
@@ -176,6 +179,7 @@ def test_produce_receives_the_graph_state_it_must_answer_from(monkeypatch) -> No
     produce = _Producer()
     try:
         run_owner_turn(
+        principal=Principal.owner(source="test"),
             owner_id="111",
             telegram_chat_id="111",
             run_id="run_state_in",
@@ -213,6 +217,7 @@ def test_a_graph_that_never_responds_does_not_run_a_second_produce(monkeypatch) 
     produce = _Producer()
 
     result = run_owner_turn(
+        principal=Principal.owner(source="test"),
         owner_id="111",
         telegram_chat_id="111",
         run_id="run_short",
@@ -235,6 +240,7 @@ def test_a_graph_that_raises_degrades_to_the_deterministic_ack(monkeypatch) -> N
     produce = _Producer()
 
     result = run_owner_turn(
+        principal=Principal.owner(source="test"),
         owner_id="111",
         telegram_chat_id="111",
         run_id="run_boom",
@@ -259,6 +265,7 @@ def test_a_graph_failure_is_logged_not_swallowed(monkeypatch, caplog) -> None:
     _stub_graph(monkeypatch, _ExplodingGraph)
     with caplog.at_level("WARNING", logger="mia.agent"):
         run_owner_turn(
+        principal=Principal.owner(source="test"),
             owner_id="111",
             telegram_chat_id="111",
             run_id="run_logged",
@@ -277,6 +284,7 @@ def test_the_real_graph_carries_the_turn_end_to_end() -> None:
     """No stubs: the compiled OwnerGraph is what produces the answer."""
     produce = _Producer("pong")
     result = run_owner_turn(
+        principal=Principal.owner(source="test"),
         owner_id="111",
         telegram_chat_id="111",
         run_id="run_real",
@@ -297,6 +305,7 @@ def test_the_real_graph_carries_the_turn_end_to_end() -> None:
 def test_the_kill_switch_reaches_the_responder_through_state(kill_switch: bool) -> None:
     produce = _Producer()
     run_owner_turn(
+        principal=Principal.owner(source="test"),
         owner_id="111",
         telegram_chat_id="111",
         run_id="run_kill",

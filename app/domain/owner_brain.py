@@ -33,7 +33,7 @@ from app.brain.store import BrainStore
 from app.capabilities.knowledge import knowledge_handlers
 from app.capabilities.memory import memory_handlers
 from app.capabilities.policy import execute_capability
-from app.capabilities.types import GraphName
+from app.capabilities.types import Principal
 from app.core.config import Settings
 from app.core.errors import MiaError
 from app.core.models import model_chain
@@ -176,6 +176,7 @@ def _weights(settings: Settings) -> MemoryScoreWeights:
 
 def answer_owner(
     *,
+    principal: Principal,
     store: LeadStore,
     brain: BrainStore,
     settings: Settings,
@@ -233,6 +234,7 @@ def answer_owner(
             now=moment,
         )
     ctx = ToolContext(
+        principal=principal,
         store=store,
         brain=brain,
         settings=settings,
@@ -365,6 +367,7 @@ def owner_context_from_state(state: Mapping[str, Any]) -> BrainContext:
 def retrieve_owner_context(
     state: Mapping[str, Any],
     *,
+    principal: Principal,
     brain: BrainStore,
     settings: Settings,
     embedding_port: EmbeddingPort | None = None,
@@ -399,7 +402,7 @@ def retrieve_owner_context(
     try:
         memory_out = execute_capability(
             "memory.search",
-            graph=GraphName.OWNER,
+            principal=principal,
             args={"query": query},
             handlers=memory_handlers(
                 brain=brain,
@@ -417,7 +420,7 @@ def retrieve_owner_context(
     try:
         knowledge_out = execute_capability(
             "knowledge.search",
-            graph=GraphName.OWNER,
+            principal=principal,
             args={"query": query},
             handlers=knowledge_handlers(brain=brain, embedding_port=port),
             kill_switch=bool(state.get("kill_switch")),
@@ -500,6 +503,7 @@ def _result_from_state(final: Mapping[str, Any]) -> OwnerBrainResult | None:
 
 def run_owner_turn(
     *,
+    principal: Principal,
     owner_id: str,
     telegram_chat_id: str,
     run_id: str,
@@ -526,6 +530,7 @@ def run_owner_turn(
             return {}
         return retrieve_owner_context(
             state,
+            principal=principal,
             brain=brain,
             settings=settings,
             embedding_port=embedding_port,

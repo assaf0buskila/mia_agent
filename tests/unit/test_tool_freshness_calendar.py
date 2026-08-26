@@ -5,6 +5,7 @@ from zoneinfo import ZoneInfo
 import httpx
 import pytest
 from app.api.inbound import process_inbound_texts
+from app.capabilities.types import Principal
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
 from app.domain.events import Channel
@@ -143,6 +144,7 @@ def test_apply_owner_calendar_fake_freshness_live() -> None:
     enriched, outcome = apply_owner_calendar(
         ack,
         FakeCalendarPort([_policy_gap(now=OWNER_NOW)]),
+        principal=Principal.owner(source="test"),
         kill_switch=False,
         timezone="Asia/Jerusalem",
         now=OWNER_NOW,
@@ -160,6 +162,7 @@ def test_apply_owner_calendar_empty_freshness_unverified() -> None:
         enriched, outcome = apply_owner_calendar(
             ack,
             port,
+            principal=Principal.owner(source="test"),
             kill_switch=False,
             timezone="Asia/Jerusalem",
             now=OWNER_NOW,
@@ -179,6 +182,7 @@ def test_apply_owner_calendar_kill_switch_freshness_empty() -> None:
     enriched, outcome = apply_owner_calendar(
         ack,
         RaisingCalendarPort(),
+        principal=Principal.owner(source="test"),
         kill_switch=True,
         timezone="Asia/Jerusalem",
         now=OWNER_NOW,

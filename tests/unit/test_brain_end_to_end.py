@@ -1,3 +1,4 @@
+
 """End-to-end owner flow: does Mia actually behave better?
 
 Drives `answer_owner` and `learn_from_exchange` — the two functions `app/api/inbound.py`
@@ -15,6 +16,7 @@ import httpx
 from app.brain.embeddings import FakeEmbeddingPort
 from app.brain.schemas import MemoryCategory, MemoryKind, MemorySource
 from app.brain.store import BrainStore
+from app.capabilities.types import Principal
 from app.core.config import get_settings
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
@@ -122,6 +124,7 @@ def test_owner_question_uses_memory_and_answers_in_hebrew() -> None:
         ]
     )
     result = answer_owner(
+        principal=Principal.owner(source="test"),
         store=LeadStore(session),
         brain=brain,
         settings=_settings(),
@@ -224,6 +227,7 @@ def test_approval_intents_never_reach_the_model() -> None:
     for task_type in DETERMINISTIC_TASK_TYPES:
         assert agent_allowed_for(task_type) is False
         result = answer_owner(
+        principal=Principal.owner(source="test"),
             store=LeadStore(session),
             brain=BrainStore(session),
             settings=_settings(),
@@ -248,6 +252,7 @@ def test_kill_switch_stops_the_agent_and_the_learning() -> None:
     session.commit()
     client, script = _client([_text("nope")])
     result = answer_owner(
+        principal=Principal.owner(source="test"),
         store=LeadStore(session),
         brain=brain,
         settings=_settings(),
@@ -283,6 +288,7 @@ def test_without_a_configured_model_the_deterministic_answer_is_kept() -> None:
     session = _session()
     session.commit()
     result = answer_owner(
+        principal=Principal.owner(source="test"),
         store=LeadStore(session),
         brain=BrainStore(session),
         settings=_settings(owner_agent_model="", openai_api_key=""),
@@ -315,6 +321,7 @@ def test_model_failure_on_a_note_degrades_to_the_honest_failure_line() -> None:
     session.commit()
     client, _script = _client([])  # every call 500s
     result = answer_owner(
+        principal=Principal.owner(source="test"),
         store=LeadStore(session),
         brain=BrainStore(session),
         settings=_settings(),
@@ -347,6 +354,7 @@ def test_model_failure_on_a_non_note_task_still_returns_its_real_fallback_verbat
     session.commit()
     client, _script = _client([])  # every call 500s
     result = answer_owner(
+        principal=Principal.owner(source="test"),
         store=LeadStore(session),
         brain=BrainStore(session),
         settings=_settings(),
@@ -368,6 +376,7 @@ def test_history_is_passed_as_data_not_instructions() -> None:
     session.commit()
     client, script = _client([_text("בסדר.")])
     answer_owner(
+        principal=Principal.owner(source="test"),
         store=LeadStore(session),
         brain=BrainStore(session),
         settings=_settings(),
@@ -392,6 +401,7 @@ def test_current_time_reaches_the_model_so_dates_are_not_guessed() -> None:
     session.commit()
     client, script = _client([_text("בסדר.")])
     answer_owner(
+        principal=Principal.owner(source="test"),
         store=LeadStore(session),
         brain=BrainStore(session),
         settings=_settings(),

@@ -21,6 +21,35 @@ class Sensitivity(StrEnum):
 
 
 @dataclass(frozen=True)
+class Principal:
+    """Who is asking, derived from the request -- never chosen by a helper.
+
+    The permission boundary used to be a `graph=GraphName.OWNER` literal written at
+    each call site, so trust was whatever the callee happened to type. Anything new
+    that called an owner helper from a web-triggered path inherited owner trust
+    silently, and no test could see it.
+
+    A Principal is minted at a channel entry point only: `owner()` after Telegram's
+    numeric-allowlist check, `client()` for website and prospect traffic. Everything
+    downstream passes the object along and cannot widen it.
+    """
+
+    graph: GraphName
+    source: str
+    actor_id: str = ""
+
+    @classmethod
+    def owner(cls, *, source: str, actor_id: str = "") -> Principal:
+        """Only after the caller has proven owner identity (numeric allowlist)."""
+        return cls(graph=GraphName.OWNER, source=source, actor_id=actor_id)
+
+    @classmethod
+    def client(cls, *, source: str, actor_id: str = "") -> Principal:
+        """Website visitors and prospect channels. Never owner capabilities."""
+        return cls(graph=GraphName.CLIENT, source=source, actor_id=actor_id)
+
+
+@dataclass(frozen=True)
 class CapabilitySpec:
     name: str
     sensitivity: Sensitivity

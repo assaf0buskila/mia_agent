@@ -5,7 +5,7 @@ from app.agents.client.graph import compile_client_graph
 from app.agents.owner.graph import compile_owner_graph
 from app.agents.shared.state import empty_client_state, empty_owner_state
 from app.brain.store import BrainStore
-from app.capabilities.types import GraphName
+from app.capabilities.types import GraphName, Principal
 from app.channels.website import message_to_client_state
 from app.core.config import Settings
 from app.db.session import get_session_factory, init_db
@@ -36,14 +36,14 @@ def test_client_retrieve_uses_client_policy_and_reaches_sales(
     def fake_execute(
         name,
         *,
-        graph,
+        principal,
         args,
         handlers,
         kill_switch=False,
         preapproved=False,
     ):
         captured["name"] = name
-        captured["graph"] = graph
+        captured["graph"] = principal.graph
         captured["query"] = args.get("query")
         del handlers, kill_switch, preapproved
         return {
@@ -168,8 +168,8 @@ def test_inactivity_via_client_graph_finalizes_once() -> None:
 def test_owner_retrieve_uses_owner_policy(monkeypatch) -> None:
     names: list[tuple[str, GraphName]] = []
 
-    def fake_execute(name, *, graph, args, handlers, kill_switch=False, preapproved=False):
-        names.append((name, graph))
+    def fake_execute(name, *, principal, args, handlers, kill_switch=False, preapproved=False):
+        names.append((name, principal.graph))
         del args, handlers, kill_switch, preapproved
         return {"hits": []}
 
@@ -179,6 +179,7 @@ def test_owner_retrieve_uses_owner_policy(monkeypatch) -> None:
     try:
         brain = BrainStore(db)
         result = run_owner_turn(
+        principal=Principal.owner(source="test"),
             owner_id="111",
             telegram_chat_id="111",
             run_id="run_own_ret",

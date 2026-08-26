@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from app.capabilities.types import Principal
 from app.domain.engine_health import compute_engine_health, format_engine_health
 from app.domain.funnel import compute_website_funnel, format_website_funnel
 from app.domain.hot_handoff import format_hot_leads_ack
@@ -70,6 +71,7 @@ def _owner_notify_readonly(store: LeadStore, *, timezone: str) -> str:
 def format_operator_snapshot_ack(
     store: LeadStore,
     *,
+    principal: Principal,
     timezone: str,
     matched_types: list[str] | None = None,
 ) -> str:
@@ -98,7 +100,7 @@ def format_operator_snapshot_ack(
     if "website_conversations" in sections:
         blocks.append(format_website_conversations_ack(store))
     if "hot_leads" in sections:
-        blocks.append(format_hot_leads_ack(store))
+        blocks.append(format_hot_leads_ack(store, principal=principal))
     if "owner_notify" in sections:
         blocks.append(_owner_notify_readonly(store, timezone=timezone))
     blocks.append(_NO_WRITE_LINE)

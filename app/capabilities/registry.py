@@ -27,7 +27,12 @@ _BOTH = frozenset({GraphName.OWNER, GraphName.CLIENT})
 CAPABILITIES: tuple[CapabilitySpec, ...] = (
     spec(MAIL_SEARCH, Sensitivity.READ, _OWNER),
     spec(MAIL_READ, Sensitivity.READ, _OWNER),
-    spec(MAIL_CREATE_DRAFT, Sensitivity.WRITE, _OWNER, confirmation_required=False),
+    # A draft is deliberately NOT approval-gated: it leaves the building only via an
+    # explicit Approve plus MIA_GMAIL_SEND (app/domain/gmail_drafts.py). Gating the
+    # draft itself would gate the safe half and change nothing about the risky half.
+    # WRITE already implies confirmation_required=False, so no override is needed --
+    # the old explicit `confirmation_required=False` read like a deliberate bypass.
+    spec(MAIL_CREATE_DRAFT, Sensitivity.WRITE, _OWNER),
     spec(MAIL_DELETE, Sensitivity.DESTRUCTIVE, _OWNER),
     spec(CALENDAR_GET_SCHEDULE, Sensitivity.READ, _OWNER),
     spec(LEADS_GET_RECENT, Sensitivity.READ, _OWNER),

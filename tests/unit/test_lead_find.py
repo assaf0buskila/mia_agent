@@ -1,7 +1,9 @@
+
 """Lead lookup by stated name or headline. Never invent a name."""
 
 from app.brain.embeddings import FakeEmbeddingPort
 from app.brain.store import BrainStore
+from app.capabilities.types import Principal
 from app.core.config import get_settings
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
@@ -48,6 +50,7 @@ def test_find_leads_matches_name_headline_and_lists_ambiguous() -> None:
         assert "לא ניחשתי" in missing
 
         ctx = ToolContext(
+        principal=Principal.owner(source="test"),
             store=store,
             brain=BrainStore(session),
             settings=get_settings(),

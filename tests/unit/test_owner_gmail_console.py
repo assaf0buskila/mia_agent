@@ -2,6 +2,7 @@
 
 from app.brain.embeddings import FakeEmbeddingPort
 from app.brain.store import BrainStore
+from app.capabilities.types import Principal
 from app.core.config import Settings, get_settings
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
@@ -35,6 +36,7 @@ def _session():
 
 def _ctx(session, *, gmail=None) -> ToolContext:
     return ToolContext(
+        principal=Principal.owner(source="test"),
         store=LeadStore(session),
         brain=BrainStore(session),
         settings=get_settings(),

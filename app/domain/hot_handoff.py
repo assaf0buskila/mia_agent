@@ -8,7 +8,7 @@ import httpx
 
 from app.capabilities.leads import leads_handlers
 from app.capabilities.policy import execute_capability
-from app.capabilities.types import GraphName
+from app.capabilities.types import Principal
 from app.core.config import Settings
 from app.core.errors import PolicyDenied
 from app.core.risk import RiskAction, RiskLevel, assert_allowed
@@ -34,10 +34,10 @@ def format_hot_brief(*, lead_id: str, sales: SalesState, want: str) -> str:
     return "\n".join(lines)[:_BRIEF_MAX]
 
 
-def format_hot_leads_ack(store) -> str:
+def format_hot_leads_ack(store, *, principal: Principal) -> str:
     result = execute_capability(
         "leads.get_recent",
-        graph=GraphName.OWNER,
+        principal=principal,
         args={"limit": 12},
         handlers=leads_handlers(store),
     )

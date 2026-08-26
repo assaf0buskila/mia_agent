@@ -4,7 +4,7 @@ from app.capabilities.calendar import calendar_handlers
 from app.capabilities.leads import leads_handlers
 from app.capabilities.mail import mail_handlers
 from app.capabilities.policy import execute_capability
-from app.capabilities.types import GraphName
+from app.capabilities.types import Principal
 from app.domain.sales import FitLevel, PainLevel, SalesState
 from app.integrations.calendar import FakeCalendarPort, TimeSlot
 from app.integrations.gmail import FakeGmailPort, InboundEmail
@@ -24,7 +24,7 @@ def test_owner_mail_read_goes_through_capability_policy_composio_port() -> None:
     )
     out = execute_capability(
         "mail.read",
-        graph=GraphName.OWNER,
+        principal=Principal.owner(source="test"),
         args={"message_id": "msg_1"},
         handlers=mail_handlers(port),
     )
@@ -40,7 +40,7 @@ def test_owner_calendar_schedule_goes_through_capability_policy() -> None:
     port = FakeCalendarPort([TimeSlot(start=start, end=end)])
     out = execute_capability(
         "calendar.get_schedule",
-        graph=GraphName.OWNER,
+        principal=Principal.owner(source="test"),
         args={
             "time_min": start.isoformat(),
             "time_max": (start + timedelta(days=1)).isoformat(),
@@ -75,7 +75,7 @@ class _LeadStore:
 def test_owner_leads_recent_goes_through_capability_policy() -> None:
     out = execute_capability(
         "leads.get_recent",
-        graph=GraphName.OWNER,
+        principal=Principal.owner(source="test"),
         args={"limit": 8},
         handlers=leads_handlers(_LeadStore()),  # type: ignore[arg-type]
     )
@@ -108,7 +108,7 @@ def test_owner_memory_and_knowledge_search_go_through_capability_policy() -> Non
     embeddings = DisabledEmbeddingPort()
     mem = execute_capability(
         "memory.search",
-        graph=GraphName.OWNER,
+        principal=Principal.owner(source="test"),
         args={"query": "AssafWeb pricing"},
         handlers=memory_handlers(
             brain=brain,  # type: ignore[arg-type]
@@ -118,7 +118,7 @@ def test_owner_memory_and_knowledge_search_go_through_capability_policy() -> Non
     )
     know = execute_capability(
         "knowledge.search",
-        graph=GraphName.OWNER,
+        principal=Principal.owner(source="test"),
         args={"query": "pricing"},
         handlers=knowledge_handlers(brain=brain, embedding_port=embeddings),  # type: ignore[arg-type]
     )
@@ -141,7 +141,7 @@ def test_owner_research_search_goes_through_capability_policy() -> None:
     )
     out = execute_capability(
         "research.search",
-        graph=GraphName.OWNER,
+        principal=Principal.owner(source="test"),
         args={"query": "AssafWeb"},
         handlers=research_handlers(port),
     )

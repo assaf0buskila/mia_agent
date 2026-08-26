@@ -13,6 +13,7 @@ from app.api.inbound_common import (
     transcript_duration_ms,
 )
 from app.brain.store import BrainStore
+from app.capabilities.types import Principal
 from app.core.config import Settings, get_settings
 from app.core.demo import demo_mode_active
 from app.core.logging import log_comm, log_owner_agent
@@ -128,6 +129,10 @@ async def process_owner_item(
     seo_audit_port: SeoAuditPort,
     owner_reply_port: OwnerReplyPort,
 ) -> OwnerTurnResult:
+    # Owner trust is established HERE, once, from the request: the caller has already
+    # matched item["from"] against the numeric owner allowlist (app/api/telegram.py).
+    # Everything downstream receives this object; nothing downstream can widen it.
+    principal = Principal.owner(source=provider, actor_id=item["from"])
     channel_value = channel.value
     owner_text = inbound_text_without_token(item["text"])
     correlation_id = new_correlation_id()
@@ -484,6 +489,7 @@ async def process_owner_item(
         ack_text, calendar_outcome = apply_owner_calendar(
             ack_text,
             calendar_port,
+            principal=principal,
             kill_switch=kill_switch,
             timezone=settings.calendar_timezone,
             demo_active=demo_mode_active(settings),
@@ -564,7 +570,7 @@ async def process_owner_item(
         decision.task_type == OwnerTaskType.HOT_LEADS
         and not decision.needs_clarification
     ):
-        ack_text = format_hot_leads_ack(store)
+        ack_text = format_hot_leads_ack(store, principal=principal)
     if (
         decision.task_type == OwnerTaskType.PENDING_APPROVALS
         and not decision.needs_clarification
@@ -581,6 +587,7 @@ async def process_owner_item(
     ):
         ack_text = format_operator_snapshot_ack(
             store,
+            principal=principal,
             timezone=settings.calendar_timezone,
             matched_types=decision.matched_types,
         )
@@ -691,6 +698,7 @@ async def process_owner_item(
     # fails, `brain_result.text` is exactly the canned ack computed above.
     brain_store = BrainStore(store.session)
     brain_result = run_owner_turn(
+        principal=principal,
         owner_id=item["from"],
         telegram_chat_id=item.get("chat_id") or item["from"],
         run_id=correlation_id,
@@ -703,6 +711,7 @@ async def process_owner_item(
         # What Assaf gets if OwnerGraph itself breaks. Never a second model call.
         fallback_text=ack_text,
         produce=lambda state: answer_owner(
+            principal=principal,
             store=store,
             brain=brain_store,
             settings=settings,

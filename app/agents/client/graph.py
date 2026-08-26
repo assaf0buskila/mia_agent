@@ -13,7 +13,7 @@ from app.brain.embeddings import build_embedding_port
 from app.brain.store import BrainStore
 from app.capabilities.knowledge import knowledge_handlers
 from app.capabilities.policy import execute_capability
-from app.capabilities.types import GraphName
+from app.capabilities.types import Principal
 from app.core.config import Settings
 from app.core.errors import MiaError
 from app.db.store import LeadStore
@@ -54,6 +54,7 @@ def compile_client_graph(
     settings: Settings | None = None,
     now: datetime | None = None,
     knowledge_lookup: Callable[[str], tuple[str, ...]] | None = None,
+    principal: Principal | None = None,
 ):
     """Compile the client LangGraph.
 
@@ -62,6 +63,7 @@ def compile_client_graph(
     Knowledge retrieve and conversation complete/finalize are graph nodes so looking
     at ClientGraph matches what Mia actually does.
     """
+    principal = principal or Principal.client(source="website")
     inner = (
         build_graph(store, reply_port=reply_port, knowledge_lookup=knowledge_lookup)
         if store is not None
@@ -85,7 +87,7 @@ def compile_client_graph(
             brain = BrainStore(store.session)
             result = execute_capability(
                 "knowledge.search",
-                graph=GraphName.CLIENT,
+                principal=principal,
                 args={"query": query},
                 handlers=knowledge_handlers(
                     brain=brain,

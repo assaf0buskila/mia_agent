@@ -35,7 +35,7 @@ from app.capabilities.knowledge import knowledge_handlers
 from app.capabilities.memory import memory_handlers
 from app.capabilities.policy import execute_capability
 from app.capabilities.research import research_handlers
-from app.capabilities.types import GraphName
+from app.capabilities.types import Principal
 from app.core.config import Settings
 from app.core.errors import PermissionDenied
 from app.db.store import LeadStore
@@ -123,6 +123,8 @@ class ToolContext:
     store: LeadStore
     brain: BrainStore
     settings: Settings
+    # Derived from the request at the channel entry point, never chosen here.
+    principal: Principal
     embedding_port: EmbeddingPort
     calendar: CalendarPort | None = None
     calendar_agenda: CalendarAgendaPort | None = None
@@ -195,7 +197,7 @@ def _search_memory(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     try:
         out = execute_capability(
             "memory.search",
-            graph=GraphName.OWNER,
+            principal=ctx.principal,
             args={"query": query},
             handlers=memory_handlers(
                 brain=ctx.brain,
@@ -224,7 +226,7 @@ def _search_knowledge(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     try:
         out = execute_capability(
             "knowledge.search",
-            graph=GraphName.OWNER,
+            principal=ctx.principal,
             args={"query": query},
             handlers=knowledge_handlers(
                 brain=ctx.brain,
@@ -318,7 +320,10 @@ def _weekly_brief(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
 
 def _hot_leads(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     del args
-    return _empty(format_hot_leads_ack(ctx.store), "No hot leads right now.")
+    return _empty(
+        format_hot_leads_ack(ctx.store, principal=ctx.principal),
+        "No hot leads right now.",
+    )
 
 
 def _pending_approvals(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
@@ -336,7 +341,10 @@ def _website_conversations(ctx: ToolContext, args: dict[str, Any]) -> ToolResult
 def _owner_status(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     del args
     return _empty(
-        format_owner_status_ack(ctx.store, timezone=ctx.timezone()), "Nothing to report."
+        format_owner_status_ack(
+            ctx.store, principal=ctx.principal, timezone=ctx.timezone()
+        ),
+        "Nothing to report.",
     )
 
 
@@ -558,7 +566,7 @@ def _research_search(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     try:
         out = execute_capability(
             "research.search",
-            graph=GraphName.OWNER,
+            principal=ctx.principal,
             args={"query": query},
             handlers=research_handlers(ctx.research),
             kill_switch=ctx.kill_switch,

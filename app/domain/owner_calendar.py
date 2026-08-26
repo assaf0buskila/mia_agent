@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.capabilities.calendar import calendar_handlers
 from app.capabilities.policy import execute_capability
-from app.capabilities.types import GraphName
+from app.capabilities.types import Principal
 from app.core.errors import PermissionDenied, PolicyDenied
 from app.domain.ai_runs import elapsed_ms
 from app.domain.meeting_availability import carve_policy_slots
@@ -36,6 +36,7 @@ def apply_owner_calendar(
     ack: str,
     calendar: CalendarPort,
     *,
+    principal: Principal,
     kill_switch: bool,
     timezone: str,
     now: datetime | None = None,
@@ -52,7 +53,7 @@ def apply_owner_calendar(
         started = perf_counter()
         payload = execute_capability(
             "calendar.get_schedule",
-            graph=GraphName.OWNER,
+            principal=principal,
             args={
                 "time_min": time_min.isoformat(),
                 "time_max": time_max.isoformat(),

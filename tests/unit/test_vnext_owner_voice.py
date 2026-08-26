@@ -1,3 +1,4 @@
+
 """A voice note and a typed message are the same owner turn.
 
 The old test here asserted that the default echo node echoes — true whether or not
@@ -13,6 +14,7 @@ from typing import Any
 
 from app.agents.owner.graph import compile_owner_graph
 from app.api.owner import process_owner_texts
+from app.capabilities.types import Principal
 from app.channels.telegram import message_to_owner_state
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
@@ -91,6 +93,7 @@ def test_audio_and_text_reach_the_responder_through_the_same_graph() -> None:
     for run_id, source in (("v_text", "text"), ("v_audio", "audio")):
         replies.append(
             run_owner_turn(
+        principal=Principal.owner(source="test"),
                 owner_id="42",
                 telegram_chat_id="42",
                 run_id=run_id,

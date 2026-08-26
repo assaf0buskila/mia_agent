@@ -1,3 +1,4 @@
+
 """One owner message costs exactly one retrieval pass.
 
 The defect this pins: `retrieve_owner_knowledge` ran `memory.search` + `knowledge.search`
@@ -24,6 +25,7 @@ from app.brain.schemas import (
     MemorySource,
 )
 from app.brain.store import BrainStore
+from app.capabilities.types import Principal
 from app.core.config import get_settings
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
@@ -153,6 +155,7 @@ def _count_retrievals(monkeypatch) -> dict[str, int]:
 
 def _turn(brain, session, port, client, *, settings):
     return run_owner_turn(
+        principal=Principal.owner(source="test"),
         owner_id="111",
         telegram_chat_id="111",
         run_id="run_retrieval",
@@ -163,6 +166,7 @@ def _turn(brain, session, port, client, *, settings):
         settings=settings,
         embedding_port=port,
         produce=lambda state: answer_owner(
+        principal=Principal.owner(source="test"),
             store=LeadStore(session),
             brain=brain,
             settings=settings,
@@ -256,6 +260,7 @@ def test_without_a_wired_brain_the_responder_still_retrieves_once(monkeypatch) -
     settings = _settings()
     try:
         run_owner_turn(
+        principal=Principal.owner(source="test"),
             owner_id="111",
             telegram_chat_id="111",
             run_id="run_no_brain",
@@ -263,6 +268,7 @@ def test_without_a_wired_brain_the_responder_still_retrieves_once(monkeypatch) -
             kill_switch=False,
             fallback_text=FALLBACK,
             produce=lambda state: answer_owner(
+        principal=Principal.owner(source="test"),
                 store=LeadStore(session),
                 brain=brain,
                 settings=settings,

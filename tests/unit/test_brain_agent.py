@@ -10,6 +10,7 @@ import pytest
 from app.brain.embeddings import FakeEmbeddingPort
 from app.brain.schemas import MemoryCategory, MemoryKind, MemorySource
 from app.brain.store import BrainStore
+from app.capabilities.types import Principal
 from app.core.config import get_settings
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
@@ -34,6 +35,7 @@ def _ctx(session, **overrides) -> ToolContext:
     for key, value in overrides.items():
         object.__setattr__(settings, key, value) if False else setattr(settings, key, value)
     return ToolContext(
+        principal=Principal.owner(source="test"),
         store=LeadStore(session),
         brain=BrainStore(session),
         settings=settings,

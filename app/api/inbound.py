@@ -17,6 +17,7 @@ from app.api.inbound_common import (
     transcript_duration_ms as _transcript_duration_ms,
 )
 from app.api.owner import process_owner_item
+from app.capabilities.types import Principal
 from app.core.config import get_settings
 from app.core.demo import demo_mode_active
 from app.core.logging import log_comm
@@ -365,8 +366,10 @@ async def process_inbound_texts(
                 ),
                 correlation_id=run_id,
             )
+        # Prospect channels are client trust too - never the owner console.
         graph = compile_client_graph(
             store,
+            principal=Principal.client(source=channel_value, actor_id=lead_id),
             reply_port=build_sales_reply_port(settings),
             settings=settings,
         )

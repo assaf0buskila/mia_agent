@@ -6,7 +6,7 @@ from collections.abc import Callable
 from typing import Any
 
 from app.capabilities.registry import get_capability
-from app.capabilities.types import GraphName, Sensitivity
+from app.capabilities.types import Principal, Sensitivity
 from app.core.errors import (
     ApprovalRequired,
     CapabilityUnavailable,
@@ -21,14 +21,20 @@ Handler = Callable[[dict[str, Any]], dict[str, Any]]
 def authorize(
     name: str,
     *,
-    graph: GraphName,
+    principal: Principal,
     kill_switch: bool = False,
     preapproved: bool = False,
 ) -> None:
+    """Gate one capability for one principal.
+
+    `principal` is derived from the request at a channel entry point. It is passed,
+    never chosen here: a callee that could name its own trust level is not a
+    permission boundary.
+    """
     spec = get_capability(name)
     if spec is None:
         raise CapabilityUnavailable(name)
-    if graph not in spec.graphs:
+    if principal.graph not in spec.graphs:
         raise PermissionDenied(name)
     try:
         decision = decide(
@@ -48,13 +54,15 @@ def authorize(
 def execute_capability(
     name: str,
     *,
-    graph: GraphName,
+    principal: Principal,
     args: dict[str, Any] | None = None,
     handlers: dict[str, Handler],
     kill_switch: bool = False,
     preapproved: bool = False,
 ) -> dict[str, Any]:
-    authorize(name, graph=graph, kill_switch=kill_switch, preapproved=preapproved)
+    authorize(
+        name, principal=principal, kill_switch=kill_switch, preapproved=preapproved
+    )
     handler = handlers.get(name)
     if handler is None:
         raise CapabilityUnavailable(name)
