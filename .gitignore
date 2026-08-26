@@ -17,3 +17,6 @@ deploy/local/
 pytest_out.txt
 pytest_co.txt
 
+
+# One-off scrape of the marketing site. Not backend source.
+.brandscan/
