@@ -69,6 +69,7 @@ def freeze_mia_clock(monkeypatch, frozen) -> None:
         "app.api.inbound.datetime",
         "app.domain.calendar_booking.datetime",
         "app.domain.meeting_changes.datetime",
+        "app.domain.owner_calendar.datetime",
         "app.integrations.calendar.datetime",
         "app.domain.meeting_availability.datetime",
         "app.domain.meeting_slots.datetime",
