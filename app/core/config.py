@@ -60,10 +60,10 @@ class Settings(BaseSettings):
     composio_api_key: str = Field(default="")
     composio_user_id: str = Field(default="")
     composio_webhook_secret: str = Field(default="")
-    # Ask Composio for resource ids (GSC site, GA4 property, Meta ad account) when the
-    # matching env var is blank. Default false: ports are built per request, so this adds
-    # one network call per process on first use. Verify with
-    # `scripts/probe_composio_discovery.py`, then turn it on.
+    # Ask Composio for resource ids (GSC site, GA4 property) when the matching env var is
+    # blank. Default false: ports are built per request, so this adds one network call per
+    # process on first use. Verify with `scripts/probe_composio_discovery.py`, then turn
+    # it on.
     composio_discovery: bool = False
     openai_api_key: str = Field(default="")
     openai_transcribe_model: str = Field(default="gpt-transcribe")
@@ -123,16 +123,8 @@ class Settings(BaseSettings):
 
     calendar_timezone: str = Field(default="Asia/Jerusalem")
     sheets_spreadsheet_id: str = Field(default="")
-    meta_ads_account_id: str = Field(default="")
-    campaign_monthly_budget: str = Field(default="")
-    campaign_name: str = Field(default="")
-    campaign_launch_date: str = Field(default="")
-    campaign_objective: str = Field(default="")
-    campaign_lead_path: str = Field(default="")
-    campaign_e2e_tested: str = Field(default="")
     firecrawl_api_key: str = Field(default="")
     apify_token: str = Field(default="")
-    linkedin_access_token: str = Field(default="")
     gsc_site_url: str = Field(default="")
     ga4_property_id: str = Field(default="")
 

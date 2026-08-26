@@ -24,4 +24,8 @@ def test_owner_voice_enters_same_owner_graph() -> None:
     )
     assert text_out["reply"] == voice_out["reply"]
     assert voice_out["source"] == "audio"
-    assert set(graph.nodes) >= {"load_owner_context", "respond"}
+    assert set(graph.nodes) >= {
+        "load_owner_context",
+        "retrieve_owner_knowledge",
+        "respond",
+    }

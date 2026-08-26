@@ -997,7 +997,14 @@ def ack_for_owner_task(
     if trigger == "spend_threshold":
         message = "נרשם כמשימת אנליטיקה כשההוצאה תגיע לתקציב המוגדר. לא ביצעתי אותה."
         if decision.task_type == OwnerTaskType.ANALYTICS:
-            message += " לא אשנה תקציבים או מודעות במטא בלי אישור שלך."
+            # ADR-039: Meta ads reads were dropped. The old line ("I will not change
+            # budgets or ads in Meta without your approval") implied a capability Mia
+            # no longer has, on a reply whose numbers are Instagram organic only. Say
+            # what this actually covers instead of what it will not do.
+            message += (
+                " אני קוראת ביצועי תוכן אורגני באינסטגרם בלבד,"
+                " אין לי גישה לנתוני קמפיינים ממומנים במטא."
+            )
         return message
     type_label = _hebrew_type_label(decision.task_type.value)
     formatted_due = _format_due_at_he(due_at)
@@ -1008,7 +1015,14 @@ def ack_for_owner_task(
     if condition == "if_not_replied":
         message += " רק אם לא תהיה תשובה."
     if decision.task_type == OwnerTaskType.ANALYTICS:
-        message += " לא אשנה תקציבים או מודעות במטא בלי אישור שלך."
+        # ADR-039: Meta ads reads were dropped. The old line ("I will not change
+        # budgets or ads in Meta without your approval") implied a capability Mia no
+        # longer has, on a reply whose numbers are Instagram organic only. Say what
+        # this actually covers instead of what it will not do.
+        message += (
+            " אני קוראת ביצועי תוכן אורגני באינסטגרם בלבד,"
+            " אין לי גישה לנתוני קמפיינים ממומנים במטא."
+        )
     if decision.task_type == OwnerTaskType.LINKEDIN:
         message += " לא אפרסם, לא אגיב ולא אשלח הודעות בלינקדאין."
     if decision.task_type == OwnerTaskType.SEO:

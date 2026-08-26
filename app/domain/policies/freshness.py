@@ -11,9 +11,7 @@ _VERSION_RE = re.compile(r"^[a-zA-Z0-9._-]{1,32}$")
 
 ALLOWLISTED_SOURCES = frozenset({
     "calendar_port",
-    "meta_ads_port",
     "instagram_insights_port",
-    "linkedin_analytics_port",
     "linkedin_port",
     "config",
     "lead_store",
@@ -121,11 +119,6 @@ _REGISTRY: dict[str, FreshnessPin] = {
         freshness_class=FreshnessClass.LIVE_ONLY,
         source="calendar_port",
     ),
-    "campaign_budget_status": _pin(
-        "campaign_budget_status",
-        freshness_class=FreshnessClass.LIVE_ONLY,
-        source="meta_ads_port",
-    ),
     "conversation_ownership": _pin(
         "conversation_ownership",
         freshness_class=FreshnessClass.LIVE_ONLY,
@@ -141,22 +134,10 @@ _REGISTRY: dict[str, FreshnessPin] = {
         freshness_class=FreshnessClass.LIVE_ONLY,
         source="lead_store",
     ),
-    "campaign_metrics": _pin(
-        "campaign_metrics",
-        freshness_class=FreshnessClass.SHORT_CACHE,
-        source="meta_ads_port",
-        ttl_seconds=300,
-    ),
     "instagram_content_metrics": _pin(
         "instagram_content_metrics",
         freshness_class=FreshnessClass.SHORT_CACHE,
         source="instagram_insights_port",
-        ttl_seconds=300,
-    ),
-    "linkedin_content_metrics": _pin(
-        "linkedin_content_metrics",
-        freshness_class=FreshnessClass.SHORT_CACHE,
-        source="linkedin_analytics_port",
         ttl_seconds=300,
     ),
     "linkedin_profile": _pin(

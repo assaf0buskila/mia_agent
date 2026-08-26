@@ -20,7 +20,8 @@ def test_secret_example_keys_match_ecs_injection() -> None:
     assert "sslmode=verify-full" in example["MIA_DATABASE_URL"]
     assert "rds-global-bundle.pem" in example["MIA_DATABASE_URL"]
     assert example["MIA_APIFY_TOKEN"] == ""
-    assert "MIA_LINKEDIN_ACCESS_TOKEN" in example
+    assert "MIA_LINKEDIN_ACCESS_TOKEN" not in example
+    assert "MIA_META_ADS_ACCOUNT_ID" not in example
 
 
 def test_env_example_documents_settings_and_adapter_map() -> None:
@@ -37,6 +38,8 @@ def test_env_example_documents_settings_and_adapter_map() -> None:
     assert "MIA_INSTAGRAM_SENDER=composio" not in text
     assert "MIA_WHATSAPP_SENDER=composio" in text
     assert "MIA_WHATSAPP_SENDER=direct" not in text
+    assert "MIA_META_ADS_ACCOUNT_ID" not in text
+    assert "MIA_LINKEDIN_ACCESS_TOKEN" not in text
     assert "MIA_APIFY_TOKEN=" in text
     assert "ADR-015" in text
     assert not (ROOT / "deploy/Caddyfile").exists()
@@ -378,9 +381,6 @@ def test_fill_placeholders_replaces_tokens_on_windows() -> None:
     }
     assert secrets["MIA_INSTAGRAM_ACCOUNT_ID"].endswith(
         "mia/prod:MIA_INSTAGRAM_ACCOUNT_ID::"
-    )
-    assert secrets["MIA_META_ADS_ACCOUNT_ID"].endswith(
-        "mia/prod:MIA_META_ADS_ACCOUNT_ID::"
     )
     assert task["containerDefinitions"][0]["logConfiguration"]["options"][
         "awslogs-region"

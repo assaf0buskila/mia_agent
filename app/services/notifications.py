@@ -16,6 +16,9 @@ def render_conversation_summary(summary: dict[str, str | None]) -> str:
     lines = ["New website conversation", ""]
     labels = (
         ("name", "Name"),
+        # Extracted only when the visitor typed an address or number themselves. Without
+        # it the owner reads a card about someone he has no way to reach.
+        ("contact", "Contact"),
         ("business", "Business"),
         ("need", "What they need"),
         ("pain", "Main problem"),

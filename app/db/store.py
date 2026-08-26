@@ -4,6 +4,8 @@ from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 from sqlalchemy import func, or_, select
+from sqlalchemy.dialects.postgresql import insert as postgres_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from app.db.models import (
@@ -33,6 +35,7 @@ from app.db.models import (
     OwnerBriefRow,
     OwnerCorrectionRow,
     OwnerInstructionRow,
+    OwnerNotificationClaimRow,
     OwnerNotificationRow,
     OwnerTaskRow,
     OwnerWeeklyRow,
@@ -135,7 +138,6 @@ from app.domain.memory import (
     clip_turn_text,
     normalize_turn_role,
 )
-from app.domain.prelaunch import ALLOWLISTED_CHECK_IDS
 from app.domain.reconciliation import is_stale_received
 from app.domain.sales import (
     MAX_ASKED_ACTIONS,
@@ -152,6 +154,18 @@ from app.integrations.transcribe import (
     sanitize_language,
     sanitize_stt_model,
     sanitize_stt_provider,
+)
+
+_ALLOWLISTED_PRELAUNCH_CHECK_IDS = frozenset(
+    {
+        "tracking_utms",
+        "source_attribution",
+        "lead_capture",
+        "sheet_tabs",
+        "alert_thresholds",
+        "e2e_test",
+        "campaign_config",
+    }
 )
 
 PACING_EVENT_TYPES = frozenset({"lead_created", "meeting_offered", "deal_updated"})
@@ -1016,7 +1030,7 @@ class LeadStore:
             return
         if failed_checks:
             for part in failed_checks.split(","):
-                if part and part not in ALLOWLISTED_CHECK_IDS:
+                if part and part not in _ALLOWLISTED_PRELAUNCH_CHECK_IDS:
                     return
         row = self.get_campaign_prelaunch(scope)
         if row is None:
@@ -2664,6 +2678,22 @@ class LeadStore:
             is not None
         )
 
+    def _insert_ignoring_conflicts(self, table, values: dict[str, str]) -> bool:
+        """`INSERT ... ON CONFLICT DO NOTHING`. True when this call inserted the row.
+
+        A `SELECT` followed by an `INSERT` is not a claim: two workers both see nothing,
+        both insert, and the loser gets an IntegrityError out of the request. The database
+        decides here instead, in one statement, and a lost race returns False rather than
+        raising. SQLite and PostgreSQL both support the clause and both report
+        `rowcount == 0` when the conflict target already existed, so the two dialects stay
+        behaviour-identical.
+        """
+        dialect = self.session.get_bind().dialect.name
+        builder = postgres_insert if dialect == "postgresql" else sqlite_insert
+        statement = builder(table).values(**values).on_conflict_do_nothing()
+        result = self.session.execute(statement)
+        return int(result.rowcount or 0) > 0
+
     def upsert_owner_notification(
         self,
         *,
@@ -2671,25 +2701,56 @@ class LeadStore:
         lead_id: str,
         scheduled_at: str,
     ) -> None:
+        """Owner-inbox row, one per (kind, lead_id). Never raises on a concurrent duplicate."""
         if not kind or not lead_id or not scheduled_at:
             return
-        existing = self.session.scalars(
-            select(OwnerNotificationRow).where(
-                OwnerNotificationRow.kind == kind,
-                OwnerNotificationRow.lead_id == lead_id,
-            )
-        ).one_or_none()
-        if existing is not None:
-            return
-        self.session.add(
-            OwnerNotificationRow(
-                kind=kind,
-                lead_id=lead_id,
-                scheduled_at=scheduled_at,
-                seen_at="",
-            )
+        self._insert_ignoring_conflicts(
+            OwnerNotificationRow.__table__,
+            {
+                "kind": kind,
+                "lead_id": lead_id,
+                "scheduled_at": scheduled_at,
+                "seen_at": "",
+            },
         )
-        self.session.flush()
+
+    def try_claim_owner_notification(
+        self,
+        *,
+        kind: str,
+        lead_id: str,
+        conversation_id: str = "",
+        claimed_at: str,
+    ) -> bool:
+        """Claim the right to send one owner notification. True for exactly one caller.
+
+        Keyed on (kind, lead_id, conversation_id): a returning lead's second website
+        conversation is a distinct claim, not a duplicate. Lead-scoped kinds pass an
+        empty conversation_id and so claim once per lead, as before.
+        """
+        if not kind or not lead_id:
+            return False
+        return self._insert_ignoring_conflicts(
+            OwnerNotificationClaimRow.__table__,
+            {
+                "kind": kind,
+                "lead_id": lead_id,
+                "conversation_id": conversation_id or "",
+                "claimed_at": claimed_at,
+            },
+        )
+
+    def has_owner_notification_claim(
+        self, *, kind: str, lead_id: str, conversation_id: str = ""
+    ) -> bool:
+        if not kind or not lead_id:
+            return False
+        return (
+            self.session.get(
+                OwnerNotificationClaimRow, (kind, lead_id, conversation_id or "")
+            )
+            is not None
+        )
 
     def try_insert_owner_notification(
         self,
@@ -2697,27 +2758,28 @@ class LeadStore:
         kind: str,
         lead_id: str,
         scheduled_at: str,
+        conversation_id: str = "",
     ) -> bool:
-        """Insert once. False on duplicate (kind, lead_id) — used for finalization idempotency."""
+        """Claim once per (kind, lead_id, conversation_id). False on a duplicate claim.
+
+        The claim and the owner-inbox row are two different keys on purpose: the inbox
+        keeps one unseen row per lead per kind, while the claim is what gates the send.
+        Both inserts are conflict-tolerant, so a concurrent caller loses the claim and
+        returns False instead of raising an IntegrityError at the caller.
+        """
         if not kind or not lead_id or not scheduled_at:
             return False
-        existing = self.session.scalars(
-            select(OwnerNotificationRow).where(
-                OwnerNotificationRow.kind == kind,
-                OwnerNotificationRow.lead_id == lead_id,
-            )
-        ).one_or_none()
-        if existing is not None:
-            return False
-        self.session.add(
-            OwnerNotificationRow(
-                kind=kind,
-                lead_id=lead_id,
-                scheduled_at=scheduled_at,
-                seen_at="",
-            )
+        claimed = self.try_claim_owner_notification(
+            kind=kind,
+            lead_id=lead_id,
+            conversation_id=conversation_id,
+            claimed_at=scheduled_at,
         )
-        self.session.flush()
+        if not claimed:
+            return False
+        self.upsert_owner_notification(
+            kind=kind, lead_id=lead_id, scheduled_at=scheduled_at
+        )
         return True
 
     def list_unseen_owner_notifications(
@@ -3026,10 +3088,20 @@ class LeadStore:
         self,
         *,
         cutoff_iso: str,
-        skip_kinds: tuple[str, ...],
+        skip_kinds: tuple[str, ...] = (),
+        skip_conversation_kinds: tuple[str, ...] = (),
         limit: int = 50,
     ) -> list[tuple[str, str]]:
-        """Website session_id + lead_id whose last visitor message is at or before cutoff."""
+        """Website session_id + lead_id whose last visitor message is at or before cutoff.
+
+        `skip_kinds` drops every session of a lead that already has an owner notification
+        of that kind — right for lead-scoped kinds such as the WhatsApp handoff, where the
+        conversation has moved off the website entirely.
+
+        `skip_conversation_kinds` drops only the sessions that were already claimed, so a
+        returning lead's next conversation is still scanned. Using the lead-scoped skip for
+        the finalization kind is what silently retired returning leads.
+        """
         if not cutoff_iso or limit <= 0:
             return []
         last_in = (
@@ -3060,6 +3132,18 @@ class LeadStore:
                 OwnerNotificationRow.kind.in_(skip_kinds)
             )
             query = query.where(LeadRow.id.notin_(notified))
+        if skip_conversation_kinds:
+            claimed = (
+                select(OwnerNotificationClaimRow.kind)
+                .where(
+                    OwnerNotificationClaimRow.kind.in_(skip_conversation_kinds),
+                    OwnerNotificationClaimRow.lead_id == LeadRow.id,
+                    OwnerNotificationClaimRow.conversation_id
+                    == ChannelIdentityRow.external_id,
+                )
+                .exists()
+            )
+            query = query.where(~claimed)
         rows = self.session.execute(query)
         return [(str(session_id), str(lead_id)) for session_id, lead_id in rows]
 

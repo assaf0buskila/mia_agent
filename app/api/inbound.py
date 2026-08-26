@@ -74,11 +74,6 @@ from app.integrations.instagram_insights import (
     build_instagram_insights_port,
 )
 from app.integrations.linkedin import LinkedInPort, build_linkedin_port
-from app.integrations.linkedin_analytics import (
-    LinkedInAnalyticsPort,
-    build_linkedin_analytics_port,
-)
-from app.integrations.meta_ads import MetaAdsPort, build_meta_ads_port
 from app.integrations.owner_reply import OwnerReplyPort, build_owner_reply_port
 from app.integrations.research import ResearchPort, build_research_port
 from app.integrations.sales_reply import build_sales_reply_port
@@ -156,11 +151,9 @@ async def process_inbound_texts(
     calendar_agenda: CalendarAgendaPort | None = None,
     calendar_booking: CalendarBookingPort | None = None,
     sheets: SheetsPort | None = None,
-    meta_ads: MetaAdsPort | None = None,
     instagram_insights: InstagramInsightsPort | None = None,
     research: ResearchPort | None = None,
     linkedin: LinkedInPort | None = None,
-    linkedin_analytics: LinkedInAnalyticsPort | None = None,
     search_console: SearchConsolePort | None = None,
     ga4: Ga4Port | None = None,
     seo_audit: SeoAuditPort | None = None,
@@ -187,7 +180,6 @@ async def process_inbound_texts(
         else build_calendar_booking_port(settings)
     )
     sheets_port = sheets if sheets is not None else build_sheets_port(settings)
-    meta_ads_port = meta_ads if meta_ads is not None else build_meta_ads_port(settings)
     instagram_insights_port = (
         instagram_insights
         if instagram_insights is not None
@@ -195,11 +187,6 @@ async def process_inbound_texts(
     )
     research_port = research if research is not None else build_research_port(settings)
     linkedin_port = linkedin if linkedin is not None else build_linkedin_port(settings)
-    linkedin_analytics_port = (
-        linkedin_analytics
-        if linkedin_analytics is not None
-        else build_linkedin_analytics_port(settings)
-    )
     search_console_port = (
         search_console if search_console is not None else build_search_console_port(settings)
     )
@@ -233,11 +220,9 @@ async def process_inbound_texts(
                 calendar_agenda_port=calendar_agenda_port,
                 gmail_port=gmail_port,
                 sheets_port=sheets_port,
-                meta_ads_port=meta_ads_port,
                 instagram_insights_port=instagram_insights_port,
                 research_port=research_port,
                 linkedin_port=linkedin_port,
-                linkedin_analytics_port=linkedin_analytics_port,
                 search_console_port=search_console_port,
                 ga4_port=ga4_port,
                 seo_audit_port=seo_audit_port,
@@ -380,7 +365,11 @@ async def process_inbound_texts(
                 ),
                 correlation_id=run_id,
             )
-        graph = compile_client_graph(store, reply_port=build_sales_reply_port(settings))
+        graph = compile_client_graph(
+            store,
+            reply_port=build_sales_reply_port(settings),
+            settings=settings,
+        )
         started = perf_counter()
         result = graph.invoke(
             empty_client_state(
@@ -391,6 +380,7 @@ async def process_inbound_texts(
                 latest_message=latest_message,
                 kill_switch=kill_switch,
                 channel=channel_value,
+                inbound_id=item["id"],
             )
         )
         persist_ai_run(

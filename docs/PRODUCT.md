@@ -62,6 +62,6 @@ Voice output. Auto-publish social. Self-edit production graph or prompts. Autono
 
 ## Current vs later
 
-**Now:** two graphs, shared core, capability/policy, voice on both, conversation finalization ping, owner Composio READs through the capability layer, Ask Mia UX preserved.
+**Now:** two graphs, shared core, capability/policy, voice on both, conversation finalization ping, owner Composio READs through the capability layer, Ask Mia UX preserved. Knowledge retrieve and conversation complete live on the graph nodes.
 
 **Not this product:** dumping the Composio catalog into the model, a third graph for WhatsApp, TTS, auto-deploy.

@@ -36,7 +36,7 @@ def test_tool_outcome_accepts_new_statuses() -> None:
         "partial",
         "stale",
     ):
-        outcome = ToolOutcome(tool="meta_ads_insights", status=status, result_count=0)
+        outcome = ToolOutcome(tool="instagram_insights", status=status, result_count=0)
         assert outcome.status == status
 
 

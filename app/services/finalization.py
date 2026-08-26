@@ -1,4 +1,4 @@
-"""One finalization workflow. Idempotent on lead + summary version."""
+"""One finalization workflow. Idempotent on conversation + summary version."""
 
 from __future__ import annotations
 
@@ -8,7 +8,21 @@ from typing import Any, Protocol
 from pydantic import BaseModel, ConfigDict
 
 from app.core.config import Settings
+from app.domain.memory import ConversationTurn
+from app.domain.sales import SalesState
 from app.domain.website_handoff_brief import KIND_WEBSITE_WHATSAPP
+from app.services.conversation_facts import (
+    describe_business,
+    describe_meeting,
+    describe_name,
+    describe_pain,
+    describe_qualification,
+    extract_budget,
+    extract_contact,
+    extract_need,
+    extract_timeline,
+    relevant_service,
+)
 from app.services.notifications import render_conversation_summary, send_owner_telegram
 
 KIND_PREFIX = "web_final_"
@@ -47,7 +61,12 @@ class NotificationStore(Protocol):
     def has_owner_notification(self, *, kind: str, lead_id: str) -> bool: ...
 
     def try_insert_owner_notification(
-        self, *, kind: str, lead_id: str, scheduled_at: str
+        self,
+        *,
+        kind: str,
+        lead_id: str,
+        scheduled_at: str,
+        conversation_id: str = "",
     ) -> bool: ...
 
 
@@ -58,11 +77,16 @@ class WebsiteFinalizationStore(NotificationStore, Protocol):
         self,
         *,
         cutoff_iso: str,
-        skip_kinds: tuple[str, ...],
+        skip_kinds: tuple[str, ...] = (),
+        skip_conversation_kinds: tuple[str, ...] = (),
         limit: int = 50,
     ) -> list[tuple[str, str]]: ...
 
     def get_sales(self, lead_id: str) -> Any: ...
+
+    def list_conversation_turns(self, conversation_id: str) -> list[ConversationTurn]: ...
+
+    def get_meeting(self, lead_id: str) -> Any: ...
 
 
 def kind_for(version: str = SUMMARY_VERSION) -> str:
@@ -78,14 +102,22 @@ def finalize_website_conversation(
     send: bool = True,
     version: str = SUMMARY_VERSION,
 ) -> FinalizeResult:
-    """Claim once, then notify. Retries after a successful claim do not send again."""
+    """Claim once per conversation, then notify. Retries after a claim do not send again.
+
+    The claim is keyed on the CONVERSATION, not the lead. Keying it on the lead meant a
+    returning visitor's second conversation was reported as a duplicate and Assaf was never
+    told about it — a silently lost lead. There is also no read-before-write here any more:
+    the claiming insert is the whole decision, so two concurrent finalizations of the same
+    conversation cannot both pass, and the loser gets False rather than an exception.
+    """
     kind = kind_for(version)
     lead_id = summary.lead_id
-    if store.has_owner_notification(kind=kind, lead_id=lead_id):
-        return FinalizeResult(claimed=False, sent=False, duplicate=True, kind=kind)
     scheduled = (now or datetime.now(UTC)).replace(microsecond=0).isoformat()
     inserted = store.try_insert_owner_notification(
-        kind=kind, lead_id=lead_id, scheduled_at=scheduled
+        kind=kind,
+        lead_id=lead_id,
+        conversation_id=summary.conversation_id,
+        scheduled_at=scheduled,
     )
     if not inserted:
         return FinalizeResult(claimed=False, sent=False, duplicate=True, kind=kind)
@@ -97,6 +129,62 @@ def finalize_website_conversation(
     )
     sent = send_owner_telegram(text=text, settings=settings)
     return FinalizeResult(claimed=True, sent=sent, kind=kind)
+
+
+def _or_none(value: str) -> str | None:
+    """A fact we do not have is None, so the renderer omits the line entirely."""
+    cleaned = (value or "").strip()
+    return cleaned or None
+
+
+def _read_sales(store: WebsiteFinalizationStore, lead_id: str) -> SalesState | None:
+    try:
+        return store.get_sales(lead_id)
+    except KeyError:
+        # No ladder row yet. The owner still gets the card, just with fewer lines on it.
+        return None
+
+
+def build_conversation_summary(
+    store: WebsiteFinalizationStore,
+    *,
+    session_id: str,
+    lead_id: str,
+    next_step: str,
+) -> ConversationSummary:
+    """Fill the owner's card from state we already hold. No LLM call, nothing invented.
+
+    Every field is either a flag the sales ladder recorded, a sanitised fragment of the
+    visitor's own words, or a row from the meetings table. Anything that was never
+    established stays None and never reaches the message.
+    """
+    sales = _read_sales(store, lead_id)
+    turns: list[ConversationTurn] = store.list_conversation_turns(session_id)
+    meeting = store.get_meeting(lead_id)
+    if sales is None:
+        return ConversationSummary(
+            conversation_id=session_id,
+            lead_id=lead_id,
+            contact=_or_none(extract_contact(turns)),
+            need=_or_none(extract_need(turns)),
+            relevant_service=_or_none(relevant_service(turns)),
+            recommended_next_step=next_step,
+        )
+    return ConversationSummary(
+        conversation_id=session_id,
+        lead_id=lead_id,
+        name=_or_none(describe_name(turns, sales)),
+        contact=_or_none(extract_contact(turns)),
+        business=_or_none(describe_business(turns, sales)),
+        need=_or_none(extract_need(turns)),
+        pain=_or_none(describe_pain(sales)),
+        relevant_service=_or_none(relevant_service(turns)),
+        timeline=_or_none(extract_timeline(turns, sales)),
+        budget=_or_none(extract_budget(turns, sales)),
+        qualification=_or_none(describe_qualification(sales)),
+        meeting_status=_or_none(describe_meeting(meeting, sales)),
+        recommended_next_step=next_step,
+    )
 
 
 def qualify_and_finalize(
@@ -114,15 +202,13 @@ def qualify_and_finalize(
         return None
     if require_visitor_message and not store.has_website_prospect_message(lead_id):
         return None
-    sales = store.get_sales(lead_id)
-    qualification = sales.fit.value if sales is not None else None
     return finalize_website_conversation(
         store,
-        summary=ConversationSummary(
-            conversation_id=session_id,
+        summary=build_conversation_summary(
+            store,
+            session_id=session_id,
             lead_id=lead_id,
-            qualification=qualification,
-            recommended_next_step=next_step,
+            next_step=next_step,
         ),
         settings=settings,
         now=now,
@@ -143,7 +229,11 @@ def scan_inactive_website_conversations(
     cutoff = (clock.astimezone(UTC) - timedelta(minutes=minutes)).isoformat()
     rows = store.list_inactive_website_conversations(
         cutoff_iso=cutoff,
-        skip_kinds=(KIND, KIND_WEBSITE_WHATSAPP),
+        # Lead-scoped: once they moved to WhatsApp the website is not the channel any more.
+        skip_kinds=(KIND_WEBSITE_WHATSAPP,),
+        # Conversation-scoped: only the sessions already finalized, so a returning lead's
+        # next conversation is still scanned instead of being retired with the lead.
+        skip_conversation_kinds=(KIND,),
         limit=50,
     )
     finalized = 0

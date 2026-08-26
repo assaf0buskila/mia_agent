@@ -894,7 +894,6 @@ def sheets_mirror_outcome(written_count: int, *, latency_ms: int = 0) -> ToolOut
 
 
 _SHEETS_TAB_MIRROR_TOOLS = frozenset({
-    "sheets_mirror_campaign",
     "sheets_mirror_content",
 })
 

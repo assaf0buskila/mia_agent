@@ -18,7 +18,6 @@ from app.domain.learning import MAX_INSTRUCTION_BODY
 from app.domain.policies.execution_policy import ExecutionMode, policy_for
 from app.integrations.base import RecordingMessagePort
 from app.integrations.linkedin import DisabledLinkedInPort
-from app.integrations.meta_ads import DisabledMetaAdsPort
 from app.integrations.research import DisabledResearchPort
 from app.integrations.sheets import FakeSheetsPort
 from sqlalchemy import delete
@@ -92,7 +91,6 @@ async def test_owner_correction_persists_logged_and_proposed() -> None:
             kill_switch=False,
             owner_ids={OWNER_CORRECTION_PHONE},
             sheets=sheets,
-            meta_ads=DisabledMetaAdsPort(),
             research=DisabledResearchPort(),
             linkedin=DisabledLinkedInPort(),
         )
@@ -145,7 +143,6 @@ async def test_owner_correction_remember_scope() -> None:
             kill_switch=False,
             owner_ids={OWNER_REMEMBER_CORRECTION_PHONE},
             sheets=FakeSheetsPort(),
-            meta_ads=DisabledMetaAdsPort(),
             research=DisabledResearchPort(),
             linkedin=DisabledLinkedInPort(),
         )
@@ -262,7 +259,6 @@ async def test_prospect_correction_phrasing_does_not_write_owner_corrections() -
             kill_switch=False,
             owner_ids=set(),
             sheets=FakeSheetsPort(),
-            meta_ads=DisabledMetaAdsPort(),
             research=DisabledResearchPort(),
             linkedin=DisabledLinkedInPort(),
         )

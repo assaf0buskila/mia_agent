@@ -17,7 +17,6 @@ from app.domain.owner_tasks import OwnerTaskType, ack_for_owner_task, classify_o
 from app.graph.orchestrator import build_graph
 from app.integrations.base import RecordingMessagePort
 from app.integrations.linkedin import DisabledLinkedInPort
-from app.integrations.meta_ads import DisabledMetaAdsPort
 from app.integrations.research import DisabledResearchPort
 from app.integrations.sheets import FakeSheetsPort
 from sqlalchemy import delete, func, select
@@ -200,7 +199,6 @@ async def test_owner_preference_persists_proposed_not_active() -> None:
             kill_switch=False,
             owner_ids={OWNER_PREFERENCE_PHONE},
             sheets=sheets,
-            meta_ads=DisabledMetaAdsPort(),
             research=DisabledResearchPort(),
             linkedin=DisabledLinkedInPort(),
         )
@@ -255,7 +253,6 @@ async def test_owner_correction_persists_proposed_not_active() -> None:
             kill_switch=False,
             owner_ids={OWNER_CORRECTION_PHONE},
             sheets=sheets,
-            meta_ads=DisabledMetaAdsPort(),
             research=DisabledResearchPort(),
             linkedin=DisabledLinkedInPort(),
         )

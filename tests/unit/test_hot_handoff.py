@@ -114,6 +114,18 @@ class _FakeHotHandoffStore:
     ) -> None:
         self.upserts.append({"kind": kind, "lead_id": lead_id, "scheduled_at": scheduled_at})
 
+    def try_insert_owner_notification(
+        self, *, kind: str, lead_id: str, scheduled_at: str, conversation_id: str = ""
+    ) -> bool:
+        # Deliberately always True: this file tests the Telegram fan-out, so the fake must
+        # never be the thing that suppresses a send. Claim-once is proved against the real
+        # LeadStore in tests/unit/test_vnext_finalization.py.
+        del conversation_id
+        self.upsert_owner_notification(
+            kind=kind, lead_id=lead_id, scheduled_at=scheduled_at
+        )
+        return True
+
 
 def test_apply_hot_handoff_notifies_every_owner(monkeypatch) -> None:
     """End to end: the hot-lead path now fans the Telegram brief out to every owner id,

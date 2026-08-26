@@ -53,7 +53,7 @@ def _pin(
 
 _REGISTRY: dict[str, NodeFailurePolicy] = {}
 
-for _node in ("meta_ads_insights", "meta_ads_pacing", "instagram_insights"):
+for _node in ("instagram_insights",):
     _REGISTRY[_node] = _pin(_node, fallback="omit")
 
 _REGISTRY["calendar_find_free_slots"] = _pin(
@@ -76,11 +76,10 @@ for _node in ("research_search", "meeting_research"):
 for _node in ("gsc_search_analytics", "ga4_pivot_report", "seo_audit"):
     _REGISTRY[_node] = _pin(_node, fallback="omit")
 
-for _node in ("linkedin_profile", "linkedin_analytics"):
+for _node in ("linkedin_profile",):
     _REGISTRY[_node] = _pin(_node, fallback="omit")
 
 _REGISTRY["sheets_mirror"] = _pin("sheets_mirror", fallback="skip")
-_REGISTRY["sheets_mirror_campaign"] = _pin("sheets_mirror_campaign", fallback="skip")
 _REGISTRY["sheets_mirror_content"] = _pin("sheets_mirror_content", fallback="skip")
 _REGISTRY["voice_transcribe"] = _pin(
     "voice_transcribe", timeout_ms=30_000, maximum_retries=1, fallback="empty"

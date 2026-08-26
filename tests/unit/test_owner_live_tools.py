@@ -22,7 +22,6 @@ _LIVE_READS = (
     "linkedin_snapshot",
     "instagram_insights",
     "research_search",
-    "ads_snapshot",
 )
 
 
@@ -58,7 +57,6 @@ def test_disconnected_live_reads_do_not_raise() -> None:
             "seo_snapshot",
             "linkedin_snapshot",
             "instagram_insights",
-            "ads_snapshot",
         ):
             result = execute_tool(name, {}, ctx)
             assert result.ok is True

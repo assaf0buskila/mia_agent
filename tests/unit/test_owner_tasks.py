@@ -52,7 +52,7 @@ def test_classify_analytics_campaign_budget() -> None:
     assert decision.needs_clarification is False
     ack = ack_for_owner_task(decision)
     assert "משימת אנליטיקה" in ack
-    assert "תקציבים או מודעות במטא" in ack
+    assert "אין לי גישה לנתוני קמפיינים ממומנים במטא" in ack
 
 
 def test_classify_research() -> None:
@@ -657,7 +657,7 @@ async def test_owner_analytics_budget_logged_not_executed() -> None:
         assert task.status == "logged"
         assert sheets.rows == {}
         ack = port.sent[0].text
-        assert "תקציבים או מודעות במטא" in ack
+        assert "אין לי גישה לנתוני קמפיינים ממומנים במטא" in ack
         assert "how the business works" not in ack
         assert "יום רגיל בעסק" not in ack
     finally:
@@ -697,7 +697,7 @@ async def test_owner_text_analytics_logged_not_sales_graph() -> None:
         assert task.status == "logged"
         assert sheets.rows == {}
         ack = port.sent[0].text
-        assert "תקציבים או מודעות במטא" in ack
+        assert "אין לי גישה לנתוני קמפיינים ממומנים במטא" in ack
         assert "how the business works" not in ack
         assert "יום רגיל בעסק" not in ack
     finally:

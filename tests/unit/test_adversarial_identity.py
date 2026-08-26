@@ -15,7 +15,6 @@ from app.domain.sales import NextAction, SalesState, select_next_action
 from app.graph.replies import WEBSITE_REPLIES, WEBSITE_REPLIES_EN
 from app.integrations.base import RecordingMessagePort
 from app.integrations.calendar import DisabledCalendarPort
-from app.integrations.meta_ads import DisabledMetaAdsPort
 from app.integrations.research import FakeResearchPort, ResearchSnippet
 from app.integrations.sheets import DisabledSheetsPort
 from app.main import app
@@ -527,7 +526,6 @@ async def test_owner_authorization_survives_separate_inbound_calls() -> None:
             "owner_ids": {OWNER_RESTART_PHONE},
             "calendar": DisabledCalendarPort(),
             "sheets": DisabledSheetsPort(),
-            "meta_ads": DisabledMetaAdsPort(),
         }
         await process_inbound_texts(
             items=[{
@@ -586,7 +584,6 @@ async def test_revoked_owner_phone_falls_back_to_prospect_path() -> None:
             "kill_switch": False,
             "calendar": DisabledCalendarPort(),
             "sheets": DisabledSheetsPort(),
-            "meta_ads": DisabledMetaAdsPort(),
         }
         await process_inbound_texts(
             items=[{
@@ -650,7 +647,6 @@ async def test_owner_research_scrape_injection_is_data_not_instructions() -> Non
             owner_ids={RESEARCH_OWNER_PHONE},
             calendar=DisabledCalendarPort(),
             sheets=DisabledSheetsPort(),
-            meta_ads=DisabledMetaAdsPort(),
             research=FakeResearchPort([injection_snippet]),
         )
         db.commit()

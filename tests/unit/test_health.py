@@ -57,27 +57,13 @@ def test_sales_llm_ready_needs_key_and_model() -> None:
     )
     assert owner.whatsapp_owner_ready() is True
     assert owner.whatsapp_ingest_ready() is True
-    composio_only = Settings(
+    no_send = Settings(
         _env_file=None,
-        composio_api_key="k",
-        composio_user_id="u",
-        whatsapp_sender="composio",
-        whatsapp_verify_token="",
-        whatsapp_app_secret="",
+        whatsapp_access_token="",
+        whatsapp_phone_number_id="",
     )
-    assert composio_only.whatsapp_ingest_ready() is False
-    assert composio_only.whatsapp_provider_label() == "composio"
-    assert composio_only.whatsapp_connected_ready() is True
-    assert composio_only.whatsapp_send_ready() is False
-    composio_send = Settings(
-        _env_file=None,
-        composio_api_key="k",
-        composio_user_id="u",
-        whatsapp_sender="composio",
-        whatsapp_phone_number_id="123",
-    )
-    assert composio_send.whatsapp_send_ready() is True
-    assert composio_send.whatsapp_ingest_ready() is False
+    assert no_send.whatsapp_send_ready() is False
+    assert no_send.whatsapp_connected_ready() is False
     meta_send = Settings(
         _env_file=None,
         whatsapp_access_token="t",
@@ -178,10 +164,10 @@ def test_health_is_alive() -> None:
     assert body["capabilities"]["gmail"] == "alive"
     assert body["capabilities"]["calendar"] == "alive"
     assert body["capabilities"]["sheets_mirror"] == "alive"
-    assert body["capabilities"]["meta_ads"] == "alive"
+    assert body["capabilities"]["meta_ads"] == "specified"
     assert body["capabilities"]["content_performance"] == "alive"
-    assert body["capabilities"]["campaign_analysis"] == "alive"
-    assert body["capabilities"]["campaign_pacing"] == "alive"
+    assert body["capabilities"]["campaign_analysis"] == "specified"
+    assert body["capabilities"]["campaign_pacing"] == "specified"
     assert body["capabilities"]["research"] == "alive"
     assert body["capabilities"]["linkedin"] == "alive"
     assert body["capabilities"]["owner_learning"] == "alive"
@@ -209,12 +195,9 @@ def test_health_is_alive() -> None:
     assert integrations["research_apify"] is False
     assert integrations["composio"] is False
     assert "MIA_COMPOSIO_API_KEY" in integrations["missing"]
-    assert integrations["linkedin_analytics"] is False
-    assert "MIA_LINKEDIN_ACCESS_TOKEN" not in integrations["missing"]
     assert "MIA_GSC_SITE_URL" in integrations["missing"]
     assert "MIA_GA4_PROPERTY_ID" in integrations["missing"]
     assert "MIA_SHEETS_SPREADSHEET_ID" in integrations["missing"]
-    assert "MIA_META_ADS_ACCOUNT_ID" in integrations["missing"]
     assert "MIA_FIRECRAWL_API_KEY" in integrations["missing"]
 
 
@@ -227,9 +210,7 @@ def test_owner_integrations_discovery_off_lists_ids_honestly() -> None:
         firecrawl_api_key="",
         gsc_site_url="",
         ga4_property_id="",
-        meta_ads_account_id="",
         sheets_spreadsheet_id="",
-        linkedin_access_token="",
     )
     integrations = owner_integrations(settings)
     assert integrations["composio"] is True
@@ -237,14 +218,12 @@ def test_owner_integrations_discovery_off_lists_ids_honestly() -> None:
     assert integrations["ga4"] is False
     assert integrations["sheets_mirror"] is False
     assert integrations["linkedin_profile"] is True
-    assert integrations["linkedin_analytics"] is False
     assert integrations["research_firecrawl"] is False
     assert integrations["missing"] == [
         "MIA_FIRECRAWL_API_KEY",
         "MIA_SHEETS_SPREADSHEET_ID",
         "MIA_GSC_SITE_URL",
         "MIA_GA4_PROPERTY_ID",
-        "MIA_META_ADS_ACCOUNT_ID",
     ]
 
 
@@ -257,38 +236,18 @@ def test_owner_integrations_discovery_on_drops_listable_ids() -> None:
         firecrawl_api_key="",
         gsc_site_url="",
         ga4_property_id="",
-        meta_ads_account_id="",
         sheets_spreadsheet_id="",
-        linkedin_access_token="",
     )
     integrations = owner_integrations(settings)
     assert integrations["search_console"] is True
     assert integrations["ga4"] is True
     assert integrations["sheets_mirror"] is False
-    assert integrations["linkedin_analytics"] is False
     assert "MIA_GSC_SITE_URL" not in integrations["missing"]
     assert "MIA_GA4_PROPERTY_ID" not in integrations["missing"]
-    assert "MIA_META_ADS_ACCOUNT_ID" not in integrations["missing"]
     assert integrations["missing"] == [
         "MIA_FIRECRAWL_API_KEY",
         "MIA_SHEETS_SPREADSHEET_ID",
     ]
-
-
-def test_owner_integrations_linkedin_token_only_enables_analytics() -> None:
-    settings = Settings(
-        _env_file=None,
-        composio_api_key="k",
-        composio_user_id="u",
-        composio_discovery=True,
-        firecrawl_api_key="fc",
-        sheets_spreadsheet_id="sheet",
-        linkedin_access_token="li-token",
-    )
-    integrations = owner_integrations(settings)
-    assert integrations["linkedin_profile"] is True
-    assert integrations["linkedin_analytics"] is True
-    assert integrations["missing"] == []
 
 
 def test_owner_integrations_apify_covers_research_without_firecrawl() -> None:

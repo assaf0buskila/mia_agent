@@ -24,7 +24,6 @@ from app.integrations.linkedin import (
     enrich_linkedin_ack,
     format_profile_line,
 )
-from app.integrations.linkedin_analytics import FakeLinkedInAnalyticsPort
 from app.integrations.research import DisabledResearchPort
 from app.integrations.sheets import FakeSheetsPort
 from sqlalchemy import select
@@ -119,7 +118,6 @@ async def test_owner_linkedin_fake_headline_in_sent_text() -> None:
             owner_ids={OWNER_LINKEDIN_PHONE},
             sheets=sheets,
             linkedin=FakeLinkedInPort(SAMPLE_PROFILE),
-            linkedin_analytics=FakeLinkedInAnalyticsPort(),
             research=ExplodingResearchPort(),
         )
         db.commit()

@@ -6,7 +6,6 @@ from app.core.capabilities import CapabilityId, require_alive
 from app.evals.harness import (
     BUYER_DATASET_VERSION,
     CALENDAR_DATASET_VERSION,
-    CAMPAIGN_DATASET_VERSION,
     EVAL_DATASET_VERSION,
     EXTRACT_DATASET_VERSION,
     OBJECTION_DATASET_VERSION,
@@ -18,7 +17,6 @@ from app.evals.harness import (
     WritingCase,
     load_buyer_dataset,
     load_calendar_dataset,
-    load_campaign_dataset,
     load_extract_dataset,
     load_objection_dataset,
     load_routing_dataset,
@@ -28,7 +26,6 @@ from app.evals.harness import (
     load_writing_dataset,
     run_buyer_eval,
     run_calendar_eval,
-    run_campaign_eval,
     run_extract_eval,
     run_objection_eval,
     run_routing_eval,
@@ -212,7 +209,6 @@ def test_eval_dataset_version_constant() -> None:
     assert ROUTING_DATASET_VERSION == "routing_v1"
     assert OBJECTION_DATASET_VERSION == "objection_v1"
     assert CALENDAR_DATASET_VERSION == "calendar_v1"
-    assert CAMPAIGN_DATASET_VERSION == "campaign_v1"
     assert SAFETY_DATASET_VERSION == "safety_v1"
     assert WEBSITE_HANDOFF_DATASET_VERSION == "website_handoff_v1"
 
@@ -339,46 +335,6 @@ def test_run_safety_eval_source_excludes_inbound_and_composio() -> None:
     source = inspect.getsource(run_safety_eval)
     assert "inbound" not in source
     assert "composio" not in source
-
-
-def test_run_campaign_eval_all_pass() -> None:
-    report = run_campaign_eval()
-    assert report.dataset_version == "campaign_v1"
-    assert report.failed == 0
-    assert report.passed == len(load_campaign_dataset())
-    assert all(r.passed for r in report.results)
-    assert report.quality is None
-
-
-def test_campaign_dataset_has_twenty_unique_cases() -> None:
-    cases = load_campaign_dataset()
-    assert len(cases) == 20
-    case_ids = {case.case_id for case in cases}
-    assert len(case_ids) == 20
-
-
-def test_campaign_dataset_has_no_pii_markers() -> None:
-    cases = load_campaign_dataset()
-    for case in cases:
-        blob = f"{case.case_id} {case.insights}"
-        assert "@" not in blob
-        assert "972" not in blob
-        assert "+972" not in blob
-
-
-def test_mutated_campaign_expected_anomaly_fails() -> None:
-    cases = load_campaign_dataset()
-    mutated = cases[0].model_copy(update={"expected_anomaly": "spend_without_clicks"})
-    report = run_campaign_eval(cases=[mutated])
-    assert report.failed == 1
-    assert report.results[0].passed is False
-
-
-def test_run_campaign_eval_source_excludes_inbound_composio_meta_ads() -> None:
-    source = inspect.getsource(run_campaign_eval)
-    assert "inbound" not in source
-    assert "composio" not in source
-    assert "meta_ads" not in source
 
 
 def test_run_calendar_eval_all_pass() -> None:

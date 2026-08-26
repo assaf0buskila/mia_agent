@@ -12,7 +12,6 @@ from app.domain.events import Channel
 from app.domain.owner_tasks import OwnerTaskType, ack_for_owner_task, classify_owner_task
 from app.domain.tools import AdapterHttpError
 from app.integrations.base import RecordingMessagePort
-from app.integrations.meta_ads import DisabledMetaAdsPort
 from app.integrations.research import (
     ApifySearchPort,
     DisabledResearchPort,
@@ -158,7 +157,6 @@ async def test_owner_research_inbound_persists_measured_latency() -> None:
             kill_switch=False,
             owner_ids={OWNER_RESEARCH_LATENCY_PHONE},
             sheets=sheets,
-            meta_ads=DisabledMetaAdsPort(),
             research=SlowResearchPort(SAMPLE_SNIPPETS),
         )
         db.commit()
@@ -236,7 +234,6 @@ async def test_owner_research_fake_titles_in_sent_text() -> None:
             kill_switch=False,
             owner_ids={OWNER_RESEARCH_PHONE},
             sheets=sheets,
-            meta_ads=DisabledMetaAdsPort(),
             research=FakeResearchPort(SAMPLE_SNIPPETS),
         )
         db.commit()

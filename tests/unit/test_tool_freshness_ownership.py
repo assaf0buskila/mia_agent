@@ -14,21 +14,14 @@ from app.domain.followups import (
     follow_up_due_on,
     lead_recent_messages_outcome,
     scan_due_follow_ups,
+    website_session_events_outcome,
 )
-from app.domain.owner_tasks import ack_for_owner_task, classify_owner_task
 from app.domain.ownership_freshness import (
     conversation_ownership_outcome,
     owner_permissions_outcome,
 )
 from app.domain.sales import FitLevel, SalesState
-from app.domain.tools import ToolOutcome
 from app.integrations.base import RecordingMessagePort
-from app.integrations.meta_ads import (
-    CampaignInsights,
-    FakeMetaAdsPort,
-    enrich_analytics_ack,
-    website_session_events_outcome,
-)
 from sqlalchemy import select
 
 OWNER_PERM_PHONE = "972509997001"
@@ -297,115 +290,5 @@ def test_scan_not_due_does_not_stamp_lead_recent_messages() -> None:
             )
         )
         assert rows == []
-    finally:
-        db.close()
-
-
-def test_enrich_analytics_ack_website_session_events_extra_cached(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        monkeypatch.setattr(
-            LeadStore,
-            "count_canonical_events",
-            lambda self, *, event_type, occurred_from, occurred_to: 1,
-        )
-        behavior_counts = iter([10, 2, 5, 8])
-
-        def _behavior_count(self, *, kind, occurred_from, occurred_to):
-            del self, kind, occurred_from, occurred_to
-            return next(behavior_counts)
-
-        monkeypatch.setattr(LeadStore, "count_behavior_events", _behavior_count)
-        decision = classify_owner_task("how's the campaign spend")
-        ack = ack_for_owner_task(decision)
-        settings = Settings(calendar_timezone="Asia/Jerusalem")
-        extras: list[ToolOutcome] = []
-        enriched, insights_outcome = enrich_analytics_ack(
-            ack,
-            FakeMetaAdsPort(CampaignInsights(spend="100", clicks="50")),
-            kill_switch=False,
-            store=store,
-            settings=settings,
-            extra_outcomes=extras,
-        )
-        assert insights_outcome.freshness == "cached"
-        assert insights_outcome.tool == "meta_ads_insights"
-        assert len(extras) == 1
-        assert extras[0].tool == "website_session_events"
-        assert extras[0].freshness == "cached"
-        assert "ירידה" in enriched
-    finally:
-        db.close()
-
-
-def test_enrich_analytics_ack_no_store_skips_website_session_events() -> None:
-    decision = classify_owner_task("how's the campaign spend")
-    ack = ack_for_owner_task(decision)
-    extras: list[ToolOutcome] = []
-    enriched, outcome = enrich_analytics_ack(
-        ack,
-        FakeMetaAdsPort(CampaignInsights(spend="100", clicks="50")),
-        kill_switch=False,
-        store=None,
-        settings=Settings(calendar_timezone="Asia/Jerusalem"),
-        extra_outcomes=extras,
-    )
-    assert outcome.freshness == "cached"
-    assert extras == []
-    assert "spend" in enriched
-
-
-@pytest.mark.asyncio
-async def test_inbound_analytics_persists_website_session_events_cached(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        port = RecordingMessagePort()
-        monkeypatch.setattr(
-            LeadStore,
-            "count_canonical_events",
-            lambda self, *, event_type, occurred_from, occurred_to: 1,
-        )
-        behavior_counts = iter([10, 2, 5, 8])
-
-        def _behavior_count(self, *, kind, occurred_from, occurred_to):
-            del self, kind, occurred_from, occurred_to
-            return next(behavior_counts)
-
-        monkeypatch.setattr(LeadStore, "count_behavior_events", _behavior_count)
-        await process_inbound_texts(
-            provider="whatsapp",
-            channel=Channel.WHATSAPP,
-            items=[
-                {
-                    "id": "tool.fresh.website.events.1",
-                    "from": "972509997301",
-                    "text": "how's the campaign spend",
-                }
-            ],
-            store=store,
-            port=port,
-            kill_switch=False,
-            owner_ids={"972509997301"},
-            meta_ads=FakeMetaAdsPort(CampaignInsights(spend="100", clicks="50")),
-        )
-        db.commit()
-        insights_row = store.get_tool_run(
-            "tool.fresh.website.events.1:tool:meta_ads_insights"
-        )
-        website_row = store.get_tool_run(
-            "tool.fresh.website.events.1:tool:website_session_events"
-        )
-        assert insights_row is not None
-        assert insights_row.freshness == "cached"
-        assert website_row is not None
-        assert website_row.freshness == "cached"
     finally:
         db.close()

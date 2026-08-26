@@ -127,10 +127,8 @@ def owner_integrations(settings) -> dict[str, object]:
     composio = settings.composio_ready()
     discovery = bool(settings.composio_discovery) and composio
     sheets_id = settings.sheets_spreadsheet_id.strip()
-    linkedin_token = settings.linkedin_access_token.strip()
     gsc_site = settings.gsc_site_url.strip()
     ga4_property = settings.ga4_property_id.strip()
-    meta_ads = settings.meta_ads_account_id.strip()
     firecrawl = bool(settings.firecrawl_api_key.strip())
     apify = bool(settings.apify_token.strip())
     missing: list[str] = []
@@ -145,8 +143,6 @@ def owner_integrations(settings) -> dict[str, object]:
             missing.append("MIA_GSC_SITE_URL")
         if not ga4_property:
             missing.append("MIA_GA4_PROPERTY_ID")
-        if not meta_ads:
-            missing.append("MIA_META_ADS_ACCOUNT_ID")
     return {
         "composio": composio,
         "gmail_read": composio,
@@ -155,9 +151,6 @@ def owner_integrations(settings) -> dict[str, object]:
         "calendar_write": settings.calendar_write,
         "sheets_mirror": composio and bool(sheets_id),
         "linkedin_profile": composio,
-        # Member analytics stays optional Direct REST. Profile is Composio; do not
-        # list the leftover token as a go-live miss (ADR-034).
-        "linkedin_analytics": bool(linkedin_token),
         "instagram_insights": composio
         or bool(settings.instagram_access_token.strip()),
         "search_console": composio and (bool(gsc_site) or discovery),

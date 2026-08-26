@@ -74,12 +74,6 @@ from app.domain.owner_tasks import (
 )
 from app.domain.owner_weeklies import apply_owner_weekly
 from app.domain.ownership_freshness import owner_permissions_outcome
-from app.domain.prelaunch import (
-    apply_prelaunch_policy,
-    evaluate_prelaunch,
-    format_prelaunch_line,
-    should_run_prelaunch,
-)
 from app.domain.seo import enrich_seo_ack
 from app.domain.takeover import apply_owner_human_resume, apply_owner_human_takeover
 from app.domain.tools import ToolOutcome
@@ -98,12 +92,6 @@ from app.integrations.instagram_insights import (
     enrich_content_insights_ack,
 )
 from app.integrations.linkedin import LinkedInPort, build_linkedin_port, enrich_linkedin_ack
-from app.integrations.linkedin_analytics import (
-    LinkedInAnalyticsPort,
-    build_linkedin_analytics_port,
-    enrich_linkedin_analytics_ack,
-)
-from app.integrations.meta_ads import MetaAdsPort, build_meta_ads_port, enrich_analytics_ack
 from app.integrations.owner_reply import OwnerReplyPort, build_owner_reply_port
 from app.integrations.research import ResearchPort, build_research_port, enrich_research_ack
 from app.integrations.search_console import SearchConsolePort, build_search_console_port
@@ -132,11 +120,9 @@ async def process_owner_item(
     calendar_agenda_port: CalendarAgendaPort | None,
     gmail_port: GmailPort,
     sheets_port: SheetsPort,
-    meta_ads_port: MetaAdsPort,
     instagram_insights_port: InstagramInsightsPort,
     research_port: ResearchPort,
     linkedin_port: LinkedInPort,
-    linkedin_analytics_port: LinkedInAnalyticsPort,
     search_console_port: SearchConsolePort,
     ga4_port: Ga4Port,
     seo_audit_port: SeoAuditPort,
@@ -603,38 +589,6 @@ async def process_owner_item(
         and not decision.needs_clarification
         and plan.trigger != TRIGGER_SPEND_THRESHOLD
     ):
-        analytics_extras: list[ToolOutcome] = []
-        ack_text, analytics_outcome = enrich_analytics_ack(
-            ack_text,
-            meta_ads_port,
-            kill_switch,
-            store=store,
-            settings=settings,
-            sheets=sheets_port,
-            extra_outcomes=analytics_extras,
-            inbound_id=item["id"],
-        )
-        persist_tool_outcome(
-            store,
-            provider=provider,
-            channel=channel,
-            inbound_provider_event_id=item["id"],
-            conversation_id=event_conversation_id(item),
-            lead_id=None,
-            outcome=analytics_outcome,
-            correlation_id=correlation_id,
-        )
-        for extra_outcome in analytics_extras:
-            persist_tool_outcome(
-                store,
-                provider=provider,
-                channel=channel,
-                inbound_provider_event_id=item["id"],
-                conversation_id=event_conversation_id(item),
-                lead_id=None,
-                outcome=extra_outcome,
-                correlation_id=correlation_id,
-            )
         content_extras: list[ToolOutcome] = []
         ack_text, insights_outcome = enrich_content_insights_ack(
             ack_text,
@@ -667,15 +621,6 @@ async def process_owner_item(
                 outcome=extra_outcome,
                 correlation_id=correlation_id,
             )
-        if should_run_prelaunch(settings) and not demo_mode_active(settings):
-            prelaunch = evaluate_prelaunch(settings)
-            apply_prelaunch_policy(
-                store,
-                snapshot=prelaunch,
-                kill_switch=kill_switch,
-                demo_active=False,
-            )
-            ack_text = f"{ack_text}\n{format_prelaunch_line(prelaunch)}"
     if (
         decision.task_type == OwnerTaskType.RESEARCH
         and not decision.needs_clarification
@@ -740,23 +685,6 @@ async def process_owner_item(
             outcome=linkedin_outcome,
             correlation_id=correlation_id,
         )
-        ack_text, analytics_outcome = enrich_linkedin_analytics_ack(
-            ack_text,
-            linkedin_analytics_port,
-            kill_switch,
-            now=datetime.now(UTC),
-            timezone=settings.calendar_timezone,
-        )
-        persist_tool_outcome(
-            store,
-            provider=provider,
-            channel=channel,
-            inbound_provider_event_id=item["id"],
-            conversation_id=event_conversation_id(item),
-            lead_id=None,
-            outcome=analytics_outcome,
-            correlation_id=correlation_id,
-        )
     # The agent answers reads and free conversation, with everything the
     # deterministic chain already computed as its fallback. Write and approval
     # intents never reach it (DETERMINISTIC_TASK_TYPES). If it is unconfigured or
@@ -784,13 +712,11 @@ async def process_owner_item(
             calendar_agenda=calendar_agenda_port,
             gmail=gmail_port,
             linkedin=linkedin_port,
-            linkedin_analytics=linkedin_analytics_port,
             search_console=search_console_port,
             ga4=ga4_port,
             seo_audit=seo_audit_port,
             instagram_insights=instagram_insights_port,
             research=research_port,
-            meta_ads=meta_ads_port,
             source_ref=f"{provider}:{item['id']}",
         ),
     )
@@ -899,11 +825,9 @@ async def process_owner_texts(
     calendar_agenda: CalendarAgendaPort | None = None,
     calendar_booking: Any = None,
     sheets: SheetsPort | None = None,
-    meta_ads: MetaAdsPort | None = None,
     instagram_insights: InstagramInsightsPort | None = None,
     research: ResearchPort | None = None,
     linkedin: LinkedInPort | None = None,
-    linkedin_analytics: LinkedInAnalyticsPort | None = None,
     search_console: SearchConsolePort | None = None,
     ga4: Ga4Port | None = None,
     seo_audit: SeoAuditPort | None = None,
@@ -926,7 +850,6 @@ async def process_owner_texts(
     )
     gmail_port = gmail if gmail is not None else build_gmail_port(settings)
     sheets_port = sheets if sheets is not None else build_sheets_port(settings)
-    meta_ads_port = meta_ads if meta_ads is not None else build_meta_ads_port(settings)
     instagram_insights_port = (
         instagram_insights
         if instagram_insights is not None
@@ -934,11 +857,6 @@ async def process_owner_texts(
     )
     research_port = research if research is not None else build_research_port(settings)
     linkedin_port = linkedin if linkedin is not None else build_linkedin_port(settings)
-    linkedin_analytics_port = (
-        linkedin_analytics
-        if linkedin_analytics is not None
-        else build_linkedin_analytics_port(settings)
-    )
     search_console_port = (
         search_console if search_console is not None else build_search_console_port(settings)
     )
@@ -971,11 +889,9 @@ async def process_owner_texts(
             calendar_agenda_port=calendar_agenda_port,
             gmail_port=gmail_port,
             sheets_port=sheets_port,
-            meta_ads_port=meta_ads_port,
             instagram_insights_port=instagram_insights_port,
             research_port=research_port,
             linkedin_port=linkedin_port,
-            linkedin_analytics_port=linkedin_analytics_port,
             search_console_port=search_console_port,
             ga4_port=ga4_port,
             seo_audit_port=seo_audit_port,

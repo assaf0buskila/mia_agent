@@ -125,38 +125,6 @@
           "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mia/prod:MIA_GA4_PROPERTY_ID::"
         },
         {
-          "name": "MIA_META_ADS_ACCOUNT_ID",
-          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mia/prod:MIA_META_ADS_ACCOUNT_ID::"
-        },
-        {
-          "name": "MIA_CAMPAIGN_MONTHLY_BUDGET",
-          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mia/prod:MIA_CAMPAIGN_MONTHLY_BUDGET::"
-        },
-        {
-          "name": "MIA_CAMPAIGN_NAME",
-          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mia/prod:MIA_CAMPAIGN_NAME::"
-        },
-        {
-          "name": "MIA_CAMPAIGN_LAUNCH_DATE",
-          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mia/prod:MIA_CAMPAIGN_LAUNCH_DATE::"
-        },
-        {
-          "name": "MIA_CAMPAIGN_OBJECTIVE",
-          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mia/prod:MIA_CAMPAIGN_OBJECTIVE::"
-        },
-        {
-          "name": "MIA_CAMPAIGN_LEAD_PATH",
-          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mia/prod:MIA_CAMPAIGN_LEAD_PATH::"
-        },
-        {
-          "name": "MIA_CAMPAIGN_E2E_TESTED",
-          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mia/prod:MIA_CAMPAIGN_E2E_TESTED::"
-        },
-        {
-          "name": "MIA_LINKEDIN_ACCESS_TOKEN",
-          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mia/prod:MIA_LINKEDIN_ACCESS_TOKEN::"
-        },
-        {
           "name": "MIA_FIRECRAWL_API_KEY",
           "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mia/prod:MIA_FIRECRAWL_API_KEY::"
         },

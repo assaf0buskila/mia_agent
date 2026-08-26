@@ -389,6 +389,29 @@ class OwnerNotificationRow(Base):
     seen_at: Mapped[str] = mapped_column(String(32), default="")
 
 
+class OwnerNotificationClaimRow(Base):
+    """Send-once ledger for owner notifications, keyed on the CONVERSATION.
+
+    `owner_notifications` is the owner's inbox and is deliberately one row per
+    (kind, lead_id) — that is the right key for "this lead has an unseen alert".
+    It is the wrong key for "has this brief already been sent": a returning lead's
+    second website conversation is a new event the owner must hear about, and keying
+    the claim on the lead classified it as a duplicate, so the owner was never told.
+
+    Claims therefore live in their own table. The natural key IS the primary key, so
+    the claim is decided by the database, not by a read-then-write in Python, and the
+    table needs no sequence — which keeps one DDL text valid on SQLite and PostgreSQL.
+    Lead-scoped kinds (hot_lead) claim with an empty conversation_id.
+    """
+
+    __tablename__ = "owner_notification_claims"
+
+    kind: Mapped[str] = mapped_column(String(32), primary_key=True)
+    lead_id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(String(255), primary_key=True, default="")
+    claimed_at: Mapped[str] = mapped_column(String(32), default="")
+
+
 class OwnerBriefRow(Base):
     __tablename__ = "owner_briefs"
     __table_args__ = (UniqueConstraint("brief_date", name="uq_owner_brief_date"),)

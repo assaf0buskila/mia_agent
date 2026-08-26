@@ -110,6 +110,6 @@ ECS Fargate + RDS + Secrets Manager `mia/prod` + ALB `https://mia.assafweb.com` 
 
 ## Current wiring
 
-- Website: `app/api/website.py` → ClientGraph. Inner sales NBA is still `build_graph` in `app/graph/orchestrator.py` (REUSE until that node is inlined).
-- Telegram: `app/api/telegram.py` → `process_owner_texts` → OwnerGraph (`app/api/owner.py`).
+- Website: `app/api/website.py` → ClientGraph (`load_conversation` → `retrieve_knowledge` → `sales_turn` or skip on end/inactivity → `complete_turn`). Inner sales NBA is still `build_graph` in `app/graph/orchestrator.py` (REUSE until that node is inlined). Widget close, inactivity (`mia-due-scan`), and handoff finalize inside `complete_turn`.
+- Telegram: `app/api/telegram.py` → `process_owner_texts` → OwnerGraph (`load_owner_context` → `retrieve_owner_knowledge` → `respond`) in `app/api/owner.py`. Owner mail/calendar/leads/research stay allowlisted tools behind `respond`, not extra nodes.
 - Prospect Meta/Gmail: `app/api/inbound.py` → ClientGraph (same NBA, not a third graph). WhatsApp outbound stays human-gated (ADR-024). Mixed tests that pass owner ids still delegate to `process_owner_item`.

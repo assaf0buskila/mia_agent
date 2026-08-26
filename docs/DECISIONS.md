@@ -50,11 +50,14 @@ Proposed is not accepted. Build may follow a proposed default only when `AGENTS.
 | ADR-030 | Owner Telegram: free conversation, typed Gmail reads, lead by name | accepted |
 | ADR-031 | Owner intent: same agent, no sub-agents | accepted |
 | ADR-032 | Owner reads: wider tool loop, live dates, agenda, deterministic query normalization | accepted |
-| ADR-033 | reserved — Gmail send after Approve; research fallback; ManyChat out (in flight in the 0bfc90 worktree, not yet merged) | proposed |
+| ADR-033 | reserved — Gmail send after Approve (in flight on `claude/mia-adr033-wip`, not yet merged) | proposed |
 | ADR-034 | LinkedIn v1 is Composio profile; member-analytics token is optional | accepted |
 | ADR-035 | Apify google-search-scraper behind ResearchPort | accepted |
 | ADR-036 | VNext two graphs + canonical docs | accepted |
 | ADR-037 | Delete ManyChat from the product | accepted |
+| ADR-038 | Graphs own retrieve and conversation complete | accepted |
+| ADR-039 | Drop Meta ads, LinkedIn post analytics, campaigns, pacing and prelaunch | accepted |
+| ADR-040 | Prospect tone awareness in the website sales prompt | accepted |
 
 ## Template
 
@@ -820,3 +823,66 @@ Keep **one** owner agent. No sub-agent, no router model, no rewrite model, no se
 
 **Alternatives considered**
 A rephrase sub-agent or query-rewriting model hop — rejected; ADR-031 already rejected it, and a pure function gets the same recall with no latency, no cost and no second untrusted planner. Growing the prompt's keyword list to cover more paraphrases — rejected; that is the bug being removed, in the prompt as much as in Python. Stripping the deterministic read classifiers so every read goes to the agent — rejected for now; they already act as the fallback when the model is unconfigured or down, and removing them would trade a real availability property for tidiness. Pinning a new Composio calendar slug for the agenda read — unnecessary; `GOOGLECALENDAR_EVENTS_LIST` was already pinned for booking conflict checks. Teaching the model Gmail operator syntax in the prompt instead of normalizing in code — rejected; it is deterministic work that does not belong in the untestable layer.
+### ADR-038 Graphs own retrieve and conversation complete
+
+> Renumbered from ADR-033 when the Phase L cleanup was merged: 028–032 belong to
+> shipped production decisions and 033 is reserved for the in-flight Gmail-send
+> slice on `claude/mia-adr033-wip`.
+
+- **Status:** accepted
+- **Date:** 2026-08-25
+- **Assaf:** ADOPT (chat: graphs must include the functions Mia needs to be functional)
+
+**Context**
+OwnerGraph was `load_owner_context → respond`. ClientGraph was `load_conversation → sales_turn`. Knowledge search, hot handoff, and website finalization (widget close, inactivity, human handoff) ran in HTTP handlers and `mia-due-scan` after `graph.invoke`. Looking at the graphs did not match what Mia did, so those product functions were easy to miss or skip.
+
+**Decision**
+1. ClientGraph nodes: `load_conversation` → `retrieve_knowledge` (`knowledge.search` as `GraphName.CLIENT`) → `sales_turn` or skip on `session_end` / `inactivity` → `complete_turn` (hot handoff + website finalize).
+2. Website `/end` and due-scan inactivity invoke ClientGraph with `turn_kind`, they do not call the finalization service as a side path.
+3. OwnerGraph nodes: `load_owner_context` → `retrieve_owner_knowledge` (`memory.search` + `knowledge.search` as owner) → `respond`. Mail, calendar, leads, and research stay allowlisted tools inside `respond`.
+4. Channels stay thin. STT, HMAC, and Sheets mirror stay outside LangGraph. Graph state stays serializable. Website visitors still cannot execute owner capabilities.
+
+**Consequences**
+Published AssafWeb facts from `knowledge.search` are passed into sales compose as labelled data. Conversation-complete pings still use the same idempotent finalization service; the graph is the caller. Do not dump the Composio catalog into extra graph nodes.
+
+**Alternatives considered**
+Leave retrieve/finalize in HTTP and due-scan — rejected; the graphs would not include the functions. One LangGraph node per Composio slug — rejected (ADR-036).
+
+### ADR-039 Drop Meta ads, LinkedIn post analytics, campaigns, pacing and prelaunch
+
+- **Status:** accepted
+- **Date:** 2026-08-26
+- **Assaf:** ADOPT (chat: "Drop them — accept the deletion")
+
+**Context**
+A Phase L cleanup pass removed five capability modules — `app/integrations/meta_ads.py`, `app/integrations/linkedin_analytics.py`, `app/domain/campaigns.py`, `app/domain/pacing.py`, `app/domain/prelaunch.py` — plus ~4,275 lines of their tests. They were shipped in image `mia:20` and advertised to the owner agent as the `ads_snapshot` tool and the analytics half of `linkedin_snapshot`, but they were **dormant in production**: `MIA_META_ADS_ACCOUNT_ID` and `MIA_LINKEDIN_ACCESS_TOKEN` are both on the live `/health` missing list and the campaign env vars are blank. Meta member analytics also has no Composio tool (ADR-009, ADR-034), so that half was structurally dark.
+
+**Decision**
+Drop all five, with their tests and their wiring: the `ANALYTICS` owner-task branch, the prelaunch gate, the `ads_snapshot` tool, the analytics enrichment inside `linkedin_snapshot`, the campaign Sheets mirror tab, the campaign eval in `app/evals/harness.py`, and the freshness/failure-policy pins that named them. `linkedin_snapshot` survives as a **profile-only** read and its description must stop promising post analytics. The four `app/core/capabilities.py` entries move to `SPECIFIED` with an empty port.
+
+**Consequences**
+Mia can no longer answer "how is the campaign spend" or report LinkedIn post reach. Meta Ads and LinkedIn analytics leave the product surface until they are deliberately rebuilt behind the capability layer (§35: capability → policy → adapter → allowlist → tests). Roughly 10k lines leave the repo, which is the first real movement toward §39's "meaningfully smaller". Everything is recoverable from git — the pre-deletion state is `c35d005` and the shipped state is `claude/mia-product-feedback-0bfc90` (`7433abf`).
+
+**Explicitly NOT dropped in the same pass**
+The cleanup also removed the Composio WhatsApp outbound sender (`ComposioWhatsAppPort`, `MIA_WHATSAPP_SENDER`) and rewrote `.env.example` to cite **ADR-016** as justification for Meta-only outbound — the opposite of what ADR-016 decides, and contrary to production, which runs `MIA_WHATSAPP_SENDER=composio`. That removal was **rejected and reverted**; ADR-016 stands unchanged. A cleanup pass is not the place to reverse an accepted ADR.
+
+**Alternatives considered**
+Keep everything — rejected; dormant, unconfigured integrations are exactly the dead weight §36 warns against, and their 4,275 test lines slowed every run. Keep Meta, drop LinkedIn — considered; rejected because Meta ads is the larger surface (813 lines plus campaigns and pacing) and nothing needs it until Assaf actually runs paid campaigns through Mia. Leave them dark but present — rejected; the tools stayed advertised to the model, so Mia offered a capability that could not work.
+
+### ADR-040 Prospect tone awareness in the website sales prompt
+
+- **Status:** accepted
+- **Date:** 2026-08-26
+- **Assaf:** ADOPT (chat: "keep it, make sure it wire correct and help mia use")
+
+**Context**
+The same cleanup pass introduced `app/domain/emotion.py`: 192 lines of deterministic keyword matching over Hebrew and English that infers one of eight prospect tones (frustrated, overwhelmed, stressed, skeptical, excited, tired, worried, uncertain), with carry-forward from the previous turn when the current message is a short non-substantive answer. No LLM call. It was wired into the live customer sales prompt and took the `PROMPT_VERSION` string `v8` — which production's shipped answer-then-ask contract (ADR-028) already owned. Two different `v8` prompts existed, and the frozen prompt hash pinned in `tests/unit/test_ai_runs.py` disagreed on both sides.
+
+**Decision**
+Keep the feature and wire it properly. One prompt version, **`sales_reply_v9`**, carries BOTH contracts: production's answer-then-ask over `PUBLISHED ASSAFWEB FACTS`, and a prospect-tone block. `ReplyContext` carries both `knowledge` and `emotional_cues`; `app/graph/orchestrator.py` passes both. Tone changes **delivery only** — when a visitor asks a direct question while sounding frustrated, Mia still answers the question first. The tone block is omitted entirely when no cues are detected, so neutral messages get no invented empathy. The frozen prompt hash is recomputed from the merged prompt, never copied from either side.
+
+**Consequences**
+Live Hebrew customer copy changes: Mia acknowledges tone before continuing. Because detection is deterministic keyword matching, it is testable and cheap, but it will miss paraphrases and can false-positive on quoted text — it must never be the basis of a business decision, only of phrasing. `sales_reply_v8` is retired on both lineages; anything citing `v8` is stale.
+
+**Alternatives considered**
+Drop it — rejected by Assaf; the behavior is wanted. Ship it behind a default-off flag — rejected; a flag that is never turned on is dead code, and Assaf asked for Mia to actually use it. Keep two prompt versions — impossible; one string, one prompt. Infer tone with a model call — rejected; a second untrusted inference per turn for a phrasing hint, against §7 ("do not create LLM calls for deterministic work").

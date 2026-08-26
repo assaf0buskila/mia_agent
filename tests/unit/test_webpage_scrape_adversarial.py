@@ -12,7 +12,6 @@ from app.domain.events import Channel, EventType
 from app.domain.sales import FitLevel, NextAction, SalesState
 from app.integrations.base import RecordingMessagePort
 from app.integrations.calendar import DisabledCalendarPort
-from app.integrations.meta_ads import DisabledMetaAdsPort
 from app.integrations.research import FakeResearchPort, ResearchSnippet
 from app.integrations.sheets import DisabledSheetsPort
 from sqlalchemy import select
@@ -85,7 +84,6 @@ async def _owner_research(
         owner_ids={owner_phone},
         calendar=DisabledCalendarPort(),
         sheets=DisabledSheetsPort(),
-        meta_ads=DisabledMetaAdsPort(),
         research=FakeResearchPort(snippets),
     )
     return port.sent[0].text

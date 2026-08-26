@@ -136,7 +136,12 @@ def compile_client_graph(
         inbound_id = state.get("inbound_id") or conversation_id
         kill_switch = bool(state.get("kill_switch"))
         turn_kind = state.get("turn_kind") or "message"
-        if next_action == "handoff" and settings is not None and lead_id:
+        if (
+            next_action == "handoff"
+            and settings is not None
+            and lead_id
+            and (state.get("channel") or "") == "website"
+        ):
             apply_hot_handoff(
                 store,
                 lead_id=lead_id,
@@ -208,7 +213,10 @@ def finalize_inactive_website_conversations(
     cutoff = (clock.astimezone(UTC) - timedelta(minutes=minutes)).isoformat()
     rows = store.list_inactive_website_conversations(
         cutoff_iso=cutoff,
-        skip_kinds=(KIND, KIND_WEBSITE_WHATSAPP),
+        # WhatsApp handoff retires the lead's website sessions; finalization retires only
+        # the one conversation it finalized, so a returning lead is scanned again.
+        skip_kinds=(KIND_WEBSITE_WHATSAPP,),
+        skip_conversation_kinds=(KIND,),
         limit=50,
     )
     graph = compile_client_graph(store, settings=settings, now=clock)

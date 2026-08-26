@@ -73,12 +73,7 @@ from app.integrations.instagram_insights import (
     enrich_content_insights_ack,
 )
 from app.integrations.linkedin import LinkedInPort, enrich_linkedin_ack
-from app.integrations.linkedin_analytics import (
-    LinkedInAnalyticsPort,
-    enrich_linkedin_analytics_ack,
-)
 from app.integrations.llm_client import function_tool
-from app.integrations.meta_ads import MetaAdsPort, enrich_analytics_ack
 from app.integrations.research import ResearchPort, ResearchSnippet, format_sources_block
 from app.integrations.search_console import SearchConsolePort
 from app.integrations.seo_audit import SeoAuditPort
@@ -133,13 +128,11 @@ class ToolContext:
     calendar_agenda: CalendarAgendaPort | None = None
     gmail: GmailPort | None = None
     linkedin: LinkedInPort | None = None
-    linkedin_analytics: LinkedInAnalyticsPort | None = None
     search_console: SearchConsolePort | None = None
     ga4: Ga4Port | None = None
     seo_audit: SeoAuditPort | None = None
     instagram_insights: InstagramInsightsPort | None = None
     research: ResearchPort | None = None
-    meta_ads: MetaAdsPort | None = None
     kill_switch: bool = False
     demo_active: bool = False
     source_ref: str = ""
@@ -540,14 +533,6 @@ def _linkedin_snapshot(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     if ctx.linkedin is None:
         return ToolResult(ok=True, text=_NOT_CONNECTED)
     text, _outcome = enrich_linkedin_ack("", ctx.linkedin, ctx.kill_switch)
-    if ctx.linkedin_analytics is not None:
-        text, _analytics = enrich_linkedin_analytics_ack(
-            text,
-            ctx.linkedin_analytics,
-            ctx.kill_switch,
-            now=ctx.now or datetime.now(UTC),
-            timezone=ctx.timezone(),
-        )
     return _empty(text, "LinkedIn returned nothing. Reconnect LinkedIn in Composio.")
 
 
@@ -592,23 +577,6 @@ def _research_search(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     ]
     text = format_sources_block(snippets)
     return _empty(text, "Research search returned nothing. Check the Firecrawl key.")
-
-
-def _ads_snapshot(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
-    del args
-    if ctx.meta_ads is None:
-        return ToolResult(ok=True, text=_NOT_CONNECTED)
-    extras: list[Any] = []
-    text, _outcome = enrich_analytics_ack(
-        "",
-        ctx.meta_ads,
-        ctx.kill_switch,
-        store=ctx.store,
-        settings=ctx.settings,
-        extra_outcomes=extras,
-        inbound_id=ctx.source_ref,
-    )
-    return _empty(text, "Meta ads returned nothing.")
 
 
 _register(
@@ -704,9 +672,9 @@ _register(
         name="daily_brief",
         description=(
             "Today's website sales scorecard: new leads, meetings offered and booked, "
-            "handoffs to Assaf, inbound messages, follow-ups due, cancellation requests "
-            "and pacing status. Use when Assaf asks what happened today or how today "
-            "is going. Takes no input; computed fresh from Postgres, not memory."
+            "handoffs to Assaf, inbound messages, follow-ups due and cancellation "
+            "requests. Use when Assaf asks what happened today or how today is going. "
+            "Takes no input; computed fresh from Postgres, not memory."
         ),
         parameters=_NO_ARGS,
         handler=_daily_brief,
@@ -717,8 +685,8 @@ _register(
         name="weekly_brief",
         description=(
             "The same scorecard as daily_brief -- leads, meetings offered and booked, "
-            "handoffs, follow-ups, cancellations, pacing -- aggregated over the current "
-            "week instead of today. Use when Assaf asks how the week is going or wants "
+            "handoffs, follow-ups, cancellations -- aggregated over the current week "
+            "instead of today. Use when Assaf asks how the week is going or wants "
             "a weekly rollup. Takes no input."
         ),
         parameters=_NO_ARGS,
@@ -978,14 +946,15 @@ _register(
         handler=_seo_snapshot,
     )
 )
+
 _register(
     ToolSpec(
         name="linkedin_snapshot",
         description=(
-            "Assaf's own LinkedIn profile plus his personal post analytics when the "
-            "member token is set -- his account only, not company or competitor data. "
-            "Use when Assaf asks about his LinkedIn presence or post performance. Takes "
-            "no input. Never posts or DMs."
+            "Assaf's own LinkedIn profile as LinkedIn has it -- his name and headline, "
+            "his account only, not company or competitor data. Use when Assaf asks what "
+            "his LinkedIn profile says. Profile only: this returns no post, follower or "
+            "impression analytics. Takes no input. Never posts or DMs."
         ),
         parameters=_NO_ARGS,
         handler=_linkedin_snapshot,
@@ -1015,19 +984,6 @@ _register(
         ),
         parameters=_string_arg("query", "Search query, usually a company domain or topic."),
         handler=_research_search,
-    )
-)
-_register(
-    ToolSpec(
-        name="ads_snapshot",
-        description=(
-            "Meta Ads campaign performance: campaign name, spend, impressions, clicks, "
-            "CTR and frequency for active campaigns. Use when Assaf asks how ads are "
-            "doing or wants a spend check. Takes no input. Never changes budget, bids "
-            "or launches."
-        ),
-        parameters=_NO_ARGS,
-        handler=_ads_snapshot,
     )
 )
 
