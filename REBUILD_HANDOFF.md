@@ -122,9 +122,15 @@ code, not to the behavior.** Audit findings, with evidence:
 1. **Settle production identity for real** — the one `imageDigest` command in §1.
 2. **Land the merge into the live tree.** Blocked while another session writes there
    (see §7). Then: `git checkout claude/mia-merge-prod` or merge it into the working branch.
-3. **Reconcile the fourth state**: the `0bfc90` worktree has ~23 uncommitted paths incl. an
-   ADR-033 that reimplements the Apify work a *second* time with a different env var
-   (`MIA_APIFY_API_TOKEN` vs `MIA_APIFY_TOKEN`) and a different REST path. Pick one.
+3. **The fourth state is rescued and the env var is decided.** That worktree's 23
+   uncommitted paths are now committed on branch `claude/mia-adr033-wip` (`e21a29c`);
+   `claude/mia-product-feedback-0bfc90` stays pinned at `7433abf` as the production record.
+   Assaf chose **`MIA_APIFY_TOKEN`** (2026-08-26) — already wired across eight files and
+   recorded in ADR-035. Do not reintroduce `MIA_APIFY_API_TOKEN`.
+   Still open on that branch: the "Gmail send on after Approve" change (flipping
+   `MIA_GMAIL_SEND` to true) is a real product decision, not a merge detail.
+   **Unverified:** the Apify REST path `/v2/actors/...` is only exercised against mocks.
+   Probe it once for real before relying on it (the WIP used the legacy `/v2/acts/`).
 4. **Then the real rebuild** (decision 2 above), gate by gate, ideally in a worktree.
 5. Cosmetic: in `docs/DECISIONS.md` the renumbered 034–037 bodies sit *before* 028–032.
    The index table is correctly ordered. An 80-line block move; left out of the merge commit

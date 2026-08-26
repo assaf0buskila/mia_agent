@@ -10,7 +10,7 @@ Production keys: AWS Secrets Manager `mia/prod`.
 
 Live Fargate is **mia:18** (task `mia:20`). ADR-028/029 deployed: migrate ran before the service moved. Owner agent model is `gpt-5.6-luna`. Meeting-first is on. Assaf still needs to send `מה קרה היום?` to prove the funnel/engine brief lines.
 
-**Apify research (ADR-030, not deployed).** Typed `ResearchPort` can use pinned `apify/google-search-scraper` when Firecrawl is empty. Add `MIA_APIFY_TOKEN` to `mia/prod` (empty is fine) before shipping a task definition that injects it.
+**Apify research (ADR-035, renumbered from ADR-030; not deployed).** Typed `ResearchPort` can use pinned `apify/google-search-scraper` when Firecrawl is empty. Add `MIA_APIFY_TOKEN` to `mia/prod` (empty is fine) before shipping a task definition that injects it.
 
 v1 channels (ADR-017) unchanged. The owner Telegram console now runs an allowlisted
 read-only tool loop with long-term memory and website knowledge when
