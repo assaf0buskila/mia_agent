@@ -3,6 +3,7 @@ from typing import Any
 from langgraph.graph import END, START, StateGraph
 
 from app.db.store import LeadStore
+from app.domain.emotion import infer_emotional_cues
 from app.domain.events import (
     CanonicalEvent,
     Channel,
@@ -167,6 +168,10 @@ def build_graph(store: LeadStore, reply_port: SalesReplyPort | None = None):
                 sales.headline = headline
                 store.save_sales(sales)
         language = reply_language(latest_message=latest_message, turns=turns)
+        emotional_cues = infer_emotional_cues(
+            latest_message,
+            recent_turns=tuple(turns),
+        )
         canned = reply_for(
             channel, action, sales, language=language, repeat_ask=repeat_ask
         )
@@ -185,6 +190,7 @@ def build_graph(store: LeadStore, reply_port: SalesReplyPort | None = None):
                 open_questions=tuple(sales.open_questions()),
                 asked_actions=tuple(dict.fromkeys(sales.asked_actions)),
                 language=language,
+                emotional_cues=emotional_cues,
             ),
         )
         reply_text = composed.text

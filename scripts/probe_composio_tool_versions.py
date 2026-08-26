@@ -29,10 +29,8 @@ from app.core.config import get_settings
 from app.integrations.composio_discovery import (
     GA4_LIST_ACCOUNT_SUMMARIES_TOOL,
     GSC_LIST_SITES_TOOL,
-    METAADS_GET_AD_ACCOUNTS_TOOL,
 )
 from app.integrations.ga4 import COMPOSIO_GA4_VERSION
-from app.integrations.meta_ads import COMPOSIO_METAADS_VERSION
 from app.integrations.search_console import COMPOSIO_GSC_VERSION
 
 BASE = "https://backend.composio.dev/api/v3.1"
@@ -45,7 +43,6 @@ CONTROLS = (
 TARGETS = (
     ("google_search_console", GSC_LIST_SITES_TOOL, COMPOSIO_GSC_VERSION),
     ("google_analytics", GA4_LIST_ACCOUNT_SUMMARIES_TOOL, COMPOSIO_GA4_VERSION),
-    ("metaads", METAADS_GET_AD_ACCOUNTS_TOOL, COMPOSIO_METAADS_VERSION),
 )
 
 

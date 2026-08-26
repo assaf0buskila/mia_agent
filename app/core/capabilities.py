@@ -217,8 +217,8 @@ CAPABILITIES: tuple[Capability, ...] = (
     Capability(
         id=CapabilityId.META_ADS,
         prd="§20",
-        status=WiringStatus.ALIVE,
-        port="app.integrations.meta_ads",
+        status=WiringStatus.SPECIFIED,
+        port="",
     ),
     Capability(
         id=CapabilityId.CONTENT_PERFORMANCE,
@@ -235,20 +235,20 @@ CAPABILITIES: tuple[Capability, ...] = (
     Capability(
         id=CapabilityId.CAMPAIGN_ANALYSIS,
         prd="§20.2",
-        status=WiringStatus.ALIVE,
-        port="app.domain.campaigns",
+        status=WiringStatus.SPECIFIED,
+        port="",
     ),
     Capability(
         id=CapabilityId.CAMPAIGN_PACING,
         prd="§19.2 / §20",
-        status=WiringStatus.ALIVE,
-        port="app.domain.pacing",
+        status=WiringStatus.SPECIFIED,
+        port="",
     ),
     Capability(
         id=CapabilityId.CAMPAIGN_PRELAUNCH,
         prd="§20.3",
-        status=WiringStatus.ALIVE,
-        port="app.domain.prelaunch",
+        status=WiringStatus.SPECIFIED,
+        port="",
     ),
     Capability(
         id=CapabilityId.RESEARCH,

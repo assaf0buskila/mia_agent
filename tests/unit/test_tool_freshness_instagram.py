@@ -15,7 +15,6 @@ from app.integrations.instagram_insights import (
     FakeInstagramInsightsPort,
     enrich_content_insights_ack,
 )
-from app.integrations.meta_ads import DisabledMetaAdsPort
 from sqlalchemy import select
 
 OWNER_FRESH_IG_PHONE = "972509998601"
@@ -158,7 +157,6 @@ async def test_inbound_ig_freshness_persisted() -> None:
             kill_switch=False,
             owner_ids={OWNER_FRESH_IG_PHONE},
             instagram_insights=FakeInstagramInsightsPort(SAMPLE_ITEMS),
-            meta_ads=DisabledMetaAdsPort(),
         )
         db.commit()
         row = store.get_tool_run("ig.fresh.inbound.1:tool:instagram_insights")
@@ -216,7 +214,6 @@ async def test_inbound_ig_empty_freshness_unverified() -> None:
             kill_switch=False,
             owner_ids={OWNER_FRESH_IG_EMPTY_PHONE},
             instagram_insights=DisabledInstagramInsightsPort(),
-            meta_ads=DisabledMetaAdsPort(),
         )
         db.commit()
         row = db.scalars(

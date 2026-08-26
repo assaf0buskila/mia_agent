@@ -55,5 +55,4 @@ def test_require_alive_canonical_events_passes() -> None:
     require_alive(CapabilityId.MEETINGS)
     require_alive(CapabilityId.CONTENT_PERFORMANCE)
     require_alive(CapabilityId.DUE_SCAN)
-    require_alive(CapabilityId.CAMPAIGN_PRELAUNCH)
     require_alive(CapabilityId.OWNER_BRIEF)

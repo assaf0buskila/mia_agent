@@ -18,11 +18,11 @@ from app.core.config import Settings
 from app.core.errors import MiaError
 from app.db.store import LeadStore
 from app.domain.hot_handoff import apply_hot_handoff
+from app.domain.website_handoff_brief import KIND_WEBSITE_WHATSAPP
 from app.graph.orchestrator import build_graph
 from app.graph.state import empty_state
 from app.integrations.sales_reply import SalesReplyPort
 from app.services.finalization import KIND, qualify_and_finalize
-from app.domain.website_handoff_brief import KIND_WEBSITE_WHATSAPP
 
 ClientRespond = Callable[[ClientState], dict]
 
@@ -130,7 +130,12 @@ def compile_client_graph(
         inbound_id = state.get("inbound_id") or conversation_id
         kill_switch = bool(state.get("kill_switch"))
         turn_kind = state.get("turn_kind") or "message"
-        if next_action == "handoff" and settings is not None and lead_id:
+        if (
+            next_action == "handoff"
+            and settings is not None
+            and lead_id
+            and (state.get("channel") or "") == "website"
+        ):
             apply_hot_handoff(
                 store,
                 lead_id=lead_id,

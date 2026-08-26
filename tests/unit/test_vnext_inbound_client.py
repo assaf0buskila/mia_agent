@@ -26,3 +26,5 @@ def test_client_state_can_carry_non_website_channel() -> None:
     assert state["channel"] == "whatsapp"
     graph = compile_client_graph()
     assert "sales_turn" in graph.nodes
+    assert "retrieve_knowledge" in graph.nodes
+    assert "complete_turn" in graph.nodes

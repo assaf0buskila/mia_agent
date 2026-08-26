@@ -1,4 +1,4 @@
-"""Catalog of currently pinned Composio execute tools and one direct LinkedIn read.
+"""Catalog of currently pinned Composio execute tools.
 
 Versions are imported from adapter constants — single source of truth.
 No dynamic Composio catalog discovery; customer graph has zero Composio tools.
@@ -38,11 +38,6 @@ from app.integrations.linkedin import (
     COMPOSIO_GET_MY_INFO_TOOL,
     COMPOSIO_LINKEDIN_VERSION,
 )
-from app.integrations.linkedin_analytics import LINKEDIN_API_VERSION
-from app.integrations.meta_ads import (
-    COMPOSIO_GET_INSIGHTS_TOOL,
-    COMPOSIO_METAADS_VERSION,
-)
 from app.integrations.search_console import (
     COMPOSIO_GSC_VERSION,
     COMPOSIO_INSPECT_URL_TOOL,
@@ -53,14 +48,6 @@ from app.integrations.sheets import (
     COMPOSIO_GOOGLESHEETS_VERSION,
     COMPOSIO_UPSERT_ROWS_TOOL,
 )
-from app.integrations.whatsapp import (
-    COMPOSIO_SEND_TEXT_TOOL as COMPOSIO_WHATSAPP_SEND_TEXT_TOOL,
-)
-from app.integrations.whatsapp import (
-    COMPOSIO_WHATSAPP_VERSION,
-)
-
-_MEMBER_POST_ANALYTICS = "member_post_analytics"
 
 
 class PreloadedTool(BaseModel):
@@ -140,25 +127,9 @@ PRELOADED_TOOLS: tuple[PreloadedTool, ...] = (
         enabled=True,
     ),
     PreloadedTool(
-        name=COMPOSIO_GET_INSIGHTS_TOOL,
-        toolkit="METAADS",
-        version=COMPOSIO_METAADS_VERSION,
-        risk="R0",
-        write=False,
-        enabled=True,
-    ),
-    PreloadedTool(
         name=COMPOSIO_SEND_TEXT_TOOL,
         toolkit="INSTAGRAM",
         version=COMPOSIO_INSTAGRAM_VERSION,
-        risk="R2",
-        write=True,
-        enabled=True,
-    ),
-    PreloadedTool(
-        name=COMPOSIO_WHATSAPP_SEND_TEXT_TOOL,
-        toolkit="WHATSAPP",
-        version=COMPOSIO_WHATSAPP_VERSION,
         risk="R2",
         write=True,
         enabled=True,
@@ -223,14 +194,6 @@ PRELOADED_TOOLS: tuple[PreloadedTool, ...] = (
         name=COMPOSIO_LIST_CONVERSION_EVENTS_TOOL,
         toolkit="GOOGLE_ANALYTICS",
         version=COMPOSIO_GA4_VERSION,
-        risk="R0",
-        write=False,
-        enabled=True,
-    ),
-    PreloadedTool(
-        name=_MEMBER_POST_ANALYTICS,
-        toolkit="linkedin_direct",
-        version=LINKEDIN_API_VERSION,
         risk="R0",
         write=False,
         enabled=True,

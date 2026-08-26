@@ -42,7 +42,6 @@
         { "name": "MIA_WHATSAPP_GRAPH_VERSION", "value": "v25.0" },
         { "name": "MIA_WHATSAPP_CLICK_TO_CHAT", "value": "972523393768" },
         { "name": "MIA_INSTAGRAM_SENDER", "value": "direct" },
-        { "name": "MIA_WHATSAPP_SENDER", "value": "composio" },
         { "name": "MIA_WHATSAPP_REQUIRE_BUSINESS_SCOPE", "value": "true" },
         { "name": "MIA_INSTAGRAM_GRAPH_HOST", "value": "graph.instagram.com" },
         { "name": "MIA_INSTAGRAM_GRAPH_VERSION", "value": "v26.0" }
@@ -123,38 +122,6 @@
         {
           "name": "MIA_GA4_PROPERTY_ID",
           "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mia/prod:MIA_GA4_PROPERTY_ID::"
-        },
-        {
-          "name": "MIA_META_ADS_ACCOUNT_ID",
-          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mia/prod:MIA_META_ADS_ACCOUNT_ID::"
-        },
-        {
-          "name": "MIA_CAMPAIGN_MONTHLY_BUDGET",
-          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mia/prod:MIA_CAMPAIGN_MONTHLY_BUDGET::"
-        },
-        {
-          "name": "MIA_CAMPAIGN_NAME",
-          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mia/prod:MIA_CAMPAIGN_NAME::"
-        },
-        {
-          "name": "MIA_CAMPAIGN_LAUNCH_DATE",
-          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mia/prod:MIA_CAMPAIGN_LAUNCH_DATE::"
-        },
-        {
-          "name": "MIA_CAMPAIGN_OBJECTIVE",
-          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mia/prod:MIA_CAMPAIGN_OBJECTIVE::"
-        },
-        {
-          "name": "MIA_CAMPAIGN_LEAD_PATH",
-          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mia/prod:MIA_CAMPAIGN_LEAD_PATH::"
-        },
-        {
-          "name": "MIA_CAMPAIGN_E2E_TESTED",
-          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mia/prod:MIA_CAMPAIGN_E2E_TESTED::"
-        },
-        {
-          "name": "MIA_LINKEDIN_ACCESS_TOKEN",
-          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mia/prod:MIA_LINKEDIN_ACCESS_TOKEN::"
         },
         {
           "name": "MIA_FIRECRAWL_API_KEY",

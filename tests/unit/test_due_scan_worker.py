@@ -217,16 +217,7 @@ def test_run_due_scan_calls_both_scans(monkeypatch: pytest.MonkeyPatch) -> None:
         db.close()
 
 
-def test_run_due_scan_spend_threshold_with_pacing(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from app.core.config import Settings
-
-    monkeypatch.setattr(
-        due_scan_module,
-        "get_settings",
-        lambda: Settings(campaign_monthly_budget="5000"),
-    )
+def test_run_due_scan_spend_threshold_stays_blocked_without_campaign_pacing() -> None:
     init_db()
     db = get_session_factory()()
     try:
@@ -254,13 +245,12 @@ def test_run_due_scan_spend_threshold_with_pacing(
             now=_FIXED_NOW,
         )
         assert summary.owner_tasks_scanned >= 1
-        assert summary.owner_tasks_due_ready >= 1
         owner_row = store.get_owner_task(
             provider="whatsapp", provider_event_id=OWNER_SPEND_EVENT_ID
         )
         assert owner_row is not None
-        assert owner_row.due_ready is True
-        assert owner_row.block_reason == "spend_reached"
+        assert owner_row.due_ready is False
+        assert owner_row.block_reason == "no_budget"
     finally:
         pacing = store.get_campaign_pacing()
         if pacing is not None:

@@ -6,14 +6,13 @@ from datetime import UTC, datetime
 
 from pydantic import BaseModel
 
+from app.agents.client.graph import finalize_inactive_website_conversations
 from app.core.config import get_settings
 from app.core.logging import configure_logging
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
 from app.domain.commitments import scan_due_owner_tasks
 from app.domain.followups import scan_due_follow_ups
-from app.domain.pacing import parse_monthly_budget
-from app.services.finalization import scan_inactive_website_conversations
 
 logger = logging.getLogger(__name__)
 
@@ -41,19 +40,14 @@ def run_due_scan(
         kill_switch=kill_switch,
         now=effective_now,
     )
-    pacing_row = store.get_campaign_pacing()
-    if pacing_row is None or pacing_row.spend == "":
-        spend_mtd: float | None = None
-    else:
-        spend_mtd = parse_monthly_budget(pacing_row.spend)
     owner_task_results = scan_due_owner_tasks(
         store,
         timezone=timezone,
         now=effective_now,
-        monthly_budget=parse_monthly_budget(settings.campaign_monthly_budget),
-        spend_mtd=spend_mtd,
+        monthly_budget=None,
+        spend_mtd=None,
     )
-    website_finalized = scan_inactive_website_conversations(
+    website_finalized = finalize_inactive_website_conversations(
         store,
         settings=settings,
         now=effective_now,

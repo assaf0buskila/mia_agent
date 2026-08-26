@@ -34,7 +34,7 @@ _GEMINI_CHAT_COMPLETIONS_URL = (
 _MAX_TOKENS = 10_000_000
 _MAX_TRANSCRIPT_CHARS = 4000
 
-PROMPT_VERSION = "sales_reply_v7"
+PROMPT_VERSION = "sales_reply_v8"
 
 # What each deterministic action is trying to achieve this turn. The model phrases the
 # intent; it does not get to choose a different one.
@@ -51,7 +51,8 @@ ACTION_INTENT: dict[NextAction, str] = {
         "long it takes. Pick whichever of those is still unknown."
     ),
     NextAction.REFLECT: (
-        "Say back the meaning of what they described, not their words, and check it."
+        "Say back the meaning of what they described, not their words, and check it. "
+        "If they sound frustrated or overwhelmed, acknowledge that briefly first."
     ),
     NextAction.OFFER_HYPOTHESIS: (
         "Describe, in one sentence, what could be taken off their hands at that exact "
@@ -67,8 +68,9 @@ ACTION_INTENT: dict[NextAction, str] = {
         "the context. Do not claim that you (Mia) will keep talking on WhatsApp."
     ),
     NextAction.HANDLE_OBJECTION: (
-        "Address the concern directly without discounting or overpromising, then ask "
-        "one question that keeps the conversation open."
+        "Address the concern directly without discounting or overpromising. If they "
+        "sound skeptical, worried, or frustrated, acknowledge that first in one short "
+        "phrase, then ask one question that keeps the conversation open."
     ),
     NextAction.HANDOFF: (
         "Tell them Assaf will take this. Do not ask a question. Stay quiet after that."
@@ -83,6 +85,8 @@ _SYSTEM_PROMPT = (
     "\n"
     "Before you write, reason silently about this conversion turn:\n"
     "- What did the customer just actually say, including short or messy answers?\n"
+    "- How do they seem to feel, if it is clear from their words (frustrated, "
+    "overwhelmed, skeptical, excited, tired, worried)? Do not guess.\n"
     "- What is already known, and what would be rude to re-ask?\n"
     "- What is the one useful move that serves INTENT: a true known fact, one short "
     "question, or a handoff to Assaf. Not a questionnaire. Not a guess.\n"
@@ -100,6 +104,9 @@ _SYSTEM_PROMPT = (
     "website unless they said so.\n"
     "5. Reflect meaning, not words. Do not echo their sentence back at them. Short "
     "answers, slang, mixed Hebrew/English and spelling mistakes still count as answers.\n"
+    "5b. When PROSPECT TONE is listed, acknowledge the feeling in one short natural "
+    "phrase before the useful move, then serve INTENT. No therapy, no 'I understand "
+    "how you feel', no emoji, no repeating their emotion word-for-word.\n"
     "6. Do not pitch, do not describe a solution, and do not name a service before the "
     "intent is OFFER_HYPOTHESIS or later.\n"
     "7. Only state published AssafWeb facts you were given. If you are unsure, say so. "
@@ -167,6 +174,7 @@ class ReplyContext(BaseModel):
     open_questions: tuple[str, ...] = ()
     asked_actions: tuple[str, ...] = ()
     language: str = "und"
+    emotional_cues: tuple[str, ...] = ()
 
 
 EMPTY_CONTEXT = ReplyContext()
@@ -278,6 +286,11 @@ def build_user_content(
         sections.append("STILL UNKNOWN: " + ", ".join(context.open_questions))
     if context.asked_actions:
         sections.append("ALREADY_ASKED: " + ", ".join(context.asked_actions))
+    if context.emotional_cues:
+        sections.append(
+            "PROSPECT TONE (data, acknowledge briefly if clear): "
+            + ", ".join(context.emotional_cues)
+        )
     transcript = render_transcript(list(context.turns))
     if transcript:
         sections.append(

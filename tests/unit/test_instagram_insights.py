@@ -21,7 +21,6 @@ from app.integrations.instagram_insights import (
     enrich_content_insights_ack,
     format_content_insights_line,
 )
-from app.integrations.meta_ads import DisabledMetaAdsPort
 from app.integrations.sheets import (
     COMPOSIO_GOOGLESHEETS_VERSION,
     COMPOSIO_UPSERT_ROWS_TOOL,
@@ -473,7 +472,6 @@ async def test_owner_analytics_inbound_tool_result_instagram_insights() -> None:
             owner_ids={OWNER_IG_CONTENT_PHONE},
             sheets=sheets,
             instagram_insights=FakeInstagramInsightsPort(SAMPLE_ITEMS),
-            meta_ads=DisabledMetaAdsPort(),
         )
         db.commit()
         task = store.get_owner_task(
@@ -526,7 +524,6 @@ async def test_owner_analytics_inbound_persists_content_mirror_tool_run() -> Non
             owner_ids={OWNER_SHCNT_PHONE},
             sheets=sheets,
             instagram_insights=FakeInstagramInsightsPort(SAMPLE_ITEMS),
-            meta_ads=DisabledMetaAdsPort(),
         )
         db.commit()
         row = store.get_tool_run(f"{inbound_id}:tool:sheets_mirror_content")

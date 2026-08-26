@@ -42,13 +42,11 @@ from app.domain.sales import FitLevel, NextAction, SalesState
 from app.integrations.calendar import FakeCalendarPort, TimeSlot
 from app.integrations.calendar_booking import CalendarBookingEvent, FakeCalendarBookingPort
 from app.integrations.sheets import (
-    BudgetMirrorRow,
     ContentMirrorRow,
     FakeSheetsPort,
     LeadMirrorRow,
     claim_sheets_mirror,
     complete_sheets_mirror,
-    mirror_budget,
     mirror_content,
     mirror_lead,
 )
@@ -159,16 +157,6 @@ class _CountingSheetsPort(FakeSheetsPort):
     def upsert_lead(self, row: LeadMirrorRow) -> None:
         self.lead_upserts += 1
         super().upsert_lead(row)
-
-
-class _CountingCampaignSheetsPort(FakeSheetsPort):
-    def __init__(self) -> None:
-        super().__init__()
-        self.budget_upserts = 0
-
-    def upsert_budget(self, row: BudgetMirrorRow) -> None:
-        self.budget_upserts += 1
-        super().upsert_budget(row)
 
 
 class _CountingContentSheetsPort(FakeSheetsPort):
@@ -612,34 +600,6 @@ def test_follow_up_same_inbound_writes_one_row() -> None:
         assert len(follow_events) == 1
         payload = json.loads(follow_events[0].payload_json)
         assert payload["status"] == "pending"
-    finally:
-        db.close()
-
-
-def test_campaign_sheets_same_inbound_upserts_once() -> None:
-    init_db()
-    db = get_session_factory()()
-    inbound_id = "xcut.sheets.camp.1"
-    try:
-        store = LeadStore(db)
-        port = _CountingCampaignSheetsPort()
-        row = BudgetMirrorRow(
-            campaign="account",
-            monthly_budget="5000.00",
-            spend="1500.00",
-            expected_spend="2100.00",
-            remaining="3500.00",
-            projected="4500.00",
-            over_under="-600.00",
-            status="under",
-        )
-        for _ in range(2):
-            if claim_sheets_mirror(store=store, inbound_id=inbound_id, tab="campaign"):
-                mirror_budget(sheets=port, row=row, kill_switch=False)
-                complete_sheets_mirror(store=store, inbound_id=inbound_id, tab="campaign")
-        db.commit()
-        assert port.budget_upserts == 1
-        assert claim_sheets_mirror(store=store, inbound_id=inbound_id, tab="campaign") is False
     finally:
         db.close()
 

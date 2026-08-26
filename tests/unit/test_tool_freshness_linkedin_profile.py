@@ -14,7 +14,6 @@ from app.integrations.linkedin import (
     LinkedInProfile,
     enrich_linkedin_ack,
 )
-from app.integrations.linkedin_analytics import DisabledLinkedInAnalyticsPort
 from app.integrations.research import DisabledResearchPort
 from app.integrations.sheets import FakeSheetsPort
 
@@ -116,7 +115,6 @@ async def test_inbound_linkedin_profile_freshness_persisted() -> None:
             owner_ids={OWNER_FRESH_LI_PROFILE_PHONE},
             sheets=FakeSheetsPort(),
             linkedin=FakeLinkedInPort(SAMPLE_PROFILE),
-            linkedin_analytics=DisabledLinkedInAnalyticsPort(),
             research=DisabledResearchPort(),
         )
         db.commit()

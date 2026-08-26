@@ -40,7 +40,6 @@ COMPOSIO_CONNECTED_ACCOUNTS_URL = "https://backend.composio.dev/api/v3.1/connect
 # Zero-argument discovery actions, one per toolkit.
 GSC_LIST_SITES_TOOL = "GOOGLE_SEARCH_CONSOLE_LIST_SITES"
 GA4_LIST_ACCOUNT_SUMMARIES_TOOL = "GOOGLE_ANALYTICS_LIST_ACCOUNT_SUMMARIES"
-METAADS_GET_AD_ACCOUNTS_TOOL = "METAADS_GET_AD_ACCOUNTS"
 
 _TIMEOUT = 20.0
 _MAX_SCAN_DEPTH = 6
@@ -49,8 +48,6 @@ _MAX_CANDIDATES = 25
 # GA4 property resource names look like "properties/123456789".
 _GA4_PROPERTY_RE = re.compile(r"^properties/(\d{4,})$")
 _GA4_BARE_ID_RE = re.compile(r"^\d{6,}$")
-# Meta returns both "act_123..." (id) and "123..." (account_id).
-_META_ACT_RE = re.compile(r"^act_(\d{5,})$")
 # Search Console accepts URL-prefix and domain properties.
 _SITE_RE = re.compile(r"^(https?://\S+|sc-domain:\S+)$")
 # Composio toolkit/tool versions are YYYYMMDD_NN.
@@ -180,20 +177,6 @@ def extract_ga4_properties(payload: Any) -> tuple[str, ...]:
         elif _GA4_BARE_ID_RE.match(cleaned):
             properties.append(cleaned)
     return _dedupe(properties)
-
-
-def extract_meta_ad_accounts(payload: Any) -> tuple[str, ...]:
-    """Meta ad account ids, returned bare so the caller can format them as it needs."""
-    values = _scan_strings(payload)
-    accounts: list[str] = []
-    for value in values:
-        cleaned = value.strip()
-        match = _META_ACT_RE.match(cleaned)
-        if match:
-            accounts.append(match.group(1))
-        elif cleaned.isdigit() and len(cleaned) >= 8:
-            accounts.append(cleaned)
-    return _dedupe(accounts)
 
 
 def choose_site(candidates: tuple[str, ...], *, website_url: str) -> str:
@@ -352,13 +335,6 @@ class ComposioDiscovery:
     def ga4_property(self) -> DiscoveryResult:
         return self._resolve(
             GA4_LIST_ACCOUNT_SUMMARIES_TOOL, "", extract_ga4_properties
-        )
-
-    def meta_ad_account(self) -> DiscoveryResult:
-        return self._resolve(
-            METAADS_GET_AD_ACCOUNTS_TOOL,
-            "",
-            extract_meta_ad_accounts,
         )
 
     def connected_toolkits(self) -> tuple[str, ...]:

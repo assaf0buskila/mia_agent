@@ -57,10 +57,10 @@ class Settings(BaseSettings):
     composio_api_key: str = Field(default="")
     composio_user_id: str = Field(default="")
     composio_webhook_secret: str = Field(default="")
-    # Ask Composio for resource ids (GSC site, GA4 property, Meta ad account) when the
-    # matching env var is blank. Default false: ports are built per request, so this adds
-    # one network call per process on first use. Verify with
-    # `scripts/probe_composio_discovery.py`, then turn it on.
+    # Ask Composio for resource ids (GSC site, GA4 property) when the matching env var is
+    # blank. Default false: ports are built per request, so this adds one network call per
+    # process on first use. Verify with `scripts/probe_composio_discovery.py`, then turn
+    # it on.
     composio_discovery: bool = False
     openai_api_key: str = Field(default="")
     openai_transcribe_model: str = Field(default="gpt-transcribe")
@@ -102,7 +102,6 @@ class Settings(BaseSettings):
     whatsapp_phone_number_id: str = Field(default="")
     whatsapp_graph_version: str = Field(default="v25.0")
     whatsapp_click_to_chat: str = Field(default="")
-    whatsapp_sender: str = Field(default="direct")
     whatsapp_require_business_scope: bool = True
     whatsapp_handoff_send: bool = False
 
@@ -120,16 +119,8 @@ class Settings(BaseSettings):
 
     calendar_timezone: str = Field(default="Asia/Jerusalem")
     sheets_spreadsheet_id: str = Field(default="")
-    meta_ads_account_id: str = Field(default="")
-    campaign_monthly_budget: str = Field(default="")
-    campaign_name: str = Field(default="")
-    campaign_launch_date: str = Field(default="")
-    campaign_objective: str = Field(default="")
-    campaign_lead_path: str = Field(default="")
-    campaign_e2e_tested: str = Field(default="")
     firecrawl_api_key: str = Field(default="")
     apify_token: str = Field(default="")
-    linkedin_access_token: str = Field(default="")
     gsc_site_url: str = Field(default="")
     ga4_property_id: str = Field(default="")
 
@@ -216,23 +207,16 @@ class Settings(BaseSettings):
         return bool(self.whatsapp_owner_phone_set())
 
     def whatsapp_provider_label(self) -> str:
-        """Outbound owner only. Inbound is always Meta (ADR-016). Never secrets."""
-        sender = self.whatsapp_sender.strip().lower()
-        if sender == "composio":
-            return "composio"
+        """Outbound is Meta Graph only. Inbound is always Meta. Never secrets."""
         return "meta"
 
     def whatsapp_connected_ready(self) -> bool:
-        """True when the chosen outbound auth pool is present. Not ingest."""
-        if self.whatsapp_provider_label() == "composio":
-            return self.composio_ready()
+        """True when Graph outbound auth is present. Not ingest."""
         return bool(self.whatsapp_access_token.strip())
 
     def whatsapp_send_ready(self) -> bool:
-        """True when the chosen outbound port would not be Disabled."""
+        """True when the Graph outbound port would not be Disabled."""
         phone = self.whatsapp_phone_number_id.strip()
-        if self.whatsapp_provider_label() == "composio":
-            return bool(self.composio_ready() and phone)
         return bool(self.whatsapp_access_token.strip() and phone)
 
     def telegram_owner_user_id_set(self) -> set[str]:

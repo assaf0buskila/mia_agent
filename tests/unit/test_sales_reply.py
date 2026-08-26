@@ -707,6 +707,20 @@ def test_protocol_module_shape() -> None:
     assert OpenAISalesReplyPort.__name__ == "OpenAISalesReplyPort"
 
 
+def test_sales_user_content_includes_prospect_tone() -> None:
+    from app.integrations.sales_reply import ReplyContext
+
+    content = build_user_content(
+        action=NextAction.HANDLE_OBJECTION,
+        canned="מה בדיוק נראה יקר?",
+        latest_message="זה יקר מדי",
+        channel="website",
+        context=ReplyContext(emotional_cues=("frustrated",)),
+    )
+    assert "PROSPECT TONE" in content
+    assert "frustrated" in content
+
+
 def test_sales_reply_prompt_requires_mixed_gender_hebrew() -> None:
     from app.integrations.sales_reply import _SYSTEM_PROMPT
 

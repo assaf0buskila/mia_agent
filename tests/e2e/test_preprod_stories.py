@@ -489,13 +489,9 @@ def test_story_campaign_change_write_stays_gated() -> None:
     assert named_write_may_auto(enabled=True, risk=RiskLevel.R4_FINANCIAL_MARKETING) is False
     assert write_flag_enabled(settings, "meta_write") is False
 
-    insights = preloaded_tool("METAADS_GET_INSIGHTS")
-    assert insights is not None
-    assert insights.write is False
-
     for name in PRELOADED_TOOL_NAMES:
         upper = name.upper()
-        if name in {"INSTAGRAM_SEND_TEXT_MESSAGE", "WHATSAPP_SEND_MESSAGE"}:
+        if name == "INSTAGRAM_SEND_TEXT_MESSAGE":
             continue
         assert "SEND" not in upper
         assert "PAUSE" not in upper
@@ -503,8 +499,6 @@ def test_story_campaign_change_write_stays_gated() -> None:
     assert preloaded_tool("GOOGLECALENDAR_DELETE") is None
     assert preloaded_tool("INSTAGRAM_SEND_TEXT_MESSAGE") is not None
     assert preloaded_tool("INSTAGRAM_SEND_TEXT_MESSAGE").write is True
-    assert preloaded_tool("WHATSAPP_SEND_MESSAGE") is not None
-    assert preloaded_tool("WHATSAPP_SEND_MESSAGE").write is True
     assert preloaded_tool("WHATSAPP_SEND_TEMPLATE_MESSAGE") is None
 
     init_db()
@@ -830,63 +824,5 @@ async def test_story_owner_research_snippets_are_data() -> None:
         assert payload["tool"] == "research_search"
         assert "http" not in json.dumps(payload).lower()
         assert "ignore" not in json.dumps(payload).lower()
-    finally:
-        db.close()
-
-
-@pytest.mark.asyncio
-async def test_story_campaign_analysis_read_no_meta_write() -> None:
-    init_db()
-    db = get_session_factory()()
-    try:
-        from app.integrations.meta_ads import CampaignInsights, FakeMetaAdsPort
-
-        store = LeadStore(db)
-        port = RecordingMessagePort()
-        owner = "972509997902"
-        await process_inbound_texts(
-            provider="whatsapp",
-            channel=Channel.WHATSAPP,
-            items=[
-                {
-                    "id": "wamid.e2e.campaign.1",
-                    "from": owner,
-                    "text": "how's the campaign spend",
-                }
-            ],
-            store=store,
-            port=port,
-            kill_switch=False,
-            owner_ids={owner},
-            sheets=FakeSheetsPort(),
-            meta_ads=FakeMetaAdsPort(
-                CampaignInsights(spend="100", clicks="5", impressions="1000"),
-                previous_snapshot=CampaignInsights(
-                    spend="100", clicks="5", impressions="1000"
-                ),
-            ),
-        )
-        db.commit()
-        task = store.get_owner_task(
-            provider="whatsapp", provider_event_id="wamid.e2e.campaign.1"
-        )
-        assert task is not None
-        assert task.task_type == "analytics"
-        sent = port.sent[0].text
-        assert sent
-        # Account-level `meta:campaign:recommendation` is first-write-wins.
-        # Use WATCH metrics only — INVESTIGATE anomalies contain "spend" and
-        # poison later `test_apply_persists_row_and_event_payload_keys_only`.
-        rec = store.get_canonical_event(
-            provider="meta",
-            provider_event_id="meta:campaign:recommendation",
-        )
-        if rec is not None:
-            payload = json.loads(rec.payload_json)
-            assert "pause" not in json.dumps(payload).lower()
-        insights_pin = preloaded_tool("METAADS_GET_INSIGHTS")
-        assert insights_pin is not None
-        assert insights_pin.write is False
-        assert preloaded_tool("METAADS_UPDATE_CAMPAIGN") is None
     finally:
         db.close()

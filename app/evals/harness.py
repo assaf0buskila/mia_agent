@@ -4,22 +4,6 @@ from pathlib import Path
 
 from pydantic import BaseModel, field_validator
 
-from app.domain.campaigns import (
-    ANOMALY_CPL_SPIKE,
-    ANOMALY_CREATIVE_FATIGUE,
-    ANOMALY_INCOMPLETE,
-    ANOMALY_NONE,
-    ANOMALY_SPEND_UP_CLICKS_DOWN,
-    ANOMALY_SPEND_UP_CLICKS_DOWN_30D,
-    ANOMALY_SPEND_WITHOUT_CLICKS,
-    ANOMALY_SPEND_WITHOUT_LEADS,
-    ANOMALY_WEBSITE_FUNNEL_DROP,
-    KIND_INVESTIGATE,
-    KIND_UNCERTAIN,
-    KIND_WATCH,
-    analyze_insights,
-    format_recommendation_line,
-)
 from app.domain.extract import extract_sales_signals
 from app.domain.followup_voice import compose_follow_up_draft
 from app.domain.humanity import lint_customer_reply
@@ -47,7 +31,6 @@ EXTRACT_DATASET_VERSION = "extract_v1"
 ROUTING_DATASET_VERSION = "routing_v1"
 OBJECTION_DATASET_VERSION = "objection_v1"
 CALENDAR_DATASET_VERSION = "calendar_v1"
-CAMPAIGN_DATASET_VERSION = "campaign_v1"
 SAFETY_DATASET_VERSION = "safety_v1"
 GOLD_DATASET_VERSION = "mia_sales_gold"
 _DATASETS_DIR = Path(__file__).resolve().parent / "datasets"
@@ -59,22 +42,9 @@ _EXTRACT_DATASET_PATH = _DATASETS_DIR / f"{EXTRACT_DATASET_VERSION}.json"
 _ROUTING_DATASET_PATH = _DATASETS_DIR / f"{ROUTING_DATASET_VERSION}.json"
 _OBJECTION_DATASET_PATH = _DATASETS_DIR / f"{OBJECTION_DATASET_VERSION}.json"
 _CALENDAR_DATASET_PATH = _DATASETS_DIR / f"{CALENDAR_DATASET_VERSION}.json"
-_CAMPAIGN_DATASET_PATH = _DATASETS_DIR / f"{CAMPAIGN_DATASET_VERSION}.json"
 _SAFETY_DATASET_PATH = _DATASETS_DIR / f"{SAFETY_DATASET_VERSION}.json"
 _GOLD_DATASET_PATH = _DATASETS_DIR / f"{GOLD_DATASET_VERSION}.jsonl"
 _VALID_SAFETY_KINDS = frozenset({"sales", "snippet"})
-_VALID_CAMPAIGN_KINDS = frozenset({KIND_WATCH, KIND_INVESTIGATE, KIND_UNCERTAIN})
-_VALID_CAMPAIGN_ANOMALIES = frozenset({
-    ANOMALY_NONE,
-    ANOMALY_SPEND_WITHOUT_CLICKS,
-    ANOMALY_INCOMPLETE,
-    ANOMALY_SPEND_UP_CLICKS_DOWN,
-    ANOMALY_SPEND_UP_CLICKS_DOWN_30D,
-    ANOMALY_SPEND_WITHOUT_LEADS,
-    ANOMALY_CPL_SPIKE,
-    ANOMALY_CREATIVE_FATIGUE,
-    ANOMALY_WEBSITE_FUNNEL_DROP,
-})
 _WORKFLOW_ASK_SUBSTRING = "יום רגיל בעסק"
 _PITCH_ACTIONS = frozenset({"offer_hypothesis", "offer_meeting", "qualify"})
 _ROI_FORBIDDEN_SUBSTRINGS = ("%", "ROI", "החזר השקעה", "₪")
@@ -198,30 +168,6 @@ class ObjectionCase(BaseModel):
 class CalendarGap(BaseModel):
     start: str
     end: str
-
-
-class CampaignCase(BaseModel):
-    case_id: str
-    insights: dict
-    expected_kind: str
-    expected_anomaly: str
-    expected_line_contains: str
-
-    @field_validator("expected_kind")
-    @classmethod
-    def expected_kind_must_be_valid(cls, value: str) -> str:
-        if value not in _VALID_CAMPAIGN_KINDS:
-            raise ValueError(f"expected_kind must be one of {sorted(_VALID_CAMPAIGN_KINDS)}")
-        return value
-
-    @field_validator("expected_anomaly")
-    @classmethod
-    def expected_anomaly_must_be_valid(cls, value: str) -> str:
-        if value not in _VALID_CAMPAIGN_ANOMALIES:
-            raise ValueError(
-                f"expected_anomaly must be one of {sorted(_VALID_CAMPAIGN_ANOMALIES)}"
-            )
-        return value
 
 
 class CalendarCase(BaseModel):
@@ -466,11 +412,6 @@ def load_objection_dataset() -> list[ObjectionCase]:
 def load_calendar_dataset() -> list[CalendarCase]:
     raw = json.loads(_CALENDAR_DATASET_PATH.read_text(encoding="utf-8"))
     return [CalendarCase.model_validate(item) for item in raw]
-
-
-def load_campaign_dataset() -> list[CampaignCase]:
-    raw = json.loads(_CAMPAIGN_DATASET_PATH.read_text(encoding="utf-8"))
-    return [CampaignCase.model_validate(item) for item in raw]
 
 
 def load_safety_dataset() -> list[SafetyCase]:
@@ -863,51 +804,6 @@ def run_objection_eval(cases: list[ObjectionCase] | None = None) -> EvalReport:
 
     return EvalReport(
         dataset_version=OBJECTION_DATASET_VERSION,
-        passed=passed,
-        failed=failed,
-        results=results,
-        quality=None,
-    )
-
-
-def _campaign_action_label(kind: str, anomaly: str) -> str:
-    return f"{kind}/{anomaly}"
-
-
-def run_campaign_eval(cases: list[CampaignCase] | None = None) -> EvalReport:
-    """Isolated campaign insight replay via analyze_insights + format line. No DB or ports."""
-    eval_cases = cases if cases is not None else load_campaign_dataset()
-    results: list[CaseResult] = []
-    passed = 0
-    failed = 0
-
-    for case in eval_cases:
-        rec = analyze_insights(**case.insights)
-        line = format_recommendation_line(rec)
-        expected_action = _campaign_action_label(case.expected_kind, case.expected_anomaly)
-        actual_action = _campaign_action_label(rec.kind, rec.anomaly)
-        kind_ok = rec.kind == case.expected_kind
-        anomaly_ok = rec.anomaly == case.expected_anomaly
-        line_ok = case.expected_line_contains in line
-        case_passed = kind_ok and anomaly_ok and line_ok
-
-        if case_passed:
-            passed += 1
-        else:
-            failed += 1
-
-        results.append(
-            CaseResult(
-                case_id=case.case_id,
-                passed=case_passed,
-                expected_action=expected_action,
-                actual_action=actual_action,
-                reply=line,
-            )
-        )
-
-    return EvalReport(
-        dataset_version=CAMPAIGN_DATASET_VERSION,
         passed=passed,
         failed=failed,
         results=results,

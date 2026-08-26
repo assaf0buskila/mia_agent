@@ -131,7 +131,6 @@ from app.domain.memory import (
     clip_turn_text,
     normalize_turn_role,
 )
-from app.domain.prelaunch import ALLOWLISTED_CHECK_IDS
 from app.domain.reconciliation import is_stale_received
 from app.domain.sales import (
     MAX_ASKED_ACTIONS,
@@ -148,6 +147,18 @@ from app.integrations.transcribe import (
     sanitize_language,
     sanitize_stt_model,
     sanitize_stt_provider,
+)
+
+_ALLOWLISTED_PRELAUNCH_CHECK_IDS = frozenset(
+    {
+        "tracking_utms",
+        "source_attribution",
+        "lead_capture",
+        "sheet_tabs",
+        "alert_thresholds",
+        "e2e_test",
+        "campaign_config",
+    }
 )
 
 PACING_EVENT_TYPES = frozenset({"lead_created", "meeting_offered", "deal_updated"})
@@ -976,7 +987,7 @@ class LeadStore:
             return
         if failed_checks:
             for part in failed_checks.split(","):
-                if part and part not in ALLOWLISTED_CHECK_IDS:
+                if part and part not in _ALLOWLISTED_PRELAUNCH_CHECK_IDS:
                     return
         row = self.get_campaign_prelaunch(scope)
         if row is None:
