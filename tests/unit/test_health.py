@@ -211,6 +211,7 @@ def test_health_is_alive() -> None:
     assert "MIA_SHEETS_SPREADSHEET_ID" in integrations["missing"]
     assert "MIA_META_ADS_ACCOUNT_ID" in integrations["missing"]
     assert "MIA_FIRECRAWL_API_KEY" in integrations["missing"]
+    assert "MIA_APIFY_API_TOKEN" in integrations["missing"]
 
 
 def test_owner_integrations_discovery_off_lists_ids_honestly() -> None:
@@ -236,6 +237,7 @@ def test_owner_integrations_discovery_off_lists_ids_honestly() -> None:
     assert integrations["research_firecrawl"] is False
     assert integrations["missing"] == [
         "MIA_FIRECRAWL_API_KEY",
+        "MIA_APIFY_API_TOKEN",
         "MIA_SHEETS_SPREADSHEET_ID",
         "MIA_LINKEDIN_ACCESS_TOKEN",
         "MIA_GSC_SITE_URL",
@@ -267,9 +269,24 @@ def test_owner_integrations_discovery_on_drops_listable_ids() -> None:
     assert "MIA_META_ADS_ACCOUNT_ID" not in integrations["missing"]
     assert integrations["missing"] == [
         "MIA_FIRECRAWL_API_KEY",
+        "MIA_APIFY_API_TOKEN",
         "MIA_SHEETS_SPREADSHEET_ID",
         "MIA_LINKEDIN_ACCESS_TOKEN",
     ]
+
+
+def test_owner_integrations_gmail_send_and_apify_follow_settings() -> None:
+    settings = Settings(
+        _env_file=None,
+        gmail_send=True,
+        apify_api_token="token",
+        firecrawl_api_key="",
+    )
+    integrations = owner_integrations(settings)
+    assert integrations["gmail_send"] is True
+    assert integrations["research_apify"] is True
+    assert integrations["research_firecrawl"] is False
+    assert "MIA_APIFY_API_TOKEN" not in integrations["missing"]
 
 
 def test_openapi_surface_prod_hides_docs() -> None:

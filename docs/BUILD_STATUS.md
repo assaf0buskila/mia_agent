@@ -1,7 +1,15 @@
 # BUILD_STATUS
 
 **Last updated:** 2026-08-25  
-**Region:** eu-north-1 (ADR-019). Live host `https://mia.assafweb.com`. Live image **mia:20** (task `mia:22`). ADR-031 owner phrasing. Rollback: image `mia:19` / task `mia:21`, or blank `MIA_OWNER_AGENT_MODEL`.
+**Region:** eu-north-1 (ADR-019). Live host `https://mia.assafweb.com`. Live image **mia:20** (task `mia:22`). ADR-033 in code on this branch: Gmail send env true after Approve, Apify research fallback, ManyChat out. WhatsApp prospect send stays false.
+
+## ADR-033 (2026-08-25) — Gmail send / Apify / ManyChat out
+
+Code on `claude/mia-product-feedback-0bfc90`. Production Gmail send needs ECS `MIA_GMAIL_SEND=true` (already in `deploy/ecs-task-definition.example.json`). Apify needs `MIA_APIFY_API_TOKEN` in Secrets Manager `mia/prod` plus a new image. Approve still required before any send. Kill switch / demo still block. WhatsApp handoff send stays false.
+
+Tests keep Settings `gmail_send` default **false**. `GET /health` `owner_integrations.gmail_send` follows env. `research_apify` is true when the token is set.
+
+Do not enable: WhatsApp prospect send, Meta writes, IG auto-reply, TTS, Lambda, ManyChat remount.
 
 ## Alive (v1)
 
@@ -17,15 +25,15 @@ Gmail inbox/search/read now render absolute + relative dates, so time-scoped mai
 
 An unclassified `NOTE` whose agent turn failed now answers `הבדיקה לא עברה כרגע. תנסה שוב.` instead of the classifier's "could not classify" line. Other task types keep their real computed fallback byte for byte. `log_owner_agent` gained `steps=`, `failed=`, `completion=`.
 
-Suite: `uv run ruff check app tests scripts` clean, `uv run pytest` **2437 passed**. Writes unchanged — approvals, drafts, takeover, scope and preference stay off the model; `MIA_GMAIL_SEND` stays false.
+Suite: `uv run ruff check app tests scripts` clean, `uv run pytest` **2437 passed**. Writes: approvals, drafts, takeover, scope and preference stay off the model; `MIA_GMAIL_SEND` is env-true in production after Approve (ADR-033).
 
 ## Owner console (ADR-030, 2026-08-24)
 
 Shipped on image **mia:20**, task **mia:22** (ADR-031 on top of ADR-030). Digest `sha256:ee4fab125c515ac1a6a8001b44b33400e1678817b2bf3cd54529054974beb25d`. Live `/health`: `status=ok`, `kill_switch=false`, `gmail_inbox=alive`, `owner_integrations.gmail_send=false`.
 
-Greetings are `היי אסף, אני כאן.` — no daily/funnel/engine dump. Unmatched Telegram text, including three-word requests like `תבדקי את המייל`, stays a `NOTE` for `owner_agent_v2` (ADR-031). Inbox tools: `gmail_inbox` / `gmail_search` / `gmail_read` (bodies are data). Send is draft + Approve; `MIA_GMAIL_SEND` stays false. `find_leads` matches stated name, headline, or full lead id.
+Greetings are `היי אסף, אני כאן.` — no daily/funnel/engine dump. Unmatched Telegram text, including three-word requests like `תבדקי את המייל`, stays a `NOTE` for `owner_agent_v2` (ADR-031). Inbox tools: `gmail_inbox` / `gmail_search` / `gmail_read` (bodies are data). Send is draft + Approve; live mia:20 still has `gmail_send=false`. ADR-033 turns production env true on the next image. `find_leads` matches stated name, headline, or full lead id.
 
-Telegram owner agent pinned reads now also include `gmail_inbox`, `gmail_search`, `gmail_read`, `find_leads`. Writes stay on the Python path. Do not enable Gmail send, WhatsApp send, Meta writes, IG auto-reply, TTS, Apify, Lambda, ManyChat.
+Telegram owner agent pinned reads now also include `gmail_inbox`, `gmail_search`, `gmail_read`, `find_leads`. Writes stay on the Python path. Do not enable WhatsApp prospect send, Meta writes, IG auto-reply, TTS, Lambda, ManyChat remount.
 
 ## Brain live (2026-08-24)
 
@@ -43,7 +51,7 @@ Live widget on `https://www.assafweb.com/` (23 Aug, Cursor browser — this repo
 
 Verified: `uv run pytest tests/unit/test_owner_live_tools.py tests/unit/test_health.py tests/unit/test_brain_agent.py` **29 passed**.
 
-Do not enable: WhatsApp send, Gmail send, Meta writes, IG auto-reply, TTS, Apify, Lambda, ManyChat.
+Do not enable: WhatsApp prospect send, Meta writes, IG auto-reply, TTS, Lambda, ManyChat remount.
 
 ## Website voice input (2026-08-23)
 
@@ -59,7 +67,7 @@ Verified: `uv run pytest` **1914 passed**. `uv run ruff check app tests` **all c
 
 ## Do not enable
 
-Gmail send, Instagram prospect send (`MIA_AUTO_REPLY_INSTAGRAM`), Meta writes, instruction activation, R5. No unused env knobs for follow-up send, browser crawl, or tool discovery.
+WhatsApp prospect send (`MIA_WHATSAPP_HANDOFF_SEND`), Instagram prospect send (`MIA_AUTO_REPLY_INSTAGRAM`), Meta writes, instruction activation, R5. Gmail send is approval-gated and env-true in production (ADR-033). No unused env knobs for follow-up send, browser crawl, or tool discovery.
 
 ## This slice (2026-08-23)
 

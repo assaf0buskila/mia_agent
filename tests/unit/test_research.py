@@ -14,6 +14,7 @@ from app.domain.tools import AdapterHttpError
 from app.integrations.base import RecordingMessagePort
 from app.integrations.meta_ads import DisabledMetaAdsPort
 from app.integrations.research import (
+    ApifySearchPort,
     DisabledResearchPort,
     FakeResearchPort,
     FirecrawlSearchPort,
@@ -322,6 +323,7 @@ def test_protocol_has_no_write_or_crawl_methods() -> None:
         DisabledResearchPort(),
         FakeResearchPort(SAMPLE_SNIPPETS),
         FirecrawlSearchPort(api_key="fc-test-key"),
+        ApifySearchPort(api_token="apify-test-token"),
     ):
         for name in dir(impl):
             if name.startswith("_"):
@@ -335,6 +337,18 @@ def test_build_research_port_firecrawl_when_key_set() -> None:
     port = build_research_port(settings)
     assert isinstance(port, FirecrawlSearchPort)
     assert not isinstance(port, DisabledResearchPort)
+
+
+def test_build_research_port_apify_when_only_apify_set() -> None:
+    settings = Settings(firecrawl_api_key="", apify_api_token="apify-live-token")
+    port = build_research_port(settings)
+    assert isinstance(port, ApifySearchPort)
+
+
+def test_build_research_port_prefers_firecrawl_when_both_set() -> None:
+    settings = Settings(firecrawl_api_key="fc-live-key", apify_api_token="apify-live-token")
+    port = build_research_port(settings)
+    assert isinstance(port, FirecrawlSearchPort)
 
 
 def test_build_research_port_disabled_when_key_empty() -> None:
@@ -516,3 +530,82 @@ def test_firecrawl_port_empty_query_skips_http() -> None:
     port = FirecrawlSearchPort(api_key="fc-test", client=client)
     assert port.search("   ") == []
     assert called is False
+
+
+def test_apify_port_maps_organic_results() -> None:
+    transport = httpx.MockTransport(
+        lambda _request: httpx.Response(
+            200,
+            json=[
+                {
+                    "organicResults": [
+                        {
+                            "title": "Acme",
+                            "url": "https://www.acme.com/about",
+                            "description": "Widgets",
+                        },
+                        {
+                            "title": "Guide",
+                            "link": "https://docs.example.com/guide",
+                            "snippet": "How it works",
+                        },
+                    ]
+                }
+            ],
+        )
+    )
+    client = httpx.Client(transport=transport)
+    port = ApifySearchPort(api_token="apify-test", client=client)
+    snippets = port.search("acme competitor research")
+    assert len(snippets) == 2
+    assert snippets[0].title == "Acme"
+    assert snippets[0].url == "https://www.acme.com/about"
+    assert snippets[0].excerpt == "Widgets"
+    assert snippets[1].title == "Guide"
+    assert snippets[1].url == "https://docs.example.com/guide"
+    assert snippets[1].excerpt == "How it works"
+
+
+def test_apify_port_request_hits_pinned_actor() -> None:
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["json"] = json.loads(request.content)
+        captured["auth"] = request.headers.get("authorization")
+        return httpx.Response(200, json=[])
+
+    transport = httpx.MockTransport(handler)
+    client = httpx.Client(transport=transport)
+    port = ApifySearchPort(api_token="apify-test", client=client)
+    port.search("  competitor research on Acme  ")
+    url = str(captured["url"])
+    assert "/v2/acts/apify~google-search-scraper/run-sync-get-dataset-items" in url
+    assert "/v2/actors/" not in url
+    assert "maxTotalChargeUsd=0.02" in url
+    assert "timeout=60" in url
+    body = captured["json"]
+    assert isinstance(body, dict)
+    assert body["queries"] == "competitor research on Acme"
+    assert body["maxPagesPerQuery"] == 1
+    assert body["saveHtml"] is False
+    assert body["saveHtmlToKeyValueStore"] is False
+    assert body["focusOnPaidAds"] is False
+    assert body["maximumLeadsEnrichmentRecords"] == 0
+    assert captured["auth"] == "Bearer apify-test"
+
+
+def test_apify_port_http_401_unauthorized_ack_unchanged() -> None:
+    transport = httpx.MockTransport(lambda _request: httpx.Response(401))
+    client = httpx.Client(transport=transport)
+    port = ApifySearchPort(api_token="apify-test", client=client)
+    decision = classify_owner_task("Do competitor research on Acme")
+    ack = ack_for_owner_task(decision)
+    enriched, outcome = enrich_research_ack(
+        ack,
+        port,
+        query="Do competitor research on Acme",
+        kill_switch=False,
+    )
+    assert enriched == ack
+    assert outcome.status == "unauthorized"

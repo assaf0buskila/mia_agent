@@ -194,9 +194,9 @@ CAPABILITIES: tuple[Capability, ...] = (
     ),
     Capability(
         id=CapabilityId.MANYCHAT,
-        prd="ADR-021",
+        prd="ADR-021 / ADR-033",
         status=WiringStatus.SPECIFIED,
-        port="deferred",
+        port="removed",
     ),
     Capability(
         id=CapabilityId.GMAIL,

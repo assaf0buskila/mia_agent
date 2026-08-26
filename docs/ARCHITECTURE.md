@@ -36,8 +36,8 @@ Personal WhatsApp stays human-only. Hot `HANDOFF` stops selling, notifies Telegr
 | Instagram insights | Graph default; Composio when sender=`composio` |
 | Gmail / Calendar / Sheets / Meta ads read / LinkedIn profile / GSC / GA4 | Composio |
 | LinkedIn member analytics | Direct REST + `MIA_LINKEDIN_ACCESS_TOKEN` (ADR-009). Composio has org share-stats only. |
-| Research | Firecrawl |
-| ManyChat | Not mounted in v1 |
+| Research | Firecrawl, else pinned Apify search (ADR-033) |
+| ManyChat | Out. Not mounted |
 
 ## Safety
 
@@ -45,7 +45,7 @@ Personal WhatsApp stays human-only. Hot `HANDOFF` stops selling, notifies Telegr
 - No tool write before risk policy (`app/core/risk.py`).
 - Approval: Meta writes, irreversible actions, quotes outside rules.
 - Kill switch: `MIA_KILL_SWITCH`. Conversation kill and human takeover are separate (see `docs/RUNBOOK.md`).
-- Production live test `MIA_AUTOMATION_MODE=auto_approved` (ADR-022). Verified WhatsApp handoff may send. Instagram prospect send stays off unless `MIA_AUTO_REPLY_INSTAGRAM`.
+- Production live test `MIA_AUTOMATION_MODE=auto_approved` (ADR-022). WhatsApp prospect send stays off (`MIA_WHATSAPP_HANDOFF_SEND=false`) until a later ADR. Instagram prospect send stays off unless `MIA_AUTO_REPLY_INSTAGRAM`.
 
 ## AWS (ADR-014, ADR-019)
 

@@ -19,7 +19,7 @@ def test_secret_example_keys_match_ecs_injection() -> None:
     assert example["MIA_OPENAI_API_KEY"] == ""
     assert "sslmode=verify-full" in example["MIA_DATABASE_URL"]
     assert "rds-global-bundle.pem" in example["MIA_DATABASE_URL"]
-    assert "MIA_APIFY" not in example
+    assert "MIA_APIFY_API_TOKEN" in example
     assert "MIA_LINKEDIN_ACCESS_TOKEN" in example
 
 
@@ -37,7 +37,7 @@ def test_env_example_documents_settings_and_adapter_map() -> None:
     assert "MIA_INSTAGRAM_SENDER=composio" not in text
     assert "MIA_WHATSAPP_SENDER=composio" in text
     assert "MIA_WHATSAPP_SENDER=direct" not in text
-    assert "MIA_APIFY" not in text
+    assert "MIA_APIFY_API_TOKEN=" in text
     assert "ADR-015" in text
     assert not (ROOT / "deploy/Caddyfile").exists()
     assert not (ROOT / "deploy/mia.service").exists()

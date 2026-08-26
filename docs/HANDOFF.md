@@ -10,7 +10,7 @@ Production keys: AWS Secrets Manager `mia/prod`.
 
 Live Fargate is **mia:20** (task `mia:22`). ADR-031 phrasing fix is on. Digest match
 `sha256:ee4fab125c515ac1a6a8001b44b33400e1678817b2bf3cd54529054974beb25d`. Owner agent
-`gpt-5.6-luna`, fallback `gpt-5.6-terra`. Meeting-first on. `MIA_GMAIL_SEND=false`.
+`gpt-5.6-luna`, fallback `gpt-5.6-terra`. Meeting-first on. `MIA_GMAIL_SEND=true` after Approve (ADR-033).
 No new migration. No knowledge re-ingest. Rollback: image `mia:19` / task `mia:21`, or blank
 `MIA_OWNER_AGENT_MODEL`.
 
@@ -18,8 +18,8 @@ No new migration. No knowledge re-ingest. Rollback: image `mia:19` / task `mia:2
 
 Branch `claude/mia-product-feedback-0bfc90` is green and deploy-ready but **has not shipped**.
 Live is still `mia:20` / task `mia:22`. Next image `mia:21`:
-`scripts/deploy_ecs_revision.py --tag 21`, linux/amd64, copy current prod env, no migration,
-no knowledge re-ingest. Do not enable Gmail send.
+`scripts/deploy_ecs_revision.py --tag 21 --env MIA_GMAIL_SEND=true`, linux/amd64, copy current prod env, no migration,
+no knowledge re-ingest. Put `MIA_APIFY_API_TOKEN` in `mia/prod` before that image. WhatsApp handoff send stays false.
 
 `owner_agent_v3`: no trigger-keyword dictionary, 8-step loop with a call ceiling and
 duplicate/empty guards, Gmail dates, read-only `calendar_agenda`, deterministic Gmail query
@@ -59,6 +59,6 @@ lead-by-name shipped on **mia:19**. Analysis of the earlier silent classifier fa
 
 1. Assaf live-tests Telegram: `היי מיה`, `תבדקי את המייל`, a name/headline lookup.
 2. WhatsApp remains deferred — needs a dedicated number and proven Cloud API inbound.
-3. Do not enable Gmail send, WhatsApp send, Meta writes, IG auto-reply, TTS, or dump the Composio catalog.
+3. Do not enable WhatsApp prospect send, Meta writes, IG auto-reply, TTS, or dump the Composio catalog. ManyChat stays unmounted.
 
 Historical slice notes: `docs/archive/HANDOFF.md`.

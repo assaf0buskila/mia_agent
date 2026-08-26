@@ -24,7 +24,7 @@
         { "name": "MIA_KILL_SWITCH", "value": "false" },
         { "name": "MIA_AUTOMATION_MODE", "value": "auto_approved" },
         { "name": "MIA_CALENDAR_WRITE", "value": "true" },
-        { "name": "MIA_GMAIL_SEND", "value": "false" },
+        { "name": "MIA_GMAIL_SEND", "value": "true" },
         { "name": "MIA_META_WRITE", "value": "false" },
         { "name": "MIA_AUTO_REPLY_INSTAGRAM", "value": "false" },
         { "name": "MIA_WEBSITE_URL", "value": "https://www.assafweb.com" },
@@ -162,6 +162,10 @@
         {
           "name": "MIA_FIRECRAWL_API_KEY",
           "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mia/prod:MIA_FIRECRAWL_API_KEY::"
+        },
+        {
+          "name": "MIA_APIFY_API_TOKEN",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT_ID:secret:mia/prod:MIA_APIFY_API_TOKEN::"
         },
         {
           "name": "MIA_TELEGRAM_BOT_TOKEN",

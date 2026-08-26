@@ -36,13 +36,13 @@ Live: 68 capabilities · `kill_switch=false` · `ops.integration_failures=0`.
 | Flag | State | Why |
 |---|---|---|
 | `whatsapp_handoff_send` | false | Assaf handles WhatsApp himself until Cloud API inbound is proven (ADR-024) |
-| `gmail_send` | false | Mia drafts; sending needs approval |
+| `gmail_send` | false on live mia:20; true after ADR-033 deploy | Draft + Approve still required. Tests keep Settings default false |
 | `auto_reply_instagram` | false | Cold IG DM spam is a hard never |
 | `meta_write` | false | R4 approval, not an env knob |
 | `MIA_COMPOSIO_DISCOVERY` | false | Turn on only after the discovery probe passes |
 | TTS / voice output | absent | Hard never |
-| ManyChat | unmounted | Not a v1 channel (ADR-021) |
-| Apify | `research_apify=false` | Adapter does not exist; do not add keys |
+| ManyChat | unmounted | Out (ADR-033). Leftover DB columns / AWS secret wait for Assaf delete list |
+| Apify | `research_apify` follows `MIA_APIFY_API_TOKEN` | Pinned `apify/google-search-scraper` behind `ResearchPort`. Firecrawl first |
 
 ## Unproven — configured but never demonstrated live
 

@@ -121,8 +121,8 @@ def owner_integrations(settings) -> dict[str, object]:
     """Which owner-console reads can actually fire. Never returns secrets.
 
     `ready` is configuration, not a live Composio ping. Assaf still has to keep the
-    matching Composio connected account Active. Apify is intentionally false until a
-    ResearchPort adapter exists.
+    matching Composio connected account Active. Research is Firecrawl first, else
+    the pinned Apify search actor (ADR-033).
     """
     composio = settings.composio_ready()
     discovery = bool(settings.composio_discovery) and composio
@@ -136,6 +136,8 @@ def owner_integrations(settings) -> dict[str, object]:
         missing.extend(["MIA_COMPOSIO_API_KEY", "MIA_COMPOSIO_USER_ID"])
     if not settings.firecrawl_api_key.strip():
         missing.append("MIA_FIRECRAWL_API_KEY")
+    if not settings.apify_api_token.strip():
+        missing.append("MIA_APIFY_API_TOKEN")
     if not sheets_id:
         missing.append("MIA_SHEETS_SPREADSHEET_ID")
     if not linkedin_token:
@@ -161,7 +163,7 @@ def owner_integrations(settings) -> dict[str, object]:
         "search_console": composio and (bool(gsc_site) or discovery),
         "ga4": composio and (bool(ga4_property) or discovery),
         "research_firecrawl": bool(settings.firecrawl_api_key.strip()),
-        "research_apify": False,
+        "research_apify": bool(settings.apify_api_token.strip()),
         "whatsapp_handoff_send": settings.whatsapp_handoff_send,
         "missing": missing,
     }

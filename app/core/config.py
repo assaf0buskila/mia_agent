@@ -130,6 +130,7 @@ class Settings(BaseSettings):
     campaign_lead_path: str = Field(default="")
     campaign_e2e_tested: str = Field(default="")
     firecrawl_api_key: str = Field(default="")
+    apify_api_token: str = Field(default="")
     linkedin_access_token: str = Field(default="")
     gsc_site_url: str = Field(default="")
     ga4_property_id: str = Field(default="")

@@ -50,6 +50,7 @@ Proposed is not accepted. Build may follow a proposed default only when `AGENTS.
 | ADR-030 | Owner Telegram: free conversation, typed Gmail reads, lead by name | accepted |
 | ADR-031 | Owner intent: same agent, no sub-agents | accepted |
 | ADR-032 | Owner reads: wider tool loop, live dates, agenda, deterministic query normalization | accepted |
+| ADR-033 | Gmail send on after Approve; Apify research fallback; ManyChat out; WhatsApp later | accepted |
 
 ## Template
 
@@ -414,14 +415,14 @@ Assaf locked a production supplier map. ADR-007 still forbids dumping catalogs i
 | LinkedIn profile | Composio |
 | LinkedIn personal member post analytics | Direct REST + `MIA_LINKEDIN_ACCESS_TOKEN` (ADR-009). Composio has org share-stats only. |
 | Meta Ads **read** | Composio |
-| Research | Firecrawl now; Apify later behind the same `ResearchPort` |
+| Research | Firecrawl, else pinned Apify search (ADR-033) |
 | ManyChat | Not mounted in v1 (ADR-021). Leftover AWS secret name stays in the box; app ignores it. |
 | Composio WhatsApp toolkit | Send pin `WHATSAPP_SEND_MESSAGE` only when sender=`composio`. No inbound trigger. Template send not wired. |
 
 One Instagram sender per conversation (`direct` or `composio`). Never dual-send Graph + Composio. ManyChat is unmounted (ADR-021).
 
 **Consequences**
-Env/docs/JSON list Meta tokens for WhatsApp and for Instagram **webhook verify**. Composio key+user covers Gmail/Calendar/Sheets/GSC/GA4/LinkedIn profile/Meta ads/future IG send+insights. Member analytics stays Direct REST (ADR-009); Composio has org share-stats only. GSC/GA4/Meta ads resource ids are leftover env, optional only when `MIA_COMPOSIO_DISCOVERY=true` (ADR-027). Sheets id stays explicit. Do not add Apify keys until that adapter exists. Do not rip live Graph IG send until the Composio port is tested.
+Env/docs/JSON list Meta tokens for WhatsApp and for Instagram **webhook verify**. Composio key+user covers Gmail/Calendar/Sheets/GSC/GA4/LinkedIn profile/Meta ads/future IG send+insights. Member analytics stays Direct REST (ADR-009); Composio has org share-stats only. GSC/GA4/Meta ads resource ids are leftover env, optional only when `MIA_COMPOSIO_DISCOVERY=true` (ADR-027). Sheets id stays explicit. Apify keys are allowed only for the pinned search actor (ADR-033). Do not rip live Graph IG send until the Composio port is tested.
 
 **Alternatives considered**
 Composio for WhatsApp or Instagram inbound — rejected; no usable inbound trigger. Composio `LINKEDIN_GET_SHARE_STATS` for personal analytics — rejected; org URN only (ADR-027). Default-everything-Composio including catalogs in the model — rejected (ADR-007). WhatsApp send via Composio is ADR-016.
@@ -716,3 +717,21 @@ Keep **one** owner agent. No sub-agent, no router model, no rewrite model, no se
 
 **Alternatives considered**
 A rephrase sub-agent or query-rewriting model hop — rejected; ADR-031 already rejected it, and a pure function gets the same recall with no latency, no cost and no second untrusted planner. Growing the prompt's keyword list to cover more paraphrases — rejected; that is the bug being removed, in the prompt as much as in Python. Stripping the deterministic read classifiers so every read goes to the agent — rejected for now; they already act as the fallback when the model is unconfigured or down, and removing them would trade a real availability property for tidiness. Pinning a new Composio calendar slug for the agenda read — unnecessary; `GOOGLECALENDAR_EVENTS_LIST` was already pinned for booking conflict checks. Teaching the model Gmail operator syntax in the prompt instead of normalizing in code — rejected; it is deterministic work that does not belong in the untestable layer.
+
+### ADR-033 Gmail send on after Approve; Apify research fallback; ManyChat out; WhatsApp later
+
+- **Status:** accepted
+- **Date:** 2026-08-25
+- **Assaf:** ADOPT (chat: Gmail send true, Apify API added, ManyChat out, WhatsApp stay for later)
+
+**Context**
+Assaf wanted approved Gmail actually to send, Apify as a research supplier, ManyChat gone, and WhatsApp kept but not launched. Catalog dump and prompt-only writes stay forbidden.
+
+**Decision**
+`MIA_GMAIL_SEND=true` in production env. Send still requires a pending draft, Assaf Approve, kill switch off, and R3 `assert_allowed`. Tests keep the Settings default **false**. Research: Firecrawl if keyed, else pinned Apify actor `apify/google-search-scraper` via `MIA_APIFY_API_TOKEN`. The model never receives an actor catalog. ManyChat stays unmounted; capability port is `removed`. WhatsApp code stays; `MIA_WHATSAPP_HANDOFF_SEND` stays false.
+
+**Consequences**
+An approved draft can leave Gmail. Apify is a typed `ResearchPort`, not a tool the model picks by slug. ManyChat leftover DB columns and the unused AWS secret name wait for an explicit delete list. WhatsApp inbound/send adapters remain for a later ADR.
+
+**Alternatives considered**
+Auto-send without Approve — rejected. Dumping Apify actors into the owner agent — rejected (ADR-007). Deleting WhatsApp now — rejected; Assaf said later. Dropping ManyChat identity columns this turn — deferred until Assaf approves the file list.

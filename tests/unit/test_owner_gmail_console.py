@@ -175,6 +175,36 @@ def test_approved_send_stays_off_when_flag_false() -> None:
         session.close()
 
 
+def test_approved_send_runs_when_flag_true() -> None:
+    session = _session()
+    try:
+        store = LeadStore(session)
+        port = FakeGmailPort()
+        apply_owner_gmail_draft(
+            store,
+            text="שלח מייל ל dane@example.com נושא: היי והתוכן שלום",
+            channel=Channel.TELEGRAM,
+            port=port,
+            kill_switch=False,
+            demo_active=False,
+        )
+        session.commit()
+        draft_id = port.created_drafts[0].draft_id
+        settings = Settings(gmail_send=True)
+        ack = execute_approved_gmail_send(
+            store=store,
+            settings=settings,
+            port=port,
+            draft_id=draft_id,
+            kill_switch=False,
+            demo_active=False,
+        )
+        assert ack == "שלחתי את המייל."
+        assert port.sent_drafts == [draft_id]
+    finally:
+        session.close()
+
+
 def test_owner_agent_prompt_plans_mail_paraphrases() -> None:
     """owner_agent_v2 -> v3: the old prompt matched intent to a literal keyword list
 
