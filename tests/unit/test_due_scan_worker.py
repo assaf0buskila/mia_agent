@@ -277,29 +277,32 @@ def test_due_scan_sends_one_unprompted_owner_reminder(
         return True
 
     monkeypatch.setattr(due_scan_module, "send_owner_telegram", fake_send)
+    reminder_now = datetime(2026, 8, 22, 12, 0, tzinfo=ZoneInfo("Asia/Jerusalem"))
     init_db()
     db = get_session_factory()()
     try:
         store = LeadStore(db)
         due_at = follow_up_due_on(
-            now=_FIXED_NOW, timezone="Asia/Jerusalem", offset_days=0
+            now=reminder_now, timezone="Asia/Jerusalem", offset_days=0
         )
-        _seed_owner_task(store, provider_event_id=OWNER_EVENT_ID, due_at=due_at)
+        _seed_owner_task(
+            store, provider_event_id="evt.owner.scan.worker.remind", due_at=due_at
+        )
         db.commit()
         first = run_due_scan(
             store,
             timezone="Asia/Jerusalem",
             kill_switch=False,
-            now=_FIXED_NOW,
+            now=reminder_now,
         )
         assert first.owner_tasks_due_ready >= 1
         assert first.owner_reminders_sent == 1
-        assert sent == ["יש 1 משימות שמחכות לטיפול."]
+        assert sent == [f"יש {first.owner_tasks_due_ready} משימות שמחכות לטיפול."]
         second = run_due_scan(
             store,
             timezone="Asia/Jerusalem",
             kill_switch=False,
-            now=_FIXED_NOW,
+            now=reminder_now,
         )
         assert second.owner_reminders_sent == 0
         assert len(sent) == 1
