@@ -68,7 +68,7 @@ Each capability has `{READ, WRITE, SENSITIVE_WRITE, DESTRUCTIVE}`, allowed graph
 
 Client allowlist is dramatically narrower than owner. Website visitors never inherit the owner Composio session.
 
-Existing risk map: R0 read AUTO, R1 low write AUTO, R2 customer message AUTO in approved scope, R3 commercial APPROVAL, R4 marketing APPROVAL, R5 destructive DENY. Kill switch denies before side effects.
+Existing risk map: R0 read AUTO, R1 low write AUTO, R2 customer message AUTO in approved scope, R3 commercial APPROVAL, R4 marketing APPROVAL, R5 destructive DENY. Kill switch denies before side effects. Website chat and voice both return 503 when it is on.
 
 ## Composio
 

@@ -348,6 +348,12 @@ def _website_knowledge_lookup(
     return lookup
 
 
+def _refuse_killed(settings: Settings) -> None:
+    """Website chat and voice share one fail-closed stop. 503, no graph, no STT."""
+    if settings.kill_switch:
+        raise HTTPException(status_code=503, detail="killed")
+
+
 def process_website_message(
     store: LeadStore,
     *,
@@ -360,6 +366,7 @@ def process_website_message(
     audio_meta: TranscriptResult | None = None,
     stt_latency_ms: int = 0,
 ) -> MessageOut:
+    _refuse_killed(settings)
     turn_started = perf_counter()
     _customer_id, lead_id = store.open_channel_lead(channel=Channel.WEBSITE, external_id=session_id)
     run_id = f"run_{uuid4().hex[:12]}"
@@ -869,6 +876,7 @@ def post_message(
     sheets: SheetsPort = Depends(get_sheets_port),
 ) -> MessageOut:
     settings = get_settings()
+    _refuse_killed(settings)
     store = LeadStore(db)
     if store.get_website_lead_id(session_id) is None:
         raise HTTPException(status_code=404, detail="session not found")
@@ -898,8 +906,7 @@ async def post_voice(
     file: UploadFile = File(...),
 ) -> VoiceMessageOut:
     settings = get_settings()
-    if settings.kill_switch:
-        raise HTTPException(status_code=503, detail="killed")
+    _refuse_killed(settings)
     store = LeadStore(db)
     if store.get_website_lead_id(session_id) is None:
         raise HTTPException(status_code=404, detail="session not found")

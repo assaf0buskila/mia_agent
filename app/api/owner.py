@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from datetime import UTC, datetime
 from typing import Any, NamedTuple
 
@@ -758,13 +759,14 @@ async def process_owner_item(
         # failed, replacing the "couldn't classify this" canned line with an honest
         # one. Composing from it here (instead of the original `ack_text`) is what
         # makes that substitution actually reach Assaf.
-        phrased = owner_reply_port.compose(
+        phrased_raw = owner_reply_port.compose(
             task_type=decision.task_type.value,
             canned=brain_result.text,
             owner_message=owner_text,
             history=tuple(owner_history),
             kill_switch=kill_switch,
         )
+        phrased = await phrased_raw if inspect.isawaitable(phrased_raw) else phrased_raw
         ack_text = phrased.text
     last_reply = ack_text
     owner_markup = owner_telegram_reply_markup(

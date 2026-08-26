@@ -321,7 +321,16 @@ def test_production_build_creates_alb_then_migrate_then_service() -> None:
     assert unhealthy["Statistic"] == "Minimum"
     assert five["MetricName"] == "HTTPCode_ELB_5XX_Count"
     assert "AlarmActions" not in unhealthy
-    assert "AlarmActions" not in five
+    assert five["AlarmActions"] == [
+        "arn:aws:sns:REGION:ACCOUNT_ID:mia-alb-5xx"
+    ]
+    example_env = (ROOT / ".env.example").read_text(encoding="utf-8")
+    assert "MIA_ALB_5XX_SNS_TOPIC_ARN=" in example_env
+    ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    assert "scripts/assert_origin_bind.py" in ci
+    assert "workflow_dispatch" in ci
+    deploy_script = (ROOT / "scripts/deploy_ecs_revision.py").read_text(encoding="utf-8")
+    assert "assert_origin_bind.py" in deploy_script
 
 
 def test_fill_placeholders_script_skips_secrets_and_aws() -> None:

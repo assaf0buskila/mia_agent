@@ -201,6 +201,7 @@ def test_run_due_scan_calls_both_scans(monkeypatch: pytest.MonkeyPatch) -> None:
             "owner_tasks_scanned": 0,
             "owner_tasks_due_ready": 0,
             "website_conversations_finalized": 0,
+            "owner_reminders_sent": 0,
         }
         assert calls["follow_ups"] == {
             "timezone": "Asia/Jerusalem",
@@ -265,6 +266,75 @@ def test_run_due_scan_never_imports_message_port() -> None:
     assert "app.integrations.base" not in source
 
 
+def test_due_scan_sends_one_unprompted_owner_reminder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sent: list[str] = []
+
+    def fake_send(*, text: str, settings, transport=None) -> bool:
+        del settings, transport
+        sent.append(text)
+        return True
+
+    monkeypatch.setattr(due_scan_module, "send_owner_telegram", fake_send)
+    init_db()
+    db = get_session_factory()()
+    try:
+        store = LeadStore(db)
+        due_at = follow_up_due_on(
+            now=_FIXED_NOW, timezone="Asia/Jerusalem", offset_days=0
+        )
+        _seed_owner_task(store, provider_event_id=OWNER_EVENT_ID, due_at=due_at)
+        db.commit()
+        first = run_due_scan(
+            store,
+            timezone="Asia/Jerusalem",
+            kill_switch=False,
+            now=_FIXED_NOW,
+        )
+        assert first.owner_tasks_due_ready >= 1
+        assert first.owner_reminders_sent == 1
+        assert sent == ["יש 1 משימות שמחכות לטיפול."]
+        second = run_due_scan(
+            store,
+            timezone="Asia/Jerusalem",
+            kill_switch=False,
+            now=_FIXED_NOW,
+        )
+        assert second.owner_reminders_sent == 0
+        assert len(sent) == 1
+    finally:
+        db.close()
+
+
+def test_due_scan_kill_switch_skips_owner_reminder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def boom(*, text: str, settings, transport=None) -> bool:
+        del text, settings, transport
+        raise AssertionError("kill switch must not ping the owner")
+
+    monkeypatch.setattr(due_scan_module, "send_owner_telegram", boom)
+    init_db()
+    db = get_session_factory()()
+    try:
+        store = LeadStore(db)
+        due_at = follow_up_due_on(
+            now=_FIXED_NOW, timezone="Asia/Jerusalem", offset_days=0
+        )
+        _seed_owner_task(store, provider_event_id="evt.owner.scan.worker.killed", due_at=due_at)
+        db.commit()
+        summary = run_due_scan(
+            store,
+            timezone="Asia/Jerusalem",
+            kill_switch=True,
+            now=_FIXED_NOW,
+        )
+        assert summary.owner_reminders_sent == 0
+    finally:
+        db.close()
+
+
 def test_require_alive_due_scan() -> None:
     require_alive(CapabilityId.DUE_SCAN)
 
@@ -299,6 +369,7 @@ def test_main_stdout_counts_only(capsys: pytest.CaptureFixture[str]) -> None:
         "owner_tasks_scanned",
         "owner_tasks_due_ready",
         "website_conversations_finalized",
+        "owner_reminders_sent",
     }
     for value in body.values():
         assert isinstance(value, int)

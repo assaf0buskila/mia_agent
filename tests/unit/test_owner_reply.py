@@ -1,7 +1,9 @@
 """Owner Telegram paraphraser: phrases typed RESULT, never selects tools."""
 
 import hashlib
+import inspect
 import json
+from pathlib import Path
 
 import httpx
 import pytest
@@ -118,11 +120,12 @@ def test_build_owner_reply_port_live_when_key_and_model() -> None:
     assert isinstance(port, OpenAIOwnerReplyPort)
 
 
-def test_openai_owner_port_kill_switch_skips_http() -> None:
+@pytest.mark.asyncio
+async def test_openai_owner_port_kill_switch_skips_http() -> None:
     class _Client:
         post_called = False
 
-        def post(self, *args, **kwargs):
+        async def post(self, *args, **kwargs):
             self.post_called = True
             raise AssertionError("kill switch must not HTTP")
 
@@ -133,7 +136,7 @@ def test_openai_owner_port_kill_switch_skips_http() -> None:
         client=client,  # type: ignore[arg-type]
     )
     canned = "אין אישורים."
-    result = port.compose(
+    result = await port.compose(
         task_type="pending_approvals",
         canned=canned,
         owner_message="מה מחכה?",
@@ -143,7 +146,8 @@ def test_openai_owner_port_kill_switch_skips_http() -> None:
     assert client.post_called is False
 
 
-def test_openai_owner_port_falls_back_when_tool_shaped() -> None:
+@pytest.mark.asyncio
+async def test_openai_owner_port_falls_back_when_tool_shaped() -> None:
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
@@ -154,23 +158,25 @@ def test_openai_owner_port_falls_back_when_tool_shaped() -> None:
             },
         )
 
-    client = httpx.Client(transport=httpx.MockTransport(handler))
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     port = OpenAIOwnerReplyPort(
         api_key="sk-test",
         model="test-sales-model",
         client=client,
     )
     canned = "אין אישורים ממתינים."
-    result = port.compose(
+    result = await port.compose(
         task_type="pending_approvals",
         canned=canned,
         owner_message="מה מחכה לאישור?",
         kill_switch=False,
     )
+    await client.aclose()
     assert result.text == canned
 
 
-def test_openai_owner_port_keeps_lead_id() -> None:
+@pytest.mark.asyncio
+async def test_openai_owner_port_keeps_lead_id() -> None:
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
@@ -186,18 +192,19 @@ def test_openai_owner_port_keeps_lead_id() -> None:
             },
         )
 
-    client = httpx.Client(transport=httpx.MockTransport(handler))
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     port = OpenAIOwnerReplyPort(
         api_key="sk-test",
         model="test-sales-model",
         client=client,
     )
-    result = port.compose(
+    result = await port.compose(
         task_type="website_conversations",
         canned="lead_abc123def456 דיבר על מלאי.",
         owner_message="מה הכי מעניין?",
         kill_switch=False,
     )
+    await client.aclose()
     assert result.text == "lead_abc123def456 הכי מעניין עכשיו."
     assert result.tokens_in == 11
     assert result.tokens_out == 9
@@ -245,7 +252,8 @@ def test_owner_reply_capability_and_policy() -> None:
     assert pin.model_source == "env"
 
 
-def test_openai_owner_request_contains_reasoning_cue() -> None:
+@pytest.mark.asyncio
+async def test_openai_owner_request_contains_reasoning_cue() -> None:
     captured: list[dict[str, object]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -255,20 +263,29 @@ def test_openai_owner_request_contains_reasoning_cue() -> None:
             json={"choices": [{"message": {"content": "שני לידים מהאתר."}}]},
         )
 
-    client = httpx.Client(transport=httpx.MockTransport(handler))
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     port = OpenAIOwnerReplyPort(
         api_key="sk-test",
         model="test-sales-model",
         client=client,
     )
-    port.compose(
+    await port.compose(
         task_type="daily_brief",
         canned="שני לידים מהאתר.",
         owner_message="מה קרה היום?",
         kill_switch=False,
     )
+    await client.aclose()
     assert captured
     messages = captured[0]["messages"]
     assert isinstance(messages, list)
     assert "reason silently" in str(messages[0]["content"])
     assert "REASON THEN WRITE" in str(messages[1]["content"])
+
+
+def test_openai_owner_port_http_is_async_not_sync_client() -> None:
+    source = inspect.getsource(OpenAIOwnerReplyPort)
+    assert "httpx.AsyncClient" in source
+    assert "httpx.Client(" not in source
+    owner = Path("app/api/owner.py").read_text(encoding="utf-8")
+    assert "inspect.isawaitable" in owner

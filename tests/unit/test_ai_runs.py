@@ -32,6 +32,7 @@ from app.integrations.sales_reply import (
 )
 from app.integrations.sheets import DisabledSheetsPort
 from app.main import app
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
@@ -135,7 +136,7 @@ def test_website_second_message_persists_second_ai_run() -> None:
         db.close()
 
 
-def test_kill_switch_still_persists_ai_run() -> None:
+def test_kill_switch_stops_website_chat_without_ai_run() -> None:
     init_db()
     db = get_session_factory()()
     try:
@@ -145,19 +146,20 @@ def test_kill_switch_still_persists_ai_run() -> None:
         )
         db.commit()
         settings = get_settings().model_copy(update={"kill_switch": True})
-        process_website_message(
-            store,
-            session_id="web_kill_switch",
-            text=VISITOR_TEXT,
-            settings=settings,
-            calendar=DisabledCalendarPort(),
-            calendar_booking=DisabledCalendarBookingPort(),
-            sheets=DisabledSheetsPort(),
-        )
+        with pytest.raises(HTTPException) as exc:
+            process_website_message(
+                store,
+                session_id="web_kill_switch",
+                text=VISITOR_TEXT,
+                settings=settings,
+                calendar=DisabledCalendarPort(),
+                calendar_booking=DisabledCalendarBookingPort(),
+                sheets=DisabledSheetsPort(),
+            )
+        assert exc.value.status_code == 503
         db.commit()
-        row = db.scalars(select(AiRunRow).where(AiRunRow.lead_id == lead_id)).one()
-        assert row.kill_switch is True
-        assert row.model == MODEL_CANNED
+        rows = list(db.scalars(select(AiRunRow).where(AiRunRow.lead_id == lead_id)))
+        assert rows == []
     finally:
         db.close()
 

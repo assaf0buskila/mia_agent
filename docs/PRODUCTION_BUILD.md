@@ -281,7 +281,7 @@ aws cloudwatch put-metric-alarm --cli-input-json file://./deploy/local/cloudwatc
 aws cloudwatch put-metric-alarm --cli-input-json file://./deploy/local/cloudwatch-alb-5xx.json
 ```
 
-`UnHealthyHostCount` uses statistic **Minimum** for two datapoints ([ALB CloudWatch metrics](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/load-balancer-cloudwatch-metrics.html)). No SNS this slice — the alarm is visible in the CloudWatch console only. Stamp `app/mia/HASH` and `targetgroup/mia/HASH` from `describe-load-balancers` / `describe-target-groups` (not the full ARN).
+`UnHealthyHostCount` uses statistic **Minimum** for two datapoints ([ALB CloudWatch metrics](https://docs.aws.amazon.com/elasticloadbalancing/latest/application/load-balancer-cloudwatch-metrics.html)). The 5xx alarm pages SNS when `MIA_ALB_5XX_SNS_TOPIC_ARN` is stamped into `AlarmActions` (`deploy/cloudwatch-alb-5xx.example.json`). Empty ARN is fail-closed: do not put-metric-alarm with a blank action. Stamp `app/mia/HASH` and `targetgroup/mia/HASH` from `describe-load-balancers` / `describe-target-groups` (not the full ARN).
 
 3. `GET https://mia.assafweb.com/health` → 200, `"env": "prod"`, `"demo": false`, `"postgres": true`, `"public_https": true`. `/docs` is 404.
 4. If `/health/ready` is 503, migrate did not finish — do not point Meta webhooks yet.
@@ -378,7 +378,7 @@ Full steps: `docs/RUNBOOK.md`.
 ## 9. Still not production-complete (honest)
 
 - AWS ingress / SQS / AgentCore / WAF (Secrets Manager box is ADR-014; not the later split)
-- Dashboards and SNS pager (Gate F). First-live ALB metric alarms exist (`deploy/cloudwatch-alb-unhealthy.example.json`, `deploy/cloudwatch-alb-5xx.example.json`); they do not page.
+- Dashboards (Gate F). ALB 5xx alarm **can page** via SNS topic ARN `MIA_ALB_5XX_SNS_TOPIC_ARN` (placeholder in `.env.example`; stamp `deploy/cloudwatch-alb-5xx.example.json`). Unhealthy-host alarm stays console-only. This PR does not create the topic or attach it live.
 - Dead-letter replay
 - Frozen STT benchmark audio
 - Versioned knowledge RAG

@@ -15,6 +15,7 @@ from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
 from app.domain.approvals import (
     ACTION_PROPOSAL_HANDOFF,
+    DECISION_APPROVED,
     DECISION_PENDING,
     RESOURCE_LEAD,
     RISK_R3,
@@ -133,5 +134,99 @@ async def test_pending_approvals_owner_turn_attaches_keyboard() -> None:
         assert sent.parse_mode == "HTML"
         assert sent.reply_markup == approval_keyboard(approval_token(row.approval_id))
         assert "מחכים לאישור" in sent.text
+    finally:
+        db.close()
+
+
+class _CallbackPort(RecordingMessagePort):
+    def __init__(self) -> None:
+        super().__init__()
+        self.answered: list[str] = []
+        self.edited: list[dict[str, str]] = []
+
+    async def answer_callback_query(self, callback_query_id: str, *, text: str = "") -> None:
+        self.answered.append(callback_query_id)
+
+    async def edit_message_text(
+        self,
+        *,
+        chat_id: str,
+        message_id: str,
+        text: str,
+        parse_mode: str | None = None,
+        clear_markup: bool = True,
+    ) -> None:
+        self.edited.append(
+            {
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "text": text,
+                "parse_mode": parse_mode or "",
+            }
+        )
+
+
+def test_approval_keyboard_callback_applies_the_decision(monkeypatch) -> None:
+    """The buttons are not decorative: a tap decides the pending approval."""
+    from app.api.deps import get_telegram_port
+    from app.main import app
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("MIA_TELEGRAM_WEBHOOK_SECRET", "tg-secret")
+    monkeypatch.setenv("MIA_TELEGRAM_OWNER_USER_IDS", _OWNER_ID)
+    monkeypatch.setenv("MIA_TELEGRAM_BOT_TOKEN", "bot-token")
+    init_db()
+    db = get_session_factory()()
+    try:
+        store = LeadStore(db)
+        _, lead_id = store.open_channel_lead(
+            channel=Channel.WEBSITE, external_id="web_apr_callback_1"
+        )
+        store.upsert_approval(
+            lead_id=lead_id,
+            channel=Channel.WEBSITE.value,
+            action=ACTION_PROPOSAL_HANDOFF,
+            risk=RISK_R3,
+            payload_hash="c" * 64,
+            decision=DECISION_PENDING,
+            resource_type=RESOURCE_LEAD,
+            resource_id=lead_id,
+            expires_at=approval_expires_at(now=datetime.now(UTC)),
+        )
+        db.commit()
+        row = store.get_approval(lead_id, ACTION_PROPOSAL_HANDOFF)
+        assert row is not None
+        token = approval_token(row.approval_id)
+        port = _CallbackPort()
+        app.dependency_overrides[get_telegram_port] = lambda: port
+        try:
+            with TestClient(app) as client:
+                response = client.post(
+                    "/v1/telegram/webhook",
+                    json={
+                        "update_id": 88,
+                        "callback_query": {
+                            "id": "q-apr-1",
+                            "from": {"id": int(_OWNER_ID)},
+                            "data": f"ok:{token}",
+                            "message": {
+                                "message_id": 44,
+                                "chat": {"id": int(_OWNER_ID)},
+                            },
+                        },
+                    },
+                    headers={"X-Telegram-Bot-Api-Secret-Token": "tg-secret"},
+                )
+            assert response.status_code == 200
+            assert response.json()["processed"] == 1
+            assert port.answered == ["q-apr-1"]
+            assert port.edited
+            assert "אושר" in port.edited[0]["text"]
+        finally:
+            app.dependency_overrides.pop(get_telegram_port, None)
+        db.expire_all()
+        refreshed = store.get_approval(lead_id, ACTION_PROPOSAL_HANDOFF)
+        assert refreshed is not None
+        assert refreshed.decision == DECISION_APPROVED
     finally:
         db.close()

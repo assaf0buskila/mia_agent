@@ -247,7 +247,8 @@ def test_website_kill_switch_persists_sheets_tool_denied(monkeypatch) -> None:
             f"/v1/website/sessions/{session_id}/messages",
             json={"text": "hi"},
         )
-        assert reply.status_code == 200
+        assert reply.status_code == 503
+        assert reply.json()["detail"] == "killed"
     db = get_session_factory()()
     try:
         rows = list(
@@ -258,10 +259,9 @@ def test_website_kill_switch_persists_sheets_tool_denied(monkeypatch) -> None:
                 )
             )
         )
-        assert len(rows) == 2
-        for row in rows:
-            payload = json.loads(row.payload_json)
-            assert payload == {"tool": "sheets_mirror", "status": "denied", "result_count": 0}
+        assert len(rows) == 1
+        payload = json.loads(rows[0].payload_json)
+        assert payload == {"tool": "sheets_mirror", "status": "denied", "result_count": 0}
         out_rows = list(
             db.scalars(
                 select(CanonicalEventRow).where(
@@ -270,7 +270,7 @@ def test_website_kill_switch_persists_sheets_tool_denied(monkeypatch) -> None:
                 )
             )
         )
-        assert len(out_rows) == 1
+        assert out_rows == []
     finally:
         db.close()
 
@@ -411,10 +411,9 @@ def test_website_kill_switch_sheets_mirror_latency(monkeypatch) -> None:
             f"/v1/website/sessions/{session_id}/messages",
             json={"text": "hi"},
         )
-        assert reply.status_code == 200
+        assert reply.status_code == 503
     db = get_session_factory()()
     try:
-        store = LeadStore(db)
         in_rows = list(
             db.scalars(
                 select(CanonicalEventRow).where(
@@ -423,21 +422,7 @@ def test_website_kill_switch_sheets_mirror_latency(monkeypatch) -> None:
                 )
             )
         )
-        assert len(in_rows) == 1
-        provider_event_id = in_rows[0].provider_event_id
-        sales_tool = db.scalar(
-            select(CanonicalEventRow).where(
-                CanonicalEventRow.provider_event_id
-                == f"{provider_event_id}:tool:sheets_mirror"
-            )
-        )
-        assert sales_tool is not None
-        payload = json.loads(sales_tool.payload_json)
-        assert payload == {"tool": "sheets_mirror", "status": "denied", "result_count": 0}
-        assert "latency_ms" not in payload
-        row = store.get_tool_run(f"{provider_event_id}:tool:sheets_mirror")
-        assert row is not None
-        assert row.latency_ms == 12
+        assert in_rows == []
     finally:
         db.close()
 
@@ -705,7 +690,7 @@ def test_website_post_cta_click_invalid_accepted_false() -> None:
         db.close()
 
 
-def test_website_kill_switch_still_persists_message_out(monkeypatch) -> None:
+def test_website_kill_switch_stops_chat_like_voice(monkeypatch) -> None:
     monkeypatch.setenv("MIA_KILL_SWITCH", "true")
     init_db()
     with TestClient(app) as client:
@@ -715,9 +700,8 @@ def test_website_kill_switch_still_persists_message_out(monkeypatch) -> None:
             f"/v1/website/sessions/{session_id}/messages",
             json={"text": "hi"},
         )
-        assert reply.status_code == 200
-        body = reply.json()
-        assert body["message"]
+        assert reply.status_code == 503
+        assert reply.json()["detail"] == "killed"
     db = get_session_factory()()
     try:
         rows = list(
@@ -728,8 +712,9 @@ def test_website_kill_switch_still_persists_message_out(monkeypatch) -> None:
             )
         )
         out_rows = [row for row in rows if row.event_type == "message_out"]
-        assert len(out_rows) == 1
-        assert json.loads(out_rows[0].payload_json)["text"] == body["message"]
+        in_rows = [row for row in rows if row.event_type == "message_in"]
+        assert out_rows == []
+        assert in_rows == []
     finally:
         db.close()
 

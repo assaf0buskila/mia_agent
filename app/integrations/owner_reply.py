@@ -220,7 +220,7 @@ class OpenAIOwnerReplyPort:
         fallback_model: str = "",
         gemini_api_key: str = "",
         gemini_model: str = "",
-        client: httpx.Client | None = None,
+        client: httpx.AsyncClient | None = None,
     ) -> None:
         self._client = client
         attempts: list[tuple[str, str, str]] = []
@@ -234,7 +234,7 @@ class OpenAIOwnerReplyPort:
             attempts.append((_GEMINI_CHAT_COMPLETIONS_URL, gemini_key, gemini_name))
         self._attempts = tuple(attempts)
 
-    def compose(
+    async def compose(
         self,
         *,
         task_type: str,
@@ -259,7 +259,7 @@ class OpenAIOwnerReplyPort:
         for url, api_key, model in self._attempts:
             headers = {"Authorization": f"Bearer {api_key}"}
             try:
-                outcome = self._complete(
+                outcome = await self._complete(
                     url=url, model=model, messages=messages, headers=headers
                 )
             except AdapterHttpError:
@@ -277,7 +277,7 @@ class OpenAIOwnerReplyPort:
             )
         return ComposeResult(text=canned)
 
-    def _complete(
+    async def _complete(
         self,
         *,
         url: str,
@@ -288,14 +288,14 @@ class OpenAIOwnerReplyPort:
         payload = {"model": model, "messages": messages}
         try:
             if self._client is not None:
-                response = self._client.post(
+                response = await self._client.post(
                     url,
                     json=payload,
                     headers=headers,
                 )
             else:
-                with httpx.Client(timeout=20.0) as client:
-                    response = client.post(
+                async with httpx.AsyncClient(timeout=20.0) as client:
+                    response = await client.post(
                         url,
                         json=payload,
                         headers=headers,
