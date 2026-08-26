@@ -12,6 +12,10 @@
 
 Kill switch stops website **chat** the same way it stops voice (HTTP 503, no graph). Owner Telegram paraphraser HTTP is async. Due-scan can send one unprompted owner Telegram due reminder per local day. Approval keyboards stay attached on pending-approval reads and callbacks apply the decision. Client isolation tests two real website sessions and a capability deny. ALB 5xx example alarm includes SNS `AlarmActions` (`MIA_ALB_5XX_SNS_TOPIC_ARN`). CD-from-green-CI exists as `workflow_dispatch` after test+image; it does not update ECS.
 
+## Cleanup (this PR)
+
+Removed leftover workaround `docs/brain.env.example` (names already live in `.env.example`). Moved dated `docs/DEPLOY_SLICE_REPORT.md` into `docs/archive/`. Removed Cursor AWS starter rule `.cursor/rules/aws-starter-rules.mdc` (not product). Origin-bind, kill-switch 503, async owner HTTP, due reminder, two-tenant isolation, and `scripts/assert_origin_bind.py` stay.
+
 ## Not this PR
 
 - Live ECS revision / service update

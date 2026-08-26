@@ -11,4 +11,4 @@ Do not load these unless you are researching a past decision. Current agent read
 
 Operator files (not required agent reading): `docs/RUNBOOK.md`, `docs/PRODUCTION_BUILD.md`. Brain implementation detail: `docs/BRAIN_ARCHITECTURE.md`.
 
-The Bible source remains `Mia_AI_Growth_Sales_Operator_PRD_Build_Bible_v1.1.docx` at the repo root.
+The Bible source remains `docs/archive/Mia_AI_Growth_Sales_Operator_PRD_Build_Bible_v1.1.docx`.
