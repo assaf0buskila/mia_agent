@@ -22,7 +22,8 @@ def test_origin_bind_gate_passes_this_sha() -> None:
 def test_ci_and_deploy_script_refuse_without_origin_bind() -> None:
     ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     deploy = (ROOT / "scripts/deploy_ecs_revision.py").read_text(encoding="utf-8")
-    assert "python scripts/assert_origin_bind.py" in ci
+    assert "scripts/assert_origin_bind.py" in ci
+    assert ci.count("assert_origin_bind.py") >= 3
     assert "assert_origin_bind.py" in deploy
     website = (ROOT / "app/api/website.py").read_text(encoding="utf-8")
     for bucket in ("session", "message", "voice", "handoff", "end"):

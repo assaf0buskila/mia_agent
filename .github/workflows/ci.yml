@@ -22,7 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: python scripts/assert_origin_bind.py
+      - run: python3 scripts/assert_origin_bind.py
       - run: docker build -f deploy/Dockerfile -t mia:ci .
 
   deploy:
@@ -31,7 +31,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: python scripts/assert_origin_bind.py
+      - run: python3 scripts/assert_origin_bind.py
       - name: Fail closed without AWS
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
