@@ -1277,7 +1277,10 @@ async def test_inbound_e2e_booking_one_reply(monkeypatch) -> None:
         db.close()
 
 
-def test_website_e2e_booking() -> None:
+def test_website_e2e_booking(monkeypatch) -> None:
+    from tests.conftest import freeze_mia_clock
+
+    freeze_mia_clock(monkeypatch, FIXED_NOW)
     init_db()
     db = get_session_factory()()
     try:

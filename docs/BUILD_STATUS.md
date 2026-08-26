@@ -3,6 +3,10 @@
 **Last updated:** 2026-08-26  
 **Region:** eu-north-1 (ADR-019). Live host `https://mia.assafweb.com`. Live image **mia:16** (task `mia:18`). `mia:15` remains in ECR for rollback.
 
+## Master CI test job (2026-08-26)
+
+Not a product change. Master `test` job on SHA `0b6369d` (PR #1 merge) failed 3 tests. Fixes: freeze ADR-012 clocks on website booking + owner calendar freshness (wall date had moved past the Aug 20/21 fixtures); document `MIA_OWNER_AGENT_GEMINI_MODEL` in `.env.example`.
+
 ## Public Ask Mia origin bind + rate limit (2026-08-26)
 
 Not deployed. Working tree / PR only.

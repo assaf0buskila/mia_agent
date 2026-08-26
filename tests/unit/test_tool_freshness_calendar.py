@@ -232,7 +232,10 @@ async def test_inbound_offer_meeting_freshness_persisted(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_inbound_owner_calendar_freshness_persisted() -> None:
+async def test_inbound_owner_calendar_freshness_persisted(monkeypatch) -> None:
+    from tests.conftest import freeze_mia_clock
+
+    freeze_mia_clock(monkeypatch, OWNER_NOW)
     init_db()
     db = get_session_factory()()
     try:
