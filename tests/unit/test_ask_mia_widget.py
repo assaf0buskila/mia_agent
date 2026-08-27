@@ -334,11 +334,12 @@ def test_whatsapp_handoff_shows_a_card_instead_of_a_page_redirect() -> None:
     source = _source()
     handoff = _function_body(source, "handoff")
     assert "window.location.assign" not in handoff
-    assert "paintHandoffCard" in handoff
+    assert "placeWhatsAppCta" in handoff
 
     card = _function_body(source, "paintHandoffCard")
-    assert "_blank" in card
-    assert "noopener" in card
+    assert "makeWhatsAppCta" in card
+    assert "_blank" in _function_body(source, "makeWhatsAppCta")
+    assert "noopener" in _function_body(source, "makeWhatsAppCta")
     # The link is still validated as a wa.me URL before it is ever rendered.
     assert "isWaMeUrl" in handoff
 
@@ -347,9 +348,11 @@ def test_handoff_card_explains_the_context_transfer_in_plural_hebrew() -> None:
     source = _source()
     card = _function_body(source, "paintHandoffCard")
     assert "אסף" in card
-    assert "פתחו" in card
-    # Customer-facing Hebrew stays 2nd-person plural so it addresses men and women.
+    cta = _function_body(source, "makeWhatsAppCta")
+    assert "נעבור" in cta
+    # Customer-facing Hebrew stays 2nd-person plural / mixed so it addresses men and women.
     assert "פתח את" not in card
+    assert "פתח את" not in cta
 
 
 def test_widget_offers_whatsapp_on_handoff_as_well_as_offer_whatsapp() -> None:
@@ -357,7 +360,8 @@ def test_widget_offers_whatsapp_on_handoff_as_well_as_offer_whatsapp() -> None:
     apply = _function_body(_source(), "applyReply")
     assert "offer_whatsapp" in apply
     assert "handoff" in apply
-    assert "waBtn.hidden = false" in apply
+    assert "placeWhatsAppCta" in apply or "requestWhatsAppCta" in apply
+    assert "waBtn.hidden = false" not in apply
 
 
 def test_widget_open_send_uses_textcontent_and_wa_me_href_only() -> None:
@@ -380,10 +384,55 @@ def test_widget_open_send_uses_textcontent_and_wa_me_href_only() -> None:
     assert "innerHTML" not in paint
     handoff = _function_body(source, "handoff")
     assert "isWaMeUrl(data.whatsapp_url)" in handoff
-    assert "paintHandoffCard(data.whatsapp_url)" in handoff
-    card = _function_body(source, "paintHandoffCard")
-    assert "link.href = url" in card
+    assert "placeWhatsAppCta(data.whatsapp_url" in handoff
+    cta = _function_body(source, "makeWhatsAppCta")
+    assert "link.href = url" in cta
+    assert "isWaMeUrl(url)" in cta
     wa = _function_body(source, "isWaMeUrl")
     assert "parsed.protocol === 'https:'" in wa
     assert "parsed.hostname === 'wa.me'" in wa
+
+
+def test_whatsapp_offer_is_a_tappable_button_not_a_raw_url() -> None:
+    """Live Ask Mia dumped a raw wa.me URL into the bubble as textContent.
+
+    The visitor could not tap a proper CTA. Offer/handoff now strip that URL from
+    visible text and attach one green https wa.me <a href> button instead.
+    """
+    source = _source()
+    assert "innerHTML" not in source
+    assert "textContent = url" not in source
+    assert "textContent = data.whatsapp_url" not in source
+    assert "appendMsg('mia', data.message)" not in source
+    apply = _function_body(source, "applyReply")
+    assert "stripWaMeUrls" in apply
+    assert apply.index("stripWaMeUrls") < apply.index("appendMsg")
+    assert "offer_whatsapp" in apply
+    assert "handoff" in apply
+    assert "isWaMeUrl(data.whatsapp_url)" in apply
+    assert "placeWhatsAppCta" in apply
+    assert "requestWhatsAppCta" in apply
+    assert "waBtn.hidden = false" not in apply
+    strip = _function_body(source, "stripWaMeUrls")
+    assert "wa.me" in strip.replace("\\", "")
+    assert "innerHTML" not in strip
+    cta = _function_body(source, "makeWhatsAppCta")
+    assert "isWaMeUrl(url)" in cta
+    assert cta.index("isWaMeUrl(url)") < cta.index("link.href = url")
+    assert "createElement('a')" in cta
+    assert "נעבור לוואטסאפ" in cta
+    assert "_blank" in cta
+    assert "noopener" in cta
+    assert "https://wa.me/" not in cta
+    wa = _function_body(source, "isWaMeUrl")
+    assert "parsed.protocol === 'https:'" in wa
+    assert "parsed.hostname === 'wa.me'" in wa
+    restore = _function_body(source, "restoreTranscript")
+    assert "stripWaMeUrls" in restore
+    paint = _function_body(source, "paintMsg")
+    assert "el.textContent = text" in paint
+    assert ".ask-mia-handoff-cta{" in source
+    assert "background:#25d366" in source[source.index(".ask-mia-handoff-cta{") :][
+        :400
+    ]
 

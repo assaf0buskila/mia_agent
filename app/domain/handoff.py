@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import re
 import secrets
+from urllib.parse import quote
 
 TOKEN_PREFIX = "mia1_"
 _TOKEN_MIN_BODY_LEN = 16
@@ -72,3 +73,11 @@ def click_to_chat_digits(value: str) -> str:
     if not stripped or not stripped.isdigit():
         return ""
     return stripped
+
+
+def click_to_chat_url(value: str, raw_token: str | None = None) -> str:
+    """Return an https wa.me URL from the click-to-chat setting, or empty."""
+    digits = click_to_chat_digits(value)
+    if not digits:
+        return ""
+    return f"https://wa.me/{digits}?text={quote(compose_handoff_text(raw_token))}"

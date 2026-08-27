@@ -38,7 +38,8 @@ def test_website_voice_transcribes_then_sales_reply() -> None:
             )
             assert reply.status_code == 200
             body = reply.json()
-            assert set(body) == {"lead_id", "next_action", "message", "heard"}
+            assert set(body) == {"lead_id", "next_action", "message", "heard", "whatsapp_url"}
+            assert body["whatsapp_url"] is None
             assert body["heard"] == "hi"
             assert body["next_action"] == "understand_workflow"
             assert "יום רגיל בעסק" in body["message"]

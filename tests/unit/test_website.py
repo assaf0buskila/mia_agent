@@ -1,16 +1,20 @@
 import json
+from urllib.parse import urlparse
 
 from app.db.models import CanonicalEventRow
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
 from app.domain.attribution import sanitize_attribution
 from app.domain.events import Channel
+from app.domain.handoff import click_to_chat_url
 from app.domain.sales import NextAction, select_next_action
 from app.graph.orchestrator import build_graph
 from app.graph.state import empty_state
 from app.main import app
 from fastapi.testclient import TestClient
 from sqlalchemy import select
+
+from tests.unit.test_handoff import CLICK_CHAT
 
 
 def test_store_reuses_website_session() -> None:
@@ -155,6 +159,7 @@ def test_website_api_session_and_message() -> None:
         body = reply.json()
         assert body["next_action"] == "understand_workflow"
         assert "יום רגיל בעסק" in body["message"]
+        assert body["whatsapp_url"] is None
         empty_end = client.post(f"/v1/website/sessions/{session_id}/end")
         # session already has a visitor message from the turn above
         assert empty_end.status_code == 200
@@ -817,6 +822,7 @@ def test_website_shoe_conversation_offers_whatsapp_without_looping() -> None:
         assert more.json()["next_action"] == "offer_whatsapp"
         assert "וואטסאפ" in more.json()["message"]
         assert "יום רגיל בעסק" not in more.json()["message"]
+        assert more.json()["whatsapp_url"] is None
     db = get_session_factory()()
     try:
         rows = _behavior_rows(db, session_id)
@@ -889,3 +895,31 @@ def test_website_prelaunch_wants_site_offers_whatsapp() -> None:
             json={"text": "בי תודה"},
         )
         assert bye.json()["next_action"] == "stop"
+
+
+def test_offer_whatsapp_reply_includes_click_to_chat_url(monkeypatch) -> None:
+    """The widget paints a real wa.me <a href> from this field. Empty when unset."""
+    monkeypatch.setenv("MIA_WHATSAPP_CLICK_TO_CHAT", CLICK_CHAT)
+    expected = click_to_chat_url(CLICK_CHAT)
+    parsed = urlparse(expected)
+    assert parsed.scheme == "https"
+    assert parsed.hostname == "wa.me"
+    with TestClient(app) as client:
+        session_id = client.post("/v1/website/sessions").json()["session_id"]
+        client.post(
+            f"/v1/website/sessions/{session_id}/messages",
+            json={"text": "היי"},
+        )
+        client.post(
+            f"/v1/website/sessions/{session_id}/messages",
+            json={
+                "text": "אני האמת לא עוסק כרגע אני רוצה לפתוח עסק והייתי רוצה אולי לבנות אתר"
+            },
+        )
+        more = client.post(
+            f"/v1/website/sessions/{session_id}/messages",
+            json={"text": "אשמח להבין את התהליך טוב יותר"},
+        )
+        assert more.status_code == 200
+        assert more.json()["next_action"] == "offer_whatsapp"
+        assert more.json()["whatsapp_url"] == expected
