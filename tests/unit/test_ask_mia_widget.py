@@ -414,7 +414,7 @@ def test_whatsapp_offer_is_a_tappable_button_not_a_raw_url() -> None:
     assert "requestWhatsAppCta" in apply
     assert "waBtn.hidden = false" not in apply
     strip = _function_body(source, "stripWaMeUrls")
-    assert "wa.me" in strip
+    assert "wa.me" in strip.replace("\\", "")
     assert "innerHTML" not in strip
     cta = _function_body(source, "makeWhatsAppCta")
     assert "isWaMeUrl(url)" in cta

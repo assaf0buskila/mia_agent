@@ -1,16 +1,20 @@
 import json
+from urllib.parse import urlparse
 
 from app.db.models import CanonicalEventRow
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
 from app.domain.attribution import sanitize_attribution
 from app.domain.events import Channel
+from app.domain.handoff import click_to_chat_url
 from app.domain.sales import NextAction, select_next_action
 from app.graph.orchestrator import build_graph
 from app.graph.state import empty_state
 from app.main import app
 from fastapi.testclient import TestClient
 from sqlalchemy import select
+
+from tests.unit.test_handoff import CLICK_CHAT
 
 
 def test_store_reuses_website_session() -> None:
@@ -895,11 +899,6 @@ def test_website_prelaunch_wants_site_offers_whatsapp() -> None:
 
 def test_offer_whatsapp_reply_includes_click_to_chat_url(monkeypatch) -> None:
     """The widget paints a real wa.me <a href> from this field. Empty when unset."""
-    from urllib.parse import urlparse
-
-    from app.domain.handoff import click_to_chat_url
-    from tests.unit.test_handoff import CLICK_CHAT
-
     monkeypatch.setenv("MIA_WHATSAPP_CLICK_TO_CHAT", CLICK_CHAT)
     expected = click_to_chat_url(CLICK_CHAT)
     parsed = urlparse(expected)
