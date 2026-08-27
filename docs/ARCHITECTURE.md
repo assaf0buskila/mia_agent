@@ -62,7 +62,7 @@ Semantic memory/extraction/embeddings **do not run** unless model ids are config
 
 ## Capability and policy
 
-Graphs call named capabilities (`mail.read`, `calendar.get_schedule`, `leads.get_recent`, `memory.search`, `knowledge.search`, `research.search`, …), never raw Composio tool slugs. Live owner calendar, hot-lead lists, memory search, knowledge search, and research search go through `execute_capability`.
+Graphs call named capabilities (`mail.read`, `calendar.get_schedule`, `leads.get_recent`, `memory.search`, `knowledge.search`, `research.search`, …), never raw Composio tool slugs. Live owner calendar, hot-lead lists, mail read, memory search, knowledge search, and research search go through `execute_capability`.
 
 Each capability has `{READ, WRITE, SENSITIVE_WRITE, DESTRUCTIVE}`, allowed graphs, confirmation, retry, and idempotency. Enforcement is Python (`app/core/risk.py` plus the capability registry). Prompt text cannot add a tool.
 
@@ -110,6 +110,8 @@ ECS Fargate + RDS + Secrets Manager `mia/prod` + ALB `https://mia.assafweb.com` 
 
 ## Current wiring
 
-- Website: `app/api/website.py` → ClientGraph (`load_conversation` → `retrieve_knowledge` → `sales_turn` or skip on end/inactivity → `complete_turn`). Inner sales NBA is still `build_graph` in `app/graph/orchestrator.py` (REUSE until that node is inlined). Widget close, inactivity (`mia-due-scan`), and handoff finalize inside `complete_turn`.
-- Telegram: `app/api/telegram.py` → `process_owner_texts` → OwnerGraph (`load_owner_context` → `retrieve_owner_knowledge` → `respond`) in `app/api/owner.py`. Owner mail/calendar/leads/research stay allowlisted tools behind `respond`, not extra nodes.
+Short map: `docs/WIRING.md`.
+
+- Website: `app/api/website.py` → `channels/website.py` → ClientGraph (`load_conversation` → `retrieve_knowledge` → `sales_turn` or skip on end/inactivity → `complete_turn`). Inner sales NBA is still `build_graph` in `app/graph/orchestrator.py` (REUSE until that node is inlined). Widget close, inactivity (`mia-due-scan`), and handoff finalize inside `complete_turn`.
+- Telegram: `app/api/telegram.py` → `process_owner_texts` (`app/api/owner.py`) → `run_owner_turn` builds state via `channels/telegram.py` → OwnerGraph (`load_owner_context` → `retrieve_owner_knowledge` → `respond`). Owner mail/calendar/leads/research stay allowlisted tools behind `respond`, not extra nodes.
 - Prospect Meta/Gmail: `app/api/inbound.py` → ClientGraph (same NBA, not a third graph). WhatsApp outbound stays human-gated (ADR-024). Mixed tests that pass owner ids still delegate to `process_owner_item`.

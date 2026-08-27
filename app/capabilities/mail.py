@@ -22,6 +22,7 @@ def mail_read(port: GmailPort, args: dict[str, Any]) -> dict[str, Any]:
         "subject": email.subject,
         "sender": email.sender,
         "text": email.text[:2000],
+        "timestamp": email.timestamp,
     }
 
 

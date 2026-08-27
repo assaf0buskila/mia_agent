@@ -31,6 +31,7 @@ def test_owner_mail_read_goes_through_capability_policy_composio_port() -> None:
     assert out["found"] is True
     assert out["subject"] == "Intro"
     assert out["sender"] == "lead@example.com"
+    assert "timestamp" in out
     assert "GMAIL_FETCH" not in str(out)
 
 

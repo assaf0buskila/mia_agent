@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 from typing import Any, NamedTuple
 
 from app.agents.owner.graph import compile_owner_graph
-from app.agents.shared.state import OwnerState, empty_owner_state
+from app.agents.shared.state import OwnerState
 from app.brain.context import (
     KNOWLEDGE_BUDGET_SHARE,
     PROFILE_BUDGET_SHARE,
@@ -34,6 +34,7 @@ from app.capabilities.knowledge import knowledge_handlers
 from app.capabilities.memory import memory_handlers
 from app.capabilities.policy import execute_capability
 from app.capabilities.types import Principal
+from app.channels.telegram import message_to_owner_state
 from app.core.config import Settings
 from app.core.errors import MiaError
 from app.core.models import model_chain
@@ -596,12 +597,11 @@ def run_owner_turn(
 
     try:
         final = compile_owner_graph(respond=respond, retrieve=retrieve).invoke(
-            empty_owner_state(
+            message_to_owner_state(
                 run_id=run_id,
                 owner_id=owner_id,
-                telegram_chat_id=telegram_chat_id,
-                thread_id=f"tg:{owner_id}",
-                latest_message=latest_message,
+                chat_id=telegram_chat_id,
+                text=latest_message,
                 source=source,
                 kill_switch=kill_switch,
             )

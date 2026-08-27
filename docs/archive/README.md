@@ -9,6 +9,6 @@ Do not load these unless you are researching a past decision. Current agent read
 3. `docs/ARCHITECTURE.md`
 4. `docs/DECISIONS.md`
 
-Operator files (not required agent reading): `docs/RUNBOOK.md`, `docs/PRODUCTION_BUILD.md`. Brain implementation detail: `docs/BRAIN_ARCHITECTURE.md`.
+Operator files (not required agent reading): `docs/RUNBOOK.md`, `docs/PRODUCTION_BUILD.md`, `docs/WIRING.md`. Brain implementation detail: `docs/BRAIN_ARCHITECTURE.md`.
 
 The Bible source remains `docs/archive/Mia_AI_Growth_Sales_Operator_PRD_Build_Bible_v1.1.docx`.
