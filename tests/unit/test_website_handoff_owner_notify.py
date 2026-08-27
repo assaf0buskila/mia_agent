@@ -86,6 +86,10 @@ def test_website_handoff_notifies_the_owner_and_says_so(monkeypatch) -> None:
         brief = str(telegram.sends[0]["text"])
         assert "ליד מהאתר" in brief
         assert "צריך אותך" in brief
+        assert "ליד" in brief
+        assert "וואטסאפ הוצע" in brief
+        assert "\n" in brief
+        assert telegram.sends[0].get("parse_mode") == "HTML"
         assert out["reply"] == HANDOFF_OWNER_NOTIFIED
         for marker in HANDOFF_LIE_MARKERS:
             if marker in HANDOFF_OWNER_NOTIFIED:

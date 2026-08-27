@@ -178,15 +178,17 @@ def compute_website_funnel(
 
 
 def format_website_funnel(funnel: WebsiteFunnel) -> str:
-    """Hebrew, owner-facing, one line. Lead-id free, no PII, no hyphen/dash."""
-    return (
-        f"משפך באתר {funnel.day}: "
-        f"פתיחות {funnel.sessions} · "
-        f"שיחות {funnel.conversations} ({funnel.conversation_rate_pct}%) · "
-        f"discovery משמעותי {funnel.engaged} ({funnel.engaged_rate_pct}%) · "
-        f"פגישה הוצעה {funnel.meetings_offered} ({funnel.meeting_offer_rate_pct}%) · "
-        f"וואטסאפ הוצע {funnel.whatsapp_offered} · "
-        f"וואטסאפ נלחץ {funnel.whatsapp_clicked} ({funnel.whatsapp_click_rate_pct}%) · "
-        f"פגישות נקבעו {funnel.meetings_booked} ({funnel.meeting_booked_rate_pct}%) · "
-        f"העברות {funnel.handoffs}"
+    """Hebrew, owner-facing, labeled lines. Lead-id free, no PII, no hyphen/dash."""
+    return "\n".join(
+        [
+            f"משפך באתר {funnel.day}",
+            f"פתיחות: {funnel.sessions}",
+            f"שיחות: {funnel.conversations} ({funnel.conversation_rate_pct}%)",
+            f"discovery משמעותי: {funnel.engaged} ({funnel.engaged_rate_pct}%)",
+            f"פגישה הוצעה: {funnel.meetings_offered} ({funnel.meeting_offer_rate_pct}%)",
+            f"וואטסאפ הוצע: {funnel.whatsapp_offered}",
+            f"וואטסאפ נלחץ: {funnel.whatsapp_clicked} ({funnel.whatsapp_click_rate_pct}%)",
+            f"פגישות נקבעו: {funnel.meetings_booked} ({funnel.meeting_booked_rate_pct}%)",
+            f"העברות: {funnel.handoffs}",
+        ]
     )

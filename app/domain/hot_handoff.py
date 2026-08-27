@@ -14,11 +14,13 @@ from app.core.config import Settings
 from app.core.errors import PolicyDenied
 from app.core.risk import RiskAction, RiskLevel, assert_allowed
 from app.domain.conversation_scope import TakeoverState
+from app.domain.owner_lead_card import card_who, format_owner_lead_card
 from app.domain.sales import SalesState
+from app.integrations.telegram_format import esc
 
 KIND_HOT_LEAD = "hot_lead"
 
-_BRIEF_MAX = 500
+_BRIEF_MAX = 1800
 _TELEGRAM_API = "https://api.telegram.org"
 
 
@@ -30,16 +32,23 @@ class OwnerNotifyAttempt(NamedTuple):
 
 
 def format_hot_brief(*, lead_id: str, sales: SalesState, want: str) -> str:
-    lines = [
-        "ליד חם — מיה עוצרת.",
-        lead_id,
-        f"fit={sales.fit.value}",
-        f"pain={int(sales.pain_level)}",
-        f"workflow={'yes' if sales.workflow_known else 'no'}",
-        f"want={want[:120]}" if want else "want=handoff",
-        "הבא: תפיסה אנושית.",
+    extra: list[tuple[str, str]] = [
+        ("התאמה", sales.fit.value),
+        ("כאב", f"P{int(sales.pain_level)}"),
+        ("תהליך ידוע", "כן" if sales.workflow_known else "לא"),
     ]
-    return "\n".join(lines)[:_BRIEF_MAX]
+    if want.strip():
+        extra.append(("מה רצו", want.strip()[:120]))
+    return format_owner_lead_card(
+        title="ליד חם — מיה עוצרת",
+        lead_id=lead_id,
+        last_said=want.strip()[:80],
+        next_action="handoff",
+        whatsapp_offered=sales.whatsapp_handoff_offered,
+        who=card_who(lead_id, sales),
+        extra_pairs=extra,
+        after=esc("הבא: תפיסה אנושית."),
+    )[:_BRIEF_MAX]
 
 
 def format_hot_leads_ack(store, *, principal: Principal) -> str:
@@ -153,7 +162,7 @@ def apply_hot_handoff(
     text = brief if brief is not None else format_hot_brief(
         lead_id=lead_id, sales=sales, want=want
     )
-    mode = parse_mode if brief is not None else None
+    mode = parse_mode if brief is not None else "HTML"
     delivered = notify_owners(
         brief=text, inbound_id=inbound_id, settings=settings, parse_mode=mode
     )

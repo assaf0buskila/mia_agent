@@ -136,11 +136,13 @@ def test_summary_omits_empty_fields() -> None:
             "name": "Dana",
             "budget": None,
             "conversation_id": "web_1",
+            "lead_id": "lead_omit12abcd",
         }
     )
-    assert "Name: Dana" in text
-    assert "Budget" not in text
-    assert "Conversation ID: web_1" in text
+    assert "Dana" in text
+    assert "תקציב" not in text
+    assert "web_1" in text
+    assert "שיחה" in text
 
 
 def test_two_conversations_for_one_lead_both_claim_and_both_ping(monkeypatch) -> None:
@@ -378,18 +380,21 @@ def test_summary_carries_the_facts_the_conversation_actually_produced() -> None:
 
         labels = _label_lines(text)
         assert len(labels) >= 6, text
+        joined = "\n".join(labels)
         for label in (
-            "Name",
-            "Contact",
-            "What they need",
-            "Main problem",
-            "Service they appear interested in",
-            "Timeline",
-            "Budget",
-            "Qualification",
-            "Meeting",
+            "שם",
+            "יצירת קשר",
+            "צורך",
+            "בעיה",
+            "שירות",
+            "לוח זמנים",
+            "תקציב",
+            "כישור",
+            "פגישה",
+            "ליד",
+            "וואטסאפ הוצע",
         ):
-            assert label in labels, text
+            assert label in joined, text
     finally:
         db.close()
 
@@ -418,10 +423,10 @@ def test_summary_leaves_undiscussed_facts_out_rather_than_guessing() -> None:
         assert summary.contact is None
         assert summary.meeting_status is None
         assert summary.qualification is None
-        assert "Budget" not in text
-        assert "Timeline" not in text
-        assert "Contact" not in text
-        assert "Qualification" not in text
+        assert "תקציב" not in text
+        assert "לוח זמנים" not in text
+        assert "יצירת קשר" not in text
+        assert "כישור" not in text
     finally:
         db.close()
 
@@ -457,8 +462,11 @@ def test_website_session_end_route_pings_the_owner_exactly_once(monkeypatch) -> 
     assert len(telegram.sends) == 1
     sent = telegram.texts()[0]
     assert session_id in sent
-    assert "New website conversation" in sent
+    assert "שיחה מהאתר הסתיימה" in sent
     assert "יוסי" in sent
+    assert "ליד" in sent
+    assert "וואטסאפ הוצע" in sent
+    assert telegram.sends[0].get("parse_mode") == "HTML"
 
 
 def test_website_session_end_route_is_idempotent(monkeypatch) -> None:

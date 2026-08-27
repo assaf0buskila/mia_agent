@@ -62,7 +62,6 @@ from app.integrations.sales_reply import build_sales_reply_port
 from app.integrations.sheets import (
     DealMirrorRow,
     FollowUpMirrorRow,
-    LeadMirrorRow,
     MeetingMirrorRow,
     SheetsPort,
     SourceMirrorRow,
@@ -70,6 +69,7 @@ from app.integrations.sheets import (
     build_sheets_port,
     claim_sheets_mirror,
     complete_sheets_mirror,
+    lead_mirror_row_from_state,
     maybe_mirror_weekly_kpi,
     mirror_activity,
     mirror_deal,
@@ -531,13 +531,13 @@ def process_website_message(
             sales = store.get_sales(lead_id)
             sheets_written = mirror_lead(
                 sheets=sheets,
-                row=LeadMirrorRow(
+                row=lead_mirror_row_from_state(
                     lead_id=lead_id,
                     channel="website",
                     stage=store.get_lead_stage(lead_id),
-                    fit=sales.fit.value,
-                    pain_level=int(sales.pain_level),
+                    sales=sales,
                     next_action=result.get("next_action", ""),
+                    turns=store.list_conversation_turns(session_id),
                 ),
                 kill_switch=settings.kill_switch,
             )

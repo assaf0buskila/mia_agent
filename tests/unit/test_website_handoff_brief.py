@@ -119,8 +119,9 @@ def test_human_handoff_brief_includes_the_conversation_and_is_not_a_whatsapp_cla
     )
     assert "צריך אותך" in brief
     assert "שעתיים כל פעם" in brief
-    assert "וואטסאפ" not in brief
     assert "מיה לא תענה שם" not in brief
+    assert "וואטסאפ הוצע" in brief
+    assert "→ וואטסאפ" not in brief
 
 
 def test_recommended_line_is_generic_when_nothing_concrete_is_known() -> None:
