@@ -2,6 +2,7 @@ import json
 
 import pytest
 from app.api.inbound import process_inbound_texts
+from app.capabilities.types import Principal
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
 from app.domain.events import Channel
@@ -18,6 +19,7 @@ from app.integrations.research import DisabledResearchPort
 from app.integrations.sheets import FakeSheetsPort
 
 OWNER_FRESH_LI_PROFILE_PHONE = "972509998621"
+_OWNER = Principal.owner(source="test")
 
 SAMPLE_PROFILE = LinkedInProfile(
     name="Assaf Web",
@@ -32,6 +34,7 @@ def test_enrich_linkedin_ack_fake_freshness_cached() -> None:
         ack,
         FakeLinkedInPort(SAMPLE_PROFILE),
         kill_switch=False,
+        principal=_OWNER,
     )
     assert outcome.freshness == "cached"
     assert outcome.status == "ok"
@@ -51,6 +54,7 @@ def test_enrich_linkedin_ack_disabled_freshness_unverified() -> None:
         ack,
         DisabledLinkedInPort(),
         kill_switch=False,
+        principal=_OWNER,
     )
     assert enriched == ack
     assert outcome.freshness == "unverified"
@@ -68,6 +72,7 @@ def test_enrich_linkedin_ack_kill_switch_freshness_empty() -> None:
         ack,
         RaisingLinkedInPort(),
         kill_switch=True,
+        principal=_OWNER,
     )
     assert enriched == ack
     assert outcome.freshness == ""
@@ -85,6 +90,7 @@ def test_enrich_linkedin_ack_http_401_freshness_unverified() -> None:
         ack,
         HttpErrorLinkedInPort(),
         kill_switch=False,
+        principal=_OWNER,
     )
     assert enriched == ack
     assert outcome.status == "unauthorized"

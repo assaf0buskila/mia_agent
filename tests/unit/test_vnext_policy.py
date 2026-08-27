@@ -17,6 +17,12 @@ def test_safe_reads_need_no_confirmation() -> None:
     authorize("knowledge.search", principal=Principal.owner(source="test"))
     authorize("knowledge.search", principal=Principal.client(source="test"))
     authorize("business.get_information", principal=Principal.client(source="test"))
+    authorize("linkedin.get_profile", principal=Principal.owner(source="test"))
+    authorize("search_console.query", principal=Principal.owner(source="test"))
+    authorize("analytics.get_traffic", principal=Principal.owner(source="test"))
+    assert is_safe_read("linkedin.get_profile") is True
+    assert is_safe_read("search_console.query") is True
+    assert is_safe_read("analytics.get_traffic") is True
 
 
 def test_destructive_mail_delete_is_denied() -> None:

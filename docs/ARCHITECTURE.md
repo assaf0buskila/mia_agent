@@ -62,7 +62,7 @@ Semantic memory/extraction/embeddings **do not run** unless model ids are config
 
 ## Capability and policy
 
-Graphs call named capabilities (`mail.read`, `calendar.get_schedule`, `leads.get_recent`, `memory.search`, `knowledge.search`, `research.search`, …), never raw Composio tool slugs. Live owner calendar, hot-lead lists, mail read, memory search, knowledge search, and research search go through `execute_capability`.
+Graphs call named capabilities (`mail.read`, `calendar.get_schedule`, `leads.get_recent`, `memory.search`, `knowledge.search`, `research.search`, `linkedin.get_profile`, `search_console.query`, `analytics.get_traffic`, …), never raw Composio tool slugs. Live owner calendar, hot-lead lists, mail read, LinkedIn profile, Search Console, GA4 traffic, memory search, knowledge search, and research search go through `execute_capability`.
 
 Each capability has `{READ, WRITE, SENSITIVE_WRITE, DESTRUCTIVE}`, allowed graphs, confirmation, retry, and idempotency. Enforcement is Python (`app/core/risk.py` plus the capability registry). Prompt text cannot add a tool.
 

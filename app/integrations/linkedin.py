@@ -16,9 +16,10 @@ from typing import Any, Protocol
 import httpx
 from pydantic import BaseModel
 
+from app.capabilities.policy import execute_capability
+from app.capabilities.types import Principal
 from app.core.config import Settings
-from app.core.errors import PolicyDenied
-from app.core.risk import RiskAction, RiskLevel, assert_allowed
+from app.core.errors import PermissionDenied, PolicyDenied
 from app.domain.ai_runs import elapsed_ms
 from app.domain.policies.freshness import overlay_stale, stamp_freshness
 from app.domain.tools import AdapterHttpError, ToolOutcome
@@ -204,28 +205,27 @@ def _linkedin_profile_outcome(
 
 
 def enrich_linkedin_ack(
-    ack: str, port: LinkedInPort, kill_switch: bool
+    ack: str,
+    port: LinkedInPort,
+    kill_switch: bool,
+    *,
+    principal: Principal,
 ) -> tuple[str, ToolOutcome]:
     """Append own-profile snapshot to owner linkedin ack. Never raises; never posts."""
-    try:
-        assert_allowed(
-            RiskAction(name="linkedin_read", risk=RiskLevel.R0_READ),
-            kill_switch=kill_switch,
-        )
-    except PolicyDenied:
-        return ack, ToolOutcome(
-            tool="linkedin_profile",
-            status="denied",
-            result_count=0,
-            freshness="",
-        )
+    from app.capabilities.linkedin import linkedin_handlers
 
     now = datetime.now(UTC)
     started = perf_counter()
     try:
-        profile = port.get_my_profile()
+        payload = execute_capability(
+            "linkedin.get_profile",
+            principal=principal,
+            args={},
+            handlers=linkedin_handlers(port),
+            kill_switch=kill_switch,
+        )
         latency = elapsed_ms(started)
-        if profile is None:
+        if not payload.get("found"):
             return ack, _linkedin_profile_outcome(
                 base_status="empty",
                 present=False,
@@ -233,6 +233,10 @@ def enrich_linkedin_ack(
                 latency_ms=latency,
                 now=now,
             )
+        profile = LinkedInProfile(
+            name=str(payload.get("name") or ""),
+            headline=str(payload.get("headline") or ""),
+        )
         line = format_profile_line(profile)
         if not line:
             return ack, _linkedin_profile_outcome(
@@ -251,6 +255,13 @@ def enrich_linkedin_ack(
                 latency_ms=latency,
                 now=now,
             ),
+        )
+    except PermissionDenied:
+        return ack, ToolOutcome(
+            tool="linkedin_profile",
+            status="denied",
+            result_count=0,
+            freshness="",
         )
     except AdapterHttpError as exc:
         return ack, _linkedin_profile_outcome(

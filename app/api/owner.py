@@ -680,6 +680,7 @@ async def process_owner_item(
             search_console_port,
             ga4_port,
             seo_audit_port,
+            principal=principal,
             kill_switch=kill_switch,
             store=store,
             settings=settings,
@@ -704,6 +705,7 @@ async def process_owner_item(
             ack_text,
             linkedin_port,
             kill_switch,
+            principal=principal,
         )
         persist_tool_outcome(
             store,

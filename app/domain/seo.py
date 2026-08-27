@@ -9,12 +9,17 @@ from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel
 
+from app.capabilities.analytics import analytics_handlers
+from app.capabilities.policy import execute_capability
+from app.capabilities.search_console import search_console_handlers
+from app.capabilities.types import Principal
 from app.core.config import Settings, get_settings
-from app.core.errors import PolicyDenied
+from app.core.errors import PermissionDenied, PolicyDenied
 from app.core.risk import RiskAction, RiskLevel, assert_allowed
 from app.domain.ai_runs import elapsed_ms
 from app.domain.tools import AdapterHttpError, ToolOutcome
 from app.integrations.ga4 import (
+    Ga4PivotRow,
     Ga4Port,
     _ga4_outcome,
     format_conversion_events_block,
@@ -129,6 +134,7 @@ def enrich_seo_ack(
     ga4: Ga4Port,
     audit: SeoAuditPort,
     *,
+    principal: Principal,
     kill_switch: bool,
     store: LeadStore | None = None,
     settings: Settings | None = None,
@@ -142,111 +148,142 @@ def enrich_seo_ack(
     blocks: list[str] = []
     gsc_rows: list[SearchAnalyticsRow] = []
     audit_snapshot = None
+    start_date, end_date = _default_read_dates(settings)
 
+    started = perf_counter()
     try:
-        assert_allowed(
-            RiskAction(name="gsc_read", risk=RiskLevel.R0_READ),
+        payload = execute_capability(
+            "search_console.query",
+            principal=principal,
+            args={
+                "start_date": start_date,
+                "end_date": end_date,
+                "dimensions": _GSC_DIMENSIONS,
+            },
+            handlers=search_console_handlers(gsc),
             kill_switch=kill_switch,
         )
-    except PolicyDenied:
+        latency = elapsed_ms(started)
+        gsc_rows = [
+            SearchAnalyticsRow(
+                page=str(item.get("page") or ""),
+                query=str(item.get("query") or ""),
+                clicks=item.get("clicks") if item.get("clicks") is not None else None,
+                impressions=(
+                    item.get("impressions") if item.get("impressions") is not None else None
+                ),
+                ctr=item.get("ctr") if item.get("ctr") is not None else None,
+                position=item.get("position") if item.get("position") is not None else None,
+            )
+            for item in (payload.get("rows") or [])
+            if isinstance(item, dict)
+        ]
+        block = format_gsc_rows_block(gsc_rows)
+        if block:
+            blocks.append(block)
+        outcomes.append(
+            _gsc_outcome(
+                base_status="ok" if gsc_rows else "empty",
+                present=bool(gsc_rows),
+                result_count=len(gsc_rows),
+                latency_ms=latency,
+                now=effective_now,
+            )
+        )
+    except PermissionDenied:
         outcomes.append(
             ToolOutcome(tool="gsc_search_analytics", status="denied", result_count=0)
         )
-    else:
-        started = perf_counter()
-        try:
-            start_date, end_date = _default_read_dates(settings)
-            gsc_rows = gsc.query_search_analytics(
-                start_date=start_date,
-                end_date=end_date,
-                dimensions=_GSC_DIMENSIONS,
+    except AdapterHttpError as exc:
+        outcomes.append(
+            _gsc_outcome(
+                base_status=exc.tool_status(),
+                present=False,
+                result_count=0,
+                latency_ms=elapsed_ms(started),
+                now=effective_now,
             )
-            latency = elapsed_ms(started)
-            block = format_gsc_rows_block(gsc_rows)
-            if block:
-                blocks.append(block)
-            outcomes.append(
-                _gsc_outcome(
-                    base_status="ok" if gsc_rows else "empty",
-                    present=bool(gsc_rows),
-                    result_count=len(gsc_rows),
-                    latency_ms=latency,
-                    now=effective_now,
-                )
+        )
+    except (RuntimeError, PolicyDenied, ValueError, OSError):
+        outcomes.append(
+            _gsc_outcome(
+                base_status="error",
+                present=False,
+                result_count=0,
+                latency_ms=elapsed_ms(started),
+                now=effective_now,
             )
-        except AdapterHttpError as exc:
-            outcomes.append(
-                _gsc_outcome(
-                    base_status=exc.tool_status(),
-                    present=False,
-                    result_count=0,
-                    latency_ms=elapsed_ms(started),
-                    now=effective_now,
-                )
-            )
-        except (RuntimeError, PolicyDenied, ValueError, OSError):
-            outcomes.append(
-                _gsc_outcome(
-                    base_status="error",
-                    present=False,
-                    result_count=0,
-                    latency_ms=elapsed_ms(started),
-                    now=effective_now,
-                )
-            )
+        )
 
+    started = perf_counter()
     try:
-        assert_allowed(
-            RiskAction(name="ga4_read", risk=RiskLevel.R0_READ),
+        payload = execute_capability(
+            "analytics.get_traffic",
+            principal=principal,
+            args={"start_date": start_date, "end_date": end_date},
+            handlers=analytics_handlers(ga4),
             kill_switch=kill_switch,
         )
-    except PolicyDenied:
+        latency = elapsed_ms(started)
+        pivot_rows = [
+            Ga4PivotRow(
+                landing_page=str(item.get("landing_page") or ""),
+                session_source=str(item.get("session_source") or ""),
+                sessions=item.get("sessions") if item.get("sessions") is not None else None,
+                engaged_sessions=(
+                    item.get("engaged_sessions")
+                    if item.get("engaged_sessions") is not None
+                    else None
+                ),
+            )
+            for item in (payload.get("rows") or [])
+            if isinstance(item, dict)
+        ]
+        conversions = [
+            str(item)
+            for item in (payload.get("conversions") or [])
+            if str(item).strip()
+        ]
+        ga4_block = format_ga4_rows_block(pivot_rows)
+        conv_block = format_conversion_events_block(conversions)
+        if ga4_block:
+            blocks.append(ga4_block)
+        if conv_block:
+            blocks.append(conv_block)
+        count = len(pivot_rows) + len(conversions)
+        outcomes.append(
+            _ga4_outcome(
+                base_status="ok" if count else "empty",
+                present=count > 0,
+                result_count=len(pivot_rows),
+                latency_ms=latency,
+                now=effective_now,
+            )
+        )
+    except PermissionDenied:
         outcomes.append(
             ToolOutcome(tool="ga4_pivot_report", status="denied", result_count=0)
         )
-    else:
-        started = perf_counter()
-        try:
-            start_date, end_date = _default_read_dates(settings)
-            pivot_rows = ga4.run_pivot_report(start_date=start_date, end_date=end_date)
-            conversions = ga4.list_conversion_events()
-            latency = elapsed_ms(started)
-            ga4_block = format_ga4_rows_block(pivot_rows)
-            conv_block = format_conversion_events_block(conversions)
-            if ga4_block:
-                blocks.append(ga4_block)
-            if conv_block:
-                blocks.append(conv_block)
-            count = len(pivot_rows) + len(conversions)
-            outcomes.append(
-                _ga4_outcome(
-                    base_status="ok" if count else "empty",
-                    present=count > 0,
-                    result_count=len(pivot_rows),
-                    latency_ms=latency,
-                    now=effective_now,
-                )
+    except AdapterHttpError as exc:
+        outcomes.append(
+            _ga4_outcome(
+                base_status=exc.tool_status(),
+                present=False,
+                result_count=0,
+                latency_ms=elapsed_ms(started),
+                now=effective_now,
             )
-        except AdapterHttpError as exc:
-            outcomes.append(
-                _ga4_outcome(
-                    base_status=exc.tool_status(),
-                    present=False,
-                    result_count=0,
-                    latency_ms=elapsed_ms(started),
-                    now=effective_now,
-                )
+        )
+    except (RuntimeError, PolicyDenied, ValueError, OSError):
+        outcomes.append(
+            _ga4_outcome(
+                base_status="error",
+                present=False,
+                result_count=0,
+                latency_ms=elapsed_ms(started),
+                now=effective_now,
             )
-        except (RuntimeError, PolicyDenied, ValueError, OSError):
-            outcomes.append(
-                _ga4_outcome(
-                    base_status="error",
-                    present=False,
-                    result_count=0,
-                    latency_ms=elapsed_ms(started),
-                    now=effective_now,
-                )
-            )
+        )
 
     try:
         assert_allowed(

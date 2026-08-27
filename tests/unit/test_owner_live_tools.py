@@ -75,3 +75,58 @@ def test_disconnected_live_reads_do_not_raise() -> None:
         assert missing.ok is False
     finally:
         session.close()
+
+
+def test_owner_linkedin_and_seo_tools_use_fake_ports() -> None:
+    from app.integrations.ga4 import FakeGa4Port, Ga4PivotRow
+    from app.integrations.linkedin import FakeLinkedInPort, LinkedInProfile
+    from app.integrations.search_console import FakeSearchConsolePort, SearchAnalyticsRow
+    from app.integrations.seo_audit import FakeSeoAuditPort, SeoAuditSnapshot
+
+    session = _session()
+    try:
+        ctx = _ctx(session)
+        ctx.linkedin = FakeLinkedInPort(
+            LinkedInProfile(name="Assaf Web", headline="Growth operator")
+        )
+        ctx.search_console = FakeSearchConsolePort(
+            analytics_rows=[
+                SearchAnalyticsRow(page="/", impressions="10", clicks="1", ctr="0.1")
+            ]
+        )
+        ctx.ga4 = FakeGa4Port(
+            pivot_rows=[Ga4PivotRow(landing_page="/", sessions="4")],
+            conversion_events=["generate_lead"],
+        )
+        ctx.seo_audit = FakeSeoAuditPort(
+            SeoAuditSnapshot(url="https://www.assafweb.com/", title="AssafWeb", h1_count=1)
+        )
+        linkedin = execute_tool("linkedin_snapshot", {}, ctx)
+        assert linkedin.ok is True
+        assert "Assaf Web" in linkedin.text
+        assert "LINKEDIN_GET_MY_INFO" not in linkedin.text
+        seo = execute_tool("seo_snapshot", {}, ctx)
+        assert seo.ok is True
+        assert "נתוני חיפוש" in seo.text
+        assert "GOOGLE_SEARCH_CONSOLE" not in seo.text
+        assert "GOOGLE_ANALYTICS" not in seo.text
+        denied_ctx = ToolContext(
+            principal=Principal.client(source="website"),
+            store=ctx.store,
+            brain=ctx.brain,
+            settings=ctx.settings,
+            embedding_port=ctx.embedding_port,
+            linkedin=ctx.linkedin,
+            search_console=ctx.search_console,
+            ga4=ctx.ga4,
+            seo_audit=ctx.seo_audit,
+            source_ref="website:test",
+        )
+        denied_li = execute_tool("linkedin_snapshot", {}, denied_ctx)
+        assert denied_li.ok is True
+        assert "Assaf Web" not in denied_li.text
+        denied_seo = execute_tool("seo_snapshot", {}, denied_ctx)
+        assert denied_seo.ok is True
+        assert "נתוני חיפוש" not in denied_seo.text
+    finally:
+        session.close()
