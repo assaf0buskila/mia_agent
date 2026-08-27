@@ -1,7 +1,6 @@
 from collections.abc import Callable
 from pathlib import Path
 from time import perf_counter
-from urllib.parse import quote
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
@@ -48,7 +47,7 @@ from app.domain.events import (
     transcription_outcome,
 )
 from app.domain.followups import apply_follow_up_policy
-from app.domain.handoff import click_to_chat_digits, compose_handoff_text
+from app.domain.handoff import click_to_chat_url
 from app.domain.meetings import apply_meeting_policy
 from app.domain.sales import NextAction
 from app.domain.website_handoff_brief import (
@@ -128,6 +127,7 @@ class MessageOut(BaseModel):
     lead_id: str
     next_action: str
     message: str
+    whatsapp_url: str | None = None
 
 
 class VoiceMessageOut(MessageOut):
@@ -697,10 +697,19 @@ def process_website_message(
         success=True,
         automation_mode=settings.automation_mode.value,
     )
+    next_action = result.get("next_action", "")
+    offer_url = None
+    if next_action in {
+        NextAction.OFFER_WHATSAPP.value,
+        NextAction.HANDOFF.value,
+    }:
+        built = click_to_chat_url(settings.whatsapp_click_to_chat)
+        offer_url = built or None
     return MessageOut(
         lead_id=lead_id,
-        next_action=result.get("next_action", ""),
+        next_action=next_action,
         message=message,
+        whatsapp_url=offer_url,
     )
 
 
@@ -792,9 +801,9 @@ def create_handoff(
         settings=settings,
     )
     whatsapp_url: str | None = None
-    digits = click_to_chat_digits(settings.whatsapp_click_to_chat)
-    if digits:
-        whatsapp_url = f"https://wa.me/{digits}?text={quote(compose_handoff_text(raw_token))}"
+    built = click_to_chat_url(settings.whatsapp_click_to_chat, raw_token)
+    if built:
+        whatsapp_url = built
     return HandoffOut(token=raw_token, expires_at=expires_at, whatsapp_url=whatsapp_url)
 
 
@@ -946,5 +955,6 @@ async def post_voice(
         lead_id=out.lead_id,
         next_action=out.next_action,
         message=out.message,
+        whatsapp_url=out.whatsapp_url,
         heard=text,
     )

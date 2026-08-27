@@ -164,7 +164,8 @@
     '.ask-mia-handoff-title{font-weight:700;color:#061b35}' +
     '.ask-mia-handoff-note{font-size:.85rem;color:#2f5f93}' +
     '.ask-mia-handoff-cta{display:inline-flex;align-items:center;justify-content:center;' +
-    'gap:.35rem;margin-top:.15rem;padding:.5rem .75rem;min-height:44px;border-radius:.65rem;' +
+    'gap:.35rem;margin-top:.15rem;padding:.5rem .75rem;min-height:44px;width:100%;' +
+    'box-sizing:border-box;border-radius:.65rem;cursor:pointer;' +
     'background:#25d366;color:#fff;font-weight:700;text-decoration:none}' +
     '.ask-mia-handoff-cta:focus-visible{outline:2px solid #2563eb;outline-offset:2px}' +
     '#ask-mia-wa.offer{box-shadow:0 0 0 2px #2563eb}' +
@@ -344,7 +345,8 @@
       rows.forEach(function (row) {
         if (!row || (row.role !== 'mia' && row.role !== 'user')) return;
         if (typeof row.text !== 'string' || !row.text) return;
-        var text = row.text.slice(0, 4000);
+        var text = stripWaMeUrls(row.text.slice(0, 4000));
+        if (!text) return;
         storedTranscript.push({ role: row.role, text: text });
         paintMsg(row.role, text);
       });
@@ -355,11 +357,12 @@
   }
 
   function appendMsg(role, text) {
-    if (typeof text !== 'string' || !text) return;
-    if (role === 'mia' && text === lastMiaText()) return;
+    if (typeof text !== 'string' || !text) return false;
+    if (role === 'mia' && text === lastMiaText()) return false;
     paintMsg(role, text);
     storedTranscript.push({ role: role, text: text });
     persistTranscript();
+    return true;
   }
 
   function isWaMeUrl(url) {
@@ -369,6 +372,79 @@
     } catch (err) {
       return false;
     }
+  }
+
+  var WA_ME_IN_TEXT = /https?:\/\/(?:www\.)?wa\.me\/[^\s]*/gi;
+
+  function stripWaMeUrls(text) {
+    if (typeof text !== 'string' || !text) return '';
+    var cleaned = text.replace(WA_ME_IN_TEXT, ' ');
+    cleaned = cleaned.replace(/\bwa\.me\/[^\s]+/gi, ' ');
+    return cleaned
+      .replace(/[ \t]+/g, ' ')
+      .replace(/ *\n */g, '\n')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+  }
+
+  function hasWhatsAppCta() {
+    return !!transcript.querySelector('.ask-mia-handoff-cta');
+  }
+
+  function notifyHandoffIssued() {
+    if (!sessionId) return;
+    fetch(
+      api + '/v1/website/sessions/' + encodeURIComponent(sessionId) + '/handoff',
+      { method: 'POST', credentials: 'omit', keepalive: true }
+    ).catch(function () {});
+  }
+
+  function makeWhatsAppCta(url) {
+    if (!isWaMeUrl(url)) return null;
+    var link = document.createElement('a');
+    link.className = 'ask-mia-handoff-cta';
+    link.href = url;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    link.textContent = 'נעבור לוואטסאפ';
+    link.addEventListener('click', notifyHandoffIssued);
+    return link;
+  }
+
+  function placeWhatsAppCta(url, ontoLastBubble) {
+    var link = makeWhatsAppCta(url);
+    if (!link) return;
+    if (hasWhatsAppCta()) return;
+    if (ontoLastBubble) {
+      var nodes = transcript.querySelectorAll('.ask-mia-mia');
+      var last = nodes.length ? nodes[nodes.length - 1] : null;
+      if (last && !last.closest('#ask-mia-loading')) {
+        last.classList.add('ask-mia-handoff');
+        last.appendChild(link);
+        transcript.scrollTop = transcript.scrollHeight;
+        link.focus();
+        return;
+      }
+    }
+    paintHandoffCard(url);
+  }
+
+  function requestWhatsAppCta(ontoLastBubble) {
+    if (!sessionId) return;
+    fetchJson(
+      api + '/v1/website/sessions/' + encodeURIComponent(sessionId) + '/handoff',
+      { method: 'POST' }
+    )
+      .then(function (data) {
+        if (typeof data.whatsapp_url === 'string' && isWaMeUrl(data.whatsapp_url)) {
+          placeWhatsAppCta(data.whatsapp_url, ontoLastBubble);
+        } else {
+          status.textContent = WA_NA;
+        }
+      })
+      .catch(function () {
+        status.textContent = ERR;
+      });
   }
 
   function hasForbiddenSubstring(value) {
@@ -542,10 +618,23 @@
         persistTranscript();
       }
     }
-    if (typeof data.message === 'string') appendMsg('mia', data.message);
-    if (data.next_action === 'offer_whatsapp' || data.next_action === 'handoff') {
-      waBtn.hidden = false;
-      waBtn.classList.add('offer');
+    var raw = typeof data.message === 'string' ? data.message : '';
+    var visible = stripWaMeUrls(raw);
+    var offering =
+      data.next_action === 'offer_whatsapp' || data.next_action === 'handoff';
+    var replyUrl =
+      typeof data.whatsapp_url === 'string' && isWaMeUrl(data.whatsapp_url)
+        ? data.whatsapp_url
+        : '';
+    var painted = visible ? appendMsg('mia', visible) : false;
+    if (offering) {
+      waBtn.hidden = true;
+      waBtn.classList.remove('offer');
+      if (replyUrl) {
+        placeWhatsAppCta(replyUrl, painted);
+      } else {
+        requestWhatsAppCta(painted);
+      }
     } else {
       waBtn.classList.remove('offer');
     }
@@ -764,9 +853,8 @@
   }
 
   function paintHandoffCard(url) {
-    // A confirmation card instead of an immediate full-page jump: the visitor sees who
-    // they are about to reach and what he will already know, and the chat stays intact
-    // behind them because the link opens in a new tab.
+    var link = makeWhatsAppCta(url);
+    if (!link) return;
     var row = document.createElement('div');
     row.className = 'ask-mia-row ask-mia-row-mia';
     var avatar = document.createElement('span');
@@ -781,13 +869,6 @@
     var note = document.createElement('span');
     note.className = 'ask-mia-handoff-note';
     note.textContent = 'אסף מקבל את כל מה שסיפרתם לי כאן, אז אין צורך להתחיל מהתחלה.';
-
-    var link = document.createElement('a');
-    link.className = 'ask-mia-handoff-cta';
-    link.href = url;
-    link.target = '_blank';
-    link.rel = 'noopener noreferrer';
-    link.textContent = 'פתחו את וואטסאפ';
 
     card.appendChild(title);
     card.appendChild(note);
@@ -809,7 +890,7 @@
     )
       .then(function (data) {
         if (typeof data.whatsapp_url === 'string' && isWaMeUrl(data.whatsapp_url)) {
-          paintHandoffCard(data.whatsapp_url);
+          placeWhatsAppCta(data.whatsapp_url, false);
           waBtn.hidden = true;
           waBtn.classList.remove('offer');
         } else {

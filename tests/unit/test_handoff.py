@@ -11,6 +11,7 @@ from app.domain.events import Channel
 from app.domain.handoff import (
     HANDOFF_COMPOSE_HINT_HE,
     click_to_chat_digits,
+    click_to_chat_url,
     compose_handoff_text,
     extract_handoff_token,
     generate_handoff_token,
@@ -86,6 +87,16 @@ def test_click_to_chat_digits_reject_non_phone() -> None:
     assert click_to_chat_digits("+972 500000001") == "972500000001"
     assert click_to_chat_digits("https://evil.example") == ""
     assert click_to_chat_digits("97250abc") == ""
+
+
+def test_click_to_chat_url_is_https_wa_me_or_empty() -> None:
+    url = click_to_chat_url(CLICK_CHAT)
+    assert url.startswith("https://wa.me/")
+    parsed_host = url.split("/")[2]
+    assert parsed_host == "wa.me"
+    assert click_to_chat_url("") == ""
+    assert click_to_chat_url("https://evil.example") == ""
+    assert click_to_chat_url("javascript:alert(1)") == ""
 
 
 @pytest.mark.asyncio
