@@ -184,6 +184,34 @@ def format_website_whatsapp_brief(
     return "\n".join(blocks)[:_BRIEF_MAX]
 
 
+def format_website_human_handoff_brief(
+    *,
+    lead_id: str,
+    sales: SalesState,
+    turns: list[ConversationTurn],
+) -> str:
+    """Owner ping when the website graph hands off. HTML. Includes the conversation.
+
+    This is not a WhatsApp click. Do not tell Assaf the visitor is already in his
+    WhatsApp inbox — they are not, until they tap the widget CTA.
+    """
+    headline = (sales.headline or "").strip()
+    who = lead_display(lead_id, headline, sales.display_name)
+    blocks = [
+        f"{bold('ליד מהאתר — צריך אותך')}",
+        esc(who),
+        esc("מיה עצרה באתר. תטפל אתה."),
+        "",
+        f"{bold('מה ידוע')}: " + esc(" · ".join(_fact_lines(sales))),
+    ]
+    transcript = _transcript_lines(turns)
+    if transcript:
+        blocks.extend(
+            ["", "השיחה:", blockquote("\n".join(transcript), expandable=True)]
+        )
+    return "\n".join(blocks)[:_BRIEF_MAX]
+
+
 def apply_website_whatsapp_handoff_brief(
     store,
     *,

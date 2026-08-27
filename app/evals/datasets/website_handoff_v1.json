@@ -46,7 +46,7 @@
       {
         "user": "כן נוח לי",
         "expected_action": "handoff",
-        "expected_reply_contains": "לאסף"
+        "expected_reply_contains": "צריך לקחת"
       }
     ]
   },
@@ -150,7 +150,7 @@
       {
         "user": "אני רוצה לדבר עם אסף",
         "expected_action": "handoff",
-        "expected_reply_contains": "אעביר",
+        "expected_reply_contains": "צריך לקחת",
         "expect": {
           "owner_required": true,
           "whatsapp_handoff_offered": false

@@ -68,6 +68,25 @@ def _clamp_tokens(value: object) -> int:
     return max(0, min(value, 10_000_000))
 
 
+def _message_text(content: object) -> str:
+    """Chat Completions `message.content` is a string, or a list of parts."""
+    if isinstance(content, str):
+        return content.strip()
+    if not isinstance(content, list):
+        return ""
+    parts: list[str] = []
+    for item in content:
+        if isinstance(item, str) and item.strip():
+            parts.append(item.strip())
+            continue
+        if not isinstance(item, dict):
+            continue
+        text = item.get("text")
+        if isinstance(text, str) and text.strip():
+            parts.append(text.strip())
+    return "\n".join(parts)
+
+
 def function_tool(
     *,
     name: str,
@@ -148,7 +167,21 @@ class LlmClient:
             payload["response_format"] = response_format
         if max_completion_tokens is not None:
             payload["max_completion_tokens"] = max_completion_tokens
-        body = self._post(payload)
+        try:
+            body = self._post(payload)
+        except LlmError as exc:
+            # Some models 400 on `parallel_tool_calls`. Drop it and retry once so a
+            # capabilities-style question is not killed by a tool-calling flag.
+            if (
+                tools
+                and parallel_tool_calls is not None
+                and _status_from_error(exc) == 400
+                and "parallel_tool_calls" in payload
+            ):
+                payload.pop("parallel_tool_calls", None)
+                body = self._post(payload)
+            else:
+                raise
         return self._parse(body)
 
     def _post(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -185,7 +218,7 @@ class LlmClient:
         content = message.get("content")
         refusal = message.get("refusal")
         return LlmResponse(
-            text=content.strip() if isinstance(content, str) else "",
+            text=_message_text(content),
             tool_calls=self._parse_tool_calls(message),
             finish_reason=str(choice.get("finish_reason") or ""),
             refusal=refusal.strip() if isinstance(refusal, str) else "",
@@ -237,10 +270,10 @@ class LlmModelChain:
     # 404 unknown or not-permitted model, 403 access denied, 410 retired. Each means
     # "this model will never work for this key" — try the next one.
     #
-    # 400 is deliberately NOT here: a malformed payload is rejected identically by every
-    # model, so advancing would just burn the fallback on the same bug. 429/500/503 are
-    # load, not access — they raise so the caller sees a transient failure rather than
-    # silently demoting to a cheaper model on every rate limit.
+    # 400 without tools is a payload bug (every model rejects it). 400 *with* tools is
+    # often this model rejecting the tool schema / parallel_tool_calls; the next model
+    # in the chain may still answer. 429/500/503 are load, not access — they raise so
+    # the caller sees a transient failure rather than silently demoting.
     ADVANCE_ON: frozenset[int] = frozenset({403, 404, 410})
 
     def __init__(self, clients: list[LlmClient]) -> None:
@@ -263,16 +296,32 @@ class LlmModelChain:
         for index, client in enumerate(self._clients):
             self.last_model = client.model
             try:
-                return client.complete(**kwargs)
+                response = client.complete(**kwargs)
             except LlmError as exc:
                 self.errors.append(f"{client.model}:{exc}")
                 status = _status_from_error(exc)
                 is_last = index == len(self._clients) - 1
-                if status is not None and status not in self.ADVANCE_ON and not is_last:
+                tools_sent = bool(kwargs.get("tools"))
+                if (
+                    status is not None
+                    and status not in self.ADVANCE_ON
+                    and not (status == 400 and tools_sent)
+                    and not is_last
+                ):
                     # Load or transport problem, not a model problem. Do not spend the
-                    # fallback on it.
+                    # fallback on it. A 400 with tools is the exception: this model may
+                    # reject the tool payload while the next one accepts it.
                     raise
                 last = exc
+                continue
+            if not response.text and not response.tool_calls:
+                # A 200 with empty content is how some model ids fail live: the account
+                # can "call" them, they return no prose and no tools, and the owner
+                # console falls through to the NOTE failure line. Try the next model.
+                self.errors.append(f"{client.model}:empty_reply")
+                last = LlmError("llm request failed: empty reply HTTP 200")
+                continue
+            return response
         raise last or LlmError("all models failed")
 
 

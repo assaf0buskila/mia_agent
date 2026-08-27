@@ -752,6 +752,11 @@ async def process_owner_item(
     )
     if brain_result.used_agent:
         ack_text = brain_result.text
+    elif brain_result.text.startswith("הבדיקה לא עברה כרגע"):
+        # Agent was allowed to run and failed. The line already names the failure
+        # class. Do not paraphrase it: that hides the class and spends a second
+        # model call that is often failing for the same reason.
+        ack_text = brain_result.text
     else:
         # `brain_result.text` is `ack_text` unchanged on every early-exit path
         # (kill switch, deterministic intent, no model configured) -- `answer_owner`

@@ -310,13 +310,11 @@ def test_model_failure_on_a_note_degrades_to_the_honest_failure_line() -> None:
     ("נרשם כמשימה. לא ביצעתי אותה." -- "recorded as a task, I did not act on it"),
     which was dishonest here: an unclassified NOTE was genuinely understood well
     enough that the agent was invoked, and it was the live model call that failed,
-    not the classification. `answer_owner` now substitutes the honest
-    NOTE_AGENT_FAILURE_TEXT ("הבדיקה לא עברה כרגע. תנסה שוב." -- "the check did not
-    go through right now, try again") instead, but only for NOTE. See the sibling
-    test below, which pins that every other task type is unaffected.
+    not the classification. `answer_owner` now substitutes an honest failure line
+    with a failure class ("הבדיקה לא עברה כרגע (שגיאת ספק). תנסה שוב.") instead of
+    the classifier's "could not classify" canned text, but only for NOTE. See the
+    sibling test below, which pins that every other task type is unaffected.
     """
-    from app.domain.owner_brain import NOTE_AGENT_FAILURE_TEXT
-
     session = _session()
     session.commit()
     client, _script = _client([])  # every call 500s
@@ -335,7 +333,8 @@ def test_model_failure_on_a_note_degrades_to_the_honest_failure_line() -> None:
         client=client,
     )
     assert result.used_agent is False
-    assert result.text == NOTE_AGENT_FAILURE_TEXT
+    assert result.text.startswith("הבדיקה לא עברה כרגע")
+    assert "שגיאת ספק" in result.text
     assert result.text != FALLBACK
 
 

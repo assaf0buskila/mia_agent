@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import NamedTuple
 
 import httpx
 
@@ -19,6 +20,13 @@ KIND_HOT_LEAD = "hot_lead"
 
 _BRIEF_MAX = 500
 _TELEGRAM_API = "https://api.telegram.org"
+
+
+class OwnerNotifyAttempt(NamedTuple):
+    """Result of one owner Telegram attempt. `attempted` is False on a duplicate claim."""
+
+    delivered: tuple[str, ...]
+    attempted: bool
 
 
 def format_hot_brief(*, lead_id: str, sales: SalesState, want: str) -> str:
@@ -50,7 +58,7 @@ def format_hot_leads_ack(store, *, principal: Principal) -> str:
 
 
 def notify_owners(
-    *, brief: str, inbound_id: str, settings: Settings, parse_mode: str = "HTML"
+    *, brief: str, inbound_id: str, settings: Settings, parse_mode: str | None = "HTML"
 ) -> tuple[str, ...]:
     """Best-effort Telegram fan-out to every allowlisted owner id, not just the first.
 
@@ -60,6 +68,10 @@ def notify_owners(
     correlation parity with callers; the notify-once idempotency stays in the caller's
     `store.try_insert_owner_notification` claim, which this function does not touch — this
     fans out whatever it is handed, so the caller must not call it without a won claim.
+
+    Telegram Bot API can return HTTP 200 with `ok: false` (or HTTP 400) for a parse_mode
+    / chat-id problem. Those are not deliveries. Counting them as success is how a
+    website handoff told the visitor the transfer happened while Assaf got nothing.
     """
     token = settings.telegram_bot_token.strip()
     owner_ids = settings.telegram_owner_user_id_set()
@@ -68,21 +80,35 @@ def notify_owners(
     delivered: list[str] = []
     with httpx.Client(timeout=10.0) as client:
         for chat_id in sorted(owner_ids):
+            payload: dict[str, object] = {
+                "chat_id": chat_id,
+                "text": brief,
+                "link_preview_options": {"is_disabled": True},
+            }
+            if parse_mode:
+                payload["parse_mode"] = parse_mode
             try:
-                client.post(
+                response = client.post(
                     f"{_TELEGRAM_API}/bot{token}/sendMessage",
-                    json={
-                        "chat_id": chat_id,
-                        "text": brief,
-                        "parse_mode": parse_mode,
-                        "link_preview_options": {"is_disabled": True},
-                    },
+                    json=payload,
                 )
             except httpx.HTTPError:
+                continue
+            if not _telegram_accepted(response):
                 continue
             delivered.append(chat_id)
     _ = inbound_id
     return tuple(delivered)
+
+
+def _telegram_accepted(response: httpx.Response) -> bool:
+    if response.status_code >= 400:
+        return False
+    try:
+        body = response.json()
+    except ValueError:
+        return False
+    return isinstance(body, dict) and body.get("ok") is True
 
 
 def apply_hot_handoff(
@@ -93,8 +119,13 @@ def apply_hot_handoff(
     want: str,
     kill_switch: bool,
     settings: Settings,
-) -> None:
+    brief: str | None = None,
+    parse_mode: str | None = None,
+) -> OwnerNotifyAttempt:
     """Mark HUMAN_TAKEOVER_REQUIRED, claim the notify, then Telegram. Never raise to inbound.
+
+    Returns whether this call attempted a send and which chat ids Telegram accepted.
+    Empty delivered means Assaf was not told — callers must not claim a transfer happened.
 
     The send is gated on a claiming insert that reports whether it actually won. The
     previous version persisted through an upsert that returns None and silently no-ops on a
@@ -110,14 +141,25 @@ def apply_hot_handoff(
             kill_switch=kill_switch,
         )
     except PolicyDenied:
-        return
+        return OwnerNotifyAttempt((), False)
     claimed = store.try_insert_owner_notification(
         kind=KIND_HOT_LEAD,
         lead_id=lead_id,
         scheduled_at=now_iso,
     )
     if not claimed:
-        return
+        return OwnerNotifyAttempt((), False)
     sales = store.get_sales(lead_id)
-    brief = format_hot_brief(lead_id=lead_id, sales=sales, want=want)
-    notify_owners(brief=brief, inbound_id=inbound_id, settings=settings)
+    text = brief if brief is not None else format_hot_brief(
+        lead_id=lead_id, sales=sales, want=want
+    )
+    mode = parse_mode if brief is not None else None
+    delivered = notify_owners(
+        brief=text, inbound_id=inbound_id, settings=settings, parse_mode=mode
+    )
+    if not delivered:
+        # Claim-then-fail used to lock the lead forever: Assaf never got a retry
+        # ping, and the visitor still saw a transfer claim. Release so the next
+        # HANDOFF turn can try Telegram again.
+        store.release_owner_notification_claim(kind=KIND_HOT_LEAD, lead_id=lead_id)
+    return OwnerNotifyAttempt(delivered, True)

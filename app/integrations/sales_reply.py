@@ -88,7 +88,9 @@ ACTION_INTENT: dict[NextAction, str] = {
         "phrase, then ask one question that keeps the conversation open."
     ),
     NextAction.HANDOFF: (
-        "Tell them Assaf will take this. Do not ask a question. Stay quiet after that."
+        "Do not claim a transfer already happened, that Assaf already received the "
+        "conversation, or that you put them in contact on WhatsApp. Python confirms "
+        "the owner ping after you write. Stay quiet after the line. No question."
     ),
     NextAction.DISQUALIFY: "Close warmly without pressure.",
     NextAction.STOP: "Stop selling and leave the door open.",

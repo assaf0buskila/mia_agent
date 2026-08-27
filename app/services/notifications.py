@@ -53,15 +53,20 @@ def send_owner_telegram(
         return True
     try:
         with httpx.Client(timeout=10.0) as client:
-            client.post(
+            response = client.post(
                 f"{_TELEGRAM_API}/bot{token}/sendMessage",
                 json={
                     "chat_id": chat_id,
                     "text": text,
-                    "parse_mode": "HTML",
                     "link_preview_options": {"is_disabled": True},
                 },
             )
     except httpx.HTTPError:
         return False
-    return True
+    if response.status_code >= 400:
+        return False
+    try:
+        body = response.json()
+    except ValueError:
+        return False
+    return isinstance(body, dict) and body.get("ok") is True

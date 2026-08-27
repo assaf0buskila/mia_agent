@@ -48,6 +48,8 @@ Finalization is one service. Triggers now: visitor closes the widget or leaves t
 
 The existing WhatsApp-click briefing (paste-ready first line for Assaf) stays. Finalization does not duplicate it for the same lead if that briefing already fired.
 
+When the website graph selects HANDOFF, Assaf gets a Telegram ping with the conversation. That ping is independent of `MIA_WHATSAPP_HANDOFF_SEND` (visitor WhatsApp send stays gated). The widget may still show a click-to-chat CTA. Visitor copy may claim a completed transfer only after Telegram accepted the ping. If the bot token, owner ids, or send fail, the widget says the transfer could not be completed — it does not invent a handoff.
+
 ## WhatsApp, Gmail, and the rest
 
 WhatsApp is Assaf’s human inbox until official Cloud API inbound exists. Website may offer WhatsApp after real buying context. Mia does not reply on WhatsApp.

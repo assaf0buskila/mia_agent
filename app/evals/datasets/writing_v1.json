@@ -78,7 +78,7 @@
     "kind": "buyer",
     "user": "כמה זה עולה?",
     "expected_action": "handoff",
-    "expected_reply_contains": "אעביר"
+    "expected_reply_contains": "צריך לקחת"
   },
   {
     "case_id": "writing_price_question_en",
@@ -87,7 +87,7 @@
     "kind": "buyer",
     "user": "how much does it cost?",
     "expected_action": "handoff",
-    "expected_reply_contains": "straight from Assaf"
+    "expected_reply_contains": "needs to take"
   },
   {
     "case_id": "writing_whatsapp_offer_he",

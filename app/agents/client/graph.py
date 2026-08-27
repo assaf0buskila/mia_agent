@@ -18,8 +18,17 @@ from app.core.config import Settings
 from app.core.errors import MiaError
 from app.db.store import LeadStore
 from app.domain.hot_handoff import apply_hot_handoff
-from app.domain.website_handoff_brief import KIND_WEBSITE_WHATSAPP
+from app.domain.website_handoff_brief import (
+    KIND_WEBSITE_WHATSAPP,
+    format_website_human_handoff_brief,
+)
 from app.graph.orchestrator import build_graph
+from app.graph.replies import (
+    HANDOFF_OWNER_NOTIFIED,
+    HANDOFF_OWNER_NOTIFIED_EN,
+    HANDOFF_OWNER_UNREACHABLE,
+    HANDOFF_OWNER_UNREACHABLE_EN,
+)
 from app.graph.state import empty_state
 from app.integrations.sales_reply import SalesReplyPort
 from app.services.finalization import KIND, qualify_and_finalize
@@ -138,24 +147,46 @@ def compile_client_graph(
         inbound_id = state.get("inbound_id") or conversation_id
         kill_switch = bool(state.get("kill_switch"))
         turn_kind = state.get("turn_kind") or "message"
+        channel = state.get("channel") or ""
+        owner_notified = False
+        overwrite_handoff = False
         if (
             next_action == "handoff"
             and settings is not None
             and lead_id
-            and (state.get("channel") or "") == "website"
+            and channel == "website"
         ):
-            apply_hot_handoff(
+            brief = None
+            parse_mode = None
+            if conversation_id:
+                brief = format_website_human_handoff_brief(
+                    lead_id=lead_id,
+                    sales=store.get_sales(lead_id),
+                    turns=store.list_conversation_turns(conversation_id),
+                )
+                parse_mode = "HTML"
+            attempt = apply_hot_handoff(
                 store,
                 lead_id=lead_id,
                 inbound_id=inbound_id,
                 want=state.get("latest_message") or "",
                 kill_switch=kill_switch,
                 settings=settings,
+                brief=brief,
+                parse_mode=parse_mode,
             )
-        if (state.get("channel") or "website") != "website":
+            if attempt.attempted:
+                overwrite_handoff = True
+                owner_notified = bool(attempt.delivered)
+        if channel != "website":
             return {"finalized": False}
         if settings is None or not lead_id or not conversation_id:
-            return {"finalized": False}
+            return _handoff_reply(
+                state,
+                owner_notified=owner_notified,
+                finalized=False,
+                overwrite=overwrite_handoff,
+            )
         next_step: str | None = None
         require_visitor = False
         if next_action == "handoff":
@@ -177,7 +208,16 @@ def compile_client_graph(
             require_visitor_message=require_visitor,
             now=now,
         )
-        return {"finalized": bool(result is not None and result.claimed)}
+        finalized = bool(result is not None and result.claimed)
+        if result is not None and result.sent:
+            owner_notified = True
+            overwrite_handoff = True
+        return _handoff_reply(
+            state,
+            owner_notified=owner_notified,
+            finalized=finalized,
+            overwrite=overwrite_handoff,
+        )
 
     def route_after_retrieve(state: ClientState) -> str:
         if (state.get("turn_kind") or "message") in _END_TURNS:
@@ -199,6 +239,24 @@ def compile_client_graph(
     graph.add_edge("sales_turn", "complete_turn")
     graph.add_edge("complete_turn", END)
     return graph.compile()
+
+
+def _handoff_reply(
+    state: ClientState,
+    *,
+    owner_notified: bool,
+    finalized: bool,
+    overwrite: bool,
+) -> dict:
+    """Overwrite HANDOFF copy so a failed Telegram ping cannot claim a transfer."""
+    if not overwrite or (state.get("next_action") or "") != "handoff":
+        return {"finalized": finalized}
+    english = (state.get("language") or "") == "en"
+    if owner_notified:
+        text = HANDOFF_OWNER_NOTIFIED_EN if english else HANDOFF_OWNER_NOTIFIED
+    else:
+        text = HANDOFF_OWNER_UNREACHABLE_EN if english else HANDOFF_OWNER_UNREACHABLE
+    return {"finalized": finalized, "reply": text}
 
 
 def finalize_inactive_website_conversations(

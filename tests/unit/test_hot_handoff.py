@@ -78,6 +78,19 @@ def test_notify_owners_single_owner_matches_previous_behavior(monkeypatch) -> No
     assert client.calls[0]["chat_id"] == "111"
 
 
+def test_notify_owners_http_error_status_is_not_delivery(monkeypatch) -> None:
+    class _BadStatus(_RecordingClient):
+        def post(self, url: str, *, json: dict[str, object]) -> httpx.Response:
+            self.calls.append(json)
+            return httpx.Response(400, json={"ok": False, "description": "bad request"})
+
+    client = _BadStatus()
+    _patch_client(monkeypatch, client)
+    settings = Settings(telegram_bot_token="tok", telegram_owner_user_ids="111")
+    assert notify_owners(brief="ליד חם", inbound_id="in_1", settings=settings) == ()
+    assert client.calls
+
+
 def test_notify_owners_no_token_or_owner_ids_sends_nothing(monkeypatch) -> None:
     client = _RecordingClient()
     _patch_client(monkeypatch, client)
@@ -125,6 +138,11 @@ class _FakeHotHandoffStore:
             kind=kind, lead_id=lead_id, scheduled_at=scheduled_at
         )
         return True
+
+    def release_owner_notification_claim(
+        self, *, kind: str, lead_id: str, conversation_id: str = ""
+    ) -> None:
+        del kind, lead_id, conversation_id
 
 
 def test_apply_hot_handoff_notifies_every_owner(monkeypatch) -> None:
