@@ -32,6 +32,7 @@ from app.brain.schemas import (
 )
 from app.brain.store import BrainStore
 from app.capabilities.knowledge import knowledge_handlers
+from app.capabilities.mail import mail_handlers
 from app.capabilities.memory import memory_handlers
 from app.capabilities.policy import execute_capability
 from app.capabilities.research import research_handlers
@@ -65,6 +66,7 @@ from app.integrations.ga4 import Ga4Port
 from app.integrations.gmail import (
     DisabledGmailPort,
     GmailPort,
+    InboundEmail,
     format_email_body,
     format_inbox_rows,
 )
@@ -425,9 +427,26 @@ def _gmail_read(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     port = _gmail_port(ctx)
     if port is None:
         return ToolResult(ok=True, text=_NOT_CONNECTED)
-    fetched = port.fetch_message(message_id)
-    if fetched is None:
+    try:
+        payload = execute_capability(
+            "mail.read",
+            principal=ctx.principal,
+            args={"message_id": message_id},
+            handlers=mail_handlers(port),
+            kill_switch=ctx.kill_switch,
+        )
+    except PermissionDenied:
+        return ToolResult(ok=False, error="mail read denied")
+    if not payload.get("found"):
         return ToolResult(ok=True, text="לא מצאתי את המייל.")
+    fetched = InboundEmail(
+        message_id=str(payload.get("message_id") or message_id),
+        sender=str(payload.get("sender") or ""),
+        subject=str(payload.get("subject") or ""),
+        text=str(payload.get("text") or ""),
+        thread_id=str(payload.get("thread_id") or ""),
+        timestamp=str(payload.get("timestamp") or ""),
+    )
     body = format_email_body(fetched, timezone=ctx.timezone(), now=ctx.now)
     return ToolResult(ok=True, text=body)
 

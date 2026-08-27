@@ -9,6 +9,7 @@ AssafWeb’s AI Growth & Sales Operator.
 | [`AGENTS.md`](AGENTS.md) | How to work in this repo |
 | [`docs/PRODUCT.md`](docs/PRODUCT.md) | What Mia is |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Two graphs, channels, policy |
+| [`docs/WIRING.md`](docs/WIRING.md) | Who calls whom (short map) |
 | [`docs/DECISIONS.md`](docs/DECISIONS.md) | ADRs that still constrain |
 | [`docs/RUNBOOK.md`](docs/RUNBOOK.md) | Operator: kill switch, flags, health |
 | [`docs/PRODUCTION_BUILD.md`](docs/PRODUCTION_BUILD.md) | Operator: AWS go-live |
