@@ -150,3 +150,63 @@ def test_owner_research_search_goes_through_capability_policy() -> None:
     assert out["hits"][0]["url"] == "https://www.assafweb.com/"
     assert "FIRECRAWL" not in str(out)
     assert port.last_query == "AssafWeb"
+
+
+def test_owner_linkedin_profile_goes_through_capability_policy() -> None:
+    from app.capabilities.linkedin import linkedin_handlers
+    from app.integrations.linkedin import FakeLinkedInPort, LinkedInProfile
+
+    port = FakeLinkedInPort(
+        LinkedInProfile(name="Assaf Web", headline="Growth operator")
+    )
+    out = execute_capability(
+        "linkedin.get_profile",
+        principal=Principal.owner(source="test"),
+        args={},
+        handlers=linkedin_handlers(port),
+    )
+    assert out["found"] is True
+    assert out["name"] == "Assaf Web"
+    assert out["headline"] == "Growth operator"
+    assert "LINKEDIN" not in str(out)
+    assert "GET_MY_INFO" not in str(out)
+
+
+def test_owner_search_console_and_analytics_go_through_capability_policy() -> None:
+    from app.capabilities.analytics import analytics_handlers
+    from app.capabilities.search_console import search_console_handlers
+    from app.integrations.ga4 import FakeGa4Port, Ga4PivotRow
+    from app.integrations.search_console import FakeSearchConsolePort, SearchAnalyticsRow
+
+    gsc = FakeSearchConsolePort(
+        analytics_rows=[
+            SearchAnalyticsRow(page="/", impressions="10", clicks="1", ctr="0.1")
+        ]
+    )
+    ga4 = FakeGa4Port(
+        pivot_rows=[Ga4PivotRow(landing_page="/", sessions="4")],
+        conversion_events=["generate_lead"],
+    )
+    search = execute_capability(
+        "search_console.query",
+        principal=Principal.owner(source="test"),
+        args={
+            "start_date": "2026-08-01",
+            "end_date": "2026-08-28",
+            "dimensions": ["page"],
+        },
+        handlers=search_console_handlers(gsc),
+    )
+    traffic = execute_capability(
+        "analytics.get_traffic",
+        principal=Principal.owner(source="test"),
+        args={"start_date": "2026-08-01", "end_date": "2026-08-28"},
+        handlers=analytics_handlers(ga4),
+    )
+    assert search["count"] == 1
+    assert search["rows"][0]["page"] == "/"
+    assert "GOOGLE_SEARCH_CONSOLE" not in str(search)
+    assert traffic["count"] == 1
+    assert traffic["conversions"] == ["generate_lead"]
+    assert "GOOGLE_ANALYTICS" not in str(traffic)
+    assert "RUN_PIVOT" not in str(traffic)

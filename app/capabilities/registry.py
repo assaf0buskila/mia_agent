@@ -19,6 +19,9 @@ LEADS_GET_RECENT = "leads.get_recent"
 MEMORY_SEARCH = "memory.search"
 KNOWLEDGE_SEARCH = "knowledge.search"
 RESEARCH_SEARCH = "research.search"
+LINKEDIN_GET_PROFILE = "linkedin.get_profile"
+SEARCH_CONSOLE_QUERY = "search_console.query"
+ANALYTICS_GET_TRAFFIC = "analytics.get_traffic"
 
 _OWNER = frozenset({GraphName.OWNER})
 _CLIENT = frozenset({GraphName.CLIENT})
@@ -39,6 +42,9 @@ CAPABILITIES: tuple[CapabilitySpec, ...] = (
     spec(MEMORY_SEARCH, Sensitivity.READ, _OWNER),
     spec(KNOWLEDGE_SEARCH, Sensitivity.READ, _BOTH),
     spec(RESEARCH_SEARCH, Sensitivity.READ, _OWNER),
+    spec(LINKEDIN_GET_PROFILE, Sensitivity.READ, _OWNER),
+    spec(SEARCH_CONSOLE_QUERY, Sensitivity.READ, _OWNER),
+    spec(ANALYTICS_GET_TRAFFIC, Sensitivity.READ, _OWNER),
     spec(BUSINESS_GET_INFORMATION, Sensitivity.READ, _CLIENT),
 )
 

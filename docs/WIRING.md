@@ -44,7 +44,8 @@ Assaf (numeric Telegram id only)
        ▼
   capabilities    app/capabilities/*  → policy → adapters
                   mail.read, calendar.get_schedule, leads.get_recent,
-                  memory.search, knowledge.search, research.search
+                  memory.search, knowledge.search, research.search,
+                  linkedin.get_profile, search_console.query, analytics.get_traffic
 
 WhatsApp (human inbox until Cloud API inbound)
   HMAC inbound    app/api/whatsapp.py → app/api/inbound.py → ClientGraph
@@ -97,6 +98,8 @@ Store is `LeadStore` + `BrainStore`. Graphs never hold SDK clients or secrets.
 | Two graphs | True. ClientGraph wraps `app/graph/orchestrator.py` until that node is inlined (ADR-036 strangler). Do not delete `app/graph/`. |
 | Two capability lists | `app/capabilities/` is the policy layer. `app/core/capabilities.py` is the `/health` status map. Different jobs. |
 | `mail.read` vs `gmail_read` | Was a real break: tests called `mail_handlers`, live `gmail_read` fetched the port directly. Live read now goes through `execute_capability`. `gmail_search` / `gmail_inbox` still format on the tool path (registry has `mail.search` with no live handler). |
+| LinkedIn / GSC / GA4 vs mail | Same class of break: adapters and owner tools existed, but live enrich skipped `execute_capability`. They now use `linkedin.get_profile`, `search_console.query`, `analytics.get_traffic`. Sheets stays a write-only mirror (`GOOGLESHEETS_UPSERT_ROWS`); no owner Sheets read (lead upsert columns are PR #8). |
+| Cursor Composio vs Mia | Cursor plugin OAuth is a different Composio user unless `MIA_COMPOSIO_USER_ID` is that same UUID. `/health` `owner_integrations` is leftover config, not a live Composio ping. |
 | Telegram channel adapter | Was test-only. `run_owner_turn` now builds state via `app/channels/telegram.py`. |
 | `task_classes.py` | Lookup catalog, not a live router. Tests + `/health` mark it ALIVE meaning “the table exists.” |
 | Meta ads / campaign_* | ADR-039 dropped them. `/health` still lists them `specified` with empty port. Leftover inventory, not leftover files. |

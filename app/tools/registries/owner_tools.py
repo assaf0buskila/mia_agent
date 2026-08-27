@@ -474,6 +474,7 @@ def _calendar_availability(ctx: ToolContext, args: dict[str, Any]) -> ToolResult
     text, _outcome = apply_owner_calendar(
         "",
         ctx.calendar,
+        principal=ctx.principal,
         kill_switch=ctx.kill_switch,
         timezone=ctx.timezone(),
         now=ctx.now,
@@ -547,6 +548,7 @@ def _seo_snapshot(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
         ctx.search_console,
         ctx.ga4,
         ctx.seo_audit,
+        principal=ctx.principal,
         kill_switch=ctx.kill_switch,
         store=ctx.store,
         settings=ctx.settings,
@@ -559,7 +561,9 @@ def _linkedin_snapshot(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     del args
     if ctx.linkedin is None:
         return ToolResult(ok=True, text=_NOT_CONNECTED)
-    text, _outcome = enrich_linkedin_ack("", ctx.linkedin, ctx.kill_switch)
+    text, _outcome = enrich_linkedin_ack(
+        "", ctx.linkedin, ctx.kill_switch, principal=ctx.principal
+    )
     return _empty(text, "LinkedIn returned nothing. Reconnect LinkedIn in Composio.")
 
 

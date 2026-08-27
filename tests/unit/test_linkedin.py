@@ -4,6 +4,7 @@ import json
 import httpx
 import pytest
 from app.api.inbound import process_inbound_texts
+from app.capabilities.types import Principal
 from app.core.config import Settings
 from app.db.models import CanonicalEventRow
 from app.db.session import get_session_factory, init_db
@@ -32,6 +33,7 @@ from tests.unit.sales_copy import assert_discovery_reply
 
 OWNER_LINKEDIN_PHONE = "972509990009"
 PROSPECT_LINKEDIN_PHONE = "972509990010"
+_OWNER = Principal.owner(source="test")
 
 SAMPLE_PROFILE = LinkedInProfile(
     name="Assaf Web",
@@ -51,7 +53,7 @@ def test_enrich_linkedin_ack_fake_appends_headline_and_keeps_not_executed() -> N
     assert decision.task_type == OwnerTaskType.LINKEDIN
     ack = ack_for_owner_task(decision)
     enriched, _outcome = enrich_linkedin_ack(
-        ack, FakeLinkedInPort(SAMPLE_PROFILE), kill_switch=False
+        ack, FakeLinkedInPort(SAMPLE_PROFILE), kill_switch=False, principal=_OWNER
     )
     assert "לא ביצעתי" in enriched
     assert "לא אפרסם, לא אגיב ולא אשלח הודעות בלינקדאין" in enriched
@@ -61,7 +63,9 @@ def test_enrich_linkedin_ack_fake_appends_headline_and_keeps_not_executed() -> N
 def test_enrich_linkedin_ack_disabled_leaves_ack_unchanged() -> None:
     decision = classify_owner_task("how's my linkedin")
     ack = ack_for_owner_task(decision)
-    enriched, _outcome = enrich_linkedin_ack(ack, DisabledLinkedInPort(), kill_switch=False)
+    enriched, _outcome = enrich_linkedin_ack(
+        ack, DisabledLinkedInPort(), kill_switch=False, principal=_OWNER
+    )
     assert enriched == ack
     assert "פרופיל:" not in enriched
 
@@ -73,7 +77,9 @@ def test_enrich_linkedin_ack_kill_switch_skips_port_call() -> None:
 
     decision = classify_owner_task("how's my linkedin")
     ack = ack_for_owner_task(decision)
-    enriched, outcome = enrich_linkedin_ack(ack, RaisingLinkedInPort(), kill_switch=True)
+    enriched, outcome = enrich_linkedin_ack(
+        ack, RaisingLinkedInPort(), kill_switch=True, principal=_OWNER
+    )
     assert enriched == ack
     assert outcome.status == "denied"
 
@@ -254,7 +260,7 @@ def test_enrich_linkedin_ack_http_401_unauthorized_ack_unchanged() -> None:
     decision = classify_owner_task("how's my linkedin")
     ack = ack_for_owner_task(decision)
     enriched, outcome = enrich_linkedin_ack(
-        ack, HttpErrorLinkedInPort(), kill_switch=False
+        ack, HttpErrorLinkedInPort(), kill_switch=False, principal=_OWNER
     )
     assert enriched == ack
     assert outcome.status == "unauthorized"

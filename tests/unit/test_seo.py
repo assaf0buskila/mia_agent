@@ -2,6 +2,7 @@ import json
 
 import pytest
 from app.api.inbound import process_inbound_texts
+from app.capabilities.types import Principal
 from app.db.models import CanonicalEventRow, SeoRecommendationRow
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
@@ -21,6 +22,7 @@ from app.integrations.sheets import FakeSheetsPort
 from sqlalchemy import select
 
 OWNER_SEO_PHONE = "972509990020"
+_OWNER = Principal.owner(source="test")
 
 
 def test_classify_seo_phrases() -> None:
@@ -57,7 +59,7 @@ def test_enrich_seo_ack_fake_appends_facts_and_website_line() -> None:
         SeoAuditSnapshot(url="https://www.assafweb.com/", title="AssafWeb", h1_count=1)
     )
     enriched, outcomes = enrich_seo_ack(
-        ack, gsc, ga4, audit, kill_switch=False
+        ack, gsc, ga4, audit, principal=_OWNER, kill_switch=False
     )
     assert "נתוני חיפוש (GSC)" in enriched
     assert "תנועה (GA4)" in enriched
@@ -75,6 +77,7 @@ def test_enrich_seo_ack_disabled_no_fake_metrics() -> None:
         DisabledSearchConsolePort(),
         DisabledGa4Port(),
         FakeSeoAuditPort(None),
+        principal=_OWNER,
         kill_switch=False,
     )
     assert "CTR 0" not in enriched
@@ -100,6 +103,7 @@ def test_enrich_seo_ack_kill_switch_skips_ports() -> None:
         RaisingPort(),  # type: ignore[arg-type]
         DisabledGa4Port(),
         FakeSeoAuditPort(None),
+        principal=_OWNER,
         kill_switch=True,
     )
     assert enriched == ack
