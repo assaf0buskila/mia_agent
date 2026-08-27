@@ -16,6 +16,9 @@ Wire-shape notes, all from the current Chat Completions reference:
 - The Gemini OpenAI-compat layer accepts the same `tools` shape but **silently ignores**
   unsupported parameters, so a 200 there is not proof the schema was honoured. Callers
   validate the parsed object and fall back.
+- GPT-5.6 on Chat Completions rejects function tools unless `reasoning_effort` is
+  `"none"` (otherwise OpenAI returns HTTP 400). This client sets that when tools are
+  sent. Prefer `/v1/responses` only if we later need reasoning + tools together.
 """
 
 from __future__ import annotations
@@ -163,6 +166,10 @@ class LlmClient:
             payload["tool_choice"] = tool_choice or "auto"
             if parallel_tool_calls is not None:
                 payload["parallel_tool_calls"] = parallel_tool_calls
+            # GPT-5.6 Chat Completions rejects function tools unless reasoning is
+            # disabled (or the caller moves to /v1/responses). Without this, live
+            # owner-agent turns 400 as Hebrew "שגיאת ספק" / provider_error.
+            payload["reasoning_effort"] = "none"
         if response_format is not None:
             payload["response_format"] = response_format
         if max_completion_tokens is not None:

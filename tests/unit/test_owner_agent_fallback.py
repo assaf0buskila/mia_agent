@@ -76,6 +76,49 @@ def test_a_bad_request_does_not_advance() -> None:
     assert chain.last_model == "primary"
 
 
+def test_tool_calls_send_reasoning_effort_none() -> None:
+    """GPT-5.6 Chat Completions 400s on function tools unless reasoning_effort is none."""
+    seen: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(json.loads(request.content.decode("utf-8")))
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": "ok"},
+                    }
+                ],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+            },
+        )
+
+    client = _client("gpt-5.6-luna", handler)
+    tool = {
+        "type": "function",
+        "function": {
+            "name": "memory_search",
+            "description": "search",
+            "parameters": {
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"],
+                "additionalProperties": False,
+            },
+            "strict": True,
+        },
+    }
+    assert client.complete(messages=_messages(), tools=[tool]).text == "ok"
+    assert seen[0]["reasoning_effort"] == "none"
+    assert "tools" in seen[0]
+
+    seen.clear()
+    assert client.complete(messages=_messages()).text == "ok"
+    assert "reasoning_effort" not in seen[0]
+
+
 def test_the_last_model_still_reports_its_failure() -> None:
     chain = LlmModelChain([_client("a", _status(404)), _client("b", _status(404))])
     with pytest.raises(LlmError):
