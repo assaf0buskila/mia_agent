@@ -195,9 +195,14 @@ def test_owner_agent_prompt_plans_mail_paraphrases() -> None:
     """
     from app.graph.owner_agent import PROMPT_VERSION, SYSTEM_PROMPT
 
-    assert PROMPT_VERSION == "owner_agent_v3"
+    assert PROMPT_VERSION == "owner_agent_v4"
     assert "gmail_inbox" in SYSTEM_PROMPT
     assert "Hebrew" in SYSTEM_PROMPT and "English" in SYSTEM_PROMPT
+    assert "seo_snapshot" in SYSTEM_PROMPT
+    assert "linkedin_snapshot" in SYSTEM_PROMPT
+    assert "instagram_insights" in SYSTEM_PROMPT
+    assert "research_search" in SYSTEM_PROMPT
+    assert "no Google Sheets read tool" in SYSTEM_PROMPT
 
     # Live reads before memory (ADR-031): inbox/calendar/leads/today come from live
     # tools every time, never memory or assumption.

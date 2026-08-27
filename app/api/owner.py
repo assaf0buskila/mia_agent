@@ -108,6 +108,28 @@ class OwnerTurnResult(NamedTuple):
     last_reply: str | None
 
 
+# Deterministic Composio enrich runs before the agent for these task types. If the
+# agent answers without calling the matching live tool, keep the enrich — otherwise
+# Assaf loses the LinkedIn/SEO/Instagram numbers that were already fetched.
+_LIVE_ENRICH_TOOLS: dict[OwnerTaskType, str] = {
+    OwnerTaskType.SEO: "seo_snapshot",
+    OwnerTaskType.LINKEDIN: "linkedin_snapshot",
+    OwnerTaskType.ANALYTICS: "instagram_insights",
+}
+
+
+def _prefer_live_enrich(
+    *,
+    task_type: OwnerTaskType,
+    tools_used: tuple[str, ...],
+    live_ack: str,
+) -> bool:
+    required = _LIVE_ENRICH_TOOLS.get(task_type)
+    if required is None or required in tools_used:
+        return False
+    return bool(live_ack.strip())
+
+
 async def process_owner_item(
     *,
     item: dict[str, str],
@@ -697,6 +719,7 @@ async def process_owner_item(
     # deterministic chain already computed as its fallback. Write and approval
     # intents never reach it (DETERMINISTIC_TASK_TYPES). If it is unconfigured or
     # fails, `brain_result.text` is exactly the canned ack computed above.
+    live_ack = ack_text
     brain_store = BrainStore(store.session)
     brain_result = run_owner_turn(
         principal=principal,
@@ -751,7 +774,14 @@ async def process_owner_item(
         completion=brain_result.completion,
     )
     if brain_result.used_agent:
-        ack_text = brain_result.text
+        if _prefer_live_enrich(
+            task_type=decision.task_type,
+            tools_used=brain_result.tools_used,
+            live_ack=live_ack,
+        ):
+            ack_text = live_ack
+        else:
+            ack_text = brain_result.text
     elif brain_result.text.startswith("הבדיקה לא עברה כרגע"):
         # Agent was allowed to run and failed. The line already names the failure
         # class. Do not paraphrase it: that hides the class and spends a second

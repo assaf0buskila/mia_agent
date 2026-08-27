@@ -29,6 +29,9 @@ def test_classify_seo_phrases() -> None:
     assert decision.needs_clarification is False
     he = classify_owner_task("בדיקת seo לאתר")
     assert he.task_type == OwnerTaskType.SEO
+    assert classify_owner_task("how is ga4 traffic this week").task_type == OwnerTaskType.SEO
+    assert classify_owner_task("גוגל אנליטיקס לאתר").task_type == OwnerTaskType.SEO
+    assert classify_owner_task("google search console clicks").task_type == OwnerTaskType.SEO
 
 
 def test_classify_bare_ctr_stays_analytics() -> None:

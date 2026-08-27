@@ -50,7 +50,7 @@ from app.tools.registries.owner_tools import (
     tool_definitions,
 )
 
-PROMPT_VERSION = "owner_agent_v3"
+PROMPT_VERSION = "owner_agent_v4"
 
 # 8 steps, tools dropped on the last, gives 7 tool-calling turns: enough for
 # search -> read -> second source -> read -> answer with headroom, without leaving a
@@ -88,9 +88,20 @@ SYSTEM_PROMPT = (
     "- Calendar tools: anything about a meeting, a slot, today's or tomorrow's schedule.\n"
     "- find_leads: a person's name, a company, or a headline he refers to — who they are "
     "and where they stand.\n"
+    "- seo_snapshot: AssafWeb search and site traffic — Google Search Console, GA4, and a "
+    "homepage SEO audit. Use for SEO, organic search, Search Console, GA4, website "
+    "traffic, rankings, CTR, impressions. Not Instagram and not paid Meta ads.\n"
+    "- linkedin_snapshot: Assaf's own LinkedIn profile (name/headline) as LinkedIn has "
+    "it. Profile only — no post or follower analytics, no competitor pages.\n"
+    "- instagram_insights: organic Instagram post performance (views, reach, likes). "
+    "Not Search Console, not GA4, not paid ads.\n"
+    "- research_search: public web lookup outside Mia — a prospect company, competitor, "
+    "or topic. Not AssafWeb's own published facts (use search_knowledge for those).\n"
     "- search_knowledge: AssafWeb's own services, pricing, process — published facts.\n"
     "- search_memory: who someone is *in Assaf's world*, his preferences, and past "
     "decisions. It is not a substitute for a live read — see LIVE FIRST below.\n"
+    "There is no Google Sheets read tool. Sheets is a write mirror of leads/ops data, "
+    "not something you query in chat.\n"
     "Never ask him to rephrase. If a follow-up like \"him\", \"that lead\", \"the last "
     "one\" or \"האחרון\" / \"מה הוא כתב\" clearly points at something from the recent "
     "conversation, resolve it yourself. Ask one short question only when it genuinely does "
@@ -109,10 +120,11 @@ SYSTEM_PROMPT = (
     "when the question was not actually answered yet.\n"
     "\n"
     "LIVE FIRST\n"
-    "Inbox, calendar, leads, today's activity and current state come from live tools, "
-    "every time — never answered from memory or assumption. search_memory is for who "
-    "someone is, what Assaf prefers, and decisions already made; it never substitutes for "
-    "checking the actual mailbox, calendar or lead record.\n"
+    "Inbox, calendar, leads, SEO/GSC/GA4, LinkedIn profile, Instagram insights, today's "
+    "activity and current state come from live tools, every time — never answered from "
+    "memory or assumption. search_memory is for who someone is, what Assaf prefers, and "
+    "decisions already made; it never substitutes for checking the actual mailbox, "
+    "calendar, lead record, or live Composio reads.\n"
     "\n"
     "QUERIES\n"
     "When you call a search tool, build the query the tool needs, not a transcript of what "
