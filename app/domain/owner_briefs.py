@@ -123,6 +123,7 @@ def compute_daily_brief(
 def format_daily_brief(snapshot: DailyBriefSnapshot) -> str:
     lines = [
         f"סיכום יומי {_format_brief_date(snapshot.brief_date)}",
+        "",
         f"לידים: {snapshot.leads}",
         f"פגישות הוצעו: {snapshot.meetings_offered}",
         f"פגישות נקבעו: {snapshot.meetings_booked}",

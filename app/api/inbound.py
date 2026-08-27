@@ -83,13 +83,13 @@ from app.integrations.seo_audit import SeoAuditPort, build_seo_audit_port
 from app.integrations.sheets import (
     DealMirrorRow,
     FollowUpMirrorRow,
-    LeadMirrorRow,
     MeetingMirrorRow,
     SheetsPort,
     activity_mirror_row_from_persisted,
     build_sheets_port,
     claim_sheets_mirror,
     complete_sheets_mirror,
+    lead_mirror_row_from_state,
     maybe_mirror_weekly_kpi,
     mirror_activity,
     mirror_deal,
@@ -527,13 +527,15 @@ async def process_inbound_texts(
                 sales = store.get_sales(lead_id)
                 sheets_written = mirror_lead(
                     sheets=sheets_port,
-                    row=LeadMirrorRow(
+                    row=lead_mirror_row_from_state(
                         lead_id=lead_id,
                         channel=channel_value,
                         stage=store.get_lead_stage(lead_id),
-                        fit=sales.fit.value,
-                        pain_level=int(sales.pain_level),
+                        sales=sales,
                         next_action=result.get("next_action", ""),
+                        turns=store.list_conversation_turns(
+                            _event_conversation_id(item)
+                        ),
                     ),
                     kill_switch=kill_switch,
                 )

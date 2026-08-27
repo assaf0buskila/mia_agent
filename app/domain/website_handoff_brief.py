@@ -14,10 +14,15 @@ from app.core.config import Settings
 from app.core.errors import PolicyDenied
 from app.core.risk import RiskAction, RiskLevel, assert_allowed
 from app.domain.hot_handoff import notify_owners
-from app.domain.lead_label import lead_display
 from app.domain.memory import ROLE_MIA, ConversationTurn, counterpart_turns
-from app.domain.sales import PainLevel, SalesState
-from app.integrations.telegram_format import blockquote, bold, esc
+from app.domain.owner_lead_card import (
+    card_who,
+    format_owner_lead_card,
+    last_message_short,
+)
+from app.domain.sales import PainLevel, SalesState, select_next_action
+from app.integrations.sheets import build_sheets_port, maybe_mirror_lead_snapshot
+from app.integrations.telegram_format import blockquote, esc
 
 KIND_WEBSITE_WHATSAPP = "website_whatsapp_handoff"
 _BRIEF_MAX = 1800
@@ -152,36 +157,36 @@ def format_website_whatsapp_brief(
     lead_id: str,
     sales: SalesState,
     turns: list[ConversationTurn],
+    stage: str = "",
 ) -> str:
     """Owner-facing briefing, HTML. No prices, no invented facts, no customer phone.
 
-    Short on purpose. The previous version opened with two lines of preamble, then an
-    opaque lead id, then facts one per line, then the whole transcript inline — so the one
-    thing Assaf needs (who is this, and what do I send) was buried under everything else.
-
-    Now: who it is on line one, the facts on a single line, the paste line, and the
-    transcript collapsed into an expandable quote that costs one tap to open.
+    Structured card first (lead id, stage, what they said, next action, WhatsApp
+    offered). Paste line and transcript follow as detail, not the opening wall.
     """
     paste = _recommended_first_line(sales=sales, turns=turns)
-    headline = (sales.headline or "").strip()
-    who = lead_display(lead_id, headline, sales.display_name)
-    blocks = [
-        f"{bold('ליד מהאתר → וואטסאפ')}",
-        esc(who),
+    after_parts = [
         esc("מיה לא תענה שם. תטפל אתה."),
         "",
-        f"{bold('מה ידוע')}: " + esc(" · ".join(_fact_lines(sales))),
-        "",
-        "השורה שלך:",
+        f"{esc('השורה שלך:')}",
         esc(paste),
     ]
     transcript = _transcript_lines(turns)
     if transcript:
-        # Collapsed by default: the transcript is evidence, not the message.
-        blocks.extend(
-            ["", "השיחה:", blockquote("\n".join(transcript), expandable=True)]
+        after_parts.extend(
+            ["", esc("השיחה:"), blockquote("\n".join(transcript), expandable=True)]
         )
-    return "\n".join(blocks)[:_BRIEF_MAX]
+    return format_owner_lead_card(
+        title="ליד מהאתר → וואטסאפ",
+        lead_id=lead_id,
+        stage=stage,
+        last_said=last_message_short(turns),
+        next_action=select_next_action(sales, channel="website").value,
+        whatsapp_offered=True,
+        who=card_who(lead_id, sales),
+        extra_pairs=[("מה ידוע", " · ".join(_fact_lines(sales)))],
+        after="\n".join(after_parts),
+    )[:_BRIEF_MAX]
 
 
 def format_website_human_handoff_brief(
@@ -189,27 +194,30 @@ def format_website_human_handoff_brief(
     lead_id: str,
     sales: SalesState,
     turns: list[ConversationTurn],
+    stage: str = "",
 ) -> str:
     """Owner ping when the website graph hands off. HTML. Includes the conversation.
 
     This is not a WhatsApp click. Do not tell Assaf the visitor is already in his
     WhatsApp inbox — they are not, until they tap the widget CTA.
     """
-    headline = (sales.headline or "").strip()
-    who = lead_display(lead_id, headline, sales.display_name)
-    blocks = [
-        f"{bold('ליד מהאתר — צריך אותך')}",
-        esc(who),
-        esc("מיה עצרה באתר. תטפל אתה."),
-        "",
-        f"{bold('מה ידוע')}: " + esc(" · ".join(_fact_lines(sales))),
-    ]
+    after_parts = [esc("מיה עצרה באתר. תטפל אתה.")]
     transcript = _transcript_lines(turns)
     if transcript:
-        blocks.extend(
-            ["", "השיחה:", blockquote("\n".join(transcript), expandable=True)]
+        after_parts.extend(
+            ["", esc("השיחה:"), blockquote("\n".join(transcript), expandable=True)]
         )
-    return "\n".join(blocks)[:_BRIEF_MAX]
+    return format_owner_lead_card(
+        title="ליד מהאתר — צריך אותך",
+        lead_id=lead_id,
+        stage=stage,
+        last_said=last_message_short(turns),
+        next_action=select_next_action(sales, channel="website").value,
+        whatsapp_offered=sales.whatsapp_handoff_offered,
+        who=card_who(lead_id, sales),
+        extra_pairs=[("מה ידוע", " · ".join(_fact_lines(sales)))],
+        after="\n".join(after_parts),
+    )[:_BRIEF_MAX]
 
 
 def apply_website_whatsapp_handoff_brief(
@@ -231,8 +239,15 @@ def apply_website_whatsapp_handoff_brief(
         return None
     sales = store.get_sales(lead_id)
     turns = store.list_conversation_turns(session_id)
+    stage = ""
+    getter = getattr(store, "get_lead_stage", None)
+    if callable(getter):
+        try:
+            stage = getter(lead_id) or ""
+        except KeyError:
+            stage = ""
     brief = format_website_whatsapp_brief(
-        lead_id=lead_id, sales=sales, turns=turns
+        lead_id=lead_id, sales=sales, turns=turns, stage=stage
     )
     # The claim, not a prior read, decides whether we send. A read-then-send left two
     # concurrent /handoff clicks both seeing "not yet notified" and both pushing the
@@ -247,4 +262,16 @@ def apply_website_whatsapp_handoff_brief(
     if not claimed:
         return brief
     notify_owners(brief=brief, inbound_id=session_id, settings=settings)
+    try:
+        maybe_mirror_lead_snapshot(
+            sheets=build_sheets_port(settings),
+            store=store,
+            lead_id=lead_id,
+            channel="website",
+            next_action="offer_whatsapp",
+            conversation_id=session_id,
+            kill_switch=settings.kill_switch,
+        )
+    except (KeyError, AttributeError, RuntimeError, TypeError):
+        pass
     return brief

@@ -89,6 +89,7 @@ class LeadReviewSnapshot(BaseModel):
     conversation_killed: bool = False
     headline: str = ""
     display_name: str = ""
+    whatsapp_offered: bool = False
 
 
 def _format_iso_date(value: str) -> str:
@@ -140,6 +141,7 @@ def build_lead_review_snapshot(store: LeadStore, *, lead_id: str) -> LeadReviewS
         conversation_killed=store.is_conversation_killed(lead_id),
         headline=sales.headline or "",
         display_name=sales.display_name or "",
+        whatsapp_offered=sales.whatsapp_handoff_offered,
     )
 
 
@@ -175,6 +177,7 @@ def format_lead_review(snapshot: LeadReviewSnapshot) -> str:
         f"התאמה: {_FIT_HE.get(snapshot.fit, snapshot.fit)}",
         f"כאב: P{snapshot.pain_level}",
         f"פעולה הבאה: {_NEXT_ACTION_HE.get(snapshot.next_action, snapshot.next_action)}",
+        f"וואטסאפ הוצע: {'כן' if snapshot.whatsapp_offered else 'לא'}",
         f"חסר: {missing_he or 'אין'}",
         f"מעקב: {follow_up_line}",
         f"פגישה: {meeting_line}",

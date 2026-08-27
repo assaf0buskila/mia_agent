@@ -929,6 +929,12 @@ def test_website_post_message_records_fake_mirror_row() -> None:
                 row = fake.rows[body["lead_id"]]
                 assert row.channel == "website"
                 assert row.next_action == NextAction.UNDERSTAND_WORKFLOW.value
+                assert row.timestamp
+                assert row.whatsapp_offered in {"כן", "לא"}
+                assert row.disqualified in {"כן", "לא"}
+                dumped = row.model_dump()
+                assert "phone" not in dumped
+                assert "email" not in dumped
                 assert len(fake.activity_rows) == 1
                 run_id = next(iter(fake.activity_rows))
                 activity = fake.activity_rows[run_id]
@@ -1040,6 +1046,10 @@ def test_website_clinic_funnel_mirrors_follow_up_row() -> None:
             with TestClient(app) as client:
                 lead_id = _run_clinic_funnel_to_meeting(client, session_id)
                 assert len(fake.rows) == 1
+                lead_row = fake.rows[lead_id]
+                assert lead_row.next_action == "offer_meeting"
+                assert lead_row.discovery_summary
+                assert lead_row.timestamp
                 assert lead_id in fake.follow_up_rows
                 fu = fake.follow_up_rows[lead_id]
                 assert _due_pattern().match(fu.due_at)
@@ -1326,7 +1336,19 @@ def test_composio_sheets_port_request_shape() -> None:
     assert arguments["keyColumn"] == LEADS_KEY_COLUMN
     assert arguments["headers"] == LEADS_HEADERS
     assert arguments["rows"] == [
-        ["lead_mirror_1", "website", "open", "good", 2, "deepen_pain"]
+        [
+            "lead_mirror_1",
+            "website",
+            "open",
+            "good",
+            2,
+            "deepen_pain",
+            "",
+            "",
+            "",
+            "",
+            "",
+        ]
     ]
     assert arguments["strictMode"] is True
     assert "text" not in body

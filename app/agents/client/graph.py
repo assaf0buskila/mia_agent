@@ -159,10 +159,16 @@ def compile_client_graph(
             brief = None
             parse_mode = None
             if conversation_id:
+                stage = ""
+                try:
+                    stage = store.get_lead_stage(lead_id)
+                except KeyError:
+                    stage = ""
                 brief = format_website_human_handoff_brief(
                     lead_id=lead_id,
                     sales=store.get_sales(lead_id),
                     turns=store.list_conversation_turns(conversation_id),
+                    stage=stage,
                 )
                 parse_mode = "HTML"
             attempt = apply_hot_handoff(

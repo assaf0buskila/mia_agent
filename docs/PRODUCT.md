@@ -42,7 +42,9 @@ No separate voice brain. No speech synthesis.
 
 ## Website conversation → Telegram ping
 
-When a meaningful website conversation is finalized, Mia sends Assaf one concise Telegram summary (name, business, need, problem, interest, timeline, budget only if discussed, qualification, meeting, recommended next step, conversation id). Missing fields stay empty. Do not interrogate the visitor just to fill the card.
+When a meaningful website conversation is finalized, Mia sends Assaf one structured Telegram card: lead id, stage, what they said in short, next action, WhatsApp offered yes/no, then known facts (name, business, need, problem, interest, timeline, budget only if discussed, qualification, meeting, recommended next step, conversation id). Missing fields stay empty. Do not interrogate the visitor just to fill the card. Hebrew owner-facing copy is labeled lines, not a wall of prose.
+
+The same conversation also upserts a row on the Google Sheets `01 Leads` mirror (timestamp, lead id, channel, stage, discovery summary, WhatsApp offered, disqualified, last message short). Postgres stays the system of record. Live Sheets needs Composio `GOOGLESHEETS` connected on `MIA_COMPOSIO_USER_ID` plus `MIA_SHEETS_SPREADSHEET_ID`. If Sheets is not connected, chat continues and the upsert is skipped.
 
 Finalization is one service. Triggers now: visitor closes the widget or leaves the page (after at least one message), configurable inactivity (`MIA_WEBSITE_INACTIVITY_MINUTES`, default 30, via `mia-due-scan`), and meeting/handoff completing the thread. Idempotent on `conversation_id + final_summary_version`. Empty opens are not pinged.
 

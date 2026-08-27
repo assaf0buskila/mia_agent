@@ -8,9 +8,12 @@ from typing import Any, Protocol
 from pydantic import BaseModel, ConfigDict
 
 from app.core.config import Settings
+from app.core.demo import demo_mode_active
 from app.domain.memory import ConversationTurn
-from app.domain.sales import SalesState
+from app.domain.owner_lead_card import last_message_short
+from app.domain.sales import SalesState, select_next_action
 from app.domain.website_handoff_brief import KIND_WEBSITE_WHATSAPP
+from app.integrations.sheets import build_sheets_port, maybe_mirror_lead_snapshot
 from app.services.conversation_facts import (
     describe_business,
     describe_meeting,
@@ -46,6 +49,10 @@ class ConversationSummary(BaseModel):
     qualification: str | None = None
     meeting_status: str | None = None
     recommended_next_step: str | None = None
+    stage: str | None = None
+    last_message_short: str | None = None
+    next_action: str | None = None
+    whatsapp_offered: str | None = None
 
 
 class FinalizeResult(BaseModel):
@@ -121,6 +128,7 @@ def finalize_website_conversation(
     )
     if not inserted:
         return FinalizeResult(claimed=False, sent=False, duplicate=True, kind=kind)
+    _maybe_mirror_finalized_lead(store, summary=summary, settings=settings)
     if not send:
         return FinalizeResult(claimed=True, sent=False, kind=kind)
     payload = summary.model_dump()
@@ -129,6 +137,31 @@ def finalize_website_conversation(
     )
     sent = send_owner_telegram(text=text, settings=settings)
     return FinalizeResult(claimed=True, sent=sent, kind=kind)
+
+
+def _maybe_mirror_finalized_lead(
+    store: NotificationStore,
+    *,
+    summary: ConversationSummary,
+    settings: Settings,
+) -> None:
+    """Refresh the Sheets lead row on owner-relevant finalization. Fail closed."""
+    if demo_mode_active(settings) or settings.kill_switch:
+        return
+    if not hasattr(store, "get_sales"):
+        return
+    try:
+        maybe_mirror_lead_snapshot(
+            sheets=build_sheets_port(settings),
+            store=store,  # type: ignore[arg-type]
+            lead_id=summary.lead_id,
+            channel="website",
+            next_action=summary.next_action or summary.recommended_next_step or "",
+            conversation_id=summary.conversation_id,
+            kill_switch=settings.kill_switch,
+        )
+    except (KeyError, AttributeError, RuntimeError, TypeError):
+        return
 
 
 def _or_none(value: str) -> str | None:
@@ -161,6 +194,17 @@ def build_conversation_summary(
     sales = _read_sales(store, lead_id)
     turns: list[ConversationTurn] = store.list_conversation_turns(session_id)
     meeting = store.get_meeting(lead_id)
+    stage = ""
+    try:
+        stage = store.get_lead_stage(lead_id)  # type: ignore[attr-defined]
+    except (AttributeError, KeyError):
+        stage = ""
+    nba = ""
+    whatsapp = None
+    if sales is not None:
+        nba = select_next_action(sales, channel="website").value
+        whatsapp = "כן" if sales.whatsapp_handoff_offered else "לא"
+    said = last_message_short(turns)
     if sales is None:
         return ConversationSummary(
             conversation_id=session_id,
@@ -169,6 +213,10 @@ def build_conversation_summary(
             need=_or_none(extract_need(turns)),
             relevant_service=_or_none(relevant_service(turns)),
             recommended_next_step=next_step,
+            stage=_or_none(stage),
+            last_message_short=_or_none(said),
+            next_action=_or_none(nba),
+            whatsapp_offered=whatsapp,
         )
     return ConversationSummary(
         conversation_id=session_id,
@@ -184,6 +232,10 @@ def build_conversation_summary(
         qualification=_or_none(describe_qualification(sales)),
         meeting_status=_or_none(describe_meeting(meeting, sales)),
         recommended_next_step=next_step,
+        stage=_or_none(stage),
+        last_message_short=_or_none(said),
+        next_action=_or_none(nba),
+        whatsapp_offered=whatsapp,
     )
 
 

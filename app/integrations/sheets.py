@@ -4,11 +4,17 @@ Postgres is the system of record. This port upserts snapshots to ``01 Leads``,
 ``04 Meetings``, ``05 Deals``, ``06 Lead Sources``, ``08 Follow-ups``, ``09 Weekly KPI``, and
 ``10 Mia Activity`` — never read sheet data back. Lead source and weekly KPI
 rows upsert on website session create; lead, follow-up, deal, meeting, activity, and
-weekly KPI rows upsert after sales graph turns.
+weekly KPI rows upsert after sales graph turns and owner-relevant website events
+(finalization, WhatsApp-click briefing).
+
+``01 Leads`` columns: Lead ID, Channel, Stage, Fit, Pain Level, Next Action,
+Timestamp, Discovery Summary, WhatsApp Offered, Disqualified, Last Message Short.
+No phone or email columns.
 
 Production adapter: Composio ``GOOGLESHEETS`` toolkit version ``20260813_00``,
 pin ``GOOGLESHEETS_UPSERT_ROWS`` only when ``MIA_COMPOSIO_API_KEY``,
 ``MIA_COMPOSIO_USER_ID``, and ``MIA_SHEETS_SPREADSHEET_ID`` are set.
+If those are missing, ``DisabledSheetsPort`` no-ops and chat continues.
 Never clear/delete/create-spreadsheet/read tools this slice.
 """
 
@@ -52,7 +58,7 @@ from app.domain.meetings import (
     STATUS_CANCELLATION_REQUESTED,
     STATUS_OFFERED,
 )
-from app.domain.sales import NextAction
+from app.domain.sales import NextAction, SalesState
 from app.domain.tools import AdapterHttpError, ToolOutcome
 
 SHEETS_MIRROR_SCOPE = "sheets_mirror"
@@ -76,6 +82,11 @@ LEADS_HEADERS = [
     "Fit",
     "Pain Level",
     "Next Action",
+    "Timestamp",
+    "Discovery Summary",
+    "WhatsApp Offered",
+    "Disqualified",
+    "Last Message Short",
 ]
 
 FOLLOWUPS_SHEET_NAME = "08 Follow-ups"
@@ -197,6 +208,11 @@ class LeadMirrorRow(BaseModel):
     fit: str
     pain_level: int
     next_action: str
+    timestamp: str = ""
+    discovery_summary: str = Field(default="", max_length=240)
+    whatsapp_offered: str = ""
+    disqualified: str = ""
+    last_message_short: str = Field(default="", max_length=80)
 
 
 class FollowUpMirrorRow(BaseModel):
@@ -480,6 +496,11 @@ class ComposioSheetsPort:
                     row.fit,
                     row.pain_level,
                     row.next_action,
+                    row.timestamp,
+                    row.discovery_summary,
+                    row.whatsapp_offered,
+                    row.disqualified,
+                    row.last_message_short,
                 ]
             ],
         )
@@ -754,6 +775,88 @@ def complete_sheets_mirror(*, store: LeadStore, inbound_id: str, tab: str) -> No
         scope=SHEETS_MIRROR_SCOPE,
         key=sheets_mirror_claim_key(inbound_id, tab),
         result_json='{"ok": true}',
+    )
+
+
+def lead_mirror_row_from_state(
+    *,
+    lead_id: str,
+    channel: str,
+    stage: str,
+    sales: SalesState,
+    next_action: str,
+    turns: list | None = None,
+    now: datetime | None = None,
+) -> LeadMirrorRow:
+    """Build the 01 Leads snapshot. No phone/email columns. Never invents facts."""
+    from app.domain.owner_lead_card import (
+        discovery_summary,
+        hebrew_yes_no,
+        is_disqualified,
+        last_message_short,
+    )
+
+    instant = now if now is not None else datetime.now(UTC)
+    timestamp = instant.replace(microsecond=0).isoformat()
+    if timestamp.endswith("+00:00"):
+        timestamp = timestamp[:-6] + "Z"
+    last_said = last_message_short(list(turns or []))
+    offered = bool(sales.whatsapp_handoff_offered) or (
+        (next_action or "").strip() == NextAction.OFFER_WHATSAPP.value
+    )
+    return LeadMirrorRow(
+        lead_id=lead_id,
+        channel=channel,
+        stage=stage,
+        fit=sales.fit.value,
+        pain_level=int(sales.pain_level),
+        next_action=next_action or "",
+        timestamp=timestamp,
+        discovery_summary=discovery_summary(sales),
+        whatsapp_offered=hebrew_yes_no(offered),
+        disqualified=hebrew_yes_no(is_disqualified(sales, next_action)),
+        last_message_short=last_said,
+    )
+
+
+def maybe_mirror_lead_snapshot(
+    *,
+    sheets: SheetsPort,
+    store: LeadStore,
+    lead_id: str,
+    channel: str,
+    next_action: str,
+    conversation_id: str = "",
+    kill_switch: bool,
+) -> bool:
+    """Best-effort 01 Leads upsert. Fail closed: never raises into chat."""
+    if not lead_id or kill_switch:
+        return False
+    try:
+        sales = store.get_sales(lead_id)
+    except KeyError:
+        return False
+    stage = "open"
+    try:
+        stage = store.get_lead_stage(lead_id) or "open"
+    except KeyError:
+        stage = "open"
+    turns: list = []
+    if conversation_id:
+        list_turns = getattr(store, "list_conversation_turns", None)
+        if callable(list_turns):
+            turns = list_turns(conversation_id)
+    return mirror_lead(
+        sheets=sheets,
+        row=lead_mirror_row_from_state(
+            lead_id=lead_id,
+            channel=channel,
+            stage=stage,
+            sales=sales,
+            next_action=next_action,
+            turns=turns,
+        ),
+        kill_switch=kill_switch,
     )
 
 

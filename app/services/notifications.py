@@ -7,34 +7,45 @@ from collections.abc import Callable
 import httpx
 
 from app.core.config import Settings
+from app.domain.owner_lead_card import format_owner_lead_card
 
 _TELEGRAM_API = "https://api.telegram.org"
 
+_EXTRA_LABELS = (
+    ("name", "שם"),
+    ("contact", "יצירת קשר"),
+    ("business", "עסק"),
+    ("need", "צורך"),
+    ("pain", "בעיה"),
+    ("relevant_service", "שירות"),
+    ("timeline", "לוח זמנים"),
+    ("budget", "תקציב"),
+    ("qualification", "כישור"),
+    ("meeting_status", "פגישה"),
+    ("recommended_next_step", "סיום"),
+    ("conversation_id", "שיחה"),
+)
+
 
 def render_conversation_summary(summary: dict[str, str | None]) -> str:
-    """Format a website-final card. Missing fields are omitted, never invented."""
-    lines = ["New website conversation", ""]
-    labels = (
-        ("name", "Name"),
-        # Extracted only when the visitor typed an address or number themselves. Without
-        # it the owner reads a card about someone he has no way to reach.
-        ("contact", "Contact"),
-        ("business", "Business"),
-        ("need", "What they need"),
-        ("pain", "Main problem"),
-        ("relevant_service", "Service they appear interested in"),
-        ("timeline", "Timeline"),
-        ("budget", "Budget"),
-        ("qualification", "Qualification"),
-        ("meeting_status", "Meeting"),
-        ("recommended_next_step", "Recommended next step"),
-        ("conversation_id", "Conversation ID"),
-    )
-    for key, label in labels:
-        value = summary.get(key)
+    """Format a website-final card. Missing fields are omitted, never invented.
+
+    Structured labeled lines, not a prose blob. Hebrew owner-facing copy.
+    """
+    extras: list[tuple[str, str]] = []
+    for key, label in _EXTRA_LABELS:
+        value = (summary.get(key) or "").strip()
         if value:
-            lines.append(f"{label}: {value}")
-    return "\n".join(lines).strip()
+            extras.append((label, value))
+    return format_owner_lead_card(
+        title="שיחה מהאתר הסתיימה",
+        lead_id=(summary.get("lead_id") or "").strip(),
+        stage=(summary.get("stage") or "").strip(),
+        last_said=(summary.get("last_message_short") or "").strip(),
+        next_action=(summary.get("next_action") or "").strip(),
+        whatsapp_offered=(summary.get("whatsapp_offered") or "") == "כן",
+        extra_pairs=extras,
+    )
 
 
 def send_owner_telegram(
@@ -58,6 +69,7 @@ def send_owner_telegram(
                 json={
                     "chat_id": chat_id,
                     "text": text,
+                    "parse_mode": "HTML",
                     "link_preview_options": {"is_disabled": True},
                 },
             )
