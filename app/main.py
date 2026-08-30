@@ -60,11 +60,26 @@ def brain_health(settings) -> dict[str, object]:
     Each feature names the env vars it still needs, so a half-configured deployment is
     diagnosable from `/health` instead of from silence in the logs.
     """
+    # `owner_agent_ready` deliberately falls back to the configured sales chain or
+    # the owner Gemini model. Health must not describe a working fallback as
+    # missing just because the dedicated OpenAI owner-model setting is blank.
     missing_agent: list[str] = []
-    if not settings.owner_agent_model.strip():
-        missing_agent.append("MIA_OWNER_AGENT_MODEL")
-    if not settings.openai_api_key.strip():
-        missing_agent.append("MIA_OPENAI_API_KEY")
+    if not settings.owner_agent_ready():
+        openai_chain_configured = any(
+            (
+                settings.owner_agent_model.strip(),
+                settings.owner_agent_fallback_model.strip(),
+                settings.sales_model.strip(),
+                settings.sales_fallback_model.strip(),
+            )
+        )
+        gemini_model_configured = bool(settings.owner_agent_gemini_model.strip())
+        if not openai_chain_configured and not gemini_model_configured:
+            missing_agent.append("MIA_OWNER_AGENT_MODEL")
+        if openai_chain_configured and not settings.openai_api_key.strip():
+            missing_agent.append("MIA_OPENAI_API_KEY")
+        if gemini_model_configured and not settings.gemini_api_key.strip():
+            missing_agent.append("MIA_GEMINI_API_KEY")
 
     missing_embeddings: list[str] = []
     if not settings.embedding_model.strip():
@@ -78,10 +93,11 @@ def brain_health(settings) -> dict[str, object]:
         missing_embeddings.append("MIA_OPENAI_API_KEY")
 
     missing_extraction: list[str] = []
-    if not settings.extraction_model.strip():
-        missing_extraction.append("MIA_EXTRACTION_MODEL")
-    if not (settings.openai_api_key.strip() or settings.gemini_api_key.strip()):
-        missing_extraction.append("MIA_OPENAI_API_KEY")
+    if not settings.extraction_ready():
+        if not settings.extraction_model.strip():
+            missing_extraction.append("MIA_EXTRACTION_MODEL")
+        if not (settings.openai_api_key.strip() or settings.gemini_api_key.strip()):
+            missing_extraction.append("MIA_OPENAI_API_KEY")
 
     missing_voice: list[str] = []
     if not settings.openai_api_key.strip():
@@ -127,6 +143,7 @@ def owner_integrations(settings) -> dict[str, object]:
     composio = settings.composio_ready()
     discovery = bool(settings.composio_discovery) and composio
     sheets_id = settings.sheets_spreadsheet_id.strip()
+    authorized_sheets = bool(settings.allowed_sheets_spreadsheet_ids())
     gsc_site = settings.gsc_site_url.strip()
     ga4_property = settings.ga4_property_id.strip()
     firecrawl = bool(settings.firecrawl_api_key.strip())
@@ -150,6 +167,11 @@ def owner_integrations(settings) -> dict[str, object]:
         "calendar_read": composio,
         "calendar_write": settings.calendar_write,
         "sheets_mirror": composio and bool(sheets_id),
+        # ADR-042 readiness is deliberately config-only: health never makes an
+        # authenticated provider call and never returns credentials.
+        "sheets_read": composio and authorized_sheets,
+        "sheets_update": composio and authorized_sheets,
+        "sheets_append": composio and authorized_sheets,
         "linkedin_profile": composio,
         "instagram_insights": composio
         or bool(settings.instagram_access_token.strip()),

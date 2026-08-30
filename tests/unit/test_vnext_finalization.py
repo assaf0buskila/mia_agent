@@ -15,16 +15,22 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import httpx
+from app.agents.client.graph import finalize_inactive_website_conversations
+from app.capabilities.types import Principal
 from app.core.config import Settings
 from app.db.base import Base
-from app.db.models import ChannelIdentityRow
+from app.db.models import (
+    ChannelIdentityRow,
+    OwnerNotificationClaimRow,
+    OwnerNotificationRecipientClaimRow,
+)
 from app.db.session import get_session_factory, init_db, make_engine
 from app.db.store import LeadStore
-from app.domain import hot_handoff as hot_handoff_mod
 from app.domain.events import Channel, build_message_in_event, build_message_out_event
 from app.domain.hot_handoff import KIND_HOT_LEAD, apply_hot_handoff
 from app.domain.sales import FitLevel, PainLevel
 from app.main import app
+from app.services import finalization as finalization_module
 from app.services import notifications as notifications_mod
 from app.services.finalization import (
     KIND,
@@ -33,9 +39,8 @@ from app.services.finalization import (
     finalize_website_conversation,
     kind_for,
     qualify_and_finalize,
-    scan_inactive_website_conversations,
 )
-from app.services.notifications import render_conversation_summary
+from app.services.notifications import OwnerTelegramDelivery, render_conversation_summary
 from fastapi.testclient import TestClient
 from sqlalchemy import event
 from sqlalchemy.orm import sessionmaker
@@ -227,12 +232,178 @@ def test_same_conversation_finalized_twice_pings_once(monkeypatch) -> None:
         assert (second.claimed, second.sent, second.duplicate) == (False, False, True)
         assert first.kind == kind_for("v1")
         assert len(telegram.sends) == 1
-        assert store.has_owner_notification_claim(
+        recipient_claim = db.get(
+            OwnerNotificationRecipientClaimRow, (KIND, lead_id, session_id, "111")
+        )
+        assert recipient_claim is not None
+        assert (
+            db.get(
+                OwnerNotificationRecipientClaimRow,
+                (KIND, lead_id, "some_other_session", "111"),
+            )
+            is None
+        )
+    finally:
+        db.close()
+
+
+def test_legacy_completed_conversation_claim_is_retained_after_recipient_upgrade(
+    monkeypatch,
+) -> None:
+    """A pre-migration claim is ambiguous delivery, never a recipient backfill."""
+    telegram = _patch_owner_send(monkeypatch)
+    init_db()
+    db = get_session_factory()()
+    try:
+        store = LeadStore(db)
+        session_id = "web_legacy_done01"
+        lead_id = _seed_turns(
+            store, session_id=session_id, turns=[("prospect", "רוצה להתקדם")]
+        )
+        assert store.try_claim_owner_notification(
+            kind=KIND,
+            lead_id=lead_id,
+            conversation_id=session_id,
+            claimed_at="2026-08-28T08:00:00+00:00",
+        )
+        db.commit()
+
+        replayed = qualify_and_finalize(
+            store,
+            session_id=session_id,
+            lead_id=lead_id,
+            settings=_owner_settings(),
+            next_step="inactivity",
+            require_visitor_message=True,
+        )
+
+        assert replayed is not None
+        assert (replayed.claimed, replayed.sent, replayed.duplicate) == (False, False, True)
+        assert telegram.sends == []
+        assert db.get(
+            OwnerNotificationRecipientClaimRow, (KIND, lead_id, session_id, "111")
+        ) is None
+        assert db.get(OwnerNotificationClaimRow, (KIND, lead_id, session_id)) is not None
+    finally:
+        db.close()
+
+
+def test_kill_switch_suppression_does_not_consume_finalization_claim(monkeypatch) -> None:
+    telegram = _patch_owner_send(monkeypatch)
+    init_db()
+    db = get_session_factory()()
+    try:
+        store = LeadStore(db)
+        session_id = "web_kill_retry01"
+        lead_id = _seed_turns(
+            store, session_id=session_id, turns=[("prospect", "שלום, רוצה להתקדם")]
+        )
+        db.commit()
+        blocked = qualify_and_finalize(
+            store,
+            session_id=session_id,
+            lead_id=lead_id,
+            settings=_owner_settings(kill_switch=True),
+            next_step="session_closed",
+            require_visitor_message=True,
+        )
+        assert blocked is not None
+        assert (blocked.claimed, blocked.sent, blocked.duplicate) == (False, False, False)
+        assert not store.has_owner_notification_claim(
             kind=KIND, lead_id=lead_id, conversation_id=session_id
         )
-        assert not store.has_owner_notification_claim(
-            kind=KIND, lead_id=lead_id, conversation_id="some_other_session"
+        delivered = qualify_and_finalize(
+            store,
+            session_id=session_id,
+            lead_id=lead_id,
+            settings=_owner_settings(),
+            next_step="session_closed",
+            require_visitor_message=True,
         )
+        assert delivered is not None
+        assert (delivered.claimed, delivered.sent, delivered.duplicate) == (True, True, False)
+        assert len(telegram.sends) == 1
+    finally:
+        db.close()
+
+
+def test_confirmed_full_rejection_releases_finalization_claim(monkeypatch) -> None:
+    class _RejectedTelegram(_RecordingTelegram):
+        def post(self, url: str, *, json: dict[str, object]) -> httpx.Response:
+            self.sends.append(json)
+            return httpx.Response(400, json={"ok": False})
+
+    telegram = _RejectedTelegram()
+    monkeypatch.setattr(notifications_mod.httpx, "Client", lambda **kwargs: telegram)
+    init_db()
+    db = get_session_factory()()
+    try:
+        store = LeadStore(db)
+        summary = ConversationSummary(
+            conversation_id="web_rejected01", lead_id="lead_rejected01"
+        )
+        result = finalize_website_conversation(
+            store, summary=summary, settings=_owner_settings()
+        )
+        assert result.claimed is True
+        assert result.sent is False
+        db.commit()
+        assert not store.has_owner_notification_claim(
+            kind=KIND, lead_id=summary.lead_id, conversation_id=summary.conversation_id
+        )
+    finally:
+        db.close()
+
+
+def test_finalization_recipient_ledger_retries_only_known_rejection(monkeypatch) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    def fake_delivery(*, recipient_ids=None, **kwargs) -> OwnerTelegramDelivery:
+        del kwargs
+        ids = tuple(recipient_ids or ())
+        calls.append(ids)
+        if ids == ("111", "222"):
+            return OwnerTelegramDelivery(delivered=("111",), rejected=("222",))
+        return OwnerTelegramDelivery(delivered=ids)
+
+    monkeypatch.setattr(finalization_module, "deliver_owner_telegram", fake_delivery)
+    init_db()
+    db = get_session_factory()()
+    try:
+        store = LeadStore(db)
+        summary = ConversationSummary(conversation_id="web_partial", lead_id="lead_partial")
+        settings = Settings(telegram_bot_token="tok", telegram_owner_user_ids="111,222")
+        assert finalize_website_conversation(store, summary=summary, settings=settings).sent
+        assert finalize_website_conversation(store, summary=summary, settings=settings).sent
+        assert calls == [("111", "222"), ("222",)]
+    finally:
+        db.close()
+
+
+def test_finalization_no_config_replays_when_delivery_becomes_available(monkeypatch) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    def fake_delivery(*, recipient_ids=None, **kwargs) -> OwnerTelegramDelivery:
+        del kwargs
+        ids = tuple(recipient_ids or ())
+        calls.append(ids)
+        return OwnerTelegramDelivery(delivered=ids)
+
+    monkeypatch.setattr(finalization_module, "deliver_owner_telegram", fake_delivery)
+    init_db()
+    db = get_session_factory()()
+    try:
+        store = LeadStore(db)
+        summary = ConversationSummary(conversation_id="web_later", lead_id="lead_later")
+        first = finalize_website_conversation(store, summary=summary, settings=Settings())
+        second = finalize_website_conversation(
+            store,
+            summary=summary,
+            settings=Settings(telegram_bot_token="tok", telegram_owner_user_ids="111"),
+        )
+        assert first.claimed and not first.sent
+        assert second.sent
+        assert calls == [("111",)]
     finally:
         db.close()
 
@@ -295,7 +466,7 @@ def test_concurrent_duplicate_claim_returns_false_and_never_raises(tmp_path) -> 
 
 def test_apply_hot_handoff_twice_sends_one_brief(monkeypatch) -> None:
     """Defect 3. The persist call returned None, so every retry re-sent the same brief."""
-    telegram = _patch_owner_send(monkeypatch, module=hot_handoff_mod)
+    telegram = _patch_owner_send(monkeypatch)
     init_db()
     db = get_session_factory()()
     try:
@@ -512,9 +683,13 @@ def test_inactive_website_conversation_finalizes_once() -> None:
         db.commit()
         settings = Settings(website_inactivity_minutes=30)
         now = old + timedelta(minutes=31)
-        assert scan_inactive_website_conversations(store, settings=settings, now=now) == 1
+        assert finalize_inactive_website_conversations(
+            store, settings=settings, principal=Principal.client(source="test"), now=now
+        ) == 1
         db.commit()
-        assert scan_inactive_website_conversations(store, settings=settings, now=now) == 0
+        assert finalize_inactive_website_conversations(
+            store, settings=settings, principal=Principal.client(source="test"), now=now
+        ) == 0
         assert store.has_owner_notification(kind=kind_for(), lead_id=lead_id)
     finally:
         db.close()
@@ -598,5 +773,91 @@ def test_empty_website_session_is_not_finalized_on_inactivity() -> None:
         )
         assert result is None
         assert not store.has_owner_notification(kind=kind_for(), lead_id=lead_id)
+    finally:
+        db.close()
+
+
+def test_empty_returning_session_cannot_borrow_an_old_sessions_visitor_message(
+    monkeypatch,
+) -> None:
+    telegram = _patch_owner_send(monkeypatch)
+    init_db()
+    db = get_session_factory()()
+    try:
+        store = LeadStore(db)
+        old_session = "web_old_message01"
+        empty_session = "web_new_empty02"
+        customer_id, lead_id = store.open_channel_lead(
+            channel=Channel.WEBSITE, external_id=old_session
+        )
+        db.add(
+            ChannelIdentityRow(
+                customer_id=customer_id,
+                channel=Channel.WEBSITE.value,
+                external_id=empty_session,
+                verified=False,
+            )
+        )
+        _seed_turns(
+            store,
+            session_id=old_session,
+            lead_id=lead_id,
+            turns=[("prospect", "יש לי חנות ואני צריך עזרה")],
+        )
+        db.commit()
+
+        result = qualify_and_finalize(
+            store,
+            session_id=empty_session,
+            lead_id=lead_id,
+            settings=_owner_settings(),
+            next_step="inactivity",
+            require_visitor_message=True,
+        )
+
+        assert result is None
+        assert not store.has_owner_notification(kind=KIND, lead_id=lead_id)
+        assert db.get(
+            OwnerNotificationRecipientClaimRow, (KIND, lead_id, empty_session, "111")
+        ) is None
+        assert telegram.sends == []
+    finally:
+        db.close()
+
+
+def test_inactivity_ignores_empty_returning_session_but_keeps_its_real_conversation() -> None:
+    init_db()
+    db = get_session_factory()()
+    try:
+        store = LeadStore(db)
+        old_session = "web_inactive_old01"
+        empty_session = "web_inactive_empty02"
+        customer_id, lead_id = store.open_channel_lead(
+            channel=Channel.WEBSITE, external_id=old_session
+        )
+        db.add(
+            ChannelIdentityRow(
+                customer_id=customer_id,
+                channel=Channel.WEBSITE.value,
+                external_id=empty_session,
+                verified=False,
+            )
+        )
+        old = datetime(2026, 8, 25, 12, 0, tzinfo=UTC)
+        _seed_turns(
+            store,
+            session_id=old_session,
+            lead_id=lead_id,
+            turns=[("prospect", "שלום")],
+            start=old,
+        )
+        db.commit()
+
+        rows = store.list_inactive_website_conversations(
+            cutoff_iso=(old + timedelta(minutes=31)).isoformat(), limit=50
+        )
+
+        assert (old_session, lead_id) in rows
+        assert (empty_session, lead_id) not in rows
     finally:
         db.close()

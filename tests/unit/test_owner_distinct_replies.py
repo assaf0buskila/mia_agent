@@ -12,7 +12,7 @@ import pytest
 from app.api.inbound import process_inbound_texts
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
-from app.domain.approvals import ACTION_PROPOSAL_HANDOFF
+from app.domain.approvals import ACTION_PROPOSAL_HANDOFF, ACTION_WEBSITE_EDIT
 from app.domain.events import Channel
 from app.domain.memory import ROLE_MIA, ConversationTurn
 from app.domain.owner_followups import (
@@ -154,13 +154,17 @@ def test_pending_approvals_read_lists_subjects_and_refuses_blanket_approval() ->
     store = _StubStore(
         approvals=[
             _StubApproval(lead_id="lead_abc", action=ACTION_PROPOSAL_HANDOFF),
-            _StubApproval(lead_id=None, action="campaign_write", resource_id="camp_9"),
+            _StubApproval(
+                lead_id=None,
+                action=ACTION_WEBSITE_EDIT,
+                resource_id="assafweb-home",
+            ),
         ]
     )
     ack = format_pending_approvals_ack(store)
     assert "מחכים לאישור: 2" in ack
     assert "lead_abc" in ack
-    assert "camp_9" in ack
+    assert "assafweb-home" in ack
     assert "None" not in ack
     assert "לא מאשרת הכל ביחד" in ack
 
@@ -445,7 +449,7 @@ def test_daily_brief_and_hot_leads_combine_into_one_snapshot() -> None:
 
 
 def test_daily_brief_plus_a_write_type_stays_exclusive() -> None:
-    decision = classify_owner_task("daily brief and campaign spend")
+    decision = classify_owner_task("daily brief and instagram content")
     assert decision.task_type == OwnerTaskType.NOTE
     assert decision.needs_clarification is True
     assert "analytics" in decision.matched_types

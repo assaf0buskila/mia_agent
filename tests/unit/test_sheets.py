@@ -1,6 +1,8 @@
 import json
 import re
+from types import SimpleNamespace
 
+import app.integrations.sheets as sheets_module
 import httpx
 import pytest
 from app.api.deps import get_sheets_port
@@ -59,8 +61,8 @@ from app.integrations.sheets import (
     mirror_follow_up,
     mirror_lead,
     mirror_meeting,
+    mirror_sales_turn,
     mirror_source,
-    pick_spreadsheet_id,
     sheets_mirror_claim_key,
 )
 from app.main import app
@@ -85,6 +87,103 @@ class CountingSheetsPort(FakeSheetsPort):
     def upsert_lead(self, row: LeadMirrorRow) -> None:
         self.lead_calls += 1
         super().upsert_lead(row)
+
+
+class SalesTurnStore:
+    def __init__(self, events: list[str], *, claimed: bool = True) -> None:
+        self.events = events
+        self.claimed = claimed
+
+    def claim_operation(self, *, scope: str, key: str) -> bool:
+        assert scope == SHEETS_MIRROR_SCOPE
+        assert key == "evt.sales.turn.1:sheets:sales"
+        self.events.append("claim")
+        return self.claimed
+
+    def complete_operation(self, *, scope: str, key: str, result_json: str) -> None:
+        assert scope == SHEETS_MIRROR_SCOPE
+        assert key == "evt.sales.turn.1:sheets:sales"
+        assert json.loads(result_json) == {"ok": True}
+        self.events.append("complete")
+
+    def get_sales(self, lead_id: str) -> SimpleNamespace:
+        assert lead_id == "lead_sales_turn_1"
+        return SimpleNamespace(fit=FitLevel.GOOD, pain_level=PainLevel.P3)
+
+    def get_lead_stage(self, lead_id: str) -> str:
+        assert lead_id == "lead_sales_turn_1"
+        return "open"
+
+    def get_follow_up(self, lead_id: str) -> SimpleNamespace:
+        assert lead_id == "lead_sales_turn_1"
+        return SimpleNamespace(
+            due_at="2026-08-29",
+            channel=Channel.WEBSITE.value,
+            status=STATUS_PENDING,
+            reason=REASON_MEETING_OFFERED,
+        )
+
+    def get_deal(self, lead_id: str) -> SimpleNamespace:
+        assert lead_id == "lead_sales_turn_1"
+        return SimpleNamespace(
+            stage="meeting_offered",
+            source=Channel.WEBSITE.value,
+            attribution_confidence="unknown",
+            expected_value="",
+            closed_value="",
+        )
+
+    def get_meeting(self, lead_id: str) -> SimpleNamespace:
+        assert lead_id == "lead_sales_turn_1"
+        return SimpleNamespace(
+            status=STATUS_OFFERED,
+            source=Channel.WEBSITE.value,
+            scheduled_at="",
+            calendar_event_id="",
+            summary="",
+        )
+
+    def get_ai_run(self, run_id: str) -> SimpleNamespace:
+        assert run_id == "run_sales_turn_1"
+        return SimpleNamespace(
+            run_id=run_id,
+            lead_id="lead_sales_turn_1",
+            channel=Channel.WEBSITE.value,
+            next_action=NextAction.OFFER_MEETING.value,
+            model=MODEL_CANNED,
+            kill_switch=False,
+            cost_usd=0,
+        )
+
+
+class OrderedSalesSheetsPort(FakeSheetsPort):
+    def __init__(self, events: list[str]) -> None:
+        super().__init__()
+        self.events = events
+
+    def upsert_lead(self, row: LeadMirrorRow) -> None:
+        self.events.append("lead")
+        super().upsert_lead(row)
+
+    def upsert_follow_up(self, row: FollowUpMirrorRow) -> None:
+        self.events.append("follow_up")
+        super().upsert_follow_up(row)
+
+    def upsert_deal(self, row: DealMirrorRow) -> None:
+        self.events.append("deal")
+        super().upsert_deal(row)
+
+    def upsert_meeting(self, row: MeetingMirrorRow) -> None:
+        self.events.append("meeting")
+        super().upsert_meeting(row)
+
+    def upsert_activity(self, row: ActivityMirrorRow) -> None:
+        self.events.append("activity")
+        super().upsert_activity(row)
+
+    def upsert_kpi(self, row: KpiMirrorRow) -> None:
+        self.events.append("kpi")
+        super().upsert_kpi(row)
 
 
 def _sample_kpi_row(*, week_start: str = "2026-08-17") -> KpiMirrorRow:
@@ -232,6 +331,150 @@ def test_claim_sheets_mirror_first_true_complete_second_false() -> None:
         assert json.loads(result) == {"ok": True}
     finally:
         db.close()
+
+
+def test_mirror_sales_turn_preserves_write_persist_complete_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    store = SalesTurnStore(events)
+    sheets = OrderedSalesSheetsPort(events)
+    persisted: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        sheets_module,
+        "compute_weekly_kpi",
+        lambda store, *, timezone: SimpleNamespace(
+            week_start="2026-08-24",
+            leads=4,
+            meetings_offered=2,
+            handoffs=1,
+            messages_in=6,
+            follow_ups_pending=1,
+        ),
+    )
+
+    def record_persist(store_arg, **kwargs) -> None:
+        assert store_arg is store
+        events.append("persist")
+        persisted.update(kwargs)
+
+    monkeypatch.setattr(sheets_module, "persist_tool_outcome", record_persist)
+
+    outcome = mirror_sales_turn(
+        store=store,
+        sheets=sheets,
+        settings=Settings(),
+        provider="website",
+        channel=Channel.WEBSITE,
+        inbound_id="evt.sales.turn.1",
+        conversation_id="web_sales_turn_1",
+        lead_id="lead_sales_turn_1",
+        run_id="run_sales_turn_1",
+        next_action=NextAction.OFFER_MEETING.value,
+        kill_switch=False,
+    )
+
+    assert events == [
+        "claim",
+        "lead",
+        "follow_up",
+        "deal",
+        "meeting",
+        "activity",
+        "kpi",
+        "persist",
+        "complete",
+    ]
+    assert outcome is persisted["outcome"]
+    assert outcome is not None
+    assert outcome.status == "ok"
+    assert outcome.result_count == 6
+    assert persisted["provider"] == "website"
+    assert persisted["channel"] == Channel.WEBSITE
+    assert persisted["inbound_provider_event_id"] == "evt.sales.turn.1"
+    assert persisted["conversation_id"] == "web_sales_turn_1"
+    assert persisted["lead_id"] == "lead_sales_turn_1"
+    assert persisted["correlation_id"] == "run_sales_turn_1"
+    assert set(sheets.rows) == {"lead_sales_turn_1"}
+    assert set(sheets.follow_up_rows) == {"lead_sales_turn_1"}
+    assert set(sheets.deal_rows) == {"lead_sales_turn_1"}
+    assert set(sheets.meeting_rows) == {"lead_sales_turn_1"}
+    assert set(sheets.activity_rows) == {"run_sales_turn_1"}
+    assert set(sheets.kpi_rows) == {"2026-08-24"}
+
+
+def test_mirror_sales_turn_claim_collision_is_a_no_op(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    store = SalesTurnStore(events, claimed=False)
+    sheets = OrderedSalesSheetsPort(events)
+    monkeypatch.setattr(
+        sheets_module,
+        "persist_tool_outcome",
+        lambda *args, **kwargs: pytest.fail("claim collision must not persist"),
+    )
+    monkeypatch.setattr(
+        sheets_module,
+        "compute_weekly_kpi",
+        lambda *args, **kwargs: pytest.fail("claim collision must not compute KPI"),
+    )
+
+    outcome = mirror_sales_turn(
+        store=store,
+        sheets=sheets,
+        settings=Settings(),
+        provider="website",
+        channel=Channel.WEBSITE,
+        inbound_id="evt.sales.turn.1",
+        conversation_id="web_sales_turn_1",
+        lead_id="lead_sales_turn_1",
+        run_id="run_sales_turn_1",
+        next_action=NextAction.OFFER_MEETING.value,
+        kill_switch=False,
+    )
+
+    assert outcome is None
+    assert events == ["claim"]
+    assert sheets.rows == {}
+
+
+def test_mirror_sales_turn_persist_failure_does_not_complete_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    store = SalesTurnStore(events)
+    sheets = OrderedSalesSheetsPort(events)
+    monkeypatch.setattr(
+        sheets_module,
+        "compute_weekly_kpi",
+        lambda store, *, timezone: None,
+    )
+
+    def fail_persist(*args, **kwargs) -> None:
+        events.append("persist")
+        raise RuntimeError("persist failed")
+
+    monkeypatch.setattr(sheets_module, "persist_tool_outcome", fail_persist)
+
+    with pytest.raises(RuntimeError, match="persist failed"):
+        mirror_sales_turn(
+            store=store,
+            sheets=sheets,
+            settings=Settings(),
+            provider="website",
+            channel=Channel.WEBSITE,
+            inbound_id="evt.sales.turn.1",
+            conversation_id="web_sales_turn_1",
+            lead_id="lead_sales_turn_1",
+            run_id="run_sales_turn_1",
+            next_action=NextAction.OFFER_MEETING.value,
+            kill_switch=False,
+        )
+
+    assert events[-1] == "persist"
+    assert "complete" not in events
 
 
 @pytest.mark.asyncio
@@ -1215,16 +1458,6 @@ def test_build_sheets_port_disabled_when_composio_credentials_missing(
     assert isinstance(port, DisabledSheetsPort)
 
 
-def test_pick_spreadsheet_id_requires_unique_mia_name() -> None:
-    files = [
-        ("id-budget", "Budget"),
-        ("id-mia", "Mia"),
-    ]
-    assert pick_spreadsheet_id(files) == "id-mia"
-    assert pick_spreadsheet_id(files, preferred="forced") == "forced"
-    assert pick_spreadsheet_id([("a", "Budget"), ("b", "Sales")]) == ""
-
-
 def test_composio_sheets_port_http_500_raises_adapter_error() -> None:
     transport = httpx.MockTransport(lambda _request: httpx.Response(500))
     client = httpx.Client(transport=transport)
@@ -1557,8 +1790,8 @@ def test_composio_sheets_port_kpi_request_shape() -> None:
     assert arguments["rows"] == [["2026-08-17", 3, 1, 0, 5, 2]]
 
 
-def test_composio_sheets_port_protocol_is_write_only() -> None:
-    forbidden = frozenset({"get", "read", "clear", "delete", "create"})
+def test_composio_sheets_port_protocol_has_only_allowlisted_owner_operations() -> None:
+    forbidden = frozenset({"clear", "delete", "create", "format", "share", "search"})
     for name in dir(ComposioSheetsPort):
         if name.startswith("_"):
             continue

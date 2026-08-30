@@ -5,8 +5,6 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import NamedTuple
 
-import httpx
-
 from app.capabilities.leads import leads_handlers
 from app.capabilities.policy import execute_capability
 from app.capabilities.types import Principal
@@ -19,14 +17,18 @@ from app.domain.sales import SalesState
 KIND_HOT_LEAD = "hot_lead"
 
 _BRIEF_MAX = 500
-_TELEGRAM_API = "https://api.telegram.org"
 
 
 class OwnerNotifyAttempt(NamedTuple):
-    """Result of one owner Telegram attempt. `attempted` is False on a duplicate claim."""
+    """Result of one owner Telegram attempt.
+
+    ``known_unreachable`` distinguishes missing Telegram configuration from a
+    duplicate recipient claim, without consuming a later retry claim.
+    """
 
     delivered: tuple[str, ...]
     attempted: bool
+    known_unreachable: bool = False
 
 
 def format_hot_brief(*, lead_id: str, sales: SalesState, want: str) -> str:
@@ -73,42 +75,31 @@ def notify_owners(
     / chat-id problem. Those are not deliveries. Counting them as success is how a
     website handoff told the visitor the transfer happened while Assaf got nothing.
     """
-    token = settings.telegram_bot_token.strip()
-    owner_ids = settings.telegram_owner_user_id_set()
-    if not token or not owner_ids:
-        return ()
-    delivered: list[str] = []
-    with httpx.Client(timeout=10.0) as client:
-        for chat_id in sorted(owner_ids):
-            payload: dict[str, object] = {
-                "chat_id": chat_id,
-                "text": brief,
-                "link_preview_options": {"is_disabled": True},
-            }
-            if parse_mode:
-                payload["parse_mode"] = parse_mode
-            try:
-                response = client.post(
-                    f"{_TELEGRAM_API}/bot{token}/sendMessage",
-                    json=payload,
-                )
-            except httpx.HTTPError:
-                continue
-            if not _telegram_accepted(response):
-                continue
-            delivered.append(chat_id)
+    return _deliver_owners(
+        brief=brief, inbound_id=inbound_id, settings=settings, parse_mode=parse_mode
+    ).delivered
+
+
+def _deliver_owners(
+    *,
+    brief: str,
+    inbound_id: str,
+    settings: Settings,
+    parse_mode: str | None,
+    recipient_ids: tuple[str, ...] | None = None,
+):
+    """Keep delivery certainty for workflow claim handling; public helper stays a tuple."""
+    # Import lazily: services package exports finalization, which imports the website
+    # handoff formatter and therefore this module during application startup.
+    from app.services.notifications import deliver_owner_telegram
+
     _ = inbound_id
-    return tuple(delivered)
-
-
-def _telegram_accepted(response: httpx.Response) -> bool:
-    if response.status_code >= 400:
-        return False
-    try:
-        body = response.json()
-    except ValueError:
-        return False
-    return isinstance(body, dict) and body.get("ok") is True
+    return deliver_owner_telegram(
+        text=brief,
+        settings=settings,
+        parse_mode=parse_mode,
+        recipient_ids=recipient_ids,
+    )
 
 
 def apply_hot_handoff(
@@ -132,9 +123,6 @@ def apply_hot_handoff(
     duplicate, then sent unconditionally — so every retry of the same inbound re-sent the
     brief and Assaf got the same hot lead over and over. One handoff, one message.
     """
-    store.set_takeover_state(lead_id, TakeoverState.HUMAN_TAKEOVER_REQUIRED.value)
-    store.cancel_pending_follow_up(lead_id)
-    now_iso = datetime.now(UTC).replace(microsecond=0).isoformat()
     try:
         assert_allowed(
             RiskAction(name="hot_handoff_persist", risk=RiskLevel.R1_LOW_WRITE),
@@ -142,24 +130,49 @@ def apply_hot_handoff(
         )
     except PolicyDenied:
         return OwnerNotifyAttempt((), False)
-    claimed = store.try_insert_owner_notification(
-        kind=KIND_HOT_LEAD,
-        lead_id=lead_id,
-        scheduled_at=now_iso,
-    )
-    if not claimed:
-        return OwnerNotifyAttempt((), False)
+    # Policy denial must leave the lead exactly as it was: no takeover state,
+    # follow-up cancellation, inbox row, recipient claim, or transport attempt.
+    store.set_takeover_state(lead_id, TakeoverState.HUMAN_TAKEOVER_REQUIRED.value)
+    store.cancel_pending_follow_up(lead_id)
+    now_iso = datetime.now(UTC).replace(microsecond=0).isoformat()
     sales = store.get_sales(lead_id)
     text = brief if brief is not None else format_hot_brief(
         lead_id=lead_id, sales=sales, want=want
     )
     mode = parse_mode if brief is not None else None
-    delivered = notify_owners(
-        brief=text, inbound_id=inbound_id, settings=settings, parse_mode=mode
+    # The owner inbox is durable handoff state, not a transport claim.  Keep it even
+    # when Telegram cannot presently be attempted; recipient claims below remain
+    # untouched so a later valid replay is eligible.
+    store.upsert_owner_notification(
+        kind=KIND_HOT_LEAD, lead_id=lead_id, scheduled_at=now_iso
     )
-    if not delivered:
-        # Claim-then-fail used to lock the lead forever: Assaf never got a retry
-        # ping, and the visitor still saw a transfer claim. Release so the next
-        # HANDOFF turn can try Telegram again.
-        store.release_owner_notification_claim(kind=KIND_HOT_LEAD, lead_id=lead_id)
-    return OwnerNotifyAttempt(delivered, True)
+    token = settings.telegram_bot_token.strip()
+    recipients = tuple(sorted(settings.telegram_owner_user_id_set()))
+    if not token or not recipients or not text.strip():
+        # Known no-attempt: no recipient claim is consumed, so a later valid replay
+        # remains eligible.
+        return OwnerNotifyAttempt((), False, True)
+    claimed_recipients = tuple(
+        recipient_id
+        for recipient_id in recipients
+        if store.try_claim_owner_notification_recipient(
+            kind=KIND_HOT_LEAD,
+            lead_id=lead_id,
+            recipient_id=recipient_id,
+            claimed_at=now_iso,
+        )
+    )
+    if not claimed_recipients:
+        return OwnerNotifyAttempt((), False)
+    delivery = _deliver_owners(
+        brief=text,
+        inbound_id=inbound_id,
+        settings=settings,
+        parse_mode=mode,
+        recipient_ids=claimed_recipients,
+    )
+    for recipient_id in delivery.rejected:
+        store.release_owner_notification_recipient_claim(
+            kind=KIND_HOT_LEAD, lead_id=lead_id, recipient_id=recipient_id
+        )
+    return OwnerNotifyAttempt(delivery.delivered, True)

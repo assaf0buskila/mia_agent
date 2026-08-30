@@ -311,6 +311,7 @@ def _request_cancellation(
         )
     if meeting.status != STATUS_BOOKED:
         return MeetingChangeResult(kind=MeetingChangeKind.NOT_HANDLED)
+    persisted = False
     try:
         assert_allowed(
             RiskAction(
@@ -361,6 +362,7 @@ def _request_cancellation(
             kill_switch=kill_switch,
             demo_active=demo_active,
         )
+        persisted = True
         return MeetingChangeResult(
             kind=MeetingChangeKind.CANCELLATION_REQUESTED,
             reply=CANCELLATION_REQUESTED_REPLY,
@@ -368,7 +370,13 @@ def _request_cancellation(
         )
     finally:
         if claimed:
-            complete_cancellation_persist(store=store, inbound_id=inbound_id)
+            if persisted:
+                complete_cancellation_persist(store=store, inbound_id=inbound_id)
+            else:
+                store.fail_operation(
+                    scope=CANCELLATION_SCOPE,
+                    key=cancellation_claim_key(inbound_id),
+                )
 
 
 def _offer_reschedule(

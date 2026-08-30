@@ -99,13 +99,6 @@ def derive_headline(turns: list[ConversationTurn]) -> str:
     return ""
 
 
-def short_lead_id(lead_id: str, *, keep: int = 8) -> str:
-    """`lead_82f527e3be5e` -> `lead_82f5`. Enough to say aloud, still unique in a list."""
-    if not lead_id.startswith("lead_"):
-        return lead_id[: keep + 5]
-    return lead_id[: keep + 1]
-
-
 def lead_display(lead_id: str, headline: str, display_name: str = "") -> str:
     """`lead_82f527e3be5e · דני · מוכר שעונים`, or just the id when nothing was learned yet.
 

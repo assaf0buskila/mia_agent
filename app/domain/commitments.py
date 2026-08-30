@@ -13,7 +13,6 @@ from app.domain.owner_tasks import OwnerTaskDecision, OwnerTaskType
 
 TRIGGER_NONE = "none"
 TRIGGER_DUE_DATE = "due_date"
-TRIGGER_SPEND_THRESHOLD = "spend_threshold"
 CONDITION_NONE = "none"
 CONDITION_IF_NOT_REPLIED = "if_not_replied"
 ACTION_NONE = "none"
@@ -22,8 +21,7 @@ ACTION_ANALYZE = "analyze"
 ACTION_RESEARCH = "research"
 ACTION_LOG = "log"
 
-_VALID_TRIGGERS = frozenset({TRIGGER_NONE, TRIGGER_DUE_DATE, TRIGGER_SPEND_THRESHOLD})
-ALLOWLISTED_OWNER_TASK_LIST_TRIGGERS = frozenset({TRIGGER_SPEND_THRESHOLD})
+_VALID_TRIGGERS = frozenset({TRIGGER_NONE, TRIGGER_DUE_DATE})
 _VALID_CONDITIONS = frozenset({CONDITION_NONE, CONDITION_IF_NOT_REPLIED})
 _VALID_ACTIONS = frozenset(
     {ACTION_NONE, ACTION_FOLLOW_UP, ACTION_ANALYZE, ACTION_RESEARCH, ACTION_LOG}
@@ -37,10 +35,6 @@ ALLOWLISTED_OWNER_TASK_SCAN_REASONS = frozenset(
         "if_not_replied",
         "needs_clarification",
         "not_due_trigger",
-        "spend_reached",
-        "spend_below",
-        "spend_unknown",
-        "no_budget",
     }
 )
 
@@ -53,16 +47,6 @@ _TOKENS: tuple[tuple[str, int], ...] = (
     ("בשבוע הבא", 7),
 )
 _HEBREW_LETTER = "\u0590-\u05FF"
-
-_SPEND_THRESHOLD_TOKENS = (
-    "after spend reaches",
-    "when spend reaches",
-    "when spend hits",
-    "spend reaches the",
-    "כשההוצאה מגיעה",
-    "כשההוצאה תגיע",
-    "אחרי שההוצאה",
-)
 
 _CONDITION_TOKENS = (
     "if he has not replied",
@@ -160,25 +144,6 @@ def parse_condition(text: str) -> str:
     return CONDITION_NONE
 
 
-def parse_spend_threshold(text: str) -> bool:
-    for token in _SPEND_THRESHOLD_TOKENS:
-        if _token_in_text(text, token):
-            return True
-    return False
-
-
-def evaluate_spend_threshold(
-    *, spend_mtd: float | None, monthly_budget: float | None
-) -> tuple[bool, str]:
-    if monthly_budget is None:
-        return False, "no_budget"
-    if spend_mtd is None:
-        return False, "spend_unknown"
-    if spend_mtd >= monthly_budget:
-        return True, "spend_reached"
-    return False, "spend_below"
-
-
 class OwnerTaskScanResult(BaseModel):
     provider: str
     provider_event_id: str
@@ -208,8 +173,6 @@ def scan_due_owner_tasks(
     *,
     timezone: str,
     now: datetime | None = None,
-    monthly_budget: float | None = None,
-    spend_mtd: float | None = None,
 ) -> list[OwnerTaskScanResult]:
     """Evaluate due logged owner tasks and persist scan fields. Never executes."""
     effective_now = now or datetime.now(UTC)
@@ -220,24 +183,8 @@ def scan_due_owner_tasks(
     except (ValueError, OSError, KeyError, ZoneInfoNotFoundError):
         date_rows = []
 
-    spend_rows = store.list_owner_tasks_by_trigger(trigger=TRIGGER_SPEND_THRESHOLD)
-    seen: set[tuple[str, str]] = set()
-    rows_to_scan: list[tuple[object, str]] = []
-    for row in date_rows:
-        key = (row.provider, row.provider_event_id)
-        if key in seen:
-            continue
-        seen.add(key)
-        rows_to_scan.append((row, "date"))
-    for row in spend_rows:
-        key = (row.provider, row.provider_event_id)
-        if key in seen:
-            continue
-        seen.add(key)
-        rows_to_scan.append((row, "spend_threshold"))
-
     results: list[OwnerTaskScanResult] = []
-    for row, mode in rows_to_scan:
+    for row in date_rows:
         try:
             assert_allowed(
                 RiskAction(name="owner_task_scan", risk=RiskLevel.R1_LOW_WRITE),
@@ -246,13 +193,7 @@ def scan_due_owner_tasks(
         except PolicyDenied:
             continue
 
-        if mode == "spend_threshold":
-            due_ready, reason = evaluate_spend_threshold(
-                spend_mtd=spend_mtd,
-                monthly_budget=monthly_budget,
-            )
-        else:
-            due_ready, reason = _scan_date_due_row(row)
+        due_ready, reason = _scan_date_due_row(row)
 
         store.save_owner_task_scan(
             provider=row.provider,
@@ -285,9 +226,7 @@ def plan_owner_commitment(
             action=ACTION_NONE,
         )
     action = _ACTION_BY_TYPE.get(decision.task_type.value, ACTION_LOG)
-    if action == ACTION_ANALYZE and parse_spend_threshold(text):
-        trigger = TRIGGER_SPEND_THRESHOLD
-    elif due_at and decision.task_type not in (
+    if due_at and decision.task_type not in (
         OwnerTaskType.DAILY_BRIEF,
         OwnerTaskType.WEEKLY_BRIEF,
         OwnerTaskType.LEAD_REVIEW,

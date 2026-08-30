@@ -1,8 +1,9 @@
-"""R3 commercial + R4 campaign approval persistence (§33): pending row, no send, no Meta."""
+"""Approval persistence for live R3/R4 actions; no side effects."""
 
 import hashlib
 import json
 import re
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 from uuid import uuid4
@@ -15,7 +16,6 @@ from app.domain.events import Channel, build_approval_required_event
 from app.domain.sales import SalesState
 
 ACTION_PROPOSAL_HANDOFF = "proposal_handoff"
-ACTION_CAMPAIGN_WRITE = "campaign_write"
 ACTION_WEBSITE_EDIT = "website_edit"
 ACTION_GMAIL_SEND = "gmail_send"
 DECISION_PENDING = "pending"
@@ -24,17 +24,14 @@ DECISION_REJECTED = "rejected"
 RISK_R3 = "R3"
 RISK_R4 = "R4"
 RESOURCE_LEAD = "lead"
-RESOURCE_CAMPAIGN = "campaign"
 RESOURCE_WEBSITE = "website"
 RESOURCE_GMAIL = "gmail"
 WEBSITE_RESOURCE_ID = "assafweb-home"
 APPROVAL_TTL = timedelta(hours=24)
 _NEXT_ACTION = "handoff"
-_CAMPAIGN_ID_VALID = re.compile(r"^[0-9]{5,24}$")
 
 LEAD_ID_RE = re.compile(r"\blead_[a-f0-9]{12}\b")
 APPROVAL_ID_RE = re.compile(r"\bapr_[a-f0-9]{12}\b")
-CAMPAIGN_ID_RE = re.compile(r"(?<![0-9])([0-9]{5,24})(?![0-9])")
 
 _APPROVE_PHRASES: tuple[str, ...] = (
     "approve the proposal",
@@ -48,21 +45,6 @@ _REJECT_PHRASES: tuple[str, ...] = (
     "דחה את ההצעה",
     "דחי את ההצעה",
     "דחה הצעת מחיר",
-)
-
-_CAMPAIGN_REQUEST_PHRASES: tuple[str, ...] = (
-    "pause campaign",
-    "request campaign pause",
-    "השהה קמפיין",
-    "בקשת השהייה לקמפיין",
-)
-_CAMPAIGN_DECIDE_APPROVE_PHRASES: tuple[str, ...] = (
-    "approve campaign",
-    "אשר קמפיין",
-)
-_CAMPAIGN_DECIDE_REJECT_PHRASES: tuple[str, ...] = (
-    "reject campaign",
-    "דחה קמפיין",
 )
 
 _WEBSITE_REQUEST_PHRASES: tuple[str, ...] = (
@@ -94,7 +76,6 @@ class OwnerApprovalResult(BaseModel):
     status: OwnerApprovalStatus
     decision: str | None = None
     lead_id: str | None = None
-    campaign_id: str | None = None
     website_id: str | None = None
     gmail_draft_id: str | None = None
 
@@ -249,6 +230,33 @@ def resource_hash_matches(row) -> bool:
     return row.payload_hash == expected
 
 
+ApprovalBindingStatus = Literal["expired", "unbound"]
+
+
+def validate_pending_approval_binding(
+    row,
+    *,
+    now: datetime,
+    action: str,
+    risk: str,
+    resource_type: str,
+    resource_id: str,
+    hash_matches: Callable[[object], bool] = resource_hash_matches,
+) -> ApprovalBindingStatus | None:
+    """Fail closed unless a pending row still binds to this exact action and resource."""
+    if is_approval_expired(row, now=now):
+        return "expired"
+    if (
+        row.action != action
+        or row.risk != risk
+        or row.resource_type != resource_type
+        or row.resource_id != resource_id
+        or not hash_matches(row)
+    ):
+        return "unbound"
+    return None
+
+
 def _phrase_in_text(text: str, phrase: str) -> bool:
     haystack = text.lower()
     needle = phrase.lower()
@@ -257,65 +265,6 @@ def _phrase_in_text(text: str, phrase: str) -> bool:
 
 def _hebrew_phrase_in_text(text: str, phrase: str) -> bool:
     return phrase in text
-
-
-def _campaign_request_in_text(text: str) -> bool:
-    return any(
-        _phrase_in_text(text, phrase)
-        if phrase.isascii()
-        else _hebrew_phrase_in_text(text, phrase)
-        for phrase in _CAMPAIGN_REQUEST_PHRASES
-    )
-
-
-def _campaign_decide_in_text(text: str) -> str | None:
-    has_approve = any(
-        _phrase_in_text(text, phrase)
-        if phrase.isascii()
-        else _hebrew_phrase_in_text(text, phrase)
-        for phrase in _CAMPAIGN_DECIDE_APPROVE_PHRASES
-    )
-    has_reject = any(
-        _phrase_in_text(text, phrase)
-        if phrase.isascii()
-        else _hebrew_phrase_in_text(text, phrase)
-        for phrase in _CAMPAIGN_DECIDE_REJECT_PHRASES
-    )
-    if has_approve and not has_reject:
-        return DECISION_APPROVED
-    if has_reject and not has_approve:
-        return DECISION_REJECTED
-    return None
-
-
-def campaign_id_ambiguous(text: str) -> bool:
-    scrubbed = LEAD_ID_RE.sub(" ", text)
-    return len(set(CAMPAIGN_ID_RE.findall(scrubbed))) > 1
-
-
-def extract_campaign_id(text: str) -> str | None:
-    scrubbed = LEAD_ID_RE.sub(" ", text)
-    matches = CAMPAIGN_ID_RE.findall(scrubbed)
-    if not matches:
-        return None
-    unique = set(matches)
-    if len(unique) > 1:
-        return None
-    campaign_id = matches[0]
-    if not _CAMPAIGN_ID_VALID.fullmatch(campaign_id):
-        return None
-    return campaign_id
-
-
-def parse_campaign_approval_intent(text: str) -> str | None:
-    """Return pending_request/approved/rejected when exactly one intent matches; else None."""
-    has_request = _campaign_request_in_text(text)
-    decide = _campaign_decide_in_text(text)
-    if has_request and decide is None:
-        return "pending_request"
-    if decide is not None and not has_request:
-        return decide
-    return None
 
 
 def _website_request_in_text(text: str) -> bool:
@@ -381,111 +330,28 @@ def extract_approval_id(text: str) -> str | None:
 
 
 def _is_valid_lead_pending(row, *, now: datetime) -> bool:
-    if is_approval_expired(row, now=now):
-        return False
-    if not resource_hash_matches(row):
-        return False
-    if row.resource_type != RESOURCE_LEAD or row.resource_id != row.lead_id:
-        return False
-    if row.lead_id is None:
-        return False
-    return True
-
-
-def _is_valid_campaign_pending(row, *, now: datetime) -> bool:
-    if is_approval_expired(row, now=now):
-        return False
-    if not resource_hash_matches(row):
-        return False
-    if row.resource_type != RESOURCE_CAMPAIGN or row.lead_id is not None:
-        return False
-    if not _CAMPAIGN_ID_VALID.fullmatch(row.resource_id or ""):
-        return False
-    return True
+    return row.lead_id is not None and validate_pending_approval_binding(
+        row,
+        now=now,
+        action=ACTION_PROPOSAL_HANDOFF,
+        risk=RISK_R3,
+        resource_type=RESOURCE_LEAD,
+        resource_id=row.lead_id,
+    ) is None
 
 
 def _validate_pending_row(row, *, lead_id: str, now: datetime) -> OwnerApprovalResult | None:
-    if is_approval_expired(row, now=now):
-        return OwnerApprovalResult(status="expired", lead_id=lead_id)
-    if not resource_hash_matches(row):
-        return OwnerApprovalResult(status="unbound", lead_id=lead_id)
-    if row.resource_type != RESOURCE_LEAD or row.resource_id != row.lead_id:
-        return OwnerApprovalResult(status="unbound", lead_id=lead_id)
+    status = validate_pending_approval_binding(
+        row,
+        now=now,
+        action=ACTION_PROPOSAL_HANDOFF,
+        risk=RISK_R3,
+        resource_type=RESOURCE_LEAD,
+        resource_id=lead_id,
+    )
+    if status is not None:
+        return OwnerApprovalResult(status=status, lead_id=lead_id)
     return None
-
-
-def _validate_campaign_pending_row(
-    row, *, campaign_id: str, now: datetime
-) -> OwnerApprovalResult | None:
-    if is_approval_expired(row, now=now):
-        return OwnerApprovalResult(status="expired", campaign_id=campaign_id)
-    if not resource_hash_matches(row):
-        return OwnerApprovalResult(status="unbound", campaign_id=campaign_id)
-    if row.resource_type != RESOURCE_CAMPAIGN or row.resource_id != campaign_id:
-        return OwnerApprovalResult(status="unbound", campaign_id=campaign_id)
-    if row.lead_id is not None:
-        return OwnerApprovalResult(status="unbound", campaign_id=campaign_id)
-    return None
-
-
-def apply_campaign_write_approval_policy(
-    store,
-    *,
-    campaign_id: str,
-    channel: Channel,
-    kill_switch: bool,
-) -> bool:
-    """Persist pending campaign_write approval. Never calls Meta."""
-    if kill_switch:
-        return False
-    if not _CAMPAIGN_ID_VALID.fullmatch(campaign_id):
-        return False
-    try:
-        assert_allowed(
-            RiskAction(name="approval_persist", risk=RiskLevel.R1_LOW_WRITE),
-            kill_switch=kill_switch,
-        )
-    except PolicyDenied:
-        return False
-    now = datetime.now(UTC)
-    expires_at = approval_expires_at(now=now)
-    digest = payload_hash(
-        action=ACTION_CAMPAIGN_WRITE,
-        risk=RISK_R4,
-        channel=channel.value,
-        resource_type=RESOURCE_CAMPAIGN,
-        resource_id=campaign_id,
-    )
-    store.upsert_campaign_approval(
-        channel=channel.value,
-        action=ACTION_CAMPAIGN_WRITE,
-        risk=RISK_R4,
-        payload_hash=digest,
-        decision=DECISION_PENDING,
-        resource_type=RESOURCE_CAMPAIGN,
-        resource_id=campaign_id,
-        expires_at=expires_at,
-    )
-    claim_key = f"{campaign_id}:approval:{ACTION_CAMPAIGN_WRITE}"
-    if not store.claim_operation(scope="approval", key=claim_key):
-        return True
-    store.save_canonical_event(
-        provider=channel.value,
-        event=build_approval_required_event(
-            provider=channel.value,
-            channel=channel,
-            lead_id=None,
-            action=ACTION_CAMPAIGN_WRITE,
-            risk=RISK_R4,
-            resource_id=campaign_id,
-        ),
-    )
-    store.complete_operation(
-        scope="approval",
-        key=claim_key,
-        result_json='{"ok": true}',
-    )
-    return True
 
 
 def _website_proposed_parts(row) -> tuple[str, str]:
@@ -517,12 +383,17 @@ def website_resource_hash_matches(row) -> bool:
 def _validate_website_pending_row(
     row, *, website_id: str, now: datetime
 ) -> OwnerApprovalResult | None:
-    if is_approval_expired(row, now=now):
-        return OwnerApprovalResult(status="expired", website_id=website_id)
-    if not website_resource_hash_matches(row):
-        return OwnerApprovalResult(status="unbound", website_id=website_id)
-    if row.resource_type != RESOURCE_WEBSITE or row.resource_id != website_id:
-        return OwnerApprovalResult(status="unbound", website_id=website_id)
+    status = validate_pending_approval_binding(
+        row,
+        now=now,
+        action=ACTION_WEBSITE_EDIT,
+        risk=RISK_R3,
+        resource_type=RESOURCE_WEBSITE,
+        resource_id=website_id,
+        hash_matches=website_resource_hash_matches,
+    )
+    if status is not None:
+        return OwnerApprovalResult(status=status, website_id=website_id)
     if row.lead_id is not None:
         return OwnerApprovalResult(status="unbound", website_id=website_id)
     return None
@@ -560,7 +431,7 @@ def apply_website_edit_approval_policy(
         sort_keys=True,
     )
     if len(params) > 255:
-        params = params[:255]
+        return False
     store.upsert_website_approval(
         channel=channel.value,
         action=ACTION_WEBSITE_EDIT,
@@ -609,10 +480,9 @@ def apply_owner_approval_decision(
     if effective_now.tzinfo is None:
         effective_now = effective_now.replace(tzinfo=UTC)
 
-    campaign_intent = parse_campaign_approval_intent(text)
     website_intent = parse_website_approval_intent(text)
     lead_intent = parse_approval_intent(text)
-    intents = [item for item in (campaign_intent, website_intent, lead_intent) if item is not None]
+    intents = [item for item in (website_intent, lead_intent) if item is not None]
     if len(intents) > 1:
         return OwnerApprovalResult(status="ambiguous")
 
@@ -663,58 +533,6 @@ def apply_owner_approval_decision(
             status="decided",
             decision=website_intent,
             website_id=WEBSITE_RESOURCE_ID,
-        )
-
-    if campaign_intent is not None:
-        if campaign_id_ambiguous(text):
-            return OwnerApprovalResult(status="ambiguous")
-        campaign_id = extract_campaign_id(text)
-        if campaign_id is None:
-            return OwnerApprovalResult(status="none")
-        if campaign_intent == "pending_request":
-            queued = apply_campaign_write_approval_policy(
-                store,
-                campaign_id=campaign_id,
-                channel=channel,
-                kill_switch=kill_switch,
-            )
-            if not queued:
-                return OwnerApprovalResult(status="skipped", campaign_id=campaign_id)
-            return OwnerApprovalResult(status="queued", campaign_id=campaign_id)
-        row = store.get_approval_by_resource(
-            RESOURCE_CAMPAIGN, campaign_id, ACTION_CAMPAIGN_WRITE
-        )
-        if row is None:
-            return OwnerApprovalResult(status="none", campaign_id=campaign_id)
-        if row.decision != DECISION_PENDING:
-            return OwnerApprovalResult(
-                status="already_decided",
-                decision=row.decision,
-                campaign_id=campaign_id,
-            )
-        blocked = _validate_campaign_pending_row(
-            row, campaign_id=campaign_id, now=effective_now
-        )
-        if blocked is not None:
-            return blocked
-        try:
-            assert_allowed(
-                RiskAction(name="approval_decide", risk=RiskLevel.R1_LOW_WRITE),
-                kill_switch=kill_switch,
-            )
-        except PolicyDenied:
-            return OwnerApprovalResult(status="skipped", campaign_id=campaign_id)
-        updated = store.decide_campaign_approval(
-            resource_id=campaign_id,
-            decision=campaign_intent,
-            now=effective_now,
-        )
-        if not updated:
-            return OwnerApprovalResult(status="none", campaign_id=campaign_id)
-        return OwnerApprovalResult(
-            status="decided",
-            decision=campaign_intent,
-            campaign_id=campaign_id,
         )
 
     if lead_intent is None:
@@ -797,8 +615,6 @@ def ack_for_approval_result(result: OwnerApprovalResult) -> str:
         return "רשמתי בקשת אישור לשינוי באתר. לא שיניתי קבצים."
     if result.status == "queued" and result.gmail_draft_id is not None:
         return "רשמתי בקשת אישור לשליחת מייל. לא שלחתי."
-    if result.status == "queued":
-        return "רשמתי בקשת אישור לקמפיין. לא שיניתי מודעות במטא."
     if result.status == "none":
         return "אין בקשת הצעה ממתינה. לא ביצעתי כלום."
     if result.status == "ambiguous":
@@ -811,16 +627,12 @@ def ack_for_approval_result(result: OwnerApprovalResult) -> str:
                 "רשמתי אישור לשינוי באתר. יישם ב-AssafWeb דרך Cursor — "
                 "מיא לא תעשה git-push."
             )
-        if result.campaign_id is not None:
-            return "רשמתי אישור לקמפיין. לא שיניתי מודעות במטא."
         if result.gmail_draft_id is not None:
             return "רשמתי אישור לשליחת המייל. לא שלחתי עדיין."
         return "רשמתי אישור להצעה. לא שלחתי אותה — זה לטיפול ידני."
     if result.status == "decided" and result.decision == DECISION_REJECTED:
         if result.website_id is not None:
             return "רשמתי דחייה לשינוי באתר. לא שיניתי קבצים."
-        if result.campaign_id is not None:
-            return "רשמתי דחייה לקמפיין. לא שיניתי מודעות במטא."
         if result.gmail_draft_id is not None:
             return "רשמתי דחייה לשליחת המייל. לא שלחתי כלום."
         return "רשמתי דחייה לבקשת ההצעה. לא שלחתי כלום."

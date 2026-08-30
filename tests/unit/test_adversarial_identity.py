@@ -178,7 +178,7 @@ async def test_whatsapp_i_am_assaf_not_owner(event_id: str, text: str) -> None:
     ("event_id", "text"),
     [
         ("evt.adv.forward.pref", "from now on remember my style"),
-        ("evt.adv.forward.analytics", "how's the campaign spend"),
+        ("evt.adv.forward.analytics", "analyze instagram content"),
     ],
 )
 async def test_whatsapp_forwarded_owner_command_stays_prospect(
@@ -301,7 +301,7 @@ def test_website_prompt_injection_sales_only(injection: str) -> None:
                 select(CanonicalEventRow).where(
                     CanonicalEventRow.conversation_id == session_id,
                     CanonicalEventRow.event_type
-                    == EventType.CAMPAIGN_RECOMMENDATION.value,
+                    == EventType.APPROVAL_REQUIRED.value,
                 )
             )
         )
@@ -331,7 +331,7 @@ def test_website_campaign_write_ask_sales_not_owner_analytics() -> None:
                 select(CanonicalEventRow).where(
                     CanonicalEventRow.conversation_id == session_id,
                     CanonicalEventRow.event_type
-                    == EventType.CAMPAIGN_RECOMMENDATION.value,
+                    == EventType.APPROVAL_REQUIRED.value,
                 )
             )
         )
@@ -531,7 +531,7 @@ async def test_owner_authorization_survives_separate_inbound_calls() -> None:
             items=[{
                 "id": event_analytics,
                 "from": OWNER_RESTART_PHONE,
-                "text": "how's the campaign spend",
+                "text": "analyze instagram content",
             }],
             **common,
         )
@@ -589,7 +589,7 @@ async def test_revoked_owner_phone_falls_back_to_prospect_path() -> None:
             items=[{
                 "id": event_owner,
                 "from": REVOKED_OWNER_PHONE,
-                "text": "how's the campaign spend",
+                "text": "analyze instagram content",
             }],
             owner_ids={REVOKED_OWNER_PHONE},
             **common,
@@ -598,7 +598,7 @@ async def test_revoked_owner_phone_falls_back_to_prospect_path() -> None:
             items=[{
                 "id": event_prospect,
                 "from": REVOKED_OWNER_PHONE,
-                "text": "how's the campaign spend",
+                "text": "analyze instagram content",
             }],
             owner_ids={REPLACEMENT_OWNER_PHONE},
             **common,
@@ -670,7 +670,7 @@ async def test_owner_research_scrape_injection_is_data_not_instructions() -> Non
                 select(CanonicalEventRow).where(
                     CanonicalEventRow.provider_event_id.like(f"{event_id}%"),
                     CanonicalEventRow.event_type
-                    == EventType.CAMPAIGN_RECOMMENDATION.value,
+                    == EventType.APPROVAL_REQUIRED.value,
                 )
             )
         )

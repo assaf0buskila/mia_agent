@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import inspect
 from datetime import UTC, datetime
-from typing import Any, NamedTuple
+from typing import NamedTuple
 
 from app.api.inbound_common import (
     event_conversation_id,
@@ -28,7 +27,7 @@ from app.domain.approvals import (
     apply_owner_approval_decision,
 )
 from app.domain.briefs import apply_owner_meeting_brief
-from app.domain.commitments import TRIGGER_SPEND_THRESHOLD, parse_due_at, plan_owner_commitment
+from app.domain.commitments import parse_due_at, plan_owner_commitment
 from app.domain.content_ideas import apply_owner_content_ideas
 from app.domain.conversation_scope import apply_owner_scope_mark
 from app.domain.debriefs import ack_for_debrief_result, apply_owner_meeting_debrief
@@ -117,6 +116,38 @@ _LIVE_ENRICH_TOOLS: dict[OwnerTaskType, str] = {
     OwnerTaskType.ANALYTICS: "instagram_insights",
 }
 
+_NO_DUE_TASK_TYPES = frozenset(
+    {
+        OwnerTaskType.DAILY_BRIEF,
+        OwnerTaskType.WEEKLY_BRIEF,
+        OwnerTaskType.LEAD_REVIEW,
+        OwnerTaskType.CONTENT_IDEA,
+        OwnerTaskType.GMAIL_SUMMARY,
+        OwnerTaskType.GMAIL_DRAFT,
+        OwnerTaskType.SEO,
+        OwnerTaskType.CALENDAR,
+        OwnerTaskType.OWNER_NOTIFY,
+        OwnerTaskType.MEETING_BRIEF,
+        OwnerTaskType.HUMAN_TAKEOVER,
+        OwnerTaskType.HUMAN_TAKEOVER_RESUME,
+        OwnerTaskType.CONVERSATION_SCOPE,
+        OwnerTaskType.HOT_LEADS,
+        OwnerTaskType.OWNER_STATUS,
+        OwnerTaskType.OPERATOR_SNAPSHOT,
+    }
+)
+
+
+def _is_authorized_owner(*, actor_id: str, owner_ids: set[str]) -> bool:
+    """Fail closed unless this request matches a configured numeric owner allowlist."""
+    return bool(
+        owner_ids
+        and actor_id.isascii()
+        and actor_id.isdigit()
+        and all(owner_id.isascii() and owner_id.isdigit() for owner_id in owner_ids)
+        and actor_id in owner_ids
+    )
+
 
 def _prefer_live_enrich(
     *,
@@ -152,8 +183,11 @@ async def process_owner_item(
     seo_audit_port: SeoAuditPort,
     owner_reply_port: OwnerReplyPort,
 ) -> OwnerTurnResult:
-    # Owner trust is established HERE, once, from the request: the caller has already
-    # matched item["from"] against the numeric owner allowlist (app/api/telegram.py).
+    # This local check precedes every claim or persistence so direct legacy callers cannot
+    # mint owner authority by merely reaching this helper.
+    if not _is_authorized_owner(actor_id=item["from"], owner_ids=owner_ids):
+        return OwnerTurnResult(processed=False, sent=False, last_reply=None)
+    # Owner trust is established HERE, once, from the request-derived numeric allowlist.
     # Everything downstream receives this object; nothing downstream can widen it.
     principal = Principal.owner(source=provider, actor_id=item["from"])
     channel_value = channel.value
@@ -267,41 +301,7 @@ async def process_owner_item(
     plan = plan_owner_commitment(
         decision=decision, text=owner_text, due_at=due_at
     )
-    persist_due_at = due_at
-    if plan.trigger == TRIGGER_SPEND_THRESHOLD:
-        persist_due_at = None
-    if decision.task_type == OwnerTaskType.DAILY_BRIEF:
-        persist_due_at = None
-    if decision.task_type == OwnerTaskType.WEEKLY_BRIEF:
-        persist_due_at = None
-    if decision.task_type == OwnerTaskType.LEAD_REVIEW:
-        persist_due_at = None
-    if decision.task_type == OwnerTaskType.CONTENT_IDEA:
-        persist_due_at = None
-    if decision.task_type == OwnerTaskType.GMAIL_SUMMARY:
-        persist_due_at = None
-    if decision.task_type == OwnerTaskType.GMAIL_DRAFT:
-        persist_due_at = None
-    if decision.task_type == OwnerTaskType.SEO:
-        persist_due_at = None
-    if decision.task_type == OwnerTaskType.CALENDAR:
-        persist_due_at = None
-    if decision.task_type == OwnerTaskType.OWNER_NOTIFY:
-        persist_due_at = None
-    if decision.task_type == OwnerTaskType.MEETING_BRIEF:
-        persist_due_at = None
-    if decision.task_type == OwnerTaskType.HUMAN_TAKEOVER:
-        persist_due_at = None
-    if decision.task_type == OwnerTaskType.HUMAN_TAKEOVER_RESUME:
-        persist_due_at = None
-    if decision.task_type == OwnerTaskType.CONVERSATION_SCOPE:
-        persist_due_at = None
-    if decision.task_type == OwnerTaskType.HOT_LEADS:
-        persist_due_at = None
-    if decision.task_type == OwnerTaskType.OWNER_STATUS:
-        persist_due_at = None
-    if decision.task_type == OwnerTaskType.OPERATOR_SNAPSHOT:
-        persist_due_at = None
+    persist_due_at = None if decision.task_type in _NO_DUE_TASK_TYPES else due_at
     owner_task_claim_key = f"{provider}:{item['id']}"
     if store.claim_operation(scope="owner_task", key=owner_task_claim_key):
         store.save_owner_task(
@@ -617,7 +617,6 @@ async def process_owner_item(
     if (
         decision.task_type == OwnerTaskType.ANALYTICS
         and not decision.needs_clarification
-        and plan.trigger != TRIGGER_SPEND_THRESHOLD
     ):
         content_extras: list[ToolOutcome] = []
         ack_text, insights_outcome = enrich_content_insights_ack(
@@ -718,8 +717,9 @@ async def process_owner_item(
             correlation_id=correlation_id,
         )
     # The agent answers reads and free conversation, with everything the
-    # deterministic chain already computed as its fallback. Write and approval
-    # intents never reach it (DETERMINISTIC_TASK_TYPES). If it is unconfigured or
+    # deterministic chain already computed as its fallback. Approval/high-risk
+    # writes never reach it (DETERMINISTIC_TASK_TYPES); ADR-042 permits only
+    # guarded low-risk Sheets values writes. If it is unconfigured or
     # fails, `brain_result.text` is exactly the canned ack computed above.
     live_ack = ack_text
     brain_store = BrainStore(store.session)
@@ -796,14 +796,13 @@ async def process_owner_item(
         # failed, replacing the "couldn't classify this" canned line with an honest
         # one. Composing from it here (instead of the original `ack_text`) is what
         # makes that substitution actually reach Assaf.
-        phrased_raw = owner_reply_port.compose(
+        phrased = await owner_reply_port.compose(
             task_type=decision.task_type.value,
             canned=brain_result.text,
             owner_message=owner_text,
             history=tuple(owner_history),
             kill_switch=kill_switch,
         )
-        phrased = await phrased_raw if inspect.isawaitable(phrased_raw) else phrased_raw
         ack_text = phrased.text
     last_reply = ack_text
     owner_markup = owner_telegram_reply_markup(
@@ -838,7 +837,6 @@ async def process_owner_item(
         status="sent" if sent else "processed",
     )
     if sent:
-        pass  # counted by caller via result.sent
         owner_message_out = build_message_out_event(
             provider=provider,
             channel=channel,
@@ -852,7 +850,6 @@ async def process_owner_item(
             provider=provider,
             event=owner_message_out,
         )
-    pass  # counted by caller via result.processed
     log_comm(
         channel=channel_value,
         provider=provider,
@@ -878,7 +875,6 @@ async def process_owner_texts(
     owner_ids: set[str] | None = None,
     calendar: CalendarPort | None = None,
     calendar_agenda: CalendarAgendaPort | None = None,
-    calendar_booking: Any = None,
     sheets: SheetsPort | None = None,
     instagram_insights: InstagramInsightsPort | None = None,
     research: ResearchPort | None = None,
@@ -888,14 +884,30 @@ async def process_owner_texts(
     seo_audit: SeoAuditPort | None = None,
     owner_reply: OwnerReplyPort | None = None,
     gmail: GmailPort | None = None,
+    preclaimed_event_id: str | None = None,
+    preclaimed_envelope_kind: str | None = None,
 ) -> dict[str, int | bool | str | None]:
     """Owner-only inbound. Prospect WhatsApp/Instagram stay on process_inbound_texts."""
-    del calendar_booking
     processed = 0
     duplicates = 0
     sent_count = 0
     last_reply: str | None = None
     owner_ids = owner_ids or set()
+    authorized_items = [
+        item
+        for item in items
+        if item.get("id")
+        and item.get("from")
+        and _is_authorized_owner(actor_id=item["from"], owner_ids=owner_ids)
+    ]
+    if not authorized_items:
+        return {
+            "processed": processed,
+            "duplicates": duplicates,
+            "sent": False,
+            "sent_count": sent_count,
+            "reply": last_reply,
+        }
     settings = get_settings()
     calendar_port = calendar if calendar is not None else build_calendar_port(settings)
     calendar_agenda_port = (
@@ -920,10 +932,19 @@ async def process_owner_texts(
     owner_reply_port = (
         owner_reply if owner_reply is not None else build_owner_reply_port(settings)
     )
-    for item in items:
-        if not item["id"] or not item["from"]:
-            continue
-        if not store.claim_webhook(
+    for item in authorized_items:
+        preclaimed = item["id"] == preclaimed_event_id
+        if preclaimed:
+            claimed = store.get_webhook(provider=provider, provider_event_id=item["id"])
+            if not (
+                claimed is not None
+                and claimed.status == "received"
+                and claimed.channel == channel.value
+                and claimed.envelope_kind == preclaimed_envelope_kind
+            ):
+                duplicates += 1
+                continue
+        elif not store.claim_webhook(
             provider=provider,
             provider_event_id=item["id"],
             channel=channel.value,

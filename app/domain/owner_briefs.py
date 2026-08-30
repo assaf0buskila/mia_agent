@@ -6,7 +6,7 @@ import re
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field
 
 from app.core.errors import PolicyDenied
 from app.core.risk import RiskAction, RiskLevel, assert_allowed
@@ -18,14 +18,6 @@ from app.domain.kpis import KPI_EVENT_TYPES, OWNER_BRIEF_EVENT_TYPES
 if TYPE_CHECKING:
     from app.db.store import LeadStore
 
-_VALID_PACING = frozenset({"on_track", "over", "under", "uncertain", ""})
-_VALID_PRELAUNCH = frozenset({"", "ready", "not_ready"})
-_PACING_STATUS_HE = {
-    "on_track": "במסלול",
-    "over": "מעל התקציב",
-    "under": "מתחת לתקציב",
-    "uncertain": "לא ודאי",
-}
 _DATE_DISPLAY = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
 
 
@@ -38,22 +30,6 @@ class DailyBriefSnapshot(BaseModel):
     follow_ups_due: int = Field(ge=0)
     meetings_booked: int = Field(ge=0)
     cancellation_requests: int = Field(ge=0)
-    pacing_status: str = ""
-    prelaunch_ready: str = ""
-
-    @field_validator("pacing_status")
-    @classmethod
-    def _validate_pacing(cls, value: str) -> str:
-        if value not in _VALID_PACING:
-            raise ValueError(f"invalid pacing_status: {value}")
-        return value
-
-    @field_validator("prelaunch_ready")
-    @classmethod
-    def _validate_prelaunch(cls, value: str) -> str:
-        if value not in _VALID_PRELAUNCH:
-            raise ValueError(f"invalid prelaunch_ready: {value}")
-        return value
 
 
 def _format_brief_date(brief_date: str) -> str:
@@ -79,14 +55,6 @@ def compute_daily_brief(
         brief_date = follow_up_due_on(now=instant, timezone=timezone, offset_days=0)
     except (ValueError, OSError, KeyError):
         return None
-    pacing_status = ""
-    pacing_row = store.get_campaign_pacing()
-    if pacing_row is not None and pacing_row.status in _VALID_PACING - {""}:
-        pacing_status = pacing_row.status
-    prelaunch_ready = ""
-    prelaunch_row = store.get_campaign_prelaunch()
-    if prelaunch_row is not None:
-        prelaunch_ready = "ready" if prelaunch_row.ready else "not_ready"
     counts = {
         key: store.count_canonical_events(
             event_type=key,
@@ -115,8 +83,6 @@ def compute_daily_brief(
         ),
         meetings_booked=brief_counts["meeting_booked"],
         cancellation_requests=brief_counts["meeting_cancellation_requested"],
-        pacing_status=pacing_status,
-        prelaunch_ready=prelaunch_ready,
     )
 
 
@@ -131,13 +97,6 @@ def format_daily_brief(snapshot: DailyBriefSnapshot) -> str:
         f"הודעות נכנסות: {snapshot.messages_in}",
         f"מעקבים לביצוע היום: {snapshot.follow_ups_due}",
     ]
-    if snapshot.pacing_status:
-        label = _PACING_STATUS_HE.get(snapshot.pacing_status, snapshot.pacing_status)
-        lines.append(f"קצב: {label}")
-    if snapshot.prelaunch_ready == "ready":
-        lines.append("שער טרום-השקה: מוכן")
-    elif snapshot.prelaunch_ready == "not_ready":
-        lines.append("שער טרום-השקה: לא מוכן")
     lines.append("לא ביצעתי משימות ולא שלחתי מעקבים.")
     return "\n".join(lines)
 
@@ -167,8 +126,6 @@ def apply_owner_brief_policy(
         follow_ups_due=snapshot.follow_ups_due,
         meetings_booked=snapshot.meetings_booked,
         cancellation_requests=snapshot.cancellation_requests,
-        pacing_status=snapshot.pacing_status,
-        prelaunch_ready=snapshot.prelaunch_ready,
     )
 
 

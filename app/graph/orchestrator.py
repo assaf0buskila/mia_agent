@@ -1,4 +1,3 @@
-from collections.abc import Callable
 from typing import Any
 
 from langgraph.graph import END, START, StateGraph
@@ -76,18 +75,11 @@ def _qualification_snapshot(sales: SalesState) -> dict[str, Any]:
 def build_graph(
     store: LeadStore,
     reply_port: SalesReplyPort | None = None,
-    knowledge_lookup: Callable[[str], tuple[str, ...]] | None = None,
 ):
     """Compile the sales graph.
 
-    `knowledge_lookup` is optional and defaults to `None` -> an empty tuple, which
-    keeps every existing caller (and the ~2268-test suite) byte-identical to today.
-    When provided it must be a pure function from the visitor's latest message to
-    rendered, provenance-tagged knowledge lines (see
-    `app.brain.context.render_visitor_knowledge_block`). It is never allowed to break a
-    turn: any exception it raises is swallowed and treated as no knowledge, and it is
-    never called at all while `kill_switch` is set (no embedding API call on a killed
-    turn).
+    Website knowledge retrieval belongs solely to ClientGraph's ``retrieve_knowledge``
+    node, which passes authorized serializable hits into this sales node.
     """
     port = reply_port if reply_port is not None else CannedSalesReplyPort()
 
@@ -203,14 +195,6 @@ def build_graph(
             channel, action, sales, language=language, repeat_ask=repeat_ask
         )
         kill_switch = state.get("kill_switch", False)
-        knowledge: tuple[str, ...] = ()
-        if knowledge_lookup is not None and not kill_switch:
-            # A brain outage must degrade phrasing, never 500 a customer: any failure
-            # here (including an embedding-provider error) is swallowed as no knowledge.
-            try:
-                knowledge = knowledge_lookup(latest_message)
-            except Exception:  # noqa: BLE001 - a brain outage degrades phrasing, never a turn
-                knowledge = ()
         composed = port.compose(
             action=action,
             canned=canned,
@@ -226,7 +210,7 @@ def build_graph(
                 open_questions=tuple(sales.open_questions()),
                 asked_actions=tuple(dict.fromkeys(sales.asked_actions)),
                 language=language,
-                knowledge=knowledge,
+                knowledge=(),
                 emotional_cues=emotional_cues,
             ),
         )

@@ -123,6 +123,7 @@ class Settings(BaseSettings):
 
     calendar_timezone: str = Field(default="Asia/Jerusalem")
     sheets_spreadsheet_id: str = Field(default="")
+    sheets_allowed_spreadsheet_ids: str = Field(default="")
     firecrawl_api_key: str = Field(default="")
     apify_token: str = Field(default="")
     gsc_site_url: str = Field(default="")
@@ -130,6 +131,17 @@ class Settings(BaseSettings):
 
     def cors_origin_list(self) -> list[str]:
         return [item.strip() for item in self.cors_origins.split(",") if item.strip()]
+
+    def allowed_sheets_spreadsheet_ids(self) -> frozenset[str]:
+        """Explicit owner-operational targets; primary mirror stays eligible."""
+        configured = {
+            item.strip()
+            for item in self.sheets_allowed_spreadsheet_ids.split(",")
+            if item.strip()
+        }
+        if self.sheets_spreadsheet_id.strip():
+            configured.add(self.sheets_spreadsheet_id.strip())
+        return frozenset(configured)
 
     def whatsapp_owner_phone_set(self) -> set[str]:
         phones: set[str] = set()

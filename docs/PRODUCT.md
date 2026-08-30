@@ -21,7 +21,12 @@ Private digital employee for Assaf. Numeric Telegram user-id allowlist only. Use
 
 Natural conversation, not a command bot. Text and voice notes in; text out. No TTS.
 
-Owner Mia may search mail, calendar, leads, knowledge, and memory through an allowlisted capability layer. Writes, approvals, sends, Meta changes, and deletions stay on the deterministic policy path — never because a prompt asked nicely.
+Owner Mia may search mail, calendar, leads, knowledge, memory, explicitly authorized Google
+Sheets, Search Console, and GA4 through an allowlisted capability layer. An authenticated owner
+may request a bounded value update or append in an Assaf-allowlisted Sheet; no Drive discovery,
+create/delete/clear/format/formula work, or Sheets read-back as Mia's truth. Other writes,
+approvals, sends, Meta changes, and deletions stay on the deterministic policy path — never
+because a prompt asked nicely.
 
 ## Client Mia (Website)
 
@@ -56,7 +61,9 @@ WhatsApp is Assaf’s human inbox until official Cloud API inbound exists. Websi
 
 Gmail: read / draft. Send is approval-gated and off by default.
 Calendar: free/busy + gated create/reschedule.
-LinkedIn / Meta ads / GSC / GA4 / research: owner reads. Instagram is not a sales inbox.
+Search Console and GA4 answer AssafWeb KPI questions from APIs: traffic, users, sessions,
+conversions, pages, clicks, impressions, CTR, position, and queries. LinkedIn is profile-only;
+Instagram is not a sales inbox.
 
 ## Hard never
 
@@ -64,6 +71,9 @@ Voice output. Auto-publish social. Self-edit production graph or prompts. Autono
 
 ## Current vs later
 
-**Now:** two graphs, shared core, capability/policy, voice on both, conversation finalization ping, owner Composio READs through the capability layer, Ask Mia UX preserved. Knowledge retrieve and conversation complete live on the graph nodes.
+**Now:** two graphs, shared core, capability/policy, voice on both, conversation finalization
+ping, and an accepted contract for API-backed GSC/GA4 owner reads and explicitly authorized
+low-risk Sheets reads/updates through the capability layer. Ask Mia UX is preserved. Knowledge
+retrieve and conversation complete live on the graph nodes.
 
 **Not this product:** dumping the Composio catalog into the model, a third graph for WhatsApp, TTS, auto-deploy.

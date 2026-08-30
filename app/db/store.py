@@ -11,10 +11,6 @@ from sqlalchemy.orm import Session
 from app.db.models import (
     AiRunRow,
     ApprovalRow,
-    CampaignPacingRow,
-    CampaignPerformanceRow,
-    CampaignPrelaunchRow,
-    CampaignRecommendationRow,
     CanonicalEventRow,
     ChannelIdentityRow,
     ContentIdeaRow,
@@ -36,6 +32,7 @@ from app.db.models import (
     OwnerCorrectionRow,
     OwnerInstructionRow,
     OwnerNotificationClaimRow,
+    OwnerNotificationRecipientClaimRow,
     OwnerNotificationRow,
     OwnerTaskRow,
     OwnerWeeklyRow,
@@ -54,7 +51,6 @@ from app.domain.ai_runs import (
     sanitize_prompt_version,
 )
 from app.domain.approvals import (
-    ACTION_CAMPAIGN_WRITE,
     ACTION_GMAIL_SEND,
     ACTION_PROPOSAL_HANDOFF,
     ACTION_WEBSITE_EDIT,
@@ -62,20 +58,15 @@ from app.domain.approvals import (
     DECISION_PENDING,
     DECISION_REJECTED,
     LEAD_ID_RE,
-    RESOURCE_CAMPAIGN,
     RESOURCE_GMAIL,
     RESOURCE_LEAD,
     RESOURCE_WEBSITE,
     RISK_R3,
-    RISK_R4,
     new_approval_id,
     proposed_parameters_json,
 )
 from app.domain.behavior import ALL_BEHAVIOR_KINDS
-from app.domain.commitments import (
-    ALLOWLISTED_OWNER_TASK_LIST_TRIGGERS,
-    ALLOWLISTED_OWNER_TASK_SCAN_REASONS,
-)
+from app.domain.commitments import ALLOWLISTED_OWNER_TASK_SCAN_REASONS
 from app.domain.company import sanitize_company_domain
 from app.domain.content_ideas import ALLOWLISTED_KINDS, ContentIdeaRecord
 from app.domain.content_insights import (
@@ -156,22 +147,6 @@ from app.integrations.transcribe import (
     sanitize_stt_provider,
 )
 
-_ALLOWLISTED_PRELAUNCH_CHECK_IDS = frozenset(
-    {
-        "tracking_utms",
-        "source_attribution",
-        "lead_capture",
-        "sheet_tabs",
-        "alert_thresholds",
-        "e2e_test",
-        "campaign_config",
-    }
-)
-
-PACING_EVENT_TYPES = frozenset({"lead_created", "meeting_offered", "deal_updated"})
-PACING_STATUSES = frozenset({"on_track", "over", "under", "uncertain"})
-OWNER_BRIEF_PACING_STATUSES = frozenset({"on_track", "over", "under", "uncertain", ""})
-OWNER_BRIEF_PRELAUNCH = frozenset({"", "ready", "not_ready"})
 WEBHOOK_STATUSES = frozenset({"received", "processed", "sent", "failed"})
 RECONCILIATION_FINDING_KINDS = frozenset(
     {"webhook_received", "sent_without_out", "handoff_expired"}
@@ -842,39 +817,6 @@ class LeadStore:
         row.draft = draft if send_ready else ""
         self.session.flush()
 
-    def get_campaign_recommendation(
-        self, scope: str = "account"
-    ) -> CampaignRecommendationRow | None:
-        return self.session.scalars(
-            select(CampaignRecommendationRow).where(
-                CampaignRecommendationRow.scope == scope
-            )
-        ).one_or_none()
-
-    def upsert_campaign_recommendation(
-        self,
-        *,
-        scope: str,
-        kind: str,
-        anomaly: str,
-        payload_json: str,
-    ) -> None:
-        row = self.get_campaign_recommendation(scope)
-        if row is None:
-            self.session.add(
-                CampaignRecommendationRow(
-                    scope=scope,
-                    kind=kind,
-                    anomaly=anomaly,
-                    payload_json=payload_json,
-                )
-            )
-        else:
-            row.kind = kind
-            row.anomaly = anomaly
-            row.payload_json = payload_json
-        self.session.flush()
-
     def get_seo_recommendation(self, scope: str = "site") -> SeoRecommendationRow | None:
         return self.session.scalars(
             select(SeoRecommendationRow).where(SeoRecommendationRow.scope == scope)
@@ -908,150 +850,6 @@ class LeadStore:
             row.why = why
             row.change = change
             row.metric = metric
-        self.session.flush()
-
-    def get_campaign_pacing(self, scope: str = "account") -> CampaignPacingRow | None:
-        return self.session.scalars(
-            select(CampaignPacingRow).where(CampaignPacingRow.scope == scope)
-        ).one_or_none()
-
-    def upsert_campaign_pacing(
-        self,
-        *,
-        scope: str,
-        campaign: str,
-        monthly_budget: str,
-        spend: str,
-        expected_spend: str,
-        remaining: str,
-        projected: str,
-        over_under: str,
-        status: str,
-    ) -> None:
-        if status not in PACING_STATUSES:
-            return
-        row = self.get_campaign_pacing(scope)
-        if row is None:
-            self.session.add(
-                CampaignPacingRow(
-                    scope=scope,
-                    campaign=campaign,
-                    monthly_budget=monthly_budget,
-                    spend=spend,
-                    expected_spend=expected_spend,
-                    remaining=remaining,
-                    projected=projected,
-                    over_under=over_under,
-                    status=status,
-                )
-            )
-        else:
-            row.campaign = campaign
-            row.monthly_budget = monthly_budget
-            row.spend = spend
-            row.expected_spend = expected_spend
-            row.remaining = remaining
-            row.projected = projected
-            row.over_under = over_under
-            row.status = status
-        self.session.flush()
-
-    def get_campaign_performance(
-        self, scope: str = "account"
-    ) -> CampaignPerformanceRow | None:
-        return self.session.scalars(
-            select(CampaignPerformanceRow).where(CampaignPerformanceRow.scope == scope)
-        ).one_or_none()
-
-    def upsert_campaign_performance(
-        self,
-        *,
-        scope: str,
-        campaign: str,
-        spend: str,
-        ctr: str,
-        cpc: str,
-        cpl: str,
-        qualified_cpl: str,
-        meetings: str,
-        deals: str,
-        revenue: str,
-        roas: str,
-    ) -> None:
-        if revenue or roas or qualified_cpl:
-            return
-        row = self.get_campaign_performance(scope)
-        if row is None:
-            self.session.add(
-                CampaignPerformanceRow(
-                    scope=scope,
-                    campaign=campaign,
-                    spend=spend,
-                    ctr=ctr,
-                    cpc=cpc,
-                    cpl=cpl,
-                    qualified_cpl=qualified_cpl,
-                    meetings=meetings,
-                    deals=deals,
-                    revenue=revenue,
-                    roas=roas,
-                )
-            )
-        else:
-            row.campaign = campaign
-            row.spend = spend
-            row.ctr = ctr
-            row.cpc = cpc
-            row.cpl = cpl
-            row.qualified_cpl = qualified_cpl
-            row.meetings = meetings
-            row.deals = deals
-            row.revenue = revenue
-            row.roas = roas
-        self.session.flush()
-
-    def get_campaign_prelaunch(self, scope: str = "account") -> CampaignPrelaunchRow | None:
-        return self.session.scalars(
-            select(CampaignPrelaunchRow).where(CampaignPrelaunchRow.scope == scope)
-        ).one_or_none()
-
-    def upsert_campaign_prelaunch(
-        self,
-        *,
-        scope: str,
-        campaign: str,
-        launch_date: str,
-        objective: str,
-        lead_path: str,
-        ready: bool,
-        failed_checks: str,
-    ) -> None:
-        if ready and failed_checks:
-            return
-        if failed_checks:
-            for part in failed_checks.split(","):
-                if part and part not in _ALLOWLISTED_PRELAUNCH_CHECK_IDS:
-                    return
-        row = self.get_campaign_prelaunch(scope)
-        if row is None:
-            self.session.add(
-                CampaignPrelaunchRow(
-                    scope=scope,
-                    campaign=campaign,
-                    launch_date=launch_date,
-                    objective=objective,
-                    lead_path=lead_path,
-                    ready=ready,
-                    failed_checks=failed_checks,
-                )
-            )
-        else:
-            row.campaign = campaign
-            row.launch_date = launch_date
-            row.objective = objective
-            row.lead_path = lead_path
-            row.ready = ready
-            row.failed_checks = failed_checks
         self.session.flush()
 
     def count_attribution_for_ig_content(self, media_id: str) -> int:
@@ -1781,73 +1579,6 @@ class LeadStore:
             row.proposed_parameters = params
         self.session.flush()
 
-    def upsert_campaign_approval(
-        self,
-        *,
-        channel: str,
-        action: str,
-        risk: str,
-        payload_hash: str,
-        decision: str,
-        resource_type: str,
-        resource_id: str,
-        expires_at: str,
-    ) -> None:
-        if (
-            action != ACTION_CAMPAIGN_WRITE
-            or risk != RISK_R4
-            or decision != DECISION_PENDING
-        ):
-            return
-        if resource_type != RESOURCE_CAMPAIGN:
-            return
-        if not re.fullmatch(r"[0-9]{5,24}", resource_id):
-            return
-        if not expires_at:
-            return
-        try:
-            datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
-        except ValueError:
-            return
-        params = proposed_parameters_json(
-            action=action,
-            risk=risk,
-            channel=channel,
-            resource_type=resource_type,
-            resource_id=resource_id,
-        )
-        row = self.get_approval_by_resource(
-            RESOURCE_CAMPAIGN, resource_id, ACTION_CAMPAIGN_WRITE
-        )
-        if row is None:
-            self.session.add(
-                ApprovalRow(
-                    lead_id=None,
-                    channel=channel,
-                    action=action,
-                    risk=risk,
-                    payload_hash=payload_hash,
-                    decision=decision,
-                    approver="",
-                    resource_type=resource_type,
-                    resource_id=resource_id,
-                    expires_at=expires_at,
-                    approval_id=new_approval_id(),
-                    proposed_parameters=params,
-                )
-            )
-        elif row.decision == DECISION_PENDING:
-            row.channel = channel
-            row.risk = risk
-            row.payload_hash = payload_hash
-            row.decision = decision
-            row.approver = ""
-            row.resource_type = resource_type
-            row.resource_id = resource_id
-            row.expires_at = expires_at
-            row.proposed_parameters = params
-        self.session.flush()
-
     def upsert_gmail_approval(
         self,
         *,
@@ -2009,30 +1740,6 @@ class LeadStore:
         self.session.flush()
         return True
 
-    def decide_campaign_approval(
-        self,
-        *,
-        resource_id: str,
-        decision: str,
-        now: datetime | None = None,
-    ) -> bool:
-        if decision not in (DECISION_APPROVED, DECISION_REJECTED):
-            return False
-        row = self.get_approval_by_resource(
-            RESOURCE_CAMPAIGN, resource_id, ACTION_CAMPAIGN_WRITE
-        )
-        if row is None or row.decision != DECISION_PENDING:
-            return False
-        effective_now = now if now is not None else datetime.now(UTC)
-        if effective_now.tzinfo is None:
-            effective_now = effective_now.replace(tzinfo=UTC)
-        row.decision = decision
-        row.approver = ""
-        if decision == DECISION_APPROVED:
-            row.approved_at = effective_now.isoformat()
-        self.session.flush()
-        return True
-
     def decide_gmail_approval(
         self,
         *,
@@ -2146,18 +1853,6 @@ class LeadStore:
             for row in rows
             if row.due_at and re.fullmatch(r"\d{4}-\d{2}-\d{2}", row.due_at)
         ]
-
-    def list_owner_tasks_by_trigger(self, *, trigger: str) -> list[OwnerTaskRow]:
-        if trigger not in ALLOWLISTED_OWNER_TASK_LIST_TRIGGERS:
-            return []
-        return list(
-            self.session.scalars(
-                select(OwnerTaskRow).where(
-                    OwnerTaskRow.status == "logged",
-                    OwnerTaskRow.trigger == trigger,
-                )
-            ).all()
-        )
 
     def save_owner_task_scan(
         self,
@@ -2600,22 +2295,6 @@ class LeadStore:
                 count += 1
         return count
 
-    def count_canonical_events_in_range(
-        self, *, event_type: str, occurred_from: str, occurred_to: str
-    ) -> int:
-        if event_type not in PACING_EVENT_TYPES:
-            return 0
-        count = self.session.scalar(
-            select(func.count())
-            .select_from(CanonicalEventRow)
-            .where(
-                CanonicalEventRow.event_type == event_type,
-                CanonicalEventRow.occurred_at >= occurred_from,
-                CanonicalEventRow.occurred_at < occurred_to,
-            )
-        )
-        return int(count or 0)
-
     def count_canonical_events_for_lead(
         self, *, lead_id: str, event_type: str, occurred_from: str, occurred_to: str
     ) -> int:
@@ -2764,6 +2443,74 @@ class LeadStore:
         if row is not None:
             self.session.delete(row)
 
+    def try_claim_owner_notification_recipient(
+        self,
+        *,
+        kind: str,
+        lead_id: str,
+        recipient_id: str,
+        claimed_at: str,
+        notification_key: str = "",
+    ) -> bool:
+        if (
+            not kind
+            or not lead_id
+            or not isinstance(notification_key, str)
+            or not recipient_id.isdecimal()
+        ):
+            return False
+        return self._insert_ignoring_conflicts(
+            OwnerNotificationRecipientClaimRow.__table__,
+            {
+                "kind": kind,
+                "lead_id": lead_id,
+                "notification_key": notification_key,
+                "recipient_id": recipient_id,
+                "claimed_at": claimed_at,
+            },
+        )
+
+    def owner_notification_claimed_at(
+        self, *, kind: str, lead_id: str, conversation_id: str = ""
+    ) -> str | None:
+        """Return a legacy claim timestamp without turning it into recipient history.
+
+        The pre-recipient ledger has no recipient outcome, so callers may use its
+        presence only as conservative compatibility evidence.  The timestamp is
+        useful for legacy *daily* reminders, whose new key is a local day.
+        """
+        if not kind or not lead_id:
+            return None
+        row = self.session.get(
+            OwnerNotificationClaimRow, (kind, lead_id, conversation_id or "")
+        )
+        return str(row.claimed_at) if row is not None else None
+
+    def release_owner_notification_recipient_claim(
+        self,
+        *,
+        kind: str,
+        lead_id: str,
+        recipient_id: str,
+        notification_key: str = "",
+    ) -> None:
+        if (
+            not kind
+            or not lead_id
+            or not isinstance(notification_key, str)
+            or not recipient_id.isdecimal()
+        ):
+            return
+        row = self.session.get(
+            OwnerNotificationRecipientClaimRow,
+            (kind, lead_id, notification_key, recipient_id),
+        )
+        if row is not None:
+            self.session.delete(row)
+            # A same-session retry must see this explicit rejection immediately;
+            # otherwise the pending DELETE is ordered after the next conflict insert.
+            self.session.flush()
+
     def try_insert_owner_notification(
         self,
         *,
@@ -2849,14 +2596,8 @@ class LeadStore:
         follow_ups_due: int,
         meetings_booked: int,
         cancellation_requests: int,
-        pacing_status: str,
-        prelaunch_ready: str,
     ) -> None:
         if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", brief_date):
-            return
-        if pacing_status not in OWNER_BRIEF_PACING_STATUSES:
-            return
-        if prelaunch_ready not in OWNER_BRIEF_PRELAUNCH:
             return
         if (
             leads < 0
@@ -2880,8 +2621,6 @@ class LeadStore:
                     follow_ups_due=follow_ups_due,
                     meetings_booked=meetings_booked,
                     cancellation_requests=cancellation_requests,
-                    pacing_status=pacing_status,
-                    prelaunch_ready=prelaunch_ready,
                 )
             )
         else:
@@ -2892,8 +2631,6 @@ class LeadStore:
             row.follow_ups_due = follow_ups_due
             row.meetings_booked = meetings_booked
             row.cancellation_requests = cancellation_requests
-            row.pacing_status = pacing_status
-            row.prelaunch_ready = prelaunch_ready
         self.session.flush()
 
     def get_owner_weekly(self, week_start: str) -> OwnerWeeklyRow | None:
@@ -2914,14 +2651,8 @@ class LeadStore:
         follow_ups_pending: int,
         meetings_booked: int,
         cancellation_requests: int,
-        pacing_status: str,
-        prelaunch_ready: str,
     ) -> None:
         if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", week_start):
-            return
-        if pacing_status not in OWNER_BRIEF_PACING_STATUSES:
-            return
-        if prelaunch_ready not in OWNER_BRIEF_PRELAUNCH:
             return
         if (
             leads < 0
@@ -2945,8 +2676,6 @@ class LeadStore:
                     follow_ups_pending=follow_ups_pending,
                     meetings_booked=meetings_booked,
                     cancellation_requests=cancellation_requests,
-                    pacing_status=pacing_status,
-                    prelaunch_ready=prelaunch_ready,
                 )
             )
         else:
@@ -2957,8 +2686,6 @@ class LeadStore:
             row.follow_ups_pending = follow_ups_pending
             row.meetings_booked = meetings_booked
             row.cancellation_requests = cancellation_requests
-            row.pacing_status = pacing_status
-            row.prelaunch_ready = prelaunch_ready
         self.session.flush()
 
     def list_conversation_turns(
@@ -3081,13 +2808,15 @@ class LeadStore:
         ).first()
         return lead.id if lead is not None else None
 
-    def has_website_prospect_message(self, lead_id: str) -> bool:
-        if not lead_id:
+    def has_website_prospect_message(self, lead_id: str, conversation_id: str) -> bool:
+        """Whether this exact website conversation, not merely its lead, has started."""
+        if not lead_id or not conversation_id:
             return False
         row = self.session.scalars(
             select(CanonicalEventRow)
             .where(
                 CanonicalEventRow.lead_id == lead_id,
+                CanonicalEventRow.conversation_id == conversation_id,
                 CanonicalEventRow.provider == Channel.WEBSITE.value,
                 CanonicalEventRow.event_type == EventType.MESSAGE_IN.value,
                 CanonicalEventRow.actor_role == "prospect",
@@ -3119,6 +2848,7 @@ class LeadStore:
         last_in = (
             select(
                 CanonicalEventRow.lead_id,
+                CanonicalEventRow.conversation_id,
                 func.max(CanonicalEventRow.occurred_at).label("last_at"),
             )
             .where(
@@ -3126,7 +2856,7 @@ class LeadStore:
                 CanonicalEventRow.event_type == EventType.MESSAGE_IN.value,
                 CanonicalEventRow.actor_role == "prospect",
             )
-            .group_by(CanonicalEventRow.lead_id)
+            .group_by(CanonicalEventRow.lead_id, CanonicalEventRow.conversation_id)
             .subquery()
         )
         query = (
@@ -3135,6 +2865,7 @@ class LeadStore:
             .join(last_in, last_in.c.lead_id == LeadRow.id)
             .where(
                 ChannelIdentityRow.channel == Channel.WEBSITE.value,
+                last_in.c.conversation_id == ChannelIdentityRow.external_id,
                 last_in.c.last_at <= cutoff_iso,
             )
             .limit(limit)

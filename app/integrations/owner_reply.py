@@ -110,7 +110,7 @@ SYSTEM_PROMPT = (
 
 
 class OwnerReplyPort(Protocol):
-    def compose(
+    async def compose(
         self,
         *,
         task_type: str,
@@ -124,7 +124,7 @@ class OwnerReplyPort(Protocol):
 class CannedOwnerReplyPort:
     """Disabled default — always return the typed RESULT unchanged."""
 
-    def compose(
+    async def compose(
         self,
         *,
         task_type: str,
@@ -143,7 +143,7 @@ class FakeOwnerReplyPort:
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
 
-    def compose(
+    async def compose(
         self,
         *,
         task_type: str,

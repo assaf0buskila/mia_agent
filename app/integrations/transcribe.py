@@ -67,9 +67,11 @@ def transcription_request_fields(
         if keywords:
             fields["keywords[]"] = list(keywords)
         return fields
-    if languages:
-        fields["language"] = languages[0]
-    return fields
+    if name.startswith("gpt-4o-") and name.endswith("-transcribe"):
+        if languages:
+            fields["language"] = languages[0]
+        return fields
+    raise TranscriptionError("OpenAI transcription model is unsupported")
 
 _STT_PROVIDER_ALLOWLIST = frozenset({"openai", "fake"})
 _STT_MODEL_RE = re.compile(r"^[a-zA-Z0-9._-]{1,64}$")
@@ -286,7 +288,12 @@ class OpenAITranscribePort:
         return self._parse_response(response, model=model)
 
     def _parse_response(self, response: httpx.Response, *, model: str) -> TranscriptResult:
-        payload = response.json()
+        try:
+            payload = response.json()
+        except (TypeError, ValueError) as exc:
+            raise TranscriptionError("OpenAI transcription returned invalid response") from exc
+        if not isinstance(payload, dict):
+            raise TranscriptionError("OpenAI transcription returned invalid response")
         text = payload.get("text", "")
         if not isinstance(text, str) or not text.strip():
             raise TranscriptionError("OpenAI transcription returned empty text")

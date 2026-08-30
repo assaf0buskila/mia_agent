@@ -3,8 +3,6 @@
 import re
 from enum import StrEnum
 
-from pydantic import BaseModel, Field
-
 from app.core.errors import PolicyDenied
 from app.core.risk import RiskAction, RiskLevel, assert_allowed
 
@@ -39,12 +37,6 @@ _WRITABLE_KINDS: frozenset[InstructionKind] = frozenset(
         InstructionKind.CORRECTION,
     }
 )
-
-
-class ProposedInstruction(BaseModel):
-    kind: InstructionKind
-    body: str = Field(max_length=MAX_INSTRUCTION_BODY)
-    status: str = "proposed"
 
 
 def _keyword_in_text(text: str, keyword: str) -> bool:

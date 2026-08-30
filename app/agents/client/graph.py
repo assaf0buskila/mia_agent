@@ -13,9 +13,9 @@ from app.brain.embeddings import build_embedding_port
 from app.brain.store import BrainStore
 from app.capabilities.knowledge import knowledge_handlers
 from app.capabilities.policy import execute_capability
-from app.capabilities.types import Principal
+from app.capabilities.types import GraphName, Principal
 from app.core.config import Settings
-from app.core.errors import MiaError
+from app.core.errors import MiaError, PermissionDenied
 from app.db.store import LeadStore
 from app.domain.hot_handoff import apply_hot_handoff
 from app.domain.website_handoff_brief import (
@@ -31,7 +31,7 @@ from app.graph.replies import (
 )
 from app.graph.state import empty_state
 from app.integrations.sales_reply import SalesReplyPort
-from app.services.finalization import KIND, qualify_and_finalize
+from app.services.finalization import qualify_and_finalize
 
 ClientRespond = Callable[[ClientState], dict]
 
@@ -62,8 +62,7 @@ def compile_client_graph(
     respond: ClientRespond | None = None,
     settings: Settings | None = None,
     now: datetime | None = None,
-    knowledge_lookup: Callable[[str], tuple[str, ...]] | None = None,
-    principal: Principal | None = None,
+    principal: Principal,
 ):
     """Compile the client LangGraph.
 
@@ -72,12 +71,11 @@ def compile_client_graph(
     Knowledge retrieve and conversation complete/finalize are graph nodes so looking
     at ClientGraph matches what Mia actually does.
     """
-    principal = principal or Principal.client(source="website")
-    inner = (
-        build_graph(store, reply_port=reply_port, knowledge_lookup=knowledge_lookup)
-        if store is not None
-        else None
-    )
+    if principal.graph is not GraphName.CLIENT:
+        raise PermissionDenied("ClientGraph requires a client principal")
+    # ClientGraph is the one owner of website knowledge retrieval.  The caller mints
+    # this principal at its transport boundary; graph code never assumes ambient trust.
+    inner = build_graph(store, reply_port=reply_port) if store is not None else None
 
     def load_conversation(state: ClientState) -> dict:
         errors = list(state.get("errors", []))
@@ -90,7 +88,7 @@ def compile_client_graph(
     def retrieve_knowledge(state: ClientState) -> dict:
         tools = list(state.get("tools_used") or [])
         query = (state.get("latest_message") or "").strip()
-        if not query or store is None:
+        if not query or store is None or bool(state.get("kill_switch")):
             return {"knowledge_hits": [], "tools_used": tools}
         try:
             brain = BrainStore(store.session)
@@ -175,7 +173,7 @@ def compile_client_graph(
                 brief=brief,
                 parse_mode=parse_mode,
             )
-            if attempt.attempted:
+            if attempt.attempted or attempt.known_unreachable:
                 overwrite_handoff = True
                 owner_notified = bool(attempt.delivered)
         if channel != "website":
@@ -187,11 +185,19 @@ def compile_client_graph(
                 finalized=False,
                 overwrite=overwrite_handoff,
             )
+        # A website HANDOFF has already claimed and delivered (or safely retained) its
+        # hot-handoff notification above.  Finalization would be a distinct claim and
+        # a second Telegram card for the same visitor turn.
+        if next_action == "handoff":
+            return _handoff_reply(
+                state,
+                owner_notified=owner_notified,
+                finalized=False,
+                overwrite=overwrite_handoff,
+            )
         next_step: str | None = None
         require_visitor = False
-        if next_action == "handoff":
-            next_step = "human_handoff"
-        elif turn_kind == "session_end":
+        if turn_kind == "session_end":
             next_step = "session_closed"
             require_visitor = True
         elif turn_kind == "inactivity":
@@ -263,6 +269,7 @@ def finalize_inactive_website_conversations(
     store: LeadStore,
     *,
     settings: Settings,
+    principal: Principal,
     now: datetime | None = None,
 ) -> int:
     """Due-scan entry: inactivity finalization runs through ClientGraph, not HTTP."""
@@ -273,15 +280,15 @@ def finalize_inactive_website_conversations(
     cutoff = (clock.astimezone(UTC) - timedelta(minutes=minutes)).isoformat()
     rows = store.list_inactive_website_conversations(
         cutoff_iso=cutoff,
-        # WhatsApp handoff retires the lead's website sessions; finalization retires only
-        # the one conversation it finalized, so a returning lead is scanned again.
+        # WhatsApp handoff retires the lead's website sessions. Finalization uses its
+        # recipient ledger for duplicate safety, so no global conversation claim may
+        # suppress a recoverable recipient retry.
         skip_kinds=(KIND_WEBSITE_WHATSAPP,),
-        skip_conversation_kinds=(KIND,),
         limit=50,
     )
-    graph = compile_client_graph(store, settings=settings, now=clock)
     finalized = 0
     for session_id, lead_id in rows:
+        graph = compile_client_graph(store, settings=settings, now=clock, principal=principal)
         out: dict[str, Any] = graph.invoke(
             empty_client_state(
                 run_id=f"inact:{session_id}",

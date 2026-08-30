@@ -66,7 +66,10 @@ def test_client_retrieve_uses_client_policy_and_reaches_sales(
         )
         db.commit()
         fake = FakeSalesReplyPort()
-        graph = compile_client_graph(store, reply_port=fake, settings=Settings())
+        graph = compile_client_graph(
+            store, reply_port=fake, settings=Settings(),
+            principal=Principal.client(source="test", actor_id=lead_id),
+        )
         out = graph.invoke(
             message_to_client_state(
                 run_id="run_know",
@@ -96,7 +99,9 @@ def test_session_end_skips_sales_and_empty_open_is_not_finalized() -> None:
             channel=Channel.WEBSITE, external_id=session_id
         )
         db.commit()
-        out = compile_client_graph(store, settings=Settings()).invoke(
+        out = compile_client_graph(
+            store, settings=Settings(), principal=Principal.client(source="test", actor_id=lead_id)
+        ).invoke(
             empty_client_state(
                 run_id="end_empty",
                 conversation_id=session_id,
@@ -139,7 +144,10 @@ def test_inactivity_via_client_graph_finalizes_once() -> None:
         db.commit()
         settings = Settings(website_inactivity_minutes=30)
         now = old + timedelta(minutes=31)
-        out = compile_client_graph(store, settings=settings, now=now).invoke(
+        out = compile_client_graph(
+            store, settings=settings, now=now,
+            principal=Principal.client(source="test", actor_id=lead_id),
+        ).invoke(
             empty_client_state(
                 run_id="inact_one",
                 conversation_id=session_id,
@@ -150,7 +158,10 @@ def test_inactivity_via_client_graph_finalizes_once() -> None:
         )
         assert out["finalized"] is True
         db.commit()
-        again = compile_client_graph(store, settings=settings, now=now).invoke(
+        again = compile_client_graph(
+            store, settings=settings, now=now,
+            principal=Principal.client(source="test", actor_id=lead_id),
+        ).invoke(
             empty_client_state(
                 run_id="inact_two",
                 conversation_id=session_id,

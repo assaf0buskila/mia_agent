@@ -3,7 +3,7 @@ import json
 import httpx
 import pytest
 from app.core.config import Settings
-from app.domain.tools import AdapterHttpError
+from app.domain.tools import AdapterHttpError, AdapterResponseError, AdapterSchemaError
 from app.integrations.search_console import (
     COMPOSIO_GSC_VERSION,
     COMPOSIO_INSPECT_URL_TOOL,
@@ -79,6 +79,42 @@ def test_composio_search_console_http_401_raises() -> None:
     with pytest.raises(AdapterHttpError) as exc_info:
         port.list_sites()
     assert exc_info.value.status_code == 401
+
+
+def test_composio_search_console_schema_and_execution_failures_are_not_empty() -> None:
+    schema_client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(200, json={"successful": True, "data": []})
+        )
+    )
+    schema_port = ComposioSearchConsolePort(
+        api_key="cmp-test",
+        user_id="user-123",
+        site_url="https://www.assafweb.com/",
+        client=schema_client,
+    )
+    with pytest.raises(AdapterSchemaError) as schema_error:
+        schema_port.query_search_analytics(
+            start_date="2026-01-01", end_date="2026-01-28", dimensions=["page"]
+        )
+    assert schema_error.value.tool_status() == "malformed"
+
+    failed_client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(200, json={"successful": False, "data": {}})
+        )
+    )
+    failed_port = ComposioSearchConsolePort(
+        api_key="cmp-test",
+        user_id="user-123",
+        site_url="https://www.assafweb.com/",
+        client=failed_client,
+    )
+    with pytest.raises(AdapterResponseError) as response_error:
+        failed_port.query_search_analytics(
+            start_date="2026-01-01", end_date="2026-01-28", dimensions=["page"]
+        )
+    assert response_error.value.tool_status() == "error"
 
 
 def test_composio_search_console_analytics_request_shape() -> None:

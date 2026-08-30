@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from pydantic import BaseModel, ConfigDict
@@ -23,7 +23,7 @@ from app.services.conversation_facts import (
     extract_timeline,
     relevant_service,
 )
-from app.services.notifications import render_conversation_summary, send_owner_telegram
+from app.services.notifications import deliver_owner_telegram, render_conversation_summary
 
 KIND_PREFIX = "web_final_"
 SUMMARY_VERSION = "v1"
@@ -69,9 +69,40 @@ class NotificationStore(Protocol):
         conversation_id: str = "",
     ) -> bool: ...
 
+    def release_owner_notification_claim(
+        self, *, kind: str, lead_id: str, conversation_id: str = ""
+    ) -> None: ...
+
+    def owner_notification_claimed_at(
+        self, *, kind: str, lead_id: str, conversation_id: str = ""
+    ) -> str | None: ...
+
+    def upsert_owner_notification(
+        self, *, kind: str, lead_id: str, scheduled_at: str
+    ) -> None: ...
+
+    def try_claim_owner_notification_recipient(
+        self,
+        *,
+        kind: str,
+        lead_id: str,
+        notification_key: str,
+        recipient_id: str,
+        claimed_at: str,
+    ) -> bool: ...
+
+    def release_owner_notification_recipient_claim(
+        self,
+        *,
+        kind: str,
+        lead_id: str,
+        notification_key: str,
+        recipient_id: str,
+    ) -> None: ...
+
 
 class WebsiteFinalizationStore(NotificationStore, Protocol):
-    def has_website_prospect_message(self, lead_id: str) -> bool: ...
+    def has_website_prospect_message(self, lead_id: str, conversation_id: str) -> bool: ...
 
     def list_inactive_website_conversations(
         self,
@@ -112,23 +143,63 @@ def finalize_website_conversation(
     """
     kind = kind_for(version)
     lead_id = summary.lead_id
-    scheduled = (now or datetime.now(UTC)).replace(microsecond=0).isoformat()
-    inserted = store.try_insert_owner_notification(
-        kind=kind,
-        lead_id=lead_id,
-        conversation_id=summary.conversation_id,
-        scheduled_at=scheduled,
-    )
-    if not inserted:
-        return FinalizeResult(claimed=False, sent=False, duplicate=True, kind=kind)
     if not send:
-        return FinalizeResult(claimed=True, sent=False, kind=kind)
+        # A policy-suppressed send is not a delivery attempt.  Do not consume the
+        # conversation claim, or turning the kill switch off later would silently lose
+        # this owner's card as a duplicate.
+        return FinalizeResult(claimed=False, sent=False, kind=kind)
+    scheduled = (now or datetime.now(UTC)).replace(microsecond=0).isoformat()
     payload = summary.model_dump()
     text = render_conversation_summary(
         {key: value if isinstance(value, str) else None for key, value in payload.items()}
     )
-    sent = send_owner_telegram(text=text, settings=settings)
-    return FinalizeResult(claimed=True, sent=sent, kind=kind)
+    # The inbox records the local business event; it is not a transport claim.
+    inbox_already_present = store.has_owner_notification(kind=kind, lead_id=lead_id)
+    store.upsert_owner_notification(kind=kind, lead_id=lead_id, scheduled_at=scheduled)
+    token = settings.telegram_bot_token.strip()
+    recipients = tuple(sorted(settings.telegram_owner_user_id_set()))
+    if not token or not recipients or not text.strip():
+        # No delivery claim exists without a valid transport attempt.  The inbox row
+        # still makes a repeated no-config scan quiet; a later configured replay can
+        # proceed because recipient claims are still absent.
+        return FinalizeResult(
+            claimed=not inbox_already_present,
+            sent=False,
+            duplicate=inbox_already_present,
+            kind=kind,
+        )
+    # The old ledger has no recipient or outcome data.  Never fabricate a recipient
+    # backfill from it: for this exact historical conversation, its durable presence
+    # is conservative evidence of accepted or ambiguous delivery and protects every
+    # configured recipient from a post-migration resend.
+    if store.owner_notification_claimed_at(
+        kind=kind, lead_id=lead_id, conversation_id=summary.conversation_id
+    ) is not None:
+        return FinalizeResult(claimed=False, sent=False, duplicate=True, kind=kind)
+    claimed_recipients = tuple(
+        recipient_id
+        for recipient_id in recipients
+        if store.try_claim_owner_notification_recipient(
+            kind=kind,
+            lead_id=lead_id,
+            notification_key=summary.conversation_id,
+            recipient_id=recipient_id,
+            claimed_at=scheduled,
+        )
+    )
+    if not claimed_recipients:
+        return FinalizeResult(claimed=False, sent=False, duplicate=True, kind=kind)
+    delivery = deliver_owner_telegram(
+        text=text, settings=settings, recipient_ids=claimed_recipients
+    )
+    for recipient_id in delivery.rejected:
+        store.release_owner_notification_recipient_claim(
+            kind=kind,
+            lead_id=lead_id,
+            notification_key=summary.conversation_id,
+            recipient_id=recipient_id,
+        )
+    return FinalizeResult(claimed=True, sent=bool(delivery.delivered), kind=kind)
 
 
 def _or_none(value: str) -> str | None:
@@ -200,7 +271,9 @@ def qualify_and_finalize(
     """One finalization service. Skip empty sessions and WhatsApp-briefing duplicates."""
     if store.has_owner_notification(kind=KIND_WEBSITE_WHATSAPP, lead_id=lead_id):
         return None
-    if require_visitor_message and not store.has_website_prospect_message(lead_id):
+    if require_visitor_message and not store.has_website_prospect_message(
+        lead_id, session_id
+    ):
         return None
     return finalize_website_conversation(
         store,
@@ -214,39 +287,4 @@ def qualify_and_finalize(
         now=now,
         send=not settings.kill_switch,
     )
-
-
-def scan_inactive_website_conversations(
-    store: WebsiteFinalizationStore,
-    *,
-    settings: Settings,
-    now: datetime | None = None,
-) -> int:
-    minutes = settings.website_inactivity_minutes
-    if minutes <= 0:
-        return 0
-    clock = now or datetime.now(UTC)
-    cutoff = (clock.astimezone(UTC) - timedelta(minutes=minutes)).isoformat()
-    rows = store.list_inactive_website_conversations(
-        cutoff_iso=cutoff,
-        # Lead-scoped: once they moved to WhatsApp the website is not the channel any more.
-        skip_kinds=(KIND_WEBSITE_WHATSAPP,),
-        # Conversation-scoped: only the sessions already finalized, so a returning lead's
-        # next conversation is still scanned instead of being retired with the lead.
-        skip_conversation_kinds=(KIND,),
-        limit=50,
-    )
-    finalized = 0
-    for session_id, lead_id in rows:
-        result = qualify_and_finalize(
-            store,
-            session_id=session_id,
-            lead_id=lead_id,
-            settings=settings,
-            next_step="inactivity",
-            require_visitor_message=True,
-            now=clock,
-        )
-        if result is not None and result.claimed:
-            finalized += 1
-    return finalized
+# Inactivity traversal is intentionally owned by ClientGraph / ``mia-due-scan``.

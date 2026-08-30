@@ -9,9 +9,13 @@ from __future__ import annotations
 
 import httpx
 from app.core.config import Settings
-from app.domain import hot_handoff as hot_handoff_mod
+from app.db.session import get_session_factory, init_db
+from app.db.store import LeadStore
+from app.domain.conversation_scope import TakeoverState
+from app.domain.events import Channel
 from app.domain.hot_handoff import KIND_HOT_LEAD, apply_hot_handoff, notify_owners
 from app.domain.sales import FitLevel, PainLevel, SalesState
+from app.services import notifications as notifications_mod
 
 
 class _RecordingClient:
@@ -35,7 +39,7 @@ class _RecordingClient:
 
 
 def _patch_client(monkeypatch, client: _RecordingClient) -> None:
-    monkeypatch.setattr(hot_handoff_mod.httpx, "Client", lambda **kwargs: client)
+    monkeypatch.setattr(notifications_mod.httpx, "Client", lambda **kwargs: client)
 
 
 def test_notify_owners_sends_to_every_allowlisted_owner(monkeypatch) -> None:
@@ -109,6 +113,8 @@ class _FakeHotHandoffStore:
         self.takeover_states: dict[str, str] = {}
         self.cancelled: list[str] = []
         self.upserts: list[dict[str, str]] = []
+        self.released: list[tuple[str, str, str]] = []
+        self.recipient_claims: set[tuple[str, str, str]] = set()
         self.sales = SalesState(
             lead_id="lead_hot123456", fit=FitLevel.GOOD, pain_level=PainLevel.P3
         )
@@ -142,7 +148,22 @@ class _FakeHotHandoffStore:
     def release_owner_notification_claim(
         self, *, kind: str, lead_id: str, conversation_id: str = ""
     ) -> None:
-        del kind, lead_id, conversation_id
+        self.released.append((kind, lead_id, conversation_id))
+
+    def try_claim_owner_notification_recipient(
+        self, *, kind: str, lead_id: str, recipient_id: str, claimed_at: str
+    ) -> bool:
+        del claimed_at
+        key = (kind, lead_id, recipient_id)
+        if key in self.recipient_claims:
+            return False
+        self.recipient_claims.add(key)
+        return True
+
+    def release_owner_notification_recipient_claim(
+        self, *, kind: str, lead_id: str, recipient_id: str
+    ) -> None:
+        self.recipient_claims.discard((kind, lead_id, recipient_id))
 
 
 def test_apply_hot_handoff_notifies_every_owner(monkeypatch) -> None:
@@ -165,3 +186,103 @@ def test_apply_hot_handoff_notifies_every_owner(monkeypatch) -> None:
     assert [call["chat_id"] for call in client.calls] == ["111", "222"]
     assert len(store.upserts) == 1
     assert store.upserts[0]["kind"] == KIND_HOT_LEAD
+
+
+def test_hot_handoff_releases_only_after_confirmed_full_rejection(monkeypatch) -> None:
+    class _RejectedClient(_RecordingClient):
+        def post(self, url: str, *, json: dict[str, object]) -> httpx.Response:
+            self.calls.append(json)
+            return httpx.Response(400, json={"ok": False})
+
+    client = _RejectedClient()
+    _patch_client(monkeypatch, client)
+    store = _FakeHotHandoffStore()
+    apply_hot_handoff(
+        store,
+        lead_id="lead_hot123456",
+        inbound_id="in_rejected",
+        want="human",
+        kill_switch=False,
+        settings=Settings(telegram_bot_token="tok", telegram_owner_user_ids="111"),
+    )
+    assert (KIND_HOT_LEAD, "lead_hot123456", "111") not in store.recipient_claims
+
+
+def test_hot_handoff_retains_claim_after_ambiguous_transport_error(monkeypatch) -> None:
+    client = _RecordingClient(fail_chat_ids=frozenset({"111"}))
+    _patch_client(monkeypatch, client)
+    store = _FakeHotHandoffStore()
+    apply_hot_handoff(
+        store,
+        lead_id="lead_hot123456",
+        inbound_id="in_transport",
+        want="human",
+        kill_switch=False,
+        settings=Settings(telegram_bot_token="tok", telegram_owner_user_ids="111"),
+    )
+    assert store.released == []
+
+
+def test_hot_handoff_partial_success_retains_claim(monkeypatch) -> None:
+    client = _RecordingClient(fail_chat_ids=frozenset({"222"}))
+    _patch_client(monkeypatch, client)
+    store = _FakeHotHandoffStore()
+    attempt = apply_hot_handoff(
+        store,
+        lead_id="lead_hot123456",
+        inbound_id="in_partial",
+        want="human",
+        kill_switch=False,
+        settings=Settings(telegram_bot_token="tok", telegram_owner_user_ids="111,222"),
+    )
+    assert attempt.delivered == ("111",)
+    assert store.released == []
+
+
+def test_hot_handoff_retains_claim_after_malformed_success_response(monkeypatch) -> None:
+    class _MalformedClient(_RecordingClient):
+        def post(self, url: str, *, json: dict[str, object]) -> httpx.Response:
+            self.calls.append(json)
+            return httpx.Response(200, content=b"not-json")
+
+    client = _MalformedClient()
+    _patch_client(monkeypatch, client)
+    store = _FakeHotHandoffStore()
+    apply_hot_handoff(
+        store,
+        lead_id="lead_hot123456",
+        inbound_id="in_malformed",
+        want="human",
+        kill_switch=False,
+        settings=Settings(telegram_bot_token="tok", telegram_owner_user_ids="111"),
+    )
+    assert store.released == []
+
+
+def test_hot_handoff_kill_switch_mutates_nothing_in_the_real_store(monkeypatch) -> None:
+    client = _RecordingClient()
+    _patch_client(monkeypatch, client)
+    init_db()
+    db = get_session_factory()()
+    try:
+        store = LeadStore(db)
+        _, lead_id = store.open_channel_lead(
+            channel=Channel.WEBSITE, external_id="web_hot_kill_order"
+        )
+        before_state = store.get_takeover_state(lead_id)
+        before_follow_up = store.get_follow_up(lead_id)
+        attempt = apply_hot_handoff(
+            store,
+            lead_id=lead_id,
+            inbound_id="hot:kill",
+            want="human",
+            kill_switch=True,
+            settings=Settings(telegram_bot_token="tok", telegram_owner_user_ids="111"),
+        )
+        assert attempt.attempted is False
+        assert store.get_takeover_state(lead_id) == before_state == TakeoverState.MIA_ACTIVE.value
+        assert store.get_follow_up(lead_id) is before_follow_up is None
+        assert not store.has_owner_notification(kind=KIND_HOT_LEAD, lead_id=lead_id)
+        assert client.calls == []
+    finally:
+        db.close()

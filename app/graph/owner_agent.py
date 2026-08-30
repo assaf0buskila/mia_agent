@@ -1,14 +1,15 @@
 """Owner agent loop.
 
 Replaces the keyword switchboard for Assaf's Telegram console when a model is configured.
-The model chooses which **read** tools to call and may chain them across several steps,
+The model chooses pinned read or bounded ADR-042 Sheets value-write tools and may chain
+them across several steps,
 so one message can answer several things at once — which the single-task classifier
 could never do.
 
 What did NOT change, and must not:
 
-- The registry is read-only plus owner-scoped memory. Nothing here sends, books, approves,
-  spends, publishes or deletes.
+- The registry is reads and owner-scoped memory, plus authenticated allowlisted ADR-042 Sheets
+  value update/append. Nothing here sends, books, approves, spends, publishes or deletes.
 - Every write of consequence still goes through `app/domain/approvals.py` and
   `app/core/risk.py`. The loop cannot reach them.
 - Assaf's message is data. It cannot add a tool, raise permissions or bypass a gate.
@@ -100,8 +101,11 @@ SYSTEM_PROMPT = (
     "- search_knowledge: AssafWeb's own services, pricing, process — published facts.\n"
     "- search_memory: who someone is *in Assaf's world*, his preferences, and past "
     "decisions. It is not a substitute for a live read — see LIVE FIRST below.\n"
-    "There is no Google Sheets read tool. Sheets is a write mirror of leads/ops data, "
-    "not something you query in chat.\n"
+    "- sheets_read: read a bounded range from an explicitly Assaf-authorized spreadsheet.\n"
+    "- sheets_update / sheets_append: make a bounded value update or append only when "
+    "Assaf explicitly asks in this authenticated turn and the spreadsheet ID is allowlisted. "
+    "Never discover Drive files, read Sheets as Mia's internal truth, or create, delete, "
+    "clear, format, or generate formulas.\n"
     "Never ask him to rephrase. If a follow-up like \"him\", \"that lead\", \"the last "
     "one\" or \"האחרון\" / \"מה הוא כתב\" clearly points at something from the recent "
     "conversation, resolve it yourself. Ask one short question only when it genuinely does "
@@ -142,7 +146,8 @@ SYSTEM_PROMPT = (
     "remember once. Do not store small talk or a question he asked.\n"
     "\n"
     "WHAT YOU CANNOT DO\n"
-    "You have read tools only. You cannot send a message, book, approve, pay, publish, "
+    "Your tools are reads and owner-memory writes, plus ADR-042 bounded authenticated "
+    "allowlisted Sheets value writes. You cannot send a message, book, approve, pay, publish, "
     "change a campaign or delete anything. If he asks for one of those, say plainly what "
     "would happen and that it needs his explicit go-ahead. Never claim you did it.\n"
     "To send email: you have no send tool. Tell him to write "
@@ -388,7 +393,26 @@ def run_owner_agent(
         # The whole assistant message, tool_calls array included, must be appended before
         # the tool results, and each result keyed by its own tool_call_id.
         messages.append(response.raw_message)
-        for call in response.tool_calls[:MAX_TOOL_CALLS_PER_STEP]:
+        for call_index, call in enumerate(response.tool_calls):
+            if call_index >= MAX_TOOL_CALLS_PER_STEP:
+                messages.append(
+                    tool_result_message(
+                        call.call_id,
+                        {"ok": False, "error": "too many tool calls this step"},
+                    )
+                )
+                continue
+            if total_tool_calls >= MAX_TOTAL_TOOL_CALLS:
+                steps.append(
+                    AgentStep(tool=call.name, ok=False, detail="total tool call ceiling reached")
+                )
+                messages.append(
+                    tool_result_message(
+                        call.call_id,
+                        {"ok": False, "error": "total tool call ceiling reached"},
+                    )
+                )
+                continue
             total_tool_calls += 1
             key = (call.name, _canonical_arguments(call.arguments))
             if key in seen_calls:
@@ -423,15 +447,6 @@ def run_owner_agent(
             else:
                 tools_failed.append(call.name)
             messages.append(tool_result_message(call.call_id, result.payload()))
-        # Any tool call the model requested beyond the cap still needs a reply, or the
-        # next request is malformed.
-        for call in response.tool_calls[MAX_TOOL_CALLS_PER_STEP:]:
-            messages.append(
-                tool_result_message(
-                    call.call_id, {"ok": False, "error": "too many tool calls this step"}
-                )
-            )
-
     # Unreachable in practice: the final iteration always sets `last_step`, which drops
     # tools and forces the `not response.tool_calls` branch above to return. Kept as a
     # safety net so the function always has an explicit terminal return.

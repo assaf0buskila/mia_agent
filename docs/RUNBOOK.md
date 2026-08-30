@@ -1,7 +1,7 @@
 # Operator runbook — Mia
 
 **Date:** 2026-08-23  
-**Status:** Gate F partial (this file + named-flag table + ALB 5xx alarm that can page when `MIA_ALB_5XX_SNS_TOPIC_ARN` is stamped). Dashboards, LangSmith, and live paging are **not** turned on by this repo. Origin-bind must be present on the SHA before `scripts/deploy_ecs_revision.py` registers an image.  
+**Status:** Gate F partial. This repo contains the named-flag table and ALB 5xx alarm wiring that can page when `MIA_ALB_5XX_SNS_TOPIC_ARN` is stamped; deployment, dashboards, LangSmith, and live paging are unverified here. Origin-bind must be present on the SHA before `scripts/deploy_ecs_revision.py` registers an image.
 **Not a grant of write access.** Does not enable Gmail send, Meta writes, follow-up send, instruction activation, Lambda/SQS/AgentCore, or `app.infra`.
 
 Go-live order: `docs/PRODUCTION_BUILD.md`. Related: `.env.example`, `docs/PRODUCT.md`, `docs/ARCHITECTURE.md`.
@@ -77,7 +77,8 @@ Example: `Take over this lead lead_ab12cd34ef56` (Telegram or owner WhatsApp). M
 
 ## 3. Automation mode (prospect send only)
 
-`MIA_AUTOMATION_MODE` (production live test **`auto_approved`**, ADR-022). Does **not** override R4, R5, or kill switch. Instagram send is a separate flag.
+`MIA_AUTOMATION_MODE` controls prospect-send behavior. Its deployed value is unverified here.
+It does **not** override R4, R5, or kill switch. Instagram send is a separate flag.
 
 | Value | Prospect WhatsApp send |
 | --- | --- |
@@ -100,9 +101,9 @@ All default **false**. `named_write_may_auto` returns false for R4/R5 always. Fl
 | Flag | Wired | Operator meaning |
 | --- | --- | --- |
 | `MIA_CALENDAR_WRITE` | **Yes** — create + reschedule PATCH | Staging booking/reschedule only after Calendar write OAuth. Reads (free/busy, GET) are not gated. |
-| `MIA_WHATSAPP_HANDOFF_SEND` | Yes (shadow bypass) | When true, verified `MIA_BUSINESS` WhatsApp continuation may send under shadow. Unused while production is `auto_approved`. |
+| `MIA_WHATSAPP_HANDOFF_SEND` | Yes (shadow bypass) | When true, verified `MIA_BUSINESS` WhatsApp continuation may send under shadow. It is not needed in `auto_approved` mode; deployed mode is unverified here. |
 | `MIA_GMAIL_SEND` | No | Ingest only. |
-| `MIA_META_WRITE` | No | Cannot override R4. Campaign execute gated. |
+| `MIA_META_WRITE` | No | Cannot override R4; no autonomous Meta action is enabled. |
 | `MIA_AUTO_REPLY_INSTAGRAM` | Yes (send gate) | Default **false**. Instagram is not a v1 sales inbox. `auto_approved` does not open it. |
 
 Rollout modes (percentage / allowlist) do not exist. Kill switch is global, not per capability.
@@ -113,9 +114,9 @@ Rollout modes (percentage / allowlist) do not exist. Kill switch is global, not 
 
 Highest operational risk if Graph and Composio both send.
 
-- Set **exactly one** of `MIA_INSTAGRAM_SENDER=direct` or `composio`. Production default is `direct`. Flip to `composio` only after staging send is tested (ADR-015).
+- Set **exactly one** of `MIA_INSTAGRAM_SENDER=direct` or `composio`. The runtime default is `direct`; deployed configuration is unverified here. Flip to `composio` only after staging send is tested (ADR-015).
 - Instagram inbound stays Meta HMAC webhook. Not a v1 sales inbox (ADR-017). `MIA_AUTO_REPLY_INSTAGRAM=false`.
-- ManyChat is removed from the app (ADR-032). Do not inject `MIA_MANYCHAT_INGEST_TOKEN`. If that name still exists in AWS Secrets Manager, leave it unused — this repo does not read it.
+- ManyChat is removed from the app (ADR-037). Do not inject `MIA_MANYCHAT_INGEST_TOKEN`. If that name still exists in AWS Secrets Manager, leave it unused — this repo does not read it.
 
 ---
 
@@ -125,7 +126,7 @@ Highest operational risk if Graph and Composio both send.
 uv run mia-migrate
 ```
 
-Applies `migrations/*.sql` in filename order. Sqlite skips Postgres-only `20260821_approval_campaign_resource.sql`. Duplicate columns are treated as already applied. JSON only (`applied` / `skipped` / `already` / `failed`). Never sends. Run this on an existing file-sqlite or Postgres after pulling new SQL files. Prod API does not `create_all` on boot — `mia-migrate` is required. Dev/test `init_db()` still creates missing tables. `/health/ready` is 503 until mapped columns exist. Existing sqlite also needs `20260822_existing_db_scan_columns.sql` (`owner_tasks.due_ready`/`block_reason`, `webhook_events.claimed_at`, `lead_follow_ups.send_ready`/`block_reason`) after `company_domain`. ADR-017: `20260822_conversation_controls.sql` (`leads.takeover_state` + `conversation_controls`).
+Applies `migrations/*.sql` in filename order. Sqlite skips Postgres-only migrations. Duplicate columns are treated as already applied. JSON only (`applied` / `skipped` / `already` / `failed`). Never sends. Run this on an existing file-sqlite or Postgres after pulling new SQL files. When configured with `MIA_ENV=prod`, the API does not `create_all` on boot — `mia-migrate` is required. Dev/test `init_db()` still creates missing tables. `/health/ready` is 503 until mapped columns exist. Existing sqlite also needs `20260822_existing_db_scan_columns.sql` (`owner_tasks.due_ready`/`block_reason`, `webhook_events.claimed_at`, `lead_follow_ups.send_ready`/`block_reason`) after `company_domain`. ADR-017: `20260822_conversation_controls.sql` (`leads.takeover_state` + `conversation_controls`).
 
 ---
 
@@ -137,7 +138,7 @@ uv run mia-due-scan
 
 Also: `uv run python -m app.workers.due_scan`.
 
-Prints JSON counts only: `follow_ups_scanned`, `follow_ups_send_ready`, `owner_tasks_scanned`, `owner_tasks_due_ready`. Uses `MIA_CALENDAR_TIMEZONE` (default `Asia/Jerusalem`) and `MIA_CAMPAIGN_MONTHLY_BUDGET` vs `campaign_pacing.spend` for spend-threshold owner tasks. **Never sends. Never executes owner tasks.** `send_ready=true` is not permission to send.
+Prints JSON counts only: `follow_ups_scanned`, `follow_ups_send_ready`, `owner_tasks_scanned`, `owner_tasks_due_ready`. Uses `MIA_CALENDAR_TIMEZONE` (default `Asia/Jerusalem`). **Never sends. Never executes owner tasks.** `send_ready=true` is not permission to send.
 
 Kill switch: follow-up rows are not send-ready. Owner-task scan still records `due_ready` (`owner_task_scan` asserts with `kill_switch=False`); execute remains gated. While the API is killed, do not expect owner WhatsApp to consume scan results.
 
@@ -179,16 +180,38 @@ Laptop: restart uvicorn after env edits. Production (ADR-014): new ECS task defi
 
 Postgres is the system of record. Sheets is a living snapshot; never read it back into SalesState.
 
+### Authorized Sheets and AssafWeb KPIs
+
+An owner Sheets request is valid only when it comes through the authenticated numeric Telegram
+owner path and targets a spreadsheet ID explicitly configured or allowlisted by Assaf. Reads are
+allowed; a bounded value update or append is low-risk and still passes named capability, `Principal`,
+policy, kill-switch, and idempotency checks. Do not use Drive discovery, create/delete/clear,
+formatting, or formula generation. Never read Sheets back as Mia's source of truth; Postgres owns
+state.
+
+For AssafWeb KPI questions, use the GSC and GA4 API-backed owner capabilities, not browser
+automation. Report normalized GA4 traffic/users/sessions/conversions/pages and GSC
+clicks/impressions/CTR/position/queries. LinkedIn is profile-only. These paths have local
+adapter/owner-tool tests; obtain classified read-only probe evidence before claiming live data.
+
 ---
 
 ## 10. Local live check (not production)
 
-Fill `.env` from `.env.example` for laptop only. Production keys live in Secrets Manager `mia/prod`. `MIA_ENV=prod` must never pair with `MIA_DEMO_MODE=true`. For a local test against [assafweb.com](https://www.assafweb.com/): `MIA_KILL_SWITCH=false`. Widget: `GET /v1/website/widget.js` — AssafWeb already embeds `AskMiaWidget`; Vercel `NEXT_PUBLIC_MIA_BASE_URL=https://mia.assafweb.com` (HTTPS public origin only; localhost rejected). Local look: `GET /v1/website/preview` (LAN bind, not `127.0.0.1` if a leftover listener exists). Prod unmounts `/docs` `/redoc` `/openapi.json` — use `/health`. If loopback widget.js lacks `Cache-Control: no-cache`, a leftover `127.0.0.1:8000` process is serving old bytes.
+Fill `.env` from `.env.example` for laptop only. Production keys belong in Secrets Manager `mia/prod`; whether they are currently stamped is unverified here. `MIA_ENV=prod` must never pair with `MIA_DEMO_MODE=true`. For a local test against [assafweb.com](https://www.assafweb.com/): `MIA_KILL_SWITCH=false`. Widget: `GET /v1/website/widget.js` — AssafWeb embeds `AskMiaWidget`; Vercel `NEXT_PUBLIC_MIA_BASE_URL=https://mia.assafweb.com` (HTTPS public origin only; localhost rejected). Local look: `GET /v1/website/preview` (LAN bind, not `127.0.0.1` if a leftover listener exists). When `MIA_ENV=prod`, `/docs` `/redoc` `/openapi.json` are unmounted — use `/health`. If loopback widget.js lacks `Cache-Control: no-cache`, a leftover `127.0.0.1:8000` process is serving old bytes.
 
 ```
 uv sync --group dev
 uv run pytest
 uv run ruff check app tests
+```
+
+Website probes are read-only for the owner but create website sessions. They send the
+allowed browser Origin explicitly, as production widget writes must be origin-bound:
+
+```
+uv run python scripts/probe_website_flow.py
+uv run python scripts/probe_live_website.py --base https://mia.assafweb.com
 ```
 
 ---
@@ -197,7 +220,6 @@ uv run ruff check app tests
 
 - CloudWatch / LangSmith / Langfuse dashboards and alerts
 - Queue age, DLQ, auth-failure-spike, latency-SLA, cost-anomaly pages
-- Spend-without-leads as an **ops alert** (owner-ack text exists; no pager)
 - Per-capability kill, percentage rollout, AgentCore, Lambda webhook ingress, SQS, WAF
 - Dead-letter replay
 

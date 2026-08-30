@@ -87,19 +87,6 @@ def dot(left: array, right: array) -> float:
     return float(sum(map(mul, left, right)))
 
 
-def cosine_similarity(left: list[float] | array, right: list[float] | array) -> float:
-    """Cosine similarity for vectors that may not be normalized. Used in tests/tools."""
-    left_arr = left if isinstance(left, array) else array(_TYPECODE, left)
-    right_arr = right if isinstance(right, array) else array(_TYPECODE, right)
-    if len(left_arr) != len(right_arr):
-        raise VectorError(f"dimension mismatch: {len(left_arr)} vs {len(right_arr)}")
-    left_norm = math.sqrt(dot(left_arr, left_arr))
-    right_norm = math.sqrt(dot(right_arr, right_arr))
-    if left_norm <= 0.0 or right_norm <= 0.0:
-        return 0.0
-    return dot(left_arr, right_arr) / (left_norm * right_norm)
-
-
 def rank_by_similarity(
     query: list[float] | array,
     candidates: list[tuple[str, str]],

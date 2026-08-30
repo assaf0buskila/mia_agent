@@ -19,13 +19,6 @@ from app.core.write_flags import named_write_may_auto, write_flag_enabled
 from app.db.models import AiRunRow, CanonicalEventRow, OwnerNotificationRow, OwnerTaskRow
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
-from app.domain.approvals import (
-    ACTION_CAMPAIGN_WRITE,
-    DECISION_PENDING,
-    RESOURCE_CAMPAIGN,
-    RISK_R4,
-    apply_owner_approval_decision,
-)
 from app.domain.events import Channel, EventType
 from app.domain.followups import (
     REASON_MEETING_OFFERED,
@@ -477,7 +470,7 @@ async def test_story_calendar_no_double_book(monkeypatch: pytest.MonkeyPatch) ->
         db.close()
 
 
-def test_story_campaign_change_write_stays_gated() -> None:
+def test_story_high_risk_write_stays_gated() -> None:
     settings = get_settings()
     assert (
         decide(
@@ -503,29 +496,6 @@ def test_story_campaign_change_write_stays_gated() -> None:
     assert preloaded_tool("INSTAGRAM_SEND_TEXT_MESSAGE").write is True
     # Mass outbound stays unwired regardless of sender (ADR-016).
     assert preloaded_tool("WHATSAPP_SEND_TEMPLATE_MESSAGE") is None
-
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        campaign_id = "120339980099"
-        result = apply_owner_approval_decision(
-            store,
-            text=f"pause campaign {campaign_id}",
-            channel=Channel.WHATSAPP,
-            kill_switch=False,
-        )
-        db.commit()
-        assert result.status == "queued"
-        row = store.get_approval_by_resource(
-            RESOURCE_CAMPAIGN, campaign_id, ACTION_CAMPAIGN_WRITE
-        )
-        assert row is not None
-        assert row.risk == RISK_R4
-        assert row.decision == DECISION_PENDING
-        assert row.lead_id is None
-    finally:
-        db.close()
 
 
 @pytest.mark.asyncio

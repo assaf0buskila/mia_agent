@@ -58,6 +58,20 @@ class AdapterHttpError(Exception):
         return tool_status_from_http(self.status_code)
 
 
+class AdapterResponseError(AdapterHttpError):
+    """Composio accepted the request but reported that the tool execution failed."""
+
+    def tool_status(self) -> str:
+        return "error"
+
+
+class AdapterSchemaError(AdapterHttpError):
+    """A successful Composio response did not match the pinned adapter contract."""
+
+    def tool_status(self) -> str:
+        return "malformed"
+
+
 def tool_status_from_http(status_code: object) -> str:
     if status_code is None:
         return "retryable"

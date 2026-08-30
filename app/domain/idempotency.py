@@ -13,6 +13,7 @@ ALLOWLISTED_OPERATION_SCOPES = frozenset(
         "approval",
         "owner_task",
         "sheets_mirror",
+        "owner_sheets_write",
         "follow_up",
         "calendar_cancellation",
     }
@@ -65,9 +66,7 @@ class IdempotencyStore(Protocol):
         self, *, scope: str, key: str, ttl_seconds: int = OPERATION_TTL_SECONDS
     ) -> bool: ...
 
-    def complete_operation(
-        self, *, scope: str, key: str, result_json: str = "{}"
-    ) -> None: ...
+    def complete_operation(self, *, scope: str, key: str, result_json: str = "{}") -> None: ...
 
     def fail_operation(self, *, scope: str, key: str) -> None: ...
 

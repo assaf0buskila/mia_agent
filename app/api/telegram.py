@@ -9,25 +9,38 @@ from fastapi import APIRouter, Depends, Header, Request
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db, get_telegram_port, get_transcription_port
+from app.api.inbound_common import outbound_reply
 from app.api.owner import process_owner_texts
-from app.core.config import get_settings
+from app.core.config import AutomationMode, get_settings
+from app.core.demo import demo_mode_active
+from app.core.outbound import send_inbound_reply
 from app.core.webhooks import verify_telegram_secret
 from app.db.store import LeadStore
 from app.domain.ai_runs import elapsed_ms
 from app.domain.events import Channel
-from app.domain.owner_callbacks import resolve_owner_callback
+from app.domain.gmail_drafts import execute_approved_gmail_send
+from app.domain.owner_callbacks import resolve_owner_callback_result
 from app.domain.tools import AdapterHttpError
 from app.integrations.base import MessagePort
+from app.integrations.gmail import build_gmail_port
 from app.integrations.telegram import (
     TelegramMediaError,
     TelegramSendError,
     parse_telegram_callback,
     parse_telegram_update,
+    validate_telegram_voice_media,
 )
 from app.integrations.telegram_format import parse_callback_token
 from app.integrations.transcribe import TranscriptionError, TranscriptionPort
 
 router = APIRouter(prefix="/v1/telegram", tags=["telegram"])
+
+# This is deliberately fixed text: a transcription provider failure must be visible to
+# the owner, but no provider response, audio bytes, transcript, or configuration detail
+# may be reflected back into Telegram.
+_VOICE_TRANSCRIPTION_FAILURE_REPLY = (
+    "לא הצלחתי לתמלל את ההודעה הקולית. אפשר לנסות שוב או לשלוח טקסט."
+)
 
 
 async def _transcribe_telegram_voice(
@@ -35,25 +48,31 @@ async def _transcribe_telegram_voice(
     item: dict[str, str],
     media: object,
     transcribe_port: TranscriptionPort,
-) -> dict[str, str]:
+) -> tuple[dict[str, str], bool]:
     if not item.get("file_id"):
-        return item
+        return item, False
     started = perf_counter()
     download = getattr(media, "download_voice", None)
     if not callable(download):
-        item["text"] = ""
-        item["source"] = "audio"
-        return item
+        return item, True
     try:
-        audio_bytes, mime_type = await download(item["file_id"])
-        try:
-            result = await transcribe_port.transcribe(audio=audio_bytes, mime_type=mime_type)
-        finally:
-            del audio_bytes
-    except (RuntimeError, TelegramMediaError, AdapterHttpError, TranscriptionError):
-        item["text"] = ""
-        item["source"] = "audio"
-        return item
+        downloaded = await download(item["file_id"])
+    except (RuntimeError, TelegramMediaError, AdapterHttpError):
+        return item, True
+    try:
+        audio_bytes, mime_type = downloaded
+    except (TypeError, ValueError):
+        return item, True
+    try:
+        audio_bytes, mime_type = validate_telegram_voice_media(audio_bytes, mime_type)
+    except TelegramMediaError:
+        return item, True
+    try:
+        result = await transcribe_port.transcribe(audio=audio_bytes, mime_type=mime_type)
+    except (RuntimeError, AdapterHttpError, TranscriptionError):
+        return item, True
+    finally:
+        del audio_bytes
     item["text"] = result.text
     item["source"] = "audio"
     item["stt_provider"] = result.stt_provider
@@ -62,7 +81,33 @@ async def _transcribe_telegram_voice(
     item["duration_ms"] = str(result.duration_ms)
     item["confidence"] = result.confidence
     item["stt_latency_ms"] = str(elapsed_ms(started))
-    return item
+    return item, False
+
+
+async def _send_transcription_failure_reply(
+    *,
+    item: dict[str, str],
+    port: MessagePort,
+    kill_switch: bool,
+    automation_mode: AutomationMode,
+) -> bool:
+    """Reply safely when voice media/STT is unavailable, without invoking OwnerGraph.
+
+    There is no owner request text to reason over on this path.  Treating an STT failure
+    as an empty request used to route it through OwnerGraph and turn it into an unrelated
+    clarification, hiding the actual operational failure from Assaf.
+    """
+    return await send_inbound_reply(
+        port=port,
+        message=outbound_reply(
+            item,
+            text=_VOICE_TRANSCRIPTION_FAILURE_REPLY,
+            channel=Channel.TELEGRAM,
+        ),
+        kill_switch=kill_switch,
+        automation_mode=automation_mode,
+        actor_role="owner",
+    )
 
 
 async def _handle_callback(
@@ -71,6 +116,7 @@ async def _handle_callback(
     port: MessagePort,
     owner_ids: set[str],
     db: Session,
+    settings,
 ) -> dict:
     """Resolve one inline-button press.
 
@@ -94,14 +140,24 @@ async def _handle_callback(
     if not decision or not token:
         return {"processed": 0, "ignored": True, "reason": "unrecognized_callback"}
     store = LeadStore(db)
-    resolved = resolve_owner_callback(store, decision=decision, token=token)
+    resolved = resolve_owner_callback_result(store, decision=decision, token=token)
+    reply_text = resolved.text
+    if resolved.gmail_draft_id_to_send is not None:
+        reply_text = execute_approved_gmail_send(
+            store=store,
+            settings=settings,
+            port=build_gmail_port(settings),
+            draft_id=resolved.gmail_draft_id_to_send,
+            kill_switch=settings.kill_switch,
+            demo_active=demo_mode_active(settings),
+        )
     edit = getattr(port, "edit_message_text", None)
     if callable(edit) and callback.get("message_id"):
         try:
             await edit(
                 chat_id=callback["chat_id"],
                 message_id=callback["message_id"],
-                text=resolved,
+                text=reply_text,
                 parse_mode="HTML",
             )
         except (TelegramSendError, AdapterHttpError, RuntimeError):
@@ -143,7 +199,11 @@ async def receive_webhook(
     callback = parse_telegram_callback(payload)
     if callback is not None:
         return await _handle_callback(
-            callback=callback, port=port, owner_ids=owner_ids, db=db
+            callback=callback,
+            port=port,
+            owner_ids=owner_ids,
+            db=db,
+            settings=settings,
         )
     parsed = parse_telegram_update(payload)
     if parsed is None:
@@ -153,9 +213,39 @@ async def receive_webhook(
     store = LeadStore(db)
     item = dict(parsed)
     if item.get("file_id"):
-        item = await _transcribe_telegram_voice(
+        if not store.claim_webhook(
+            provider="telegram",
+            provider_event_id=item["id"],
+            channel=Channel.TELEGRAM.value,
+            envelope_kind="audio",
+        ):
+            return {
+                "processed": 0,
+                "duplicates": 1,
+                "sent": False,
+                "voice_error": True,
+            }
+        item, transcription_failed = await _transcribe_telegram_voice(
             item=item, media=port, transcribe_port=transcribe_port
         )
+        if transcription_failed:
+            sent = await _send_transcription_failure_reply(
+                item=item,
+                port=port,
+                kill_switch=settings.kill_switch,
+                automation_mode=settings.automation_mode,
+            )
+            store.mark_webhook(
+                provider="telegram",
+                provider_event_id=item["id"],
+                status="sent" if sent else "processed",
+            )
+            return {
+                "processed": 1,
+                "duplicates": 0,
+                "sent": sent,
+                "voice_error": True,
+            }
     inbound = {
         "id": item["id"],
         "from": item["from"],
@@ -178,4 +268,6 @@ async def receive_webhook(
         port=port,
         kill_switch=settings.kill_switch,
         owner_ids=owner_ids,
+        preclaimed_event_id=item["id"] if item.get("file_id") else None,
+        preclaimed_envelope_kind="audio" if item.get("file_id") else None,
     )

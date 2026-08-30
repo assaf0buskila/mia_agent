@@ -60,8 +60,8 @@ def test_classify_daily_brief_still_daily_not_weekly() -> None:
     assert weekly.task_type != OwnerTaskType.DAILY_BRIEF
 
 
-def test_classify_weekly_brief_plus_campaign_clarification() -> None:
-    decision = classify_owner_task("weekly brief and campaign spend")
+def test_classify_weekly_brief_plus_analytics_clarification() -> None:
+    decision = classify_owner_task("weekly brief and instagram content")
     assert decision.task_type == OwnerTaskType.NOTE
     assert decision.needs_clarification is True
     assert decision.matched_types == ["analytics", "weekly_brief"]

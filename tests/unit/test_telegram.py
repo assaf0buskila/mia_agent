@@ -1,0 +1,434 @@
+"""Telegram voice adapter: one authenticated note reaches the one OwnerGraph."""
+
+from __future__ import annotations
+
+from itertools import count
+from typing import Any
+
+import httpx
+import pytest
+from app.api import owner as owner_api
+from app.api.deps import get_telegram_port, get_transcription_port
+from app.db.session import init_db
+from app.domain.owner_brain import OwnerBrainResult
+from app.integrations.base import RecordingMessagePort
+from app.integrations.telegram import TelegramMediaError, TelegramPort
+from app.integrations.transcribe import FakeTranscriptionPort, TranscriptionError
+from app.main import app
+from fastapi.testclient import TestClient
+
+OWNER_ID = "551122"
+WEBHOOK_SECRET = "telegram-voice-test-secret"
+_UPDATE_IDS = count(10_000)
+
+
+def _fresh_update_id() -> int:
+    """Avoid process-lifetime SQLite webhook collisions on same-process test reruns."""
+    return next(_UPDATE_IDS)
+
+
+class RecordingTelegramVoicePort(RecordingMessagePort):
+    def __init__(self) -> None:
+        super().__init__()
+        self.downloaded_file_ids: list[str] = []
+
+    async def download_voice(self, file_id: str) -> tuple[bytes, str]:
+        self.downloaded_file_ids.append(file_id)
+        return b"synthetic-ogg", "audio/ogg"
+
+
+class FailingTranscriptionPort:
+    async def transcribe(
+        self, *, audio: bytes, mime_type: str, filename: str = "note.ogg"
+    ) -> object:
+        del audio, mime_type, filename
+        raise TranscriptionError("provider said: transcript and token must stay private")
+
+
+class InvalidMimeTelegramVoicePort(RecordingMessagePort):
+    def __init__(self, mime_type: str) -> None:
+        super().__init__()
+        self.mime_type = mime_type
+        self.downloaded_file_ids: list[str] = []
+
+    async def download_voice(self, file_id: str) -> tuple[bytes, str]:
+        self.downloaded_file_ids.append(file_id)
+        return b"not-audio", self.mime_type
+
+
+class AlternateTelegramVoicePort(RecordingMessagePort):
+    def __init__(self, audio: object, mime_type: object) -> None:
+        super().__init__()
+        self.audio = audio
+        self.mime_type = mime_type
+        self.downloaded_file_ids: list[str] = []
+
+    async def download_voice(self, file_id: str) -> tuple[bytes, str]:
+        self.downloaded_file_ids.append(file_id)
+        return self.audio, self.mime_type  # type: ignore[return-value]
+
+
+class MalformedTelegramVoicePort(RecordingMessagePort):
+    def __init__(self, result: object) -> None:
+        super().__init__()
+        self.result = result
+        self.downloaded_file_ids: list[str] = []
+
+    async def download_voice(self, file_id: str) -> tuple[bytes, str]:
+        self.downloaded_file_ids.append(file_id)
+        return self.result  # type: ignore[return-value]
+
+
+def _voice_update(*, update_id: int, file_id: str) -> dict[str, Any]:
+    return {
+        "update_id": update_id,
+        "message": {
+            "message_id": update_id + 100,
+            "from": {"id": int(OWNER_ID), "username": "not-an-authority"},
+            "chat": {"id": int(OWNER_ID), "type": "private"},
+            "voice": {"file_id": file_id, "mime_type": "audio/ogg"},
+        },
+    }
+
+
+def _configure_owner(monkeypatch) -> None:
+    monkeypatch.setenv("MIA_TELEGRAM_WEBHOOK_SECRET", WEBHOOK_SECRET)
+    monkeypatch.setenv("MIA_TELEGRAM_OWNER_USER_IDS", OWNER_ID)
+    monkeypatch.setenv("MIA_TELEGRAM_BOT_TOKEN", "test-bot-token")
+
+
+def test_voice_note_downloads_transcribes_reaches_owner_graph_and_escapes_html(monkeypatch) -> None:
+    """A real webhook request proves the complete channel path, not a helper-only hop."""
+    _configure_owner(monkeypatch)
+    init_db()
+    telegram = RecordingTelegramVoicePort()
+    transcribe = FakeTranscriptionPort("תבדקי את התזכורת")
+    graph_inputs: list[dict[str, Any]] = []
+
+    def owner_graph_result(**kwargs: object) -> OwnerBrainResult:
+        graph_inputs.append(dict(kwargs))
+        return OwnerBrainResult("<owner reply & verified>", True, ())
+
+    monkeypatch.setattr(owner_api, "answer_owner", owner_graph_result)
+    app.dependency_overrides[get_telegram_port] = lambda: telegram
+    app.dependency_overrides[get_transcription_port] = lambda: transcribe
+    try:
+        update_id = _fresh_update_id()
+        with TestClient(app) as client:
+            response = client.post(
+                "/v1/telegram/webhook",
+                json=_voice_update(update_id=update_id, file_id="voice-file-701"),
+                headers={"X-Telegram-Bot-Api-Secret-Token": WEBHOOK_SECRET},
+            )
+        assert response.status_code == 200
+        assert response.json()["processed"] == 1
+        assert telegram.downloaded_file_ids == ["voice-file-701"]
+        assert transcribe.call_count == 1
+        assert len(graph_inputs) == 1
+        assert graph_inputs[0]["owner_text"] == "תבדקי את התזכורת"
+        assert telegram.sent[0].text == "&lt;owner reply &amp; verified&gt;"
+        assert telegram.sent[0].parse_mode == "HTML"
+    finally:
+        app.dependency_overrides.pop(get_telegram_port, None)
+        app.dependency_overrides.pop(get_transcription_port, None)
+
+
+def test_voice_transcription_failure_is_visible_and_does_not_enter_owner_graph(monkeypatch) -> None:
+    _configure_owner(monkeypatch)
+    init_db()
+    telegram = RecordingTelegramVoicePort()
+    graph_calls: list[object] = []
+    monkeypatch.setattr(owner_api, "answer_owner", lambda **kwargs: graph_calls.append(kwargs))
+    app.dependency_overrides[get_telegram_port] = lambda: telegram
+    app.dependency_overrides[get_transcription_port] = lambda: FailingTranscriptionPort()
+    try:
+        update_id = _fresh_update_id()
+        with TestClient(app) as client:
+            response = client.post(
+                "/v1/telegram/webhook",
+                json=_voice_update(update_id=update_id, file_id="voice-file-702"),
+                headers={"X-Telegram-Bot-Api-Secret-Token": WEBHOOK_SECRET},
+            )
+        assert response.status_code == 200
+        assert response.json() == {
+            "processed": 1,
+            "duplicates": 0,
+            "sent": True,
+            "voice_error": True,
+        }
+        assert telegram.sent[0].text == (
+            "לא הצלחתי לתמלל את ההודעה הקולית. אפשר לנסות שוב או לשלוח טקסט."
+        )
+        assert telegram.sent[0].parse_mode == "HTML"
+        assert not graph_calls
+        rendered = str(telegram.sent) + str(response.json())
+        assert "provider said" not in rendered
+        assert "transcript and token" not in rendered
+    finally:
+        app.dependency_overrides.pop(get_telegram_port, None)
+        app.dependency_overrides.pop(get_transcription_port, None)
+
+
+def test_retried_voice_transcription_failure_sends_one_visible_reply(monkeypatch) -> None:
+    _configure_owner(monkeypatch)
+    init_db()
+    telegram = RecordingTelegramVoicePort()
+    app.dependency_overrides[get_telegram_port] = lambda: telegram
+    app.dependency_overrides[get_transcription_port] = lambda: FailingTranscriptionPort()
+    try:
+        update_id = _fresh_update_id()
+        with TestClient(app) as client:
+            first = client.post(
+                "/v1/telegram/webhook",
+                json=_voice_update(update_id=update_id, file_id="voice-file-703"),
+                headers={"X-Telegram-Bot-Api-Secret-Token": WEBHOOK_SECRET},
+            )
+            retry = client.post(
+                "/v1/telegram/webhook",
+                json=_voice_update(update_id=update_id, file_id="voice-file-703"),
+                headers={"X-Telegram-Bot-Api-Secret-Token": WEBHOOK_SECRET},
+            )
+        assert first.json()["sent"] is True
+        assert retry.json() == {
+            "processed": 0,
+            "duplicates": 1,
+            "sent": False,
+            "voice_error": True,
+        }
+        assert len(telegram.sent) == 1
+    finally:
+        app.dependency_overrides.pop(get_telegram_port, None)
+        app.dependency_overrides.pop(get_transcription_port, None)
+
+
+def test_retried_voice_success_claims_before_download_stt_graph_and_reply(monkeypatch) -> None:
+    _configure_owner(monkeypatch)
+    init_db()
+    telegram = RecordingTelegramVoicePort()
+    transcribe = FakeTranscriptionPort("תבדקי את התזכורת")
+    graph_calls: list[object] = []
+    monkeypatch.setattr(
+        owner_api,
+        "answer_owner",
+        lambda **kwargs: graph_calls.append(kwargs) or OwnerBrainResult("ok", True, ()),
+    )
+    app.dependency_overrides[get_telegram_port] = lambda: telegram
+    app.dependency_overrides[get_transcription_port] = lambda: transcribe
+    try:
+        update_id = _fresh_update_id()
+        with TestClient(app) as client:
+            first = client.post(
+                "/v1/telegram/webhook",
+                json=_voice_update(update_id=update_id, file_id="voice-file-704"),
+                headers={"X-Telegram-Bot-Api-Secret-Token": WEBHOOK_SECRET},
+            )
+            retry = client.post(
+                "/v1/telegram/webhook",
+                json=_voice_update(update_id=update_id, file_id="voice-file-704"),
+                headers={"X-Telegram-Bot-Api-Secret-Token": WEBHOOK_SECRET},
+            )
+        assert first.json()["processed"] == 1
+        assert retry.json()["duplicates"] == 1
+        assert telegram.downloaded_file_ids == ["voice-file-704"]
+        assert transcribe.call_count == 1
+        assert len(graph_calls) == len(telegram.sent) == 1
+    finally:
+        app.dependency_overrides.pop(get_telegram_port, None)
+        app.dependency_overrides.pop(get_transcription_port, None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "content_type",
+    [
+        None,
+        "",
+        "text/html",
+        "application/json",
+        "image/png",
+        "application/octet-stream",
+        "audio/ogg; broken",
+    ],
+)
+async def test_telegram_download_voice_rejects_non_audio_and_malformed_content_types(
+    content_type: str | None,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/getFile"):
+            return httpx.Response(200, json={"ok": True, "result": {"file_path": "voice/note.ogg"}})
+        headers = {} if content_type is None else {"content-type": content_type}
+        return httpx.Response(200, content=b"not-audio", headers=headers)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        port = TelegramPort(bot_token="test-bot-token", client=client)
+        with pytest.raises(TelegramMediaError):
+            await port.download_voice("voice-file-invalid-mime")
+
+
+@pytest.mark.asyncio
+async def test_telegram_download_voice_normalizes_supported_audio_content_type() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/getFile"):
+            return httpx.Response(200, json={"ok": True, "result": {"file_path": "voice/note.ogg"}})
+        return httpx.Response(
+            200,
+            content=b"audio",
+            headers={"content-type": "Audio/Ogg; codecs=opus"},
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        port = TelegramPort(bot_token="test-bot-token", client=client)
+        audio, mime_type = await port.download_voice("voice-file-valid-mime")
+    assert audio == b"audio"
+    assert mime_type == "audio/ogg"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("media_case", ["empty", "oversize"])
+async def test_telegram_download_voice_rejects_empty_and_oversize_audio(media_case: str) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/getFile"):
+            return httpx.Response(200, json={"ok": True, "result": {"file_path": "voice/note.ogg"}})
+        content = b"" if media_case == "empty" else b"x" * 16_000_001
+        return httpx.Response(200, content=content, headers={"content-type": "audio/ogg"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        port = TelegramPort(bot_token="test-bot-token", client=client)
+        with pytest.raises(TelegramMediaError):
+            await port.download_voice(f"voice-file-{media_case}")
+
+
+@pytest.mark.parametrize(
+    "mime_type",
+    [
+        "text/html",
+        "application/json",
+        "image/png",
+        "application/octet-stream",
+        "",
+        "audio/ogg; broken",
+    ],
+)
+def test_invalid_voice_mime_is_visible_and_never_reaches_stt_or_owner_graph(
+    monkeypatch,
+    mime_type: str,
+) -> None:
+    _configure_owner(monkeypatch)
+    init_db()
+    telegram = InvalidMimeTelegramVoicePort(mime_type)
+    transcribe = FakeTranscriptionPort("must not be used")
+    graph_calls: list[object] = []
+    monkeypatch.setattr(owner_api, "answer_owner", lambda **kwargs: graph_calls.append(kwargs))
+    app.dependency_overrides[get_telegram_port] = lambda: telegram
+    app.dependency_overrides[get_transcription_port] = lambda: transcribe
+    try:
+        update_id = _fresh_update_id()
+        with TestClient(app) as client:
+            response = client.post(
+                "/v1/telegram/webhook",
+                json=_voice_update(update_id=update_id, file_id="voice-file-invalid-mime"),
+                headers={"X-Telegram-Bot-Api-Secret-Token": WEBHOOK_SECRET},
+            )
+        assert response.status_code == 200
+        assert response.json()["voice_error"] is True
+        assert telegram.downloaded_file_ids == ["voice-file-invalid-mime"]
+        assert transcribe.call_count == 0
+        assert graph_calls == []
+        assert telegram.sent[0].text == (
+            "לא הצלחתי לתמלל את ההודעה הקולית. אפשר לנסות שוב או לשלוח טקסט."
+        )
+    finally:
+        app.dependency_overrides.pop(get_telegram_port, None)
+        app.dependency_overrides.pop(get_transcription_port, None)
+
+
+@pytest.mark.parametrize(
+    ("media_case", "mime_type"),
+    [
+        ("empty", "audio/ogg"),
+        ("oversize", "audio/ogg"),
+        ("valid", "text/plain"),
+        ("valid", ""),
+        ("valid", "audio/ogg; broken"),
+        ("valid", None),
+        ("not-bytes", "audio/ogg"),
+    ],
+)
+def test_alternate_voice_port_cannot_bypass_media_validation(
+    monkeypatch, media_case: str, mime_type: object
+) -> None:
+    _configure_owner(monkeypatch)
+    init_db()
+    audio: object = {
+        "empty": b"",
+        "oversize": b"x" * 16_000_001,
+        "valid": b"voice",
+        "not-bytes": "not-bytes",
+    }[media_case]
+    telegram = AlternateTelegramVoicePort(audio, mime_type)
+    transcribe = FakeTranscriptionPort("must not be used")
+    graph_calls: list[object] = []
+    monkeypatch.setattr(owner_api, "answer_owner", lambda **kwargs: graph_calls.append(kwargs))
+    app.dependency_overrides[get_telegram_port] = lambda: telegram
+    app.dependency_overrides[get_transcription_port] = lambda: transcribe
+    try:
+        update_id = _fresh_update_id()
+        with TestClient(app) as client:
+            response = client.post(
+                "/v1/telegram/webhook",
+                json=_voice_update(update_id=update_id, file_id="alternate-voice"),
+                headers={"X-Telegram-Bot-Api-Secret-Token": WEBHOOK_SECRET},
+            )
+        assert response.json()["voice_error"] is True
+        assert telegram.downloaded_file_ids == ["alternate-voice"]
+        assert transcribe.call_count == 0
+        assert graph_calls == []
+        assert len(telegram.sent) == 1
+    finally:
+        app.dependency_overrides.pop(get_telegram_port, None)
+        app.dependency_overrides.pop(get_transcription_port, None)
+
+
+@pytest.mark.parametrize(
+    "malformed_result",
+    [
+        None,
+        (b"voice",),
+        (b"voice", "audio/ogg", "extra"),
+        "not-a-pair",
+        {"audio": b"voice", "mime": "audio/ogg"},
+    ],
+)
+def test_malformed_voice_download_result_is_visible_once_and_never_reaches_stt_or_graph(
+    monkeypatch, malformed_result: object
+) -> None:
+    _configure_owner(monkeypatch)
+    init_db()
+    telegram = MalformedTelegramVoicePort(malformed_result)
+    transcribe = FakeTranscriptionPort("must not be used")
+    graph_calls: list[object] = []
+    monkeypatch.setattr(owner_api, "answer_owner", lambda **kwargs: graph_calls.append(kwargs))
+    app.dependency_overrides[get_telegram_port] = lambda: telegram
+    app.dependency_overrides[get_transcription_port] = lambda: transcribe
+    try:
+        update_id = _fresh_update_id()
+        with TestClient(app) as client:
+            first = client.post(
+                "/v1/telegram/webhook",
+                json=_voice_update(update_id=update_id, file_id="malformed-voice"),
+                headers={"X-Telegram-Bot-Api-Secret-Token": WEBHOOK_SECRET},
+            )
+            retry = client.post(
+                "/v1/telegram/webhook",
+                json=_voice_update(update_id=update_id, file_id="malformed-voice"),
+                headers={"X-Telegram-Bot-Api-Secret-Token": WEBHOOK_SECRET},
+            )
+        assert first.json()["voice_error"] is True
+        assert retry.json()["duplicates"] == 1
+        assert telegram.downloaded_file_ids == ["malformed-voice"]
+        assert transcribe.call_count == 0
+        assert graph_calls == []
+        assert len(telegram.sent) == 1
+    finally:
+        app.dependency_overrides.pop(get_telegram_port, None)
+        app.dependency_overrides.pop(get_transcription_port, None)

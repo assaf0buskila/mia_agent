@@ -15,9 +15,12 @@ import ast
 from pathlib import Path
 
 import pytest
+from app.api import owner
+from app.api.owner import process_owner_item, process_owner_texts
 from app.capabilities.policy import authorize, execute_capability
 from app.capabilities.types import GraphName, Principal
 from app.core.errors import ApprovalRequired, PermissionDenied
+from app.domain.events import Channel
 
 APP = Path(__file__).resolve().parents[2] / "app"
 
@@ -78,6 +81,75 @@ def test_a_client_principal_cannot_be_widened_by_its_holder() -> None:
     assert visitor.graph is GraphName.CLIENT
     with pytest.raises((AttributeError, TypeError)):
         visitor.graph = GraphName.OWNER  # type: ignore[misc]
+
+
+@pytest.mark.asyncio
+async def test_owner_mint_rejects_empty_or_non_numeric_allowlists_before_side_effects() -> None:
+    """The owner helper is safe even when a legacy caller bypasses its channel check."""
+    base = dict(
+        item={"id": "evt", "from": "123", "text": "hello"},
+        provider="telegram",
+        channel=object(),
+        store=object(),
+        port=object(),
+        kill_switch=False,
+        settings=object(),
+        calendar_port=object(),
+        calendar_agenda_port=None,
+        gmail_port=object(),
+        sheets_port=object(),
+        instagram_insights_port=object(),
+        research_port=object(),
+        linkedin_port=object(),
+        search_console_port=object(),
+        ga4_port=object(),
+        seo_audit_port=object(),
+        owner_reply_port=object(),
+    )
+    for owner_ids in (set(), {"not-numeric"}, {"456"}):
+        result = await process_owner_item(owner_ids=owner_ids, **base)  # type: ignore[arg-type]
+        assert result.processed is False
+        assert result.sent is False
+
+
+@pytest.mark.asyncio
+async def test_owner_batch_rejects_before_constructing_default_adapters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("unauthorized owner batch must not construct an adapter")
+
+    for name in (
+        "get_settings",
+        "build_calendar_port",
+        "build_calendar_agenda_port",
+        "build_gmail_port",
+        "build_sheets_port",
+        "build_instagram_insights_port",
+        "build_research_port",
+        "build_linkedin_port",
+        "build_search_console_port",
+        "build_ga4_port",
+        "build_seo_audit_port",
+        "build_owner_reply_port",
+    ):
+        monkeypatch.setattr(owner, name, forbidden)
+    result = await process_owner_texts(
+        provider="telegram",
+        channel=Channel.TELEGRAM,
+        items=[{"id": "evt", "from": "not-numeric", "text": "hello"}],
+        store=object(),
+        port=object(),
+        kill_switch=False,
+        owner_ids={"123"},
+    )
+    assert result == {
+        "processed": 0,
+        "duplicates": 0,
+        "sent": False,
+        "sent_count": 0,
+        "reply": None,
+    }
 
 
 def test_a_handler_cannot_be_reached_without_passing_authorize() -> None:

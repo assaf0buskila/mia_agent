@@ -12,9 +12,11 @@ import sys
 
 from app.evals.harness import (
     run_buyer_eval,
+    run_calendar_eval,
     run_extract_eval,
     run_gold_eval,
     run_objection_eval,
+    run_routing_eval,
     run_safety_eval,
     run_sales_eval,
     run_website_handoff_eval,
@@ -24,9 +26,11 @@ from app.evals.harness import (
 RUNNERS = {
     "sales": run_sales_eval,
     "buyer": run_buyer_eval,
+    "calendar": run_calendar_eval,
     "website_handoff": run_website_handoff_eval,
     "safety": run_safety_eval,
     "objection": run_objection_eval,
+    "routing": run_routing_eval,
     "extract": run_extract_eval,
     "writing": run_writing_eval,
     "gold": run_gold_eval,

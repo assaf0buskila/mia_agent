@@ -42,10 +42,13 @@ def test_approvals_is_human_only_with_approval() -> None:
     assert policy.approval_required is True
 
 
-def test_meta_ads_is_deterministic() -> None:
+def test_meta_ads_is_unsupported_and_fails_safe() -> None:
     policy = policy_for(CapabilityId.META_ADS)
-    assert policy.execution_mode == ExecutionMode.DETERMINISTIC
-    assert policy.risk == RiskLevel.R0_READ
+    assert policy.execution_mode == ExecutionMode.HUMAN_ONLY
+    assert policy.risk == RiskLevel.R5_DESTRUCTIVE
+    assert policy.approval_required is True
+    assert policy.fail_closed is True
+    assert policy.minimum_confidence == 1.0
 
 
 def test_aws_runtime_is_human_only() -> None:

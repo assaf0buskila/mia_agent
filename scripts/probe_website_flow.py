@@ -46,18 +46,22 @@ CONVERSATIONS: dict[str, list[str]] = {
         "let's book a meeting",
     ],
 }
+WEBSITE_ORIGIN = "https://www.assafweb.com"
 
 
 def main() -> int:
     init_db()
     with TestClient(app) as client:
         for name, messages in CONVERSATIONS.items():
-            session_id = client.post("/v1/website/sessions").json()["session_id"]
+            session_id = client.post(
+                "/v1/website/sessions", headers={"Origin": WEBSITE_ORIGIN}
+            ).json()["session_id"]
             print(f"\n=== {name} ===")
             for text in messages:
                 body = client.post(
                     f"/v1/website/sessions/{session_id}/messages",
                     json={"text": text},
+                    headers={"Origin": WEBSITE_ORIGIN},
                 ).json()
                 print(f"  > {text}")
                 print(f"  {body['next_action']:<18} | {body['message']}")

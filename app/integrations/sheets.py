@@ -2,20 +2,25 @@
 
 Postgres is the system of record. This port upserts snapshots to ``01 Leads``,
 ``04 Meetings``, ``05 Deals``, ``06 Lead Sources``, ``08 Follow-ups``, ``09 Weekly KPI``, and
-``10 Mia Activity`` — never read sheet data back. Lead source and weekly KPI
+``10 Mia Activity`` — and exposes bounded reads plus values-only updates/appends
+for explicitly authorized owner spreadsheets. It never reads Sheets back as Mia's
+internal truth, decision input, or recovery source. Lead source and weekly KPI
 rows upsert on website session create; lead, follow-up, deal, meeting, activity, and
 weekly KPI rows upsert after sales graph turns.
 
 Production adapter: Composio ``GOOGLESHEETS`` toolkit version ``20260813_00``,
-pin ``GOOGLESHEETS_UPSERT_ROWS`` only when ``MIA_COMPOSIO_API_KEY``,
+pins the legacy mirror ``GOOGLESHEETS_UPSERT_ROWS`` plus owner-operational
+``GOOGLESHEETS_VALUES_GET``, ``GOOGLESHEETS_VALUES_UPDATE``, and
+``GOOGLESHEETS_SPREADSHEETS_VALUES_APPEND`` only when ``MIA_COMPOSIO_API_KEY``,
 ``MIA_COMPOSIO_USER_ID``, and ``MIA_SHEETS_SPREADSHEET_ID`` are set.
-Never clear/delete/create-spreadsheet/read tools this slice.
+Never clear/delete/create-spreadsheet/format/share tools this slice.
 """
 
 from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from datetime import UTC, datetime
 from time import perf_counter
 from typing import Any, Protocol
@@ -36,7 +41,12 @@ from app.domain.deals import (
     ALLOWLISTED_CONFIDENCE,
     ALLOWLISTED_STAGES,
 )
-from app.domain.events import Channel, sheets_tab_mirror_outcome
+from app.domain.events import (
+    Channel,
+    persist_tool_outcome,
+    sheets_mirror_outcome,
+    sheets_tab_mirror_outcome,
+)
 from app.domain.followups import (
     REASON_MEETING_BOOKED,
     REASON_MEETING_OFFERED,
@@ -53,19 +63,23 @@ from app.domain.meetings import (
     STATUS_OFFERED,
 )
 from app.domain.sales import NextAction
-from app.domain.tools import AdapterHttpError, ToolOutcome
+from app.domain.tools import (
+    AdapterHttpError,
+    AdapterResponseError,
+    AdapterSchemaError,
+    ToolOutcome,
+)
 
 SHEETS_MIRROR_SCOPE = "sheets_mirror"
 SHEETS_MIRROR_TABS = frozenset({"sales", "session", "content"})
 
 COMPOSIO_GOOGLESHEETS_VERSION = "20260813_00"
 COMPOSIO_UPSERT_ROWS_TOOL = "GOOGLESHEETS_UPSERT_ROWS"
-COMPOSIO_SEARCH_SPREADSHEETS_TOOL = "GOOGLESHEETS_SEARCH_SPREADSHEETS"
+COMPOSIO_VALUES_GET_TOOL = "GOOGLESHEETS_VALUES_GET"
+COMPOSIO_VALUES_UPDATE_TOOL = "GOOGLESHEETS_VALUES_UPDATE"
+COMPOSIO_VALUES_APPEND_TOOL = "GOOGLESHEETS_SPREADSHEETS_VALUES_APPEND"
 _COMPOSIO_EXECUTE_BASE = "https://backend.composio.dev/api/v3.1/tools/execute"
-_COMPOSIO_EXECUTE_URL = (
-    f"{_COMPOSIO_EXECUTE_BASE}/{COMPOSIO_UPSERT_ROWS_TOOL}"
-)
-PREFERRED_SHEET_NAME = "mia"
+_COMPOSIO_EXECUTE_URL = f"{_COMPOSIO_EXECUTE_BASE}/{COMPOSIO_UPSERT_ROWS_TOOL}"
 
 LEADS_SHEET_NAME = "01 Leads"
 LEADS_KEY_COLUMN = "Lead ID"
@@ -157,37 +171,106 @@ CONTENT_HEADERS = [
     "Lead Signals",
 ]
 _METRIC_PATTERN = re.compile(r"^[0-9]*$")
+_A1_RANGE_PATTERN = re.compile(
+    r"^(?:[A-Za-z0-9 _-]{1,80}!)?[A-Z]{1,3}[1-9][0-9]{0,5}(?::[A-Z]{1,3}[1-9][0-9]{0,5})?$"
+)
+_A1_ENDPOINT_PATTERN = re.compile(r"^([A-Z]{1,3})([1-9][0-9]{0,5})$")
+MAX_OWNER_SHEET_ROWS = 20
+MAX_OWNER_SHEET_COLUMNS = 10
+MAX_OWNER_SHEET_CELL_CHARS = 500
 
-BUDGET_SHEET_NAME = "02 Campaign Budget"
-BUDGET_KEY_COLUMN = "Campaign"
-BUDGET_HEADERS = [
-    "Campaign",
-    "Monthly Budget",
-    "Spend",
-    "Expected Spend",
-    "Remaining",
-    "Projected",
-    "Over Under",
-    "Status",
-]
 
-PERF_SHEET_NAME = "03 Campaign Performance"
-PERF_KEY_COLUMN = "Campaign"
-PERF_HEADERS = [
-    "Campaign",
-    "Spend",
-    "CTR",
-    "CPC",
-    "CPL",
-    "Qualified CPL",
-    "Meetings",
-    "Deals",
-    "Revenue",
-    "ROAS",
-]
-_CAMPAIGN_KEY_PATTERN = re.compile(r"^[a-zA-Z0-9._-]{1,32}$")
-_NUMERIC_MIRROR_PATTERN = re.compile(r"^-?\d+(\.\d{1,2})?$")
-_PACING_STATUSES = frozenset({"on_track", "over", "under", "uncertain"})
+def _normalize_sheet_values(raw: object) -> list[list[str]]:
+    if not isinstance(raw, list) or not raw or len(raw) > MAX_OWNER_SHEET_ROWS:
+        raise ValueError("values must contain 1-20 rows")
+    values: list[list[str]] = []
+    for row in raw:
+        if not isinstance(row, list) or not row or len(row) > MAX_OWNER_SHEET_COLUMNS:
+            raise ValueError("each row must contain 1-10 cells")
+        normalized_row: list[str] = []
+        for cell in row:
+            if not isinstance(cell, str):
+                raise ValueError("sheet cells must be strings")
+            text = cell.strip()
+            if not text:
+                raise ValueError("sheet cells must not be empty")
+            if len(text) > MAX_OWNER_SHEET_CELL_CHARS:
+                raise ValueError("sheet cell exceeds 500 characters")
+            if text.startswith("="):
+                raise ValueError("formula-leading sheet values are forbidden")
+            normalized_row.append(text)
+        values.append(normalized_row)
+    return values
+
+
+def _normalize_sheet_read_values(raw: object) -> list[list[str]]:
+    if not isinstance(raw, list) or len(raw) > MAX_OWNER_SHEET_ROWS:
+        raise AdapterSchemaError()
+    values: list[list[str]] = []
+    for row in raw:
+        if not isinstance(row, list) or len(row) > MAX_OWNER_SHEET_COLUMNS:
+            raise AdapterSchemaError()
+        normalized_row: list[str] = []
+        for cell in row:
+            if not isinstance(cell, str) or len(cell) > MAX_OWNER_SHEET_CELL_CHARS:
+                raise AdapterSchemaError()
+            normalized_row.append(cell)
+        values.append(normalized_row)
+    return values
+
+
+def validate_owner_sheet_request(
+    *,
+    spreadsheet_id: str,
+    a1_range: str,
+    values: object | None,
+    allowed_spreadsheet_ids: frozenset[str],
+) -> tuple[str, str, list[list[str]]]:
+    target = spreadsheet_id.strip()
+    bounded_range = a1_range.strip()
+    if not target or target not in allowed_spreadsheet_ids:
+        raise ValueError("spreadsheet id is not allowlisted")
+    max_rows, max_columns = _parse_bounded_a1_range(bounded_range)
+    if values is None:
+        return target, bounded_range, []
+    normalized = _normalize_sheet_values(values)
+    if len(normalized) > max_rows or any(len(row) > max_columns for row in normalized):
+        raise ValueError("values exceed the target A1 range")
+    return target, bounded_range, normalized
+
+
+def _parse_bounded_a1_range(a1_range: str) -> tuple[int, int]:
+    """Validate endpoint order and the approved 20-row by 10-column request window."""
+    if not _A1_RANGE_PATTERN.fullmatch(a1_range):
+        raise ValueError("range must be a bounded A1 range")
+    _prefix, _bang, cells = a1_range.partition("!")
+    if not _bang:
+        cells = _prefix
+    start, separator, end = cells.partition(":")
+    if not separator:
+        end = start
+    start_match = _A1_ENDPOINT_PATTERN.fullmatch(start)
+    end_match = _A1_ENDPOINT_PATTERN.fullmatch(end)
+    if start_match is None or end_match is None:
+        raise ValueError("range must be a bounded A1 range")
+    start_column = _a1_column_number(start_match.group(1))
+    end_column = _a1_column_number(end_match.group(1))
+    start_row = int(start_match.group(2))
+    end_row = int(end_match.group(2))
+    if end_column < start_column or end_row < start_row:
+        raise ValueError("range endpoints must be ordered")
+    row_span = end_row - start_row + 1
+    column_span = end_column - start_column + 1
+    if row_span > MAX_OWNER_SHEET_ROWS or column_span > MAX_OWNER_SHEET_COLUMNS:
+        raise ValueError("range exceeds the 20-row by 10-column limit")
+    return row_span, column_span
+
+
+def _a1_column_number(column: str) -> int:
+    number = 0
+    for letter in column:
+        number = number * 26 + ord(letter) - ord("A") + 1
+    return number
 
 
 class LeadMirrorRow(BaseModel):
@@ -266,31 +349,16 @@ class ContentMirrorRow(BaseModel):
     lead_signals: int = Field(default=0, ge=0)
 
 
-class BudgetMirrorRow(BaseModel):
-    campaign: str
-    monthly_budget: str
-    spend: str = ""
-    expected_spend: str = ""
-    remaining: str = ""
-    projected: str = ""
-    over_under: str = ""
-    status: str
-
-
-class PerformanceMirrorRow(BaseModel):
-    campaign: str
-    spend: str = ""
-    ctr: str = ""
-    cpc: str = ""
-    cpl: str = ""
-    qualified_cpl: str = ""
-    meetings: str = ""
-    deals: str = ""
-    revenue: str = ""
-    roas: str = ""
-
-
 class SheetsPort(Protocol):
+    def read_values(self, *, spreadsheet_id: str, a1_range: str) -> list[list[str]]: ...
+
+    def update_values(
+        self, *, spreadsheet_id: str, a1_range: str, values: list[list[str]]
+    ) -> None: ...
+
+    def append_values(
+        self, *, spreadsheet_id: str, a1_range: str, values: list[list[str]]
+    ) -> None: ...
     def upsert_lead(self, row: LeadMirrorRow) -> None: ...
 
     def upsert_source(self, row: SourceMirrorRow) -> None: ...
@@ -307,12 +375,18 @@ class SheetsPort(Protocol):
 
     def upsert_content(self, row: ContentMirrorRow) -> None: ...
 
-    def upsert_budget(self, row: BudgetMirrorRow) -> None: ...
-
-    def upsert_performance(self, row: PerformanceMirrorRow) -> None: ...
-
 
 class DisabledSheetsPort:
+    def read_values(self, *, spreadsheet_id: str, a1_range: str) -> list[list[str]]:
+        del spreadsheet_id, a1_range
+        return []
+
+    def update_values(self, *, spreadsheet_id: str, a1_range: str, values: list[list[str]]) -> None:
+        del spreadsheet_id, a1_range, values
+
+    def append_values(self, *, spreadsheet_id: str, a1_range: str, values: list[list[str]]) -> None:
+        del spreadsheet_id, a1_range, values
+
     def upsert_lead(self, row: LeadMirrorRow) -> None:
         del row
 
@@ -337,12 +411,6 @@ class DisabledSheetsPort:
     def upsert_content(self, row: ContentMirrorRow) -> None:
         del row
 
-    def upsert_budget(self, row: BudgetMirrorRow) -> None:
-        del row
-
-    def upsert_performance(self, row: PerformanceMirrorRow) -> None:
-        del row
-
 
 class ComposioSheetsPort:
     """Live Composio adapter. HTTP/transport raises AdapterHttpError; 200 unsuccessful skips."""
@@ -353,16 +421,16 @@ class ComposioSheetsPort:
         api_key: str,
         user_id: str,
         spreadsheet_id: str = "",
+        allowed_spreadsheet_ids: frozenset[str] = frozenset(),
         client: httpx.Client | None = None,
     ) -> None:
         self._api_key = api_key
         self._user_id = user_id
         self._spreadsheet_id = spreadsheet_id.strip()
+        self._allowed_spreadsheet_ids = frozenset(allowed_spreadsheet_ids)
         self._client = client
 
-    def _execute_tool(
-        self, tool_slug: str, arguments: dict[str, Any]
-    ) -> dict[str, Any] | None:
+    def _execute_tool(self, tool_slug: str, arguments: dict[str, Any]) -> dict[str, Any] | None:
         payload = {
             "user_id": self._user_id,
             "version": COMPOSIO_GOOGLESHEETS_VERSION,
@@ -375,31 +443,29 @@ class ComposioSheetsPort:
         url = f"{_COMPOSIO_EXECUTE_BASE}/{tool_slug}"
         try:
             if self._client is not None:
-                response = self._client.post(
-                    url, json=payload, headers=request_headers
-                )
+                response = self._client.post(url, json=payload, headers=request_headers)
             else:
                 with httpx.Client(timeout=20.0) as client:
-                    response = client.post(
-                        url, json=payload, headers=request_headers
-                    )
+                    response = client.post(url, json=payload, headers=request_headers)
         except httpx.HTTPError as exc:
             raise AdapterHttpError(None) from exc
         if response.status_code >= 400:
             raise AdapterHttpError(response.status_code)
         try:
             body = response.json()
-            if not isinstance(body, dict) or body.get("successful") is not True:
-                return None
+            if not isinstance(body, dict) or not isinstance(body.get("successful"), bool):
+                raise AdapterSchemaError()
+            if body["successful"] is False:
+                raise AdapterResponseError()
             data = body.get("data")
             if isinstance(data, str):
                 try:
                     data = json.loads(data)
                 except json.JSONDecodeError:
-                    return None
+                    raise AdapterSchemaError() from None
             if isinstance(data, dict):
                 return data
-            return None
+            raise AdapterSchemaError()
         except (
             ValueError,
             KeyError,
@@ -407,7 +473,57 @@ class ComposioSheetsPort:
             AttributeError,
             IndexError,
         ):
-            return None
+            raise AdapterSchemaError() from None
+
+    def read_values(self, *, spreadsheet_id: str, a1_range: str) -> list[list[str]]:
+        target, bounded_range, _ = validate_owner_sheet_request(
+            spreadsheet_id=spreadsheet_id,
+            a1_range=a1_range,
+            values=None,
+            allowed_spreadsheet_ids=self._allowed_spreadsheet_ids,
+        )
+        data = self._execute_tool(
+            COMPOSIO_VALUES_GET_TOOL,
+            {"spreadsheetId": target, "range": bounded_range},
+        )
+        raw_values = (data or {}).get("values")
+        if not isinstance(raw_values, list):
+            raise AdapterSchemaError()
+        return _normalize_sheet_read_values(raw_values)
+
+    def update_values(self, *, spreadsheet_id: str, a1_range: str, values: list[list[str]]) -> None:
+        target, bounded_range, bounded_values = validate_owner_sheet_request(
+            spreadsheet_id=spreadsheet_id,
+            a1_range=a1_range,
+            values=values,
+            allowed_spreadsheet_ids=self._allowed_spreadsheet_ids,
+        )
+        self._execute_tool(
+            COMPOSIO_VALUES_UPDATE_TOOL,
+            {
+                "spreadsheetId": target,
+                "range": bounded_range,
+                "values": bounded_values,
+                "valueInputOption": "RAW",
+            },
+        )
+
+    def append_values(self, *, spreadsheet_id: str, a1_range: str, values: list[list[str]]) -> None:
+        target, bounded_range, bounded_values = validate_owner_sheet_request(
+            spreadsheet_id=spreadsheet_id,
+            a1_range=a1_range,
+            values=values,
+            allowed_spreadsheet_ids=self._allowed_spreadsheet_ids,
+        )
+        self._execute_tool(
+            COMPOSIO_VALUES_APPEND_TOOL,
+            {
+                "spreadsheetId": target,
+                "range": bounded_range,
+                "values": bounded_values,
+                "valueInputOption": "RAW",
+            },
+        )
 
     def _execute_upsert(
         self,
@@ -607,46 +723,6 @@ class ComposioSheetsPort:
             ],
         )
 
-    def upsert_budget(self, row: BudgetMirrorRow) -> None:
-        self._execute_upsert(
-            sheet_name=BUDGET_SHEET_NAME,
-            key_column=BUDGET_KEY_COLUMN,
-            headers=BUDGET_HEADERS,
-            values=[
-                [
-                    row.campaign,
-                    row.monthly_budget,
-                    row.spend,
-                    row.expected_spend,
-                    row.remaining,
-                    row.projected,
-                    row.over_under,
-                    row.status,
-                ]
-            ],
-        )
-
-    def upsert_performance(self, row: PerformanceMirrorRow) -> None:
-        self._execute_upsert(
-            sheet_name=PERF_SHEET_NAME,
-            key_column=PERF_KEY_COLUMN,
-            headers=PERF_HEADERS,
-            values=[
-                [
-                    row.campaign,
-                    row.spend,
-                    row.ctr,
-                    row.cpc,
-                    row.cpl,
-                    row.qualified_cpl,
-                    row.meetings,
-                    row.deals,
-                    row.revenue,
-                    row.roas,
-                ]
-            ],
-        )
-
 
 class FakeSheetsPort:
     """Test double. Dict keyed by lead_id; second upsert overwrites."""
@@ -660,8 +736,21 @@ class FakeSheetsPort:
         self._activity_rows: dict[str, ActivityMirrorRow] = {}
         self._kpi_rows: dict[str, KpiMirrorRow] = {}
         self._content_rows: dict[str, ContentMirrorRow] = {}
-        self._budget_rows: dict[str, BudgetMirrorRow] = {}
-        self._performance_rows: dict[str, PerformanceMirrorRow] = {}
+        self.owner_values: dict[tuple[str, str], list[list[str]]] = {}
+        self.owner_operations: list[tuple[str, str, str, list[list[str]]]] = []
+
+    def read_values(self, *, spreadsheet_id: str, a1_range: str) -> list[list[str]]:
+        return [list(row) for row in self.owner_values.get((spreadsheet_id, a1_range), [])]
+
+    def update_values(self, *, spreadsheet_id: str, a1_range: str, values: list[list[str]]) -> None:
+        normalized = _normalize_sheet_values(values)
+        self.owner_values[(spreadsheet_id, a1_range)] = normalized
+        self.owner_operations.append(("update", spreadsheet_id, a1_range, normalized))
+
+    def append_values(self, *, spreadsheet_id: str, a1_range: str, values: list[list[str]]) -> None:
+        normalized = _normalize_sheet_values(values)
+        self.owner_values.setdefault((spreadsheet_id, a1_range), []).extend(normalized)
+        self.owner_operations.append(("append", spreadsheet_id, a1_range, normalized))
 
     @property
     def rows(self) -> dict[str, LeadMirrorRow]:
@@ -695,14 +784,6 @@ class FakeSheetsPort:
     def content_rows(self) -> dict[str, ContentMirrorRow]:
         return dict(self._content_rows)
 
-    @property
-    def budget_rows(self) -> dict[str, BudgetMirrorRow]:
-        return dict(self._budget_rows)
-
-    @property
-    def performance_rows(self) -> dict[str, PerformanceMirrorRow]:
-        return dict(self._performance_rows)
-
     def upsert_lead(self, row: LeadMirrorRow) -> None:
         self._rows[row.lead_id] = row
 
@@ -726,12 +807,6 @@ class FakeSheetsPort:
 
     def upsert_content(self, row: ContentMirrorRow) -> None:
         self._content_rows[row.media_id] = row
-
-    def upsert_budget(self, row: BudgetMirrorRow) -> None:
-        self._budget_rows[row.campaign] = row
-
-    def upsert_performance(self, row: PerformanceMirrorRow) -> None:
-        self._performance_rows[row.campaign] = row
 
 
 def sheets_mirror_claim_key(inbound_id: str, tab: str) -> str:
@@ -773,14 +848,16 @@ def mirror_lead(*, sheets: SheetsPort, row: LeadMirrorRow, kill_switch: bool) ->
 def _sanitized_source_row(row: SourceMirrorRow) -> SourceMirrorRow | None:
     if not row.lead_id or "@" in row.lead_id:
         return None
-    cleaned = sanitize_attribution({
-        "utm_source": row.utm_source or None,
-        "utm_medium": row.utm_medium or None,
-        "utm_campaign": row.utm_campaign or None,
-        "utm_content": row.utm_content or None,
-        "landing_page": row.landing_page or None,
-        "referrer": row.referrer or None,
-    })
+    cleaned = sanitize_attribution(
+        {
+            "utm_source": row.utm_source or None,
+            "utm_medium": row.utm_medium or None,
+            "utm_campaign": row.utm_campaign or None,
+            "utm_content": row.utm_content or None,
+            "landing_page": row.landing_page or None,
+            "referrer": row.referrer or None,
+        }
+    )
     if not cleaned:
         return None
     return SourceMirrorRow(
@@ -891,9 +968,7 @@ def _sanitized_activity_row(row: ActivityMirrorRow) -> ActivityMirrorRow | None:
     )
 
 
-def mirror_activity(
-    *, sheets: SheetsPort, row: ActivityMirrorRow, kill_switch: bool
-) -> bool:
+def mirror_activity(*, sheets: SheetsPort, row: ActivityMirrorRow, kill_switch: bool) -> bool:
     """R1 assert_allowed before upsert. Returns True if written; never raises."""
     clean = _sanitized_activity_row(row)
     if clean is None:
@@ -909,9 +984,7 @@ def mirror_activity(
         return False
 
 
-def mirror_follow_up(
-    *, sheets: SheetsPort, row: FollowUpMirrorRow, kill_switch: bool
-) -> bool:
+def mirror_follow_up(*, sheets: SheetsPort, row: FollowUpMirrorRow, kill_switch: bool) -> bool:
     """R1 assert_allowed before upsert. Returns True if written; never raises."""
     clean = _sanitized_follow_up_row(row)
     if clean is None:
@@ -979,9 +1052,7 @@ def _sanitized_meeting_row(row: MeetingMirrorRow) -> MeetingMirrorRow | None:
         event_id = sanitize_event_id(row.calendar_event_id)
         if normalized is None or event_id is None:
             return None
-        return row.model_copy(
-            update={"scheduled_at": normalized, "calendar_event_id": event_id}
-        )
+        return row.model_copy(update={"scheduled_at": normalized, "calendar_event_id": event_id})
     return row
 
 
@@ -1057,6 +1128,133 @@ def maybe_mirror_weekly_kpi(
     )
 
 
+def mirror_sales_turn(
+    *,
+    store: LeadStore,
+    sheets: SheetsPort,
+    settings: Settings,
+    provider: str,
+    channel: Channel,
+    inbound_id: str,
+    conversation_id: str,
+    lead_id: str,
+    run_id: str,
+    next_action: str,
+    kill_switch: bool,
+    measure_elapsed: Callable[[float], int] = elapsed_ms,
+) -> ToolOutcome | None:
+    """Mirror one completed sales turn with the existing claim/outcome ordering."""
+    if demo_mode_active(settings):
+        return None
+    if not claim_sheets_mirror(store=store, inbound_id=inbound_id, tab="sales"):
+        return None
+
+    started = perf_counter()
+    sales = store.get_sales(lead_id)
+    sheets_written = mirror_lead(
+        sheets=sheets,
+        row=LeadMirrorRow(
+            lead_id=lead_id,
+            channel=channel.value,
+            stage=store.get_lead_stage(lead_id),
+            fit=sales.fit.value,
+            pain_level=int(sales.pain_level),
+            next_action=next_action,
+        ),
+        kill_switch=kill_switch,
+    )
+    follow_up_written = False
+    follow_up = store.get_follow_up(lead_id)
+    if follow_up is not None:
+        follow_up_written = mirror_follow_up(
+            sheets=sheets,
+            row=FollowUpMirrorRow(
+                lead_id=lead_id,
+                due_at=follow_up.due_at,
+                channel=follow_up.channel,
+                status=follow_up.status,
+                result=follow_up.reason,
+            ),
+            kill_switch=kill_switch,
+        )
+    deal_written = False
+    deal = store.get_deal(lead_id)
+    if deal is not None:
+        deal_written = mirror_deal(
+            sheets=sheets,
+            row=DealMirrorRow(
+                lead_id=lead_id,
+                stage=deal.stage,
+                source=deal.source,
+                attribution_confidence=deal.attribution_confidence,
+                expected_value=deal.expected_value,
+                closed_value=deal.closed_value,
+            ),
+            kill_switch=kill_switch,
+        )
+    meeting_written = False
+    meeting = store.get_meeting(lead_id)
+    if meeting is not None:
+        meeting_written = mirror_meeting(
+            sheets=sheets,
+            row=MeetingMirrorRow(
+                lead_id=lead_id,
+                status=meeting.status,
+                source=meeting.source,
+                scheduled_at=meeting.scheduled_at,
+                calendar_event_id=meeting.calendar_event_id,
+                summary=meeting.summary,
+            ),
+            kill_switch=kill_switch,
+        )
+    activity_written = False
+    ai_run = store.get_ai_run(run_id)
+    if ai_run is not None:
+        activity_row = activity_mirror_row_from_persisted(
+            run_id=ai_run.run_id,
+            lead_id=ai_run.lead_id,
+            channel=ai_run.channel,
+            next_action=ai_run.next_action,
+            model=ai_run.model,
+            kill_switch=ai_run.kill_switch,
+            cost_usd=ai_run.cost_usd,
+            timezone=settings.calendar_timezone,
+        )
+        if activity_row is not None:
+            activity_written = mirror_activity(
+                sheets=sheets,
+                row=activity_row,
+                kill_switch=kill_switch,
+            )
+    kpi_written = maybe_mirror_weekly_kpi(
+        store=store,
+        sheets=sheets,
+        settings=settings,
+        kill_switch=kill_switch,
+    )
+    outcome = sheets_mirror_outcome(
+        int(sheets_written)
+        + int(follow_up_written)
+        + int(deal_written)
+        + int(meeting_written)
+        + int(activity_written)
+        + int(kpi_written),
+        latency_ms=measure_elapsed(started),
+    )
+    persist_tool_outcome(
+        store,
+        provider=provider,
+        channel=channel,
+        inbound_provider_event_id=inbound_id,
+        conversation_id=conversation_id,
+        lead_id=lead_id,
+        outcome=outcome,
+        correlation_id=run_id,
+    )
+    complete_sheets_mirror(store=store, inbound_id=inbound_id, tab="sales")
+    return outcome
+
+
 def _sanitized_content_row(row: ContentMirrorRow) -> ContentMirrorRow | None:
     if not is_allowlisted_media_id(row.media_id):
         return None
@@ -1089,82 +1287,6 @@ def mirror_content(*, sheets: SheetsPort, row: ContentMirrorRow, kill_switch: bo
         return True
     except (AdapterHttpError, PolicyDenied, RuntimeError):
         return False
-
-
-def _valid_campaign_key(campaign: str) -> bool:
-    return campaign == "account" or _CAMPAIGN_KEY_PATTERN.fullmatch(campaign) is not None
-
-
-def _valid_numeric_field(value: str) -> bool:
-    if value == "":
-        return True
-    return _NUMERIC_MIRROR_PATTERN.fullmatch(value) is not None
-
-
-def _sanitized_budget_row(row: BudgetMirrorRow) -> BudgetMirrorRow | None:
-    if not _valid_campaign_key(row.campaign):
-        return None
-    if row.status not in _PACING_STATUSES:
-        return None
-    for field in (
-        "monthly_budget",
-        "spend",
-        "expected_spend",
-        "remaining",
-        "projected",
-        "over_under",
-    ):
-        if not _valid_numeric_field(getattr(row, field)):
-            return None
-    if not _valid_numeric_field(row.monthly_budget) or row.monthly_budget == "":
-        return None
-    return row
-
-
-def mirror_budget(*, sheets: SheetsPort, row: BudgetMirrorRow, kill_switch: bool) -> bool:
-    clean = _sanitized_budget_row(row)
-    if clean is None:
-        return False
-    try:
-        assert_allowed(
-            RiskAction(name="sheets_mirror", risk=RiskLevel.R1_LOW_WRITE),
-            kill_switch=kill_switch,
-        )
-        sheets.upsert_budget(clean)
-        return True
-    except (AdapterHttpError, PolicyDenied, RuntimeError):
-        return False
-
-
-def _sanitized_performance_row(row: PerformanceMirrorRow) -> PerformanceMirrorRow | None:
-    if not _valid_campaign_key(row.campaign):
-        return None
-    if row.revenue != "" or row.roas != "" or row.qualified_cpl != "":
-        return None
-    for field in ("spend", "cpc", "cpl", "meetings", "deals"):
-        if not _valid_numeric_field(getattr(row, field)):
-            return None
-    if row.ctr != "" and re.fullmatch(r"\d+(\.\d+)?%?", row.ctr) is None:
-        return None
-    return row
-
-
-def mirror_performance(
-    *, sheets: SheetsPort, row: PerformanceMirrorRow, kill_switch: bool
-) -> bool:
-    clean = _sanitized_performance_row(row)
-    if clean is None:
-        return False
-    try:
-        assert_allowed(
-            RiskAction(name="sheets_mirror", risk=RiskLevel.R1_LOW_WRITE),
-            kill_switch=kill_switch,
-        )
-        sheets.upsert_performance(clean)
-        return True
-    except (AdapterHttpError, PolicyDenied, RuntimeError):
-        return False
-
 
 
 def maybe_mirror_content_insights(
@@ -1208,50 +1330,6 @@ def maybe_mirror_content_insights(
     return None
 
 
-def pick_spreadsheet_id(
-    files: list[tuple[str, str]], *, preferred: str = ""
-) -> str:
-    explicit = preferred.strip()
-    if explicit:
-        return explicit
-    mia_named = [
-        (file_id, name)
-        for file_id, name in files
-        if PREFERRED_SHEET_NAME in name.lower()
-    ]
-    exact = [
-        file_id
-        for file_id, name in mia_named
-        if name.strip().lower() == PREFERRED_SHEET_NAME
-    ]
-    if len(exact) == 1:
-        return exact[0]
-    if len(mia_named) == 1:
-        return mia_named[0][0]
-    return ""
-
-
-def _map_spreadsheet_files(
-    data: dict[str, Any] | None,
-) -> list[tuple[str, str]]:
-    if data is None:
-        return []
-    entries = data.get("files") or data.get("spreadsheets") or data.get("items")
-    if not isinstance(entries, list):
-        return []
-    mapped: list[tuple[str, str]] = []
-    for entry in entries:
-        if not isinstance(entry, dict):
-            continue
-        raw_id = entry.get("id") or entry.get("spreadsheetId")
-        raw_name = entry.get("name") or entry.get("title") or ""
-        file_id = raw_id.strip() if isinstance(raw_id, str) else ""
-        name = raw_name.strip() if isinstance(raw_name, str) else ""
-        if file_id:
-            mapped.append((file_id, name))
-    return mapped
-
-
 def build_sheets_port(settings: Settings) -> SheetsPort:
     api_key = settings.composio_api_key.strip()
     user_id = settings.composio_user_id.strip()
@@ -1260,5 +1338,6 @@ def build_sheets_port(settings: Settings) -> SheetsPort:
             api_key=api_key,
             user_id=user_id,
             spreadsheet_id=settings.sheets_spreadsheet_id.strip(),
+            allowed_spreadsheet_ids=settings.allowed_sheets_spreadsheet_ids(),
         )
     return DisabledSheetsPort()

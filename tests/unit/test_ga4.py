@@ -3,7 +3,7 @@ import json
 import httpx
 import pytest
 from app.core.config import Settings
-from app.domain.tools import AdapterHttpError
+from app.domain.tools import AdapterHttpError, AdapterResponseError, AdapterSchemaError
 from app.integrations.ga4 import (
     COMPOSIO_GA4_VERSION,
     COMPOSIO_LIST_CONVERSION_EVENTS_TOOL,
@@ -73,6 +73,38 @@ def test_composio_ga4_http_401_raises() -> None:
     with pytest.raises(AdapterHttpError) as exc_info:
         port.run_pivot_report(start_date="28daysAgo", end_date="yesterday")
     assert exc_info.value.status_code == 401
+
+
+def test_composio_ga4_schema_and_execution_failures_are_not_empty() -> None:
+    schema_client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(200, json={"successful": True, "data": []})
+        )
+    )
+    schema_port = ComposioGa4Port(
+        api_key="cmp-test",
+        user_id="user-123",
+        property_id="properties/1",
+        client=schema_client,
+    )
+    with pytest.raises(AdapterSchemaError) as schema_error:
+        schema_port.run_pivot_report(start_date="28daysAgo", end_date="yesterday")
+    assert schema_error.value.tool_status() == "malformed"
+
+    failed_client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(200, json={"successful": False, "data": {}})
+        )
+    )
+    failed_port = ComposioGa4Port(
+        api_key="cmp-test",
+        user_id="user-123",
+        property_id="properties/1",
+        client=failed_client,
+    )
+    with pytest.raises(AdapterResponseError) as response_error:
+        failed_port.run_pivot_report(start_date="28daysAgo", end_date="yesterday")
+    assert response_error.value.tool_status() == "error"
 
 
 def test_composio_pivot_request_shape() -> None:

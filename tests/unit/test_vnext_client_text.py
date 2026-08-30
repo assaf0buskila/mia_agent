@@ -1,4 +1,5 @@
 from app.agents.client.graph import compile_client_graph
+from app.capabilities.types import Principal
 from app.channels.website import message_to_client_state
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
@@ -14,7 +15,9 @@ def test_website_text_reaches_client_graph() -> None:
             channel=Channel.WEBSITE, external_id="web_vnext"
         )
         db.commit()
-        graph = compile_client_graph(store)
+        graph = compile_client_graph(
+            store, principal=Principal.client(source="website", actor_id="web_vnext")
+        )
         out = graph.invoke(
             message_to_client_state(
                 run_id="run_1",

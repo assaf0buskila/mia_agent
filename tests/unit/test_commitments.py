@@ -5,7 +5,6 @@ from app.core.config import get_settings
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
 from app.domain.commitments import (
-    ACTION_ANALYZE,
     ACTION_FOLLOW_UP,
     ACTION_LOG,
     ACTION_NONE,
@@ -13,11 +12,8 @@ from app.domain.commitments import (
     CONDITION_NONE,
     TRIGGER_DUE_DATE,
     TRIGGER_NONE,
-    TRIGGER_SPEND_THRESHOLD,
-    evaluate_spend_threshold,
     parse_condition,
     parse_due_at,
-    parse_spend_threshold,
     plan_owner_commitment,
     scan_due_owner_tasks,
 )
@@ -107,68 +103,6 @@ def test_plan_hebrew_sales_follow_up_with_condition() -> None:
     assert plan.trigger == TRIGGER_DUE_DATE
     assert plan.condition == CONDITION_IF_NOT_REPLIED
     assert plan.action == ACTION_FOLLOW_UP
-
-
-def test_plan_analytics_no_date() -> None:
-    text = "how's the campaign spend"
-    decision = classify_owner_task(text)
-    plan = plan_owner_commitment(decision=decision, text=text, due_at=None)
-    assert plan.trigger == TRIGGER_NONE
-    assert plan.condition == CONDITION_NONE
-    assert plan.action == ACTION_ANALYZE
-
-
-def test_plan_analytics_ignores_reply_condition() -> None:
-    text = "how's the campaign spend if he has not replied"
-    decision = classify_owner_task(text)
-    plan = plan_owner_commitment(decision=decision, text=text, due_at=None)
-    assert plan.action == ACTION_ANALYZE
-    assert plan.condition == CONDITION_NONE
-
-
-def test_plan_analytics_spend_threshold_english() -> None:
-    text = "analyze the campaign after spend reaches the threshold"
-    decision = classify_owner_task(text)
-    plan = plan_owner_commitment(decision=decision, text=text, due_at="2026-08-22")
-    assert plan.trigger == TRIGGER_SPEND_THRESHOLD
-    assert plan.action == ACTION_ANALYZE
-    assert plan.condition == CONDITION_NONE
-
-
-def test_plan_analytics_spend_threshold_hebrew() -> None:
-    text = "תבדקי את הקמפיין כשההוצאה תגיע לתקציב"
-    decision = classify_owner_task(text)
-    plan = plan_owner_commitment(decision=decision, text=text, due_at=None)
-    assert plan.trigger == TRIGGER_SPEND_THRESHOLD
-    assert plan.action == ACTION_ANALYZE
-
-
-def test_parse_spend_threshold_bare_spend_no_match() -> None:
-    assert parse_spend_threshold("how's the campaign spend") is False
-
-
-def test_evaluate_spend_threshold_reached() -> None:
-    due_ready, reason = evaluate_spend_threshold(spend_mtd=5000.0, monthly_budget=5000.0)
-    assert due_ready is True
-    assert reason == "spend_reached"
-
-
-def test_evaluate_spend_threshold_below() -> None:
-    due_ready, reason = evaluate_spend_threshold(spend_mtd=1000.0, monthly_budget=5000.0)
-    assert due_ready is False
-    assert reason == "spend_below"
-
-
-def test_evaluate_spend_threshold_unknown() -> None:
-    due_ready, reason = evaluate_spend_threshold(spend_mtd=None, monthly_budget=5000.0)
-    assert due_ready is False
-    assert reason == "spend_unknown"
-
-
-def test_evaluate_spend_threshold_no_budget() -> None:
-    due_ready, reason = evaluate_spend_threshold(spend_mtd=1000.0, monthly_budget=None)
-    assert due_ready is False
-    assert reason == "no_budget"
 
 
 def test_plan_preference_all_none() -> None:
@@ -340,161 +274,6 @@ def test_scan_due_owner_tasks_tomorrow_not_scanned() -> None:
         assert row is not None
         assert row.due_ready is False
         assert row.block_reason == ""
-    finally:
-        db.close()
-
-
-def _seed_spend_threshold_task(
-    store: LeadStore,
-    *,
-    provider_event_id: str,
-    status: str = "logged",
-) -> None:
-    store.save_owner_task(
-        provider="whatsapp",
-        provider_event_id=provider_event_id,
-        channel="whatsapp",
-        external_id="972509990211",
-        task_type="analytics",
-        status=status,
-        due_at=None,
-        trigger=TRIGGER_SPEND_THRESHOLD,
-        condition=CONDITION_NONE,
-        action=ACTION_ANALYZE,
-    )
-
-
-def test_scan_spend_threshold_reached() -> None:
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        settings = get_settings()
-        event_id = "evt.owner.spend.reached"
-        _seed_spend_threshold_task(store, provider_event_id=event_id)
-        db.commit()
-        results = scan_due_owner_tasks(
-            store,
-            timezone=settings.calendar_timezone,
-            monthly_budget=5000.0,
-            spend_mtd=5000.0,
-        )
-        matching = [item for item in results if item.provider_event_id == event_id]
-        assert len(matching) == 1
-        assert matching[0].due_ready is True
-        assert matching[0].reason == "spend_reached"
-        row = store.get_owner_task(provider="whatsapp", provider_event_id=event_id)
-        assert row is not None
-        assert row.due_ready is True
-        assert row.block_reason == "spend_reached"
-    finally:
-        db.close()
-
-
-def test_scan_spend_threshold_below() -> None:
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        settings = get_settings()
-        event_id = "evt.owner.spend.below"
-        _seed_spend_threshold_task(store, provider_event_id=event_id)
-        db.commit()
-        results = scan_due_owner_tasks(
-            store,
-            timezone=settings.calendar_timezone,
-            monthly_budget=5000.0,
-            spend_mtd=1000.0,
-        )
-        matching = [item for item in results if item.provider_event_id == event_id]
-        assert len(matching) == 1
-        assert matching[0].due_ready is False
-        assert matching[0].reason == "spend_below"
-    finally:
-        db.close()
-
-
-def test_scan_spend_threshold_unknown() -> None:
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        settings = get_settings()
-        event_id = "evt.owner.spend.unknown"
-        _seed_spend_threshold_task(store, provider_event_id=event_id)
-        db.commit()
-        results = scan_due_owner_tasks(
-            store,
-            timezone=settings.calendar_timezone,
-            monthly_budget=5000.0,
-            spend_mtd=None,
-        )
-        matching = [item for item in results if item.provider_event_id == event_id]
-        assert len(matching) == 1
-        assert matching[0].due_ready is False
-        assert matching[0].reason == "spend_unknown"
-    finally:
-        db.close()
-
-
-def test_scan_spend_threshold_no_budget() -> None:
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        settings = get_settings()
-        event_id = "evt.owner.spend.no_budget"
-        _seed_spend_threshold_task(store, provider_event_id=event_id)
-        db.commit()
-        results = scan_due_owner_tasks(
-            store,
-            timezone=settings.calendar_timezone,
-            monthly_budget=None,
-            spend_mtd=5000.0,
-        )
-        matching = [item for item in results if item.provider_event_id == event_id]
-        assert len(matching) == 1
-        assert matching[0].due_ready is False
-        assert matching[0].reason == "no_budget"
-    finally:
-        db.close()
-
-
-def test_scan_due_owner_tasks_invalid_timezone_still_scans_spend_threshold() -> None:
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        now = datetime(2026, 8, 21, 12, 0, tzinfo=UTC)
-        due_at = follow_up_due_on(now=now, timezone="Asia/Jerusalem", offset_days=0)
-        date_event_id = "evt.owner.scan.bad_tz"
-        spend_event_id = "evt.owner.spend.bad_tz"
-        _seed_owner_task(store, provider_event_id=date_event_id, due_at=due_at)
-        _seed_spend_threshold_task(store, provider_event_id=spend_event_id)
-        db.commit()
-        results = scan_due_owner_tasks(
-            store,
-            timezone="Not/A/Timezone",
-            now=now,
-            monthly_budget=5000.0,
-            spend_mtd=5000.0,
-        )
-        date_matching = [
-            item for item in results if item.provider_event_id == date_event_id
-        ]
-        spend_matching = [
-            item for item in results if item.provider_event_id == spend_event_id
-        ]
-        assert date_matching == []
-        assert len(spend_matching) == 1
-        assert spend_matching[0].due_ready is True
-        assert spend_matching[0].reason == "spend_reached"
-        date_row = store.get_owner_task(
-            provider="whatsapp", provider_event_id=date_event_id
-        )
-        assert date_row is not None
-        assert date_row.due_ready is False
-        assert date_row.block_reason == ""
     finally:
         db.close()
 

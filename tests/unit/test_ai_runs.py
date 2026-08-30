@@ -1,10 +1,12 @@
 import hashlib
-import inspect
 import json
 
 import pytest
+from app.agents.client.graph import compile_client_graph
 from app.api.inbound import process_inbound_texts
 from app.api.website import process_website_message
+from app.capabilities.types import Principal
+from app.channels.website import message_to_client_state
 from app.core.config import get_settings
 from app.db.models import AiRunRow
 from app.db.session import get_session_factory, init_db
@@ -22,11 +24,15 @@ from app.domain.events import Channel, persist_tool_outcome
 from app.domain.policies import POLICY_VERSION
 from app.domain.sales import NextAction
 from app.domain.tools import ToolOutcome
-from app.graph.orchestrator import build_graph
 from app.integrations.base import RecordingMessagePort
 from app.integrations.calendar import DisabledCalendarPort
 from app.integrations.calendar_booking import DisabledCalendarBookingPort
-from app.integrations.sales_reply import _SYSTEM_PROMPT, ReplyContext, build_user_content
+from app.integrations.sales_reply import (
+    _SYSTEM_PROMPT,
+    FakeSalesReplyPort,
+    ReplyContext,
+    build_user_content,
+)
 from app.integrations.sales_reply import (
     PROMPT_VERSION as SALES_REPLY_PROMPT_VERSION,
 )
@@ -506,12 +512,41 @@ def test_v9_user_content_renders_knowledge_and_tone_together() -> None:
     assert "Tone never decides whether you answer their question." in content
 
 
-def test_v9_orchestrator_passes_both_knowledge_and_tone() -> None:
-    """ADR-040 wiring: dropping either kwarg from ReplyContext is the bug."""
-    source = inspect.getsource(build_graph)
-    assert "infer_emotional_cues(" in source
-    assert "emotional_cues=emotional_cues" in source
-    assert "knowledge=knowledge" in source
+def test_v9_client_graph_passes_structured_knowledge_and_tone_to_reply_port(monkeypatch) -> None:
+    """ADR-040/038: one ClientGraph retrieval supplies facts and sales compose supplies tone."""
+    def fake_execute(*args: object, **kwargs: object) -> dict[str, object]:
+        return {"hits": [{"id": "faq-1", "label": "FAQ", "text": "Published fact."}]}
+
+    monkeypatch.setattr("app.agents.client.graph.execute_capability", fake_execute)
+    init_db()
+    db = get_session_factory()()
+    try:
+        store = LeadStore(db)
+        _, lead_id = store.open_channel_lead(
+            channel=Channel.WEBSITE, external_id="web_v9_wiring"
+        )
+        db.commit()
+        port = FakeSalesReplyPort()
+        graph = compile_client_graph(
+            store,
+            reply_port=port,
+            principal=Principal.client(source="website", actor_id="web_v9_wiring"),
+        )
+        graph.invoke(
+            message_to_client_state(
+                run_id="run_v9_wiring",
+                session_id="web_v9_wiring",
+                lead_id=lead_id,
+                text="This is ridiculous, what do you offer?",
+            )
+        )
+        call = port.calls[0]
+        assert call["knowledge_hits"] == [
+            {"id": "faq-1", "label": "FAQ", "text": "Published fact."}
+        ]
+        assert call["context"].emotional_cues == ("frustrated",)
+    finally:
+        db.close()
 
 
 

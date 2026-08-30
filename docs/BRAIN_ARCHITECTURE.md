@@ -288,9 +288,9 @@ All model ids are configuration, never hard-coded (AGENTS.md build-time model po
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `MIA_OWNER_AGENT_MODEL` | *(empty)* | tool-calling loop. Empty → deterministic classifier |
+| `MIA_OWNER_AGENT_MODEL` | *(empty)* | preferred tool-calling model; blank may use the configured sales chain, otherwise deterministic classifier |
 | `MIA_OWNER_AGENT_FALLBACK_MODEL` | *(empty)* | secondary model id |
-| `MIA_OWNER_AGENT_MAX_STEPS` | `4` | tool-loop step budget |
+| `MIA_OWNER_AGENT_MAX_STEPS` | `8` | tool-loop step budget (ADR-032) |
 | `MIA_EXTRACTION_MODEL` | *(empty)* | memory extraction + reconciliation |
 | `MIA_EMBEDDING_PROVIDER` | `openai` | `openai` or `gemini`. Never auto-failover |
 | `MIA_EMBEDDING_MODEL` | *(empty)* | e.g. `text-embedding-3-small` |
@@ -314,13 +314,18 @@ is still missing, plus live corpus counts:
 
 ```json
 "brain": {
-  "owner_agent":      {"ready": false, "missing": ["MIA_OWNER_AGENT_MODEL"], "max_steps": 4},
+  "owner_agent":      {"ready": false, "missing": ["MIA_OWNER_AGENT_MODEL"], "max_steps": 8},
   "embeddings":       {"ready": false, "missing": ["MIA_EMBEDDING_MODEL"], "provider": "openai", "dim": 1536},
   "memory_extraction":{"ready": false, "missing": ["MIA_EXTRACTION_MODEL"]},
   "voice_in":         {"ready": false, "missing": ["MIA_TELEGRAM_BOT_TOKEN"]},
   "corpus":           {"memories": 0, "knowledge_chunks": 0}
 }
 ```
+
+When an owner sales-chain or owner-Gemini fallback is configured and ready, the
+owner-agent `missing` list is empty even if `MIA_OWNER_AGENT_MODEL` is blank.
+The readiness block reports the active fallback contract, not a preferred-but-unused
+configuration path.
 
 ---
 

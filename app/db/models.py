@@ -136,17 +136,6 @@ class FollowUpRow(Base):
     draft: Mapped[str] = mapped_column(String(500), default="")
 
 
-class CampaignRecommendationRow(Base):
-    __tablename__ = "campaign_recommendations"
-    __table_args__ = (UniqueConstraint("scope", name="uq_campaign_recommendation_scope"),)
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    scope: Mapped[str] = mapped_column(String(32), default="account", unique=True)
-    kind: Mapped[str] = mapped_column(String(32))
-    anomaly: Mapped[str] = mapped_column(String(32))
-    payload_json: Mapped[str] = mapped_column(Text)
-
-
 class SeoRecommendationRow(Base):
     __tablename__ = "seo_recommendations"
     __table_args__ = (UniqueConstraint("scope", name="uq_seo_recommendation_scope"),)
@@ -158,54 +147,6 @@ class SeoRecommendationRow(Base):
     why: Mapped[str] = mapped_column(String(255), default="")
     change: Mapped[str] = mapped_column(String(255), default="")
     metric: Mapped[str] = mapped_column(String(255), default="")
-
-
-class CampaignPacingRow(Base):
-    __tablename__ = "campaign_pacing"
-    __table_args__ = (UniqueConstraint("scope", name="uq_campaign_pacing_scope"),)
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    scope: Mapped[str] = mapped_column(String(32), default="account", unique=True)
-    campaign: Mapped[str] = mapped_column(String(32))
-    monthly_budget: Mapped[str] = mapped_column(String(32))
-    spend: Mapped[str] = mapped_column(String(32), default="")
-    expected_spend: Mapped[str] = mapped_column(String(32), default="")
-    remaining: Mapped[str] = mapped_column(String(32), default="")
-    projected: Mapped[str] = mapped_column(String(32), default="")
-    over_under: Mapped[str] = mapped_column(String(32), default="")
-    status: Mapped[str] = mapped_column(String(32))
-
-
-class CampaignPerformanceRow(Base):
-    __tablename__ = "campaign_performance"
-    __table_args__ = (UniqueConstraint("scope", name="uq_campaign_performance_scope"),)
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    scope: Mapped[str] = mapped_column(String(32), default="account", unique=True)
-    campaign: Mapped[str] = mapped_column(String(32))
-    spend: Mapped[str] = mapped_column(String(32), default="")
-    ctr: Mapped[str] = mapped_column(String(32), default="")
-    cpc: Mapped[str] = mapped_column(String(32), default="")
-    cpl: Mapped[str] = mapped_column(String(32), default="")
-    qualified_cpl: Mapped[str] = mapped_column(String(32), default="")
-    meetings: Mapped[str] = mapped_column(String(32), default="")
-    deals: Mapped[str] = mapped_column(String(32), default="")
-    revenue: Mapped[str] = mapped_column(String(32), default="")
-    roas: Mapped[str] = mapped_column(String(32), default="")
-
-
-class CampaignPrelaunchRow(Base):
-    __tablename__ = "campaign_prelaunch"
-    __table_args__ = (UniqueConstraint("scope", name="uq_campaign_prelaunch_scope"),)
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    scope: Mapped[str] = mapped_column(String(32), default="account", unique=True)
-    campaign: Mapped[str] = mapped_column(String(32))
-    launch_date: Mapped[str] = mapped_column(String(32), default="")
-    objective: Mapped[str] = mapped_column(String(32), default="")
-    lead_path: Mapped[str] = mapped_column(String(32), default="")
-    ready: Mapped[bool] = mapped_column(Boolean, default=False)
-    failed_checks: Mapped[str] = mapped_column(String(128), default="")
 
 
 class ContentInsightRow(Base):
@@ -412,6 +353,22 @@ class OwnerNotificationClaimRow(Base):
     claimed_at: Mapped[str] = mapped_column(String(32), default="")
 
 
+class OwnerNotificationRecipientClaimRow(Base):
+    """Per-recipient notification delivery ledger.
+
+    A Telegram fan-out is not one atomic delivery: accepted owners must not receive a
+    retry, known rejected owners must, and ambiguous recipients must remain protected.
+    """
+
+    __tablename__ = "owner_notification_recipient_claims"
+
+    kind: Mapped[str] = mapped_column(String(32), primary_key=True)
+    lead_id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    notification_key: Mapped[str] = mapped_column(String(255), primary_key=True, default="")
+    recipient_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    claimed_at: Mapped[str] = mapped_column(String(32), default="")
+
+
 class OwnerBriefRow(Base):
     __tablename__ = "owner_briefs"
     __table_args__ = (UniqueConstraint("brief_date", name="uq_owner_brief_date"),)
@@ -425,8 +382,6 @@ class OwnerBriefRow(Base):
     follow_ups_due: Mapped[int] = mapped_column(Integer, default=0)
     meetings_booked: Mapped[int] = mapped_column(Integer, default=0)
     cancellation_requests: Mapped[int] = mapped_column(Integer, default=0)
-    pacing_status: Mapped[str] = mapped_column(String(32), default="")
-    prelaunch_ready: Mapped[str] = mapped_column(String(16), default="")
 
 
 class OwnerWeeklyRow(Base):
@@ -442,8 +397,6 @@ class OwnerWeeklyRow(Base):
     follow_ups_pending: Mapped[int] = mapped_column(Integer, default=0)
     meetings_booked: Mapped[int] = mapped_column(Integer, default=0)
     cancellation_requests: Mapped[int] = mapped_column(Integer, default=0)
-    pacing_status: Mapped[str] = mapped_column(String(32), default="")
-    prelaunch_ready: Mapped[str] = mapped_column(String(16), default="")
 
 
 class VoiceTranscriptRow(Base):

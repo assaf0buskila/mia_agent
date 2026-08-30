@@ -22,6 +22,9 @@ RESEARCH_SEARCH = "research.search"
 LINKEDIN_GET_PROFILE = "linkedin.get_profile"
 SEARCH_CONSOLE_QUERY = "search_console.query"
 ANALYTICS_GET_TRAFFIC = "analytics.get_traffic"
+SHEETS_READ = "sheets.read"
+SHEETS_UPDATE = "sheets.update"
+SHEETS_APPEND = "sheets.append"
 
 _OWNER = frozenset({GraphName.OWNER})
 _CLIENT = frozenset({GraphName.CLIENT})
@@ -45,6 +48,9 @@ CAPABILITIES: tuple[CapabilitySpec, ...] = (
     spec(LINKEDIN_GET_PROFILE, Sensitivity.READ, _OWNER),
     spec(SEARCH_CONSOLE_QUERY, Sensitivity.READ, _OWNER),
     spec(ANALYTICS_GET_TRAFFIC, Sensitivity.READ, _OWNER),
+    spec(SHEETS_READ, Sensitivity.READ, _OWNER),
+    spec(SHEETS_UPDATE, Sensitivity.WRITE, _OWNER, idempotent=False),
+    spec(SHEETS_APPEND, Sensitivity.WRITE, _OWNER, idempotent=False),
     spec(BUSINESS_GET_INFORMATION, Sensitivity.READ, _CLIENT),
 )
 

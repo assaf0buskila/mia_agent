@@ -112,21 +112,11 @@ _REGISTRY: dict[str, ActionPolicy] = {
     CapabilityId.SHEETS_MIRROR.value: _det(
         CapabilityId.SHEETS_MIRROR, risk=RiskLevel.R1_LOW_WRITE
     ),
-    CapabilityId.META_ADS.value: _det(CapabilityId.META_ADS, risk=RiskLevel.R0_READ),
     CapabilityId.CONTENT_PERFORMANCE.value: _det(
         CapabilityId.CONTENT_PERFORMANCE, risk=RiskLevel.R0_READ
     ),
     CapabilityId.CONTENT_IDEAS.value: _det(
         CapabilityId.CONTENT_IDEAS, risk=RiskLevel.R1_LOW_WRITE
-    ),
-    CapabilityId.CAMPAIGN_ANALYSIS.value: _det(
-        CapabilityId.CAMPAIGN_ANALYSIS, risk=RiskLevel.R1_LOW_WRITE
-    ),
-    CapabilityId.CAMPAIGN_PACING.value: _det(
-        CapabilityId.CAMPAIGN_PACING, risk=RiskLevel.R1_LOW_WRITE
-    ),
-    CapabilityId.CAMPAIGN_PRELAUNCH.value: _det(
-        CapabilityId.CAMPAIGN_PRELAUNCH, risk=RiskLevel.R1_LOW_WRITE
     ),
     CapabilityId.RESEARCH.value: _det(CapabilityId.RESEARCH, risk=RiskLevel.R0_READ),
     CapabilityId.LINKEDIN.value: _det(CapabilityId.LINKEDIN, risk=RiskLevel.R0_READ),

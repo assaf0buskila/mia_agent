@@ -23,6 +23,8 @@ def analytics_get_traffic(port: Ga4Port, args: dict[str, Any]) -> dict[str, Any]
                 "session_source": row.session_source,
                 "sessions": row.sessions,
                 "engaged_sessions": row.engaged_sessions,
+                "users": row.users,
+                "conversions": row.conversions,
             }
             for row in rows
         ],

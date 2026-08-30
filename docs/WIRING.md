@@ -45,7 +45,8 @@ Assaf (numeric Telegram id only)
   capabilities    app/capabilities/*  → policy → adapters
                   mail.read, calendar.get_schedule, leads.get_recent,
                   memory.search, knowledge.search, research.search,
-                  linkedin.get_profile, search_console.query, analytics.get_traffic
+                  linkedin.get_profile, search_console.query, analytics.get_traffic,
+                  sheets.read, sheets.update, sheets.append
 
 WhatsApp (human inbox until Cloud API inbound)
   HMAC inbound    app/api/whatsapp.py → app/api/inbound.py → ClientGraph
@@ -79,7 +80,7 @@ Store is `LeadStore` + `BrainStore`. Graphs never hold SDK clients or secrets.
 | `app/integrations/` | Typed ports (Composio / Meta / STT / Telegram / …) | runtime |
 | `app/db/` | SQLAlchemy + LeadStore | runtime |
 | `app/services/` | finalization ping, owner notify, conversation facts | runtime |
-| `app/tools/registries/` | Owner-agent allowlist (reads). Writes stay on domain/policy | runtime |
+| `app/tools/registries/` | Owner-agent allowlist; bounded Sheets updates/appends remain policy-controlled | runtime |
 | `app/web/` | Ask Mia widget + marks | runtime |
 | `app/workers/` | CLI entry points (`pyproject` scripts): due-scan, reconcile, migrate, ingest, telegram webhook | runtime / ops |
 | `app/evals/` | Local Graph Lab datasets + harness | CI + `scripts/eval_diff.py` |
@@ -96,13 +97,14 @@ Store is `LeadStore` + `BrainStore`. Graphs never hold SDK clients or secrets.
 | Claim | Reality |
 | --- | --- |
 | Two graphs | True. ClientGraph wraps `app/graph/orchestrator.py` until that node is inlined (ADR-036 strangler). Do not delete `app/graph/`. |
+| Owner agent count | Exactly one bounded owner tool loop (ADR-031/032), never a production sub-agent swarm. Its default limit is `MIA_OWNER_AGENT_MAX_STEPS=8`. |
 | Two capability lists | `app/capabilities/` is the policy layer. `app/core/capabilities.py` is the `/health` status map. Different jobs. |
 | `mail.read` vs `gmail_read` | Was a real break: tests called `mail_handlers`, live `gmail_read` fetched the port directly. Live read now goes through `execute_capability`. `gmail_search` / `gmail_inbox` still format on the tool path (registry has `mail.search` with no live handler). |
-| LinkedIn / GSC / GA4 vs mail | Same class of break: adapters and owner tools existed, but live enrich skipped `execute_capability`. They now use `linkedin.get_profile`, `search_console.query`, `analytics.get_traffic`. Sheets stays a write-only mirror (`GOOGLESHEETS_UPSERT_ROWS`); no owner Sheets read (lead upsert columns are PR #8). |
+| Sheets / KPI owner tools | Sheets access is only to Assaf-configured/allowlisted IDs: `sheets.read` is READ; `sheets.update` and `sheets.append` are bounded low-risk literal-value operations after an explicit authenticated owner request. Principal, policy, kill switch, and idempotency apply; no Drive discovery or Sheets read-back. GSC/GA4 use APIs and normalize AssafWeb traffic/users/sessions/conversions/pages plus clicks/impressions/CTR/position/queries. LinkedIn remains profile-only. Local focused tests prove these paths; no live provider response is recorded. |
 | Cursor Composio vs Mia | Cursor plugin OAuth is a different Composio user unless `MIA_COMPOSIO_USER_ID` is that same UUID. `/health` `owner_integrations` is leftover config, not a live Composio ping. |
-| Telegram channel adapter | Was test-only. `run_owner_turn` now builds state via `app/channels/telegram.py`. |
+| Telegram voice | Local production-shaped tests cover numeric-owner webhook → media download → shared transcription port → OwnerGraph → escaped HTML reply. Source-derived readiness names are recorded, but no live bot voice note or provider call is proven. |
 | `task_classes.py` | Lookup catalog, not a live router. Tests + `/health` mark it ALIVE meaning “the table exists.” |
-| Meta ads / campaign_* | ADR-039 dropped them. `/health` still lists them `specified` with empty port. Leftover inventory, not leftover files. |
+| Website probes | `scripts/probe_website_flow.py` and `scripts/probe_live_website.py` send `Origin: https://www.assafweb.com` for every website POST, matching fail-closed widget writes. |
 | Source-grep tests | Several `test_vnext_*` files lock imports by reading `.py` text. They prevent silent bypass; they do not prove behavior by themselves. Behavior tests sit beside them. |
 
 ## Do not delete
@@ -115,22 +117,25 @@ File cleanup is necessary and not sufficient.
 
 This PR does not make Mia 100% production-ready. Still required, and **not done here**:
 
-- Live ECS cut of the Telegram NOTE-fallback + HANDOFF-ping SHA (PR #4). Do not deploy from this PR.
-- Composio tools returning real owner data on the live host
+- Current ECS revision/service update. Do not deploy from this PR.
+- Live read-only data from Sheets, GSC, GA4, or LinkedIn
 - Telegram voice note end-to-end on the live bot
 - Website meeting CREATE against live Calendar OAuth
 - WhatsApp remains a human inbox (ADR-024); do not flip send to prove “ready”
 
-Origin-bind fail-closed, website kill switch 503, owner Telegram fallback to the sales model, and HANDOFF owner ping `ok:true` before transfer copy stay proven in tests. They are not a live cut.
+Origin-bind fail-closed, website kill switch 503, owner Telegram fallback to the sales model, HANDOFF owner ping `ok:true` before transfer copy, Telegram voice routing, and Sheets/KPI policy behavior are proven locally. They are not a live cut.
 
-## File counts (this SHA vs master `39d1ef3`)
+## Current working-tree file counts
 
-| Tree | Before | After |
-| --- | --- | --- |
-| `app/` + `tests/` + `scripts/` + `deploy/` + `docs/` | 408 | 410 |
-| `app/*.py` | 172 | 172 |
-| `tests/*.py` | 141 | 141 |
-| living `docs/*.md` (not archive) | 7 | 8 (`WIRING.md` added) |
-| `docs/archive/` | 33 | 34 (PR #4 slice moved here) |
+Measured 2026-08-28 with `rg --files` in the current working tree; these are inventory counts,
+not a deployment claim or a comparison to a historical branch.
 
-No `app/` file had zero callers and was not an entry point. The +2 is the map plus the archived slice. The overdose is real product surface, not a pile of orphans.
+| Tree | Count |
+| --- | --- |
+| `app/*.py` | 176 |
+| `tests/*.py` | 147 |
+| `app/` + `tests/` + `scripts/` + `deploy/` + `docs/` files | 420 |
+| living `docs/*.md` (not archive) | 8 |
+| `docs/archive/*.md` | 32 |
+
+These counts do not establish that every file is live, deployed, or independently reviewed.

@@ -82,7 +82,6 @@ class EventType(StrEnum):
     DEAL_UPDATED = "deal_updated"
     MEETING_BRIEF = "meeting_brief"
     MEETING_DEBRIEF = "meeting_debrief"
-    CAMPAIGN_RECOMMENDATION = "campaign_recommendation"
     BUSINESS_VALUE = "business_value"
 
 
@@ -629,8 +628,6 @@ def _sanitize_meeting_brief_payload(payload: dict[str, Any]) -> dict[str, Any]:
 _APPROVAL_REQUIRED_ACTION = "proposal_handoff"
 _APPROVAL_REQUIRED_RISK = "R3"
 _APPROVAL_REQUIRED_DECISION = "pending"
-_CAMPAIGN_WRITE_ACTION = "campaign_write"
-_CAMPAIGN_WRITE_RISK = "R4"
 _WEBSITE_EDIT_ACTION = "website_edit"
 
 
@@ -650,9 +647,7 @@ def build_approval_required_event(
     effective_risk = risk or _APPROVAL_REQUIRED_RISK
     effective_decision = decision or _APPROVAL_REQUIRED_DECISION
     effective_resource_id = resource_id if resource_id is not None else (lead_id or "")
-    if effective_action == _CAMPAIGN_WRITE_ACTION:
-        provider_event_id = f"{effective_resource_id}:approval:campaign_write"
-    elif effective_action == _WEBSITE_EDIT_ACTION:
+    if effective_action == _WEBSITE_EDIT_ACTION:
         provider_event_id = f"{effective_resource_id}:approval:website_edit"
     else:
         provider_event_id = f"{lead_id}:approval:proposal_handoff"
@@ -748,56 +743,6 @@ def build_meeting_debrief_event(
     )
 
 
-_CAMPAIGN_RECOMMENDATION_KINDS = frozenset({"watch", "investigate", "uncertain"})
-_CAMPAIGN_RECOMMENDATION_ANOMALIES = frozenset({
-    "none",
-    "spend_without_clicks",
-    "incomplete_metrics",
-    "spend_up_clicks_down",
-    "spend_up_clicks_down_30d",
-    "spend_without_leads",
-    "cpl_spike",
-    "creative_fatigue",
-    "website_funnel_drop",
-})
-_CAMPAIGN_RECOMMENDATION_PAYLOAD_KEYS = frozenset({"kind", "anomaly"})
-
-
-def build_campaign_recommendation_event(
-    *,
-    kind: str,
-    anomaly: str,
-    payload: dict[str, Any] | None = None,
-    occurred_at: datetime | None = None,
-) -> CanonicalEvent:
-    """Build CAMPAIGN_RECOMMENDATION for account-level Meta analysis snapshot."""
-    if kind not in _CAMPAIGN_RECOMMENDATION_KINDS:
-        raise ValueError(f"unknown kind: {kind}")
-    if anomaly not in _CAMPAIGN_RECOMMENDATION_ANOMALIES:
-        raise ValueError(f"unknown anomaly: {anomaly}")
-    raw_payload = payload if payload is not None else {"kind": kind, "anomaly": anomaly}
-    clean_payload = {
-        key: raw_payload[key]
-        for key in _CAMPAIGN_RECOMMENDATION_PAYLOAD_KEYS
-        if key in raw_payload
-    }
-    if clean_payload.get("kind") not in _CAMPAIGN_RECOMMENDATION_KINDS:
-        raise ValueError(f"unknown kind: {clean_payload.get('kind')}")
-    if clean_payload.get("anomaly") not in _CAMPAIGN_RECOMMENDATION_ANOMALIES:
-        raise ValueError(f"unknown anomaly: {clean_payload.get('anomaly')}")
-    provider_event_id = "meta:campaign:recommendation"
-    return CanonicalEvent(
-        event_id=f"evt_{provider_event_id}",
-        event_type=EventType.CAMPAIGN_RECOMMENDATION,
-        channel=Channel.INTERNAL,
-        occurred_at=occurred_at or datetime.now(UTC),
-        idempotency_key=provider_event_id,
-        lead_id=None,
-        conversation_id=None,
-        actor_role="system",
-        payload=clean_payload,
-        source={"provider": "meta"},
-    )
 
 
 def build_tool_result_event(

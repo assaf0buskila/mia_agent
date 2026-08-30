@@ -1087,6 +1087,44 @@ def test_cancellation_same_inbound_writes_once() -> None:
         db.close()
 
 
+def test_cancellation_failed_persist_is_reclaimable_once(monkeypatch) -> None:
+    init_db()
+    db = get_session_factory()()
+    try:
+        store = LeadStore(db)
+        lead_id = _seed_booked(store, external_id="gate2.cancel.reclaim@example.com")
+        inbound_id = "evt.cancel.reclaim.1"
+        original = store.mark_meeting_cancellation_requested
+        calls = 0
+
+        def fail_once(*, lead_id: str, requested_at: str) -> bool:
+            nonlocal calls
+            calls += 1
+            return False if calls == 1 else original(lead_id=lead_id, requested_at=requested_at)
+
+        monkeypatch.setattr(store, "mark_meeting_cancellation_requested", fail_once)
+        kwargs = dict(
+            store=store,
+            lead_id=lead_id,
+            provider="gmail",
+            channel=Channel.GMAIL,
+            conversation_id="thread-cancel-reclaim",
+            message="cancel my meeting",
+            calendar=FakeCalendarPort([]),
+            booking_port=FakeCalendarBookingPort(),
+            kill_switch=False,
+            timezone="Asia/Jerusalem",
+            inbound_id=inbound_id,
+        )
+        first = resolve_booked_meeting_change(**kwargs, now=FIXED_NOW)
+        second = resolve_booked_meeting_change(**kwargs, now=FIXED_NOW + timedelta(minutes=1))
+        assert first.kind == MeetingChangeKind.RETRY
+        assert second.kind == MeetingChangeKind.CANCELLATION_REQUESTED
+        assert calls == 2
+    finally:
+        db.close()
+
+
 def test_cancellation_duplicate_inbound_claim_skips_write_while_still_booked() -> None:
     init_db()
     db = get_session_factory()()

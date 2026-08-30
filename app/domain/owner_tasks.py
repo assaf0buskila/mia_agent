@@ -5,12 +5,10 @@ from enum import StrEnum
 
 from pydantic import BaseModel, Field
 
-from app.domain.approvals import CAMPAIGN_ID_RE, LEAD_ID_RE
+from app.domain.approvals import LEAD_ID_RE
 from app.domain.gmail_drafts import parse_gmail_send_intent
 from app.domain.gmail_summaries import THREAD_ID_RE
 from app.domain.learning import InstructionKind, classify_instruction_kind
-
-_CAMPAIGN_ID_VALID = re.compile(r"^[0-9]{5,24}$")
 
 _HEBREW_LETTER = "\u0590-\u05FF"
 
@@ -106,19 +104,6 @@ _MEETING_BRIEF_PHRASES: tuple[str, ...] = (
     "pre meeting brief",
     "תקציר פגישה",
     "בריף פגישה",
-)
-
-_CAMPAIGN_APPROVAL_REQUEST_PHRASES: tuple[str, ...] = (
-    "pause campaign",
-    "request campaign pause",
-    "השהה קמפיין",
-    "בקשת השהייה לקמפיין",
-)
-_CAMPAIGN_APPROVAL_DECIDE_PHRASES: tuple[str, ...] = (
-    "approve campaign",
-    "reject campaign",
-    "אשר קמפיין",
-    "דחה קמפיין",
 )
 
 _HUMAN_TAKEOVER_RESUME_PHRASES: tuple[str, ...] = (
@@ -243,19 +228,11 @@ _TYPE_KEYWORDS: dict[str, tuple[str, ...]] = {
         "לקוח פוטנציאלי",
     ),
     "analytics": (
-        "campaign",
-        "ads",
-        "meta",
-        "budget",
-        "spend",
         "ctr",
         "instagram insights",
         "instagram content",
         "analyze instagram",
         "content performance",
-        "קמפיין",
-        "מודעות",
-        "תקציב מודעות",
         "ביצועי תוכן",
         "תובנות אינסטגרם",
         "האינסטגרם שלי",
@@ -398,20 +375,14 @@ def _token_in_text(text: str, token: str) -> bool:
     return re.search(rf"(?<![a-z0-9]){re.escape(needle)}(?![a-z0-9])", haystack) is not None
 
 
-def _review_phrase_in_text(text: str, phrase: str) -> bool:
-    if phrase.isascii():
-        return phrase.lower() in text.lower()
-    return phrase in text
-
-
-def _content_idea_phrase_in_text(text: str, phrase: str) -> bool:
+def _phrase_in_text(text: str, phrase: str) -> bool:
     if phrase.isascii():
         return phrase.lower() in text.lower()
     return phrase in text
 
 
 def _matches_lead_review(text: str) -> bool:
-    if any(_review_phrase_in_text(text, phrase) for phrase in _REVIEW_PHRASES):
+    if any(_phrase_in_text(text, phrase) for phrase in _REVIEW_PHRASES):
         return True
     if LEAD_ID_RE.search(text) is None:
         return False
@@ -427,148 +398,91 @@ def _matches_lead_outreach(text: str) -> bool:
     if LEAD_ID_RE.search(text) is None:
         return False
     return any(
-        _review_phrase_in_text(text, phrase) for phrase in _LEAD_OUTREACH_PHRASES
+        _phrase_in_text(text, phrase) for phrase in _LEAD_OUTREACH_PHRASES
     )
 
 
 def _matches_content_idea(text: str) -> bool:
     return any(
-        _content_idea_phrase_in_text(text, phrase) for phrase in _CONTENT_IDEA_PHRASES
+        _phrase_in_text(text, phrase) for phrase in _CONTENT_IDEA_PHRASES
     )
-
-
-def _gmail_summary_phrase_in_text(text: str, phrase: str) -> bool:
-    if phrase.isascii():
-        return phrase.lower() in text.lower()
-    return phrase in text
 
 
 def _matches_gmail_summary(text: str) -> bool:
     return any(
-        _gmail_summary_phrase_in_text(text, phrase)
+        _phrase_in_text(text, phrase)
         for phrase in _GMAIL_SUMMARY_PHRASES
     )
 
 
 def _matches_gmail_draft(text: str) -> bool:
     return any(
-        _gmail_summary_phrase_in_text(text, phrase)
+        _phrase_in_text(text, phrase)
         for phrase in _GMAIL_DRAFT_PHRASES
     )
 
 
-def _seo_phrase_in_text(text: str, phrase: str) -> bool:
-    if phrase.isascii():
-        return phrase.lower() in text.lower()
-    return phrase in text
-
-
 def _matches_seo(text: str) -> bool:
-    return any(_seo_phrase_in_text(text, phrase) for phrase in _SEO_PHRASES)
-
-
-def _calendar_phrase_in_text(text: str, phrase: str) -> bool:
-    if phrase.isascii():
-        return phrase.lower() in text.lower()
-    return phrase in text
+    return any(_phrase_in_text(text, phrase) for phrase in _SEO_PHRASES)
 
 
 def _matches_calendar(text: str) -> bool:
     return any(
-        _calendar_phrase_in_text(text, phrase) for phrase in _CALENDAR_PHRASES
+        _phrase_in_text(text, phrase) for phrase in _CALENDAR_PHRASES
     )
-
-
-def _owner_notify_phrase_in_text(text: str, phrase: str) -> bool:
-    if phrase.isascii():
-        return phrase.lower() in text.lower()
-    return phrase in text
 
 
 def _matches_owner_notify(text: str) -> bool:
     return any(
-        _owner_notify_phrase_in_text(text, phrase)
+        _phrase_in_text(text, phrase)
         for phrase in _OWNER_NOTIFY_PHRASES
     )
 
 
-def _meeting_brief_phrase_in_text(text: str, phrase: str) -> bool:
-    if phrase.isascii():
-        return phrase.lower() in text.lower()
-    return phrase in text
-
-
 def _matches_meeting_brief(text: str) -> bool:
     return any(
-        _meeting_brief_phrase_in_text(text, phrase)
+        _phrase_in_text(text, phrase)
         for phrase in _MEETING_BRIEF_PHRASES
     )
 
 
-def _campaign_approval_phrase_in_text(text: str, phrase: str) -> bool:
-    if phrase.isascii():
-        return phrase.lower() in text.lower()
-    return phrase in text
-
-
-def _matches_campaign_approval(text: str) -> bool:
-    phrases = _CAMPAIGN_APPROVAL_REQUEST_PHRASES + _CAMPAIGN_APPROVAL_DECIDE_PHRASES
-    return any(
-        _campaign_approval_phrase_in_text(text, phrase) for phrase in phrases
-    )
-
-
-def _has_campaign_approval_id(text: str) -> bool:
-    scrubbed = LEAD_ID_RE.sub(" ", text)
-    matches = CAMPAIGN_ID_RE.findall(scrubbed)
-    if len(set(matches)) != 1 or len(matches) == 0:
-        return False
-    return _CAMPAIGN_ID_VALID.fullmatch(matches[0]) is not None
-
-
-def _human_takeover_phrase_in_text(text: str, phrase: str) -> bool:
-    if phrase.isascii():
-        return phrase.lower() in text.lower()
-    return phrase in text
-
-
 def _matches_human_takeover_resume(text: str) -> bool:
     return any(
-        _human_takeover_phrase_in_text(text, phrase)
+        _phrase_in_text(text, phrase)
         for phrase in _HUMAN_TAKEOVER_RESUME_PHRASES
     )
 
 
 def _matches_human_takeover(text: str) -> bool:
     return any(
-        _human_takeover_phrase_in_text(text, phrase)
+        _phrase_in_text(text, phrase)
         for phrase in _HUMAN_TAKEOVER_PHRASES
     )
 
 
 def _matches_conversation_scope(text: str) -> bool:
     return any(
-        _human_takeover_phrase_in_text(text, phrase)
+        _phrase_in_text(text, phrase)
         for phrase in _CONVERSATION_SCOPE_PHRASES
     )
 
 
 def _matches_hot_leads(text: str) -> bool:
     return any(
-        _human_takeover_phrase_in_text(text, phrase) for phrase in _HOT_LEADS_PHRASES
+        _phrase_in_text(text, phrase) for phrase in _HOT_LEADS_PHRASES
     )
 
 
 def _matches_pending_approvals(text: str) -> bool:
     return any(
-        _human_takeover_phrase_in_text(text, phrase)
+        _phrase_in_text(text, phrase)
         for phrase in _PENDING_APPROVALS_PHRASES
     )
 
 
 def _matches_website_conversations(text: str) -> bool:
     return any(
-        _human_takeover_phrase_in_text(text, phrase)
+        _phrase_in_text(text, phrase)
         for phrase in _WEBSITE_CONVERSATIONS_PHRASES
     )
 
@@ -713,14 +627,6 @@ def _dedicated_matches(text: str) -> list[OwnerTaskDecision]:
                 task_type=OwnerTaskType.WEBSITE_CONVERSATIONS,
                 needs_clarification=False,
                 matched_types=["website_conversations"],
-            )
-        )
-    if _matches_campaign_approval(text):
-        matches.append(
-            OwnerTaskDecision(
-                task_type=OwnerTaskType.APPROVAL,
-                needs_clarification=not _has_campaign_approval_id(text),
-                matched_types=["approval"],
             )
         )
     if _matches_conversation_scope(text):
@@ -960,14 +866,10 @@ def ack_for_owner_task(
                 f"הבנתי. אכין את השאלה הבאה בשיחה{subject}, "
                 "אבל לא אשלח בלי אישור שלך. נכון?"
             )
-        if (
-            decision.task_type == OwnerTaskType.APPROVAL
-            and decision.needs_clarification
-            and text is not None
-            and _matches_campaign_approval(text)
-        ):
+        if text is not None and ("campaign" in text.lower() or "קמפיין" in text):
             return (
-                "מה שהבנתי: אישור קמפיין. אני לא מבצעת כלום. מה מזהה הקמפיין?"
+                "ניהול ונתוני קמפיינים ממומנים אינם זמינים במיאה. "
+                "לא נרשמה בקשה ולא בוצע שינוי."
             )
         if decision.matched_types:
             labels = _type_labels(decision.matched_types)
@@ -1006,18 +908,6 @@ def ack_for_owner_task(
                 "נשמר כהצעת כלל. זה לא פעיל ולא ישנה פרומפטים בפרודקשן עד שתאשר."
             )
         return "נשמר כהצעת העדפה. זה לא פעיל ולא ישנה פרומפטים בפרודקשן עד שתאשר."
-    if trigger == "spend_threshold":
-        message = "נרשם כמשימת אנליטיקה כשההוצאה תגיע לתקציב המוגדר. לא ביצעתי אותה."
-        if decision.task_type == OwnerTaskType.ANALYTICS:
-            # ADR-039: Meta ads reads were dropped. The old line ("I will not change
-            # budgets or ads in Meta without your approval") implied a capability Mia
-            # no longer has, on a reply whose numbers are Instagram organic only. Say
-            # what this actually covers instead of what it will not do.
-            message += (
-                " אני קוראת ביצועי תוכן אורגני באינסטגרם בלבד,"
-                " אין לי גישה לנתוני קמפיינים ממומנים במטא."
-            )
-        return message
     type_label = _hebrew_type_label(decision.task_type.value)
     formatted_due = _format_due_at_he(due_at)
     if formatted_due is not None:
@@ -1026,15 +916,6 @@ def ack_for_owner_task(
         message = f"נרשם כמשימת {type_label}. לא ביצעתי אותה."
     if condition == "if_not_replied":
         message += " רק אם לא תהיה תשובה."
-    if decision.task_type == OwnerTaskType.ANALYTICS:
-        # ADR-039: Meta ads reads were dropped. The old line ("I will not change
-        # budgets or ads in Meta without your approval") implied a capability Mia no
-        # longer has, on a reply whose numbers are Instagram organic only. Say what
-        # this actually covers instead of what it will not do.
-        message += (
-            " אני קוראת ביצועי תוכן אורגני באינסטגרם בלבד,"
-            " אין לי גישה לנתוני קמפיינים ממומנים במטא."
-        )
     if decision.task_type == OwnerTaskType.LINKEDIN:
         message += " לא אפרסם, לא אגיב ולא אשלח הודעות בלינקדאין."
     if decision.task_type == OwnerTaskType.SEO:

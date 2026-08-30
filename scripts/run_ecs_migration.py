@@ -33,13 +33,8 @@ def _aws(*args: str) -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--task-definition", required=True)
-    parser.add_argument(
-        "--command",
-        default="mia-migrate",
-        help="Container command to run (default mia-migrate).",
-    )
     args = parser.parse_args()
-    command = args.command.split()
+    command = ["mia-migrate"]
 
     service = _aws(
         "ecs", "describe-services", "--cluster", CLUSTER, "--services", SERVICE

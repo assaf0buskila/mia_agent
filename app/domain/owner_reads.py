@@ -27,7 +27,7 @@ def format_pending_approvals_ack(store: LeadStore, *, limit: int = _MAX_LISTED) 
     cap = max(1, limit)
     lines = [f"מחכים לאישור: {len(rows)}"]
     for row in rows[:cap]:
-        # Campaign and website approvals carry no lead, so fall back to the resource
+        # Website approvals carry no lead, so fall back to the resource
         # they act on rather than printing an empty subject.
         subject = row.lead_id or row.resource_id or row.approval_id
         lines.append(f"{subject} · {row.action}")

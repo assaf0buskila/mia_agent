@@ -4,25 +4,30 @@
 boundary: `docs/PRD.md` says a website visitor can never *write* owner memory, and this
 file protects the matching read-side invariant — a visitor must never be able to
 *retrieve* owner memory either. It also covers the operational safety properties the
-wiring in `app/graph/orchestrator.py` and `app/api/website.py` promises: the kill switch
-skips the lookup entirely (no embedding call), a broken brain never 500s a website turn,
-and the ADR-028 meeting-first gate behaves exactly as documented for both callers
+wiring in `app/agents/client/graph.py` promises: the kill switch skips the lookup
+entirely (no embedding call), a broken brain never 500s a website turn, and the ADR-028
+meeting-first gate behaves exactly as documented for both callers
 (`meeting_first=False` unchanged, `meeting_first=True` offers the meeting then falls
 back to WhatsApp).
 """
 
 from __future__ import annotations
 
+import app.agents.client.graph as client_graph_module
+import app.brain.context as context_module
+import app.capabilities.knowledge as capability_module
+from app.agents.client.graph import compile_client_graph
+from app.agents.shared.state import empty_client_state
 from app.brain.context import assemble_visitor_context
 from app.brain.embeddings import FakeEmbeddingPort
 from app.brain.schemas import KnowledgeCategory, KnowledgeChunk
+from app.capabilities.types import Principal
+from app.core.errors import ProviderUnavailable
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
 from app.domain.events import Channel
 from app.domain.extract import extract_sales_signals
 from app.domain.sales import NextAction, SalesState, mark_action_delivered, select_next_action
-from app.graph.orchestrator import build_graph
-from app.graph.state import empty_state
 from app.main import app
 from fastapi.testclient import TestClient
 
@@ -109,9 +114,8 @@ def test_assemble_visitor_context_empty_store_is_safe_too() -> None:
     assert context.open_questions == ()
 
 
-def test_kill_switch_skips_knowledge_lookup_entirely() -> None:
-    """`app/graph/orchestrator.py`: the lookup (and therefore any embedding call) must
-    never run while `kill_switch` is set."""
+def test_kill_switch_skips_client_knowledge_retrieval_entirely(monkeypatch) -> None:
+    """The ClientGraph capability is not invoked while the kill switch is set."""
     init_db()
     db = get_session_factory()()
     try:
@@ -122,20 +126,23 @@ def test_kill_switch_skips_knowledge_lookup_entirely() -> None:
         db.commit()
         calls = {"n": 0}
 
-        def spy_lookup(query: str) -> tuple[str, ...]:
+        def spy_execute(*args: object, **kwargs: object) -> dict[str, object]:
             calls["n"] += 1
-            return ("- [faq] should never be reached while the kill switch is on",)
+            return {"hits": []}
 
-        graph = build_graph(store, knowledge_lookup=spy_lookup)
+        monkeypatch.setattr(client_graph_module, "execute_capability", spy_execute)
+        graph = compile_client_graph(
+            store,
+            principal=Principal.client(source="website", actor_id=lead_id),
+        )
         result = graph.invoke(
-            empty_state(
+            empty_client_state(
                 run_id="run_visitor_kill",
-                thread_id="web_visitor_kill",
-                channel="website",
+                conversation_id="web_visitor_kill",
+                visitor_id="web_visitor_kill",
                 lead_id=lead_id,
                 latest_message="what does this cost?",
                 kill_switch=True,
-                meeting_first=True,
             )
         )
 
@@ -145,18 +152,59 @@ def test_kill_switch_skips_knowledge_lookup_entirely() -> None:
         db.close()
 
 
-def test_knowledge_lookup_exception_does_not_break_the_turn(monkeypatch) -> None:
+def test_website_client_graph_executes_knowledge_once(monkeypatch) -> None:
+    """One website message has one retrieval owner in the live composition.
+
+    Before this guard, ClientGraph executed the capability and the website injected a
+    second direct retrieval into the reused inner sales graph. The spies distinguish
+    those paths while exercising the actual HTTP route and ClientGraph invocation.
+    """
+    capability_calls = 0
+    retrieval_paths: list[str] = []
+    real_capability_retrieve = capability_module.retrieve_knowledge
+    real_direct_retrieve = context_module.retrieve_knowledge
+    real_execute = client_graph_module.execute_capability
+
+    def through_capability(*args: object, **kwargs: object):
+        retrieval_paths.append("capability")
+        return real_capability_retrieve(*args, **kwargs)
+
+    def through_legacy_website_path(*args: object, **kwargs: object):
+        retrieval_paths.append("legacy_website")
+        return real_direct_retrieve(*args, **kwargs)
+
+    def counted_execute(*args: object, **kwargs: object):
+        nonlocal capability_calls
+        capability_calls += 1
+        return real_execute(*args, **kwargs)
+
+    monkeypatch.setattr(capability_module, "retrieve_knowledge", through_capability)
+    monkeypatch.setattr(context_module, "retrieve_knowledge", through_legacy_website_path)
+    monkeypatch.setattr(client_graph_module, "execute_capability", counted_execute)
+    init_db()
+    with TestClient(app) as client:
+        session_id = client.post("/v1/website/sessions").json()["session_id"]
+        response = client.post(
+            f"/v1/website/sessions/{session_id}/messages",
+            json={"text": "מה השירות שלכם כולל?"},
+        )
+
+    assert response.status_code == 200
+    assert capability_calls == 1
+    assert retrieval_paths == ["capability"]
+
+
+def test_knowledge_capability_exception_does_not_break_the_turn(monkeypatch) -> None:
     """A brain outage must degrade phrasing, never 500 a customer.
 
-    Patches the real wiring point (`app.api.website.assemble_visitor_context`, called
-    from inside `_website_knowledge_lookup`) so this exercises the actual website
-    message endpoint end to end, not just the orchestrator's own try/except.
+    Patches the ClientGraph capability call so this exercises the actual website
+    message endpoint end to end, not just its local error handling.
     """
 
     def boom(*args: object, **kwargs: object) -> None:
-        raise RuntimeError("brain outage")
+        raise ProviderUnavailable("brain outage")
 
-    monkeypatch.setattr("app.api.website.assemble_visitor_context", boom)
+    monkeypatch.setattr("app.agents.client.graph.execute_capability", boom)
     init_db()
     with TestClient(app) as client:
         session_id = client.post("/v1/website/sessions").json()["session_id"]

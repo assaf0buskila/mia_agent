@@ -1,4 +1,4 @@
-"""LinkedIn / GSC / GA4 are owner READs through the registry. Sheets is not."""
+"""Owner-only Composio reads and bounded Sheets operations use the registry."""
 
 from app.capabilities.registry import (
     CAPABILITIES,
@@ -22,6 +22,9 @@ def test_owner_composio_reads_are_registered() -> None:
         assert name not in CLIENT_CAPABILITIES
 
 
-def test_sheets_has_no_owner_capability() -> None:
+def test_sheets_owner_capabilities_are_explicit_and_not_client_visible() -> None:
     names = {item.name for item in CAPABILITIES}
-    assert not any(name.startswith("sheets.") for name in names)
+    assert {"sheets.read", "sheets.update", "sheets.append"}.issubset(names)
+    for name in ("sheets.read", "sheets.update", "sheets.append"):
+        assert name in OWNER_CAPABILITIES
+        assert name not in CLIENT_CAPABILITIES

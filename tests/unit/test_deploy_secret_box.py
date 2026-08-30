@@ -364,6 +364,8 @@ def test_fill_placeholders_replaces_tokens_on_windows() -> None:
         [
             "powershell",
             "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
             "-File",
             str(script),
             "-AccountId",
@@ -413,7 +415,15 @@ def test_fill_placeholders_replaces_tokens_on_windows() -> None:
 
 def _run_ps1(script: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["powershell", "-NoProfile", "-File", str(script), *args],
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(script),
+            *args,
+        ],
         cwd=ROOT,
         check=False,
         capture_output=True,

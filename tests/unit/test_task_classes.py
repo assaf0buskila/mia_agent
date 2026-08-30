@@ -45,18 +45,32 @@ def test_transcribe_and_normal_sales_use_env_model_source() -> None:
     assert task_class_pin(TaskClass.OWNER_CONVERSATION.value).model_source == "env"
 
 
-def test_code_owned_classes_use_none_model_source() -> None:
-    none_sources = (
+def test_none_model_source_inventory_is_current() -> None:
+    expected_none_sources = {
         TaskClass.ROUTE,
         TaskClass.EXTRACT,
-        TaskClass.CAMPAIGN_INTERPRETATION,
         TaskClass.DEEP_RESEARCH,
         TaskClass.MESSAGE_HUMANITY_REVIEW,
         TaskClass.SAFETY_VERIFICATION,
         TaskClass.OBJECTION_HANDLING,
-    )
-    for task_class in none_sources:
+    }
+    actual_none_sources = {
+        task_class
+        for task_class in _ALL_TASK_CLASSES
+        if task_class_pin(task_class.value).model_source == "none"
+    }
+    assert actual_none_sources == expected_none_sources
+    for task_class in expected_none_sources:
         assert task_class_pin(task_class.value).model_source == "none"
+
+    code_owned = {
+        TaskClass.ROUTE,
+        TaskClass.EXTRACT,
+        TaskClass.OBJECTION_HANDLING,
+        TaskClass.SAFETY_VERIFICATION,
+    }
+    for task_class in code_owned:
+        assert task_class_pin(task_class.value).owner == "code"
 
 
 def test_model_task_classes_capability_alive() -> None:

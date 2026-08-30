@@ -126,7 +126,7 @@ def test_classify_calendar_phrases(text: str) -> None:
 
 
 def test_classify_calendar_wins_over_analytics() -> None:
-    decision = classify_owner_task("calendar availability and campaign spend")
+    decision = classify_owner_task("calendar availability and instagram content")
     assert decision.task_type == OwnerTaskType.CALENDAR
     assert decision.needs_clarification is False
 
@@ -144,7 +144,7 @@ def test_classify_daily_brief_not_calendar() -> None:
 
 
 def test_classify_analytics_not_calendar() -> None:
-    decision = classify_owner_task("how's the campaign spend")
+    decision = classify_owner_task("analyze instagram content")
     assert decision.task_type == OwnerTaskType.ANALYTICS
     assert decision.task_type != OwnerTaskType.CALENDAR
 

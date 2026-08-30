@@ -22,7 +22,12 @@ from app.core.config import Settings
 from app.core.errors import PermissionDenied, PolicyDenied
 from app.domain.ai_runs import elapsed_ms
 from app.domain.policies.freshness import overlay_stale, stamp_freshness
-from app.domain.tools import AdapterHttpError, ToolOutcome
+from app.domain.tools import (
+    AdapterHttpError,
+    AdapterResponseError,
+    AdapterSchemaError,
+    ToolOutcome,
+)
 
 COMPOSIO_LINKEDIN_VERSION = "20260724_00"
 COMPOSIO_GET_MY_INFO_TOOL = "LINKEDIN_GET_MY_INFO"
@@ -89,16 +94,18 @@ class ComposioLinkedInPort:
             raise AdapterHttpError(response.status_code)
         try:
             body = response.json()
-            if not isinstance(body, dict) or body.get("successful") is not True:
-                return None
+            if not isinstance(body, dict) or not isinstance(body.get("successful"), bool):
+                raise AdapterSchemaError()
+            if body["successful"] is False:
+                raise AdapterResponseError()
             data = body.get("data")
             if isinstance(data, str):
                 try:
                     data = json.loads(data)
                 except json.JSONDecodeError:
-                    return None
+                    raise AdapterSchemaError() from None
             if not isinstance(data, dict):
-                return None
+                raise AdapterSchemaError()
             return _map_data_to_profile(data)
         except (
             ValueError,
@@ -107,7 +114,7 @@ class ComposioLinkedInPort:
             AttributeError,
             IndexError,
         ):
-            return None
+            raise AdapterSchemaError() from None
 
 
 class FakeLinkedInPort:

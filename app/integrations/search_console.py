@@ -17,7 +17,12 @@ from pydantic import BaseModel
 
 from app.core.config import Settings
 from app.domain.policies.freshness import overlay_stale, stamp_freshness
-from app.domain.tools import AdapterHttpError, ToolOutcome
+from app.domain.tools import (
+    AdapterHttpError,
+    AdapterResponseError,
+    AdapterSchemaError,
+    ToolOutcome,
+)
 
 COMPOSIO_GSC_VERSION = "20260806_00"
 COMPOSIO_LIST_SITES_TOOL = "GOOGLE_SEARCH_CONSOLE_LIST_SITES"
@@ -127,6 +132,8 @@ class ComposioSearchConsolePort:
 
     def list_sites(self) -> list[str]:
         body = self._execute(COMPOSIO_LIST_SITES_TOOL, {})
+        if body is not None and not _has_site_list_schema(body):
+            raise AdapterSchemaError()
         return _map_site_list(body)
 
     def query_search_analytics(
@@ -147,6 +154,8 @@ class ComposioSearchConsolePort:
             "row_limit": MAX_ANALYTICS_ROWS,
         }
         body = self._execute(COMPOSIO_SEARCH_ANALYTICS_TOOL, arguments)
+        if body is not None and not isinstance(body.get("rows"), list):
+            raise AdapterSchemaError()
         return _map_analytics_rows(body, dimensions)
 
     def inspect_url(self, url: str) -> UrlInspectionResult | None:
@@ -186,19 +195,21 @@ class ComposioSearchConsolePort:
             raise AdapterHttpError(response.status_code)
         try:
             body = response.json()
-            if not isinstance(body, dict) or body.get("successful") is not True:
-                return None
+            if not isinstance(body, dict) or not isinstance(body.get("successful"), bool):
+                raise AdapterSchemaError()
+            if body["successful"] is False:
+                raise AdapterResponseError()
             data = body.get("data")
             if isinstance(data, str):
                 try:
                     data = json.loads(data)
                 except json.JSONDecodeError:
-                    return None
+                    raise AdapterSchemaError() from None
             if isinstance(data, dict):
                 return data
-            return None
+            raise AdapterSchemaError()
         except (ValueError, KeyError, TypeError, AttributeError, IndexError):
-            return None
+            raise AdapterSchemaError() from None
 
 
 def _metric_str(value: object) -> str | None:
@@ -219,7 +230,6 @@ def _map_site_list(data: dict[str, Any] | None) -> list[str]:
         return []
     entries = (
         data.get("siteEntry")
-        or data.get("siteEntry")
         or data.get("sites")
         or data.get("items")
     )
@@ -232,7 +242,6 @@ def _map_site_list(data: dict[str, Any] | None) -> list[str]:
         elif isinstance(entry, dict):
             raw = (
                 entry.get("siteUrl")
-                or entry.get("siteUrl")
                 or entry.get("url")
             )
             site = raw.strip() if isinstance(raw, str) else ""
@@ -243,6 +252,10 @@ def _map_site_list(data: dict[str, Any] | None) -> list[str]:
         if len(sites) >= MAX_ANALYTICS_ROWS:
             break
     return sites
+
+
+def _has_site_list_schema(data: dict[str, Any]) -> bool:
+    return any(isinstance(data.get(key), list) for key in ("siteEntry", "sites", "items"))
 
 
 def pick_gsc_site(sites: list[str], *, preferred: str = "") -> str:
@@ -306,12 +319,10 @@ def _map_analytics_rows(
 def _map_inspection(url: str, data: dict[str, Any] | None) -> UrlInspectionResult | None:
     if data is None:
         return None
-    inspection = data.get("inspectionResult") or data.get("inspectionResult")
+    inspection = data.get("inspectionResult")
     if not isinstance(inspection, dict):
         inspection = data
-    index_status = inspection.get("indexStatusResult") or inspection.get(
-        "indexStatusResult"
-    )
+    index_status = inspection.get("indexStatusResult")
     status_text = ""
     coverage = ""
     if isinstance(index_status, dict):

@@ -5,16 +5,14 @@ from zoneinfo import ZoneInfo
 
 import pytest
 from app.core.capabilities import CapabilityId, require_alive
-from app.core.config import get_settings
+from app.core.config import Settings, get_settings
 from app.db.models import FollowUpRow
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
 from app.domain.commitments import (
-    ACTION_ANALYZE,
     ACTION_FOLLOW_UP,
     CONDITION_NONE,
     TRIGGER_DUE_DATE,
-    TRIGGER_SPEND_THRESHOLD,
 )
 from app.domain.events import Channel
 from app.domain.followup_voice import MEETING_OFFERED_FOLLOW_UP
@@ -31,9 +29,7 @@ from sqlalchemy import select
 SCAN_PHONE_WA = "972509994401"
 MAIN_PHONE = "972509994403"
 OWNER_EVENT_ID = "evt.owner.scan.worker.due"
-OWNER_SPEND_EVENT_ID = "evt.owner.scan.worker.spend"
 OWNER_EXTERNAL_ID = "972509994404"
-OWNER_SPEND_EXTERNAL_ID = "972509994405"
 _FIXED_NOW = datetime(2026, 8, 21, 12, 0, tzinfo=ZoneInfo("Asia/Jerusalem"))
 
 
@@ -77,26 +73,6 @@ def _seed_owner_task(
         trigger=trigger,
         condition=condition,
         action=ACTION_FOLLOW_UP,
-    )
-
-
-def _seed_spend_threshold_owner_task(
-    store: LeadStore,
-    *,
-    provider_event_id: str,
-    external_id: str = OWNER_SPEND_EXTERNAL_ID,
-) -> None:
-    store.save_owner_task(
-        provider="whatsapp",
-        provider_event_id=provider_event_id,
-        channel="whatsapp",
-        external_id=external_id,
-        task_type="analytics",
-        status="logged",
-        due_at=None,
-        trigger=TRIGGER_SPEND_THRESHOLD,
-        condition=CONDITION_NONE,
-        action=ACTION_ANALYZE,
     )
 
 
@@ -176,12 +152,10 @@ def test_run_due_scan_calls_both_scans(monkeypatch: pytest.MonkeyPatch) -> None:
         }
         return []
 
-    def fake_owner_tasks(store, *, timezone, now=None, monthly_budget=None, spend_mtd=None):
+    def fake_owner_tasks(store, *, timezone, now=None):
         calls["owner_tasks"] = {
             "timezone": timezone,
             "now": now,
-            "monthly_budget": monthly_budget,
-            "spend_mtd": spend_mtd,
         }
         return []
 
@@ -211,52 +185,8 @@ def test_run_due_scan_calls_both_scans(monkeypatch: pytest.MonkeyPatch) -> None:
         assert calls["owner_tasks"] == {
             "timezone": "Asia/Jerusalem",
             "now": _FIXED_NOW,
-            "monthly_budget": None,
-            "spend_mtd": None,
         }
     finally:
-        db.close()
-
-
-def test_run_due_scan_spend_threshold_stays_blocked_without_campaign_pacing() -> None:
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        settings = get_settings()
-        _seed_spend_threshold_owner_task(
-            store, provider_event_id=OWNER_SPEND_EVENT_ID
-        )
-        store.upsert_campaign_pacing(
-            scope="account",
-            campaign="account",
-            monthly_budget="5000",
-            spend="5000.00",
-            expected_spend="2500.00",
-            remaining="2500.00",
-            projected="5000.00",
-            over_under="0.00",
-            status="on_track",
-        )
-        db.commit()
-        summary = run_due_scan(
-            store,
-            timezone=settings.calendar_timezone,
-            kill_switch=False,
-            now=_FIXED_NOW,
-        )
-        assert summary.owner_tasks_scanned >= 1
-        owner_row = store.get_owner_task(
-            provider="whatsapp", provider_event_id=OWNER_SPEND_EVENT_ID
-        )
-        assert owner_row is not None
-        assert owner_row.due_ready is False
-        assert owner_row.block_reason == "no_budget"
-    finally:
-        pacing = store.get_campaign_pacing()
-        if pacing is not None:
-            db.delete(pacing)
-            db.commit()
         db.close()
 
 
@@ -271,12 +201,22 @@ def test_due_scan_sends_one_unprompted_owner_reminder(
 ) -> None:
     sent: list[str] = []
 
-    def fake_send(*, text: str, settings, transport=None) -> bool:
-        del settings, transport
-        sent.append(text)
-        return True
+    class Delivery:
+        delivered = ("111",)
+        rejected = ()
+        confirmed_failure = False
 
-    monkeypatch.setattr(due_scan_module, "send_owner_telegram", fake_send)
+    def fake_send(*, text: str, settings, transport=None, recipient_ids=None) -> Delivery:
+        del settings, transport, recipient_ids
+        sent.append(text)
+        return Delivery()
+
+    monkeypatch.setattr(due_scan_module, "deliver_owner_telegram", fake_send)
+    monkeypatch.setattr(
+        due_scan_module,
+        "get_settings",
+        lambda: Settings(telegram_bot_token="tok", telegram_owner_user_ids="111"),
+    )
     reminder_now = datetime(2026, 8, 22, 12, 0, tzinfo=ZoneInfo("Asia/Jerusalem"))
     init_db()
     db = get_session_factory()()
@@ -310,14 +250,98 @@ def test_due_scan_sends_one_unprompted_owner_reminder(
         db.close()
 
 
+def test_due_reminder_retries_only_the_known_rejected_owner(monkeypatch) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    class Delivery:
+        def __init__(self, delivered: tuple[str, ...], rejected: tuple[str, ...]) -> None:
+            self.delivered = delivered
+            self.rejected = rejected
+
+    def fake_send(*, recipient_ids=None, **kwargs) -> Delivery:
+        del kwargs
+        ids = tuple(recipient_ids or ())
+        calls.append(ids)
+        if ids == ("111", "222"):
+            return Delivery(("111",), ("222",))
+        return Delivery(ids, ())
+
+    monkeypatch.setattr(due_scan_module, "deliver_owner_telegram", fake_send)
+    init_db()
+    db = get_session_factory()()
+    try:
+        store = LeadStore(db)
+        settings = Settings(telegram_bot_token="tok", telegram_owner_user_ids="111,222")
+        now = datetime(2026, 8, 22, 12, 0, tzinfo=ZoneInfo("Asia/Jerusalem"))
+        assert due_scan_module.maybe_notify_due_owner_tasks(
+            store, due_ready=2, settings=settings, kill_switch=False, now=now
+        ) == 1
+        assert due_scan_module.maybe_notify_due_owner_tasks(
+            store, due_ready=2, settings=settings, kill_switch=False, now=now
+        ) == 1
+        assert calls == [("111", "222"), ("222",)]
+    finally:
+        db.close()
+
+
+def test_legacy_same_day_due_claim_does_not_resend_but_old_day_does(monkeypatch) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    class Delivery:
+        delivered = ("111",)
+        rejected = ()
+
+    def fake_send(*, recipient_ids=None, **kwargs) -> Delivery:
+        del kwargs
+        calls.append(tuple(recipient_ids or ()))
+        return Delivery()
+
+    monkeypatch.setattr(due_scan_module, "deliver_owner_telegram", fake_send)
+    init_db()
+    db = get_session_factory()()
+    try:
+        store = LeadStore(db)
+        settings = Settings(telegram_bot_token="tok", telegram_owner_user_ids="111")
+        today = datetime(2026, 8, 22, 12, 0, tzinfo=ZoneInfo("Asia/Jerusalem"))
+        assert store.try_claim_owner_notification(
+            kind=due_scan_module.KIND_DUE_REMINDER,
+            lead_id="owner_due",
+            claimed_at="2026-08-22T08:00:00+00:00",
+        )
+        db.commit()
+
+        assert due_scan_module.maybe_notify_due_owner_tasks(
+            store, due_ready=2, settings=settings, kill_switch=False, now=today
+        ) == 0
+        assert calls == []
+
+        store.release_owner_notification_claim(
+            kind=due_scan_module.KIND_DUE_REMINDER, lead_id="owner_due"
+        )
+        db.commit()
+        assert store.try_claim_owner_notification(
+            kind=due_scan_module.KIND_DUE_REMINDER,
+            lead_id="owner_due",
+            claimed_at="2026-08-21T08:00:00+00:00",
+        )
+        db.commit()
+
+        assert due_scan_module.maybe_notify_due_owner_tasks(
+            store, due_ready=2, settings=settings, kill_switch=False, now=today
+        ) == 1
+        assert calls == [("111",)]
+    finally:
+        db.close()
+
+
 def test_due_scan_kill_switch_skips_owner_reminder(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def boom(*, text: str, settings, transport=None) -> bool:
+    def boom(*, text: str, settings, transport=None):
         del text, settings, transport
         raise AssertionError("kill switch must not ping the owner")
 
-    monkeypatch.setattr(due_scan_module, "send_owner_telegram", boom)
+    monkeypatch.setattr(due_scan_module, "deliver_owner_telegram", boom)
     init_db()
     db = get_session_factory()()
     try:

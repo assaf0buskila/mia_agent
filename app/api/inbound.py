@@ -16,7 +16,7 @@ from app.api.inbound_common import (
 from app.api.inbound_common import (
     transcript_duration_ms as _transcript_duration_ms,
 )
-from app.api.owner import process_owner_item
+from app.api.owner import _is_authorized_owner, process_owner_item
 from app.capabilities.types import Principal
 from app.core.config import get_settings
 from app.core.demo import demo_mode_active
@@ -44,7 +44,6 @@ from app.domain.events import (
     build_message_in_event,
     build_message_out_event,
     persist_tool_outcome,
-    sheets_mirror_outcome,
     stamp_correlation,
     transcription_outcome,
     webhook_envelope_kind,
@@ -81,21 +80,9 @@ from app.integrations.sales_reply import build_sales_reply_port
 from app.integrations.search_console import SearchConsolePort, build_search_console_port
 from app.integrations.seo_audit import SeoAuditPort, build_seo_audit_port
 from app.integrations.sheets import (
-    DealMirrorRow,
-    FollowUpMirrorRow,
-    LeadMirrorRow,
-    MeetingMirrorRow,
     SheetsPort,
-    activity_mirror_row_from_persisted,
     build_sheets_port,
-    claim_sheets_mirror,
-    complete_sheets_mirror,
-    maybe_mirror_weekly_kpi,
-    mirror_activity,
-    mirror_deal,
-    mirror_follow_up,
-    mirror_lead,
-    mirror_meeting,
+    mirror_sales_turn,
 )
 
 
@@ -169,36 +156,19 @@ async def process_inbound_texts(
     owner_ids = owner_ids or set()
     settings = get_settings()
     calendar_port = calendar if calendar is not None else build_calendar_port(settings)
-    calendar_agenda_port = (
-        calendar_agenda
-        if calendar_agenda is not None
-        else build_calendar_agenda_port(settings)
-    )
-    gmail_port = gmail if gmail is not None else build_gmail_port(settings)
     calendar_booking_port = (
         calendar_booking
         if calendar_booking is not None
         else build_calendar_booking_port(settings)
     )
     sheets_port = sheets if sheets is not None else build_sheets_port(settings)
-    instagram_insights_port = (
-        instagram_insights
-        if instagram_insights is not None
-        else build_instagram_insights_port(settings)
-    )
     research_port = research if research is not None else build_research_port(settings)
-    linkedin_port = linkedin if linkedin is not None else build_linkedin_port(settings)
-    search_console_port = (
-        search_console if search_console is not None else build_search_console_port(settings)
-    )
-    ga4_port = ga4 if ga4 is not None else build_ga4_port(settings)
-    seo_audit_port = seo_audit if seo_audit is not None else build_seo_audit_port(settings)
-    owner_reply_port = (
-        owner_reply if owner_reply is not None else build_owner_reply_port(settings)
-    )
     for item in items:
         if not item["id"] or not item["from"]:
             continue
+        is_authorized_owner = _is_authorized_owner(
+            actor_id=item["from"], owner_ids=owner_ids
+        )
         if not store.claim_webhook(
             provider=provider,
             provider_event_id=item["id"],
@@ -207,7 +177,31 @@ async def process_inbound_texts(
         ):
             duplicates += 1
             continue
-        if item["from"] in owner_ids:
+        if is_authorized_owner:
+            calendar_agenda_port = (
+                calendar_agenda
+                if calendar_agenda is not None
+                else build_calendar_agenda_port(settings)
+            )
+            gmail_port = gmail if gmail is not None else build_gmail_port(settings)
+            instagram_insights_port = (
+                instagram_insights
+                if instagram_insights is not None
+                else build_instagram_insights_port(settings)
+            )
+            linkedin_port = linkedin if linkedin is not None else build_linkedin_port(settings)
+            search_console_port = (
+                search_console
+                if search_console is not None
+                else build_search_console_port(settings)
+            )
+            ga4_port = ga4 if ga4 is not None else build_ga4_port(settings)
+            seo_audit_port = (
+                seo_audit if seo_audit is not None else build_seo_audit_port(settings)
+            )
+            owner_reply_port = (
+                owner_reply if owner_reply is not None else build_owner_reply_port(settings)
+            )
             turn = await process_owner_item(
                 item=item,
                 provider=provider,
@@ -521,110 +515,20 @@ async def process_inbound_texts(
                 outcome=opt_out_outcome,
                 correlation_id=run_id,
             )
-        if not demo_mode_active(settings):
-            if claim_sheets_mirror(store=store, inbound_id=item["id"], tab="sales"):
-                started = perf_counter()
-                sales = store.get_sales(lead_id)
-                sheets_written = mirror_lead(
-                    sheets=sheets_port,
-                    row=LeadMirrorRow(
-                        lead_id=lead_id,
-                        channel=channel_value,
-                        stage=store.get_lead_stage(lead_id),
-                        fit=sales.fit.value,
-                        pain_level=int(sales.pain_level),
-                        next_action=result.get("next_action", ""),
-                    ),
-                    kill_switch=kill_switch,
-                )
-                fu_written = False
-                fu = store.get_follow_up(lead_id)
-                if fu is not None:
-                    fu_written = mirror_follow_up(
-                        sheets=sheets_port,
-                        row=FollowUpMirrorRow(
-                            lead_id=lead_id,
-                            due_at=fu.due_at,
-                            channel=fu.channel,
-                            status=fu.status,
-                            result=fu.reason,
-                        ),
-                        kill_switch=kill_switch,
-                    )
-                deal_written = False
-                deal = store.get_deal(lead_id)
-                if deal is not None:
-                    deal_written = mirror_deal(
-                        sheets=sheets_port,
-                        row=DealMirrorRow(
-                            lead_id=lead_id,
-                            stage=deal.stage,
-                            source=deal.source,
-                            attribution_confidence=deal.attribution_confidence,
-                            expected_value=deal.expected_value,
-                            closed_value=deal.closed_value,
-                        ),
-                        kill_switch=kill_switch,
-                    )
-                meeting_written = False
-                meeting = store.get_meeting(lead_id)
-                if meeting is not None:
-                    meeting_written = mirror_meeting(
-                        sheets=sheets_port,
-                        row=MeetingMirrorRow(
-                            lead_id=lead_id,
-                            status=meeting.status,
-                            source=meeting.source,
-                            scheduled_at=meeting.scheduled_at,
-                            calendar_event_id=meeting.calendar_event_id,
-                            summary=meeting.summary,
-                        ),
-                        kill_switch=kill_switch,
-                    )
-                activity_written = False
-                ai = store.get_ai_run(run_id)
-                if ai is not None:
-                    activity_row = activity_mirror_row_from_persisted(
-                        run_id=ai.run_id,
-                        lead_id=ai.lead_id,
-                        channel=ai.channel,
-                        next_action=ai.next_action,
-                        model=ai.model,
-                        kill_switch=ai.kill_switch,
-                        cost_usd=ai.cost_usd,
-                        timezone=settings.calendar_timezone,
-                    )
-                    if activity_row is not None:
-                        activity_written = mirror_activity(
-                            sheets=sheets_port,
-                            row=activity_row,
-                            kill_switch=kill_switch,
-                        )
-                kpi_written = maybe_mirror_weekly_kpi(
-                    store=store,
-                    sheets=sheets_port,
-                    settings=settings,
-                    kill_switch=kill_switch,
-                )
-                persist_tool_outcome(
-                    store,
-                    provider=provider,
-                    channel=channel,
-                    inbound_provider_event_id=item["id"],
-                    conversation_id=_event_conversation_id(item),
-                    lead_id=lead_id,
-                    outcome=sheets_mirror_outcome(
-                        int(sheets_written)
-                        + int(fu_written)
-                        + int(deal_written)
-                        + int(meeting_written)
-                        + int(activity_written)
-                        + int(kpi_written),
-                        latency_ms=elapsed_ms(started),
-                    ),
-                    correlation_id=run_id,
-                )
-                complete_sheets_mirror(store=store, inbound_id=item["id"], tab="sales")
+        mirror_sales_turn(
+            store=store,
+            sheets=sheets_port,
+            settings=settings,
+            provider=provider,
+            channel=channel,
+            inbound_id=item["id"],
+            conversation_id=_event_conversation_id(item),
+            lead_id=lead_id,
+            run_id=run_id,
+            next_action=result.get("next_action", ""),
+            kill_switch=kill_switch,
+            measure_elapsed=elapsed_ms,
+        )
         if reply_text:
             automation_scope = (
                 _whatsapp_automation_scope(store, item)

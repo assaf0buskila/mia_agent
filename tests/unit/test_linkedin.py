@@ -11,7 +11,7 @@ from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
 from app.domain.events import Channel
 from app.domain.owner_tasks import OwnerTaskType, ack_for_owner_task, classify_owner_task
-from app.domain.tools import AdapterHttpError
+from app.domain.tools import AdapterHttpError, AdapterResponseError, AdapterSchemaError
 from app.integrations.base import RecordingMessagePort
 from app.integrations.linkedin import (
     COMPOSIO_GET_MY_INFO_TOOL,
@@ -297,7 +297,7 @@ def test_composio_linkedin_port_network_error_raises_adapter_error() -> None:
     assert exc_info.value.status_code is None
 
 
-def test_composio_linkedin_port_unsuccessful_response_returns_none() -> None:
+def test_composio_linkedin_port_unsuccessful_response_is_not_reported_as_empty() -> None:
     transport = httpx.MockTransport(
         lambda _request: httpx.Response(
             200,
@@ -310,7 +310,27 @@ def test_composio_linkedin_port_unsuccessful_response_returns_none() -> None:
         user_id="user-123",
         client=client,
     )
-    assert port.get_my_profile() is None
+    with pytest.raises(AdapterResponseError) as exc_info:
+        port.get_my_profile()
+    assert exc_info.value.tool_status() == "error"
+
+
+def test_composio_linkedin_port_schema_mismatch_is_not_reported_as_empty() -> None:
+    transport = httpx.MockTransport(
+        lambda _request: httpx.Response(
+            200,
+            json={"data": ["not a profile object"], "successful": True},
+        )
+    )
+    client = httpx.Client(transport=transport)
+    port = ComposioLinkedInPort(
+        api_key="cmp-test",
+        user_id="user-123",
+        client=client,
+    )
+    with pytest.raises(AdapterSchemaError) as exc_info:
+        port.get_my_profile()
+    assert exc_info.value.tool_status() == "malformed"
 
 
 def test_composio_linkedin_port_request_shape() -> None:

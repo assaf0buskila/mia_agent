@@ -11,7 +11,6 @@ from app.domain.events import (
     EventType,
     build_attribution_event,
     build_behavior_event,
-    build_campaign_recommendation_event,
     build_deal_updated_event,
     build_follow_up_event,
     build_handoff_event,
@@ -240,47 +239,6 @@ def test_build_meeting_brief_event_pairs_and_payload() -> None:
     assert event.payload["missing_fields"] == ["timeline", "metric"]
     assert event.payload["owner_questions"] == ["timeline"]
 
-
-def test_build_campaign_recommendation_event_strips_extra_keys() -> None:
-    event = build_campaign_recommendation_event(
-        kind="investigate",
-        anomaly="spend_without_clicks",
-        payload={
-            "kind": "investigate",
-            "anomaly": "spend_without_clicks",
-            "spend": "500",
-            "email": "secret@example.com",
-        },
-    )
-    assert event.event_type == EventType.CAMPAIGN_RECOMMENDATION
-    assert event.event_id == "evt_meta:campaign:recommendation"
-    assert event.idempotency_key == "meta:campaign:recommendation"
-    assert event.channel == Channel.INTERNAL
-    assert event.lead_id is None
-    assert event.actor_role == "system"
-    assert event.source == {"provider": "meta"}
-    assert set(event.payload.keys()) == {"kind", "anomaly"}
-    assert event.payload == {
-        "kind": "investigate",
-        "anomaly": "spend_without_clicks",
-    }
-
-    with pytest.raises(ValueError, match="unknown kind"):
-        build_campaign_recommendation_event(kind="pause", anomaly="none")
-
-    for anomaly in (
-        "spend_up_clicks_down",
-        "spend_up_clicks_down_30d",
-        "spend_without_leads",
-        "cpl_spike",
-        "creative_fatigue",
-        "website_funnel_drop",
-    ):
-        compare = build_campaign_recommendation_event(
-            kind="investigate",
-            anomaly=anomaly,
-        )
-        assert compare.payload == {"kind": "investigate", "anomaly": anomaly}
 
 
 def test_build_follow_up_event_pairs_and_payload() -> None:

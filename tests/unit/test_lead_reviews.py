@@ -82,8 +82,8 @@ def test_classify_daily_brief_not_lead_review() -> None:
     assert decision.needs_clarification is False
 
 
-def test_classify_campaign_spend_still_analytics() -> None:
-    decision = classify_owner_task("how's the campaign spend")
+def test_classify_instagram_content_is_analytics() -> None:
+    decision = classify_owner_task("analyze instagram content")
     assert decision.task_type == OwnerTaskType.ANALYTICS
     assert decision.needs_clarification is False
 

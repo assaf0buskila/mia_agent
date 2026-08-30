@@ -368,27 +368,27 @@ async def test_openai_transcribe_port_primary_failure_uses_fallback() -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         body = request.content.decode(errors="replace")
-        if "stt-primary" in body:
-            models.append("stt-primary")
+        if "gpt-transcribe" in body:
+            models.append("gpt-transcribe")
             return httpx.Response(500, json={"error": {"message": "busy"}})
-        if "stt-fallback" in body:
-            models.append("stt-fallback")
+        if "gpt-4o-mini-transcribe" in body:
+            models.append("gpt-4o-mini-transcribe")
             return httpx.Response(200, json={"text": "from fallback"})
         return httpx.Response(500)
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
     port = OpenAITranscribePort(
         api_key="secret-token-value",
-        model="stt-primary",
-        fallback_model="stt-fallback",
+        model="gpt-transcribe",
+        fallback_model="gpt-4o-mini-transcribe",
         client=client,
     )
     result = await port.transcribe(audio=b"abc", mime_type="audio/ogg")
     await client.aclose()
     assert result.text == "from fallback"
     assert result.stt_provider == "openai"
-    assert result.stt_model == "stt-fallback"
-    assert models == ["stt-primary", "stt-fallback"]
+    assert result.stt_model == "gpt-4o-mini-transcribe"
+    assert models == ["gpt-transcribe", "gpt-4o-mini-transcribe"]
 
 
 @pytest.mark.asyncio

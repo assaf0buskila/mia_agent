@@ -15,6 +15,17 @@ _TELEGRAM_API = "https://api.telegram.org"
 # getFile downloads are capped at 20MB by Telegram; stay under it.
 _MAX_AUDIO_BYTES = 16_000_000
 _TIMEOUT = 20.0
+_SUPPORTED_AUDIO_MIME_TYPES = frozenset(
+    {
+        "audio/mpeg",
+        "audio/mp4",
+        "audio/ogg",
+        "audio/opus",
+        "audio/wav",
+        "audio/webm",
+        "audio/x-wav",
+    }
+)
 
 # Must be stated on every setWebhook call. Omitting it reuses the previous server-side
 # value, which silently drops button presses if it was ever narrowed to messages only.
@@ -29,6 +40,32 @@ class TelegramSendError(MiaError):
 class TelegramMediaError(MiaError):
     code = "telegram_media_failed"
     http_status = 502
+
+
+def normalize_telegram_audio_mime(content_type: object) -> str:
+    """Return one supported media type, rejecting absent or malformed headers."""
+    if not isinstance(content_type, str) or not content_type.strip():
+        raise TelegramMediaError("Telegram media content type missing")
+    parts = content_type.split(";")
+    mime = parts[0].strip().lower()
+    if mime not in _SUPPORTED_AUDIO_MIME_TYPES:
+        raise TelegramMediaError("Telegram media content type is unsupported")
+    for parameter in parts[1:]:
+        if "=" not in parameter:
+            raise TelegramMediaError("Telegram media content type is malformed")
+        name, value = parameter.split("=", 1)
+        if not name.strip() or not value.strip():
+            raise TelegramMediaError("Telegram media content type is malformed")
+    return mime
+
+
+def validate_telegram_voice_media(audio: object, content_type: object) -> tuple[bytes, str]:
+    """Enforce the voice-media contract at every adapter boundary."""
+    if not isinstance(audio, bytes) or not audio:
+        raise TelegramMediaError("Telegram media is empty or malformed")
+    if len(audio) > _MAX_AUDIO_BYTES:
+        raise TelegramMediaError("Telegram media exceeds maximum size")
+    return audio, normalize_telegram_audio_mime(content_type)
 
 
 def _reraise_classified(error_cls: type[MiaError], prefix: str, exc: AdapterHttpError) -> NoReturn:
@@ -186,23 +223,22 @@ class TelegramPort:
             parsed = urlparse(file_url)
             if parsed.scheme != "https" or (parsed.hostname or "") != "api.telegram.org":
                 raise TelegramMediaError("Telegram media host is not allowlisted")
-            try:
-                if self._client is not None:
-                    media = await self._client.get(file_url)
-                else:
-                    async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-                        media = await client.get(file_url)
-            except httpx.HTTPError as exc:
-                raise AdapterHttpError(None) from exc
-            if media.status_code >= 400:
-                raise AdapterHttpError(media.status_code)
-            data = media.content
-            if len(data) > _MAX_AUDIO_BYTES:
-                raise TelegramMediaError("Telegram media exceeds maximum size")
-            mime = media.headers.get("content-type", "audio/ogg") or "audio/ogg"
-            return data, mime.split(";")[0].strip()
+            return await self._download_voice_file(file_url)
         except AdapterHttpError as exc:
             _reraise_classified(TelegramMediaError, "Telegram media download failed", exc)
+
+    async def _download_voice_file(self, file_url: str) -> tuple[bytes, str]:
+        try:
+            if self._client is not None:
+                media = await self._client.get(file_url)
+            else:
+                async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+                    media = await client.get(file_url)
+        except httpx.HTTPError as exc:
+            raise AdapterHttpError(None) from exc
+        if media.status_code >= 400:
+            raise AdapterHttpError(media.status_code)
+        return validate_telegram_voice_media(media.content, media.headers.get("content-type"))
 
 
 def parse_telegram_update(payload: dict[str, Any]) -> dict[str, str] | None:

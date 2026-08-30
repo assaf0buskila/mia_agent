@@ -62,9 +62,19 @@ Semantic memory/extraction/embeddings **do not run** unless model ids are config
 
 ## Capability and policy
 
-Graphs call named capabilities (`mail.read`, `calendar.get_schedule`, `leads.get_recent`, `memory.search`, `knowledge.search`, `research.search`, `linkedin.get_profile`, `search_console.query`, `analytics.get_traffic`, …), never raw Composio tool slugs. Live owner calendar, hot-lead lists, mail read, LinkedIn profile, Search Console, GA4 traffic, memory search, knowledge search, and research search go through `execute_capability`.
+Graphs call named capabilities (`mail.read`, `calendar.get_schedule`, `leads.get_recent`,
+`memory.search`, `knowledge.search`, `research.search`, `linkedin.get_profile`,
+`search_console.query`, `analytics.get_traffic`, `sheets.read`, `sheets.update`, …), never raw
+Composio tool slugs. Live owner calendar, hot-lead lists, mail read, LinkedIn profile, Search
+Console, GA4 traffic, authorized Sheets access, memory search, knowledge search, and research
+search go through `execute_capability`.
 
-Each capability has `{READ, WRITE, SENSITIVE_WRITE, DESTRUCTIVE}`, allowed graphs, confirmation, retry, and idempotency. Enforcement is Python (`app/core/risk.py` plus the capability registry). Prompt text cannot add a tool.
+Each capability has `{READ, WRITE, SENSITIVE_WRITE, DESTRUCTIVE}`, allowed graphs, confirmation,
+retry, and idempotency. Enforcement is Python (`app/core/risk.py` plus the capability registry)
+using the channel-minted `Principal`; prompt text cannot add a tool. Sheets reads are `READ`.
+Bounded value update/append is low-risk and requires an explicit authenticated owner request plus
+an Assaf-configured/allowlisted spreadsheet ID. No Drive discovery, create/delete/clear,
+formatting, formula generation, or client access is permitted.
 
 Client allowlist is dramatically narrower than owner. Website visitors never inherit the owner Composio session.
 
@@ -74,11 +84,14 @@ Existing risk map: R0 read AUTO, R1 low write AUTO, R2 customer message AUTO in 
 
 Tool supplier behind adapters. Pin schemas. No catalog dump. Stable owner identity → one Composio user/session (`MIA_COMPOSIO_USER_ID`), not a new session per message.
 
-Direct APIs remain where they win (Meta inbound HMAC, STT, LinkedIn member analytics).
+Direct APIs remain where they win (Meta inbound HMAC and STT). LinkedIn is profile-only under
+ADR-034/039; member analytics is not a current product capability.
 
 ## Persistence
 
-Postgres is the system of record. Sheets is a human-readable mirror, never read back. Do not add another database.
+Postgres is the system of record. Explicitly authorized Sheets may receive policy-controlled
+operational reads and bounded value update/appends, but are never read back as Mia's internal
+truth, decision input, or recovery source. Do not add another database.
 
 ## Cross-graph events
 

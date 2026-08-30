@@ -99,8 +99,8 @@ def test_classify_bare_reayonot_not_content_idea() -> None:
     assert "content_idea" not in decision.matched_types
 
 
-def test_classify_content_ideas_plus_campaign_first_pass() -> None:
-    decision = classify_owner_task("content ideas and campaign spend")
+def test_classify_content_ideas_first_pass() -> None:
+    decision = classify_owner_task("content ideas and instagram content")
     assert decision.task_type == OwnerTaskType.CONTENT_IDEA
     assert decision.needs_clarification is False
     assert decision.matched_types == ["content_idea"]

@@ -7,10 +7,12 @@ due_ready, Mia pings the allowlisted Telegram owner once per local day.
 import json
 import logging
 from datetime import UTC, datetime
+from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel
 
 from app.agents.client.graph import finalize_inactive_website_conversations
+from app.capabilities.types import Principal
 from app.core.config import Settings, get_settings
 from app.core.demo import demo_mode_active
 from app.core.logging import configure_logging
@@ -18,12 +20,30 @@ from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
 from app.domain.commitments import scan_due_owner_tasks
 from app.domain.followups import follow_up_due_on, scan_due_follow_ups
-from app.services.notifications import send_owner_telegram
+from app.services.notifications import deliver_owner_telegram
 
 logger = logging.getLogger(__name__)
 
 KIND_DUE_REMINDER = "due_owner_tasks"
 _DUE_REMINDER_LEAD = "owner_due"
+
+
+def _legacy_due_claim_matches_day(*, claimed_at: str | None, day: str, timezone: str) -> bool:
+    """Conservatively retain only a legacy reminder from this same local day.
+
+    Legacy rows have no recipient and no daily notification key, so they cannot be
+    backfilled.  A dated legacy row for today is treated as accepted-or-ambiguous;
+    an older (or unparseable) row must not suppress all future daily reminders.
+    """
+    if not claimed_at or not day:
+        return False
+    try:
+        when = datetime.fromisoformat(claimed_at)
+        if when.tzinfo is None:
+            return when.date().isoformat() == day
+        return when.astimezone(ZoneInfo(timezone)).date().isoformat() == day
+    except (TypeError, ValueError, OSError):
+        return False
 
 
 class DueScanSummary(BaseModel):
@@ -54,16 +74,47 @@ def maybe_notify_due_owner_tasks(
         )
     except (ValueError, OSError, KeyError):
         return 0
-    inserted = store.try_insert_owner_notification(
-        kind=KIND_DUE_REMINDER,
-        lead_id=_DUE_REMINDER_LEAD,
-        conversation_id=day,
-        scheduled_at=now.replace(microsecond=0).isoformat(),
-    )
-    if not inserted:
+    if _legacy_due_claim_matches_day(
+        claimed_at=store.owner_notification_claimed_at(
+            kind=KIND_DUE_REMINDER, lead_id=_DUE_REMINDER_LEAD
+        ),
+        day=day,
+        timezone=settings.calendar_timezone,
+    ):
         return 0
+    scheduled = now.replace(microsecond=0).isoformat()
     text = f"יש {due_ready} משימות שמחכות לטיפול."
-    return 1 if send_owner_telegram(text=text, settings=settings) else 0
+    store.upsert_owner_notification(
+        kind=KIND_DUE_REMINDER, lead_id=_DUE_REMINDER_LEAD, scheduled_at=scheduled
+    )
+    token = settings.telegram_bot_token.strip()
+    recipients = tuple(sorted(settings.telegram_owner_user_id_set()))
+    if not token or not recipients or not text.strip():
+        return 0
+    claimed_recipients = tuple(
+        recipient_id
+        for recipient_id in recipients
+        if store.try_claim_owner_notification_recipient(
+            kind=KIND_DUE_REMINDER,
+            lead_id=_DUE_REMINDER_LEAD,
+            notification_key=day,
+            recipient_id=recipient_id,
+            claimed_at=scheduled,
+        )
+    )
+    if not claimed_recipients:
+        return 0
+    delivery = deliver_owner_telegram(
+        text=text, settings=settings, recipient_ids=claimed_recipients
+    )
+    for recipient_id in delivery.rejected:
+        store.release_owner_notification_recipient_claim(
+            kind=KIND_DUE_REMINDER,
+            lead_id=_DUE_REMINDER_LEAD,
+            notification_key=day,
+            recipient_id=recipient_id,
+        )
+    return 1 if delivery.delivered else 0
 
 
 def run_due_scan(
@@ -85,12 +136,11 @@ def run_due_scan(
         store,
         timezone=timezone,
         now=effective_now,
-        monthly_budget=None,
-        spend_mtd=None,
     )
     website_finalized = finalize_inactive_website_conversations(
         store,
         settings=settings,
+        principal=Principal.client(source="due_scan"),
         now=effective_now,
     )
     due_ready = sum(1 for item in owner_task_results if item.due_ready)

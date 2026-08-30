@@ -69,6 +69,32 @@ def _assistant_tool_call(call_id: str, name: str, arguments: dict[str, Any]) -> 
     }
 
 
+def _assistant_tool_calls(calls: list[tuple[str, str, dict[str, Any]]]) -> dict:
+    return {
+        "choices": [
+            {
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": call_id,
+                            "type": "function",
+                            "function": {
+                                "name": name,
+                                "arguments": json.dumps(arguments),
+                            },
+                        }
+                        for call_id, name, arguments in calls
+                    ],
+                },
+            }
+        ],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+    }
+
+
 def _assistant_text(text: str, finish: str = "stop") -> dict:
     return {
         "choices": [
@@ -358,6 +384,47 @@ def test_total_tool_call_ceiling_stops_offering_tools(monkeypatch: pytest.Monkey
     # tools at all -- the model was forced into a prose-only turn.
     third_request = transport.requests[2]
     assert "tools" not in third_request
+
+
+def test_total_tool_call_ceiling_refuses_excess_calls_in_one_parallel_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A parallel batch cannot execute past the remaining whole-run budget."""
+    from app.graph import owner_agent as owner_agent_module
+
+    monkeypatch.setattr(owner_agent_module, "MAX_TOTAL_TOOL_CALLS", 1)
+    session = _session()
+    session.commit()
+    client, transport = _client(
+        [
+            _assistant_tool_calls(
+                [
+                    ("c1", "hot_leads", {}),
+                    ("c2", "pending_approvals", {}),
+                    ("c3", "owner_status", {}),
+                ]
+            ),
+            _assistant_text("זה כל מה שהספקתי לבדוק."),
+        ]
+    )
+    outcome = run_owner_agent(
+        client=client, ctx=_ctx(session), owner_message="מה המצב?", max_steps=5
+    )
+    assert outcome.completed is True
+    assert outcome.tools_used == ("hot_leads",)
+    assert [step.detail for step in outcome.steps] == [
+        "ok",
+        "total tool call ceiling reached",
+        "total tool call ceiling reached",
+    ]
+    tool_messages = [
+        message
+        for message in transport.requests[1]["messages"]
+        if message["role"] == "tool"
+    ]
+    assert [message["tool_call_id"] for message in tool_messages] == ["c1", "c2", "c3"]
+    assert "total tool call ceiling reached" in tool_messages[1]["content"]
+    assert "tools" not in transport.requests[1]
 
 
 def test_repeated_empty_result_stops_offering_that_tool(

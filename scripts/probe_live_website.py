@@ -17,6 +17,7 @@ DEFECT_A: tuple[str, ...] = (
     "נעליים מידות דגמים",
     "בערך שעתיים כל פעם",
 )
+WEBSITE_ORIGIN = "https://www.assafweb.com"
 
 
 def _post(url: str, payload: dict | None) -> dict:
@@ -24,7 +25,7 @@ def _post(url: str, payload: dict | None) -> dict:
     request = urllib.request.Request(
         url,
         data=data,
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", "Origin": WEBSITE_ORIGIN},
         method="POST",
     )
     with urllib.request.urlopen(request, timeout=45) as response:
@@ -53,7 +54,8 @@ def main() -> None:
     replies: list[str] = []
     for text in DEFECT_A:
         out = _post(
-            f"{base}/v1/website/sessions/{session_id}/messages", {"text": text}
+            f"{base}/v1/website/sessions/{session_id}/messages",
+            {"text": text},
         )
         reply = out["message"]
         replies.append(reply)
@@ -65,7 +67,9 @@ def main() -> None:
     looped = [r for r in replies if "יום רגיל בעסק" in r]
     print(f"opening-question restarts: {len(looped)}")
 
-    handoff = _post(f"{base}/v1/website/sessions/{session_id}/handoff", None)
+    handoff = _post(
+        f"{base}/v1/website/sessions/{session_id}/handoff", None
+    )
     token = handoff["token"]
     print(f"\nhandoff token: {token[:6]}… expires {handoff['expires_at']}")
     print(f"whatsapp_url present: {handoff.get('whatsapp_url') is not None}")

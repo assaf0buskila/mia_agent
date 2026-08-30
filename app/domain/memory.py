@@ -49,10 +49,6 @@ def mia_turns(turns: list[ConversationTurn]) -> list[ConversationTurn]:
     return [turn for turn in turns if turn.role == ROLE_MIA]
 
 
-def human_turn_count(turns: list[ConversationTurn]) -> int:
-    return len(counterpart_turns(turns))
-
-
 def render_transcript(turns: list[ConversationTurn], *, mia_label: str = "MIA") -> str:
     """Plain transcript for a prompt. Labels are fixed; turn text is never trusted."""
     lines: list[str] = []

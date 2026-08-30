@@ -18,7 +18,12 @@ from pydantic import BaseModel
 
 from app.core.config import Settings
 from app.domain.policies.freshness import overlay_stale, stamp_freshness
-from app.domain.tools import AdapterHttpError, ToolOutcome
+from app.domain.tools import (
+    AdapterHttpError,
+    AdapterResponseError,
+    AdapterSchemaError,
+    ToolOutcome,
+)
 
 COMPOSIO_GA4_VERSION = "20260721_00"
 COMPOSIO_PIVOT_REPORT_TOOL = "GOOGLE_ANALYTICS_RUN_PIVOT_REPORT"
@@ -35,6 +40,8 @@ class Ga4PivotRow(BaseModel):
     session_source: str = ""
     sessions: str | None = None
     engaged_sessions: str | None = None
+    users: str | None = None
+    conversions: str | None = None
 
 
 class Ga4Port(Protocol):
@@ -113,13 +120,20 @@ class ComposioGa4Port:
             "property": property_id,
             "dateRanges": [{"startDate": start_date, "endDate": end_date}],
             "dimensions": [{"name": "landingPage"}, {"name": "sessionSource"}],
-            "metrics": [{"name": "sessions"}, {"name": "engagedSessions"}],
+            "metrics": [
+                {"name": "activeUsers"},
+                {"name": "sessions"},
+                {"name": "conversions"},
+                {"name": "engagedSessions"},
+            ],
             "pivots": [
                 {"fieldNames": ["landingPage"], "limit": MAX_PIVOT_ROWS},
                 {"fieldNames": ["sessionSource"], "limit": MAX_PIVOT_ROWS},
             ],
         }
         body = self._execute(COMPOSIO_PIVOT_REPORT_TOOL, arguments)
+        if body is not None and not _has_pivot_rows_schema(body):
+            raise AdapterSchemaError()
         return _map_pivot_rows(body)
 
     def list_conversion_events(self) -> list[str]:
@@ -128,6 +142,8 @@ class ComposioGa4Port:
             return []
         arguments = {"parent": property_id}
         body = self._execute(COMPOSIO_LIST_CONVERSION_EVENTS_TOOL, arguments)
+        if body is not None and not _has_conversion_events_schema(body):
+            raise AdapterSchemaError()
         return _map_conversion_events(body)
 
     def _execute(self, tool_slug: str, arguments: dict[str, Any]) -> dict[str, Any] | None:
@@ -153,19 +169,21 @@ class ComposioGa4Port:
             raise AdapterHttpError(response.status_code)
         try:
             body = response.json()
-            if not isinstance(body, dict) or body.get("successful") is not True:
-                return None
+            if not isinstance(body, dict) or not isinstance(body.get("successful"), bool):
+                raise AdapterSchemaError()
+            if body["successful"] is False:
+                raise AdapterResponseError()
             data = body.get("data")
             if isinstance(data, str):
                 try:
                     data = json.loads(data)
                 except json.JSONDecodeError:
-                    return None
+                    raise AdapterSchemaError() from None
             if isinstance(data, dict):
                 return data
-            return None
+            raise AdapterSchemaError()
         except (ValueError, KeyError, TypeError, AttributeError, IndexError):
-            return None
+            raise AdapterSchemaError() from None
 
 
 def normalize_ga4_property_id(raw: str) -> str | None:
@@ -258,27 +276,44 @@ def _map_pivot_rows(data: dict[str, Any] | None) -> list[Ga4PivotRow]:
         source = ""
         sessions: str | None = None
         engaged: str | None = None
+        users: str | None = None
+        conversions: str | None = None
         if isinstance(dimension_values, list):
             if len(dimension_values) > 0:
                 landing = _dim_value(dimension_values[0])
             if len(dimension_values) > 1:
                 source = _dim_value(dimension_values[1])
         if isinstance(metric_values, list):
-            if len(metric_values) > 0:
+            if len(metric_values) == 2:  # historical fixture/provider response shape
                 sessions = _metric_str(_metric_value(metric_values[0]))
-            if len(metric_values) > 1:
                 engaged = _metric_str(_metric_value(metric_values[1]))
+            else:
+                values = [_metric_str(_metric_value(value)) for value in metric_values]
+                users = values[0] if len(values) > 0 else None
+                sessions = values[1] if len(values) > 1 else None
+                conversions = values[2] if len(values) > 2 else None
+                engaged = values[3] if len(values) > 3 else None
         mapped.append(
             Ga4PivotRow(
                 landing_page=landing,
                 session_source=source,
                 sessions=sessions,
                 engaged_sessions=engaged,
+                users=users,
+                conversions=conversions,
             )
         )
         if len(mapped) >= MAX_PIVOT_ROWS:
             break
     return mapped
+
+
+def _has_pivot_rows_schema(data: dict[str, Any]) -> bool:
+    rows = data.get("rows")
+    if isinstance(rows, list):
+        return True
+    pivot = data.get("pivotReport") or data.get("report")
+    return isinstance(pivot, dict) and isinstance(pivot.get("rows"), list)
 
 
 def _dim_value(value: object) -> str:
@@ -316,6 +351,10 @@ def _map_conversion_events(data: dict[str, Any] | None) -> list[str]:
         if len(names) >= MAX_PIVOT_ROWS:
             break
     return names
+
+
+def _has_conversion_events_schema(data: dict[str, Any]) -> bool:
+    return any(isinstance(data.get(key), list) for key in ("conversionEvents", "events", "items"))
 
 
 def _ga4_outcome(
@@ -375,6 +414,10 @@ def format_ga4_rows_block(rows: list[Ga4PivotRow]) -> str:
         parts: list[str] = [label[:120]]
         if row.sessions is not None:
             parts.append(f"סשנים {row.sessions}")
+        if row.users is not None:
+            parts.append(f"משתמשים {row.users}")
+        if row.conversions is not None:
+            parts.append(f"המרות {row.conversions}")
         if row.engaged_sessions is not None:
             parts.append(f"מעורבים {row.engaged_sessions}")
         if len(parts) > 1:

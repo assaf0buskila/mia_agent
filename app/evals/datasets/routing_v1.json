@@ -24,6 +24,12 @@
     "expected_clarification": true
   },
   {
+    "case_id": "rt_sales_follow_up_en",
+    "user": "schedule a follow-up with the lead tomorrow",
+    "expected_type": "sales",
+    "expected_clarification": false
+  },
+  {
     "case_id": "rt_content_idea_he",
     "user": "רעיונות לתוכן",
     "expected_type": "content_idea",
@@ -45,12 +51,6 @@
     "case_id": "rt_meeting_brief_he",
     "user": "תקציר פגישה lead_b1c2d3e4f5a6",
     "expected_type": "meeting_brief",
-    "expected_clarification": false
-  },
-  {
-    "case_id": "rt_campaign_pause_id",
-    "user": "pause campaign 120339980501",
-    "expected_type": "approval",
     "expected_clarification": false
   },
   {

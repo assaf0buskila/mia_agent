@@ -1,5 +1,5 @@
 from app.core.config import MiaEnv, Settings
-from app.main import app, openapi_surface, owner_integrations
+from app.main import app, brain_health, openapi_surface, owner_integrations
 from fastapi.testclient import TestClient
 
 
@@ -72,6 +72,46 @@ def test_sales_llm_ready_needs_key_and_model() -> None:
     assert meta_send.whatsapp_provider_label() == "meta"
     assert meta_send.whatsapp_send_ready() is True
     assert meta_send.whatsapp_connected_ready() is True
+
+
+def test_brain_health_respects_owner_and_extraction_fallback_readiness() -> None:
+    sales_fallback = Settings(
+        _env_file=None,
+        openai_api_key="key",
+        sales_model="sales-model",
+        owner_agent_model="",
+    )
+    health = brain_health(sales_fallback)
+    assert health["owner_agent"] == {"ready": True, "missing": [], "max_steps": 8}
+
+    gemini_fallback = Settings(
+        _env_file=None,
+        gemini_api_key="key",
+        owner_agent_gemini_model="owner-model",
+        extraction_model="extract-model",
+    )
+    health = brain_health(gemini_fallback)
+    assert health["owner_agent"]["ready"] is True
+    assert health["owner_agent"]["missing"] == []
+    assert health["memory_extraction"] == {"ready": True, "missing": []}
+
+    missing_openai = brain_health(
+        Settings(_env_file=None, owner_agent_model="owner-model")
+    )
+    assert missing_openai["owner_agent"] == {
+        "ready": False,
+        "missing": ["MIA_OPENAI_API_KEY"],
+        "max_steps": 8,
+    }
+
+    missing_gemini = brain_health(
+        Settings(_env_file=None, owner_agent_gemini_model="owner-model")
+    )
+    assert missing_gemini["owner_agent"] == {
+        "ready": False,
+        "missing": ["MIA_GEMINI_API_KEY"],
+        "max_steps": 8,
+    }
 
 
 def test_health_live_is_minimal() -> None:
@@ -217,6 +257,9 @@ def test_owner_integrations_discovery_off_lists_ids_honestly() -> None:
     assert integrations["search_console"] is False
     assert integrations["ga4"] is False
     assert integrations["sheets_mirror"] is False
+    assert integrations["sheets_read"] is False
+    assert integrations["sheets_update"] is False
+    assert integrations["sheets_append"] is False
     assert integrations["linkedin_profile"] is True
     assert integrations["research_firecrawl"] is False
     assert integrations["missing"] == [
@@ -242,12 +285,31 @@ def test_owner_integrations_discovery_on_drops_listable_ids() -> None:
     assert integrations["search_console"] is True
     assert integrations["ga4"] is True
     assert integrations["sheets_mirror"] is False
+    assert integrations["sheets_read"] is False
+    assert integrations["sheets_update"] is False
+    assert integrations["sheets_append"] is False
     assert "MIA_GSC_SITE_URL" not in integrations["missing"]
     assert "MIA_GA4_PROPERTY_ID" not in integrations["missing"]
     assert integrations["missing"] == [
         "MIA_FIRECRAWL_API_KEY",
         "MIA_SHEETS_SPREADSHEET_ID",
     ]
+
+
+def test_owner_integrations_sheets_allowlist_enables_adr042_operations() -> None:
+    settings = Settings(
+        _env_file=None,
+        composio_api_key="k",
+        composio_user_id="u",
+        sheets_spreadsheet_id="",
+        sheets_allowed_spreadsheet_ids="allowed-one, allowed-two",
+    )
+    integrations = owner_integrations(settings)
+    assert integrations["sheets_mirror"] is False
+    assert integrations["sheets_read"] is True
+    assert integrations["sheets_update"] is True
+    assert integrations["sheets_append"] is True
+    assert "MIA_SHEETS_SPREADSHEET_ID" in integrations["missing"]
 
 
 def test_owner_integrations_apify_covers_research_without_firecrawl() -> None:

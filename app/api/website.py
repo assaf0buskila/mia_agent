@@ -1,4 +1,3 @@
-from collections.abc import Callable
 from pathlib import Path
 from time import perf_counter
 from uuid import uuid4
@@ -17,9 +16,6 @@ from app.api.deps import (
     get_sheets_port,
     get_transcription_port,
 )
-from app.brain.context import assemble_visitor_context, render_visitor_knowledge_block
-from app.brain.embeddings import build_embedding_port
-from app.brain.store import BrainStore
 from app.capabilities.types import Principal
 from app.channels.website import message_to_client_state
 from app.core.config import Settings, get_settings
@@ -59,22 +55,13 @@ from app.integrations.calendar_booking import CalendarBookingPort
 from app.integrations.research import build_research_port
 from app.integrations.sales_reply import build_sales_reply_port
 from app.integrations.sheets import (
-    DealMirrorRow,
-    FollowUpMirrorRow,
-    LeadMirrorRow,
-    MeetingMirrorRow,
     SheetsPort,
     SourceMirrorRow,
-    activity_mirror_row_from_persisted,
     build_sheets_port,
     claim_sheets_mirror,
     complete_sheets_mirror,
     maybe_mirror_weekly_kpi,
-    mirror_activity,
-    mirror_deal,
-    mirror_follow_up,
-    mirror_lead,
-    mirror_meeting,
+    mirror_sales_turn,
     mirror_source,
 )
 from app.integrations.transcribe import (
@@ -327,27 +314,6 @@ def process_website_session(
     return SessionOut(session_id=session_id, lead_id=lead_id, customer_id=customer_id)
 
 
-def _website_knowledge_lookup(
-    store: LeadStore, settings: Settings
-) -> Callable[[str], tuple[str, ...]]:
-    """Knowledge-only lookup for the visitor's latest message (see `app.brain.context`).
-
-    Shares the same SQLAlchemy session as `store` rather than opening a second one.
-    `assemble_visitor_context` never touches owner memory (hard safety invariant); any
-    failure here is the caller's problem to swallow, not this function's.
-    """
-    brain_store = BrainStore(store.session)
-    embedding_port = build_embedding_port(settings)
-
-    def lookup(query: str) -> tuple[str, ...]:
-        context = assemble_visitor_context(
-            brain_store, query=query, embedding_port=embedding_port
-        )
-        return render_visitor_knowledge_block(context)
-
-    return lookup
-
-
 def _refuse_killed(settings: Settings) -> None:
     """Website chat and voice share one fail-closed stop. 503, no graph, no STT."""
     if settings.kill_switch:
@@ -429,7 +395,6 @@ def process_website_message(
         principal=Principal.client(source="website", actor_id=session_id),
         reply_port=build_sales_reply_port(settings),
         settings=settings,
-        knowledge_lookup=_website_knowledge_lookup(store, settings),
     )
     started = perf_counter()
     result = graph.invoke(
@@ -525,110 +490,20 @@ def process_website_message(
         timezone=settings.calendar_timezone,
         demo_active=demo_mode_active(settings),
     )
-    if not demo_mode_active(settings):
-        if claim_sheets_mirror(store=store, inbound_id=provider_event_id, tab="sales"):
-            started = perf_counter()
-            sales = store.get_sales(lead_id)
-            sheets_written = mirror_lead(
-                sheets=sheets,
-                row=LeadMirrorRow(
-                    lead_id=lead_id,
-                    channel="website",
-                    stage=store.get_lead_stage(lead_id),
-                    fit=sales.fit.value,
-                    pain_level=int(sales.pain_level),
-                    next_action=result.get("next_action", ""),
-                ),
-                kill_switch=settings.kill_switch,
-            )
-            fu_written = False
-            fu = store.get_follow_up(lead_id)
-            if fu is not None:
-                fu_written = mirror_follow_up(
-                    sheets=sheets,
-                    row=FollowUpMirrorRow(
-                        lead_id=lead_id,
-                        due_at=fu.due_at,
-                        channel=fu.channel,
-                        status=fu.status,
-                        result=fu.reason,
-                    ),
-                    kill_switch=settings.kill_switch,
-                )
-            deal_written = False
-            deal = store.get_deal(lead_id)
-            if deal is not None:
-                deal_written = mirror_deal(
-                    sheets=sheets,
-                    row=DealMirrorRow(
-                        lead_id=lead_id,
-                        stage=deal.stage,
-                        source=deal.source,
-                        attribution_confidence=deal.attribution_confidence,
-                        expected_value=deal.expected_value,
-                        closed_value=deal.closed_value,
-                    ),
-                    kill_switch=settings.kill_switch,
-                )
-            meeting_written = False
-            meeting = store.get_meeting(lead_id)
-            if meeting is not None:
-                meeting_written = mirror_meeting(
-                    sheets=sheets,
-                    row=MeetingMirrorRow(
-                        lead_id=lead_id,
-                        status=meeting.status,
-                        source=meeting.source,
-                        scheduled_at=meeting.scheduled_at,
-                        calendar_event_id=meeting.calendar_event_id,
-                        summary=meeting.summary,
-                    ),
-                    kill_switch=settings.kill_switch,
-                )
-            activity_written = False
-            ai = store.get_ai_run(run_id)
-            if ai is not None:
-                activity_row = activity_mirror_row_from_persisted(
-                    run_id=ai.run_id,
-                    lead_id=ai.lead_id,
-                    channel=ai.channel,
-                    next_action=ai.next_action,
-                    model=ai.model,
-                    kill_switch=ai.kill_switch,
-                    cost_usd=ai.cost_usd,
-                    timezone=settings.calendar_timezone,
-                )
-                if activity_row is not None:
-                    activity_written = mirror_activity(
-                        sheets=sheets,
-                        row=activity_row,
-                        kill_switch=settings.kill_switch,
-                    )
-            kpi_written = maybe_mirror_weekly_kpi(
-                store=store,
-                sheets=sheets,
-                settings=settings,
-                kill_switch=settings.kill_switch,
-            )
-            persist_tool_outcome(
-                store,
-                provider="website",
-                channel=Channel.WEBSITE,
-                inbound_provider_event_id=provider_event_id,
-                conversation_id=session_id,
-                lead_id=lead_id,
-                outcome=sheets_mirror_outcome(
-                    int(sheets_written)
-                    + int(fu_written)
-                    + int(deal_written)
-                    + int(meeting_written)
-                    + int(activity_written)
-                    + int(kpi_written),
-                    latency_ms=elapsed_ms(started),
-                ),
-                correlation_id=run_id,
-            )
-            complete_sheets_mirror(store=store, inbound_id=provider_event_id, tab="sales")
+    mirror_sales_turn(
+        store=store,
+        sheets=sheets,
+        settings=settings,
+        provider="website",
+        channel=Channel.WEBSITE,
+        inbound_id=provider_event_id,
+        conversation_id=session_id,
+        lead_id=lead_id,
+        run_id=run_id,
+        next_action=result.get("next_action", ""),
+        kill_switch=settings.kill_switch,
+        measure_elapsed=elapsed_ms,
+    )
     for calendar_outcome in calendar_outcomes:
         persist_tool_outcome(
             store,

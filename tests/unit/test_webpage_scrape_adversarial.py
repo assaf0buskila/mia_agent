@@ -224,7 +224,6 @@ async def test_excerpt_injection_not_in_ack_or_tool_result() -> None:
                 select(CanonicalEventRow).where(
                     CanonicalEventRow.provider_event_id.like(f"{event_id}%"),
                     CanonicalEventRow.event_type.in_([
-                        EventType.CAMPAIGN_RECOMMENDATION.value,
                         EventType.APPROVAL_REQUIRED.value,
                     ]),
                 )

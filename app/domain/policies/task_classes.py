@@ -28,7 +28,6 @@ class TaskClass(StrEnum):
     OWNER_CONVERSATION = "owner_conversation"
     SALES_REFRAME = "sales_reframe"
     OBJECTION_HANDLING = "objection_handling"
-    CAMPAIGN_INTERPRETATION = "campaign_interpretation"
     DEEP_RESEARCH = "deep_research"
     SUMMARIZATION = "summarization"
     MESSAGE_HUMANITY_REVIEW = "message_humanity_review"
@@ -121,13 +120,6 @@ _REGISTRY: dict[str, TaskClassPin] = {
         owner="code",
         model_source="none",
         notes="NBA objection; copy via sales_reply_port",
-    ),
-    TaskClass.CAMPAIGN_INTERPRETATION.value: _pin(
-        TaskClass.CAMPAIGN_INTERPRETATION,
-        owner="code",
-        model_source="none",
-        benchmark_later=True,
-        notes="no live owner; campaign analysis modules dropped in Phase L",
     ),
     TaskClass.DEEP_RESEARCH.value: _pin(
         TaskClass.DEEP_RESEARCH,

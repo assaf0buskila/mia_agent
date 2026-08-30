@@ -8,6 +8,7 @@ demo skip the write. Bodies are data, never instructions.
 from __future__ import annotations
 
 import re
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from app.core.errors import PolicyDenied
@@ -22,6 +23,7 @@ from app.domain.approvals import (
     RISK_R3,
     extract_approval_id,
     payload_hash,
+    validate_pending_approval_binding,
 )
 from app.domain.events import Channel, build_approval_required_event
 from app.integrations.gmail import DisabledGmailPort, GmailPort
@@ -152,7 +154,6 @@ def execute_approved_gmail_send(
     demo_active: bool,
 ) -> str:
     """Send a draft that is already approved. Never called from the model loop."""
-    del store
     if demo_active or kill_switch:
         return "לא שולחת במצב הזה. הטיוטה נשארה בתיבת הדואר."
     if isinstance(port, DisabledGmailPort):
@@ -162,6 +163,21 @@ def execute_approved_gmail_send(
             "השליחה כבויה. הטיוטה נשארה בתיבת הדואר. "
             "לא שלחתי — צריך MIA_GMAIL_SEND=true אחרי האישור."
         )
+    row = store.get_approval_by_resource(RESOURCE_GMAIL, draft_id, ACTION_GMAIL_SEND)
+    if row is None or row.decision != DECISION_APPROVED:
+        return "לא שלחתי. הטיוטה אינה מאושרת."
+    if (
+        validate_pending_approval_binding(
+            row,
+            now=datetime.now(UTC),
+            action=ACTION_GMAIL_SEND,
+            risk=RISK_R3,
+            resource_type=RESOURCE_GMAIL,
+            resource_id=draft_id,
+        )
+        is not None
+    ):
+        return "לא שלחתי. אישור הטיוטה אינו תקף."
     try:
         assert_allowed(
             RiskAction(name="gmail_send", risk=RiskLevel.R3_COMMERCIAL),
@@ -169,8 +185,17 @@ def execute_approved_gmail_send(
         )
     except PolicyDenied:
         return "לא שלחתי. הטיוטה נשארה בתיבת הדואר."
+    send_key = f"{draft_id}:send:{ACTION_GMAIL_SEND}"
+    if not store.claim_operation(scope="approval", key=send_key):
+        return "השליחה כבר טופלה. לא שלחתי שוב את הטיוטה."
     if not port.send_draft(draft_id):
+        store.fail_operation(scope="approval", key=send_key)
         return "האישור נרשם אבל השליחה נכשלה. הטיוטה אמורה עדיין להיות בתיבה."
+    store.complete_operation(
+        scope="approval",
+        key=send_key,
+        result_json='{"ok": true}',
+    )
     return "שלחתי את המייל."
 
 
@@ -189,7 +214,9 @@ def apply_gmail_send_decision(
     row = None
     if approval_id is not None:
         found = store.get_approval_by_approval_id(approval_id)
-        if found is not None and found.action == ACTION_GMAIL_SEND:
+        if found is not None and found.action != ACTION_GMAIL_SEND:
+            return "unbound", found.resource_id
+        if found is not None:
             row = found
             if intent is None:
                 lowered = text.lower()
@@ -212,6 +239,16 @@ def apply_gmail_send_decision(
         row = pending[0]
     if row.decision != DECISION_PENDING:
         return "already_decided", row.resource_id
+    binding = validate_pending_approval_binding(
+        row,
+        now=datetime.now(UTC),
+        action=ACTION_GMAIL_SEND,
+        risk=RISK_R3,
+        resource_type=RESOURCE_GMAIL,
+        resource_id=row.resource_id,
+    )
+    if binding is not None:
+        return binding, row.resource_id
     if kill_switch:
         return "skipped", row.resource_id
     try:
@@ -248,8 +285,6 @@ def _persist_pending(
         )
     except PolicyDenied:
         return False
-    from datetime import UTC, datetime
-
     from app.domain.approvals import approval_expires_at
 
     now = datetime.now(UTC)

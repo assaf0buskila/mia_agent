@@ -1,8 +1,9 @@
 """Wiring between the owner inbound path and the brain.
 
 Deliberately surgical. The agent loop takes over **reads and free conversation**, which is
-where the keyword switchboard failed. Every intent that changes state — approvals, human
-takeover, conversation scope, stored preferences, outreach drafts, meeting debriefs — stays
+where the keyword switchboard failed. Every high-risk or approval-bound intent that changes
+state — approvals, human takeover, conversation scope, stored preferences, outreach drafts,
+meeting debriefs — stays
 on the existing deterministic path, untouched, because that is where the safety properties
 live.
 
@@ -59,8 +60,9 @@ from app.integrations.seo_audit import SeoAuditPort
 from app.integrations.telegram_format import hebrew_datetime
 from app.tools.registries.owner_tools import ToolContext
 
-# These intents mutate state or bind an approval. They keep the deterministic handler and
-# never route through the model. Adding to this set is always the safe direction.
+# These approval/high-risk intents mutate state or bind an approval. They keep the deterministic
+# handler and never route through the model. ADR-042's bounded Sheets values tools are the narrow
+# low-risk exception, with deterministic allowlist, intent, policy and idempotency guards.
 DETERMINISTIC_TASK_TYPES: frozenset[OwnerTaskType] = frozenset(
     {
         OwnerTaskType.APPROVAL,
@@ -111,6 +113,7 @@ def classify_note_agent_failure(reason: str, completion: str = "") -> str:
 def format_note_agent_failure(reason: str, completion: str = "") -> str:
     label = classify_note_agent_failure(reason, completion)
     return f"הבדיקה לא עברה כרגע ({label}). תנסה שוב."
+
 
 # Same channel as `log_owner_agent`, so a graph failure lands next to the turn it broke.
 _LOG = logging.getLogger("mia.agent")
@@ -292,6 +295,7 @@ def answer_owner(
         kill_switch=kill_switch,
         demo_active=demo_active,
         source_ref=source_ref,
+        owner_text=owner_text,
         now=moment,
     )
     outcome: AgentOutcome = run_owner_agent(
@@ -397,12 +401,8 @@ def owner_context_from_state(state: Mapping[str, Any]) -> BrainContext:
     """
     return BrainContext(
         profile=str(state.get("profile") or ""),
-        memories=tuple(
-            _as_items(_compact_hits(state.get("memory_hits")), origin="memory")
-        ),
-        knowledge=tuple(
-            _as_items(_compact_hits(state.get("knowledge_hits")), origin="knowledge")
-        ),
+        memories=tuple(_as_items(_compact_hits(state.get("memory_hits")), origin="memory")),
+        knowledge=tuple(_as_items(_compact_hits(state.get("knowledge_hits")), origin="knowledge")),
         open_questions=tuple(str(item) for item in (state.get("open_questions") or [])),
         used_chars=int(state.get("context_chars") or 0),
         degraded=bool(state.get("context_degraded")),
@@ -609,9 +609,7 @@ def run_owner_turn(
     except Exception as exc:
         # Broad on purpose: a broken graph must degrade to the deterministic ack, not
         # surface a traceback in Telegram. Logged with the traceback so it stays fixable.
-        _LOG.exception(
-            "owner_graph_failed run_id=%s error=%s", run_id, type(exc).__name__
-        )
+        _LOG.exception("owner_graph_failed run_id=%s error=%s", run_id, type(exc).__name__)
         return OwnerBrainResult(
             fallback_text,
             False,
@@ -621,9 +619,7 @@ def run_owner_turn(
     result = _result_from_state(final)
     if result is None:
         _LOG.warning("owner_graph_no_result run_id=%s", run_id)
-        return OwnerBrainResult(
-            fallback_text, False, (), fallback_reason=GRAPH_NO_RESULT_REASON
-        )
+        return OwnerBrainResult(fallback_text, False, (), fallback_reason=GRAPH_NO_RESULT_REASON)
     return result
 
 
@@ -652,9 +648,7 @@ def learn_from_exchange(
     extraction_client = client or build_extraction_client(settings)
     if not extraction_client.enabled():
         return 0
-    result = extract_candidates(
-        extraction_client, owner_message=owner_text, history=history
-    )
+    result = extract_candidates(extraction_client, owner_message=owner_text, history=history)
     if not result.candidates and not result.gaps:
         return 0
     port = embedding_port or build_embedding_port(settings)

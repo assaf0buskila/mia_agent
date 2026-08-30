@@ -64,9 +64,10 @@ def test_owner_user_content_asks_for_conversation_reasoning() -> None:
     assert "מה מחכה לאישור?" in content
 
 
-def test_canned_port_returns_result_unchanged() -> None:
+@pytest.mark.asyncio
+async def test_canned_port_returns_result_unchanged() -> None:
     port = CannedOwnerReplyPort()
-    result = port.compose(
+    result = await port.compose(
         task_type="daily_brief",
         canned="היום היו שני לידים.",
         owner_message="מה קרה היום?",
@@ -77,15 +78,16 @@ def test_canned_port_returns_result_unchanged() -> None:
     assert result.tokens_out == 0
 
 
-def test_fake_port_paraphrases_unless_kill_switch() -> None:
+@pytest.mark.asyncio
+async def test_fake_port_paraphrases_unless_kill_switch() -> None:
     fake = FakeOwnerReplyPort()
-    live = fake.compose(
+    live = await fake.compose(
         task_type="hot_leads",
         canned="ליד אחד חם.",
         owner_message="תראה לי לידים חמים",
         kill_switch=False,
     )
-    killed = fake.compose(
+    killed = await fake.compose(
         task_type="hot_leads",
         canned="ליד אחד חם.",
         owner_message="תראה לי לידים חמים",
@@ -288,4 +290,5 @@ def test_openai_owner_port_http_is_async_not_sync_client() -> None:
     assert "httpx.AsyncClient" in source
     assert "httpx.Client(" not in source
     owner = Path("app/api/owner.py").read_text(encoding="utf-8")
-    assert "inspect.isawaitable" in owner
+    assert "await owner_reply_port.compose" in owner
+    assert "inspect.isawaitable" not in owner

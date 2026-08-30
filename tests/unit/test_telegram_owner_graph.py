@@ -102,3 +102,28 @@ async def test_the_text_telegram_sends_comes_out_of_the_graph_state(monkeypatch)
     assert port.sent[0].text.startswith(MARK)
     assert port.sent[0].text == graph.finals[0]["reply"]
     assert result["reply"] == graph.finals[0]["reply"]
+
+
+async def test_preclaimed_owner_event_requires_the_exact_received_webhook() -> None:
+    """Caller-controlled item data cannot bypass the canonical webhook claim."""
+    init_db()
+    session = get_session_factory()()
+    port = RecordingMessagePort()
+    try:
+        result = await process_owner_texts(
+            provider="telegram",
+            channel=Channel.TELEGRAM,
+            items=[{"id": "evt.owner.unclaimed.1", "from": OWNER_ID, "text": "שלום"}],
+            store=LeadStore(session),
+            port=port,
+            kill_switch=False,
+            owner_ids={OWNER_ID},
+            preclaimed_event_id="evt.owner.unclaimed.1",
+            preclaimed_envelope_kind="audio",
+        )
+    finally:
+        session.close()
+
+    assert result["processed"] == 0
+    assert result["duplicates"] == 1
+    assert port.sent == []

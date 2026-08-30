@@ -4,26 +4,24 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from app.api.inbound import process_inbound_texts
-from app.core.risk import RiskLevel
-from app.core.write_flags import named_write_may_auto
 from app.db.models import ApprovalRow, CanonicalEventRow, IdempotencyRow
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
 from app.domain.approvals import (
-    ACTION_CAMPAIGN_WRITE,
     ACTION_PROPOSAL_HANDOFF,
+    ACTION_WEBSITE_EDIT,
     DECISION_APPROVED,
     DECISION_PENDING,
     DECISION_REJECTED,
-    RESOURCE_CAMPAIGN,
     RESOURCE_LEAD,
+    RESOURCE_WEBSITE,
     RISK_R3,
-    RISK_R4,
+    WEBSITE_RESOURCE_ID,
     OwnerApprovalResult,
     ack_for_approval_result,
     apply_approval_policy,
-    apply_campaign_write_approval_policy,
     apply_owner_approval_decision,
+    apply_website_edit_approval_policy,
     approval_expires_at,
     is_approval_expired,
     payload_hash,
@@ -37,26 +35,12 @@ from app.integrations.calendar import DisabledCalendarPort
 from app.integrations.sheets import DisabledSheetsPort
 from app.main import app
 from fastapi.testclient import TestClient
-from sqlalchemy import func, select
+from sqlalchemy import select
 
 PROSPECT_PHONE = "972509995011"
 PROSPECT_PHONE_2 = "972509995012"
 PROSPECT_PHONE_APPROVAL = "972509995013"
 OWNER_PHONE_APPROVAL = "972509990050"
-OWNER_PHONE_CAMPAIGN = "972509998101"
-CAMPAIGN_PERSIST = "120339980001"
-CAMPAIGN_DUP = "120339980002"
-CAMPAIGN_APPROVE = "120339980003"
-CAMPAIGN_VS_LEAD = "120339980004"
-CAMPAIGN_EXPIRED = "120339980005"
-CAMPAIGN_TAMPER = "120339980006"
-CAMPAIGN_AMBIG_A = "120339980007"
-CAMPAIGN_AMBIG_B = "120339980008"
-CAMPAIGN_OBJECT_A = "120339980401"
-CAMPAIGN_OBJECT_B = "120339980402"
-CAMPAIGN_OBJECT_C = "120339980403"
-CAMPAIGN_CLAIM_A = "120339980501"
-CAMPAIGN_CLAIM_B = "120339980502"
 
 _APPROVAL_PAYLOAD_KEYS = frozenset({"action", "risk", "decision"})
 _IDENTITY_PAYLOAD_KEYS = frozenset(
@@ -168,6 +152,21 @@ def test_website_proposal_handoff_creates_pending_approval() -> None:
             "decision": DECISION_PENDING,
         }
         assert "@" not in events[0].payload_json
+    finally:
+        db.close()
+
+
+def test_campaign_pause_cannot_queue_any_approval() -> None:
+    init_db()
+    db = get_session_factory()()
+    try:
+        result = apply_owner_approval_decision(
+            LeadStore(db),
+            text="pause campaign 120339980001",
+            channel=Channel.WHATSAPP,
+            kill_switch=False,
+        )
+        assert result.status == "none"
     finally:
         db.close()
 
@@ -704,6 +703,55 @@ def test_ack_for_expired_and_unbound() -> None:
     assert unbound == "האישור לא תואם למשאב. לא ביצעתי כלום."
 
 
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("action", "gmail_send"),
+        ("risk", "R4"),
+        ("resource_type", "gmail"),
+        ("resource_id", "lead_other"),
+    ],
+)
+def test_text_approval_rejects_every_binding_field(field: str, value: str) -> None:
+    init_db()
+    db = get_session_factory()()
+    try:
+        store = LeadStore(db)
+        _, lead_id = _seed_pending_approval(store, external_id=f"text_binding_{field}")
+        row = store.get_approval(lead_id, ACTION_PROPOSAL_HANDOFF)
+        assert row is not None
+        setattr(row, field, value)
+        result = apply_owner_approval_decision(
+            store,
+            text=f"approve the proposal {row.approval_id}",
+            channel=Channel.WHATSAPP,
+            kill_switch=False,
+        )
+        assert result.status == "unbound"
+        assert row.decision == DECISION_PENDING
+    finally:
+        db.close()
+
+
+def test_website_approval_rejects_oversize_json_before_persist() -> None:
+    init_db()
+    db = get_session_factory()()
+    try:
+        store = LeadStore(db)
+        assert apply_website_edit_approval_policy(
+            store,
+            before="a" * 255,
+            after="b" * 255,
+            channel=Channel.WEBSITE,
+            kill_switch=False,
+        ) is False
+        assert store.get_approval_by_resource(
+            RESOURCE_WEBSITE, WEBSITE_RESOURCE_ID, ACTION_WEBSITE_EDIT
+        ) is None
+    finally:
+        db.close()
+
+
 @pytest.mark.asyncio
 async def test_owner_inbound_approve_proposal_persist_only() -> None:
     init_db()
@@ -757,300 +805,6 @@ async def test_owner_inbound_approve_proposal_persist_only() -> None:
         assert "לא שלחתי" in port.sent[0].text
         assert "@" not in port.sent[0].text
         assert lead_id not in port.sent[0].text
-    finally:
-        db.close()
-
-
-def _campaign_approval_row(db, campaign_id: str) -> ApprovalRow | None:
-    return db.scalars(
-        select(ApprovalRow).where(
-            ApprovalRow.resource_type == RESOURCE_CAMPAIGN,
-            ApprovalRow.resource_id == campaign_id,
-            ApprovalRow.action == ACTION_CAMPAIGN_WRITE,
-        )
-    ).one_or_none()
-
-
-@pytest.mark.asyncio
-async def test_campaign_pause_request_persists_pending_row() -> None:
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        port = RecordingMessagePort()
-        await process_inbound_texts(
-            provider="whatsapp",
-            channel=Channel.WHATSAPP,
-            items=[{
-                "id": "wamid.camp.appr.1",
-                "from": OWNER_PHONE_CAMPAIGN,
-                "text": f"pause campaign {CAMPAIGN_PERSIST}",
-            }],
-            store=store,
-            port=port,
-            kill_switch=False,
-            owner_ids={OWNER_PHONE_CAMPAIGN},
-            calendar=DisabledCalendarPort(),
-            sheets=DisabledSheetsPort(),
-        )
-        db.commit()
-        row = _campaign_approval_row(db, CAMPAIGN_PERSIST)
-        assert row is not None
-        assert row.action == ACTION_CAMPAIGN_WRITE
-        assert row.risk == RISK_R4
-        assert row.decision == DECISION_PENDING
-        assert row.lead_id is None
-        assert row.resource_type == RESOURCE_CAMPAIGN
-        assert row.resource_id == CAMPAIGN_PERSIST
-        assert row.expires_at
-        expected_hash = payload_hash(
-            action=ACTION_CAMPAIGN_WRITE,
-            risk=RISK_R4,
-            channel=Channel.WHATSAPP.value,
-            resource_type=RESOURCE_CAMPAIGN,
-            resource_id=CAMPAIGN_PERSIST,
-        )
-        assert row.payload_hash == expected_hash
-        assert len(port.sent) == 1
-        assert "לא שיניתי מודעות במטא" in port.sent[0].text
-    finally:
-        db.close()
-
-
-@pytest.mark.asyncio
-async def test_campaign_duplicate_request_first_write_wins() -> None:
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        port = RecordingMessagePort()
-        for event_id in ("wamid.camp.appr.2a", "wamid.camp.appr.2b"):
-            await process_inbound_texts(
-                provider="whatsapp",
-                channel=Channel.WHATSAPP,
-                items=[{
-                    "id": event_id,
-                    "from": OWNER_PHONE_CAMPAIGN,
-                    "text": f"pause campaign {CAMPAIGN_DUP}",
-                }],
-                store=store,
-                port=port,
-                kill_switch=False,
-                owner_ids={OWNER_PHONE_CAMPAIGN},
-                calendar=DisabledCalendarPort(),
-                sheets=DisabledSheetsPort(),
-            )
-        db.commit()
-        rows = list(
-            db.scalars(
-                select(ApprovalRow).where(
-                    ApprovalRow.resource_type == RESOURCE_CAMPAIGN,
-                    ApprovalRow.resource_id == CAMPAIGN_DUP,
-                )
-            )
-        )
-        assert len(rows) == 1
-    finally:
-        db.close()
-
-
-@pytest.mark.asyncio
-async def test_campaign_approve_decides_without_meta_write(monkeypatch) -> None:
-    monkeypatch.setenv("MIA_META_WRITE", "false")
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        port = RecordingMessagePort()
-        await process_inbound_texts(
-            provider="whatsapp",
-            channel=Channel.WHATSAPP,
-            items=[{
-                "id": "wamid.camp.appr.3a",
-                "from": OWNER_PHONE_CAMPAIGN,
-                "text": f"pause campaign {CAMPAIGN_APPROVE}",
-            }],
-            store=store,
-            port=port,
-            kill_switch=False,
-            owner_ids={OWNER_PHONE_CAMPAIGN},
-            calendar=DisabledCalendarPort(),
-            sheets=DisabledSheetsPort(),
-        )
-        port.sent.clear()
-        await process_inbound_texts(
-            provider="whatsapp",
-            channel=Channel.WHATSAPP,
-            items=[{
-                "id": "wamid.camp.appr.3b",
-                "from": OWNER_PHONE_CAMPAIGN,
-                "text": f"approve campaign {CAMPAIGN_APPROVE}",
-            }],
-            store=store,
-            port=port,
-            kill_switch=False,
-            owner_ids={OWNER_PHONE_CAMPAIGN},
-            calendar=DisabledCalendarPort(),
-            sheets=DisabledSheetsPort(),
-        )
-        db.commit()
-        row = _campaign_approval_row(db, CAMPAIGN_APPROVE)
-        assert row is not None
-        assert row.decision == DECISION_APPROVED
-        assert named_write_may_auto(
-            enabled=True, risk=RiskLevel.R4_FINANCIAL_MARKETING
-        ) is False
-        assert len(port.sent) == 1
-        assert "לא שיניתי מודעות במטא" in port.sent[0].text
-    finally:
-        db.close()
-
-
-@pytest.mark.asyncio
-async def test_lead_proposal_approve_does_not_decide_campaign_row() -> None:
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        apply_campaign_write_approval_policy(
-            store,
-            campaign_id=CAMPAIGN_VS_LEAD,
-            channel=Channel.WHATSAPP,
-            kill_switch=False,
-        )
-        _, lead_id = _seed_pending_approval(store, external_id="972509998102")
-        db.commit()
-        result = apply_owner_approval_decision(
-            store,
-            text=f"approve the proposal {lead_id}",
-            channel=Channel.WHATSAPP,
-            kill_switch=False,
-        )
-        db.commit()
-        assert result.status == "decided"
-        assert result.lead_id == lead_id
-        campaign_row = _campaign_approval_row(db, CAMPAIGN_VS_LEAD)
-        assert campaign_row is not None
-        assert campaign_row.decision == DECISION_PENDING
-    finally:
-        db.close()
-
-
-def test_campaign_expired_row_stays_pending() -> None:
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        apply_campaign_write_approval_policy(
-            store,
-            campaign_id=CAMPAIGN_EXPIRED,
-            channel=Channel.WHATSAPP,
-            kill_switch=False,
-        )
-        row = store.get_approval_by_resource(
-            RESOURCE_CAMPAIGN, CAMPAIGN_EXPIRED, ACTION_CAMPAIGN_WRITE
-        )
-        assert row is not None
-        row.expires_at = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
-        db.commit()
-        result = apply_owner_approval_decision(
-            store,
-            text=f"approve campaign {CAMPAIGN_EXPIRED}",
-            channel=Channel.WHATSAPP,
-            kill_switch=False,
-        )
-        db.commit()
-        assert result.status == "expired"
-        assert _campaign_approval_row(db, CAMPAIGN_EXPIRED).decision == DECISION_PENDING
-    finally:
-        db.close()
-
-
-def test_campaign_hash_tamper_unbound() -> None:
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        apply_campaign_write_approval_policy(
-            store,
-            campaign_id=CAMPAIGN_TAMPER,
-            channel=Channel.WHATSAPP,
-            kill_switch=False,
-        )
-        row = store.get_approval_by_resource(
-            RESOURCE_CAMPAIGN, CAMPAIGN_TAMPER, ACTION_CAMPAIGN_WRITE
-        )
-        assert row is not None
-        row.payload_hash = "c" * 64
-        db.commit()
-        result = apply_owner_approval_decision(
-            store,
-            text=f"approve campaign {CAMPAIGN_TAMPER}",
-            channel=Channel.WHATSAPP,
-            kill_switch=False,
-        )
-        db.commit()
-        assert result.status == "unbound"
-        assert _campaign_approval_row(db, CAMPAIGN_TAMPER).decision == DECISION_PENDING
-    finally:
-        db.close()
-
-
-@pytest.mark.asyncio
-async def test_campaign_missing_id_clarification_no_row() -> None:
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        port = RecordingMessagePort()
-        before = db.scalar(
-            select(func.count())
-            .select_from(ApprovalRow)
-            .where(ApprovalRow.resource_type == RESOURCE_CAMPAIGN)
-        )
-        await process_inbound_texts(
-            provider="whatsapp",
-            channel=Channel.WHATSAPP,
-            items=[{
-                "id": "wamid.camp.appr.4",
-                "from": OWNER_PHONE_CAMPAIGN,
-                "text": "pause campaign",
-            }],
-            store=store,
-            port=port,
-            kill_switch=False,
-            owner_ids={OWNER_PHONE_CAMPAIGN},
-            calendar=DisabledCalendarPort(),
-            sheets=DisabledSheetsPort(),
-        )
-        db.commit()
-        after = db.scalar(
-            select(func.count())
-            .select_from(ApprovalRow)
-            .where(ApprovalRow.resource_type == RESOURCE_CAMPAIGN)
-        )
-        assert after == before
-        assert len(port.sent) == 1
-        assert "מה מזהה הקמפיין" in port.sent[0].text
-    finally:
-        db.close()
-
-
-def test_campaign_two_ids_ambiguous_no_persist() -> None:
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        result = apply_owner_approval_decision(
-            store,
-            text=f"pause campaign {CAMPAIGN_AMBIG_A} and {CAMPAIGN_AMBIG_B}",
-            channel=Channel.WHATSAPP,
-            kill_switch=False,
-        )
-        db.commit()
-        assert result.status == "ambiguous"
-        assert _campaign_approval_row(db, CAMPAIGN_AMBIG_A) is None
-        assert _campaign_approval_row(db, CAMPAIGN_AMBIG_B) is None
     finally:
         db.close()
 
@@ -1174,97 +928,6 @@ def test_lead_approve_leaves_execute_fields_empty() -> None:
         db.close()
 
 
-def test_campaign_pending_row_has_approval_object_fields() -> None:
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        apply_campaign_write_approval_policy(
-            store,
-            campaign_id=CAMPAIGN_OBJECT_A,
-            channel=Channel.WHATSAPP,
-            kill_switch=False,
-        )
-        db.commit()
-        row = _campaign_approval_row(db, CAMPAIGN_OBJECT_A)
-        assert row is not None
-        assert _APR_ID.match(row.approval_id)
-        assert len(row.approval_id) == 16
-        _assert_reserved_identity_empty(row)
-        assert row.approved_at == ""
-        _assert_execute_fields_empty(row)
-        expected_params = _expected_proposed_parameters(
-            action=ACTION_CAMPAIGN_WRITE,
-            risk=RISK_R4,
-            channel=Channel.WHATSAPP.value,
-            resource_type=RESOURCE_CAMPAIGN,
-            resource_id=CAMPAIGN_OBJECT_A,
-        )
-        assert row.proposed_parameters == expected_params
-        parsed = json.loads(row.proposed_parameters)
-        assert set(parsed.keys()) == _IDENTITY_PAYLOAD_KEYS
-        assert row.payload_hash == payload_hash(**parsed)
-    finally:
-        db.close()
-
-
-def test_campaign_pending_reupsert_preserves_approval_id() -> None:
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        apply_campaign_write_approval_policy(
-            store,
-            campaign_id=CAMPAIGN_OBJECT_B,
-            channel=Channel.WHATSAPP,
-            kill_switch=False,
-        )
-        db.commit()
-        first = _campaign_approval_row(db, CAMPAIGN_OBJECT_B)
-        assert first is not None
-        first_id = first.approval_id
-        apply_campaign_write_approval_policy(
-            store,
-            campaign_id=CAMPAIGN_OBJECT_B,
-            channel=Channel.WHATSAPP,
-            kill_switch=False,
-        )
-        db.commit()
-        second = _campaign_approval_row(db, CAMPAIGN_OBJECT_B)
-        assert second is not None
-        assert second.approval_id == first_id
-    finally:
-        db.close()
-
-
-def test_campaign_approve_stamps_approved_at_execute_stays_empty() -> None:
-    init_db()
-    frozen = datetime(2026, 8, 21, 13, 0, 0, tzinfo=UTC)
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        apply_campaign_write_approval_policy(
-            store,
-            campaign_id=CAMPAIGN_OBJECT_C,
-            channel=Channel.WHATSAPP,
-            kill_switch=False,
-        )
-        db.commit()
-        assert store.decide_campaign_approval(
-            resource_id=CAMPAIGN_OBJECT_C,
-            decision=DECISION_APPROVED,
-            now=frozen,
-        )
-        db.commit()
-        row = _campaign_approval_row(db, CAMPAIGN_OBJECT_C)
-        assert row is not None
-        assert row.approved_at == frozen.isoformat()
-        _assert_execute_fields_empty(row)
-        _assert_reserved_identity_empty(row)
-    finally:
-        db.close()
-
-
 def test_lead_approval_claim_first_persist_completes_idempotency() -> None:
     init_db()
     db = get_session_factory()()
@@ -1335,62 +998,6 @@ def test_lead_approval_duplicate_queue_one_canonical() -> None:
             db.scalars(
                 select(CanonicalEventRow).where(
                     CanonicalEventRow.lead_id == lead_id,
-                    CanonicalEventRow.event_type == EventType.APPROVAL_REQUIRED.value,
-                )
-            )
-        )
-        assert len(events) == 1
-    finally:
-        db.close()
-
-
-def test_campaign_approval_claim_first_persist_completes_idempotency() -> None:
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        apply_campaign_write_approval_policy(
-            store,
-            campaign_id=CAMPAIGN_CLAIM_A,
-            channel=Channel.WHATSAPP,
-            kill_switch=False,
-        )
-        db.commit()
-        claim_key = f"{CAMPAIGN_CLAIM_A}:approval:{ACTION_CAMPAIGN_WRITE}"
-        idem_row = db.scalars(
-            select(IdempotencyRow).where(
-                IdempotencyRow.scope == "approval",
-                IdempotencyRow.key == claim_key,
-            )
-        ).one()
-        assert idem_row.status == "completed"
-    finally:
-        db.close()
-
-
-def test_campaign_approval_duplicate_queue_one_canonical() -> None:
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        apply_campaign_write_approval_policy(
-            store,
-            campaign_id=CAMPAIGN_CLAIM_B,
-            channel=Channel.WHATSAPP,
-            kill_switch=False,
-        )
-        apply_campaign_write_approval_policy(
-            store,
-            campaign_id=CAMPAIGN_CLAIM_B,
-            channel=Channel.WHATSAPP,
-            kill_switch=False,
-        )
-        db.commit()
-        events = list(
-            db.scalars(
-                select(CanonicalEventRow).where(
-                    CanonicalEventRow.provider_event_id
-                    == f"{CAMPAIGN_CLAIM_B}:approval:campaign_write",
                     CanonicalEventRow.event_type == EventType.APPROVAL_REQUIRED.value,
                 )
             )

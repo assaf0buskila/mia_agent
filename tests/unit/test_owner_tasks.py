@@ -7,14 +7,12 @@ from app.db.models import IdempotencyRow, OwnerTaskRow
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
 from app.domain.commitments import (
-    ACTION_ANALYZE,
     ACTION_FOLLOW_UP,
     ACTION_NONE,
     CONDITION_IF_NOT_REPLIED,
     CONDITION_NONE,
     TRIGGER_DUE_DATE,
     TRIGGER_NONE,
-    TRIGGER_SPEND_THRESHOLD,
     parse_due_at,
     plan_owner_commitment,
 )
@@ -45,14 +43,6 @@ def test_classify_sales_follow_up() -> None:
     assert "לא ביצעתי" in ack
     if due_at:
         assert "ל־" in ack
-
-def test_classify_analytics_campaign_budget() -> None:
-    decision = classify_owner_task("pause the campaign budget")
-    assert decision.task_type == OwnerTaskType.ANALYTICS
-    assert decision.needs_clarification is False
-    ack = ack_for_owner_task(decision)
-    assert "משימת אנליטיקה" in ack
-    assert "אין לי גישה לנתוני קמפיינים ממומנים במטא" in ack
 
 
 def test_classify_research() -> None:
@@ -109,10 +99,10 @@ def test_classify_remember_linkedin_understanding_check() -> None:
 
 
 def test_classify_two_types_needs_clarification() -> None:
-    decision = classify_owner_task("pause the ads and update the lead")
+    decision = classify_owner_task("research a competitor and update the lead")
     assert decision.task_type == OwnerTaskType.NOTE
     assert decision.needs_clarification is True
-    assert decision.matched_types == ["analytics", "sales"]
+    assert decision.matched_types == ["research", "sales"]
 
 
 def test_classify_ignores_keywords_inside_other_words() -> None:
@@ -137,20 +127,6 @@ def test_classify_hebrew_preference() -> None:
     decision = classify_owner_task("מעכשיו אל תגידי דחוף")
     assert decision.task_type == OwnerTaskType.PREFERENCE
     assert decision.needs_clarification is False
-
-
-def test_classify_campaign_pause_with_id_is_approval() -> None:
-    decision = classify_owner_task("pause campaign 1203300000001")
-    assert decision.task_type == OwnerTaskType.APPROVAL
-    assert decision.needs_clarification is False
-
-
-def test_classify_campaign_pause_without_id_needs_clarification() -> None:
-    decision = classify_owner_task("pause campaign")
-    assert decision.task_type == OwnerTaskType.APPROVAL
-    assert decision.needs_clarification is True
-    ack = ack_for_owner_task(decision, text="pause campaign")
-    assert "מה מזהה הקמפיין" in ack
 
 
 def test_classify_approve_the_proposal() -> None:
@@ -194,12 +170,6 @@ def test_plan_approval_commitment_all_none() -> None:
     assert plan.action == ACTION_NONE
 
 
-def test_classify_hebrew_analytics_ads_budget() -> None:
-    decision = classify_owner_task("מה מצב תקציב המודעות")
-    assert decision.task_type == OwnerTaskType.ANALYTICS
-    assert decision.needs_clarification is False
-
-
 def test_classify_hebrew_research_competitor() -> None:
     decision = classify_owner_task("חפשי על המתחרה החדש")
     assert decision.task_type == OwnerTaskType.RESEARCH
@@ -222,13 +192,6 @@ def test_classify_hebrew_meeting_debrief() -> None:
     decision = classify_owner_task("אחרי הפגישה דיברנו עם יעל")
     assert decision.task_type == OwnerTaskType.MEETING_DEBRIEF
     assert decision.needs_clarification is False
-
-
-def test_classify_hebrew_dual_sales_analytics() -> None:
-    decision = classify_owner_task("תעקבי אחרי הליד ותבדקי את הקמפיין")
-    assert decision.task_type == OwnerTaskType.NOTE
-    assert decision.needs_clarification is True
-    assert decision.matched_types == ["analytics", "sales"]
 
 
 def test_classify_hebrew_tikun_is_not_preference() -> None:
@@ -282,34 +245,6 @@ def test_plan_hebrew_sales_if_not_replied() -> None:
     assert plan.trigger == TRIGGER_DUE_DATE
     assert plan.condition == CONDITION_IF_NOT_REPLIED
     assert plan.action == ACTION_FOLLOW_UP
-
-
-def test_plan_analytics_campaign_spend_no_trigger() -> None:
-    text = "how's the campaign spend"
-    decision = classify_owner_task(text)
-    plan = plan_owner_commitment(decision=decision, text=text, due_at=None)
-    assert plan.trigger == TRIGGER_NONE
-    assert plan.condition == CONDITION_NONE
-    assert plan.action == ACTION_ANALYZE
-
-
-def test_ack_spend_threshold_analytics() -> None:
-    text = "analyze the campaign after spend reaches the threshold"
-    decision = classify_owner_task(text)
-    plan = plan_owner_commitment(decision=decision, text=text, due_at=None)
-    ack = ack_for_owner_task(decision, trigger=plan.trigger)
-    assert "תקציב המוגדר" in ack
-    assert "לא ביצעתי" in ack
-    assert "threshold" not in ack.lower()
-    assert "5000" not in ack
-
-
-def test_plan_analytics_spend_threshold_when_spend_reaches() -> None:
-    text = "analyze the campaign after spend reaches the threshold"
-    decision = classify_owner_task(text)
-    plan = plan_owner_commitment(decision=decision, text=text, due_at=None)
-    assert plan.trigger == TRIGGER_SPEND_THRESHOLD
-    assert plan.action == ACTION_ANALYZE
 
 
 def test_plan_preference_commitment_all_none() -> None:
@@ -384,50 +319,6 @@ async def test_owner_inbound_persists_structured_commitment() -> None:
         assert "רק אם לא תהיה תשובה" in port.sent[0].text
         assert "לא ביצעתי" in port.sent[0].text
         assert "Daniel" not in port.sent[0].text
-    finally:
-        db.close()
-
-
-@pytest.mark.asyncio
-async def test_owner_inbound_persists_spend_threshold_commitment() -> None:
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        port = RecordingMessagePort()
-        owner_text = "analyze the campaign after spend reaches the threshold"
-        event_id = "evt.owner.spend.inbound.1"
-        owner_phone = "972509990211"
-        await process_inbound_texts(
-            provider="whatsapp",
-            channel=Channel.WHATSAPP,
-            items=[
-                {
-                    "id": event_id,
-                    "from": owner_phone,
-                    "text": owner_text,
-                }
-            ],
-            store=store,
-            port=port,
-            kill_switch=False,
-            owner_ids={owner_phone},
-        )
-        db.commit()
-        task = store.get_owner_task(provider="whatsapp", provider_event_id=event_id)
-        assert task is not None
-        assert task.task_type == "analytics"
-        assert task.status == "logged"
-        assert task.trigger == TRIGGER_SPEND_THRESHOLD
-        assert task.action == ACTION_ANALYZE
-        assert task.due_at is None
-        assert store.get_campaign_pacing() is None
-        assert len(port.sent) == 1
-        assert "תקציב המוגדר" in port.sent[0].text
-        assert "לא ביצעתי" in port.sent[0].text
-        assert "קצב:" not in port.sent[0].text
-        assert owner_text not in port.sent[0].text
-        assert "threshold" not in port.sent[0].text.lower()
     finally:
         db.close()
 
@@ -619,87 +510,6 @@ async def test_save_owner_task_idempotent() -> None:
             )
         )
         assert count == 1
-    finally:
-        db.close()
-
-
-@pytest.mark.asyncio
-async def test_owner_analytics_budget_logged_not_executed() -> None:
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        sheets = FakeSheetsPort()
-        port = RecordingMessagePort()
-        await process_inbound_texts(
-            provider="whatsapp",
-            channel=Channel.WHATSAPP,
-            items=[
-                {
-                    "id": "evt.owner.analytics.1",
-                    "from": "972509990004",
-                    "text": "pause the campaign budget",
-                    "source": "audio",
-                }
-            ],
-            store=store,
-            port=port,
-            kill_switch=False,
-            owner_ids={"972509990004"},
-            sheets=sheets,
-        )
-        db.commit()
-        task = store.get_owner_task(
-            provider="whatsapp", provider_event_id="evt.owner.analytics.1"
-        )
-        assert task is not None
-        assert task.task_type == "analytics"
-        assert task.status == "logged"
-        assert sheets.rows == {}
-        ack = port.sent[0].text
-        assert "אין לי גישה לנתוני קמפיינים ממומנים במטא" in ack
-        assert "how the business works" not in ack
-        assert "יום רגיל בעסק" not in ack
-    finally:
-        db.close()
-
-
-@pytest.mark.asyncio
-async def test_owner_text_analytics_logged_not_sales_graph() -> None:
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        sheets = FakeSheetsPort()
-        port = RecordingMessagePort()
-        await process_inbound_texts(
-            provider="whatsapp",
-            channel=Channel.WHATSAPP,
-            items=[
-                {
-                    "id": "evt.owner.text.analytics.1",
-                    "from": "972509990011",
-                    "text": "pause the campaign budget",
-                }
-            ],
-            store=store,
-            port=port,
-            kill_switch=False,
-            owner_ids={"972509990011"},
-            sheets=sheets,
-        )
-        db.commit()
-        task = store.get_owner_task(
-            provider="whatsapp", provider_event_id="evt.owner.text.analytics.1"
-        )
-        assert task is not None
-        assert task.task_type == "analytics"
-        assert task.status == "logged"
-        assert sheets.rows == {}
-        ack = port.sent[0].text
-        assert "אין לי גישה לנתוני קמפיינים ממומנים במטא" in ack
-        assert "how the business works" not in ack
-        assert "יום רגיל בעסק" not in ack
     finally:
         db.close()
 
@@ -1030,3 +840,26 @@ def test_greeting_ack_is_a_short_hello() -> None:
     assert "אפשר לבקש" not in ack
     assert "משפך" not in ack
 
+
+def test_campaign_spend_is_unsupported_not_organic_analytics() -> None:
+    decision = classify_owner_task("how's the campaign spend")
+    assert decision.task_type == OwnerTaskType.NOTE
+    assert decision.needs_clarification is True
+    assert decision.matched_types == []
+    reply = ack_for_owner_task(decision, text="how's the campaign spend")
+    assert "אינם זמינים" in reply
+    assert "לא נרשמה בקשה" in reply
+
+
+def test_campaign_pause_with_identifier_is_never_approval() -> None:
+    decision = classify_owner_task("pause campaign 1203300000001")
+    assert decision.task_type == OwnerTaskType.NOTE
+    assert decision.needs_clarification is True
+    reply = ack_for_owner_task(decision, text="pause campaign 1203300000001")
+    assert "אינם זמינים" in reply
+
+
+def test_instagram_organic_analytics_stays_live() -> None:
+    decision = classify_owner_task("analyze instagram content")
+    assert decision.task_type == OwnerTaskType.ANALYTICS
+    assert decision.needs_clarification is False

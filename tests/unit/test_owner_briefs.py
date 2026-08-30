@@ -49,14 +49,14 @@ def test_classify_meeting_debrief_not_daily_brief() -> None:
     assert decision.needs_clarification is False
 
 
-def test_classify_campaign_spend_still_analytics() -> None:
-    decision = classify_owner_task("how's the campaign spend")
+def test_classify_instagram_content_is_analytics() -> None:
+    decision = classify_owner_task("analyze instagram content")
     assert decision.task_type == OwnerTaskType.ANALYTICS
     assert decision.needs_clarification is False
 
 
-def test_classify_daily_brief_plus_campaign_clarification() -> None:
-    decision = classify_owner_task("daily brief and campaign spend")
+def test_classify_daily_brief_plus_analytics_clarification() -> None:
+    decision = classify_owner_task("daily brief and instagram content")
     assert decision.task_type == OwnerTaskType.NOTE
     assert decision.needs_clarification is True
     assert decision.matched_types == ["analytics", "daily_brief"]
