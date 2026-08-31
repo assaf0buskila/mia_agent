@@ -360,7 +360,7 @@ class ComposioCatalog:
         self._detail_cache[key] = (monotonic() + _CACHE_TTL_SECONDS, detail)
         return detail
 
-    def execute_read(self, tool: CatalogTool, arguments: dict[str, Any]) -> dict[str, Any] | None:
+    def execute(self, tool: CatalogTool, arguments: dict[str, Any]) -> dict[str, Any] | None:
         payload: dict[str, Any] = {"user_id": self._user_id, "arguments": arguments}
         if tool.version:
             payload["version"] = tool.version
@@ -368,6 +368,11 @@ class ComposioCatalog:
         if body is None or body.get("successful") is not True:
             return None
         return body
+
+    # Kept as the narrow read-facing name for existing callers.  Side-effect callers
+    # must use the approval-bound domain workflow, never this compatibility method.
+    def execute_read(self, tool: CatalogTool, arguments: dict[str, Any]) -> dict[str, Any] | None:
+        return self.execute(tool, arguments)
 
 
 def risk_for_slug(slug: str, toolkit: str = "") -> RiskLevel:

@@ -117,6 +117,7 @@ def apply_hot_handoff(
     settings: Settings,
     brief: str | None = None,
     parse_mode: str | None = None,
+    notification_key: str = "",
 ) -> OwnerNotifyAttempt:
     """Mark HUMAN_TAKEOVER_REQUIRED, claim the notify, then Telegram. Never raise to inbound.
 
@@ -153,7 +154,7 @@ def apply_hot_handoff(
     )
     if any(
         store.has_owner_notification_claim(
-            kind=kind, lead_id=lead_id, conversation_id=""
+            kind=kind, lead_id=lead_id, conversation_id=notification_key
         )
         for kind in WEBSITE_HANDOFF_DELIVERY_KINDS
     ):
@@ -164,6 +165,7 @@ def apply_hot_handoff(
         accepted = store.confirmed_owner_notification_recipients(
             kind=KIND_WEBSITE_HANDOFF_DELIVERY,
             lead_id=lead_id,
+            notification_key=notification_key,
         )
         if accepted:
             return OwnerNotifyAttempt(accepted, False)
@@ -177,6 +179,7 @@ def apply_hot_handoff(
             kind=KIND_WEBSITE_HANDOFF_DELIVERY,
             compatible_kinds=WEBSITE_HANDOFF_DELIVERY_KINDS,
             lead_id=lead_id,
+            notification_key=notification_key,
             recipient_id=recipient_id,
             claimed_at=now_iso,
         )
@@ -186,6 +189,7 @@ def apply_hot_handoff(
             store.confirmed_owner_notification_recipients(
                 kind=KIND_WEBSITE_HANDOFF_DELIVERY,
                 lead_id=lead_id,
+                notification_key=notification_key,
             ),
             False,
         )
@@ -204,11 +208,13 @@ def apply_hot_handoff(
     store.record_owner_notification_recipient_delivery_outcomes_durably(
         kind=KIND_WEBSITE_HANDOFF_DELIVERY,
         lead_id=lead_id,
+        notification_key=notification_key,
         delivered_recipient_ids=delivery.delivered,
         rejected_recipient_ids=delivery.rejected,
     )
     accepted = store.confirmed_owner_notification_recipients(
         kind=KIND_WEBSITE_HANDOFF_DELIVERY,
         lead_id=lead_id,
+        notification_key=notification_key,
     )
     return OwnerNotifyAttempt(accepted, True)

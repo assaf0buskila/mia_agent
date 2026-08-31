@@ -646,9 +646,9 @@ def test_website_handoff_reports_durable_delivery_without_resending(monkeypatch)
                 (
                         store.has_owner_notification_delivery_claim(
                             kind=website_handoff_brief_mod.KIND_WEBSITE_HANDOFF_DELIVERY,
-                        lead_id=lead_id,
-                        notification_key="",
-                    ),
+                            lead_id=lead_id,
+                            notification_key=session_id,
+                        ),
                     store.has_owner_notification(
                         kind=website_handoff_brief_mod.KIND_WEBSITE_WHATSAPP,
                         lead_id=lead_id,
@@ -675,7 +675,7 @@ def test_website_handoff_reports_durable_delivery_without_resending(monkeypatch)
     assert committed_before_send == [(True, True, 1, 1)]
 
 
-def test_website_handoff_legacy_lead_claim_suppresses_recipient_send(monkeypatch) -> None:
+def test_website_handoff_legacy_lead_claim_does_not_hide_new_session(monkeypatch) -> None:
     monkeypatch.setenv("MIA_TELEGRAM_BOT_TOKEN", "tok")
     monkeypatch.setenv("MIA_TELEGRAM_OWNER_USER_IDS", "111")
     sends: list[tuple[str, ...]] = []
@@ -705,8 +705,8 @@ def test_website_handoff_legacy_lead_claim_suppresses_recipient_send(monkeypatch
         response = client.post(f"/v1/website/sessions/{session_id}/handoff")
 
     assert response.status_code == 200
-    assert response.json()["notification_status"] == "duplicate_or_ambiguous"
-    assert sends == []
+    assert response.json()["notification_status"] == "delivered"
+    assert sends == [("111",)]
     db = get_session_factory()()
     try:
         recipient_claims = list(
@@ -714,11 +714,13 @@ def test_website_handoff_legacy_lead_claim_suppresses_recipient_send(monkeypatch
                 select(OwnerNotificationRecipientClaimRow).where(
                     OwnerNotificationRecipientClaimRow.lead_id == lead_id,
                     OwnerNotificationRecipientClaimRow.kind
-                    == website_handoff_brief_mod.KIND_WEBSITE_WHATSAPP,
+                    == website_handoff_brief_mod.KIND_WEBSITE_HANDOFF_DELIVERY,
+                    OwnerNotificationRecipientClaimRow.notification_key == session_id,
                 )
             )
         )
-        assert recipient_claims == []
+        assert len(recipient_claims) == 1
+        assert recipient_claims[0].delivery_status == "accepted"
     finally:
         db.close()
 

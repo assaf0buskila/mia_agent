@@ -93,10 +93,17 @@ SYSTEM_PROMPT = (
     "- seo_snapshot: AssafWeb search and site traffic — Google Search Console, GA4, and a "
     "homepage SEO audit. Use for SEO, organic search, Search Console, GA4, website "
     "traffic, rankings, CTR, impressions. Not Instagram and not paid Meta ads.\n"
-    "- linkedin_snapshot: Assaf's own LinkedIn profile (name/headline) as LinkedIn has "
-    "it. Profile only — no post or follower analytics, no competitor pages.\n"
+    "- linkedin_snapshot: the pinned summary of Assaf's own LinkedIn profile. For another "
+    "active LinkedIn read, use the Composio search/schema/read path. For a non-destructive "
+    "LinkedIn side effect, use its exact schema and the approval proposal tool; never use "
+    "delete/remove/revoke or direct-message tools.\n"
     "- instagram_insights: organic Instagram post performance (views, reach, likes). "
     "Not Search Console, not GA4, not paid ads.\n"
+    "- owner_system_audit: when Assaf asks to check everything, all connections, or "
+    "which systems work, call this first. It runs the defined bounded checks behind one "
+    "model tool call and returns an item-by-item result. Do not say you can only make two "
+    "calls or blame a generic provider limit; report exactly which item was checked, "
+    "unavailable, empty, or not configured.\n"
     "- research_search: public web lookup outside Mia — a prospect company, competitor, "
     "or topic. Not AssafWeb's own published facts (use search_knowledge for those).\n"
     "- search_knowledge: AssafWeb's own services, pricing, process — published facts.\n"
@@ -107,8 +114,10 @@ SYSTEM_PROMPT = (
     "range=null for a small first-tab preview when he did not name a range.\n"
     "- sheets_update / sheets_append: make a bounded value update or append only when "
     "Assaf explicitly asks in this authenticated turn and the spreadsheet ID is allowlisted. "
-    "Never discover Drive files, read Sheets as Mia's internal truth, or create, delete, "
-    "clear, format, or generate formulas.\n"
+    "The exact configured Mia CRM spreadsheet is different: its fixed tabs, headers, and "
+    "business projections are Mia-managed automatically. Never discover Drive files, read "
+    "Sheets as Mia's internal truth, or delete a spreadsheet, clear business rows, or "
+    "generate formulas.\n"
     "- Composio on demand (composio_search_tools, composio_get_tool_schema, "
     "composio_execute_tool): when no pinned tool covers his need, search only ACTIVE "
     "connected owner toolkits, load one exact current schema, then use it. This never "
@@ -238,6 +247,8 @@ class AgentOutcome(NamedTuple):
     steps_used: int = 0
     tools_failed: tuple[str, ...] = ()
     completion: str = ""
+    # Durable approvals created by successful tool calls in this exact turn.
+    approval_ids: tuple[str, ...] = ()
 
     def used_any_tool(self) -> bool:
         return bool(self.tools_used)
@@ -309,6 +320,7 @@ def run_owner_agent(
     seen_calls: set[tuple[str, str]] = set()
     empty_counts: dict[str, int] = {}
     blocked_tools: set[str] = set()
+    approval_ids: list[str] = []
 
     def finish(
         *, text: str = "", completed: bool, completion: str, error: str, steps_used: int
@@ -324,6 +336,7 @@ def run_owner_agent(
             steps_used,
             tuple(tools_failed),
             completion,
+            tuple(approval_ids),
         )
 
     max_steps = max(1, max_steps)
@@ -441,6 +454,8 @@ def run_owner_agent(
             steps.append(AgentStep(tool=call.name, ok=result.ok, detail=result.error or "ok"))
             if result.ok:
                 tools_used.append(call.name)
+                if result.approval_id and result.approval_id not in approval_ids:
+                    approval_ids.append(result.approval_id)
                 if _looks_empty(result.text):
                     empty_counts[call.name] = empty_counts.get(call.name, 0) + 1
                     if empty_counts[call.name] > EMPTY_RESULT_REPEAT_LIMIT:

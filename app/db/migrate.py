@@ -11,7 +11,13 @@ from sqlalchemy import text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
-POSTGRES_ONLY = frozenset({"20260821_approval_campaign_resource.sql"})
+POSTGRES_ONLY = frozenset(
+    {
+        "20260821_approval_campaign_resource.sql",
+        "20260901_approval_resource_id_varchar80.sql",
+        "20260901_linkedin_approval_parameters_text.sql",
+    }
+)
 
 _SCHEMA_MIGRATIONS_DDL = """
 CREATE TABLE IF NOT EXISTS schema_migrations (

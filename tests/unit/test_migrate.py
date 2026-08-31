@@ -3,6 +3,7 @@ from pathlib import Path
 
 from app.db import migrate as migrate_module
 from app.db.migrate import POSTGRES_ONLY, apply_migrations
+from app.db.models import ApprovalRow
 from app.db.session import make_engine
 from app.workers import migrate as migrate_worker
 from sqlalchemy import text
@@ -47,6 +48,8 @@ def test_apply_migrations_first_run_sqlite(tmp_path: Path) -> None:
         summary = apply_migrations(engine)
 
         assert "20260821_approval_campaign_resource.sql" in summary.skipped
+        assert "20260901_approval_resource_id_varchar80.sql" in summary.skipped
+        assert "20260901_linkedin_approval_parameters_text.sql" in summary.skipped
         assert summary.failed == ""
         assert summary.applied or summary.already
 
@@ -60,6 +63,8 @@ def test_apply_migrations_first_run_sqlite(tmp_path: Path) -> None:
         recorded = _schema_migration_filenames(engine)
         assert recorded
         assert "20260821_approval_campaign_resource.sql" not in recorded
+        assert "20260901_approval_resource_id_varchar80.sql" not in recorded
+        assert "20260901_linkedin_approval_parameters_text.sql" not in recorded
         assert sqlite_safe in recorded
     finally:
         engine.dispose()
@@ -77,6 +82,8 @@ def test_apply_migrations_second_run_moves_to_already(tmp_path: Path) -> None:
         assert second.failed == ""
         assert second.applied == []
         assert "20260821_approval_campaign_resource.sql" in second.skipped
+        assert "20260901_approval_resource_id_varchar80.sql" in second.skipped
+        assert "20260901_linkedin_approval_parameters_text.sql" in second.skipped
         assert set(first.applied).issubset(set(second.already))
     finally:
         engine.dispose()
@@ -145,7 +152,29 @@ def test_migration_sql_is_postgres_parseable_no_sqlite_autoincrement() -> None:
 
 
 def test_postgres_only_skip_contract() -> None:
-    assert POSTGRES_ONLY == frozenset({"20260821_approval_campaign_resource.sql"})
+    assert POSTGRES_ONLY == frozenset(
+        {
+            "20260821_approval_campaign_resource.sql",
+            "20260901_approval_resource_id_varchar80.sql",
+            "20260901_linkedin_approval_parameters_text.sql",
+        }
+    )
+
+
+def test_approval_resource_id_schema_matches_bounded_workflows() -> None:
+    assert ApprovalRow.__table__.c.resource_id.type.length == 80
+
+
+def test_approval_resource_id_postgres_migration_widens_existing_column() -> None:
+    path = (
+        Path(__file__).resolve().parents[2]
+        / "migrations"
+        / "20260901_approval_resource_id_varchar80.sql"
+    )
+    statements = migrate_module._split_statements(path.read_text(encoding="utf-8"))
+    assert statements == [
+        "ALTER TABLE approvals ALTER COLUMN resource_id TYPE VARCHAR(80)"
+    ]
 
 
 def test_migration_modules_do_not_import_integrations() -> None:

@@ -18,3 +18,5 @@ Scope: All requested Mia repairs are implemented, live owner capabilities are pr
   EVIDENCE: Phase 1.5 closes with exact 164/164 disposition coverage and `gates/evidence/function-cleanup-heavy-twenty-third-review.md`: persistent 126 + 42 matrices, fresh 168-case four-effect review, full 2,475-test regression, Ruff, origin binding, 273/273 evals, diff-check, and no unresolved P0/P1/P2.
 - [ ] G8: Current live reliability closure covers website-to-WhatsApp owner notification, Composio identity/no-data behavior, and exact-Sheet binding without changing the one-owner-agent architecture.
   EVIDENCE: tracked in `gates/leaf-1.6-live-reliability.md`; pending combined verification, deployment, and live acceptance.
+- [ ] G9: The Mia number-one-assistant package is independently verified, merged, and deployed from the exact reviewed commit, including the self-managed CRM workspace and approval-bound owner writes.
+  EVIDENCE: tracked in `gates/leaf-1.8-number-one-assistant-release.md`; pending current-tree checks, fresh HEAVY review, remote merge proof, and production rollout.

@@ -102,9 +102,14 @@ All default **false**. `named_write_may_auto` returns false for R4/R5 always. Fl
 | --- | --- | --- |
 | `MIA_CALENDAR_WRITE` | **Yes** — create + reschedule PATCH | Staging booking/reschedule only after Calendar write OAuth. Reads (free/busy, GET) are not gated. |
 | `MIA_WHATSAPP_HANDOFF_SEND` | Yes (shadow bypass) | When true, verified `MIA_BUSINESS` WhatsApp continuation may send under shadow. It is not needed in `auto_approved` mode; deployed mode is unverified here. |
-| `MIA_GMAIL_SEND` | No | Ingest only. |
+| `MIA_GMAIL_SEND` | **Yes** — approved draft send only | Keep false unless the Telegram approval callback and Gmail OAuth are both verified. Never enables model-direct send. |
 | `MIA_META_WRITE` | No | Cannot override R4; no autonomous Meta action is enabled. |
 | `MIA_AUTO_REPLY_INSTAGRAM` | Yes (send gate) | Default **false**. Instagram is not a v1 sales inbox. `auto_approved` does not open it. |
+
+Mia's configured CRM workbook is maintained outside request paths. Run `uv run
+mia-sheets-maintain` for an immediate idempotent repair; scheduled `mia-due-scan` also performs
+best-effort maintenance after its database work. The worker reads a schema marker before changing
+tabs, never discovers Drive files, and never clears business rows.
 
 Rollout modes (percentage / allowlist) do not exist. Kill switch is global, not per capability.
 
@@ -191,7 +196,9 @@ state.
 
 For AssafWeb KPI questions, use the GSC and GA4 API-backed owner capabilities, not browser
 automation. Report normalized GA4 traffic/users/sessions/conversions/pages and GSC
-clicks/impressions/CTR/position/queries. LinkedIn is profile-only. These paths have local
+clicks/impressions/CTR/position/queries. LinkedIn active reads are available; an exact,
+schema-validated post/comment/upload side effect requires an expiring hash-bound Telegram approval.
+LinkedIn direct messages and destructive tools remain denied. These paths have local
 adapter/owner-tool tests; obtain classified read-only probe evidence before claiming live data.
 
 ---

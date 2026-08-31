@@ -9,8 +9,12 @@ from app.domain.approvals import LEAD_ID_RE
 from app.domain.gmail_drafts import parse_gmail_send_intent
 from app.domain.gmail_summaries import THREAD_ID_RE
 from app.domain.learning import InstructionKind, classify_instruction_kind
+from app.domain.owner_calendar_writes import (
+    parse_calendar_change_decision,
+    parse_calendar_change_request,
+)
 
-_HEBREW_LETTER = "\u0590-\u05FF"
+_HEBREW_LETTER = "\u0590-\u05ff"
 
 _REVIEW_PHRASES: tuple[str, ...] = (
     "lead review",
@@ -312,6 +316,7 @@ _TYPE_LABELS_HE: dict[str, str] = {
     "gmail_draft": "טיוטת מייל",
     "seo": "קידום אתר",
     "calendar": "יומן",
+    "calendar_write": "שינוי יומן",
     "owner_notify": "התראות פגישות",
     "meeting_brief": "תקציר פגישה",
     "human_takeover": "תפיסה אנושית",
@@ -345,6 +350,7 @@ class OwnerTaskType(StrEnum):
     GMAIL_DRAFT = "gmail_draft"
     SEO = "seo"
     CALENDAR = "calendar"
+    CALENDAR_WRITE = "calendar_write"
     OWNER_NOTIFY = "owner_notify"
     MEETING_BRIEF = "meeting_brief"
     HUMAN_TAKEOVER = "human_takeover"
@@ -397,29 +403,19 @@ def _matches_lead_outreach(text: str) -> bool:
     """
     if LEAD_ID_RE.search(text) is None:
         return False
-    return any(
-        _phrase_in_text(text, phrase) for phrase in _LEAD_OUTREACH_PHRASES
-    )
+    return any(_phrase_in_text(text, phrase) for phrase in _LEAD_OUTREACH_PHRASES)
 
 
 def _matches_content_idea(text: str) -> bool:
-    return any(
-        _phrase_in_text(text, phrase) for phrase in _CONTENT_IDEA_PHRASES
-    )
+    return any(_phrase_in_text(text, phrase) for phrase in _CONTENT_IDEA_PHRASES)
 
 
 def _matches_gmail_summary(text: str) -> bool:
-    return any(
-        _phrase_in_text(text, phrase)
-        for phrase in _GMAIL_SUMMARY_PHRASES
-    )
+    return any(_phrase_in_text(text, phrase) for phrase in _GMAIL_SUMMARY_PHRASES)
 
 
 def _matches_gmail_draft(text: str) -> bool:
-    return any(
-        _phrase_in_text(text, phrase)
-        for phrase in _GMAIL_DRAFT_PHRASES
-    )
+    return any(_phrase_in_text(text, phrase) for phrase in _GMAIL_DRAFT_PHRASES)
 
 
 def _matches_seo(text: str) -> bool:
@@ -427,64 +423,39 @@ def _matches_seo(text: str) -> bool:
 
 
 def _matches_calendar(text: str) -> bool:
-    return any(
-        _phrase_in_text(text, phrase) for phrase in _CALENDAR_PHRASES
-    )
+    return any(_phrase_in_text(text, phrase) for phrase in _CALENDAR_PHRASES)
 
 
 def _matches_owner_notify(text: str) -> bool:
-    return any(
-        _phrase_in_text(text, phrase)
-        for phrase in _OWNER_NOTIFY_PHRASES
-    )
+    return any(_phrase_in_text(text, phrase) for phrase in _OWNER_NOTIFY_PHRASES)
 
 
 def _matches_meeting_brief(text: str) -> bool:
-    return any(
-        _phrase_in_text(text, phrase)
-        for phrase in _MEETING_BRIEF_PHRASES
-    )
+    return any(_phrase_in_text(text, phrase) for phrase in _MEETING_BRIEF_PHRASES)
 
 
 def _matches_human_takeover_resume(text: str) -> bool:
-    return any(
-        _phrase_in_text(text, phrase)
-        for phrase in _HUMAN_TAKEOVER_RESUME_PHRASES
-    )
+    return any(_phrase_in_text(text, phrase) for phrase in _HUMAN_TAKEOVER_RESUME_PHRASES)
 
 
 def _matches_human_takeover(text: str) -> bool:
-    return any(
-        _phrase_in_text(text, phrase)
-        for phrase in _HUMAN_TAKEOVER_PHRASES
-    )
+    return any(_phrase_in_text(text, phrase) for phrase in _HUMAN_TAKEOVER_PHRASES)
 
 
 def _matches_conversation_scope(text: str) -> bool:
-    return any(
-        _phrase_in_text(text, phrase)
-        for phrase in _CONVERSATION_SCOPE_PHRASES
-    )
+    return any(_phrase_in_text(text, phrase) for phrase in _CONVERSATION_SCOPE_PHRASES)
 
 
 def _matches_hot_leads(text: str) -> bool:
-    return any(
-        _phrase_in_text(text, phrase) for phrase in _HOT_LEADS_PHRASES
-    )
+    return any(_phrase_in_text(text, phrase) for phrase in _HOT_LEADS_PHRASES)
 
 
 def _matches_pending_approvals(text: str) -> bool:
-    return any(
-        _phrase_in_text(text, phrase)
-        for phrase in _PENDING_APPROVALS_PHRASES
-    )
+    return any(_phrase_in_text(text, phrase) for phrase in _PENDING_APPROVALS_PHRASES)
 
 
 def _matches_website_conversations(text: str) -> bool:
-    return any(
-        _phrase_in_text(text, phrase)
-        for phrase in _WEBSITE_CONVERSATIONS_PHRASES
-    )
+    return any(_phrase_in_text(text, phrase) for phrase in _WEBSITE_CONVERSATIONS_PHRASES)
 
 
 def _has_gmail_summary_identifier(text: str) -> bool:
@@ -497,9 +468,7 @@ def _keyword_in_text(text: str, keyword: str) -> bool:
     needle = keyword.lower()
     if " " in needle:
         return needle in haystack
-    return (
-        re.search(rf"(?<![a-z0-9]){re.escape(needle)}(?![a-z0-9])", haystack) is not None
-    )
+    return re.search(rf"(?<![a-z0-9]){re.escape(needle)}(?![a-z0-9])", haystack) is not None
 
 
 def _matching_types(text: str) -> set[OwnerTaskType]:
@@ -589,7 +558,23 @@ def _dedicated_matches(text: str) -> list[OwnerTaskDecision]:
                 matched_types=["seo"],
             )
         )
-    if _matches_calendar(text):
+    if parse_calendar_change_request(text, default_timezone="Asia/Jerusalem") is not None:
+        matches.append(
+            OwnerTaskDecision(
+                task_type=OwnerTaskType.CALENDAR_WRITE,
+                needs_clarification=False,
+                matched_types=["calendar_write"],
+            )
+        )
+    elif parse_calendar_change_decision(text) is not None:
+        matches.append(
+            OwnerTaskDecision(
+                task_type=OwnerTaskType.APPROVAL,
+                needs_clarification=False,
+                matched_types=["approval"],
+            )
+        )
+    elif _matches_calendar(text):
         matches.append(
             OwnerTaskDecision(
                 task_type=OwnerTaskType.CALENDAR,
@@ -830,59 +815,31 @@ def ack_for_owner_task(
 ) -> str:
     if decision.needs_clarification:
         if decision.task_type == OwnerTaskType.LEAD_REVIEW:
-            return (
-                "מה שהבנתי: סקירת ליד. אני לא מבצעת כלום. מה מזהה הליד?"
-            )
+            return "מה שהבנתי: סקירת ליד. אני לא מבצעת כלום. מה מזהה הליד?"
         if decision.task_type == OwnerTaskType.GMAIL_SUMMARY:
-            return (
-                "מה שהבנתי: סיכום מייל. אני לא מבצעת כלום. "
-                "מה מזהה השרשור או הליד?"
-            )
+            return "מה שהבנתי: סיכום מייל. אני לא מבצעת כלום. מה מזהה השרשור או הליד?"
         if decision.task_type == OwnerTaskType.GMAIL_DRAFT:
-            return (
-                "מה שהבנתי: טיוטת מייל. אני לא שולחת בלי אישור. "
-                "מה המייל, הנושא והתוכן?"
-            )
+            return "מה שהבנתי: טיוטת מייל. אני לא שולחת בלי אישור. מה המייל, הנושא והתוכן?"
         if decision.task_type == OwnerTaskType.MEETING_BRIEF:
-            return (
-                "מה שהבנתי: תקציר פגישה. אני לא מבצעת כלום. מה מזהה הליד?"
-            )
+            return "מה שהבנתי: תקציר פגישה. אני לא מבצעת כלום. מה מזהה הליד?"
         if decision.task_type == OwnerTaskType.HUMAN_TAKEOVER:
-            return (
-                "מה שהבנתי: תפיסה אנושית. אני לא מבצעת כלום. מה מזהה הליד?"
-            )
+            return "מה שהבנתי: תפיסה אנושית. אני לא מבצעת כלום. מה מזהה הליד?"
         if decision.task_type == OwnerTaskType.HUMAN_TAKEOVER_RESUME:
-            return (
-                "מה שהבנתי: שחרור תפיסה. אני לא מבצעת כלום. מה מזהה הליד?"
-            )
+            return "מה שהבנתי: שחרור תפיסה. אני לא מבצעת כלום. מה מזהה הליד?"
         if decision.task_type == OwnerTaskType.CONVERSATION_SCOPE:
-            return (
-                "מה שהבנתי: סימון שיחה. חסר מספר או lead_id. אני לא מבצעת כלום."
-            )
+            return "מה שהבנתי: סימון שיחה. חסר מספר או lead_id. אני לא מבצעת כלום."
         if decision.task_type == OwnerTaskType.LEAD_OUTREACH:
             match = LEAD_ID_RE.search(text) if text is not None else None
             subject = f" של {match.group(0)}" if match is not None else ""
-            return (
-                f"הבנתי. אכין את השאלה הבאה בשיחה{subject}, "
-                "אבל לא אשלח בלי אישור שלך. נכון?"
-            )
+            return f"הבנתי. אכין את השאלה הבאה בשיחה{subject}, אבל לא אשלח בלי אישור שלך. נכון?"
         if text is not None and ("campaign" in text.lower() or "קמפיין" in text):
-            return (
-                "ניהול ונתוני קמפיינים ממומנים אינם זמינים במיאה. "
-                "לא נרשמה בקשה ולא בוצע שינוי."
-            )
+            return "ניהול ונתוני קמפיינים ממומנים אינם זמינים במיאה. לא נרשמה בקשה ולא בוצע שינוי."
         if decision.matched_types:
             labels = _type_labels(decision.matched_types)
-            return (
-                f"מה שהבנתי: זה יכול להיות {labels}. "
-                "אני לא מבצעת כלום. איזה משימה אתה רוצה?"
-            )
+            return f"מה שהבנתי: זה יכול להיות {labels}. אני לא מבצעת כלום. איזה משימה אתה רוצה?"
         if inbound_source == "audio":
             return "לא תפסתי את ההקלטה. אני לא מבצעת כלום."
-        return (
-            "מה שהבנתי: לא הצלחתי לסווג את ההודעה. "
-            "אני לא מבצעת כלום. תכתוב מה המשימה."
-        )
+        return "מה שהבנתי: לא הצלחתי לסווג את ההודעה. אני לא מבצעת כלום. תכתוב מה המשימה."
     if decision.task_type == OwnerTaskType.OWNER_STATUS:
         return "היי אסף, אני כאן."
     # Placeholders. The inbound handler replaces these with the real read so the
@@ -894,19 +851,11 @@ def ack_for_owner_task(
     if decision.task_type == OwnerTaskType.WEBSITE_CONVERSATIONS:
         return "בודקת את השיחות מהאתר."
     if decision.task_type == OwnerTaskType.PREFERENCE:
-        kind = (
-            classify_instruction_kind(text)
-            if text is not None
-            else InstructionKind.PREFERENCE
-        )
+        kind = classify_instruction_kind(text) if text is not None else InstructionKind.PREFERENCE
         if kind == InstructionKind.CORRECTION:
-            return (
-                "נשמר כהצעת תיקון. זה לא פעיל ולא ישנה פרומפטים בפרודקשן עד שתאשר."
-            )
+            return "נשמר כהצעת תיקון. זה לא פעיל ולא ישנה פרומפטים בפרודקשן עד שתאשר."
         if kind == InstructionKind.BEHAVIOR_RULE:
-            return (
-                "נשמר כהצעת כלל. זה לא פעיל ולא ישנה פרומפטים בפרודקשן עד שתאשר."
-            )
+            return "נשמר כהצעת כלל. זה לא פעיל ולא ישנה פרומפטים בפרודקשן עד שתאשר."
         return "נשמר כהצעת העדפה. זה לא פעיל ולא ישנה פרומפטים בפרודקשן עד שתאשר."
     type_label = _hebrew_type_label(decision.task_type.value)
     formatted_due = _format_due_at_he(due_at)

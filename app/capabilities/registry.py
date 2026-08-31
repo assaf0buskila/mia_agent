@@ -25,9 +25,11 @@ ANALYTICS_GET_TRAFFIC = "analytics.get_traffic"
 SHEETS_READ = "sheets.read"
 SHEETS_UPDATE = "sheets.update"
 SHEETS_APPEND = "sheets.append"
+SHEETS_LIST_TABS = "sheets.list_tabs"
 COMPOSIO_CATALOG_SEARCH = "composio.catalog_search"
 COMPOSIO_TOOL_SCHEMA = "composio.tool_schema"
 COMPOSIO_EXECUTE_READ = "composio.execute_read"
+COMPOSIO_PROPOSE_LINKEDIN_WRITE = "composio.propose_linkedin_write"
 
 _OWNER = frozenset({GraphName.OWNER})
 _CLIENT = frozenset({GraphName.CLIENT})
@@ -52,6 +54,7 @@ CAPABILITIES: tuple[CapabilitySpec, ...] = (
     spec(SEARCH_CONSOLE_QUERY, Sensitivity.READ, _OWNER),
     spec(ANALYTICS_GET_TRAFFIC, Sensitivity.READ, _OWNER),
     spec(SHEETS_READ, Sensitivity.READ, _OWNER),
+    spec(SHEETS_LIST_TABS, Sensitivity.READ, _OWNER),
     spec(SHEETS_UPDATE, Sensitivity.WRITE, _OWNER, idempotent=False),
     spec(SHEETS_APPEND, Sensitivity.WRITE, _OWNER, idempotent=False),
     # Dynamic Composio operations are still named capabilities.  The catalog adapter
@@ -60,6 +63,9 @@ CAPABILITIES: tuple[CapabilitySpec, ...] = (
     spec(COMPOSIO_CATALOG_SEARCH, Sensitivity.READ, _OWNER),
     spec(COMPOSIO_TOOL_SCHEMA, Sensitivity.READ, _OWNER),
     spec(COMPOSIO_EXECUTE_READ, Sensitivity.READ, _OWNER),
+    # This low write records an approval request only. Provider execution remains
+    # R3/R4 and occurs solely through the separately bound approval callback.
+    spec(COMPOSIO_PROPOSE_LINKEDIN_WRITE, Sensitivity.WRITE, _OWNER),
     spec(BUSINESS_GET_INFORMATION, Sensitivity.READ, _CLIENT),
 )
 

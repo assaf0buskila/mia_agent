@@ -17,6 +17,7 @@ from app.integrations.instagram_insights import (
     DisabledInstagramInsightsPort,
     FakeInstagramInsightsPort,
     GraphInstagramInsightsPort,
+    InstagramInsightBudgetExceeded,
     build_instagram_insights_port,
     enrich_content_insights_ack,
     format_content_insights_line,
@@ -178,6 +179,23 @@ def test_enrich_content_insights_ack_http_401_unauthorized_ack_unchanged() -> No
     assert "תוכן:" not in enriched
 
 
+def test_enrich_reports_bounded_instagram_read_as_partial_not_empty() -> None:
+    class BudgetLimitedInsightsPort:
+        def list_recent_insights(self, *, limit: int = 5) -> list[ContentInsight]:
+            del limit
+            raise InstagramInsightBudgetExceeded()
+
+    enriched, outcome = enrich_content_insights_ack(
+        "ack",
+        BudgetLimitedInsightsPort(),
+        store=None,
+        kill_switch=False,
+    )
+    assert enriched == "ack"
+    assert outcome.status == "partial"
+    assert outcome.result_count == 0
+
+
 def test_graph_port_insights_400_skips_media() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/media"):
@@ -212,6 +230,172 @@ def test_graph_port_insights_400_skips_media() -> None:
     assert len(items) == 1
     assert items[0].media_id == MEDIA_ID_2
     assert items[0].views == "99"
+
+
+def test_graph_port_retries_supported_metrics_individually_after_mixed_batch_rejection() -> None:
+    requested_metrics: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/media"):
+            return httpx.Response(
+                200, json={"data": [{"id": MEDIA_ID_1, "media_type": "IMAGE"}]}
+            )
+        metric = str(request.url.params.get("metric") or "")
+        requested_metrics.append(metric)
+        if "," in metric:
+            return httpx.Response(400, json={"error": {"message": "mixed metrics unsupported"}})
+        values = {"reach": 900, "likes": 45, "comments": 3, "saved": 12}
+        if metric == "views":
+            return httpx.Response(400, json={"error": {"message": "unsupported for image"}})
+        return httpx.Response(
+            200, json={"data": [{"name": metric, "values": [{"value": values[metric]}]}]}
+        )
+
+    port = GraphInstagramInsightsPort(
+        access_token="ig-token",
+        account_id="123456789",
+        graph_version="v26.0",
+        graph_host="graph.instagram.com",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    items = port.list_recent_insights(limit=1)
+    assert len(items) == 1
+    assert items[0].views is None
+    assert items[0].reach == "900"
+    assert items[0].likes == "45"
+    assert items[0].comments == "3"
+    assert items[0].saved == "12"
+    assert requested_metrics == [
+        "views,reach,likes,comments,saved",
+        "views",
+        "reach",
+        "likes",
+        "comments",
+        "saved",
+    ]
+
+
+@pytest.mark.parametrize("status_code", [401, 429, 503])
+def test_graph_port_terminal_insight_failure_stops_without_metric_fallback(
+    status_code: int,
+) -> None:
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        if request.url.path.endswith("/media"):
+            return httpx.Response(
+                200, json={"data": [{"id": MEDIA_ID_1, "media_type": "IMAGE"}]}
+            )
+        return httpx.Response(status_code, json={"error": {"message": "provider down"}})
+
+    port = GraphInstagramInsightsPort(
+        access_token="ig-token",
+        account_id="123456789",
+        graph_version="v26.0",
+        graph_host="graph.instagram.com",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    with pytest.raises(AdapterHttpError) as exc_info:
+        port.list_recent_insights(limit=1)
+    assert exc_info.value.status_code == status_code
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_status"),
+    [
+        ({"message": "Invalid OAuth access token", "code": 190}, 401),
+        ({"message": "Application request limit reached", "code": 4}, 429),
+    ],
+)
+def test_graph_port_stops_mixed_metric_fallback_on_terminal_400_provider_error(
+    error: dict[str, object], expected_status: int
+) -> None:
+    requested_metrics: list[str] = []
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if request.url.path.endswith("/media"):
+            return httpx.Response(
+                200, json={"data": [{"id": MEDIA_ID_1, "media_type": "IMAGE"}]}
+            )
+        metric = str(request.url.params.get("metric") or "")
+        requested_metrics.append(metric)
+        if "," in metric:
+            return httpx.Response(
+                400, json={"error": {"message": "mixed metrics unsupported"}}
+            )
+        return httpx.Response(400, json={"error": error})
+
+    port = GraphInstagramInsightsPort(
+        access_token="ig-token",
+        account_id="123456789",
+        graph_version="v26.0",
+        graph_host="graph.instagram.com",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    with pytest.raises(AdapterHttpError) as exc_info:
+        port.list_recent_insights(limit=1)
+    assert exc_info.value.status_code == expected_status
+    assert requested_metrics == ["views,reach,likes,comments,saved", "views"]
+    assert calls == 3
+
+
+def test_graph_port_does_not_retry_generic_metric_error_individually() -> None:
+    requested_metrics: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/media"):
+            return httpx.Response(
+                200, json={"data": [{"id": MEDIA_ID_1, "media_type": "IMAGE"}]}
+            )
+        metric = str(request.url.params.get("metric") or "")
+        requested_metrics.append(metric)
+        return httpx.Response(400, json={"error": {"message": "unsupported metric"}})
+
+    port = GraphInstagramInsightsPort(
+        access_token="ig-token",
+        account_id="123456789",
+        graph_version="v26.0",
+        graph_host="graph.instagram.com",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    assert port.list_recent_insights(limit=1) == []
+    assert requested_metrics == ["views,reach,likes,comments,saved"]
+
+
+def test_graph_port_enforces_total_audit_call_budget() -> None:
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        if request.url.path.endswith("/media"):
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {"id": str(int(MEDIA_ID_1) + index), "media_type": "IMAGE"}
+                        for index in range(5)
+                    ]
+                },
+            )
+        return httpx.Response(
+            400, json={"error": {"message": "mixed metrics unsupported"}}
+        )
+
+    port = GraphInstagramInsightsPort(
+        access_token="ig-token",
+        account_id="123456789",
+        graph_version="v26.0",
+        graph_host="graph.instagram.com",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    with pytest.raises(InstagramInsightBudgetExceeded):
+        port.list_recent_insights(limit=5)
+    assert len(calls) == 11
 
 
 def test_enrich_appends_hebrew_line_and_persists() -> None:
@@ -549,6 +733,17 @@ def test_composio_sheets_port_content_request_shape() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         captured["url"] = str(request.url)
         captured["json"] = json.loads(request.content)
+        if str(request.url).endswith("GOOGLESHEETS_GET_SHEET_NAMES"):
+            from app.integrations.sheets import CRM_WORKSPACE_TABS
+
+            return httpx.Response(
+                200,
+                json={
+                    "data": {"sheetNames": [name for name, _headers in CRM_WORKSPACE_TABS]},
+                    "error": None,
+                    "successful": True,
+                },
+            )
         return httpx.Response(
             200,
             json={"data": {}, "error": None, "successful": True},
@@ -691,3 +886,87 @@ def test_composio_insights_parses_media_no_captions_or_urls() -> None:
     insight_args = captured[1]["arguments"]
     assert insight_args["ig_media_id"] == MEDIA_ID_1
     assert insight_args["metric"] == ["views", "reach", "likes", "comments", "saved"]
+
+
+def test_composio_retries_only_classified_mixed_metric_incompatibility() -> None:
+    requested_metrics: list[list[str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        arguments = body["arguments"]
+        if "fields" in arguments:
+            return httpx.Response(
+                200,
+                json={
+                    "successful": True,
+                    "data": {"data": [{"id": MEDIA_ID_1, "media_type": "IMAGE"}]},
+                },
+            )
+        metric = arguments["metric"]
+        requested_metrics.append(metric)
+        if len(metric) > 1:
+            return httpx.Response(
+                200,
+                json={
+                    "successful": False,
+                    "error": {"message": "mixed metrics unsupported"},
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "successful": True,
+                "data": {
+                    "data": [{"name": metric[0], "values": [{"value": 7}]}]
+                },
+            },
+        )
+
+    from app.integrations.instagram_insights import ComposioInstagramInsightsPort
+
+    port = ComposioInstagramInsightsPort(
+        api_key="cmp-test",
+        user_id="user-abc",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    items = port.list_recent_insights(limit=1)
+    assert len(items) == 1
+    assert items[0].views == "7"
+    assert requested_metrics == [
+        ["views", "reach", "likes", "comments", "saved"],
+        ["views"],
+        ["reach"],
+        ["likes"],
+        ["comments"],
+        ["saved"],
+    ]
+
+
+def test_composio_provider_failure_does_not_fan_out_metrics() -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        body = json.loads(request.content)
+        if "fields" in body["arguments"]:
+            return httpx.Response(
+                200,
+                json={
+                    "successful": True,
+                    "data": {"data": [{"id": MEDIA_ID_1, "media_type": "IMAGE"}]},
+                },
+            )
+        return httpx.Response(503, json={"message": "upstream unavailable"})
+
+    from app.integrations.instagram_insights import ComposioInstagramInsightsPort
+
+    port = ComposioInstagramInsightsPort(
+        api_key="cmp-test",
+        user_id="user-abc",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    with pytest.raises(AdapterHttpError) as exc_info:
+        port.list_recent_insights(limit=1)
+    assert exc_info.value.status_code == 503
+    assert calls == 2

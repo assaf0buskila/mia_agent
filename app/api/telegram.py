@@ -26,9 +26,13 @@ from app.domain.events import (
     transcription_outcome,
 )
 from app.domain.gmail_drafts import execute_approved_gmail_send
+from app.domain.owner_calendar_writes import execute_approved_calendar_change
 from app.domain.owner_callbacks import resolve_owner_callback_result
+from app.domain.owner_linkedin_writes import execute_approved_linkedin_write
 from app.domain.tools import AdapterHttpError
 from app.integrations.base import MessagePort
+from app.integrations.calendar import build_calendar_port
+from app.integrations.calendar_booking import build_calendar_booking_port
 from app.integrations.gmail import build_gmail_port
 from app.integrations.telegram import (
     TelegramMediaError,
@@ -179,6 +183,23 @@ async def _handle_callback(
             draft_id=resolved.gmail_draft_id_to_send,
             kill_switch=settings.kill_switch,
             demo_active=demo_mode_active(settings),
+        )
+    if resolved.calendar_resource_id_to_execute is not None:
+        reply_text = execute_approved_calendar_change(
+            store=store,
+            settings=settings,
+            calendar=build_calendar_port(settings),
+            booking=build_calendar_booking_port(settings),
+            resource_id=resolved.calendar_resource_id_to_execute,
+            kill_switch=settings.kill_switch,
+            demo_active=demo_mode_active(settings),
+        )
+    if resolved.linkedin_resource_id_to_execute is not None:
+        reply_text = execute_approved_linkedin_write(
+            store=store,
+            settings=settings,
+            resource_id=resolved.linkedin_resource_id_to_execute,
+            kill_switch=settings.kill_switch,
         )
     edit = getattr(port, "edit_message_text", None)
     if callable(edit) and callback.get("message_id"):

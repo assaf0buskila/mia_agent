@@ -212,6 +212,7 @@ async def process_inbound_texts(
                 owner_ids=owner_ids,
                 settings=settings,
                 calendar_port=calendar_port,
+                calendar_booking_port=calendar_booking_port,
                 calendar_agenda_port=calendar_agenda_port,
                 gmail_port=gmail_port,
                 sheets_port=sheets_port,

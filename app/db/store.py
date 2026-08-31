@@ -6,6 +6,7 @@ from uuid import uuid4
 from sqlalchemy import func, or_, select
 from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.db.models import (
@@ -51,6 +52,8 @@ from app.domain.ai_runs import (
     sanitize_prompt_version,
 )
 from app.domain.approvals import (
+    ACTION_CALENDAR_CREATE,
+    ACTION_CALENDAR_RESCHEDULE,
     ACTION_GMAIL_SEND,
     ACTION_PROPOSAL_HANDOFF,
     ACTION_WEBSITE_EDIT,
@@ -58,6 +61,7 @@ from app.domain.approvals import (
     DECISION_PENDING,
     DECISION_REJECTED,
     LEAD_ID_RE,
+    RESOURCE_CALENDAR,
     RESOURCE_GMAIL,
     RESOURCE_LEAD,
     RESOURCE_WEBSITE,
@@ -191,11 +195,9 @@ def _asked_actions_from_row(raw: str | None) -> list[str]:
         return []
     if not isinstance(parsed, list):
         return []
-    return [
-        item
-        for item in parsed
-        if isinstance(item, str) and item in _VALID_NEXT_ACTIONS
-    ][-MAX_ASKED_ACTIONS:]
+    return [item for item in parsed if isinstance(item, str) and item in _VALID_NEXT_ACTIONS][
+        -MAX_ASKED_ACTIONS:
+    ]
 
 
 def sales_from_row(row: SalesStateRow) -> SalesState:
@@ -253,9 +255,7 @@ class LeadStore:
             lead.sales_state = sales
             self.session.add_all([customer, lead])
             self.session.flush()
-            self._save_lead_created(
-                channel=channel, lead_id=lead.id, conversation_id=external_id
-            )
+            self._save_lead_created(channel=channel, lead_id=lead.id, conversation_id=external_id)
             return customer.id, lead.id
         lead = self.session.scalars(
             select(LeadRow).where(LeadRow.customer_id == row.customer_id).order_by(LeadRow.id)
@@ -265,14 +265,10 @@ class LeadStore:
             lead.sales_state = SalesStateRow(lead_id=lead.id)
             self.session.add(lead)
             self.session.flush()
-            self._save_lead_created(
-                channel=channel, lead_id=lead.id, conversation_id=external_id
-            )
+            self._save_lead_created(channel=channel, lead_id=lead.id, conversation_id=external_id)
         return row.customer_id, lead.id
 
-    def _save_lead_created(
-        self, *, channel: Channel, lead_id: str, conversation_id: str
-    ) -> None:
+    def _save_lead_created(self, *, channel: Channel, lead_id: str, conversation_id: str) -> None:
         self.save_canonical_event(
             provider=channel.value,
             event=build_lead_created_event(
@@ -432,9 +428,7 @@ class LeadStore:
         )
 
     def count_sales_snapshots(self) -> int:
-        return int(
-            self.session.scalar(select(func.count()).select_from(SalesStateRow)) or 0
-        )
+        return int(self.session.scalar(select(func.count()).select_from(SalesStateRow)) or 0)
 
     def list_sales_snapshots(self, *, limit: int = 20) -> list[SalesState]:
         """Sales state for the most recent leads. Facts only, no message text."""
@@ -459,12 +453,7 @@ class LeadStore:
                 return [self.get_sales(needle)]
             except KeyError:
                 return []
-        escaped = (
-            needle.casefold()
-            .replace("\\", "\\\\")
-            .replace("%", "\\%")
-            .replace("_", "\\_")
-        )
+        escaped = needle.casefold().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         pattern = f"%{escaped}%"
         rows = self.session.scalars(
             select(SalesStateRow)
@@ -483,9 +472,9 @@ class LeadStore:
     def count_pending_approvals(self) -> int:
         return int(
             self.session.scalar(
-                select(func.count()).select_from(ApprovalRow).where(
-                    ApprovalRow.decision == DECISION_PENDING
-                )
+                select(func.count())
+                .select_from(ApprovalRow)
+                .where(ApprovalRow.decision == DECISION_PENDING)
             )
             or 0
         )
@@ -553,11 +542,9 @@ class LeadStore:
         row.data_source_known = sales.data_source_known
         row.discovery_turns = max(0, int(sales.discovery_turns))
         row.asked_actions = json.dumps(
-            [
-                value
-                for value in sales.asked_actions
-                if value in _VALID_NEXT_ACTIONS
-            ][-MAX_ASKED_ACTIONS:]
+            [value for value in sales.asked_actions if value in _VALID_NEXT_ACTIONS][
+                -MAX_ASKED_ACTIONS:
+            ]
         )
         row.explicit_buying_intent = sales.explicit_buying_intent
         row.headline = (sales.headline or "")[:120]
@@ -676,9 +663,7 @@ class LeadStore:
         self.session.flush()
 
     def get_ai_run(self, run_id: str) -> AiRunRow | None:
-        return self.session.scalars(
-            select(AiRunRow).where(AiRunRow.run_id == run_id)
-        ).one_or_none()
+        return self.session.scalars(select(AiRunRow).where(AiRunRow.run_id == run_id)).one_or_none()
 
     def save_shadow_decision(
         self,
@@ -969,9 +954,7 @@ class LeadStore:
             select(ContentIdeaRow).where(ContentIdeaRow.idea_date == idea_date)
         ).one_or_none()
         if row is None:
-            self.session.add(
-                ContentIdeaRow(idea_date=idea_date, kinds=payload)
-            )
+            self.session.add(ContentIdeaRow(idea_date=idea_date, kinds=payload))
         else:
             row.kinds = payload
         self.session.flush()
@@ -1141,9 +1124,7 @@ class LeadStore:
         if not thread_id or len(thread_id) > 255:
             return None
         return self.session.scalars(
-            select(GmailThreadSummaryRow).where(
-                GmailThreadSummaryRow.thread_id == thread_id
-            )
+            select(GmailThreadSummaryRow).where(GmailThreadSummaryRow.thread_id == thread_id)
         ).one_or_none()
 
     def upsert_gmail_thread_summary(
@@ -1301,11 +1282,7 @@ class LeadStore:
         normalized_at = normalize_scheduled_at_utc(scheduled_at)
         normalized_rescheduled_at = normalize_scheduled_at_utc(rescheduled_at)
         clean_event_id = sanitize_event_id(calendar_event_id)
-        if (
-            normalized_at is None
-            or normalized_rescheduled_at is None
-            or clean_event_id is None
-        ):
+        if normalized_at is None or normalized_rescheduled_at is None or clean_event_id is None:
             return False
         row = self.lock_meeting_for_update(lead_id)
         if row is None or row.status != STATUS_BOOKED:
@@ -1446,9 +1423,7 @@ class LeadStore:
         }
 
     def get_deal(self, lead_id: str) -> DealRow | None:
-        return self.session.scalars(
-            select(DealRow).where(DealRow.lead_id == lead_id)
-        ).one_or_none()
+        return self.session.scalars(select(DealRow).where(DealRow.lead_id == lead_id)).one_or_none()
 
     def upsert_deal(
         self,
@@ -1526,11 +1501,7 @@ class LeadStore:
         expires_at: str,
         approver: str = "",
     ) -> None:
-        if (
-            action != ACTION_PROPOSAL_HANDOFF
-            or risk != RISK_R3
-            or decision != DECISION_PENDING
-        ):
+        if action != ACTION_PROPOSAL_HANDOFF or risk != RISK_R3 or decision != DECISION_PENDING:
             return
         if resource_type != RESOURCE_LEAD:
             return
@@ -1591,11 +1562,7 @@ class LeadStore:
         resource_id: str,
         expires_at: str,
     ) -> None:
-        if (
-            action != ACTION_GMAIL_SEND
-            or risk != RISK_R3
-            or decision != DECISION_PENDING
-        ):
+        if action != ACTION_GMAIL_SEND or risk != RISK_R3 or decision != DECISION_PENDING:
             return
         if resource_type != RESOURCE_GMAIL:
             return
@@ -1612,9 +1579,7 @@ class LeadStore:
             resource_type=resource_type,
             resource_id=resource_id,
         )
-        row = self.get_approval_by_resource(
-            RESOURCE_GMAIL, resource_id, ACTION_GMAIL_SEND
-        )
+        row = self.get_approval_by_resource(RESOURCE_GMAIL, resource_id, ACTION_GMAIL_SEND)
         if row is None:
             self.session.add(
                 ApprovalRow(
@@ -1644,6 +1609,129 @@ class LeadStore:
             row.proposed_parameters = params
         self.session.flush()
 
+    def upsert_calendar_approval(
+        self,
+        *,
+        channel: str,
+        action: str,
+        risk: str,
+        payload_hash: str,
+        decision: str,
+        resource_id: str,
+        expires_at: str,
+        proposed_parameters: str,
+    ) -> None:
+        """Persist an exact owner calendar change awaiting approval.
+
+        The compact JSON is not display text: it is the immutable payload that is
+        hashed and re-checked immediately before the provider write.
+        """
+        if action not in (ACTION_CALENDAR_CREATE, ACTION_CALENDAR_RESCHEDULE):
+            return
+        if risk != RISK_R3 or decision != DECISION_PENDING:
+            return
+        if not resource_id or len(resource_id) > 80 or not expires_at:
+            return
+        try:
+            datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+        except ValueError:
+            return
+        if not proposed_parameters or len(proposed_parameters) > 255:
+            return
+        row = self.get_approval_by_resource(RESOURCE_CALENDAR, resource_id, action)
+        if row is None:
+            self.session.add(
+                ApprovalRow(
+                    lead_id=None,
+                    channel=channel,
+                    action=action,
+                    risk=risk,
+                    payload_hash=payload_hash,
+                    decision=decision,
+                    approver="",
+                    resource_type=RESOURCE_CALENDAR,
+                    resource_id=resource_id,
+                    expires_at=expires_at,
+                    approval_id=new_approval_id(),
+                    proposed_parameters=proposed_parameters,
+                )
+            )
+        elif row.decision == DECISION_PENDING:
+            row.channel = channel
+            row.risk = risk
+            row.payload_hash = payload_hash
+            row.expires_at = expires_at
+            row.proposed_parameters = proposed_parameters
+        self.session.flush()
+
+    def upsert_linkedin_approval(
+        self, *, channel: str, action: str, risk: str, payload_hash: str,
+        decision: str, resource_id: str, expires_at: str, proposed_parameters: str,
+    ) -> None:
+        """Persist one exact LinkedIn provider write; its arguments are rehashed at execute."""
+        if action != "linkedin_composio_write" or risk not in ("R3", "R4"):
+            return
+        if decision != DECISION_PENDING or not resource_id or len(resource_id) > 80:
+            return
+        from app.domain.owner_linkedin_writes import linkedin_parameters_within_bound
+
+        if not linkedin_parameters_within_bound(proposed_parameters):
+            return
+        try:
+            datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+        except ValueError:
+            return
+        row = self.get_approval_by_resource("linkedin_tool", resource_id, action)
+        if row is None:
+            self.session.add(ApprovalRow(
+                lead_id=None, channel=channel, action=action, risk=risk,
+                payload_hash=payload_hash, decision=decision, approver="",
+                resource_type="linkedin_tool", resource_id=resource_id,
+                expires_at=expires_at, approval_id=new_approval_id(),
+                proposed_parameters=proposed_parameters,
+            ))
+        elif row.decision == DECISION_PENDING:
+            row.channel, row.risk, row.payload_hash = channel, risk, payload_hash
+            row.expires_at, row.proposed_parameters = expires_at, proposed_parameters
+        self.session.flush()
+
+    def decide_linkedin_approval(self, *, resource_id: str, decision: str) -> bool:
+        if decision not in (DECISION_APPROVED, DECISION_REJECTED):
+            return False
+        row = self.get_approval_by_resource("linkedin_tool", resource_id, "linkedin_composio_write")
+        if row is None or row.decision != DECISION_PENDING:
+            return False
+        row.decision, row.approver = decision, ""
+        if decision == DECISION_APPROVED:
+            row.approved_at = datetime.now(UTC).isoformat()
+        self.session.flush()
+        return True
+
+    def decide_calendar_approval(
+        self,
+        *,
+        resource_id: str,
+        action: str,
+        decision: str,
+        now: datetime | None = None,
+    ) -> bool:
+        if action not in (ACTION_CALENDAR_CREATE, ACTION_CALENDAR_RESCHEDULE):
+            return False
+        if decision not in (DECISION_APPROVED, DECISION_REJECTED):
+            return False
+        row = self.get_approval_by_resource(RESOURCE_CALENDAR, resource_id, action)
+        if row is None or row.decision != DECISION_PENDING:
+            return False
+        effective_now = now if now is not None else datetime.now(UTC)
+        if effective_now.tzinfo is None:
+            effective_now = effective_now.replace(tzinfo=UTC)
+        row.decision = decision
+        row.approver = ""
+        if decision == DECISION_APPROVED:
+            row.approved_at = effective_now.isoformat()
+        self.session.flush()
+        return True
+
     def upsert_website_approval(
         self,
         *,
@@ -1657,11 +1745,7 @@ class LeadStore:
         expires_at: str,
         proposed_parameters: str,
     ) -> None:
-        if (
-            action != ACTION_WEBSITE_EDIT
-            or risk != RISK_R3
-            or decision != DECISION_PENDING
-        ):
+        if action != ACTION_WEBSITE_EDIT or risk != RISK_R3 or decision != DECISION_PENDING:
             return
         if resource_type != RESOURCE_WEBSITE:
             return
@@ -1671,9 +1755,7 @@ class LeadStore:
             datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
         except ValueError:
             return
-        row = self.get_approval_by_resource(
-            RESOURCE_WEBSITE, resource_id, ACTION_WEBSITE_EDIT
-        )
+        row = self.get_approval_by_resource(RESOURCE_WEBSITE, resource_id, ACTION_WEBSITE_EDIT)
         if row is None:
             self.session.add(
                 ApprovalRow(
@@ -1749,9 +1831,7 @@ class LeadStore:
     ) -> bool:
         if decision not in (DECISION_APPROVED, DECISION_REJECTED):
             return False
-        row = self.get_approval_by_resource(
-            RESOURCE_GMAIL, resource_id, ACTION_GMAIL_SEND
-        )
+        row = self.get_approval_by_resource(RESOURCE_GMAIL, resource_id, ACTION_GMAIL_SEND)
         if row is None or row.decision != DECISION_PENDING:
             return False
         effective_now = now if now is not None else datetime.now(UTC)
@@ -1773,9 +1853,7 @@ class LeadStore:
     ) -> bool:
         if decision not in (DECISION_APPROVED, DECISION_REJECTED):
             return False
-        row = self.get_approval_by_resource(
-            RESOURCE_WEBSITE, resource_id, ACTION_WEBSITE_EDIT
-        )
+        row = self.get_approval_by_resource(RESOURCE_WEBSITE, resource_id, ACTION_WEBSITE_EDIT)
         if row is None or row.decision != DECISION_PENDING:
             return False
         effective_now = now if now is not None else datetime.now(UTC)
@@ -1828,9 +1906,7 @@ class LeadStore:
         )
         self.session.flush()
 
-    def get_owner_task(
-        self, *, provider: str, provider_event_id: str
-    ) -> OwnerTaskRow | None:
+    def get_owner_task(self, *, provider: str, provider_event_id: str) -> OwnerTaskRow | None:
         return self.session.scalars(
             select(OwnerTaskRow).where(
                 OwnerTaskRow.provider == provider,
@@ -1849,9 +1925,7 @@ class LeadStore:
             )
         ).all()
         return [
-            row
-            for row in rows
-            if row.due_at and re.fullmatch(r"\d{4}-\d{2}-\d{2}", row.due_at)
+            row for row in rows if row.due_at and re.fullmatch(r"\d{4}-\d{2}-\d{2}", row.due_at)
         ]
 
     def save_owner_task_scan(
@@ -1864,9 +1938,7 @@ class LeadStore:
     ) -> None:
         if block_reason not in ALLOWLISTED_OWNER_TASK_SCAN_REASONS:
             return
-        row = self.get_owner_task(
-            provider=provider, provider_event_id=provider_event_id
-        )
+        row = self.get_owner_task(provider=provider, provider_event_id=provider_event_id)
         if row is None:
             return
         row.due_ready = due_ready
@@ -2016,9 +2088,7 @@ class LeadStore:
             return True
         return False
 
-    def complete_operation(
-        self, *, scope: str, key: str, result_json: str = "{}"
-    ) -> None:
+    def complete_operation(self, *, scope: str, key: str, result_json: str = "{}") -> None:
         if not key or scope not in ALLOWLISTED_OPERATION_SCOPES:
             return
         existing = self.session.scalars(
@@ -2059,6 +2129,91 @@ class LeadStore:
         if existing is None or existing.status != "completed":
             return "{}"
         return existing.result_json or "{}"
+
+    def claim_provider_write(self, *, scope: str, key: str) -> bool:
+        """Durably reserve a provider write before its external call.
+
+        Unlike ordinary operation claims, this reservation never expires or becomes
+        reclaimable.  A process can die after the provider accepts a write but before
+        our outcome commit; reissuing that write automatically would be unsafe.
+        """
+        if not key or scope not in ALLOWLISTED_OPERATION_SCOPES:
+            return False
+        existing = self.session.scalars(
+            select(IdempotencyRow).where(
+                IdempotencyRow.scope == scope,
+                IdempotencyRow.key == key,
+            )
+        ).one_or_none()
+        if existing is not None:
+            return False
+        now = datetime.now(UTC).isoformat()
+        self.session.add(
+            IdempotencyRow(
+                scope=scope,
+                key=key,
+                created_at=now,
+                status="provider_claimed",
+                expires_at="",
+                result_json="{}",
+            )
+        )
+        try:
+            self.session.commit()
+        except SQLAlchemyError:
+            self.session.rollback()
+            return False
+        return True
+
+    def complete_provider_write(self, *, scope: str, key: str, result_json: str = "{}") -> bool:
+        """Persist a known provider success without making an ambiguous claim retryable."""
+        if not key or scope not in ALLOWLISTED_OPERATION_SCOPES:
+            return False
+        existing = self.session.scalars(
+            select(IdempotencyRow).where(
+                IdempotencyRow.scope == scope,
+                IdempotencyRow.key == key,
+            )
+        ).one_or_none()
+        if existing is None or existing.status != "provider_claimed":
+            return False
+        existing.status = "completed"
+        existing.result_json = sanitize_operation_result(result_json)
+        try:
+            self.session.commit()
+        except SQLAlchemyError:
+            self.session.rollback()
+            return False
+        return True
+
+    def mark_provider_write_pending_review(self, *, scope: str, key: str) -> None:
+        """Keep an indeterminate provider outcome permanently out of auto-retry."""
+        if not key or scope not in ALLOWLISTED_OPERATION_SCOPES:
+            return
+        existing = self.session.scalars(
+            select(IdempotencyRow).where(
+                IdempotencyRow.scope == scope,
+                IdempotencyRow.key == key,
+            )
+        ).one_or_none()
+        if existing is None or existing.status != "provider_claimed":
+            return
+        existing.status = "pending_review"
+        try:
+            self.session.commit()
+        except SQLAlchemyError:
+            self.session.rollback()
+
+    def get_provider_write_status(self, *, scope: str, key: str) -> str:
+        if not key or scope not in ALLOWLISTED_OPERATION_SCOPES:
+            return ""
+        existing = self.session.scalars(
+            select(IdempotencyRow).where(
+                IdempotencyRow.scope == scope,
+                IdempotencyRow.key == key,
+            )
+        ).one_or_none()
+        return existing.status if existing is not None else ""
 
     def _fill_webhook_envelope_if_empty(
         self,
@@ -2128,9 +2283,7 @@ class LeadStore:
         self.session.flush()
         return True
 
-    def get_webhook(
-        self, *, provider: str, provider_event_id: str
-    ) -> WebhookEventRow | None:
+    def get_webhook(self, *, provider: str, provider_event_id: str) -> WebhookEventRow | None:
         return self.session.scalars(
             select(WebhookEventRow).where(
                 WebhookEventRow.provider == provider,
@@ -2273,9 +2426,7 @@ class LeadStore:
         )
         return int(count or 0)
 
-    def count_behavior_events(
-        self, *, kind: str, occurred_from: str, occurred_to: str
-    ) -> int:
+    def count_behavior_events(self, *, kind: str, occurred_from: str, occurred_to: str) -> int:
         if kind not in ALL_BEHAVIOR_KINDS:
             return 0
         rows = self.session.scalars(
@@ -2316,9 +2467,7 @@ class LeadStore:
         if status not in {"pending", "cancelled", "recovered"}:
             return 0
         count = self.session.scalar(
-            select(func.count())
-            .select_from(FollowUpRow)
-            .where(FollowUpRow.status == status)
+            select(func.count()).select_from(FollowUpRow).where(FollowUpRow.status == status)
         )
         return int(count or 0)
 
@@ -2425,9 +2574,7 @@ class LeadStore:
         if not kind or not lead_id:
             return False
         return (
-            self.session.get(
-                OwnerNotificationClaimRow, (kind, lead_id, conversation_id or "")
-            )
+            self.session.get(OwnerNotificationClaimRow, (kind, lead_id, conversation_id or ""))
             is not None
         )
 
@@ -2453,8 +2600,7 @@ class LeadStore:
             .where(
                 OwnerNotificationRecipientClaimRow.kind == kind,
                 OwnerNotificationRecipientClaimRow.lead_id == lead_id,
-                OwnerNotificationRecipientClaimRow.notification_key
-                == notification_key,
+                OwnerNotificationRecipientClaimRow.notification_key == notification_key,
             )
             .limit(1)
         ).first()
@@ -2480,8 +2626,7 @@ class LeadStore:
             .where(
                 OwnerNotificationRecipientClaimRow.kind == kind,
                 OwnerNotificationRecipientClaimRow.lead_id == lead_id,
-                OwnerNotificationRecipientClaimRow.notification_key
-                == notification_key,
+                OwnerNotificationRecipientClaimRow.notification_key == notification_key,
                 OwnerNotificationRecipientClaimRow.delivery_status == "accepted",
             )
             .order_by(OwnerNotificationRecipientClaimRow.recipient_id)
@@ -2546,8 +2691,7 @@ class LeadStore:
                 .where(
                     OwnerNotificationRecipientClaimRow.kind.in_(legacy_kinds),
                     OwnerNotificationRecipientClaimRow.lead_id == lead_id,
-                    OwnerNotificationRecipientClaimRow.notification_key
-                    == notification_key,
+                    OwnerNotificationRecipientClaimRow.notification_key == notification_key,
                     OwnerNotificationRecipientClaimRow.recipient_id == recipient_id,
                 )
                 .limit(1)
@@ -2630,9 +2774,7 @@ class LeadStore:
         """Drop a claim that never produced a Telegram delivery so a later turn can retry."""
         if not kind or not lead_id:
             return
-        row = self.session.get(
-            OwnerNotificationClaimRow, (kind, lead_id, conversation_id or "")
-        )
+        row = self.session.get(OwnerNotificationClaimRow, (kind, lead_id, conversation_id or ""))
         if row is not None:
             self.session.delete(row)
 
@@ -2678,9 +2820,7 @@ class LeadStore:
         """
         if not kind or not lead_id:
             return None
-        row = self.session.get(
-            OwnerNotificationClaimRow, (kind, lead_id, conversation_id or "")
-        )
+        row = self.session.get(OwnerNotificationClaimRow, (kind, lead_id, conversation_id or ""))
         return str(row.claimed_at) if row is not None else None
 
     def release_owner_notification_recipient_claim(
@@ -2733,9 +2873,7 @@ class LeadStore:
         )
         if not claimed:
             return False
-        self.upsert_owner_notification(
-            kind=kind, lead_id=lead_id, scheduled_at=scheduled_at
-        )
+        self.upsert_owner_notification(kind=kind, lead_id=lead_id, scheduled_at=scheduled_at)
         return True
 
     def list_unseen_owner_notifications(
@@ -2950,9 +3088,7 @@ class LeadStore:
         row = self.session.get(LeadRow, lead_id)
         return row.customer_id if row is not None else None
 
-    def get_channel_identity(
-        self, *, channel: str, external_id: str
-    ) -> ChannelIdentityRow | None:
+    def get_channel_identity(self, *, channel: str, external_id: str) -> ChannelIdentityRow | None:
         return self.session.scalars(
             select(ChannelIdentityRow).where(
                 ChannelIdentityRow.channel == channel,
@@ -2960,9 +3096,7 @@ class LeadStore:
             )
         ).one_or_none()
 
-    def save_identity_link(
-        self, *, identity_id: int, customer_id: str, reason: str
-    ) -> bool:
+    def save_identity_link(self, *, identity_id: int, customer_id: str, reason: str) -> bool:
         if reason not in ALLOWLISTED_LINK_REASONS:
             return False
         identity = self.session.get(ChannelIdentityRow, identity_id)
@@ -2999,9 +3133,7 @@ class LeadStore:
         if identity is None:
             return None
         lead = self.session.scalars(
-            select(LeadRow)
-            .where(LeadRow.customer_id == identity.customer_id)
-            .order_by(LeadRow.id)
+            select(LeadRow).where(LeadRow.customer_id == identity.customer_id).order_by(LeadRow.id)
         ).first()
         return lead.id if lead is not None else None
 
@@ -3072,9 +3204,7 @@ class LeadStore:
                 OwnerNotificationClaimRow.kind.in_(skip_kinds),
                 OwnerNotificationClaimRow.conversation_id == "",
             )
-            recipient_claimed = select(
-                OwnerNotificationRecipientClaimRow.lead_id
-            ).where(
+            recipient_claimed = select(OwnerNotificationRecipientClaimRow.lead_id).where(
                 OwnerNotificationRecipientClaimRow.kind.in_(skip_kinds),
                 OwnerNotificationRecipientClaimRow.notification_key == "",
             )
@@ -3088,8 +3218,7 @@ class LeadStore:
                 .where(
                     OwnerNotificationClaimRow.kind.in_(skip_conversation_kinds),
                     OwnerNotificationClaimRow.lead_id == LeadRow.id,
-                    OwnerNotificationClaimRow.conversation_id
-                    == ChannelIdentityRow.external_id,
+                    OwnerNotificationClaimRow.conversation_id == ChannelIdentityRow.external_id,
                 )
                 .exists()
             )
@@ -3097,9 +3226,7 @@ class LeadStore:
         rows = self.session.execute(query)
         return [(str(session_id), str(lead_id)) for session_id, lead_id in rows]
 
-    def issue_handoff_token(
-        self, lead_id: str, website_session_id: str
-    ) -> tuple[str, str]:
+    def issue_handoff_token(self, lead_id: str, website_session_id: str) -> tuple[str, str]:
         now = datetime.now(UTC)
         expires_at = now + timedelta(minutes=HANDOFF_TTL_MINUTES)
         expires_at_iso = expires_at.isoformat()
@@ -3123,9 +3250,7 @@ class LeadStore:
         self.session.flush()
         return raw_token, expires_at_iso
 
-    def consume_handoff_token(
-        self, raw_token: str, *, whatsapp_external_id: str
-    ) -> str | None:
+    def consume_handoff_token(self, raw_token: str, *, whatsapp_external_id: str) -> str | None:
         row = self.session.scalars(
             select(HandoffTokenRow).where(
                 HandoffTokenRow.token_hash == hash_handoff_token(raw_token)
@@ -3162,9 +3287,7 @@ class LeadStore:
         self.session.flush()
         return row.lead_id
 
-    def aggregate_ai_runs(
-        self, *, occurred_from: str, occurred_to: str
-    ) -> AiRunAggregate:
+    def aggregate_ai_runs(self, *, occurred_from: str, occurred_to: str) -> AiRunAggregate:
         """All-time aggregate over persisted `AiRunRow`s.
 
         `occurred_from` / `occurred_to` are accepted for interface parity with the

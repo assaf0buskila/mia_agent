@@ -20,6 +20,7 @@ from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
 from app.domain.commitments import scan_due_owner_tasks
 from app.domain.followups import follow_up_due_on, scan_due_follow_ups
+from app.integrations.sheets import maintain_crm_workspace
 from app.services.notifications import deliver_owner_telegram
 
 logger = logging.getLogger(__name__)
@@ -179,6 +180,7 @@ def main() -> None:
         raise
     finally:
         session.close()
+    crm_workspace_status = maintain_crm_workspace(settings)
     counts = summary.model_dump()
     print(json.dumps(counts))
     logger.info(
@@ -192,6 +194,7 @@ def main() -> None:
         counts["website_conversations_finalized"],
         counts["owner_reminders_sent"],
     )
+    logger.info("sheets CRM maintenance status=%s", crm_workspace_status)
 
 
 if __name__ == "__main__":

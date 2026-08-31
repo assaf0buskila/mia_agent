@@ -2,12 +2,14 @@
 
 import json
 import unicodedata
+from uuid import uuid4
 
 import pytest
 from app.brain.embeddings import FakeEmbeddingPort
 from app.brain.store import BrainStore
 from app.capabilities.types import Principal
 from app.core.config import get_settings
+from app.db.models import OwnerNotificationRow
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
 from app.tools.registries.owner_tools import (
@@ -16,6 +18,7 @@ from app.tools.registries.owner_tools import (
     get_tool,
     tool_names,
 )
+from sqlalchemy import select
 
 _LIVE_READS = (
     "gmail_summary",
@@ -27,6 +30,7 @@ _LIVE_READS = (
     "website_kpis",
     "linkedin_snapshot",
     "instagram_insights",
+    "owner_system_audit",
     "research_search",
 )
 
@@ -306,6 +310,121 @@ def test_owner_sheets_exact_hebrew_mutation_tokens_authorize_writes() -> None:
             ctx.owner_text = owner_text
             assert execute_tool(tool_name, args, ctx).ok is True
         assert len(ctx.sheets.owner_operations) == 4
+    finally:
+        session.close()
+
+
+def test_owner_system_audit_reports_each_surface_without_a_blanket_provider_claim() -> None:
+    """A broad owner request is one model tool call, not a two-call partial answer."""
+    session = _session()
+    try:
+        ctx = _ctx(session)
+        result = execute_tool("owner_system_audit", {}, ctx)
+        assert result.ok is True
+        assert "אין כאן מגבלת שתי קריאות" in result.text
+        for label in (
+            "Gmail",
+            "Calendar agenda (today)",
+            "Calendar availability",
+            "LinkedIn profile",
+            "Instagram Insights",
+            "AssafWeb SEO, GSC and GA4",
+            "Google Sheets (גיליון מורשה)",
+            "Hot leads",
+            "Pending approvals",
+            "Website conversations",
+            "Daily brief",
+            "New booked meetings",
+        ):
+            assert label in result.text
+        assert "לא נבדק: אין גיליון מורשה מוגדר" in result.text
+        assert "לא נבדקו ולא בוצעו" in result.text
+    finally:
+        session.close()
+
+
+def test_owner_system_audit_keeps_unseen_booked_meetings_unconsumed() -> None:
+    """The aggregate audit reports its inbox snapshot without acknowledging it."""
+    from app.domain.owner_notify import KIND_MEETING_BOOKED
+
+    session = _session()
+    try:
+        ctx = _ctx(session)
+        lead_id = f"owner-audit-{uuid4().hex}"
+        ctx.store.upsert_owner_notification(
+            kind=KIND_MEETING_BOOKED,
+            lead_id=lead_id,
+            scheduled_at="2026-09-01T09:00:00+00:00",
+        )
+        before_count = ctx.store.count_unseen_owner_notifications(
+            kinds=(KIND_MEETING_BOOKED,)
+        )
+        notification = session.scalar(
+            select(OwnerNotificationRow).where(
+                OwnerNotificationRow.kind == KIND_MEETING_BOOKED,
+                OwnerNotificationRow.lead_id == lead_id,
+            )
+        )
+        assert notification is not None
+        notification_id = notification.id
+        assert notification.seen_at == ""
+
+        result = execute_tool("owner_system_audit", {}, ctx)
+
+        after_count = ctx.store.count_unseen_owner_notifications(
+            kinds=(KIND_MEETING_BOOKED,)
+        )
+        session.expire_all()
+        notification_after = session.get(OwnerNotificationRow, notification_id)
+        assert result.ok is True
+        assert "New booked meetings: נבדק: התקבלה תשובה" in result.text
+        assert after_count == before_count
+        assert notification_after is not None
+        assert notification_after.seen_at == ""
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_owner_system_audit_reports_bounded_instagram_read_as_partial_failure() -> None:
+    from app.integrations.instagram_insights import InstagramInsightBudgetExceeded
+
+    class BudgetLimitedInstagramPort:
+        def list_recent_insights(self, *, limit: int = 5):
+            del limit
+            raise InstagramInsightBudgetExceeded()
+
+    session = _session()
+    try:
+        ctx = _ctx(session)
+        ctx.instagram_insights = BudgetLimitedInstagramPort()
+        result = execute_tool("owner_system_audit", {}, ctx)
+        assert result.ok is True
+        assert "Instagram Insights: לא נבדק: הקריאה נכשלה" in result.text
+        assert "Instagram insights status: partial." in result.text
+    finally:
+        session.close()
+
+
+def test_owner_system_audit_reads_one_configured_sheet_preview_without_writing() -> None:
+    from app.integrations.sheets import FakeSheetsPort
+
+    session = _session()
+    try:
+        ctx = _ctx(session)
+        sheets = FakeSheetsPort()
+        sheets.owner_values[("mia-crm", "A1:J20")] = [["Lead ID", "Stage"]]
+        ctx.sheets = sheets
+        ctx.settings = ctx.settings.model_copy(
+            update={
+                "sheets_spreadsheet_id": "mia-crm",
+                "sheets_allowed_spreadsheet_ids": "aaa-other,mia-crm",
+            }
+        )
+        result = execute_tool("owner_system_audit", {}, ctx)
+        assert result.ok is True
+        assert "Sheet values: Lead ID | Stage" in result.text
+        assert sheets.owner_operations == []
     finally:
         session.close()
 

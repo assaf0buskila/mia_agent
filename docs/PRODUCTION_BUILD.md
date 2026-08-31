@@ -21,8 +21,8 @@ Cloudflare Tunnel is **test only**. Do not deploy Mia’s sales graph to Vercel,
 | Keys | Secrets Manager secret `mia/prod` (the box). ECS injects `MIA_*`. Never git, never chat |
 | Env | `MIA_ENV=prod` and `MIA_DEMO_MODE=false` — never together as prod+demo |
 | Prospect send | `MIA_AUTOMATION_MODE=auto_approved` (ADR-022). Unknown WhatsApp still silent. Instagram send stays off. |
-| Calendar writes | `MIA_CALENDAR_WRITE=true` (Assaf ADOPT 2026-08-22). Still no Gmail send / Meta writes |
-| Gmail / Meta send | **Off** — `MIA_GMAIL_SEND` / `MIA_META_WRITE` exist; paths unwired. R4/R5 are not env knobs. Follow-up persist/due-scan is alive; no auto-send flag. |
+| Calendar writes | `MIA_CALENDAR_WRITE=true` (Assaf ADOPT 2026-08-22). Exact create/move proposals execute only after Assaf's one-tap Telegram approval. |
+| Gmail / Meta send | Gmail draft send is wired but stays approval-only and additionally requires `MIA_GMAIL_SEND=true`; Meta writes remain off. R4/R5 are not env knobs. Follow-up persist/due-scan is alive; no auto-send flag. |
 | Kill switch | `MIA_KILL_SWITCH=false` for live; `true` + new deployment is the emergency stop |
 | Lambda / AgentCore / SQS / WAF | Specified later. Not first live |
 

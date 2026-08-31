@@ -143,6 +143,8 @@ class OwnerBrainResult(NamedTuple):
     steps: int = 0
     tools_failed: tuple[str, ...] = ()
     completion: str = ""
+    # Exact durable approvals created by this turn's tool executions.
+    approval_ids: tuple[str, ...] = ()
 
 
 def agent_allowed_for(task_type: OwnerTaskType) -> bool:
@@ -331,12 +333,13 @@ def answer_owner(
         return OwnerBrainResult(
             text,
             False,
-            (),
+            outcome.tools_used,
             fallback_reason=reason,
             model=model,
             steps=outcome.steps_used,
             tools_failed=outcome.tools_failed,
             completion=outcome.completion,
+            approval_ids=outcome.approval_ids,
         )
     return OwnerBrainResult(
         outcome.text.strip(),
@@ -348,6 +351,7 @@ def answer_owner(
         steps=outcome.steps_used,
         tools_failed=outcome.tools_failed,
         completion=outcome.completion,
+        approval_ids=outcome.approval_ids,
     )
 
 
@@ -518,6 +522,7 @@ def _result_payload(result: OwnerBrainResult) -> dict[str, Any]:
         "steps": result.steps,
         "tools_failed": list(result.tools_failed),
         "completion": result.completion,
+        "approval_ids": list(result.approval_ids),
     }
 
 
@@ -543,6 +548,7 @@ def _result_from_state(final: Mapping[str, Any]) -> OwnerBrainResult | None:
         steps=int(payload.get("steps") or 0),
         tools_failed=tuple(str(name) for name in (payload.get("tools_failed") or ())),
         completion=str(payload.get("completion") or ""),
+        approval_ids=tuple(str(value) for value in (payload.get("approval_ids") or ())),
     )
 
 

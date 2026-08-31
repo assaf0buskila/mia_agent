@@ -16,10 +16,13 @@ ALLOWLISTED_OPERATION_SCOPES = frozenset(
         "owner_sheets_write",
         "follow_up",
         "calendar_cancellation",
+        "linkedin_approval",
     }
 )
 
-ALLOWLISTED_OPERATION_STATUSES = frozenset({"in_flight", "completed", "failed"})
+ALLOWLISTED_OPERATION_STATUSES = frozenset(
+    {"in_flight", "completed", "failed", "provider_claimed", "pending_review"}
+)
 
 OPERATION_TTL_SECONDS = 300
 
@@ -71,3 +74,11 @@ class IdempotencyStore(Protocol):
     def fail_operation(self, *, scope: str, key: str) -> None: ...
 
     def get_operation_result(self, *, scope: str, key: str) -> str: ...
+
+    def claim_provider_write(self, *, scope: str, key: str) -> bool: ...
+
+    def complete_provider_write(self, *, scope: str, key: str, result_json: str = "{}") -> bool: ...
+
+    def mark_provider_write_pending_review(self, *, scope: str, key: str) -> None: ...
+
+    def get_provider_write_status(self, *, scope: str, key: str) -> str: ...

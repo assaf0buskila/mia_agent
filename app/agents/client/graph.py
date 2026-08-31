@@ -174,6 +174,7 @@ def compile_client_graph(
                 settings=settings,
                 brief=brief,
                 parse_mode=parse_mode,
+                notification_key=conversation_id,
             )
             owner_notified = bool(attempt.delivered)
         if channel != "website":

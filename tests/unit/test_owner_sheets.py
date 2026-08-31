@@ -7,9 +7,15 @@ from app.capabilities.sheets import sheets_handlers
 from app.capabilities.types import Principal
 from app.domain.tools import AdapterHttpError
 from app.integrations.sheets import (
+    COMPOSIO_ADD_SHEET_TOOL,
+    COMPOSIO_GET_SHEET_NAMES_TOOL,
     COMPOSIO_VALUES_APPEND_TOOL,
     COMPOSIO_VALUES_GET_TOOL,
     COMPOSIO_VALUES_UPDATE_TOOL,
+    CRM_WORKSPACE_SCHEMA_RANGE,
+    CRM_WORKSPACE_SCHEMA_VERSION,
+    CRM_WORKSPACE_TABS,
+    LEADS_SHEET_NAME,
     ComposioSheetsPort,
     FakeSheetsPort,
     normalize_owner_spreadsheet_id,
@@ -84,6 +90,234 @@ def test_owner_sheets_pasted_google_url_uses_allowlisted_id_and_bounded_preview(
         handlers=handlers,
     ) == {"count": 1, "rows": [["ok"]]}
     assert requests[0]["arguments"] == {"spreadsheetId": _SHEET, "range": "A1:J20"}
+
+
+def test_owner_sheets_lists_tabs_only_inside_the_allowlisted_sheet() -> None:
+    requests: list[tuple[str, dict]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append((str(request.url), json.loads(request.content)))
+        return httpx.Response(
+            200,
+            json={"successful": True, "data": {"sheetNames": ["01 Leads", "10 Mia Activity"]}},
+        )
+
+    port = _port(httpx.Client(transport=httpx.MockTransport(handler)))
+    handlers = sheets_handlers(port, allowed_spreadsheet_ids=frozenset({_SHEET}))
+    url = f"https://docs.google.com/spreadsheets/d/{_SHEET}/edit"
+    assert execute_capability(
+        "sheets.list_tabs",
+        principal=_OWNER,
+        args={"spreadsheet_id": url},
+        handlers=handlers,
+    ) == {"count": 2, "tabs": ["01 Leads", "10 Mia Activity"]}
+    assert requests[0][0].endswith(COMPOSIO_GET_SHEET_NAMES_TOOL)
+    assert requests[0][1] == {
+        "user_id": "user-test",
+        "version": "20260826_00",
+        "arguments": {"spreadsheetId": _SHEET},
+    }
+
+
+def test_configured_mia_sheet_initializes_fixed_crm_workspace_idempotently() -> None:
+    requests: list[tuple[str, dict]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        tool = str(request.url).rsplit("/", 1)[-1]
+        body = json.loads(request.content)
+        requests.append((tool, body))
+        if tool == COMPOSIO_GET_SHEET_NAMES_TOOL:
+            return httpx.Response(
+                200,
+                json={
+                    "successful": True,
+                    "data": {"sheetNames": [LEADS_SHEET_NAME, "10 Mia Activity"]},
+                },
+            )
+        if tool == COMPOSIO_VALUES_GET_TOOL:
+            a1_range = body["arguments"]["range"]
+            if a1_range == CRM_WORKSPACE_SCHEMA_RANGE:
+                return httpx.Response(200, json={"successful": True, "data": {"values": []}})
+            sheet_name = a1_range.split("!", 1)[0]
+            headers = next(
+                headers for name, headers in CRM_WORKSPACE_TABS if name == sheet_name
+            )
+            return httpx.Response(
+                200, json={"successful": True, "data": {"values": [headers]}}
+            )
+        return httpx.Response(200, json={"successful": True, "data": {}})
+
+    port = ComposioSheetsPort(
+        api_key="cmp-test",
+        user_id="user-test",
+        spreadsheet_id=_SHEET,
+        allowed_spreadsheet_ids=frozenset({_SHEET, "sheet-other"}),
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    port.ensure_crm_workspace()
+    first_call_count = len(requests)
+    port.ensure_crm_workspace()
+
+    assert len(requests) == first_call_count
+    assert requests[0][0] == COMPOSIO_GET_SHEET_NAMES_TOOL
+    add_requests = [body for tool, body in requests if tool == COMPOSIO_ADD_SHEET_TOOL]
+    assert len(add_requests) == 6
+    assert all(body["arguments"]["spreadsheetId"] == _SHEET for body in add_requests)
+    assert not any(
+        body["arguments"]["properties"]["title"] == LEADS_SHEET_NAME for body in add_requests
+    )
+    update_requests = [body for tool, body in requests if tool == COMPOSIO_VALUES_UPDATE_TOOL]
+    assert len(update_requests) == 7
+    assert not any(
+        body["arguments"]["range"].startswith(f"{LEADS_SHEET_NAME}!")
+        for body in update_requests
+    )
+    assert all(body["arguments"]["spreadsheetId"] == _SHEET for body in update_requests)
+    marker = next(
+        body
+        for body in update_requests
+        if body["arguments"]["range"] == CRM_WORKSPACE_SCHEMA_RANGE
+    )
+    assert marker["arguments"]["values"] == [[CRM_WORKSPACE_SCHEMA_VERSION]]
+
+
+def test_crm_schema_marker_skips_repair_only_after_every_header_is_current() -> None:
+    requests: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        tool = str(request.url).rsplit("/", 1)[-1]
+        requests.append(tool)
+        if tool == COMPOSIO_GET_SHEET_NAMES_TOOL:
+            return httpx.Response(
+                200,
+                json={
+                    "successful": True,
+                    "data": {"sheetNames": [name for name, _headers in CRM_WORKSPACE_TABS]},
+                },
+            )
+        if tool == COMPOSIO_VALUES_GET_TOOL:
+            request_body = json.loads(request.content)
+            a1_range = request_body["arguments"]["range"]
+            if a1_range != CRM_WORKSPACE_SCHEMA_RANGE:
+                sheet_name = a1_range.split("!", 1)[0]
+                return httpx.Response(
+                    200,
+                    json={
+                        "successful": True,
+                        "data": {
+                            "values": [
+                                headers
+                                for name, headers in CRM_WORKSPACE_TABS
+                                if name == sheet_name
+                            ]
+                        },
+                    },
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "successful": True,
+                    "data": {"values": [[CRM_WORKSPACE_SCHEMA_VERSION]]},
+                },
+            )
+        raise AssertionError("schema marker should prevent every write")
+
+    port = ComposioSheetsPort(
+        api_key="cmp-marker-test",
+        user_id="user-marker-test",
+        spreadsheet_id="sheet-marker-test",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    port.ensure_crm_workspace()
+    assert requests.count(COMPOSIO_GET_SHEET_NAMES_TOOL) == 1
+    assert requests.count(COMPOSIO_VALUES_GET_TOOL) == len(CRM_WORKSPACE_TABS) + 1
+    assert COMPOSIO_ADD_SHEET_TOOL not in requests
+    assert COMPOSIO_VALUES_UPDATE_TOOL not in requests
+
+
+def test_crm_schema_marker_repairs_a_damaged_fixed_header() -> None:
+    requests: list[tuple[str, dict]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        tool = str(request.url).rsplit("/", 1)[-1]
+        body = json.loads(request.content)
+        requests.append((tool, body))
+        if tool == COMPOSIO_GET_SHEET_NAMES_TOOL:
+            return httpx.Response(
+                200,
+                json={
+                    "successful": True,
+                    "data": {"sheetNames": [name for name, _headers in CRM_WORKSPACE_TABS]},
+                },
+            )
+        if tool == COMPOSIO_VALUES_GET_TOOL:
+            a1_range = body["arguments"]["range"]
+            if a1_range == CRM_WORKSPACE_SCHEMA_RANGE:
+                values = [[CRM_WORKSPACE_SCHEMA_VERSION]]
+            else:
+                sheet_name = a1_range.split("!", 1)[0]
+                values = next(
+                    [headers]
+                    for name, headers in CRM_WORKSPACE_TABS
+                    if name == sheet_name
+                )
+                if sheet_name == LEADS_SHEET_NAME:
+                    values = [["Damaged header"]]
+            return httpx.Response(200, json={"successful": True, "data": {"values": values}})
+        return httpx.Response(200, json={"successful": True, "data": {}})
+
+    port = ComposioSheetsPort(
+        api_key="cmp-repair-test",
+        user_id="user-repair-test",
+        spreadsheet_id="sheet-repair-test",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    port.ensure_crm_workspace()
+
+    updates = [body for tool, body in requests if tool == COMPOSIO_VALUES_UPDATE_TOOL]
+    assert len(updates) == 2
+    assert {body["arguments"]["range"] for body in updates} == {
+        f"{LEADS_SHEET_NAME}!A1:F1",
+        CRM_WORKSPACE_SCHEMA_RANGE,
+    }
+
+
+def test_crm_workspace_without_a_configured_sheet_is_a_noop() -> None:
+    called = False
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal called
+        called = True
+        return httpx.Response(200, json={"successful": True, "data": {}})
+
+    port = ComposioSheetsPort(
+        api_key="cmp-test",
+        user_id="user-test",
+        spreadsheet_id="",
+        allowed_spreadsheet_ids=frozenset({_SHEET}),
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    port.ensure_crm_workspace()
+    assert called is False
+
+
+def test_owner_sheets_tab_discovery_rejects_an_unallowlisted_reference_before_http() -> None:
+    called = False
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal called
+        called = True
+        return httpx.Response(200, json={"successful": True, "data": {"sheetNames": []}})
+
+    port = _port(httpx.Client(transport=httpx.MockTransport(handler)))
+    with pytest.raises(Exception, match="allowlisted"):
+        execute_capability(
+            "sheets.list_tabs",
+            principal=_OWNER,
+            args={"spreadsheet_id": "another-sheet"},
+            handlers=sheets_handlers(port, allowed_spreadsheet_ids=frozenset({_SHEET})),
+        )
+    assert called is False
 
 
 def test_owner_sheets_url_convenience_never_widens_writes() -> None:

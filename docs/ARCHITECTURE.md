@@ -34,7 +34,9 @@ Two LangGraph entry points, shared core, thin channels. Decisions: `docs/DECISIO
 
 Deterministic code owns identity, NBA, scoring, permissions, idempotency. Models paraphrase and,
 on the owner side, choose among pinned tools plus on-demand Composio search/schema/read
-meta-tools. Untrusted text is data.
+meta-tools. Broad "check everything" requests route through one aggregate audit tool that runs
+bounded per-surface checks and returns factual item statuses instead of inventing provider-call
+limits. Untrusted text is data.
 
 Graph state is serializable domain data only. No SDK clients, no secrets.
 
@@ -78,9 +80,13 @@ search go through `execute_capability`.
 Each capability has `{READ, WRITE, SENSITIVE_WRITE, DESTRUCTIVE}`, allowed graphs, confirmation,
 retry, and idempotency. Enforcement is Python (`app/core/risk.py` plus the capability registry)
 using the channel-minted `Principal`; prompt text cannot add a tool. Sheets reads are `READ`.
-Bounded value update/append is low-risk and requires an explicit authenticated owner request plus
-an Assaf-configured/allowlisted spreadsheet ID. No Drive discovery, create/delete/clear,
-formatting, formula generation, or client access is permitted.
+Bounded value update/append outside Mia's CRM workspace is low-risk and requires an explicit
+authenticated owner request plus an Assaf-configured/allowlisted spreadsheet ID. For the exact
+`MIA_SHEETS_SPREADSHEET_ID`, the Sheets adapter may idempotently add the fixed CRM tabs, repair
+their header rows, and upsert canonical projections without per-cell approval. It cannot discover
+Drive files, create or delete a spreadsheet, clear business rows, generate formulas, or grant
+client access. Structural repair runs only in the `mia-sheets-maintain` background/one-off worker
+(and as best-effort maintenance after `mia-due-scan`), never inside a website or owner request.
 For `sheets.read`, the same ID may arrive inside an exact HTTPS Google Sheets URL; it is extracted
 locally and still checked against the allowlist. A missing read range becomes only `A1:J20` on the
 first visible tab. Writes never receive a default target or range.
@@ -101,14 +107,24 @@ schemas fail closed.
 Slug-based Python risk classification denies destructive actions and refuses every side effect or
 unknown action until it has a named capability, approval, idempotency, and audit contract.
 
-Direct APIs remain where they win (Meta inbound HMAC and STT). LinkedIn is profile-only under
-ADR-034/039; member analytics is not a current product capability.
+LinkedIn now has such a contract for exact non-destructive side effects: the proposed slug and
+arguments are schema-checked and hash-bound to a Telegram approval, then the active tool, schema,
+risk, expiry, kill switch, and idempotency are rechecked before execution. LinkedIn delete/remove,
+revoke, message, DM, and InMail tools remain denied. Gmail draft send and Calendar create/move use
+their own typed approval contracts.
+
+Direct APIs remain where they win (Meta inbound HMAC and STT). Instagram stays analytics-only;
+when a provider rejects a mixed insight metric request, the adapter retries the metrics
+individually and reports exactly which fields are unavailable.
 
 ## Persistence
 
-Postgres is the system of record. Explicitly authorized Sheets may receive policy-controlled
-operational reads and bounded value update/appends, but are never read back as Mia's internal
-truth, decision input, or recovery source. Do not add another database.
+Postgres is the system of record. Mia owns the layout and continuous operational projections in
+the exact configured CRM spreadsheet, including `10 Mia Activity`; the adapter creates missing
+fixed tabs and repairs headers in the background, using a schema-version marker to avoid repeat
+writes. Request-path upserts never wait for structural repair. Other authorized Sheets receive policy-controlled
+reads and bounded value update/appends only. No Sheet is read back as Mia's internal truth,
+decision input, or recovery source. Do not add another database.
 
 ## Cross-graph events
 
@@ -135,8 +151,10 @@ Widget `app/web/ask_mia.js` depends on:
 Preserve pill, bubbles, composer mic, palette, WhatsApp card. No TTS. No competing WhatsApp FAB.
 `GET /config` may expose only the server-configured `https://wa.me` URL. After session creation the
 existing composer WhatsApp action is visible when that URL is valid; its click opens immediately
-and independently posts the idempotent handoff notification. Never derive a destination from
-model or visitor text.
+and independently posts the handoff notification. The claim key is conversation/session scoped:
+the graph and click dedupe within one session, but an old lead-level claim cannot suppress a new
+conversation. Delivery logs contain only the outcome class, never visitor text. Never derive a
+destination from model or visitor text.
 
 ## Runtime
 

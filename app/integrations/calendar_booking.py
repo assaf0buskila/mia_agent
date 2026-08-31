@@ -34,9 +34,7 @@ _EVENTS_LIST_URL = (
 _CREATE_EVENT_URL = (
     f"https://backend.composio.dev/api/v3.1/tools/execute/{COMPOSIO_CREATE_EVENT_TOOL}"
 )
-_EVENTS_GET_URL = (
-    f"https://backend.composio.dev/api/v3.1/tools/execute/{COMPOSIO_EVENTS_GET_TOOL}"
-)
+_EVENTS_GET_URL = f"https://backend.composio.dev/api/v3.1/tools/execute/{COMPOSIO_EVENTS_GET_TOOL}"
 _PATCH_EVENT_URL = (
     f"https://backend.composio.dev/api/v3.1/tools/execute/{COMPOSIO_PATCH_EVENT_TOOL}"
 )
@@ -143,6 +141,9 @@ class CalendarBookingPort(Protocol):
         end: datetime,
         timezone: str,
         calendar_id: str = "primary",
+        summary: str = "AssafWeb intro call",
+        create_meeting_room: bool = True,
+        allow_nonstandard_duration: bool = False,
     ) -> CalendarBookingEvent | None: ...
 
     def get_event(
@@ -161,6 +162,7 @@ class CalendarBookingPort(Protocol):
         end: datetime,
         timezone: str,
         calendar_id: str = "primary",
+        allow_nonstandard_duration: bool = False,
     ) -> CalendarBookingEvent | None: ...
 
 
@@ -182,8 +184,20 @@ class DisabledCalendarBookingPort:
         end: datetime,
         timezone: str,
         calendar_id: str = "primary",
+        summary: str = "AssafWeb intro call",
+        create_meeting_room: bool = True,
+        allow_nonstandard_duration: bool = False,
     ) -> CalendarBookingEvent | None:
-        del booking_key, start, end, timezone, calendar_id
+        del (
+            booking_key,
+            start,
+            end,
+            timezone,
+            calendar_id,
+            summary,
+            create_meeting_room,
+            allow_nonstandard_duration,
+        )
         return None
 
     def get_event(
@@ -204,8 +218,9 @@ class DisabledCalendarBookingPort:
         end: datetime,
         timezone: str,
         calendar_id: str = "primary",
+        allow_nonstandard_duration: bool = False,
     ) -> CalendarBookingEvent | None:
-        del event_id, start, end, timezone, calendar_id
+        del event_id, start, end, timezone, calendar_id, allow_nonstandard_duration
         return None
 
 
@@ -247,9 +262,7 @@ class FakeCalendarBookingPort:
         booking_key: str,
         calendar_id: str = "primary",
     ) -> BookingLookupResult:
-        self.lookup_calls.append(
-            {"booking_key": booking_key, "calendar_id": calendar_id}
-        )
+        self.lookup_calls.append({"booking_key": booking_key, "calendar_id": calendar_id})
         if booking_key in self.lookup_errors:
             return BookingLookupResult(status=BookingLookupStatus.ERROR)
         event = self.existing.get(booking_key)
@@ -267,6 +280,9 @@ class FakeCalendarBookingPort:
         end: datetime,
         timezone: str,
         calendar_id: str = "primary",
+        summary: str = "AssafWeb intro call",
+        create_meeting_room: bool = True,
+        allow_nonstandard_duration: bool = False,
     ) -> CalendarBookingEvent | None:
         self.create_calls.append(
             {
@@ -275,6 +291,9 @@ class FakeCalendarBookingPort:
                 "end": end,
                 "timezone": timezone,
                 "calendar_id": calendar_id,
+                "summary": summary,
+                "create_meeting_room": create_meeting_room,
+                "allow_nonstandard_duration": allow_nonstandard_duration,
             }
         )
         if booking_key in self.existing:
@@ -326,6 +345,7 @@ class FakeCalendarBookingPort:
         end: datetime,
         timezone: str,
         calendar_id: str = "primary",
+        allow_nonstandard_duration: bool = False,
     ) -> CalendarBookingEvent | None:
         self.patch_calls.append(
             {
@@ -334,6 +354,7 @@ class FakeCalendarBookingPort:
                 "end": end,
                 "timezone": timezone,
                 "calendar_id": calendar_id,
+                "allow_nonstandard_duration": allow_nonstandard_duration,
             }
         )
         prior = self.events_by_id.get(event_id)
@@ -390,9 +411,7 @@ class ComposioCalendarBookingPort:
                 return BookingLookupResult(status=BookingLookupStatus.ERROR)
             event = _parse_lookup_match(body, booking_key=booking_key)
             if event is not None:
-                return BookingLookupResult(
-                    status=BookingLookupStatus.FOUND, event=event
-                )
+                return BookingLookupResult(status=BookingLookupStatus.FOUND, event=event)
             page_token = _next_page_token(body)
             if not page_token:
                 return BookingLookupResult(status=BookingLookupStatus.NOT_FOUND)
@@ -408,8 +427,14 @@ class ComposioCalendarBookingPort:
         end: datetime,
         timezone: str,
         calendar_id: str = "primary",
+        summary: str = "AssafWeb intro call",
+        create_meeting_room: bool = True,
+        allow_nonstandard_duration: bool = False,
     ) -> CalendarBookingEvent | None:
         if not _valid_booking_key(booking_key):
+            return None
+        summary = summary.strip()
+        if not summary or len(summary) > 120:
             return None
         if not _valid_timezone(timezone):
             return None
@@ -420,7 +445,10 @@ class ComposioCalendarBookingPort:
         if start_utc >= end_utc:
             return None
         duration = end_utc - start_utc
-        if duration != timedelta(minutes=MEETING_DURATION_MINUTES):
+        if (
+            not allow_nonstandard_duration
+            and duration != timedelta(minutes=MEETING_DURATION_MINUTES)
+        ) or duration < timedelta(minutes=5) or duration > timedelta(hours=12):
             return None
         try:
             local_start = start_utc.astimezone(ZoneInfo(timezone))
@@ -429,12 +457,12 @@ class ComposioCalendarBookingPort:
             return None
         arguments = {
             "calendar_id": calendar_id,
-            "summary": "AssafWeb intro call",
+            "summary": summary,
             "start_datetime": local_start.strftime("%Y-%m-%dT%H:%M:%S"),
             "end_datetime": local_end.strftime("%Y-%m-%dT%H:%M:%S"),
             "timezone": timezone,
             "send_updates": "none",
-            "create_meeting_room": True,
+            "create_meeting_room": create_meeting_room,
             "transparency": "opaque",
             "visibility": "private",
             "guestsCanModify": False,
@@ -478,6 +506,7 @@ class ComposioCalendarBookingPort:
         end: datetime,
         timezone: str,
         calendar_id: str = "primary",
+        allow_nonstandard_duration: bool = False,
     ) -> CalendarBookingEvent | None:
         clean_event_id = sanitize_event_id(event_id)
         start_utc = to_utc_aware(start)
@@ -486,7 +515,11 @@ class ComposioCalendarBookingPort:
             return None
         if start_utc is None or end_utc is None or start_utc >= end_utc:
             return None
-        if end_utc - start_utc != timedelta(minutes=MEETING_DURATION_MINUTES):
+        duration = end_utc - start_utc
+        if (
+            not allow_nonstandard_duration
+            and duration != timedelta(minutes=MEETING_DURATION_MINUTES)
+        ) or duration < timedelta(minutes=5) or duration > timedelta(hours=12):
             return None
         try:
             zone = ZoneInfo(timezone)

@@ -59,6 +59,12 @@ from app.domain.learning import (
 from app.domain.owner_brain import answer_owner, learn_from_exchange, run_owner_turn
 from app.domain.owner_briefs import apply_owner_brief
 from app.domain.owner_calendar import apply_owner_calendar
+from app.domain.owner_calendar_writes import (
+    apply_owner_calendar_change_request,
+    calendar_request_help,
+    decide_calendar_change,
+    execute_approved_calendar_change,
+)
 from app.domain.owner_followups import needs_data_anchor, routed_owner_text
 from app.domain.owner_notify import apply_owner_notify
 from app.domain.owner_reads import (
@@ -84,6 +90,10 @@ from app.integrations.calendar import (
     CalendarPort,
     build_calendar_agenda_port,
     build_calendar_port,
+)
+from app.integrations.calendar_booking import (
+    CalendarBookingPort,
+    build_calendar_booking_port,
 )
 from app.integrations.ga4 import Ga4Port, build_ga4_port
 from app.integrations.gmail import GmailPort, build_gmail_port
@@ -172,6 +182,7 @@ async def process_owner_item(
     owner_ids: set[str],
     settings: Settings,
     calendar_port: CalendarPort,
+    calendar_booking_port: CalendarBookingPort | None = None,
     calendar_agenda_port: CalendarAgendaPort | None,
     gmail_port: GmailPort,
     sheets_port: SheetsPort,
@@ -190,6 +201,7 @@ async def process_owner_item(
     # Owner trust is established HERE, once, from the request-derived numeric allowlist.
     # Everything downstream receives this object; nothing downstream can widen it.
     principal = Principal.owner(source=provider, actor_id=item["from"])
+    booking_port = calendar_booking_port or build_calendar_booking_port(settings)
     channel_value = channel.value
     owner_text = inbound_text_without_token(item["text"])
     correlation_id = new_correlation_id()
@@ -255,11 +267,7 @@ async def process_owner_item(
     routed_text = routed_owner_text(
         owner_text,
         history=owner_history,
-        fallback_lead_id=(
-            top_website_lead_id(store)
-            if needs_data_anchor(owner_text)
-            else None
-        ),
+        fallback_lead_id=(top_website_lead_id(store) if needs_data_anchor(owner_text) else None),
     )
     decision = promote_unclassified_text_to_status(
         classify_owner_task(routed_text),
@@ -267,40 +275,35 @@ async def process_owner_item(
         text=routed_text,
     )
     due_at: str | None = None
-    if (
-        not decision.needs_clarification
-        and decision.task_type
-        not in (
-            OwnerTaskType.PREFERENCE,
-            OwnerTaskType.APPROVAL,
-            OwnerTaskType.DAILY_BRIEF,
-            OwnerTaskType.WEEKLY_BRIEF,
-            OwnerTaskType.LEAD_REVIEW,
-            OwnerTaskType.CONTENT_IDEA,
-            OwnerTaskType.GMAIL_SUMMARY,
-            OwnerTaskType.GMAIL_DRAFT,
-            OwnerTaskType.SEO,
-            OwnerTaskType.CALENDAR,
-            OwnerTaskType.OWNER_NOTIFY,
-            OwnerTaskType.MEETING_BRIEF,
-            OwnerTaskType.HUMAN_TAKEOVER,
-            OwnerTaskType.HUMAN_TAKEOVER_RESUME,
-            OwnerTaskType.CONVERSATION_SCOPE,
-            OwnerTaskType.HOT_LEADS,
-            OwnerTaskType.PENDING_APPROVALS,
-            OwnerTaskType.WEBSITE_CONVERSATIONS,
-            OwnerTaskType.OWNER_STATUS,
-            OwnerTaskType.OPERATOR_SNAPSHOT,
-        )
+    if not decision.needs_clarification and decision.task_type not in (
+        OwnerTaskType.PREFERENCE,
+        OwnerTaskType.APPROVAL,
+        OwnerTaskType.DAILY_BRIEF,
+        OwnerTaskType.WEEKLY_BRIEF,
+        OwnerTaskType.LEAD_REVIEW,
+        OwnerTaskType.CONTENT_IDEA,
+        OwnerTaskType.GMAIL_SUMMARY,
+        OwnerTaskType.GMAIL_DRAFT,
+        OwnerTaskType.SEO,
+        OwnerTaskType.CALENDAR,
+        OwnerTaskType.CALENDAR_WRITE,
+        OwnerTaskType.OWNER_NOTIFY,
+        OwnerTaskType.MEETING_BRIEF,
+        OwnerTaskType.HUMAN_TAKEOVER,
+        OwnerTaskType.HUMAN_TAKEOVER_RESUME,
+        OwnerTaskType.CONVERSATION_SCOPE,
+        OwnerTaskType.HOT_LEADS,
+        OwnerTaskType.PENDING_APPROVALS,
+        OwnerTaskType.WEBSITE_CONVERSATIONS,
+        OwnerTaskType.OWNER_STATUS,
+        OwnerTaskType.OPERATOR_SNAPSHOT,
     ):
         due_at = parse_due_at(
             owner_text,
             now=datetime.now(UTC),
             timezone=settings.calendar_timezone,
         )
-    plan = plan_owner_commitment(
-        decision=decision, text=owner_text, due_at=due_at
-    )
+    plan = plan_owner_commitment(decision=decision, text=owner_text, due_at=due_at)
     persist_due_at = None if decision.task_type in _NO_DUE_TASK_TYPES else due_at
     owner_task_claim_key = f"{provider}:{item['id']}"
     if store.claim_operation(scope="owner_task", key=owner_task_claim_key):
@@ -321,10 +324,7 @@ async def process_owner_item(
             key=owner_task_claim_key,
             result_json='{"ok": true}',
         )
-    if (
-        decision.task_type == OwnerTaskType.PREFERENCE
-        and not decision.needs_clarification
-    ):
+    if decision.task_type == OwnerTaskType.PREFERENCE and not decision.needs_clarification:
         instruction_kind = classify_instruction_kind(owner_text)
         propose_owner_instruction(
             store=store,
@@ -352,31 +352,39 @@ async def process_owner_item(
         text=routed_text
         if decision.task_type == OwnerTaskType.LEAD_OUTREACH
         else owner_text
-        if (
-            decision.task_type == OwnerTaskType.PREFERENCE
-            and not decision.needs_clarification
-        )
-        or (
-            decision.task_type == OwnerTaskType.APPROVAL
-            and decision.needs_clarification
-        )
+        if (decision.task_type == OwnerTaskType.PREFERENCE and not decision.needs_clarification)
+        or (decision.task_type == OwnerTaskType.APPROVAL and decision.needs_clarification)
         else None,
         inbound_source=item.get("source"),
     )
-    if (
-        decision.task_type == OwnerTaskType.APPROVAL
-        and not decision.needs_clarification
-    ):
+    if decision.task_type == OwnerTaskType.APPROVAL and not decision.needs_clarification:
+        calendar_intent, calendar_resource_id = decide_calendar_change(
+            store, text=owner_text, kill_switch=kill_switch
+        )
         gmail_intent, gmail_draft_id = apply_gmail_send_decision(
             store,
             text=owner_text,
             kill_switch=kill_switch,
         )
-        if gmail_intent == "ambiguous":
-            ack_text = (
-                "יש כמה טיוטות ממתינות. אני לא מאשרת בלי שתגיד איזו. "
-                "לא ביצעתי כלום."
-            )
+        if calendar_intent is not None:
+            if calendar_intent == DECISION_APPROVED and calendar_resource_id:
+                ack_text = execute_approved_calendar_change(
+                    store=store,
+                    settings=settings,
+                    calendar=calendar_port,
+                    booking=booking_port,
+                    resource_id=calendar_resource_id,
+                    kill_switch=kill_switch,
+                    demo_active=demo_mode_active(settings),
+                )
+            elif calendar_intent == DECISION_REJECTED:
+                ack_text = "רשמתי דחייה לשינוי ביומן. לא שיניתי כלום."
+            elif calendar_intent == "ambiguous":
+                ack_text = "יש כמה שינויים ביומן שמחכים לאישור. בחר בקשה אחת."
+            else:
+                ack_text = "לא מצאתי שינוי יומן ממתין לאישור."
+        elif gmail_intent == "ambiguous":
+            ack_text = "יש כמה טיוטות ממתינות. אני לא מאשרת בלי שתגיד איזו. לא ביצעתי כלום."
         elif gmail_intent is not None and not gmail_draft_id:
             ack_text = "אין טיוטת מייל ממתינה. לא שלחתי כלום."
         elif gmail_intent is not None:
@@ -390,18 +398,13 @@ async def process_owner_item(
             result = OwnerApprovalResult(
                 status=mapped_status,  # type: ignore[arg-type]
                 decision=(
-                    gmail_intent
-                    if gmail_intent in (DECISION_APPROVED, DECISION_REJECTED)
-                    else None
+                    gmail_intent if gmail_intent in (DECISION_APPROVED, DECISION_REJECTED) else None
                 ),
                 gmail_draft_id=gmail_draft_id or None,
             )
             if result.status != "skipped":
                 ack_text = ack_for_approval_result(result)
-            if (
-                gmail_intent == DECISION_APPROVED
-                and gmail_draft_id
-            ):
+            if gmail_intent == DECISION_APPROVED and gmail_draft_id:
                 ack_text = execute_approved_gmail_send(
                     store=store,
                     settings=settings,
@@ -419,10 +422,7 @@ async def process_owner_item(
             )
             if result.status != "skipped":
                 ack_text = ack_for_approval_result(result)
-    if (
-        decision.task_type == OwnerTaskType.MEETING_DEBRIEF
-        and not decision.needs_clarification
-    ):
+    if decision.task_type == OwnerTaskType.MEETING_DEBRIEF and not decision.needs_clarification:
         result = apply_owner_meeting_debrief(
             store,
             text=routed_text,
@@ -432,10 +432,7 @@ async def process_owner_item(
         debrief_ack = ack_for_debrief_result(result)
         if debrief_ack is not None:
             ack_text = debrief_ack
-    if (
-        decision.task_type == OwnerTaskType.LEAD_REVIEW
-        and not decision.needs_clarification
-    ):
+    if decision.task_type == OwnerTaskType.LEAD_REVIEW and not decision.needs_clarification:
         review_ack = apply_owner_lead_review(
             store,
             text=routed_text,
@@ -444,10 +441,7 @@ async def process_owner_item(
         )
         if review_ack is not None:
             ack_text = review_ack
-    if (
-        decision.task_type == OwnerTaskType.DAILY_BRIEF
-        and not decision.needs_clarification
-    ):
+    if decision.task_type == OwnerTaskType.DAILY_BRIEF and not decision.needs_clarification:
         brief_ack = apply_owner_brief(
             store,
             timezone=settings.calendar_timezone,
@@ -456,10 +450,7 @@ async def process_owner_item(
         )
         if brief_ack is not None:
             ack_text = brief_ack
-    if (
-        decision.task_type == OwnerTaskType.WEEKLY_BRIEF
-        and not decision.needs_clarification
-    ):
+    if decision.task_type == OwnerTaskType.WEEKLY_BRIEF and not decision.needs_clarification:
         weekly_ack = apply_owner_weekly(
             store,
             timezone=settings.calendar_timezone,
@@ -468,10 +459,7 @@ async def process_owner_item(
         )
         if weekly_ack is not None:
             ack_text = weekly_ack
-    if (
-        decision.task_type == OwnerTaskType.CONTENT_IDEA
-        and not decision.needs_clarification
-    ):
+    if decision.task_type == OwnerTaskType.CONTENT_IDEA and not decision.needs_clarification:
         ideas_ack = apply_owner_content_ideas(
             store,
             timezone=settings.calendar_timezone,
@@ -480,10 +468,7 @@ async def process_owner_item(
         )
         if ideas_ack is not None:
             ack_text = ideas_ack
-    if (
-        decision.task_type == OwnerTaskType.GMAIL_SUMMARY
-        and not decision.needs_clarification
-    ):
+    if decision.task_type == OwnerTaskType.GMAIL_SUMMARY and not decision.needs_clarification:
         gmail_ack = apply_owner_gmail_summary(
             store,
             text=routed_text,
@@ -493,10 +478,7 @@ async def process_owner_item(
         )
         if gmail_ack is not None:
             ack_text = gmail_ack
-    if (
-        decision.task_type == OwnerTaskType.GMAIL_DRAFT
-        and not decision.needs_clarification
-    ):
+    if decision.task_type == OwnerTaskType.GMAIL_DRAFT and not decision.needs_clarification:
         ack_text = apply_owner_gmail_draft(
             store,
             text=routed_text,
@@ -505,10 +487,7 @@ async def process_owner_item(
             kill_switch=kill_switch,
             demo_active=demo_mode_active(settings),
         )
-    if (
-        decision.task_type == OwnerTaskType.CALENDAR
-        and not decision.needs_clarification
-    ):
+    if decision.task_type == OwnerTaskType.CALENDAR and not decision.needs_clarification:
         ack_text, calendar_outcome = apply_owner_calendar(
             ack_text,
             calendar_port,
@@ -528,10 +507,19 @@ async def process_owner_item(
                 outcome=calendar_outcome,
                 correlation_id=correlation_id,
             )
-    if (
-        decision.task_type == OwnerTaskType.OWNER_NOTIFY
-        and not decision.needs_clarification
-    ):
+    if decision.task_type == OwnerTaskType.CALENDAR_WRITE:
+        ack_text = (
+            apply_owner_calendar_change_request(
+                store,
+                text=routed_text,
+                channel=channel,
+                kill_switch=kill_switch,
+                demo_active=demo_mode_active(settings),
+                default_timezone=settings.calendar_timezone,
+            )
+            or calendar_request_help()
+        )
+    if decision.task_type == OwnerTaskType.OWNER_NOTIFY and not decision.needs_clarification:
         notify_ack = apply_owner_notify(
             store,
             timezone=settings.calendar_timezone,
@@ -540,10 +528,7 @@ async def process_owner_item(
         )
         if notify_ack is not None:
             ack_text = notify_ack
-    if (
-        decision.task_type == OwnerTaskType.MEETING_BRIEF
-        and not decision.needs_clarification
-    ):
+    if decision.task_type == OwnerTaskType.MEETING_BRIEF and not decision.needs_clarification:
         brief_ack = apply_owner_meeting_brief(
             store,
             text=routed_text,
@@ -589,35 +574,23 @@ async def process_owner_item(
         )
         if scope_ack is not None:
             ack_text = scope_ack
-    if (
-        decision.task_type == OwnerTaskType.HOT_LEADS
-        and not decision.needs_clarification
-    ):
+    if decision.task_type == OwnerTaskType.HOT_LEADS and not decision.needs_clarification:
         ack_text = format_hot_leads_ack(store, principal=principal)
-    if (
-        decision.task_type == OwnerTaskType.PENDING_APPROVALS
-        and not decision.needs_clarification
-    ):
+    if decision.task_type == OwnerTaskType.PENDING_APPROVALS and not decision.needs_clarification:
         ack_text = format_pending_approvals_ack(store)
     if (
         decision.task_type == OwnerTaskType.WEBSITE_CONVERSATIONS
         and not decision.needs_clarification
     ):
         ack_text = format_website_conversations_ack(store)
-    if (
-        decision.task_type == OwnerTaskType.OPERATOR_SNAPSHOT
-        and not decision.needs_clarification
-    ):
+    if decision.task_type == OwnerTaskType.OPERATOR_SNAPSHOT and not decision.needs_clarification:
         ack_text = format_operator_snapshot_ack(
             store,
             principal=principal,
             timezone=settings.calendar_timezone,
             matched_types=decision.matched_types,
         )
-    if (
-        decision.task_type == OwnerTaskType.ANALYTICS
-        and not decision.needs_clarification
-    ):
+    if decision.task_type == OwnerTaskType.ANALYTICS and not decision.needs_clarification:
         content_extras: list[ToolOutcome] = []
         ack_text, insights_outcome = enrich_content_insights_ack(
             ack_text,
@@ -650,10 +623,7 @@ async def process_owner_item(
                 outcome=extra_outcome,
                 correlation_id=correlation_id,
             )
-    if (
-        decision.task_type == OwnerTaskType.RESEARCH
-        and not decision.needs_clarification
-    ):
+    if decision.task_type == OwnerTaskType.RESEARCH and not decision.needs_clarification:
         ack_text, research_outcome = enrich_research_ack(
             ack_text,
             research_port,
@@ -670,10 +640,7 @@ async def process_owner_item(
             outcome=research_outcome,
             correlation_id=correlation_id,
         )
-    if (
-        decision.task_type == OwnerTaskType.SEO
-        and not decision.needs_clarification
-    ):
+    if decision.task_type == OwnerTaskType.SEO and not decision.needs_clarification:
         ack_text, seo_outcomes = enrich_seo_ack(
             ack_text,
             search_console_port,
@@ -696,10 +663,7 @@ async def process_owner_item(
                 outcome=seo_outcome,
                 correlation_id=correlation_id,
             )
-    if (
-        decision.task_type == OwnerTaskType.LINKEDIN
-        and not decision.needs_clarification
-    ):
+    if decision.task_type == OwnerTaskType.LINKEDIN and not decision.needs_clarification:
         ack_text, linkedin_outcome = enrich_linkedin_ack(
             ack_text,
             linkedin_port,
@@ -805,8 +769,17 @@ async def process_owner_item(
         )
         ack_text = phrased.text
     last_reply = ack_text
+    linkedin_approval_id = (
+        brain_result.approval_ids[0]
+        if "composio_propose_linkedin_action" in brain_result.tools_used
+        and brain_result.approval_ids
+        else ""
+    )
     owner_markup = owner_telegram_reply_markup(
-        store, channel=channel, task_type=decision.task_type
+        store,
+        channel=channel,
+        task_type=decision.task_type,
+        linkedin_approval_id=linkedin_approval_id,
     )
     # Learn after the reply is settled, never before: memory formation must not
     # delay or change what Assaf sees this turn.
@@ -874,6 +847,7 @@ async def process_owner_texts(
     kill_switch: bool,
     owner_ids: set[str] | None = None,
     calendar: CalendarPort | None = None,
+    calendar_booking: CalendarBookingPort | None = None,
     calendar_agenda: CalendarAgendaPort | None = None,
     sheets: SheetsPort | None = None,
     instagram_insights: InstagramInsightsPort | None = None,
@@ -910,10 +884,11 @@ async def process_owner_texts(
         }
     settings = get_settings()
     calendar_port = calendar if calendar is not None else build_calendar_port(settings)
+    calendar_booking_port = (
+        calendar_booking if calendar_booking is not None else build_calendar_booking_port(settings)
+    )
     calendar_agenda_port = (
-        calendar_agenda
-        if calendar_agenda is not None
-        else build_calendar_agenda_port(settings)
+        calendar_agenda if calendar_agenda is not None else build_calendar_agenda_port(settings)
     )
     gmail_port = gmail if gmail is not None else build_gmail_port(settings)
     sheets_port = sheets if sheets is not None else build_sheets_port(settings)
@@ -929,9 +904,7 @@ async def process_owner_texts(
     )
     ga4_port = ga4 if ga4 is not None else build_ga4_port(settings)
     seo_audit_port = seo_audit if seo_audit is not None else build_seo_audit_port(settings)
-    owner_reply_port = (
-        owner_reply if owner_reply is not None else build_owner_reply_port(settings)
-    )
+    owner_reply_port = owner_reply if owner_reply is not None else build_owner_reply_port(settings)
     for item in authorized_items:
         preclaimed = item["id"] == preclaimed_event_id
         if preclaimed:
@@ -962,6 +935,7 @@ async def process_owner_texts(
             owner_ids=owner_ids,
             settings=settings,
             calendar_port=calendar_port,
+            calendar_booking_port=calendar_booking_port,
             calendar_agenda_port=calendar_agenda_port,
             gmail_port=gmail_port,
             sheets_port=sheets_port,

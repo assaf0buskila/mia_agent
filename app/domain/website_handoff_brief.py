@@ -263,8 +263,10 @@ def apply_website_whatsapp_handoff_brief(
     # The owner inbox records the local business event. Delivery idempotency is a
     # separate per-recipient ledger: accepted/ambiguous recipients remain claimed,
     # while an explicit Telegram rejection releases only that recipient for retry.
-    # This notification stays lead-scoped by product contract, so notification_key is
-    # empty rather than the website session id.
+    # Delivery is conversation-scoped. A returning visitor starts a new website session
+    # and must produce a new owner alert, while graph handoff and WhatsApp click inside
+    # the same session share this key and still deduplicate against each other.
+    notification_key = session_id
     now_iso = datetime.now(UTC).replace(microsecond=0).isoformat()
     store.upsert_owner_notification(
         kind=KIND_WEBSITE_WHATSAPP, lead_id=lead_id, scheduled_at=now_iso
@@ -274,7 +276,7 @@ def apply_website_whatsapp_handoff_brief(
     # fan-out conservatively instead of risking a duplicate owner ping.
     if any(
         store.has_owner_notification_claim(
-            kind=kind, lead_id=lead_id, conversation_id=""
+            kind=kind, lead_id=lead_id, conversation_id=notification_key
         )
         for kind in WEBSITE_HANDOFF_DELIVERY_KINDS
     ):
@@ -287,7 +289,7 @@ def apply_website_whatsapp_handoff_brief(
         if store.confirmed_owner_notification_recipients(
             kind=KIND_WEBSITE_HANDOFF_DELIVERY,
             lead_id=lead_id,
-            notification_key="",
+            notification_key=notification_key,
         ):
             return WebsiteWhatsAppBriefResult(brief, NOTIFICATION_DELIVERED)
         return WebsiteWhatsAppBriefResult(brief, NOTIFICATION_FAILED)
@@ -298,7 +300,7 @@ def apply_website_whatsapp_handoff_brief(
             kind=KIND_WEBSITE_HANDOFF_DELIVERY,
             compatible_kinds=WEBSITE_HANDOFF_DELIVERY_KINDS,
             lead_id=lead_id,
-            notification_key="",
+            notification_key=notification_key,
             recipient_id=recipient_id,
             claimed_at=now_iso,
         )
@@ -307,7 +309,7 @@ def apply_website_whatsapp_handoff_brief(
         if store.confirmed_owner_notification_recipients(
             kind=KIND_WEBSITE_HANDOFF_DELIVERY,
             lead_id=lead_id,
-            notification_key="",
+            notification_key=notification_key,
         ):
             return WebsiteWhatsAppBriefResult(brief, NOTIFICATION_DELIVERED)
         return WebsiteWhatsAppBriefResult(
@@ -323,14 +325,14 @@ def apply_website_whatsapp_handoff_brief(
     outcomes_persisted = store.record_owner_notification_recipient_delivery_outcomes_durably(
         kind=KIND_WEBSITE_HANDOFF_DELIVERY,
         lead_id=lead_id,
-        notification_key="",
+        notification_key=notification_key,
         delivered_recipient_ids=delivery.delivered,
         rejected_recipient_ids=delivery.rejected,
     )
     if delivery.delivered or store.confirmed_owner_notification_recipients(
         kind=KIND_WEBSITE_HANDOFF_DELIVERY,
         lead_id=lead_id,
-        notification_key="",
+        notification_key=notification_key,
     ):
         status = NOTIFICATION_DELIVERED
     elif delivery.ambiguous or not outcomes_persisted:

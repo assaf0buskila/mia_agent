@@ -50,8 +50,10 @@ from app.core.config import Settings
 from app.core.errors import InvalidArguments, PermissionDenied
 from app.core.risk import RiskLevel
 from app.db.store import LeadStore
+from app.domain.approvals import ACTION_LINKEDIN_COMPOSIO_WRITE, RESOURCE_LINKEDIN_TOOL
 from app.domain.briefs import apply_owner_meeting_brief
 from app.domain.content_ideas import apply_owner_content_ideas
+from app.domain.events import Channel
 from app.domain.gmail_query import normalize_gmail_query
 from app.domain.gmail_summaries import apply_owner_gmail_summary
 from app.domain.hot_handoff import format_hot_leads_ack
@@ -61,6 +63,11 @@ from app.domain.owner_calendar import (
     apply_owner_calendar,
     format_calendar_agenda,
     resolve_agenda_window,
+)
+from app.domain.owner_connection_audit import OwnerAuditResult, format_owner_connection_audit
+from app.domain.owner_linkedin_writes import (
+    linkedin_approval_resource_id,
+    propose_linkedin_write,
 )
 from app.domain.owner_notify import apply_owner_notify
 from app.domain.owner_reads import (
@@ -217,6 +224,9 @@ class ToolResult:
     text: str = ""
     error: str = ""
     max_chars: int = MAX_TOOL_RESULT_CHARS
+    # Exact durable approval created by this tool call. This is orchestration
+    # metadata, not provider/model text, and must remain bound to this turn.
+    approval_id: str = ""
 
     def payload(self) -> dict[str, Any]:
         if not self.ok:
@@ -411,6 +421,67 @@ def _operator_snapshot(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
         format_operator_snapshot_ack(ctx.store, timezone=ctx.timezone()),
         "Nothing to report.",
     )
+
+
+def _owner_system_audit(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
+    """Run the defined Owner operating-surface audit in one model tool call.
+
+    The individual provider reads remain bounded and retain their own policy checks.
+    This aggregates their results so a broad request cannot be cut short by the
+    agent loop's normal per-turn call budget or described as a provider limitation.
+    """
+    del args
+
+    def probe(label: str, callback: Callable[[], ToolResult]) -> OwnerAuditResult:
+        try:
+            result = callback()
+        except Exception as exc:  # noqa: BLE001 - one unavailable integration must not hide others
+            return OwnerAuditResult(label=label, ok=False, text=type(exc).__name__)
+        return OwnerAuditResult(label=label, ok=result.ok, text=result.text or result.error)
+
+    allowed_sheets = sorted(ctx.settings.allowed_sheets_spreadsheet_ids())
+    if allowed_sheets:
+        audit_sheet = ctx.settings.sheets_spreadsheet_id.strip() or allowed_sheets[0]
+        sheets_result = probe(
+            "Google Sheets (גיליון מורשה)",
+            lambda: _sheets_read(ctx, {"spreadsheet_id": audit_sheet, "range": None}),
+        )
+    else:
+        sheets_result = OwnerAuditResult(
+            label="Google Sheets (גיליון מורשה)",
+            ok=True,
+            text=(
+                "No allowlisted spreadsheet is configured, so no Sheets read was attempted "
+                "safely."
+            ),
+        )
+
+    results = [
+        probe("Gmail", lambda: _gmail_inbox(ctx, {})),
+        probe("Calendar agenda (today)", lambda: _calendar_agenda(ctx, {"range": "today"})),
+        probe("Calendar availability", lambda: _calendar_availability(ctx, {})),
+        probe("LinkedIn profile", lambda: _linkedin_snapshot(ctx, {})),
+        probe("Instagram Insights", lambda: _instagram_insights(ctx, {})),
+        probe("AssafWeb SEO, GSC and GA4", lambda: _website_kpis(ctx, {})),
+        sheets_result,
+        probe("Hot leads", lambda: _hot_leads(ctx, {})),
+        probe("Pending approvals", lambda: _pending_approvals(ctx, {})),
+        probe("Website conversations", lambda: _website_conversations(ctx, {})),
+        probe("Daily brief", lambda: _daily_brief(ctx, {})),
+        probe(
+            "New booked meetings",
+            lambda: ToolResult(
+                ok=True,
+                text=format_operator_snapshot_ack(
+                    ctx.store,
+                    principal=ctx.principal,
+                    timezone=ctx.timezone(),
+                    matched_types=["owner_notify"],
+                ),
+            ),
+        ),
+    ]
+    return ToolResult(ok=True, text=format_owner_connection_audit(results), max_chars=11_000)
 
 
 def _lead_review(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
@@ -734,6 +805,32 @@ def _sheets_read(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     if not rows:
         return ToolResult(ok=True, text="The requested Sheet range is empty.")
     return ToolResult(ok=True, text="Sheet values:\n" + "\n".join(" | ".join(row) for row in rows))
+
+
+def _sheets_list_tabs(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
+    port = _owner_sheets_port(ctx)
+    if port is None:
+        return ToolResult(ok=True, text=_NOT_CONNECTED)
+    try:
+        out = execute_capability(
+            "sheets.list_tabs",
+            principal=ctx.principal,
+            args=args,
+            handlers=sheets_handlers(
+                port, allowed_spreadsheet_ids=ctx.settings.allowed_sheets_spreadsheet_ids()
+            ),
+            kill_switch=ctx.kill_switch,
+        )
+    except PermissionDenied:
+        return ToolResult(ok=False, error="sheets tab discovery denied")
+    except AdapterHttpError as exc:
+        return ToolResult(ok=False, error=f"Sheets tab discovery unavailable ({exc.tool_status()})")
+    except (RuntimeError, ValueError, OSError):
+        return ToolResult(ok=False, error="Sheets tab discovery failed")
+    tabs = out.get("tabs") or []
+    if not tabs:
+        return ToolResult(ok=True, text="No visible tabs were returned for this Sheet.")
+    return ToolResult(ok=True, text="Sheet tabs: " + " | ".join(tabs))
 
 
 def _sheets_write(ctx: ToolContext, args: dict[str, Any], *, append: bool) -> ToolResult:
@@ -1247,12 +1344,17 @@ def _instagram_insights(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     del args
     if ctx.instagram_insights is None:
         return ToolResult(ok=True, text=_NOT_CONNECTED)
-    text, _outcome = enrich_content_insights_ack(
+    text, outcome = enrich_content_insights_ack(
         "",
         ctx.instagram_insights,
         ctx.store,
         ctx.kill_switch,
     )
+    if outcome.status not in {"ok", "empty"}:
+        return ToolResult(
+            ok=False,
+            error=f"Instagram insights status: {outcome.status}.",
+        )
     return _empty(text, "Instagram insights returned nothing.")
 
 
@@ -1366,6 +1468,43 @@ def _composio_execute_tool(ctx: ToolContext, args: dict[str, Any]) -> ToolResult
         return ToolResult(ok=True, text=_NOT_CONNECTED)
     with catalog:
         return _composio_execute_with_catalog(catalog, args, values)
+
+
+def _composio_propose_linkedin_tool(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
+    try:
+        authorize(
+            "composio.propose_linkedin_write",
+            principal=ctx.principal,
+            kill_switch=ctx.kill_switch,
+        )
+    except PermissionDenied:
+        return ToolResult(ok=False, error="Composio execution denied")
+    values = _parse_composio_arguments(args)
+    if isinstance(values, ToolResult):
+        return values
+    catalog = _catalog(ctx)
+    if catalog is None:
+        return ToolResult(ok=True, text=_NOT_CONNECTED)
+    slug = str(args.get("tool_slug") or "").strip().upper()
+    with catalog:
+        text = propose_linkedin_write(
+            store=ctx.store,
+            channel=Channel.TELEGRAM,
+            catalog=catalog,
+            slug=slug,
+            arguments=values,
+            kill_switch=ctx.kill_switch,
+        )
+    if not text.startswith("LinkedIn action is ready"):
+        return ToolResult(ok=False, text=text, error=text)
+    resource_id = linkedin_approval_resource_id(slug, values)
+    row = ctx.store.get_approval_by_resource(
+        RESOURCE_LINKEDIN_TOOL, resource_id, ACTION_LINKEDIN_COMPOSIO_WRITE
+    )
+    approval_id = str(row.approval_id or "").strip() if row is not None else ""
+    if not approval_id:
+        return ToolResult(ok=False, error="LinkedIn approval binding was not persisted")
+    return ToolResult(ok=True, text=text, approval_id=approval_id)
 
 
 def _parse_composio_arguments(args: dict[str, Any]) -> dict[str, Any] | ToolResult:
@@ -1601,6 +1740,34 @@ _register(
         ),
         parameters=_NO_ARGS,
         handler=_owner_status,
+    )
+)
+_register(
+    ToolSpec(
+        name="sheets_list_tabs",
+        description=(
+            "Lists tab names only inside one explicitly Assaf-allowlisted Google Sheet. "
+            "Accept a pasted Google Sheets URL and extract its ID locally. Use this when "
+            "the first-tab preview is empty; never search Drive or another spreadsheet."
+        ),
+        parameters=_sheet_args(include_values=False),
+        handler=_sheets_list_tabs,
+    )
+)
+_register(
+    ToolSpec(
+        name="owner_system_audit",
+        description=(
+            "Runs Mia's complete operational connection audit in one tool call. Use when "
+            "Assaf asks to check/test everything, all connections, what works, or a broad "
+            "system audit. It performs bounded live checks for Gmail, Calendar agenda and "
+            "availability, LinkedIn profile, Instagram Insights, AssafWeb GSC/GA4, one "
+            "authorized Sheet preview, hot leads, pending approvals, website conversations, "
+            "daily brief, and new booked meetings. It returns a separate factual status for "
+            "each item. It never writes, sends, posts, books, approves, or deletes."
+        ),
+        parameters=_NO_ARGS,
+        handler=_owner_system_audit,
     )
 )
 _register(
@@ -1944,6 +2111,30 @@ _register(
             "additionalProperties": False,
         },
         handler=_composio_execute_tool,
+    )
+)
+_register(
+    ToolSpec(
+        name="composio_propose_linkedin_action",
+        description=(
+            "Prepares one exact non-destructive LinkedIn post, comment, upload, or other "
+            "side-effect action from an ACTIVE LinkedIn connection. It validates the current "
+            "schema and creates a Telegram approval; it never executes the action itself. "
+            "Use after composio_get_tool_schema. Direct messages and deletes are denied."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "tool_slug": {"type": "string", "description": "Exact LinkedIn tool slug."},
+                "arguments_json": {
+                    "type": "string",
+                    "description": "Exact JSON arguments for that current schema.",
+                },
+            },
+            "required": ["tool_slug", "arguments_json"],
+            "additionalProperties": False,
+        },
+        handler=_composio_propose_linkedin_tool,
     )
 )
 

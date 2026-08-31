@@ -158,3 +158,52 @@ Budget note: Multi-subsystem repair with production-facing integrations; impleme
   and diff-check. The reviewer reports RELEASE PASS with no unresolved P0-P2 blocker.
   Exact-SHA deployment, migration application, and controlled live acceptance remain
   intentionally open.
+
+## Phase 1.8 contract: Mia number-one-assistant release
+
+- Scope: make the configured Mia spreadsheet her self-maintained business workspace;
+  close owner Gmail/Calendar/LinkedIn approval writes, broad connection auditing,
+  Instagram analytics fallback, and website WhatsApp-to-Telegram notification; then
+  merge and deploy the exact verified commit.
+- Spreadsheet ownership: Mia owns the fixed CRM tabs and records every business-domain
+  movement represented by the application (lead, source, follow-up, meeting, deal,
+  content, KPI, and Mia activity). Assaf never has to maintain the workbook. PostgreSQL
+  remains the durable ledger and source of truth; the Sheet is Mia's managed operating
+  view, not an authority that can erase or rewrite internal state.
+- Approval safety: Gmail send, Calendar create/move, and non-destructive LinkedIn writes
+  require exact owner approval, a durable pre-provider claim, idempotency, and an
+  auditable terminal or pending-review outcome. Ambiguous writes never auto-replay.
+- Performance: CRM structure maintenance is background/one-off and never blocks a
+  visitor or owner request. Instagram fallback is bounded and stops on provider,
+  authorization, transport, or rate-limit failure.
+- Release: the complete current tree must pass focused checks, whole-tree Ruff, full
+  pytest, diff-check, and a fresh HEAVY review able to fail the release. Only the exact
+  reviewed commit may be pushed, merged, and deployed; production health and task/image
+  identity are verified after rollout.
+- Gate: `gates/leaf-1.8-number-one-assistant-release.md`.
+
+- 2026-09-01 Phase 1.8 opened after Assaf clarified that Mia fully manages her configured
+  spreadsheet and asked for push, merge, deploy, and a concise list of remaining open
+  work. Three earlier P1 review blockers are repaired; current-tree parent verification,
+  a fresh release review, and exact-commit deployment are pending.
+- 2026-09-01 Phase 1.8 local parent gate passes: managed CRM 98, approval crash-safety 5,
+  website/Instagram/owner edge 76, focused Gmail callback/crash 16, full tree 2,668,
+  whole-tree Ruff, origin binding, and diff-check all pass. The first full run exposed
+  one stale retry expectation; the current contract blocks ambiguous Gmail send replay
+  and its strengthened regression plus the complete rerun are green. Fresh HEAVY review
+  is next; no push or deployment has occurred yet.
+- 2026-09-01 first fresh HEAVY Phase 1.8 review BLOCKED release on four reproduced
+  defects: OAuth-style 400 continued Instagram fallback, LinkedIn proposals lacked the
+  immediate approval keyboard, the aggregate audit consumed booked-meeting notifications,
+  and LinkedIn's 255-character approval field rejected practical post bodies. Three
+  disjoint repair leaves are active; release review, push, and deployment remain gated.
+- 2026-09-01 all four review blockers are repaired. Parent verification now passes all
+  2,675 tests, whole-tree Ruff, origin binding, and diff-check. The aggregate audit's
+  non-consumption regression identifies the exact notification row and is independent of
+  shared-suite ordering. A new fresh HEAVY release review is the next gate.
+- 2026-09-01 the next HEAVY review found and reproduced two additional P1 release
+  blockers: cross-turn LinkedIn approval-button binding and a production PostgreSQL
+  `approvals.resource_id` width mismatch. Both are repaired with exact ID propagation and
+  an additive PostgreSQL widening migration. Parent verification passes 2,680 tests,
+  whole-tree Ruff, origin binding, and diff-check; a second fresh HEAVY reviewer reports
+  `VERDICT: PASS` with no unresolved P0-P2. Exact-commit release is next.

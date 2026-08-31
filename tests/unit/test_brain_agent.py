@@ -163,6 +163,38 @@ def test_agent_calls_a_tool_then_answers() -> None:
     assert "Mia" in tool_messages[0]["content"]
 
 
+def test_agent_carries_the_exact_approval_created_by_its_tool_call(monkeypatch) -> None:
+    from app.graph import owner_agent as owner_agent_module
+    from app.tools.registries.owner_tools import ToolResult
+
+    session = _session()
+    session.commit()
+    client, _transport = _client(
+        [
+            _assistant_tool_call("c1", "hot_leads", {}),
+            _assistant_text("הפעולה מחכה לאישור."),
+        ]
+    )
+    monkeypatch.setattr(
+        owner_agent_module,
+        "execute_tool",
+        lambda *_args, **_kwargs: ToolResult(
+            ok=True,
+            text="approval prepared",
+            approval_id="apr_from_this_exact_tool_call",
+        ),
+    )
+
+    outcome = run_owner_agent(
+        client=client,
+        ctx=_ctx(session),
+        owner_message="פרסמי את הפוסט אחרי אישור",
+    )
+
+    assert outcome.completed is True
+    assert outcome.approval_ids == ("apr_from_this_exact_tool_call",)
+
+
 def test_agent_chains_two_tools_across_steps() -> None:
     session = _session()
     session.commit()
@@ -181,6 +213,29 @@ def test_agent_chains_two_tools_across_steps() -> None:
     )
     assert outcome.completed is True
     assert outcome.tools_used == ("hot_leads", "pending_approvals")
+
+
+def test_agent_can_complete_a_broad_audit_with_one_aggregate_tool_call() -> None:
+    session = _session()
+    session.commit()
+    client, transport = _client(
+        [
+            _assistant_tool_call("audit-1", "owner_system_audit", {}),
+            _assistant_text("בדקתי את כל הסעיפים. התוצאה למעלה מפרטת כל חיבור בנפרד."),
+        ]
+    )
+    outcome = run_owner_agent(
+        client=client,
+        ctx=_ctx(session),
+        owner_message="תבדקי את כל החיבורים ומה עובד",
+        max_steps=3,
+    )
+    assert outcome.completed is True
+    assert outcome.tools_used == ("owner_system_audit",)
+    assert len(transport.requests) == 2
+    tool_messages = [m for m in transport.requests[1]["messages"] if m.get("role") == "tool"]
+    assert len(tool_messages) == 1
+    assert "אין כאן מגבלת שתי קריאות" in tool_messages[0]["content"]
 
 
 def test_unknown_tool_name_is_refused_not_executed() -> None:

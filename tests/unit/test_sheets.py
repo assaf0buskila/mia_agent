@@ -1520,8 +1520,11 @@ def test_composio_sheets_port_unsuccessful_response_does_not_raise() -> None:
 
 def test_composio_sheets_port_request_shape() -> None:
     captured: dict[str, object] = {}
+    calls = 0
 
     def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
         captured["url"] = str(request.url)
         captured["json"] = json.loads(request.content)
         return httpx.Response(
@@ -1547,6 +1550,7 @@ def test_composio_sheets_port_request_shape() -> None:
     )
     port.upsert_lead(row)
 
+    assert calls == 1
     assert str(captured["url"]).endswith(f"/{COMPOSIO_UPSERT_ROWS_TOOL}")
     body = captured["json"]
     assert isinstance(body, dict)

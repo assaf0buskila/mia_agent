@@ -681,6 +681,19 @@ def create_handoff(
         session_id=session_id,
         settings=settings,
     )
+    # HTTP 200 only means the click workflow completed. Record the bounded delivery
+    # class separately so production can distinguish Telegram acceptance from a
+    # rejected or ambiguous attempt without logging visitor text or provider detail.
+    log_comm(
+        channel=Channel.WEBSITE.value,
+        provider="telegram",
+        actor_type="owner_notification",
+        direction="out",
+        external_message_id="website_whatsapp_handoff",
+        policy_result=notification.notification_status,
+        success=notification.notification_status == "delivered",
+        automation_mode=settings.automation_mode.value,
+    )
     if notification.local_commit_failed:
         # The durability boundary rolled back the issued token and behavior event.
         # Never return a normal handoff body containing that nonexistent token.

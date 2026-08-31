@@ -13,6 +13,12 @@ from app.capabilities.registry import (
 )
 from app.capabilities.types import Principal
 from app.core.errors import PermissionDenied
+from app.domain.events import Channel
+from app.domain.owner_callbacks import resolve_owner_callback_result
+from app.domain.owner_linkedin_writes import (
+    MAX_LINKEDIN_APPROVAL_PARAMETERS_BYTES,
+    propose_linkedin_write,
+)
 from app.integrations.composio_catalog import (
     CatalogTool,
     ComposioCatalog,
@@ -214,9 +220,7 @@ def test_catalog_does_not_cache_a_transient_provider_failure() -> None:
     ComposioCatalog.reset_cache()
     catalog = ComposioCatalog(api_key="project", user_id="owner", client=_client(handler))
     assert catalog.search("my info", "LINKEDIN") == ()
-    assert [tool.slug for tool in catalog.search("my info", "LINKEDIN")] == [
-        "LINKEDIN_GET_MY_INFO"
-    ]
+    assert [tool.slug for tool in catalog.search("my info", "LINKEDIN")] == ["LINKEDIN_GET_MY_INFO"]
     assert tool_attempts == 2
 
 
@@ -380,15 +384,11 @@ def test_schema_preflight_checks_nested_items_enums_and_bounds() -> None:
         "required": ["filters"],
         "additionalProperties": False,
     }
-    assert validate_arguments(
-        schema, {"filters": {"status": "OPEN", "labels": ["ready"]}}
-    ) == ""
+    assert validate_arguments(schema, {"filters": {"status": "OPEN", "labels": ["ready"]}}) == ""
     assert "allowed value" in validate_arguments(
         schema, {"filters": {"status": "UNKNOWN", "labels": ["ready"]}}
     )
-    assert "shorter" in validate_arguments(
-        schema, {"filters": {"status": "OPEN", "labels": ["x"]}}
-    )
+    assert "shorter" in validate_arguments(schema, {"filters": {"status": "OPEN", "labels": ["x"]}})
 
 
 def test_documented_composio_input_parameter_map_is_normalized() -> None:
@@ -433,17 +433,9 @@ def test_slug_risk_is_conservative(slug: str, expected: str) -> None:
 
 
 def test_slug_risk_ignores_read_words_in_toolkit_prefix() -> None:
+    assert risk_for_slug("GOOGLE_SEARCH_CONSOLE_LIST_SITES", "GOOGLE_SEARCH_CONSOLE").value == "R0"
     assert (
-        risk_for_slug(
-            "GOOGLE_SEARCH_CONSOLE_LIST_SITES", "GOOGLE_SEARCH_CONSOLE"
-        ).value
-        == "R0"
-    )
-    assert (
-        risk_for_slug(
-            "GOOGLE_SEARCH_CONSOLE_SUBMIT_SITEMAP", "GOOGLE_SEARCH_CONSOLE"
-        ).value
-        == "R3"
+        risk_for_slug("GOOGLE_SEARCH_CONSOLE_SUBMIT_SITEMAP", "GOOGLE_SEARCH_CONSOLE").value == "R3"
     )
     assert risk_for_slug("NOTION_FETCH_DATA", "NOTION").value == "R0"
 
@@ -517,6 +509,187 @@ def test_dynamic_execute_is_read_only_schema_checked_and_kill_switch_checked(mon
         _context(kill_switch=True),
     )
     assert not killed.ok and "denied" in killed.error
+
+
+def test_linkedin_side_effect_is_bound_for_approval_and_never_executes_at_proposal_time() -> None:
+    class Store:
+        def __init__(self):
+            self.saved = []
+            self.row = None
+
+        def upsert_linkedin_approval(self, **kwargs):
+            self.saved.append(kwargs)
+            self.row = SimpleNamespace(
+                **kwargs,
+                resource_type="linkedin_tool",
+                approval_id="apr_linkedin_test",
+            )
+
+        def get_approval_by_resource(self, *_args):
+            return self.row
+
+        def get_approval_by_approval_id(self, _approval_id):
+            return self.row
+
+        def decide_linkedin_approval(self, *, resource_id, decision):
+            assert resource_id == self.row.resource_id
+            self.row.decision = decision
+            return True
+
+        def claim_operation(self, **_kwargs):
+            return True
+
+        def save_canonical_event(self, **_kwargs):
+            pass
+
+        def complete_operation(self, **_kwargs):
+            pass
+
+    class Catalog:
+        def detail(self, slug):
+            return CatalogTool(
+                slug,
+                "LINKEDIN",
+                "post",
+                {
+                    "type": "object",
+                    "properties": {"text": {"type": "string"}},
+                    "required": ["text"],
+                    "additionalProperties": False,
+                },
+            )
+
+    store = Store()
+    result = propose_linkedin_write(
+        store=store,
+        channel=Channel.TELEGRAM,
+        catalog=Catalog(),
+        slug="LINKEDIN_POST_UPDATE",
+        arguments={"text": "hello"},
+        kill_switch=False,
+    )
+    assert result.startswith("LinkedIn action is ready")
+    assert len(store.saved) == 1
+    assert store.saved[0]["risk"] == "R4"
+    approved = resolve_owner_callback_result(
+        store, decision="approve", token="apr_linkedin_test"
+    )
+    assert approved.linkedin_resource_id_to_execute == store.row.resource_id
+    replay = resolve_owner_callback_result(
+        store, decision="approve", token="apr_linkedin_test"
+    )
+    assert replay.linkedin_resource_id_to_execute == store.row.resource_id
+
+
+def test_linkedin_destructive_and_direct_message_tools_remain_denied() -> None:
+    class Catalog:
+        def detail(self, slug):
+            return CatalogTool(
+                slug,
+                "LINKEDIN",
+                "action",
+                {"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+            )
+
+    class Store:
+        pass
+
+    assert "Destructive" in propose_linkedin_write(
+        store=Store(),
+        channel=Channel.TELEGRAM,
+        catalog=Catalog(),
+        slug="LINKEDIN_DELETE_POST",
+        arguments={},
+        kill_switch=False,
+    )
+    assert "direct messages" in propose_linkedin_write(
+        store=Store(),
+        channel=Channel.TELEGRAM,
+        catalog=Catalog(),
+        slug="LINKEDIN_SEND_MESSAGE",
+        arguments={},
+        kill_switch=False,
+    )
+
+
+def test_linkedin_approval_accepts_a_practical_exact_post_payload_over_255_chars() -> None:
+    class Store:
+        def __init__(self):
+            self.saved = []
+            self.row = None
+
+        def upsert_linkedin_approval(self, **kwargs):
+            self.saved.append(kwargs)
+            self.row = SimpleNamespace(
+                **kwargs, resource_type="linkedin_tool", approval_id="apr_linkedin_long"
+            )
+
+        def get_approval_by_resource(self, *_args):
+            return self.row
+
+        def claim_operation(self, **_kwargs):
+            return True
+
+        def save_canonical_event(self, **_kwargs):
+            pass
+
+        def complete_operation(self, **_kwargs):
+            pass
+
+    class Catalog:
+        def detail(self, slug):
+            return CatalogTool(
+                slug,
+                "LINKEDIN",
+                "post",
+                {
+                    "type": "object",
+                    "properties": {"text": {"type": "string"}},
+                    "required": ["text"],
+                    "additionalProperties": False,
+                },
+            )
+
+    store = Store()
+    result = propose_linkedin_write(
+        store=store,
+        channel=Channel.TELEGRAM,
+        catalog=Catalog(),
+        slug="LINKEDIN_POST_UPDATE",
+        arguments={"text": "x" * 1_000},
+        kill_switch=False,
+    )
+    assert result.startswith("LinkedIn action is ready")
+    assert len(store.saved[0]["proposed_parameters"]) > 255
+    assert json.loads(store.saved[0]["proposed_parameters"]) == {
+        "arguments": {"text": "x" * 1_000},
+        "slug": "LINKEDIN_POST_UPDATE",
+    }
+
+
+def test_linkedin_approval_rejects_payload_beyond_the_explicit_bound() -> None:
+    class Catalog:
+        def detail(self, slug):
+            return CatalogTool(
+                slug,
+                "LINKEDIN",
+                "post",
+                {
+                    "type": "object",
+                    "properties": {"text": {"type": "string"}},
+                    "required": ["text"],
+                    "additionalProperties": False,
+                },
+            )
+
+    assert "too large" in propose_linkedin_write(
+        store=SimpleNamespace(),
+        channel=Channel.TELEGRAM,
+        catalog=Catalog(),
+        slug="LINKEDIN_POST_UPDATE",
+        arguments={"text": "x" * MAX_LINKEDIN_APPROVAL_PARAMETERS_BYTES},
+        kill_switch=False,
+    )
 
 
 @pytest.mark.parametrize(

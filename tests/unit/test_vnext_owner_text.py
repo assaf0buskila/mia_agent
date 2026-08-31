@@ -157,6 +157,27 @@ def test_the_answer_is_read_from_the_returned_graph_state(monkeypatch) -> None:
     assert produce.calls == 1
 
 
+def test_owner_graph_round_trips_exact_turn_approval_ids(monkeypatch) -> None:
+    _stub_graph(monkeypatch, _RewritingGraph)
+
+    result = run_owner_turn(
+        principal=Principal.owner(source="test"),
+        owner_id="111",
+        telegram_chat_id="111",
+        run_id="run_exact_approval",
+        latest_message="prepare linkedin post",
+        kill_switch=False,
+        produce=lambda _state: OwnerBrainResult(
+            "ready",
+            True,
+            ("composio_propose_linkedin_action",),
+            approval_ids=("apr_exact_turn",),
+        ),
+    )
+
+    assert result.approval_ids == ("apr_exact_turn",)
+
+
 def test_produce_receives_the_graph_state_it_must_answer_from(monkeypatch) -> None:
     """`produce` takes the state, so what the graph retrieved can reach the answer.
 

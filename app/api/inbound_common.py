@@ -3,6 +3,11 @@
 from __future__ import annotations
 
 from app.db.store import LeadStore
+from app.domain.approvals import (
+    ACTION_CALENDAR_CREATE,
+    ACTION_CALENDAR_RESCHEDULE,
+    ACTION_GMAIL_SEND,
+)
 from app.domain.events import Channel
 from app.domain.owner_callbacks import approval_token
 from app.domain.owner_tasks import OwnerTaskType
@@ -70,13 +75,24 @@ def owner_telegram_reply_markup(
     *,
     channel: Channel,
     task_type: OwnerTaskType,
+    linkedin_approval_id: str = "",
 ) -> dict | None:
-    """One-tap approve/reject on pending-approval reads. ADR-026 console completion."""
+    """One-tap approve/reject for a just-proposed LinkedIn action or approval reads."""
     if channel is not Channel.TELEGRAM:
         return None
-    if task_type is not OwnerTaskType.PENDING_APPROVALS:
-        return None
+    if linkedin_approval_id:
+        return approval_keyboard(approval_token(linkedin_approval_id))
     rows = store.list_all_pending_approvals()
+    if task_type is OwnerTaskType.GMAIL_DRAFT:
+        rows = [row for row in rows if row.action == ACTION_GMAIL_SEND]
+    elif task_type is OwnerTaskType.CALENDAR_WRITE:
+        rows = [
+            row
+            for row in rows
+            if row.action in (ACTION_CALENDAR_CREATE, ACTION_CALENDAR_RESCHEDULE)
+        ]
+    elif task_type is not OwnerTaskType.PENDING_APPROVALS:
+        return None
     if not rows:
         return None
     approval_id = (rows[0].approval_id or "").strip()

@@ -186,16 +186,19 @@ def execute_approved_gmail_send(
     except PolicyDenied:
         return "לא שלחתי. הטיוטה נשארה בתיבת הדואר."
     send_key = f"{draft_id}:send:{ACTION_GMAIL_SEND}"
-    if not store.claim_operation(scope="approval", key=send_key):
-        return "השליחה כבר טופלה. לא שלחתי שוב את הטיוטה."
-    if not port.send_draft(draft_id):
-        store.fail_operation(scope="approval", key=send_key)
-        return "האישור נרשם אבל השליחה נכשלה. הטיוטה אמורה עדיין להיות בתיבה."
-    store.complete_operation(
-        scope="approval",
-        key=send_key,
-        result_json='{"ok": true}',
-    )
+    if not store.claim_provider_write(scope="approval", key=send_key):
+        return "השליחה כבר טופלה או ממתינה לבדיקה. לא שלחתי שוב את הטיוטה."
+    try:
+        sent = port.send_draft(draft_id)
+    except Exception:
+        sent = False
+    if not sent:
+        store.mark_provider_write_pending_review(scope="approval", key=send_key)
+        return "תוצאת השליחה אינה ודאית וממתינה לבדיקה. לא שלחתי שוב את הטיוטה."
+    if not store.complete_provider_write(
+        scope="approval", key=send_key, result_json='{"ok": true}'
+    ):
+        return "השליחה התקבלה אך תוצאתה ממתינה לבדיקה. לא שלחתי שוב את הטיוטה."
     return "שלחתי את המייל."
 
 

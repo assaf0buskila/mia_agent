@@ -2,18 +2,20 @@
 
 Postgres is the system of record. This port upserts snapshots to ``01 Leads``,
 ``04 Meetings``, ``05 Deals``, ``06 Lead Sources``, ``08 Follow-ups``, ``09 Weekly KPI``, and
-``10 Mia Activity`` — and exposes bounded reads plus values-only updates/appends
+``10 Mia Activity`` — and owns the tab/header structure of the one configured Mia
+CRM spreadsheet. It also exposes bounded reads plus values-only updates/appends
 for explicitly authorized owner spreadsheets. It never reads Sheets back as Mia's
 internal truth, decision input, or recovery source. Lead source and weekly KPI
 rows upsert on website session create; lead, follow-up, deal, meeting, activity, and
 weekly KPI rows upsert after sales graph turns.
 
-Production adapter: Composio ``GOOGLESHEETS`` toolkit version ``20260813_00``,
+Production adapter: Composio ``GOOGLESHEETS`` toolkit version ``20260826_00``,
 pins the legacy mirror ``GOOGLESHEETS_UPSERT_ROWS`` plus owner-operational
 ``GOOGLESHEETS_VALUES_GET``, ``GOOGLESHEETS_VALUES_UPDATE``, and
 ``GOOGLESHEETS_SPREADSHEETS_VALUES_APPEND`` only when ``MIA_COMPOSIO_API_KEY``,
 ``MIA_COMPOSIO_USER_ID``, and ``MIA_SHEETS_SPREADSHEET_ID`` are set.
-Never clear/delete/create-spreadsheet/format/share tools this slice.
+It may add the fixed CRM tabs inside the configured spreadsheet, but never
+clear/delete/create-spreadsheet/share or discover Drive files.
 """
 
 from __future__ import annotations
@@ -22,7 +24,9 @@ import json
 import re
 from collections.abc import Callable
 from datetime import UTC, datetime
-from time import perf_counter
+from hashlib import sha256
+from threading import Lock
+from time import monotonic, perf_counter
 from typing import Any, Protocol
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
@@ -74,11 +78,13 @@ from app.domain.tools import (
 SHEETS_MIRROR_SCOPE = "sheets_mirror"
 SHEETS_MIRROR_TABS = frozenset({"sales", "session", "content"})
 
-COMPOSIO_GOOGLESHEETS_VERSION = "20260813_00"
+COMPOSIO_GOOGLESHEETS_VERSION = "20260826_00"
 COMPOSIO_UPSERT_ROWS_TOOL = "GOOGLESHEETS_UPSERT_ROWS"
 COMPOSIO_VALUES_GET_TOOL = "GOOGLESHEETS_VALUES_GET"
 COMPOSIO_VALUES_UPDATE_TOOL = "GOOGLESHEETS_VALUES_UPDATE"
 COMPOSIO_VALUES_APPEND_TOOL = "GOOGLESHEETS_SPREADSHEETS_VALUES_APPEND"
+COMPOSIO_GET_SHEET_NAMES_TOOL = "GOOGLESHEETS_GET_SHEET_NAMES"
+COMPOSIO_ADD_SHEET_TOOL = "GOOGLESHEETS_ADD_SHEET"
 _COMPOSIO_EXECUTE_BASE = "https://backend.composio.dev/api/v3.1/tools/execute"
 _COMPOSIO_EXECUTE_URL = f"{_COMPOSIO_EXECUTE_BASE}/{COMPOSIO_UPSERT_ROWS_TOOL}"
 
@@ -173,6 +179,19 @@ CONTENT_HEADERS = [
     "Saved",
     "Lead Signals",
 ]
+
+CRM_WORKSPACE_TABS: tuple[tuple[str, list[str]], ...] = (
+    (LEADS_SHEET_NAME, LEADS_HEADERS),
+    (MEETINGS_SHEET_NAME, MEETINGS_HEADERS),
+    (DEALS_SHEET_NAME, DEALS_HEADERS),
+    (SOURCES_SHEET_NAME, SOURCES_HEADERS),
+    (CONTENT_SHEET_NAME, CONTENT_HEADERS),
+    (FOLLOWUPS_SHEET_NAME, FOLLOWUPS_HEADERS),
+    (KPI_SHEET_NAME, KPI_HEADERS),
+    (ACTIVITY_SHEET_NAME, ACTIVITY_HEADERS),
+)
+CRM_WORKSPACE_SCHEMA_VERSION = "mia-crm-v1"
+CRM_WORKSPACE_SCHEMA_RANGE = f"{ACTIVITY_SHEET_NAME}!J1"
 _METRIC_PATTERN = re.compile(r"^[0-9]*$")
 _A1_RANGE_PATTERN = re.compile(
     r"^(?:[A-Za-z0-9 _-]{1,80}!)?[A-Z]{1,3}[1-9][0-9]{0,5}(?::[A-Z]{1,3}[1-9][0-9]{0,5})?$"
@@ -379,6 +398,10 @@ class ContentMirrorRow(BaseModel):
 
 
 class SheetsPort(Protocol):
+    def ensure_crm_workspace(self) -> None: ...
+
+    def list_sheet_names(self, *, spreadsheet_id: str) -> list[str]: ...
+
     def read_values(self, *, spreadsheet_id: str, a1_range: str) -> list[list[str]]: ...
 
     def update_values(
@@ -406,6 +429,13 @@ class SheetsPort(Protocol):
 
 
 class DisabledSheetsPort:
+    def ensure_crm_workspace(self) -> None:
+        return
+
+    def list_sheet_names(self, *, spreadsheet_id: str) -> list[str]:
+        del spreadsheet_id
+        return []
+
     def read_values(self, *, spreadsheet_id: str, a1_range: str) -> list[list[str]]:
         del spreadsheet_id, a1_range
         return []
@@ -444,6 +474,10 @@ class DisabledSheetsPort:
 class ComposioSheetsPort:
     """Live Composio adapter. HTTP/transport raises AdapterHttpError; 200 unsuccessful skips."""
 
+    _workspace_ready_until: dict[tuple[str, str, str], float] = {}
+    _workspace_ready_lock = Lock()
+    _workspace_refresh_seconds = 3600.0
+
     def __init__(
         self,
         *,
@@ -456,8 +490,17 @@ class ComposioSheetsPort:
         self._api_key = api_key
         self._user_id = user_id
         self._spreadsheet_id = spreadsheet_id.strip()
-        self._allowed_spreadsheet_ids = frozenset(allowed_spreadsheet_ids)
+        authorized = set(allowed_spreadsheet_ids)
+        if self._spreadsheet_id:
+            authorized.add(self._spreadsheet_id)
+        self._allowed_spreadsheet_ids = frozenset(authorized)
         self._client = client
+        self._crm_ready = False
+        self._workspace_key = (
+            sha256(api_key.encode("utf-8")).hexdigest()[:16],
+            user_id,
+            self._spreadsheet_id,
+        )
 
     def _execute_tool(self, tool_slug: str, arguments: dict[str, Any]) -> dict[str, Any] | None:
         payload = {
@@ -520,6 +563,40 @@ class ComposioSheetsPort:
             raise AdapterSchemaError()
         return _normalize_sheet_read_values(raw_values)
 
+    def list_sheet_names(self, *, spreadsheet_id: str) -> list[str]:
+        """Discover tabs only inside an already allowlisted spreadsheet.
+
+        This is deliberately not Drive discovery: it receives the same exact target
+        check as a values read, then returns only small plain-text tab titles.  It
+        lets an owner recover from an empty first tab without guessing a range.
+        """
+        target, _bounded_range, _ = validate_owner_sheet_request(
+            spreadsheet_id=spreadsheet_id,
+            a1_range="A1",
+            values=None,
+            allowed_spreadsheet_ids=self._allowed_spreadsheet_ids,
+        )
+        data = self._execute_tool(
+            COMPOSIO_GET_SHEET_NAMES_TOOL, {"spreadsheetId": target}
+        )
+        raw_names = (data or {}).get("sheetNames")
+        if not isinstance(raw_names, list):
+            # Current provider responses have used both field names. Accept neither
+            # silently: an unknown shape stays an adapter error rather than a false
+            # "no tabs" report.
+            raw_names = (data or {}).get("sheets")
+        if not isinstance(raw_names, list) or len(raw_names) > 50:
+            raise AdapterSchemaError()
+        names: list[str] = []
+        for raw_name in raw_names:
+            if not isinstance(raw_name, str):
+                raise AdapterSchemaError()
+            name = raw_name.strip()
+            if not name or len(name) > 80 or "\n" in name or "\r" in name:
+                raise AdapterSchemaError()
+            names.append(name)
+        return names
+
     def update_values(self, *, spreadsheet_id: str, a1_range: str, values: list[list[str]]) -> None:
         target, bounded_range, bounded_values = validate_owner_sheet_request(
             spreadsheet_id=spreadsheet_id,
@@ -553,6 +630,90 @@ class ComposioSheetsPort:
                 "valueInputOption": "RAW",
             },
         )
+
+    def ensure_crm_workspace(self) -> None:
+        """Create and repair Mia's fixed CRM tabs in her configured spreadsheet.
+
+        This authority is intentionally narrower than the owner Sheets allowlist:
+        only ``MIA_SHEETS_SPREADSHEET_ID`` can be organized, no Drive lookup occurs,
+        and existing business rows are never cleared. Repeated calls are a no-op in
+        the same process after the complete structure has been confirmed.
+        """
+        if self._crm_ready:
+            return
+        spreadsheet_id = self._spreadsheet_id
+        if not spreadsheet_id:
+            return
+        if spreadsheet_id not in self._allowed_spreadsheet_ids:
+            raise ValueError("configured CRM spreadsheet id is not allowlisted")
+        if self._workspace_ready_until.get(self._workspace_key, 0.0) > monotonic():
+            self._crm_ready = True
+            return
+
+        with self._workspace_ready_lock:
+            if self._workspace_ready_until.get(self._workspace_key, 0.0) > monotonic():
+                self._crm_ready = True
+                return
+            existing = set(self.list_sheet_names(spreadsheet_id=spreadsheet_id))
+            marker_is_current = False
+            if ACTIVITY_SHEET_NAME in existing:
+                marker_data = self._execute_tool(
+                    COMPOSIO_VALUES_GET_TOOL,
+                    {
+                        "spreadsheetId": spreadsheet_id,
+                        "range": CRM_WORKSPACE_SCHEMA_RANGE,
+                    },
+                )
+                marker_is_current = (marker_data or {}).get("values") == [
+                    [CRM_WORKSPACE_SCHEMA_VERSION]
+                ]
+
+            header_is_current: dict[str, bool] = {}
+            for sheet_name, headers in CRM_WORKSPACE_TABS:
+                if sheet_name not in existing:
+                    header_is_current[sheet_name] = False
+                    continue
+                final_column = chr(ord("A") + len(headers) - 1)
+                header_is_current[sheet_name] = self.read_values(
+                    spreadsheet_id=spreadsheet_id,
+                    a1_range=f"{sheet_name}!A1:{final_column}1",
+                ) == [headers]
+
+            if marker_is_current and all(header_is_current.values()):
+                self._workspace_ready_until[self._workspace_key] = (
+                    monotonic() + self._workspace_refresh_seconds
+                )
+                self._crm_ready = True
+                return
+            for sheet_name, _headers in CRM_WORKSPACE_TABS:
+                if sheet_name in existing:
+                    continue
+                self._execute_tool(
+                    COMPOSIO_ADD_SHEET_TOOL,
+                    {
+                        "spreadsheetId": spreadsheet_id,
+                        "properties": {"title": sheet_name},
+                    },
+                )
+
+            for sheet_name, headers in CRM_WORKSPACE_TABS:
+                if header_is_current[sheet_name]:
+                    continue
+                final_column = chr(ord("A") + len(headers) - 1)
+                self.update_values(
+                    spreadsheet_id=spreadsheet_id,
+                    a1_range=f"{sheet_name}!A1:{final_column}1",
+                    values=[headers],
+                )
+            self.update_values(
+                spreadsheet_id=spreadsheet_id,
+                a1_range=CRM_WORKSPACE_SCHEMA_RANGE,
+                values=[[CRM_WORKSPACE_SCHEMA_VERSION]],
+            )
+            self._workspace_ready_until[self._workspace_key] = (
+                monotonic() + self._workspace_refresh_seconds
+            )
+            self._crm_ready = True
 
     def _execute_upsert(
         self,
@@ -767,6 +928,14 @@ class FakeSheetsPort:
         self._content_rows: dict[str, ContentMirrorRow] = {}
         self.owner_values: dict[tuple[str, str], list[list[str]]] = {}
         self.owner_operations: list[tuple[str, str, str, list[list[str]]]] = []
+        self.sheet_names: dict[str, list[str]] = {}
+        self.crm_workspace_ensures = 0
+
+    def ensure_crm_workspace(self) -> None:
+        self.crm_workspace_ensures += 1
+
+    def list_sheet_names(self, *, spreadsheet_id: str) -> list[str]:
+        return list(self.sheet_names.get(spreadsheet_id, []))
 
     def read_values(self, *, spreadsheet_id: str, a1_range: str) -> list[list[str]]:
         return [list(row) for row in self.owner_values.get((spreadsheet_id, a1_range), [])]
@@ -1370,3 +1539,28 @@ def build_sheets_port(settings: Settings) -> SheetsPort:
             allowed_spreadsheet_ids=settings.allowed_sheets_spreadsheet_ids(),
         )
     return DisabledSheetsPort()
+
+
+def maintain_crm_workspace(settings: Settings) -> str:
+    """Best-effort background maintenance for Mia's one configured CRM workbook.
+
+    This function belongs in a worker/one-off command, never a visitor request. The
+    result is deliberately aggregate and contains no spreadsheet id or provider body.
+    """
+    if settings.kill_switch:
+        return "disabled"
+    port = build_sheets_port(settings)
+    if isinstance(port, DisabledSheetsPort) or not settings.sheets_spreadsheet_id.strip():
+        return "not_configured"
+    try:
+        port.ensure_crm_workspace()
+    except (
+        AdapterHttpError,
+        AdapterResponseError,
+        AdapterSchemaError,
+        OSError,
+        RuntimeError,
+        ValueError,
+    ):
+        return "unavailable"
+    return "ready"

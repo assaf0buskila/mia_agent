@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
+from app.api import owner as owner_api
 from app.api.inbound import process_inbound_texts
 from app.api.inbound_common import (
     outbound_reply as _outbound_reply,
@@ -25,6 +26,7 @@ from app.domain.approvals import (
     payload_hash,
 )
 from app.domain.events import Channel
+from app.domain.owner_brain import OwnerBrainResult
 from app.domain.owner_callbacks import approval_token
 from app.domain.owner_tasks import OwnerTaskType
 from app.integrations.base import RecordingMessagePort
@@ -69,6 +71,114 @@ def test_pending_approvals_markup_uses_first_approval_id() -> None:
         task_type=OwnerTaskType.PENDING_APPROVALS,
     )
     assert markup == approval_keyboard(approval_token("apr_abc123def456"))
+
+
+def test_linkedin_proposal_markup_binds_the_exact_new_approval_id() -> None:
+    markup = _owner_telegram_reply_markup(
+        SimpleNamespace(),  # type: ignore[arg-type]
+        channel=Channel.TELEGRAM,
+        task_type=OwnerTaskType.NOTE,
+        linkedin_approval_id="apr_linkedin_exact",
+    )
+    assert markup == approval_keyboard(approval_token("apr_linkedin_exact"))
+
+
+def test_store_keeps_long_linkedin_payload_exact() -> None:
+    init_db()
+    db = get_session_factory()()
+    try:
+        store = LeadStore(db)
+        parameters = '{"arguments":{"text":"' + "x" * 1_000 + '"},"slug":"LINKEDIN_POST_UPDATE"}'
+        store.upsert_linkedin_approval(
+            channel=Channel.TELEGRAM.value,
+            action="linkedin_composio_write",
+            risk="R4",
+            payload_hash="a" * 64,
+            decision=DECISION_PENDING,
+            resource_id="li_long_parameters",
+            expires_at=approval_expires_at(now=datetime.now(UTC)),
+            proposed_parameters=parameters,
+        )
+        row = store.get_approval_by_resource(
+            "linkedin_tool", "li_long_parameters", "linkedin_composio_write"
+        )
+        assert row is not None
+        assert row.proposed_parameters == parameters
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_linkedin_turn_keyboard_ignores_an_unrelated_newer_approval(monkeypatch) -> None:
+    init_db()
+    db = get_session_factory()()
+    try:
+        store = LeadStore(db)
+        common = {
+            "channel": Channel.TELEGRAM.value,
+            "action": "linkedin_composio_write",
+            "risk": "R4",
+            "decision": DECISION_PENDING,
+            "expires_at": approval_expires_at(now=datetime.now(UTC)),
+        }
+        store.upsert_linkedin_approval(
+            **common,
+            payload_hash="1" * 64,
+            resource_id="li_exact_turn",
+            proposed_parameters='{"arguments":{"text":"exact"},"slug":"LINKEDIN_POST"}',
+        )
+        exact = store.get_approval_by_resource(
+            "linkedin_tool", "li_exact_turn", "linkedin_composio_write"
+        )
+        assert exact is not None
+        store.upsert_linkedin_approval(
+            **common,
+            payload_hash="2" * 64,
+            resource_id="li_unrelated_newer",
+            proposed_parameters='{"arguments":{"text":"other"},"slug":"LINKEDIN_POST"}',
+        )
+        unrelated = store.get_approval_by_resource(
+            "linkedin_tool", "li_unrelated_newer", "linkedin_composio_write"
+        )
+        assert unrelated is not None
+        db.commit()
+        monkeypatch.setattr(
+            owner_api,
+            "run_owner_turn",
+            lambda **_kwargs: OwnerBrainResult(
+                "LinkedIn action is ready for approval.",
+                True,
+                ("composio_propose_linkedin_action",),
+                approval_ids=(exact.approval_id,),
+            ),
+        )
+        port = RecordingMessagePort()
+
+        await process_inbound_texts(
+            provider="telegram",
+            channel=Channel.TELEGRAM,
+            items=[
+                {
+                    "id": "evt.linkedin.exact.turn.keyboard",
+                    "from": _OWNER_ID,
+                    "text": "prepare a linkedin post for approval",
+                }
+            ],
+            store=store,
+            port=port,
+            kill_switch=False,
+            owner_ids={_OWNER_ID},
+        )
+
+        assert len(port.sent) == 1
+        assert port.sent[0].reply_markup == approval_keyboard(
+            approval_token(exact.approval_id)
+        )
+        assert port.sent[0].reply_markup != approval_keyboard(
+            approval_token(unrelated.approval_id)
+        )
+    finally:
+        db.close()
 
 
 def test_pending_approvals_markup_skips_empty_and_non_telegram() -> None:
@@ -254,7 +364,7 @@ def test_approval_keyboard_callback_applies_the_decision(monkeypatch) -> None:
         db.close()
 
 
-def test_gmail_callback_recovers_deferred_and_failed_send_once(monkeypatch) -> None:
+def test_gmail_callback_defers_then_never_replays_an_ambiguous_send(monkeypatch) -> None:
     from uuid import uuid4
 
     from app.api import telegram as telegram_api
@@ -356,12 +466,12 @@ def test_gmail_callback_recovers_deferred_and_failed_send_once(monkeypatch) -> N
             assert failed_replay.status_code == 200
             assert sent_replay.status_code == 200
             assert completed_replay.status_code == 200
-            assert gmail_port.sent_drafts == [draft_id]
-            assert send_attempts == 2
+            assert gmail_port.sent_drafts == []
+            assert send_attempts == 1
             assert "השליחה כבויה" in telegram_port.edited[0]["text"]
-            assert "השליחה נכשלה" in telegram_port.edited[1]["text"]
-            assert "שלחתי" in telegram_port.edited[2]["text"]
-            assert "כבר טופלה" in telegram_port.edited[3]["text"]
+            assert "תוצאת השליחה אינה ודאית" in telegram_port.edited[1]["text"]
+            assert "ממתינה לבדיקה" in telegram_port.edited[2]["text"]
+            assert "ממתינה לבדיקה" in telegram_port.edited[3]["text"]
         finally:
             app.dependency_overrides.pop(get_telegram_port, None)
     finally:

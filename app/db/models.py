@@ -274,12 +274,18 @@ class ApprovalRow(Base):
     decision: Mapped[str] = mapped_column(String(32), default="pending")
     approver: Mapped[str] = mapped_column(String(32), default="")
     resource_type: Mapped[str] = mapped_column(String(32), default="lead")
-    resource_id: Mapped[str] = mapped_column(String(40), default="")
+    # Named approval workflows cap provider-bound identifiers at 80 characters.
+    # Calendar and LinkedIn proposal ids include a prefix plus a 40-char digest,
+    # so the original VARCHAR(40) could reject otherwise valid approvals.
+    resource_id: Mapped[str] = mapped_column(String(80), default="")
     expires_at: Mapped[str] = mapped_column(String(40), default="")
     approval_id: Mapped[str] = mapped_column(String(32), default="", index=True)
     business_id: Mapped[str] = mapped_column(String(32), default="")
     actor_id: Mapped[str] = mapped_column(String(32), default="")
-    proposed_parameters: Mapped[str] = mapped_column(String(255), default="")
+    # Approval payloads are normally compact, but an exact LinkedIn post/comment/upload
+    # schema can legitimately exceed 255 characters. The application still applies a
+    # conservative action-specific bound before this durable TEXT field is used.
+    proposed_parameters: Mapped[str] = mapped_column(Text, default="")
     approved_at: Mapped[str] = mapped_column(String(40), default="")
     executed_at: Mapped[str] = mapped_column(String(40), default="")
     execution_operation_id: Mapped[str] = mapped_column(String(64), default="")

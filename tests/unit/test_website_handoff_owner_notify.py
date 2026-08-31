@@ -21,7 +21,6 @@ from app.domain.hot_handoff import KIND_HOT_LEAD, apply_hot_handoff
 from app.domain.website_handoff_brief import (
     KIND_WEBSITE_WHATSAPP,
     NOTIFICATION_DELIVERED,
-    NOTIFICATION_DUPLICATE_OR_AMBIGUOUS,
     apply_website_whatsapp_handoff_brief,
 )
 from app.graph.replies import (
@@ -172,7 +171,7 @@ def test_graph_handoff_and_whatsapp_click_share_one_owner_delivery_both_orders(
         db.close()
 
 
-def test_legacy_hot_claim_suppresses_graph_and_whatsapp_click(monkeypatch) -> None:
+def test_legacy_lead_claim_does_not_suppress_a_new_website_session(monkeypatch) -> None:
     telegram = _RecordingTelegram()
     _patch_telegram(monkeypatch, telegram)
     init_db()
@@ -197,13 +196,14 @@ def test_legacy_hot_claim_suppresses_graph_and_whatsapp_click(monkeypatch) -> No
         )
         _drive_handoff(store, session_id, lead_id, settings)
 
-        assert click.notification_status == NOTIFICATION_DUPLICATE_OR_AMBIGUOUS
-        assert telegram.sends == []
+        assert click.notification_status == NOTIFICATION_DELIVERED
+        # Click and graph handoff share the new session key, so this is still one alert.
+        assert [send["chat_id"] for send in telegram.sends] == ["111"]
     finally:
         db.close()
 
 
-def test_historical_recipient_claims_suppress_only_that_owner_across_paths(
+def test_historical_lead_scoped_recipient_claims_do_not_hide_new_sessions(
     monkeypatch,
 ) -> None:
     telegram = _RecordingTelegram()
@@ -247,7 +247,7 @@ def test_historical_recipient_claims_suppress_only_that_owner_across_paths(
         db.commit()
         _drive_handoff(store, old_click_session, old_click_lead, settings)
 
-        assert [send["chat_id"] for send in telegram.sends] == ["222", "222"]
+        assert [send["chat_id"] for send in telegram.sends] == ["111", "222", "111", "222"]
     finally:
         db.close()
 

@@ -45,6 +45,25 @@ def sheets_read(
     return {"count": len(rows), "rows": rows}
 
 
+def sheets_list_tabs(
+    port: SheetsPort, args: dict[str, Any], *, allowed_spreadsheet_ids: frozenset[str]
+) -> dict[str, Any]:
+    reference = str(args.get("spreadsheet_id") or "").strip()
+    if not reference:
+        raise InvalidArguments("spreadsheet_id is required")
+    try:
+        spreadsheet_id, _range, _ = validate_owner_sheet_request(
+            spreadsheet_id=reference,
+            a1_range="A1",
+            values=None,
+            allowed_spreadsheet_ids=allowed_spreadsheet_ids,
+        )
+    except ValueError as exc:
+        raise InvalidArguments(str(exc)) from None
+    names = port.list_sheet_names(spreadsheet_id=spreadsheet_id)
+    return {"count": len(names), "tabs": names}
+
+
 def sheets_update(
     port: SheetsPort, args: dict[str, Any], *, allowed_spreadsheet_ids: frozenset[str]
 ) -> dict[str, Any]:
@@ -79,6 +98,9 @@ def sheets_handlers(
 ) -> dict[str, Any]:
     return {
         "sheets.read": lambda args: sheets_read(
+            port, args, allowed_spreadsheet_ids=allowed_spreadsheet_ids
+        ),
+        "sheets.list_tabs": lambda args: sheets_list_tabs(
             port, args, allowed_spreadsheet_ids=allowed_spreadsheet_ids
         ),
         "sheets.update": lambda args: sheets_update(
