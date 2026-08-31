@@ -133,6 +133,7 @@ class HandoffOut(BaseModel):
     token: str
     expires_at: str
     whatsapp_url: str | None
+    notification_status: str
 
 
 class BehaviorEventIn(BaseModel):
@@ -669,17 +670,26 @@ def create_handoff(
         lead_id=lead_id,
         payload={"kind": "whatsapp_handoff"},
     )
-    apply_website_whatsapp_handoff_brief(
+    notification = apply_website_whatsapp_handoff_brief(
         store,
         lead_id=lead_id,
         session_id=session_id,
         settings=settings,
     )
+    if notification.local_commit_failed:
+        # The durability boundary rolled back the issued token and behavior event.
+        # Never return a normal handoff body containing that nonexistent token.
+        raise HTTPException(status_code=503, detail="handoff persistence unavailable")
     whatsapp_url: str | None = None
     built = click_to_chat_url(settings.whatsapp_click_to_chat, raw_token)
     if built:
         whatsapp_url = built
-    return HandoffOut(token=raw_token, expires_at=expires_at, whatsapp_url=whatsapp_url)
+    return HandoffOut(
+        token=raw_token,
+        expires_at=expires_at,
+        whatsapp_url=whatsapp_url,
+        notification_status=notification.notification_status,
+    )
 
 
 @router.post("/sessions/{session_id}/events", response_model=BehaviorEventOut)

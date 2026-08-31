@@ -396,7 +396,21 @@
     fetch(
       api + '/v1/website/sessions/' + encodeURIComponent(sessionId) + '/handoff',
       { method: 'POST', credentials: 'omit', keepalive: true }
-    ).catch(function () {});
+    )
+      .then(function (response) {
+        if (!response.ok) throw new Error('handoff failed');
+        return response.json();
+      })
+      .then(function (data) {
+        if (data.notification_status === 'delivered') {
+          status.textContent = 'אסף קיבל את תקציר השיחה.';
+        } else if (data.notification_status === 'failed') {
+          status.textContent = 'לא הצלחתי להעביר את השיחה לאסף כרגע.';
+        }
+      })
+      .catch(function () {
+        status.textContent = 'לא הצלחתי להעביר את השיחה לאסף כרגע.';
+      });
   }
 
   function makeWhatsAppCta(url) {
@@ -427,24 +441,6 @@
       }
     }
     paintHandoffCard(url);
-  }
-
-  function requestWhatsAppCta(ontoLastBubble) {
-    if (!sessionId) return;
-    fetchJson(
-      api + '/v1/website/sessions/' + encodeURIComponent(sessionId) + '/handoff',
-      { method: 'POST' }
-    )
-      .then(function (data) {
-        if (typeof data.whatsapp_url === 'string' && isWaMeUrl(data.whatsapp_url)) {
-          placeWhatsAppCta(data.whatsapp_url, ontoLastBubble);
-        } else {
-          status.textContent = WA_NA;
-        }
-      })
-      .catch(function () {
-        status.textContent = ERR;
-      });
   }
 
   function hasForbiddenSubstring(value) {
@@ -633,7 +629,7 @@
       if (replyUrl) {
         placeWhatsAppCta(replyUrl, painted);
       } else {
-        requestWhatsAppCta(painted);
+        status.textContent = WA_NA;
       }
     } else {
       waBtn.classList.remove('offer');
@@ -868,7 +864,7 @@
     title.textContent = 'ממשיכים עם אסף בוואטסאפ';
     var note = document.createElement('span');
     note.className = 'ask-mia-handoff-note';
-    note.textContent = 'אסף מקבל את כל מה שסיפרתם לי כאן, אז אין צורך להתחיל מהתחלה.';
+    note.textContent = 'בלחיצה תיפתח שיחה עם אסף בוואטסאפ. מיה לא עונה שם.';
 
     card.appendChild(title);
     card.appendChild(note);

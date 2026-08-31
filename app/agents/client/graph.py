@@ -18,10 +18,8 @@ from app.core.config import Settings
 from app.core.errors import MiaError, PermissionDenied
 from app.db.store import LeadStore
 from app.domain.hot_handoff import apply_hot_handoff
-from app.domain.website_handoff_brief import (
-    KIND_WEBSITE_WHATSAPP,
-    format_website_human_handoff_brief,
-)
+from app.domain.owner_notification_delivery import WEBSITE_HANDOFF_DELIVERY_KINDS
+from app.domain.website_handoff_brief import format_website_human_handoff_brief
 from app.graph.orchestrator import build_graph
 from app.graph.replies import (
     HANDOFF_OWNER_NOTIFIED,
@@ -283,7 +281,7 @@ def finalize_inactive_website_conversations(
         # WhatsApp handoff retires the lead's website sessions. Finalization uses its
         # recipient ledger for duplicate safety, so no global conversation claim may
         # suppress a recoverable recipient retry.
-        skip_kinds=(KIND_WEBSITE_WHATSAPP,),
+        skip_kinds=WEBSITE_HANDOFF_DELIVERY_KINDS,
         limit=50,
     )
     finalized = 0

@@ -4,20 +4,27 @@ from __future__ import annotations
 
 import json
 from time import perf_counter
+from typing import Literal
 
-from fastapi import APIRouter, Depends, Header, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db, get_telegram_port, get_transcription_port
-from app.api.inbound_common import outbound_reply
+from app.api.inbound_common import event_conversation_id, outbound_reply
 from app.api.owner import process_owner_texts
 from app.core.config import AutomationMode, get_settings
 from app.core.demo import demo_mode_active
+from app.core.logging import log_comm
 from app.core.outbound import send_inbound_reply
 from app.core.webhooks import verify_telegram_secret
 from app.db.store import LeadStore
 from app.domain.ai_runs import elapsed_ms
-from app.domain.events import Channel
+from app.domain.events import (
+    Channel,
+    persist_tool_outcome,
+    transcription_outcome,
+)
 from app.domain.gmail_drafts import execute_approved_gmail_send
 from app.domain.owner_callbacks import resolve_owner_callback_result
 from app.domain.tools import AdapterHttpError
@@ -42,35 +49,50 @@ _VOICE_TRANSCRIPTION_FAILURE_REPLY = (
     "לא הצלחתי לתמלל את ההודעה הקולית. אפשר לנסות שוב או לשלוח טקסט."
 )
 
+VoiceFailureStage = Literal[
+    "",
+    "download_unavailable",
+    "download_failed",
+    "media_rejected",
+    "stt_failed",
+]
+
+
+def _voice_failure(
+    item: dict[str, str], *, stage: VoiceFailureStage, started: float
+) -> tuple[dict[str, str], VoiceFailureStage, int]:
+    """Return only a fixed operational class; never retain provider or audio detail."""
+    return item, stage, elapsed_ms(started)
+
 
 async def _transcribe_telegram_voice(
     *,
     item: dict[str, str],
     media: object,
     transcribe_port: TranscriptionPort,
-) -> tuple[dict[str, str], bool]:
+) -> tuple[dict[str, str], VoiceFailureStage, int]:
     if not item.get("file_id"):
-        return item, False
+        return item, "", 0
     started = perf_counter()
     download = getattr(media, "download_voice", None)
     if not callable(download):
-        return item, True
+        return _voice_failure(item, stage="download_unavailable", started=started)
     try:
         downloaded = await download(item["file_id"])
     except (RuntimeError, TelegramMediaError, AdapterHttpError):
-        return item, True
+        return _voice_failure(item, stage="download_failed", started=started)
     try:
         audio_bytes, mime_type = downloaded
     except (TypeError, ValueError):
-        return item, True
+        return _voice_failure(item, stage="download_failed", started=started)
     try:
         audio_bytes, mime_type = validate_telegram_voice_media(audio_bytes, mime_type)
     except TelegramMediaError:
-        return item, True
+        return _voice_failure(item, stage="media_rejected", started=started)
     try:
         result = await transcribe_port.transcribe(audio=audio_bytes, mime_type=mime_type)
     except (RuntimeError, AdapterHttpError, TranscriptionError):
-        return item, True
+        return _voice_failure(item, stage="stt_failed", started=started)
     finally:
         del audio_bytes
     item["text"] = result.text
@@ -80,8 +102,9 @@ async def _transcribe_telegram_voice(
     item["language"] = result.language
     item["duration_ms"] = str(result.duration_ms)
     item["confidence"] = result.confidence
-    item["stt_latency_ms"] = str(elapsed_ms(started))
-    return item, False
+    latency_ms = elapsed_ms(started)
+    item["stt_latency_ms"] = str(latency_ms)
+    return item, "", latency_ms
 
 
 async def _send_transcription_failure_reply(
@@ -225,10 +248,47 @@ async def receive_webhook(
                 "sent": False,
                 "voice_error": True,
             }
-        item, transcription_failed = await _transcribe_telegram_voice(
+        item, voice_failure_stage, voice_latency_ms = await _transcribe_telegram_voice(
             item=item, media=port, transcribe_port=transcribe_port
         )
-        if transcription_failed:
+        if voice_failure_stage:
+            # Persist the claim and content-free outcome before the external reply.
+            # A flush is not durability: get_db normally commits only after this route
+            # returns, which would allow a commit failure to happen after Telegram sent.
+            persist_tool_outcome(
+                store,
+                provider="telegram",
+                channel=Channel.TELEGRAM,
+                inbound_provider_event_id=item["id"],
+                conversation_id=event_conversation_id(item),
+                lead_id=None,
+                outcome=transcription_outcome(
+                    transcribed=False,
+                    latency_ms=voice_latency_ms,
+                ),
+            )
+            try:
+                db.commit()
+            except SQLAlchemyError:
+                db.rollback()
+                # Telegram should retry this update. Never send before the claim and
+                # outcome are durable, and never expose database/provider detail.
+                raise HTTPException(
+                    status_code=503,
+                    detail="voice processing temporarily unavailable",
+                ) from None
+            log_comm(
+                channel=Channel.TELEGRAM.value,
+                provider="telegram",
+                actor_type="owner",
+                direction="in",
+                external_message_id=item["id"],
+                conversation_id=event_conversation_id(item),
+                policy_result=voice_failure_stage,
+                latency_ms=voice_latency_ms,
+                success=False,
+                automation_mode=settings.automation_mode.value,
+            )
             sent = await _send_transcription_failure_reply(
                 item=item,
                 port=port,
@@ -238,7 +298,10 @@ async def receive_webhook(
             store.mark_webhook(
                 provider="telegram",
                 provider_event_id=item["id"],
-                status="sent" if sent else "processed",
+                # A definite outbound failure must stay reclaimable. Marking it
+                # processed permanently deduplicates the only safe owner-facing
+                # explanation even though Telegram received nothing.
+                status="sent" if sent else "failed",
             )
             return {
                 "processed": 1,

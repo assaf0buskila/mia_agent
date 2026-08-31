@@ -103,3 +103,23 @@ Budget note: Multi-subsystem repair with production-facing integrations; impleme
 - 2026-08-30 the twenty-first clean-room HEAVY review failed on two P1 Unicode security-view gaps: 64 M*/Cf/full-width earlier operation variants and nine obscured readable-sentinel variants evaded the raw counter/guard, with all 73 crossing the four counted effects. The bounded repair masks JSON strings, applies NFKD compatibility normalization, removes every M*/Cf character, and casefolds only an intent/security view used for operation, negation, sentinel, and positive-clause checks; raw IDs, targets, literals, payloads, and provider data remain exact. Parent verification passes 26 owner-live tests, the exact 332-test 19-file suite, the full 2,474-test tree, whole-tree Ruff, origin binding, 273/273 evals, and diff-check. Current metrics are 164 function files, 1,646 definitions, 42,529 physical lines, 37,797 nonblank lines, and 36 C901 findings. A twenty-second fresh HEAVY review is required before commit or deployment.
 - 2026-08-30 the twenty-second clean-room HEAVY review failed on one P1 whole-turn authority defect: 24 mixed-script, sentinel-confusable, split-operation, and multilingual mutation-bearing prefixes were discarded while a later valid suffix crossed all four effects. The structural repair removes suffix-only matching and full-matches the complete security-view request using only bare, `Please`, exact `Please record this now:`, or tested `אלופה` prefaces plus one operation and one complete bound clause. Parent verification passes 27 owner-live tests, the exact 333-test 19-file suite, the full 2,475-test tree, whole-tree Ruff, origin binding, 273/273 evals, and diff-check. Current metrics are 164 function files, 1,646 definitions, 42,537 physical lines, 37,805 nonblank lines, and 36 C901 findings. A twenty-third fresh HEAVY review is required before commit or deployment.
 - 2026-08-30 the twenty-third clean-room HEAVY review passes with no unresolved P0/P1/P2/P3. It independently reproduces the persistent 126-case and 42-case matrices and adds a 168-case whole-turn probe: 246 combined denials are effect-free and 90 positives replay with one durable row/provider mutation. Owner-live 27, exact 333, full 2,475, whole-tree Ruff, origin binding, 273/273 evals, diff-check, and exact 164/164 inventory all pass. Phase 1.5 cleanup gates and root G7 are accepted; root live Telegram/provider G2/G3 and AWS deployment remain pending.
+
+## Phase 1.6 contract: live reliability closure
+
+- Scope: repair content-free Telegram voice failure evidence, truthful and retry-safe
+  website-to-WhatsApp owner notification, Composio account binding plus valid no-data
+  parsing, and the user's exact allowlisted Google Sheet.
+- Architecture: one production OwnerGraph agent remains. Development sub-agents own
+  disjoint files only; no production swarm, TTS, WhatsApp brain, or Sheets system of
+  record is introduced.
+- Finish line: `gates/leaf-1.6-live-reliability.md` plus root G2, G3, and G8 require
+  current-tree tests, fresh HEAVY review, an exact-SHA deployment, and live acceptance.
+- 2026-08-31 sanitized pre-deployment evidence in
+  `gates/evidence/phase16-live-predeploy.md` records that the configured Composio user
+  did not own an active account; `mia/prod` was rebound to the sole user owning all
+  eight required ACTIVE toolkits while preserving all other fields and the previous
+  secret version.
+- 2026-08-31 the same sanitized evidence records the exact production-bound Sheet ID
+  and successful bounded read of `10 Mia Activity!Z236`. Writes remain gated to a fresh
+  authenticated owner Telegram request; current-tree parser behavior is not claimed
+  live until the next exact-SHA deployment and re-probe.

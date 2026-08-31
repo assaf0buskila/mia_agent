@@ -1,9 +1,14 @@
 import json
 from urllib.parse import urlparse
 
-from app.db.models import CanonicalEventRow
+from app.db.models import (
+    CanonicalEventRow,
+    HandoffTokenRow,
+    OwnerNotificationRecipientClaimRow,
+)
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
+from app.domain import website_handoff_brief as website_handoff_brief_mod
 from app.domain.attribution import sanitize_attribution
 from app.domain.events import Channel
 from app.domain.handoff import click_to_chat_url
@@ -11,8 +16,10 @@ from app.domain.sales import NextAction, select_next_action
 from app.graph.orchestrator import build_graph
 from app.graph.state import empty_state
 from app.main import app
+from app.services.notifications import OwnerTelegramDelivery
 from fastapi.testclient import TestClient
 from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from tests.unit.test_handoff import CLICK_CHAT
 
@@ -591,6 +598,7 @@ def test_website_handoff_persists_whatsapp_handoff() -> None:
         session_id = created.json()["session_id"]
         response = client.post(f"/v1/website/sessions/{session_id}/handoff")
         assert response.status_code == 200
+        assert response.json()["notification_status"] == "failed"
     db = get_session_factory()()
     try:
         rows = _behavior_rows(db, session_id)
@@ -599,6 +607,212 @@ def test_website_handoff_persists_whatsapp_handoff() -> None:
         assert handoff[0].provider_event_id == f"{session_id}:whatsapp_handoff"
     finally:
         db.close()
+
+
+def test_website_handoff_reports_delivery_then_duplicate(monkeypatch) -> None:
+    monkeypatch.setenv("MIA_TELEGRAM_BOT_TOKEN", "tok")
+    monkeypatch.setenv("MIA_TELEGRAM_OWNER_USER_IDS", "111")
+    sends: list[tuple[str, ...]] = []
+    committed_before_send: list[tuple[bool, bool, int, int]] = []
+    session_id = ""
+
+    def deliver(**kwargs):
+        db = get_session_factory()()
+        try:
+            store = LeadStore(db)
+            lead_id = store.get_website_lead_id(session_id)
+            assert lead_id is not None
+            handoff_events = [
+                row
+                for row in _behavior_rows(db, session_id)
+                if json.loads(row.payload_json)["kind"] == "whatsapp_handoff"
+            ]
+            tokens = list(
+                db.scalars(
+                    select(HandoffTokenRow).where(
+                        HandoffTokenRow.website_session_id == session_id
+                    )
+                )
+            )
+            committed_before_send.append(
+                (
+                        store.has_owner_notification_delivery_claim(
+                            kind=website_handoff_brief_mod.KIND_WEBSITE_HANDOFF_DELIVERY,
+                        lead_id=lead_id,
+                        notification_key="",
+                    ),
+                    store.has_owner_notification(
+                        kind=website_handoff_brief_mod.KIND_WEBSITE_WHATSAPP,
+                        lead_id=lead_id,
+                    ),
+                    len(handoff_events),
+                    len(tokens),
+                )
+            )
+        finally:
+            db.close()
+        sends.append(kwargs["recipient_ids"])
+        return OwnerTelegramDelivery(delivered=kwargs["recipient_ids"])
+
+    monkeypatch.setattr(website_handoff_brief_mod, "_deliver_owner_brief", deliver)
+    with TestClient(app) as client:
+        session_id = client.post("/v1/website/sessions").json()["session_id"]
+        first = client.post(f"/v1/website/sessions/{session_id}/handoff")
+        second = client.post(f"/v1/website/sessions/{session_id}/handoff")
+
+    assert first.status_code == 200
+    assert first.json()["notification_status"] == "delivered"
+    assert second.json()["notification_status"] == "duplicate_or_ambiguous"
+    assert sends == [("111",)]
+    assert committed_before_send == [(True, True, 1, 1)]
+
+
+def test_website_handoff_legacy_lead_claim_suppresses_recipient_send(monkeypatch) -> None:
+    monkeypatch.setenv("MIA_TELEGRAM_BOT_TOKEN", "tok")
+    monkeypatch.setenv("MIA_TELEGRAM_OWNER_USER_IDS", "111")
+    sends: list[tuple[str, ...]] = []
+
+    def deliver(**kwargs):
+        sends.append(kwargs["recipient_ids"])
+        return OwnerTelegramDelivery(delivered=kwargs["recipient_ids"])
+
+    monkeypatch.setattr(website_handoff_brief_mod, "_deliver_owner_brief", deliver)
+    with TestClient(app) as client:
+        session_id = client.post("/v1/website/sessions").json()["session_id"]
+        db = get_session_factory()()
+        try:
+            store = LeadStore(db)
+            lead_id = store.get_website_lead_id(session_id)
+            assert lead_id is not None
+            assert store.try_claim_owner_notification(
+                kind=website_handoff_brief_mod.KIND_WEBSITE_WHATSAPP,
+                lead_id=lead_id,
+                conversation_id="",
+                claimed_at="2026-08-31T00:00:00+00:00",
+            )
+            db.commit()
+        finally:
+            db.close()
+
+        response = client.post(f"/v1/website/sessions/{session_id}/handoff")
+
+    assert response.status_code == 200
+    assert response.json()["notification_status"] == "duplicate_or_ambiguous"
+    assert sends == []
+    db = get_session_factory()()
+    try:
+        recipient_claims = list(
+            db.scalars(
+                select(OwnerNotificationRecipientClaimRow).where(
+                    OwnerNotificationRecipientClaimRow.lead_id == lead_id,
+                    OwnerNotificationRecipientClaimRow.kind
+                    == website_handoff_brief_mod.KIND_WEBSITE_WHATSAPP,
+                )
+            )
+        )
+        assert recipient_claims == []
+    finally:
+        db.close()
+
+
+def test_website_handoff_claim_commit_failure_sends_nothing_and_retries(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("MIA_TELEGRAM_BOT_TOKEN", "tok")
+    monkeypatch.setenv("MIA_TELEGRAM_OWNER_USER_IDS", "111")
+    sends: list[tuple[str, ...]] = []
+
+    def deliver(**kwargs):
+        sends.append(kwargs["recipient_ids"])
+        return OwnerTelegramDelivery(delivered=kwargs["recipient_ids"])
+
+    monkeypatch.setattr(website_handoff_brief_mod, "_deliver_owner_brief", deliver)
+    original_commit = Session.commit
+    injected = False
+
+    def fail_first_commit(db_session):
+        nonlocal injected
+        if not injected:
+            injected = True
+            raise RuntimeError("injected pre-delivery commit failure")
+        return original_commit(db_session)
+
+    with TestClient(app) as client:
+        session_id = client.post("/v1/website/sessions").json()["session_id"]
+        monkeypatch.setattr(Session, "commit", fail_first_commit)
+        failed = client.post(f"/v1/website/sessions/{session_id}/handoff")
+        assert failed.status_code == 503
+        assert failed.json() == {"detail": "handoff persistence unavailable"}
+        assert "token" not in failed.json()
+        assert sends == []
+
+        retried = client.post(f"/v1/website/sessions/{session_id}/handoff")
+
+    assert retried.status_code == 200
+    assert retried.json()["notification_status"] == "delivered"
+    assert sends == [("111",)]
+
+
+def test_website_handoff_explicit_rejection_is_retryable(monkeypatch) -> None:
+    monkeypatch.setenv("MIA_TELEGRAM_BOT_TOKEN", "tok")
+    monkeypatch.setenv("MIA_TELEGRAM_OWNER_USER_IDS", "111")
+    sends: list[tuple[str, ...]] = []
+
+    def deliver(**kwargs):
+        recipients = kwargs["recipient_ids"]
+        sends.append(recipients)
+        if len(sends) == 1:
+            return OwnerTelegramDelivery(rejected=recipients)
+        return OwnerTelegramDelivery(delivered=recipients)
+
+    monkeypatch.setattr(website_handoff_brief_mod, "_deliver_owner_brief", deliver)
+    with TestClient(app) as client:
+        session_id = client.post("/v1/website/sessions").json()["session_id"]
+        rejected = client.post(f"/v1/website/sessions/{session_id}/handoff")
+        retried = client.post(f"/v1/website/sessions/{session_id}/handoff")
+
+    assert rejected.json()["notification_status"] == "failed"
+    assert retried.json()["notification_status"] == "delivered"
+    assert sends == [("111",), ("111",)]
+
+
+def test_website_handoff_release_commit_failure_recovers_then_retries_once(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("MIA_TELEGRAM_BOT_TOKEN", "tok")
+    monkeypatch.setenv("MIA_TELEGRAM_OWNER_USER_IDS", "111")
+    sends: list[tuple[str, ...]] = []
+
+    def deliver(**kwargs):
+        recipients = kwargs["recipient_ids"]
+        sends.append(recipients)
+        if len(sends) == 1:
+            return OwnerTelegramDelivery(rejected=recipients)
+        return OwnerTelegramDelivery(delivered=recipients)
+
+    monkeypatch.setattr(website_handoff_brief_mod, "_deliver_owner_brief", deliver)
+    original_commit = Session.commit
+    commit_calls = 0
+
+    def fail_first_release_commit(db_session):
+        nonlocal commit_calls
+        commit_calls += 1
+        if commit_calls == 2:
+            raise RuntimeError("injected click-brief release commit failure")
+        return original_commit(db_session)
+
+    with TestClient(app) as client:
+        session_id = client.post("/v1/website/sessions").json()["session_id"]
+        monkeypatch.setattr(Session, "commit", fail_first_release_commit)
+        rejected = client.post(f"/v1/website/sessions/{session_id}/handoff")
+        retry = client.post(f"/v1/website/sessions/{session_id}/handoff")
+        duplicate = client.post(f"/v1/website/sessions/{session_id}/handoff")
+
+    assert rejected.json()["notification_status"] == "failed"
+    assert retry.json()["notification_status"] == "delivered"
+    assert duplicate.json()["notification_status"] == "duplicate_or_ambiguous"
+    assert sends == [("111",), ("111",)]
+    assert commit_calls >= 5
 
 
 def test_website_post_page_viewed_accepted_and_idempotent() -> None:

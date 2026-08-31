@@ -16,3 +16,5 @@ Scope: All requested Mia repairs are implemented, live owner capabilities are pr
   EVIDENCE: Final current-tree run passed all 2,375 collected tests; Ruff and origin binding passed; 233/233 deterministic evals plus routing 20/20 passed; second independent HEAVY rereview found no unresolved P0/P1/P2.
 - [x] G7: Every production/script Python function file receives a measured cleanup disposition, and accepted final simplifications are independently verified.
   EVIDENCE: Phase 1.5 closes with exact 164/164 disposition coverage and `gates/evidence/function-cleanup-heavy-twenty-third-review.md`: persistent 126 + 42 matrices, fresh 168-case four-effect review, full 2,475-test regression, Ruff, origin binding, 273/273 evals, diff-check, and no unresolved P0/P1/P2.
+- [ ] G8: Current live reliability closure covers website-to-WhatsApp owner notification, Composio identity/no-data behavior, and exact-Sheet binding without changing the one-owner-agent architecture.
+  EVIDENCE: tracked in `gates/leaf-1.6-live-reliability.md`; pending combined verification, deployment, and live acceptance.

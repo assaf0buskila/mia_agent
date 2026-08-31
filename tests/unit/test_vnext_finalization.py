@@ -26,9 +26,16 @@ from app.db.models import (
 )
 from app.db.session import get_session_factory, init_db, make_engine
 from app.db.store import LeadStore
+from app.domain import hot_handoff as hot_handoff_module
+from app.domain.conversation_scope import TakeoverState
 from app.domain.events import Channel, build_message_in_event, build_message_out_event
 from app.domain.hot_handoff import KIND_HOT_LEAD, apply_hot_handoff
+from app.domain.owner_notification_delivery import (
+    KIND_WEBSITE_HANDOFF_DELIVERY,
+    WEBSITE_HANDOFF_DELIVERY_KINDS,
+)
 from app.domain.sales import FitLevel, PainLevel
+from app.domain.website_handoff_brief import KIND_WEBSITE_WHATSAPP
 from app.main import app
 from app.services import finalization as finalization_module
 from app.services import notifications as notifications_mod
@@ -42,8 +49,8 @@ from app.services.finalization import (
 )
 from app.services.notifications import OwnerTelegramDelivery, render_conversation_summary
 from fastapi.testclient import TestClient
-from sqlalchemy import event
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy import event, select
+from sqlalchemy.orm import Session, sessionmaker
 
 # The unit DB is one shared in-memory sqlite for the whole module, so conversations
 # seeded here must sit AFTER the inactivity cutoffs the scan tests below use. Otherwise
@@ -243,6 +250,116 @@ def test_same_conversation_finalized_twice_pings_once(monkeypatch) -> None:
             )
             is None
         )
+    finally:
+        db.close()
+
+
+def test_finalization_commit_failure_sends_nothing_then_retries_once(
+    monkeypatch,
+) -> None:
+    telegram = _patch_owner_send(monkeypatch)
+    init_db()
+    db = get_session_factory()()
+    try:
+        store = LeadStore(db)
+        session_id = "web_final_commit_retry"
+        lead_id = _seed_turns(
+            store,
+            session_id=session_id,
+            turns=[("prospect", "שלום, רוצה להתקדם")],
+        )
+        db.commit()
+        summary = ConversationSummary(
+            conversation_id=session_id,
+            lead_id=lead_id,
+            recommended_next_step="call",
+        )
+        original_commit = Session.commit
+        injected = False
+
+        def fail_first_commit(db_session):
+            nonlocal injected
+            if not injected:
+                injected = True
+                raise RuntimeError("injected finalization claim commit failure")
+            return original_commit(db_session)
+
+        monkeypatch.setattr(Session, "commit", fail_first_commit)
+        first = finalize_website_conversation(
+            store, summary=summary, settings=_owner_settings()
+        )
+        assert (first.claimed, first.sent, first.duplicate) == (False, False, False)
+        assert telegram.sends == []
+        assert not store.has_owner_notification_delivery_claim(
+            kind=KIND, lead_id=lead_id, notification_key=session_id
+        )
+
+        retry = finalize_website_conversation(
+            store, summary=summary, settings=_owner_settings()
+        )
+        duplicate = finalize_website_conversation(
+            store, summary=summary, settings=_owner_settings()
+        )
+
+        assert (retry.claimed, retry.sent, retry.duplicate) == (True, True, False)
+        assert (duplicate.claimed, duplicate.sent, duplicate.duplicate) == (
+            False,
+            False,
+            True,
+        )
+        assert len(telegram.sends) == 1
+    finally:
+        db.close()
+
+
+def test_finalization_release_commit_failure_recovers_then_retries_once(
+    monkeypatch,
+) -> None:
+    sends: list[tuple[str, ...]] = []
+
+    def deliver(*, recipient_ids=None, **kwargs) -> OwnerTelegramDelivery:
+        del kwargs
+        recipients = tuple(recipient_ids or ())
+        sends.append(recipients)
+        if len(sends) == 1:
+            return OwnerTelegramDelivery(rejected=recipients)
+        return OwnerTelegramDelivery(delivered=recipients)
+
+    monkeypatch.setattr(finalization_module, "deliver_owner_telegram", deliver)
+    init_db()
+    db = get_session_factory()()
+    try:
+        store = LeadStore(db)
+        summary = ConversationSummary(
+            conversation_id="web_final_release_retry",
+            lead_id="lead_final_release_retry",
+        )
+        original_commit = Session.commit
+        commit_calls = 0
+
+        def fail_first_release_commit(db_session):
+            nonlocal commit_calls
+            commit_calls += 1
+            if commit_calls == 2:
+                raise RuntimeError("injected finalization release commit failure")
+            return original_commit(db_session)
+
+        monkeypatch.setattr(Session, "commit", fail_first_release_commit)
+        rejected = finalize_website_conversation(
+            store, summary=summary, settings=_owner_settings()
+        )
+        retry = finalize_website_conversation(
+            store, summary=summary, settings=_owner_settings()
+        )
+        duplicate = finalize_website_conversation(
+            store, summary=summary, settings=_owner_settings()
+        )
+
+        assert rejected.claimed and not rejected.sent
+        assert retry.sent
+        assert duplicate.duplicate
+        assert sends == [("111",), ("111",)]
+        assert commit_calls >= 4
     finally:
         db.close()
 
@@ -464,6 +581,56 @@ def test_concurrent_duplicate_claim_returns_false_and_never_raises(tmp_path) -> 
         engine.dispose()
 
 
+def test_concurrent_hot_and_click_claims_share_one_canonical_winner(tmp_path) -> None:
+    engine = make_engine(f"sqlite:///{tmp_path / 'handoff-race.db'}")
+    try:
+        Base.metadata.create_all(bind=engine)
+        factory = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+        loser = factory()
+        racer = factory()
+        claim = {
+            "kind": KIND_WEBSITE_HANDOFF_DELIVERY,
+            "compatible_kinds": WEBSITE_HANDOFF_DELIVERY_KINDS,
+            "lead_id": "lead_cross_path_race",
+            "notification_key": "",
+            "recipient_id": "111",
+            "claimed_at": "2026-08-31T09:00:00+00:00",
+        }
+        fired: list[str] = []
+
+        @event.listens_for(engine, "before_cursor_execute")
+        def _let_other_path_claim(conn, cursor, statement, parameters, context, many):
+            del conn, cursor, parameters, context, many
+            if fired or "owner_notification_recipient_claims" not in statement.lower():
+                return
+            if not statement.lstrip().upper().startswith("INSERT"):
+                return
+            fired.append(statement)
+            assert LeadStore(racer).try_claim_owner_notification_recipient_compatible(
+                **claim
+            )
+            racer.commit()
+
+        try:
+            claimed = LeadStore(
+                loser
+            ).try_claim_owner_notification_recipient_compatible(**claim)
+            loser.commit()
+        finally:
+            event.remove(engine, "before_cursor_execute", _let_other_path_claim)
+
+        assert fired, "the cross-path racing writer never claimed"
+        assert claimed is False
+        rows = list(loser.scalars(select(OwnerNotificationRecipientClaimRow)))
+        assert [(row.kind, row.lead_id, row.recipient_id) for row in rows] == [
+            (KIND_WEBSITE_HANDOFF_DELIVERY, claim["lead_id"], "111")
+        ]
+        loser.close()
+        racer.close()
+    finally:
+        engine.dispose()
+
+
 def test_apply_hot_handoff_twice_sends_one_brief(monkeypatch) -> None:
     """Defect 3. The persist call returned None, so every retry re-sent the same brief."""
     telegram = _patch_owner_send(monkeypatch)
@@ -492,6 +659,138 @@ def test_apply_hot_handoff_twice_sends_one_brief(monkeypatch) -> None:
         assert len(telegram.sends) == 1
         assert lead_id in str(telegram.sends[0]["text"])
         assert store.has_owner_notification(kind=KIND_HOT_LEAD, lead_id=lead_id)
+    finally:
+        db.close()
+
+
+def test_hot_handoff_commit_failure_sends_nothing_then_retries_once(
+    monkeypatch,
+) -> None:
+    telegram = _patch_owner_send(monkeypatch)
+    init_db()
+    db = get_session_factory()()
+    try:
+        store = LeadStore(db)
+        _, lead_id = store.open_channel_lead(
+            channel=Channel.WEBSITE, external_id="web_hot_commit_retry"
+        )
+        db.commit()
+        original_commit = Session.commit
+        injected = False
+
+        def fail_first_commit(db_session):
+            nonlocal injected
+            if not injected:
+                injected = True
+                raise RuntimeError("injected hot-handoff claim commit failure")
+            return original_commit(db_session)
+
+        monkeypatch.setattr(Session, "commit", fail_first_commit)
+        first = apply_hot_handoff(
+            store,
+            lead_id=lead_id,
+            inbound_id="in_hot_commit_1",
+            want="רוצה לדבר עכשיו",
+            kill_switch=False,
+            settings=_owner_settings(),
+        )
+        assert (first.attempted, first.known_unreachable, first.delivered) == (
+            False,
+            True,
+            (),
+        )
+        assert telegram.sends == []
+        assert store.get_takeover_state(lead_id) == TakeoverState.MIA_ACTIVE.value
+        assert not store.has_owner_notification_delivery_claim(
+            kind=KIND_HOT_LEAD, lead_id=lead_id
+        )
+
+        retry = apply_hot_handoff(
+            store,
+            lead_id=lead_id,
+            inbound_id="in_hot_commit_2",
+            want="רוצה לדבר עכשיו",
+            kill_switch=False,
+            settings=_owner_settings(),
+        )
+        duplicate = apply_hot_handoff(
+            store,
+            lead_id=lead_id,
+            inbound_id="in_hot_commit_3",
+            want="רוצה לדבר עכשיו",
+            kill_switch=False,
+            settings=_owner_settings(),
+        )
+
+        assert retry.delivered == ("111",)
+        assert duplicate.attempted is False
+        assert len(telegram.sends) == 1
+    finally:
+        db.close()
+
+
+def test_hot_handoff_release_commit_failure_recovers_then_retries_once(
+    monkeypatch,
+) -> None:
+    sends: list[tuple[str, ...]] = []
+
+    def deliver(**kwargs) -> OwnerTelegramDelivery:
+        recipients = kwargs["recipient_ids"]
+        sends.append(recipients)
+        if len(sends) == 1:
+            return OwnerTelegramDelivery(rejected=recipients)
+        return OwnerTelegramDelivery(delivered=recipients)
+
+    monkeypatch.setattr(hot_handoff_module, "_deliver_owners", deliver)
+    init_db()
+    db = get_session_factory()()
+    try:
+        store = LeadStore(db)
+        _, lead_id = store.open_channel_lead(
+            channel=Channel.WEBSITE, external_id="web_hot_release_retry"
+        )
+        db.commit()
+        original_commit = Session.commit
+        commit_calls = 0
+
+        def fail_first_release_commit(db_session):
+            nonlocal commit_calls
+            commit_calls += 1
+            if commit_calls == 2:
+                raise RuntimeError("injected hot-handoff release commit failure")
+            return original_commit(db_session)
+
+        monkeypatch.setattr(Session, "commit", fail_first_release_commit)
+        rejected = apply_hot_handoff(
+            store,
+            lead_id=lead_id,
+            inbound_id="in_hot_release_1",
+            want="human",
+            kill_switch=False,
+            settings=_owner_settings(),
+        )
+        retry = apply_hot_handoff(
+            store,
+            lead_id=lead_id,
+            inbound_id="in_hot_release_2",
+            want="human",
+            kill_switch=False,
+            settings=_owner_settings(),
+        )
+        duplicate = apply_hot_handoff(
+            store,
+            lead_id=lead_id,
+            inbound_id="in_hot_release_3",
+            want="human",
+            kill_switch=False,
+            settings=_owner_settings(),
+        )
+
+        assert rejected.attempted and not rejected.delivered
+        assert retry.delivered == ("111",)
+        assert duplicate.attempted is False
+        assert sends == [("111",), ("111",)]
+        assert commit_calls >= 4
     finally:
         db.close()
 
@@ -657,6 +956,49 @@ def test_website_session_end_route_is_idempotent(monkeypatch) -> None:
     assert len(telegram.sends) == 1
 
 
+def test_website_session_end_commit_failure_is_retryable_and_sends_once(
+    monkeypatch,
+) -> None:
+    telegram = _patch_owner_send(monkeypatch)
+    settings = _owner_settings()
+    monkeypatch.setattr("app.api.website.get_settings", lambda: settings)
+    init_db()
+    session_id = "web_route_commit_retry"
+    db = get_session_factory()()
+    try:
+        store = LeadStore(db)
+        _seed_turns(
+            store, session_id=session_id, turns=[("prospect", "היי, רוצה לשמוע")]
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    original_commit = Session.commit
+    injected = False
+
+    def fail_first_commit(db_session):
+        nonlocal injected
+        if not injected:
+            injected = True
+            raise RuntimeError("injected route finalization claim commit failure")
+        return original_commit(db_session)
+
+    monkeypatch.setattr(Session, "commit", fail_first_commit)
+    with TestClient(app) as client:
+        failed = client.post(f"/v1/website/sessions/{session_id}/end")
+        assert failed.status_code == 200
+        assert failed.json() == {"accepted": True, "finalized": False}
+        assert telegram.sends == []
+
+        retry = client.post(f"/v1/website/sessions/{session_id}/end")
+        duplicate = client.post(f"/v1/website/sessions/{session_id}/end")
+
+    assert retry.json() == {"accepted": True, "finalized": True}
+    assert duplicate.json() == {"accepted": True, "finalized": False}
+    assert len(telegram.sends) == 1
+
+
 def test_inactive_website_conversation_finalizes_once() -> None:
     init_db()
     db = get_session_factory()()
@@ -773,6 +1115,132 @@ def test_empty_website_session_is_not_finalized_on_inactivity() -> None:
         )
         assert result is None
         assert not store.has_owner_notification(kind=kind_for(), lead_id=lead_id)
+    finally:
+        db.close()
+
+
+def test_inactivity_skip_uses_retained_click_claim_not_owner_inbox() -> None:
+    init_db()
+    db = get_session_factory()()
+    try:
+        store = LeadStore(db)
+        old = datetime(2026, 8, 25, 12, 0, tzinfo=UTC)
+        failed_session = "web_click_failed_inactive"
+        retained_session = "web_click_retained_inactive"
+        failed_lead = _seed_turns(
+            store,
+            session_id=failed_session,
+            turns=[("prospect", "שלום")],
+            start=old,
+        )
+        retained_lead = _seed_turns(
+            store,
+            session_id=retained_session,
+            turns=[("prospect", "hello")],
+            start=old + timedelta(seconds=1),
+        )
+        for lead_id in (failed_lead, retained_lead):
+            store.upsert_owner_notification(
+                kind=KIND_WEBSITE_WHATSAPP,
+                lead_id=lead_id,
+                scheduled_at=old.isoformat(),
+            )
+        assert store.try_claim_owner_notification_recipient(
+            kind=KIND_WEBSITE_WHATSAPP,
+            lead_id=retained_lead,
+            notification_key="",
+            recipient_id="111",
+            claimed_at=old.isoformat(),
+        )
+        db.commit()
+
+        rows = store.list_inactive_website_conversations(
+            cutoff_iso=(old + timedelta(minutes=31)).isoformat(),
+            skip_kinds=(KIND_WEBSITE_WHATSAPP,),
+            limit=50,
+        )
+        sessions = {session_id for session_id, _ in rows}
+        assert failed_session in sessions
+        assert retained_session not in sessions
+    finally:
+        db.close()
+
+
+def test_failed_whatsapp_click_inbox_does_not_suppress_later_finalization(
+    monkeypatch,
+) -> None:
+    telegram = _patch_owner_send(monkeypatch)
+    init_db()
+    db = get_session_factory()()
+    try:
+        store = LeadStore(db)
+        session_id = "web_click_failed_then_close"
+        lead_id = _seed_turns(
+            store,
+            session_id=session_id,
+            turns=[("prospect", "אני רוצה לדבר עם אסף")],
+        )
+        store.upsert_owner_notification(
+            kind=KIND_WEBSITE_WHATSAPP,
+            lead_id=lead_id,
+            scheduled_at=_START.isoformat(),
+        )
+        db.commit()
+
+        result = qualify_and_finalize(
+            store,
+            session_id=session_id,
+            lead_id=lead_id,
+            settings=_owner_settings(),
+            next_step="session_closed",
+            require_visitor_message=True,
+        )
+
+        assert result is not None and result.sent
+        assert len(telegram.sends) == 1
+    finally:
+        db.close()
+
+
+def test_retained_whatsapp_click_recipient_claim_suppresses_duplicate_finalization(
+    monkeypatch,
+) -> None:
+    telegram = _patch_owner_send(monkeypatch)
+    init_db()
+    db = get_session_factory()()
+    try:
+        store = LeadStore(db)
+        session_id = "web_click_retained_then_close"
+        lead_id = _seed_turns(
+            store,
+            session_id=session_id,
+            turns=[("prospect", "אני רוצה לדבר עם אסף")],
+        )
+        store.upsert_owner_notification(
+            kind=KIND_WEBSITE_WHATSAPP,
+            lead_id=lead_id,
+            scheduled_at=_START.isoformat(),
+        )
+        assert store.try_claim_owner_notification_recipient(
+            kind=KIND_WEBSITE_WHATSAPP,
+            lead_id=lead_id,
+            notification_key="",
+            recipient_id="111",
+            claimed_at=_START.isoformat(),
+        )
+        db.commit()
+
+        result = qualify_and_finalize(
+            store,
+            session_id=session_id,
+            lead_id=lead_id,
+            settings=_owner_settings(),
+            next_step="session_closed",
+            require_visitor_message=True,
+        )
+
+        assert result is None
+        assert telegram.sends == []
     finally:
         db.close()
 

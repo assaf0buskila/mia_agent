@@ -9,6 +9,7 @@ Read-only — never add sitemap or site.
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from datetime import datetime
 from typing import Any, Protocol
 
@@ -31,6 +32,8 @@ COMPOSIO_INSPECT_URL_TOOL = "GOOGLE_SEARCH_CONSOLE_INSPECT_URL"
 _COMPOSIO_EXECUTE_BASE = "https://backend.composio.dev/api/v3.1/tools/execute"
 MAX_ANALYTICS_ROWS = 10
 PREFERRED_GSC_HOST = "assafweb.com"
+_ALLOWED_ANALYTICS_DIMENSIONS = frozenset({"page", "query"})
+_GSC_RESPONSE_AGGREGATION_TYPES = frozenset({"auto", "byPage", "byProperty"})
 
 
 class SearchAnalyticsRow(BaseModel):
@@ -143,6 +146,7 @@ class ComposioSearchConsolePort:
         end_date: str,
         dimensions: list[str],
     ) -> list[SearchAnalyticsRow]:
+        normalized_dimensions = normalize_search_analytics_dimensions(dimensions)
         site_url = self._site_url
         if not site_url:
             return []
@@ -150,13 +154,15 @@ class ComposioSearchConsolePort:
             "site_url": site_url,
             "start_date": start_date,
             "end_date": end_date,
-            "dimensions": dimensions[:2],
+            "dimensions": list(normalized_dimensions),
             "row_limit": MAX_ANALYTICS_ROWS,
         }
         body = self._execute(COMPOSIO_SEARCH_ANALYTICS_TOOL, arguments)
-        if body is not None and not isinstance(body.get("rows"), list):
+        if body is not None and not _has_analytics_rows_schema(
+            body, normalized_dimensions
+        ):
             raise AdapterSchemaError()
-        return _map_analytics_rows(body, dimensions)
+        return _map_analytics_rows(body, normalized_dimensions)
 
     def inspect_url(self, url: str) -> UrlInspectionResult | None:
         trimmed = url.strip()
@@ -274,9 +280,31 @@ def pick_gsc_site(sites: list[str], *, preferred: str = "") -> str:
     return ""
 
 
+def normalize_search_analytics_dimensions(
+    dimensions: object,
+) -> tuple[str, ...]:
+    """Return the one request/mapping dimension sequence or fail closed."""
+    if (
+        not isinstance(dimensions, Sequence)
+        or isinstance(dimensions, (str, bytes))
+        or not dimensions
+        or len(dimensions) > 2
+    ):
+        raise AdapterSchemaError()
+    normalized: list[str] = []
+    for dimension in dimensions:
+        if not isinstance(dimension, str):
+            raise AdapterSchemaError()
+        trimmed = dimension.strip()
+        if trimmed not in _ALLOWED_ANALYTICS_DIMENSIONS or trimmed in normalized:
+            raise AdapterSchemaError()
+        normalized.append(trimmed)
+    return tuple(normalized)
+
+
 def _map_analytics_rows(
     data: dict[str, Any] | None,
-    dimensions: list[str],
+    dimensions: tuple[str, ...],
 ) -> list[SearchAnalyticsRow]:
     if data is None:
         return []
@@ -286,34 +314,85 @@ def _map_analytics_rows(
     mapped: list[SearchAnalyticsRow] = []
     dim_keys = [dim.lower() for dim in dimensions]
     for row in rows:
-        if not isinstance(row, dict):
-            continue
+        if not _has_analytics_row_schema(row, dimensions):
+            raise AdapterSchemaError()
+        assert isinstance(row, dict)
         keys = row.get("keys")
-        key_list = keys if isinstance(keys, list) else []
+        if not isinstance(keys, list):
+            raise AdapterSchemaError()
+        key_list = keys
         page = ""
         query = ""
         for index, dim in enumerate(dim_keys):
-            if index >= len(key_list):
-                continue
             val = key_list[index]
-            text = val.strip() if isinstance(val, str) else ""
+            if not isinstance(val, str):
+                raise AdapterSchemaError()
+            text = val.strip()
             if dim in {"page", "landingpage"}:
                 page = text
             elif dim in {"query", "searchquery"}:
                 query = text
+        metrics = {
+            name: _metric_str(row[name])
+            for name in _GSC_METRIC_FIELDS
+            if name in row
+        }
+        if any(value is None for value in metrics.values()):
+            raise AdapterSchemaError()
         mapped.append(
             SearchAnalyticsRow(
                 page=page,
                 query=query,
-                clicks=_metric_str(row.get("clicks")),
-                impressions=_metric_str(row.get("impressions")),
-                ctr=_metric_str(row.get("ctr")),
-                position=_metric_str(row.get("position")),
+                clicks=metrics["clicks"],
+                impressions=metrics["impressions"],
+                ctr=metrics["ctr"],
+                position=metrics["position"],
             )
         )
         if len(mapped) >= MAX_ANALYTICS_ROWS:
             break
     return mapped
+
+
+_GSC_METRIC_FIELDS = ("clicks", "impressions", "ctr", "position")
+
+
+def _has_analytics_rows_schema(
+    data: dict[str, Any], dimensions: tuple[str, ...]
+) -> bool:
+    """Accept Google's typed no-data response, but never a malformed present rows field."""
+    aggregation = data.get("responseAggregationType")
+    if "responseAggregationType" in data and not (
+        isinstance(aggregation, str)
+        and aggregation in _GSC_RESPONSE_AGGREGATION_TYPES
+    ):
+        return False
+    if "rows" in data:
+        rows = data["rows"]
+        if not isinstance(rows, list):
+            return False
+        return all(_has_analytics_row_schema(row, dimensions) for row in rows)
+    return (
+        isinstance(aggregation, str)
+        and aggregation in _GSC_RESPONSE_AGGREGATION_TYPES
+    )
+
+
+def _has_analytics_row_schema(row: object, dimensions: tuple[str, ...]) -> bool:
+    if not isinstance(row, dict):
+        return False
+    keys = row.get("keys")
+    required_keys = len(dimensions)
+    if (
+        not isinstance(keys, list)
+        or len(keys) != required_keys
+        or any(not isinstance(value, str) for value in keys[:required_keys])
+    ):
+        return False
+    return all(
+        name in row and _metric_str(row[name]) is not None
+        for name in _GSC_METRIC_FIELDS
+    )
 
 
 def _map_inspection(url: str, data: dict[str, Any] | None) -> UrlInspectionResult | None:

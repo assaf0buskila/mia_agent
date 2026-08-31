@@ -115,6 +115,7 @@ class _FakeHotHandoffStore:
         self.upserts: list[dict[str, str]] = []
         self.released: list[tuple[str, str, str]] = []
         self.recipient_claims: set[tuple[str, str, str]] = set()
+        self.delivery_state_commits = 0
         self.sales = SalesState(
             lead_id="lead_hot123456", fit=FitLevel.GOOD, pain_level=PainLevel.P3
         )
@@ -160,10 +161,59 @@ class _FakeHotHandoffStore:
         self.recipient_claims.add(key)
         return True
 
+    def try_claim_owner_notification_recipient_compatible(
+        self,
+        *,
+        kind: str,
+        compatible_kinds: tuple[str, ...],
+        lead_id: str,
+        recipient_id: str,
+        claimed_at: str,
+        notification_key: str = "",
+    ) -> bool:
+        del notification_key
+        if any(
+            claim[0] in compatible_kinds
+            and claim[1:] == (lead_id, recipient_id)
+            for claim in self.recipient_claims
+        ):
+            return False
+        return self.try_claim_owner_notification_recipient(
+            kind=kind,
+            lead_id=lead_id,
+            recipient_id=recipient_id,
+            claimed_at=claimed_at,
+        )
+
     def release_owner_notification_recipient_claim(
         self, *, kind: str, lead_id: str, recipient_id: str
     ) -> None:
         self.recipient_claims.discard((kind, lead_id, recipient_id))
+
+    def commit_owner_notification_delivery_state(self) -> bool:
+        self.delivery_state_commits += 1
+        return True
+
+    def release_owner_notification_recipient_claims_durably(
+        self,
+        *,
+        kind: str,
+        lead_id: str,
+        recipient_ids: tuple[str, ...],
+        notification_key: str = "",
+    ) -> bool:
+        del notification_key
+        for recipient_id in recipient_ids:
+            self.release_owner_notification_recipient_claim(
+                kind=kind, lead_id=lead_id, recipient_id=recipient_id
+            )
+        return self.commit_owner_notification_delivery_state()
+
+    def has_owner_notification_claim(
+        self, *, kind: str, lead_id: str, conversation_id: str = ""
+    ) -> bool:
+        del kind, lead_id, conversation_id
+        return False
 
 
 def test_apply_hot_handoff_notifies_every_owner(monkeypatch) -> None:
@@ -186,6 +236,7 @@ def test_apply_hot_handoff_notifies_every_owner(monkeypatch) -> None:
     assert [call["chat_id"] for call in client.calls] == ["111", "222"]
     assert len(store.upserts) == 1
     assert store.upserts[0]["kind"] == KIND_HOT_LEAD
+    assert store.delivery_state_commits == 1
 
 
 def test_hot_handoff_releases_only_after_confirmed_full_rejection(monkeypatch) -> None:
@@ -205,7 +256,8 @@ def test_hot_handoff_releases_only_after_confirmed_full_rejection(monkeypatch) -
         kill_switch=False,
         settings=Settings(telegram_bot_token="tok", telegram_owner_user_ids="111"),
     )
-    assert (KIND_HOT_LEAD, "lead_hot123456", "111") not in store.recipient_claims
+    assert store.recipient_claims == set()
+    assert store.delivery_state_commits == 2
 
 
 def test_hot_handoff_retains_claim_after_ambiguous_transport_error(monkeypatch) -> None:

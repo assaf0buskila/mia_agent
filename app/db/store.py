@@ -2431,6 +2431,137 @@ class LeadStore:
             is not None
         )
 
+    def has_owner_notification_delivery_claim(
+        self, *, kind: str, lead_id: str, notification_key: str = ""
+    ) -> bool:
+        """Whether legacy or per-recipient state conservatively protects a delivery.
+
+        Recipient claims are retained after Telegram acceptance or an ambiguous
+        transport result and released after an explicit rejection. The legacy ledger
+        has no outcome detail, so its presence remains conservative duplicate evidence.
+        """
+        if not kind or not lead_id or not isinstance(notification_key, str):
+            return False
+        if self.has_owner_notification_claim(
+            kind=kind,
+            lead_id=lead_id,
+            conversation_id=notification_key,
+        ):
+            return True
+        row = self.session.scalars(
+            select(OwnerNotificationRecipientClaimRow)
+            .where(
+                OwnerNotificationRecipientClaimRow.kind == kind,
+                OwnerNotificationRecipientClaimRow.lead_id == lead_id,
+                OwnerNotificationRecipientClaimRow.notification_key
+                == notification_key,
+            )
+            .limit(1)
+        ).first()
+        return row is not None
+
+    def commit_owner_notification_delivery_state(self) -> bool:
+        """Durably close local state before or after an external owner delivery.
+
+        A website request normally commits after the FastAPI dependency yields back.
+        That is too late for Telegram: an accepted request followed by a database
+        commit failure would lose its recipient claim and make the next click resend.
+        Callers use this boundary before the external call, and again after releasing
+        explicitly rejected recipients. A failed commit is rolled back so the shared
+        request session remains usable and the caller can return a truthful status.
+        """
+        try:
+            self.session.commit()
+        except Exception:  # noqa: BLE001 - transaction boundary must fail closed
+            self.session.rollback()
+            return False
+        return True
+
+    def try_claim_owner_notification_recipient_compatible(
+        self,
+        *,
+        kind: str,
+        compatible_kinds: tuple[str, ...],
+        lead_id: str,
+        recipient_id: str,
+        claimed_at: str,
+        notification_key: str = "",
+    ) -> bool:
+        """Claim a canonical recipient key while honoring historical kind aliases.
+
+        Historical rows are stable compatibility evidence. New callers all insert the
+        same canonical ``kind``, so the database primary key still decides concurrent
+        hot-handoff versus WhatsApp-click races without a read-then-send window.
+        """
+        legacy_kinds = tuple(sorted(set(compatible_kinds) - {kind}))
+        if (
+            not kind
+            or not lead_id
+            or not isinstance(notification_key, str)
+            or not recipient_id.isdecimal()
+        ):
+            return False
+        # Insert the shared new key first. That atomic PK conflict, not the historical
+        # compatibility read, decides races between new hot and click callers.
+        inserted = self.try_claim_owner_notification_recipient(
+            kind=kind,
+            lead_id=lead_id,
+            notification_key=notification_key,
+            recipient_id=recipient_id,
+            claimed_at=claimed_at,
+        )
+        if not inserted:
+            return False
+        if legacy_kinds:
+            historical = self.session.scalars(
+                select(OwnerNotificationRecipientClaimRow)
+                .where(
+                    OwnerNotificationRecipientClaimRow.kind.in_(legacy_kinds),
+                    OwnerNotificationRecipientClaimRow.lead_id == lead_id,
+                    OwnerNotificationRecipientClaimRow.notification_key
+                    == notification_key,
+                    OwnerNotificationRecipientClaimRow.recipient_id == recipient_id,
+                )
+                .limit(1)
+            ).first()
+            if historical is not None:
+                self.release_owner_notification_recipient_claim(
+                    kind=kind,
+                    lead_id=lead_id,
+                    notification_key=notification_key,
+                    recipient_id=recipient_id,
+                )
+                return False
+        return True
+
+    def release_owner_notification_recipient_claims_durably(
+        self,
+        *,
+        kind: str,
+        lead_id: str,
+        recipient_ids: tuple[str, ...],
+        notification_key: str = "",
+    ) -> bool:
+        """Persist confirmed-rejection releases with one bounded recovery attempt.
+
+        A failed commit rolls its DELETEs back. Re-issuing the exact idempotent deletes
+        once prevents a transient post-send commit failure from retaining a known
+        rejected recipient forever, without risking another Telegram call here.
+        """
+        if not recipient_ids:
+            return True
+        for _attempt in range(2):
+            for recipient_id in recipient_ids:
+                self.release_owner_notification_recipient_claim(
+                    kind=kind,
+                    lead_id=lead_id,
+                    notification_key=notification_key,
+                    recipient_id=recipient_id,
+                )
+            if self.commit_owner_notification_delivery_state():
+                return True
+        return False
+
     def release_owner_notification_claim(
         self, *, kind: str, lead_id: str, conversation_id: str = ""
     ) -> None:
@@ -2835,9 +2966,9 @@ class LeadStore:
     ) -> list[tuple[str, str]]:
         """Website session_id + lead_id whose last visitor message is at or before cutoff.
 
-        `skip_kinds` drops every session of a lead that already has an owner notification
-        of that kind — right for lead-scoped kinds such as the WhatsApp handoff, where the
-        conversation has moved off the website entirely.
+        `skip_kinds` drops every session of a lead that has retained delivery claim state
+        for that kind. It deliberately does not use the owner inbox row: a known failed
+        WhatsApp-click Telegram attempt remains eligible for later finalization.
 
         `skip_conversation_kinds` drops only the sessions that were already claimed, so a
         returning lead's next conversation is still scanned. Using the lead-scoped skip for
@@ -2871,10 +3002,20 @@ class LeadStore:
             .limit(limit)
         )
         if skip_kinds:
-            notified = select(OwnerNotificationRow.lead_id).where(
-                OwnerNotificationRow.kind.in_(skip_kinds)
+            legacy_claimed = select(OwnerNotificationClaimRow.lead_id).where(
+                OwnerNotificationClaimRow.kind.in_(skip_kinds),
+                OwnerNotificationClaimRow.conversation_id == "",
             )
-            query = query.where(LeadRow.id.notin_(notified))
+            recipient_claimed = select(
+                OwnerNotificationRecipientClaimRow.lead_id
+            ).where(
+                OwnerNotificationRecipientClaimRow.kind.in_(skip_kinds),
+                OwnerNotificationRecipientClaimRow.notification_key == "",
+            )
+            query = query.where(
+                LeadRow.id.notin_(legacy_claimed),
+                LeadRow.id.notin_(recipient_claimed),
+            )
         if skip_conversation_kinds:
             claimed = (
                 select(OwnerNotificationClaimRow.kind)

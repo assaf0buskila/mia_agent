@@ -2,7 +2,9 @@ import json
 
 import httpx
 import pytest
+from app.capabilities.search_console import search_console_query
 from app.core.config import Settings
+from app.core.errors import InvalidArguments
 from app.domain.tools import AdapterHttpError, AdapterResponseError, AdapterSchemaError
 from app.integrations.search_console import (
     COMPOSIO_GSC_VERSION,
@@ -117,6 +119,234 @@ def test_composio_search_console_schema_and_execution_failures_are_not_empty() -
     assert response_error.value.tool_status() == "error"
 
 
+@pytest.mark.parametrize("aggregation", ["auto", "byPage", "byProperty"])
+def test_composio_search_console_well_formed_no_data_returns_empty(
+    aggregation: str,
+) -> None:
+    client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                json={
+                    "successful": True,
+                    "data": {"responseAggregationType": aggregation},
+                },
+            )
+        )
+    )
+    port = ComposioSearchConsolePort(
+        api_key="cmp-test",
+        user_id="user-123",
+        site_url="https://www.assafweb.com/",
+        client=client,
+    )
+
+    assert port.query_search_analytics(
+        start_date="2026-08-29", end_date="2026-08-29", dimensions=["page"]
+    ) == []
+
+
+@pytest.mark.parametrize(
+    "aggregation",
+    [None, "", "AUTO", "byNewsShowcasePanel", "bySite", 7, {}],
+)
+def test_composio_search_console_unknown_no_data_aggregation_fails_closed(
+    aggregation: object,
+) -> None:
+    client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                json={
+                    "successful": True,
+                    "data": {"responseAggregationType": aggregation},
+                },
+            )
+        )
+    )
+    port = ComposioSearchConsolePort(
+        api_key="cmp-test",
+        user_id="user-123",
+        site_url="https://www.assafweb.com/",
+        client=client,
+    )
+
+    with pytest.raises(AdapterSchemaError):
+        port.query_search_analytics(
+            start_date="2026-08-29",
+            end_date="2026-08-29",
+            dimensions=["page"],
+        )
+
+
+def test_composio_search_console_unknown_populated_aggregation_fails_closed() -> None:
+    client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                json={
+                    "successful": True,
+                    "data": {
+                        "rows": [
+                            {
+                                "keys": ["/"],
+                                "clicks": 1,
+                                "impressions": 2,
+                                "ctr": 0.5,
+                                "position": 3,
+                            }
+                        ],
+                        "responseAggregationType": "byNewsShowcasePanel",
+                    },
+                },
+            )
+        )
+    )
+    port = ComposioSearchConsolePort(
+        api_key="cmp-test",
+        user_id="user-123",
+        site_url="https://www.assafweb.com/",
+        client=client,
+    )
+
+    with pytest.raises(AdapterSchemaError):
+        port.query_search_analytics(
+            start_date="2026-08-01",
+            end_date="2026-08-28",
+            dimensions=["page"],
+        )
+
+
+@pytest.mark.parametrize(
+    "dimensions",
+    [
+        [],
+        ["page", "page"],
+        ["page", "query", "page"],
+        ["landingPage"],
+        [7],
+    ],
+)
+def test_composio_search_console_invalid_dimensions_fail_before_http(
+    dimensions: list[str],
+) -> None:
+    def unexpected_request(_request: httpx.Request) -> httpx.Response:
+        pytest.fail("invalid dimensions must fail before the provider request")
+
+    port = ComposioSearchConsolePort(
+        api_key="cmp-test",
+        user_id="user-123",
+        site_url="https://www.assafweb.com/",
+        client=httpx.Client(transport=httpx.MockTransport(unexpected_request)),
+    )
+
+    with pytest.raises(AdapterSchemaError):
+        port.query_search_analytics(
+            start_date="2026-08-01",
+            end_date="2026-08-28",
+            dimensions=dimensions,
+        )
+
+
+@pytest.mark.parametrize(
+    "dimensions",
+    [[], ["page", "page"], ["page", "query", "page"]],
+)
+def test_search_console_capability_rejects_duplicate_or_too_many_dimensions(
+    dimensions: list[str],
+) -> None:
+    port = FakeSearchConsolePort()
+
+    with pytest.raises(InvalidArguments):
+        search_console_query(
+            port,
+            {
+                "start_date": "2026-08-01",
+                "end_date": "2026-08-28",
+                "dimensions": dimensions,
+            },
+        )
+    assert port.last_analytics_args is None
+
+
+@pytest.mark.parametrize("bad_rows", [None, {}, "not-a-list"])
+def test_composio_search_console_present_malformed_rows_still_fail(bad_rows: object) -> None:
+    client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                json={
+                    "successful": True,
+                    "data": {
+                        "rows": bad_rows,
+                        "responseAggregationType": "auto",
+                    },
+                },
+            )
+        )
+    )
+    port = ComposioSearchConsolePort(
+        api_key="cmp-test",
+        user_id="user-123",
+        site_url="https://www.assafweb.com/",
+        client=client,
+    )
+
+    with pytest.raises(AdapterSchemaError):
+        port.query_search_analytics(
+            start_date="2026-08-29", end_date="2026-08-29", dimensions=["page"]
+        )
+
+
+@pytest.mark.parametrize(
+    "bad_row",
+    [
+        None,
+        {"clicks": 1, "impressions": 2, "ctr": 0.5, "position": 3},
+        {"keys": ["/"], "impressions": 2, "ctr": 0.5, "position": 3},
+        {
+            "keys": "not-a-list",
+            "clicks": 1,
+            "impressions": 2,
+            "ctr": 0.5,
+            "position": 3,
+        },
+        {"keys": [7], "clicks": 1, "impressions": 2, "ctr": 0.5, "position": 3},
+        {
+            "keys": ["/", "unexpected"],
+            "clicks": 1,
+            "impressions": 2,
+            "ctr": 0.5,
+            "position": 3,
+        },
+        {"keys": ["/"], "clicks": True, "impressions": 2, "ctr": 0.5, "position": 3},
+        {"keys": ["/"], "clicks": 1, "impressions": 2, "ctr": {}, "position": 3},
+    ],
+)
+def test_composio_search_console_malformed_row_elements_fail_closed(
+    bad_row: object,
+) -> None:
+    client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                json={"successful": True, "data": {"rows": [bad_row]}},
+            )
+        )
+    )
+    port = ComposioSearchConsolePort(
+        api_key="cmp-test",
+        user_id="user-123",
+        site_url="https://www.assafweb.com/",
+        client=client,
+    )
+
+    with pytest.raises(AdapterSchemaError):
+        port.query_search_analytics(
+            start_date="2026-08-01", end_date="2026-08-28", dimensions=["page"]
+        )
+
+
 def test_composio_search_console_analytics_request_shape() -> None:
     captured: dict[str, object] = {}
 
@@ -129,13 +359,14 @@ def test_composio_search_console_analytics_request_shape() -> None:
                 "data": {
                     "rows": [
                         {
-                            "keys": ["/"],
+                            "keys": ["/", "mia agency"],
                             "clicks": 5,
                             "impressions": 200,
                             "ctr": 0.025,
                             "position": 8.1,
                         }
-                    ]
+                    ],
+                    "responseAggregationType": "byPage",
                 },
                 "successful": True,
             },
@@ -152,11 +383,13 @@ def test_composio_search_console_analytics_request_shape() -> None:
     rows = port.query_search_analytics(
         start_date="2026-01-01",
         end_date="2026-01-28",
-        dimensions=["page"],
+        dimensions=["page", "query"],
     )
     assert len(rows) == 1
     assert rows[0].clicks == "5"
     assert rows[0].impressions == "200"
+    assert rows[0].page == "/"
+    assert rows[0].query == "mia agency"
     assert str(captured["url"]).endswith(f"/{COMPOSIO_SEARCH_ANALYTICS_TOOL}")
     body = captured["json"]
     assert isinstance(body, dict)
@@ -166,6 +399,7 @@ def test_composio_search_console_analytics_request_shape() -> None:
     assert args["site_url"] == "https://www.assafweb.com/"
     assert args["start_date"] == "2026-01-01"
     assert args["end_date"] == "2026-01-28"
+    assert args["dimensions"] == ["page", "query"]
 
 
 def test_composio_list_sites_execute_url() -> None:

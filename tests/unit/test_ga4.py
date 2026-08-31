@@ -107,6 +107,519 @@ def test_composio_ga4_schema_and_execution_failures_are_not_empty() -> None:
     assert response_error.value.tool_status() == "error"
 
 
+def test_composio_ga4_well_formed_no_data_returns_empty() -> None:
+    client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                json={
+                    "successful": True,
+                    "data": {
+                        "dimensionHeaders": [{"name": "landingPage"}],
+                        "metricHeaders": [{"name": "activeUsers", "type": "TYPE_INTEGER"}],
+                        "pivotHeaders": [],
+                        "metadata": {"currencyCode": "ILS", "timeZone": "Asia/Jerusalem"},
+                    },
+                },
+            )
+        )
+    )
+    port = ComposioGa4Port(
+        api_key="cmp-test",
+        user_id="user-123",
+        property_id="properties/1",
+        client=client,
+    )
+
+    assert port.run_pivot_report(start_date="2026-08-29", end_date="2026-08-29") == []
+
+
+def test_composio_ga4_rowless_nonempty_pivot_headers_fail_closed() -> None:
+    client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                json={
+                    "successful": True,
+                    "data": {
+                        "dimensionHeaders": [
+                            {"name": "landingPage"},
+                            {"name": "sessionSource"},
+                        ],
+                        "metricHeaders": [
+                            {"name": "activeUsers", "type": "TYPE_INTEGER"}
+                        ],
+                        "pivotHeaders": [
+                            {
+                                "pivotDimensionHeaders": [
+                                    {"dimensionValues": [{"value": "/"}]}
+                                ],
+                                "rowCount": 1,
+                            }
+                        ],
+                        "metadata": {
+                            "currencyCode": "ILS",
+                            "timeZone": "Asia/Jerusalem",
+                        },
+                    },
+                },
+            )
+        )
+    )
+    port = ComposioGa4Port(
+        api_key="cmp-test",
+        user_id="user-123",
+        property_id="properties/1",
+        client=client,
+    )
+
+    with pytest.raises(AdapterSchemaError):
+        port.run_pivot_report(start_date="2026-08-29", end_date="2026-08-29")
+
+
+@pytest.mark.parametrize(
+    ("field", "bad_value"),
+    [
+        ("dimensionHeaders", [None]),
+        ("dimensionHeaders", [{}]),
+        ("dimensionHeaders", [{"name": " "}]),
+        ("dimensionHeaders", [{"name": 7}]),
+        ("metricHeaders", [None]),
+        ("metricHeaders", [{}]),
+        ("metricHeaders", [{"name": " ", "type": "TYPE_INTEGER"}]),
+        ("metricHeaders", [{"name": "sessions"}]),
+        ("metricHeaders", [{"name": "sessions", "type": "TYPE_UNKNOWN"}]),
+        ("metricHeaders", [{"name": "sessions", "type": 7}]),
+        ("metricHeaders", [{"name": "sessions", "type": {}}]),
+        ("pivotHeaders", [None]),
+        ("pivotHeaders", [{}]),
+        (
+            "pivotHeaders",
+            [{"pivotDimensionHeaders": None, "rowCount": 0}],
+        ),
+        (
+            "pivotHeaders",
+            [{"pivotDimensionHeaders": [None], "rowCount": 1}],
+        ),
+        (
+            "pivotHeaders",
+            [
+                {
+                    "pivotDimensionHeaders": [{"dimensionValues": None}],
+                    "rowCount": 1,
+                }
+            ],
+        ),
+        (
+            "pivotHeaders",
+            [
+                {
+                    "pivotDimensionHeaders": [
+                        {"dimensionValues": [{"value": 7}]}
+                    ],
+                    "rowCount": 1,
+                }
+            ],
+        ),
+        (
+            "pivotHeaders",
+            [{"pivotDimensionHeaders": [], "rowCount": True}],
+        ),
+        (
+            "pivotHeaders",
+            [{"pivotDimensionHeaders": [], "rowCount": -1}],
+        ),
+        (
+            "pivotHeaders",
+            [{"pivotDimensionHeaders": [], "rowCount": 1}],
+        ),
+        (
+            "pivotHeaders",
+            [
+                {
+                    "pivotDimensionHeaders": [{"dimensionValues": []}],
+                    "rowCount": 1,
+                }
+            ],
+        ),
+    ],
+)
+def test_composio_ga4_malformed_no_data_headers_fail_closed(
+    field: str, bad_value: object
+) -> None:
+    data: dict[str, object] = {
+        "dimensionHeaders": [{"name": "landingPage"}],
+        "metricHeaders": [{"name": "activeUsers", "type": "TYPE_INTEGER"}],
+        "pivotHeaders": [],
+        "metadata": {"currencyCode": "ILS", "timeZone": "Asia/Jerusalem"},
+    }
+    data[field] = bad_value
+    client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                json={"successful": True, "data": data},
+            )
+        )
+    )
+    port = ComposioGa4Port(
+        api_key="cmp-test",
+        user_id="user-123",
+        property_id="properties/1",
+        client=client,
+    )
+
+    with pytest.raises(AdapterSchemaError):
+        port.run_pivot_report(start_date="2026-08-29", end_date="2026-08-29")
+
+
+@pytest.mark.parametrize(
+    ("field", "bad_value"),
+    [
+        ("dimensionHeaders", [None]),
+        ("metricHeaders", [None]),
+        ("pivotHeaders", [None]),
+        ("metadata", None),
+    ],
+)
+def test_composio_ga4_populated_malformed_headers_fail_closed(
+    field: str, bad_value: object
+) -> None:
+    data: dict[str, object] = {
+        "rows": [
+            {
+                "dimensionValues": [{"value": "/"}, {"value": "google"}],
+                "metricValues": [{"value": "12"}, {"value": "5"}],
+            }
+        ],
+        "dimensionHeaders": [{"name": "landingPage"}],
+        "metricHeaders": [{"name": "sessions", "type": "TYPE_INTEGER"}],
+        "pivotHeaders": [],
+        "metadata": {"currencyCode": "ILS", "timeZone": "Asia/Jerusalem"},
+    }
+    data[field] = bad_value
+    client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                json={"successful": True, "data": data},
+            )
+        )
+    )
+    port = ComposioGa4Port(
+        api_key="cmp-test",
+        user_id="user-123",
+        property_id="properties/1",
+        client=client,
+    )
+
+    with pytest.raises(AdapterSchemaError):
+        port.run_pivot_report(start_date="2026-08-01", end_date="2026-08-28")
+
+
+@pytest.mark.parametrize("bad_rows", [None, {}, "not-a-list"])
+def test_composio_ga4_present_malformed_rows_still_fail(bad_rows: object) -> None:
+    client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                json={
+                    "successful": True,
+                    "data": {
+                        "rows": bad_rows,
+                        "dimensionHeaders": [],
+                        "metricHeaders": [],
+                        "pivotHeaders": [],
+                        "metadata": {},
+                    },
+                },
+            )
+        )
+    )
+    port = ComposioGa4Port(
+        api_key="cmp-test",
+        user_id="user-123",
+        property_id="properties/1",
+        client=client,
+    )
+
+    with pytest.raises(AdapterSchemaError):
+        port.run_pivot_report(start_date="2026-08-29", end_date="2026-08-29")
+
+
+@pytest.mark.parametrize(
+    "bad_row",
+    [
+        None,
+        {"metricValues": [{"value": "1"}, {"value": "2"}]},
+        {
+            "dimensionValues": [{"value": "/"}, {"value": "google"}],
+        },
+        {
+            "dimensionValues": "not-a-list",
+            "metricValues": [{"value": "1"}, {"value": "2"}],
+        },
+        {
+            "dimensionValues": [{"value": 7}, {"value": "google"}],
+            "metricValues": [{"value": "1"}, {"value": "2"}],
+        },
+        {
+            "dimensionValues": [{"value": "/"}, {"value": "google"}],
+            "metricValues": [{"value": True}, {"value": "2"}],
+        },
+        {
+            "dimensionValues": [{"value": "/"}, {"value": "google"}],
+            "metricValues": [{"value": "1"}, {"value": {}}],
+        },
+        {
+            "dimensionValues": [],
+            "dimensions": [{"value": "/"}, {"value": "google"}],
+            "metricValues": [{"value": "1"}, {"value": "2"}],
+        },
+        {
+            "dimensionValues": [{"value": "/"}, {"value": "google"}],
+            "metricValues": [],
+            "metrics": [{"value": "1"}, {"value": "2"}],
+        },
+    ],
+)
+def test_composio_ga4_malformed_row_elements_fail_closed(bad_row: object) -> None:
+    client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                json={"successful": True, "data": {"rows": [bad_row]}},
+            )
+        )
+    )
+    port = ComposioGa4Port(
+        api_key="cmp-test",
+        user_id="user-123",
+        property_id="properties/1",
+        client=client,
+    )
+
+    with pytest.raises(AdapterSchemaError):
+        port.run_pivot_report(start_date="2026-08-01", end_date="2026-08-28")
+
+
+def test_composio_ga4_historical_two_metric_row_stays_mapped() -> None:
+    client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                json={
+                    "successful": True,
+                    "data": {
+                        "rows": [
+                            {
+                                "dimensionValues": [
+                                    {"value": "/"},
+                                    {"value": "google"},
+                                ],
+                                "metricValues": [
+                                    {"value": "12"},
+                                    {"value": "5"},
+                                ],
+                            }
+                        ]
+                    },
+                },
+            )
+        )
+    )
+    port = ComposioGa4Port(
+        api_key="cmp-test",
+        user_id="user-123",
+        property_id="properties/1",
+        client=client,
+    )
+
+    rows = port.run_pivot_report(start_date="2026-08-01", end_date="2026-08-28")
+
+    assert len(rows) == 1
+    assert rows[0].sessions == "12"
+    assert rows[0].engaged_sessions == "5"
+    assert rows[0].users is None
+    assert rows[0].conversions is None
+
+
+@pytest.mark.parametrize(
+    "data_patch",
+    [
+        {
+            "dimensionHeaders": [
+                {"name": "sessionSource"},
+                {"name": "landingPage"},
+            ]
+        },
+        {
+            "dimensionHeaders": [
+                {"name": "landingPage"},
+                {"name": "sessionSource"},
+                {"name": "country"},
+            ]
+        },
+        {
+            "metricHeaders": [
+                {"name": "sessions", "type": "TYPE_INTEGER"},
+                {"name": "activeUsers", "type": "TYPE_INTEGER"},
+                {"name": "conversions", "type": "TYPE_FLOAT"},
+                {"name": "engagedSessions", "type": "TYPE_INTEGER"},
+            ]
+        },
+        {
+            "metricHeaders": [
+                {"name": "activeUsers", "type": "TYPE_INTEGER"},
+                {"name": "sessions", "type": "TYPE_INTEGER"},
+                {"name": "conversions", "type": "TYPE_FLOAT"},
+                {"name": "engagedSessions", "type": "TYPE_INTEGER"},
+                {"name": "eventCount", "type": "TYPE_INTEGER"},
+            ]
+        },
+    ],
+)
+def test_composio_ga4_semantic_header_drift_fails_closed(
+    data_patch: dict[str, object],
+) -> None:
+    data: dict[str, object] = {
+        "rows": [
+            {
+                "dimensionValues": [{"value": "/pricing"}, {"value": "google"}],
+                "metricValues": [
+                    {"value": "10"},
+                    {"value": "12"},
+                    {"value": "1"},
+                    {"value": "5"},
+                ],
+            }
+        ],
+        "dimensionHeaders": [
+            {"name": "landingPage"},
+            {"name": "sessionSource"},
+        ],
+        "metricHeaders": [
+            {"name": "activeUsers", "type": "TYPE_INTEGER"},
+            {"name": "sessions", "type": "TYPE_INTEGER"},
+            {"name": "conversions", "type": "TYPE_FLOAT"},
+            {"name": "engagedSessions", "type": "TYPE_INTEGER"},
+        ],
+        "pivotHeaders": [],
+        "metadata": {},
+    }
+    data.update(data_patch)
+    client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200, json={"successful": True, "data": data}
+            )
+        )
+    )
+    port = ComposioGa4Port(
+        api_key="cmp-test",
+        user_id="user-123",
+        property_id="properties/1",
+        client=client,
+    )
+
+    with pytest.raises(AdapterSchemaError):
+        port.run_pivot_report(start_date="2026-08-01", end_date="2026-08-28")
+
+
+def test_composio_ga4_extra_dimension_value_fails_closed() -> None:
+    client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                json={
+                    "successful": True,
+                    "data": {
+                        "rows": [
+                            {
+                                "dimensionValues": [
+                                    {"value": "/pricing"},
+                                    {"value": "google"},
+                                    {"value": "IL"},
+                                ],
+                                "metricValues": [
+                                    {"value": "10"},
+                                    {"value": "12"},
+                                    {"value": "1"},
+                                    {"value": "5"},
+                                ],
+                            }
+                        ]
+                    },
+                },
+            )
+        )
+    )
+    port = ComposioGa4Port(
+        api_key="cmp-test",
+        user_id="user-123",
+        property_id="properties/1",
+        client=client,
+    )
+
+    with pytest.raises(AdapterSchemaError):
+        port.run_pivot_report(start_date="2026-08-01", end_date="2026-08-28")
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {},
+        {
+            "dimensionHeaders": [
+                {"name": "landingPage"},
+                {"name": "sessionSource"},
+            ]
+        },
+        {
+            "metricHeaders": [
+                {"name": "activeUsers", "type": "TYPE_INTEGER"},
+                {"name": "sessions", "type": "TYPE_INTEGER"},
+                {"name": "conversions", "type": "TYPE_FLOAT"},
+                {"name": "engagedSessions", "type": "TYPE_INTEGER"},
+            ]
+        },
+    ],
+)
+def test_composio_ga4_four_metric_rows_require_both_header_sets(
+    headers: dict[str, object],
+) -> None:
+    data: dict[str, object] = {
+        "rows": [
+            {
+                "dimensionValues": [{"value": "/"}, {"value": "google"}],
+                "metricValues": [
+                    {"value": "10"},
+                    {"value": "12"},
+                    {"value": "1"},
+                    {"value": "5"},
+                ],
+            }
+        ],
+        **headers,
+    }
+    client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200, json={"successful": True, "data": data}
+            )
+        )
+    )
+    port = ComposioGa4Port(
+        api_key="cmp-test",
+        user_id="user-123",
+        property_id="properties/1",
+        client=client,
+    )
+
+    with pytest.raises(AdapterSchemaError):
+        port.run_pivot_report(start_date="2026-08-01", end_date="2026-08-28")
+
+
 def test_composio_pivot_request_shape() -> None:
     captured: dict[str, object] = {}
 
@@ -120,9 +633,36 @@ def test_composio_pivot_request_shape() -> None:
                     "rows": [
                         {
                             "dimensionValues": [{"value": "/"}, {"value": "google"}],
-                            "metricValues": [{"value": "12"}, {"value": "5"}],
+                            "metricValues": [
+                                {"value": "10"},
+                                {"value": "12"},
+                                {"value": "1"},
+                                {"value": "5"},
+                            ],
                         }
-                    ]
+                    ],
+                    "dimensionHeaders": [
+                        {"name": "landingPage"},
+                        {"name": "sessionSource"},
+                    ],
+                    "metricHeaders": [
+                        {"name": "activeUsers", "type": "TYPE_INTEGER"},
+                        {"name": "sessions", "type": "TYPE_INTEGER"},
+                        {"name": "conversions", "type": "TYPE_FLOAT"},
+                        {"name": "engagedSessions", "type": "TYPE_INTEGER"},
+                    ],
+                    "pivotHeaders": [
+                        {
+                            "pivotDimensionHeaders": [
+                                {"dimensionValues": [{"value": "/"}]}
+                            ],
+                            "rowCount": 1,
+                        }
+                    ],
+                    "metadata": {
+                        "currencyCode": "ILS",
+                        "timeZone": "Asia/Jerusalem",
+                    },
                 },
                 "successful": True,
             },
@@ -138,7 +678,9 @@ def test_composio_pivot_request_shape() -> None:
     )
     rows = port.run_pivot_report(start_date="28daysAgo", end_date="yesterday")
     assert len(rows) == 1
+    assert rows[0].users == "10"
     assert rows[0].sessions == "12"
+    assert rows[0].conversions == "1"
     assert rows[0].engaged_sessions == "5"
     assert str(captured["url"]).endswith(f"/{COMPOSIO_PIVOT_REPORT_TOOL}")
     body = captured["json"]

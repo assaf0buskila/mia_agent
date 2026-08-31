@@ -9,17 +9,25 @@ from __future__ import annotations
 
 import re
 from datetime import UTC, datetime
+from typing import NamedTuple
 
 from app.core.config import Settings
 from app.core.errors import PolicyDenied
 from app.core.risk import RiskAction, RiskLevel, assert_allowed
-from app.domain.hot_handoff import notify_owners
 from app.domain.lead_label import lead_display
 from app.domain.memory import ROLE_MIA, ConversationTurn, counterpart_turns
+from app.domain.owner_notification_delivery import (
+    KIND_WEBSITE_HANDOFF_DELIVERY,
+    KIND_WEBSITE_WHATSAPP_LEGACY,
+    WEBSITE_HANDOFF_DELIVERY_KINDS,
+)
 from app.domain.sales import PainLevel, SalesState
 from app.integrations.telegram_format import blockquote, bold, esc
 
-KIND_WEBSITE_WHATSAPP = "website_whatsapp_handoff"
+KIND_WEBSITE_WHATSAPP = KIND_WEBSITE_WHATSAPP_LEGACY
+NOTIFICATION_DELIVERED = "delivered"
+NOTIFICATION_FAILED = "failed"
+NOTIFICATION_DUPLICATE_OR_AMBIGUOUS = "duplicate_or_ambiguous"
 _BRIEF_MAX = 1800
 _MAX_TURNS = 10
 _PROSPECT_WINDOW = 4
@@ -57,6 +65,24 @@ _FORBIDDEN_PASTE = re.compile(
 )
 _FAKE_URGENCY = ("רק היום", "הזדמנות אחרונה", "limited time", "act now")
 _MIA_WILL_REPLY = ("מיה תענה", "מיה תחזיר", "מיה תכתוב")
+
+
+class WebsiteWhatsAppBriefResult(NamedTuple):
+    brief: str | None
+    notification_status: str
+    local_commit_failed: bool = False
+
+
+def _deliver_owner_brief(*, brief: str, settings: Settings, recipient_ids: tuple[str, ...]):
+    """Lazy import avoids the services package's finalization import cycle."""
+    from app.services.notifications import deliver_owner_telegram
+
+    return deliver_owner_telegram(
+        text=brief,
+        settings=settings,
+        parse_mode="HTML",
+        recipient_ids=recipient_ids,
+    )
 
 
 def _fact_lines(sales: SalesState) -> list[str]:
@@ -218,33 +244,89 @@ def apply_website_whatsapp_handoff_brief(
     lead_id: str,
     session_id: str,
     settings: Settings,
-) -> str | None:
-    """Persist once per lead and best-effort Telegram. Never raises to the website."""
+) -> WebsiteWhatsAppBriefResult:
+    """Persist the owner card and deliver once per owner. Never raises to the website."""
     if settings.kill_switch or settings.demo_mode:
-        return None
+        return WebsiteWhatsAppBriefResult(None, NOTIFICATION_FAILED)
     try:
         assert_allowed(
             RiskAction(name="website_whatsapp_brief", risk=RiskLevel.R1_LOW_WRITE),
             kill_switch=settings.kill_switch,
         )
     except PolicyDenied:
-        return None
+        return WebsiteWhatsAppBriefResult(None, NOTIFICATION_FAILED)
     sales = store.get_sales(lead_id)
     turns = store.list_conversation_turns(session_id)
     brief = format_website_whatsapp_brief(
         lead_id=lead_id, sales=sales, turns=turns
     )
-    # The claim, not a prior read, decides whether we send. A read-then-send left two
-    # concurrent /handoff clicks both seeing "not yet notified" and both pushing the
-    # brief. Lead-scoped on purpose: one WhatsApp handoff brief per lead, not per
-    # conversation, so conversation_id stays empty here.
+    # The owner inbox records the local business event. Delivery idempotency is a
+    # separate per-recipient ledger: accepted/ambiguous recipients remain claimed,
+    # while an explicit Telegram rejection releases only that recipient for retry.
+    # This notification stays lead-scoped by product contract, so notification_key is
+    # empty rather than the website session id.
     now_iso = datetime.now(UTC).replace(microsecond=0).isoformat()
-    claimed = store.try_insert_owner_notification(
-        kind=KIND_WEBSITE_WHATSAPP,
-        lead_id=lead_id,
-        scheduled_at=now_iso,
+    store.upsert_owner_notification(
+        kind=KIND_WEBSITE_WHATSAPP, lead_id=lead_id, scheduled_at=now_iso
     )
-    if not claimed:
-        return brief
-    notify_owners(brief=brief, inbound_id=session_id, settings=settings)
-    return brief
+    # A pre-recipient deployment could already have sent this lead-scoped brief.
+    # Its legacy claim has no recipient/outcome detail, so suppress the whole new
+    # fan-out conservatively instead of risking a duplicate owner ping.
+    if any(
+        store.has_owner_notification_claim(
+            kind=kind, lead_id=lead_id, conversation_id=""
+        )
+        for kind in WEBSITE_HANDOFF_DELIVERY_KINDS
+    ):
+        return WebsiteWhatsAppBriefResult(
+            brief, NOTIFICATION_DUPLICATE_OR_AMBIGUOUS
+        )
+    token = settings.telegram_bot_token.strip()
+    recipients = tuple(sorted(settings.telegram_owner_user_id_set()))
+    if not token or not recipients or not brief.strip():
+        return WebsiteWhatsAppBriefResult(brief, NOTIFICATION_FAILED)
+    claimed_recipients = tuple(
+        recipient_id
+        for recipient_id in recipients
+        if store.try_claim_owner_notification_recipient_compatible(
+            kind=KIND_WEBSITE_HANDOFF_DELIVERY,
+            compatible_kinds=WEBSITE_HANDOFF_DELIVERY_KINDS,
+            lead_id=lead_id,
+            notification_key="",
+            recipient_id=recipient_id,
+            claimed_at=now_iso,
+        )
+    )
+    if not claimed_recipients:
+        return WebsiteWhatsAppBriefResult(
+            brief, NOTIFICATION_DUPLICATE_OR_AMBIGUOUS
+        )
+    # The claim must survive independently of FastAPI's commit-after-yield cleanup.
+    # No external Telegram request is allowed unless this local transaction commits.
+    if not store.commit_owner_notification_delivery_state():
+        return WebsiteWhatsAppBriefResult(brief, NOTIFICATION_FAILED, True)
+    delivery = _deliver_owner_brief(
+        brief=brief, settings=settings, recipient_ids=claimed_recipients
+    )
+    release_persisted = (
+        store.release_owner_notification_recipient_claims_durably(
+            kind=KIND_WEBSITE_HANDOFF_DELIVERY,
+            lead_id=lead_id,
+            notification_key="",
+            recipient_ids=delivery.rejected,
+        )
+        if delivery.rejected
+        else True
+    )
+    if delivery.delivered:
+        status = NOTIFICATION_DELIVERED
+    elif delivery.ambiguous or not release_persisted:
+        status = NOTIFICATION_DUPLICATE_OR_AMBIGUOUS
+    elif delivery.rejected:
+        status = NOTIFICATION_FAILED
+    else:
+        # The adapter had enough configuration to attempt but provided no explicit
+        # outcome. Retaining the durable claim is safer and more truthful than saying
+        # the delivery failed and inviting a duplicate retry.
+        status = NOTIFICATION_DUPLICATE_OR_AMBIGUOUS
+    return WebsiteWhatsAppBriefResult(brief, status)

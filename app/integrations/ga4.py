@@ -33,6 +33,26 @@ _COMPOSIO_EXECUTE_BASE = "https://backend.composio.dev/api/v3.1/tools/execute"
 MAX_PIVOT_ROWS = 10
 PREFERRED_GA4_NAME = "assafweb"
 _PROPERTY_RE = re.compile(r"^properties/\d+$")
+_GA4_METRIC_TYPES = frozenset(
+    {
+        "METRIC_TYPE_UNSPECIFIED",
+        "TYPE_INTEGER",
+        "TYPE_FLOAT",
+        "TYPE_SECONDS",
+        "TYPE_MILLISECONDS",
+        "TYPE_MINUTES",
+        "TYPE_HOURS",
+        "TYPE_STANDARD",
+        "TYPE_CURRENCY",
+        "TYPE_FEET",
+        "TYPE_MILES",
+        "TYPE_METERS",
+        "TYPE_KILOMETERS",
+    }
+)
+_PIVOT_DIMENSIONS = ("landingPage", "sessionSource")
+_PIVOT_METRICS = ("activeUsers", "sessions", "conversions", "engagedSessions")
+_HISTORICAL_PIVOT_METRICS = ("sessions", "engagedSessions")
 
 
 class Ga4PivotRow(BaseModel):
@@ -268,31 +288,33 @@ def _map_pivot_rows(data: dict[str, Any] | None) -> list[Ga4PivotRow]:
         return []
     mapped: list[Ga4PivotRow] = []
     for row in rows:
-        if not isinstance(row, dict):
-            continue
-        dimension_values = row.get("dimensionValues") or row.get("dimensions")
-        metric_values = row.get("metricValues") or row.get("metrics")
+        if not _has_pivot_row_schema(row):
+            raise AdapterSchemaError()
+        assert isinstance(row, dict)
+        dimension_values = (
+            row["dimensionValues"]
+            if "dimensionValues" in row
+            else row.get("dimensions")
+        )
+        metric_values = (
+            row["metricValues"] if "metricValues" in row else row.get("metrics")
+        )
+        if not isinstance(dimension_values, list) or not isinstance(metric_values, list):
+            raise AdapterSchemaError()
         landing = ""
         source = ""
         sessions: str | None = None
         engaged: str | None = None
         users: str | None = None
         conversions: str | None = None
-        if isinstance(dimension_values, list):
-            if len(dimension_values) > 0:
-                landing = _dim_value(dimension_values[0])
-            if len(dimension_values) > 1:
-                source = _dim_value(dimension_values[1])
-        if isinstance(metric_values, list):
-            if len(metric_values) == 2:  # historical fixture/provider response shape
-                sessions = _metric_str(_metric_value(metric_values[0]))
-                engaged = _metric_str(_metric_value(metric_values[1]))
-            else:
-                values = [_metric_str(_metric_value(value)) for value in metric_values]
-                users = values[0] if len(values) > 0 else None
-                sessions = values[1] if len(values) > 1 else None
-                conversions = values[2] if len(values) > 2 else None
-                engaged = values[3] if len(values) > 3 else None
+        landing = _dim_value(dimension_values[0])
+        source = _dim_value(dimension_values[1])
+        if len(metric_values) == 2:  # historical fixture/provider response shape
+            sessions = _metric_str(_metric_value(metric_values[0]))
+            engaged = _metric_str(_metric_value(metric_values[1]))
+        else:
+            values = [_metric_str(_metric_value(value)) for value in metric_values]
+            users, sessions, conversions, engaged = values
         mapped.append(
             Ga4PivotRow(
                 landing_page=landing,
@@ -309,11 +331,214 @@ def _map_pivot_rows(data: dict[str, Any] | None) -> list[Ga4PivotRow]:
 
 
 def _has_pivot_rows_schema(data: dict[str, Any]) -> bool:
-    rows = data.get("rows")
-    if isinstance(rows, list):
+    if "rows" in data:
+        return _has_pivot_report_schema(data)
+    for key in ("pivotReport", "report"):
+        if key in data:
+            nested = data[key]
+            return isinstance(nested, dict) and _has_pivot_report_schema(nested)
+    return _has_pivot_report_schema(data)
+
+
+def _has_pivot_report_schema(data: dict[str, Any]) -> bool:
+    """Accept GA4's typed no-data report, while malformed present rows stay fatal."""
+    if "rows" in data:
+        rows = data["rows"]
+        if not isinstance(rows, list) or not all(
+            _has_pivot_row_schema(row) for row in rows
+        ):
+            return False
+        return _has_report_header_schema(
+            data,
+            require_all=False,
+            require_empty_pivots=not rows,
+        ) and _has_expected_pivot_headers(data, rows=rows)
+    return _has_report_header_schema(
+        data,
+        require_all=True,
+        require_empty_pivots=True,
+    ) and _has_expected_pivot_headers(data, rows=[])
+
+
+def _has_expected_pivot_headers(
+    data: dict[str, Any], *, rows: list[object]
+) -> bool:
+    """Bind positional values to the exact semantic request contract.
+
+    GA4 values are positional. Merely validating that header names are strings lets a
+    provider reorder or add columns while Mia confidently labels the wrong KPI. A
+    rowless response may legitimately return only a prefix of the requested headers,
+    but populated responses must name the exact columns for their row shape whenever
+    headers are present. Headerless populated responses remain accepted for the
+    historical two-metric provider shape.
+    """
+
+    dimension_names = _header_names(data.get("dimensionHeaders"))
+    metric_names = _header_names(data.get("metricHeaders"))
+    metric_count: int | None = None
+    if rows:
+        metric_counts = {
+            len(row.get("metricValues", row.get("metrics", [])))
+            for row in rows
+            if isinstance(row, dict)
+        }
+        if len(metric_counts) != 1:
+            return False
+        metric_count = next(iter(metric_counts))
+        # The only accepted headerless compatibility shape is the historical
+        # two-metric report. Current four-metric data must carry both exact header
+        # sets or positional values could be confidently assigned to the wrong KPI.
+        both_missing = dimension_names is None and metric_names is None
+        if metric_count == 2 and both_missing:
+            return True
+        if dimension_names is None or metric_names is None:
+            return False
+    if dimension_names is not None:
+        expected_dimensions = (
+            _PIVOT_DIMENSIONS
+            if rows
+            else _PIVOT_DIMENSIONS[: len(dimension_names)]
+        )
+        if dimension_names != expected_dimensions:
+            return False
+    if metric_names is None:
         return True
-    pivot = data.get("pivotReport") or data.get("report")
-    return isinstance(pivot, dict) and isinstance(pivot.get("rows"), list)
+    if not rows:
+        return metric_names == _PIVOT_METRICS[: len(metric_names)]
+    assert metric_count is not None
+    expected_metrics = (
+        _HISTORICAL_PIVOT_METRICS if metric_count == 2 else _PIVOT_METRICS
+    )
+    return metric_names == expected_metrics
+
+
+def _header_names(value: object) -> tuple[str, ...] | None:
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        return ()
+    names: list[str] = []
+    for header in value:
+        if not isinstance(header, dict) or not isinstance(header.get("name"), str):
+            return ()
+        names.append(header["name"].strip())
+    return tuple(names)
+
+
+def _has_report_header_schema(
+    data: dict[str, Any],
+    *,
+    require_all: bool,
+    require_empty_pivots: bool,
+) -> bool:
+    validators = {
+        "dimensionHeaders": _has_dimension_header_schema,
+        "metricHeaders": _has_metric_header_schema,
+        "pivotHeaders": _has_pivot_header_schema,
+    }
+    for key, validator in validators.items():
+        if key not in data:
+            if require_all:
+                return False
+            continue
+        values = data[key]
+        if not isinstance(values, list) or not all(validator(value) for value in values):
+            return False
+        if key == "pivotHeaders" and require_empty_pivots and values:
+            return False
+    if "metadata" not in data:
+        return not require_all
+    return isinstance(data["metadata"], dict)
+
+
+def _has_dimension_header_schema(header: object) -> bool:
+    return (
+        isinstance(header, dict)
+        and isinstance(header.get("name"), str)
+        and bool(header["name"].strip())
+    )
+
+
+def _has_metric_header_schema(header: object) -> bool:
+    if not isinstance(header, dict):
+        return False
+    metric_type = header.get("type")
+    return (
+        isinstance(header.get("name"), str)
+        and bool(header["name"].strip())
+        and isinstance(metric_type, str)
+        and metric_type in _GA4_METRIC_TYPES
+    )
+
+
+def _has_pivot_header_schema(header: object) -> bool:
+    if not isinstance(header, dict):
+        return False
+    pivot_dimension_headers = header.get("pivotDimensionHeaders")
+    row_count = header.get("rowCount")
+    if (
+        isinstance(pivot_dimension_headers, list)
+        and all(
+            _has_pivot_dimension_header_schema(item)
+            for item in pivot_dimension_headers
+        )
+        and isinstance(row_count, int)
+        and not isinstance(row_count, bool)
+        and row_count >= 0
+    ):
+        return (
+            (row_count == 0 and not pivot_dimension_headers)
+            or (
+                row_count > 0
+                and bool(pivot_dimension_headers)
+                and len(pivot_dimension_headers) <= row_count
+            )
+        )
+    return False
+
+
+def _has_pivot_dimension_header_schema(header: object) -> bool:
+    if not isinstance(header, dict):
+        return False
+    dimension_values = header.get("dimensionValues")
+    return isinstance(dimension_values, list) and bool(dimension_values) and all(
+        isinstance(value, dict)
+        and isinstance(value.get("value"), str)
+        for value in dimension_values
+    )
+
+
+def _has_pivot_row_schema(row: object) -> bool:
+    if not isinstance(row, dict):
+        return False
+    dimension_values = (
+        row["dimensionValues"]
+        if "dimensionValues" in row
+        else row.get("dimensions")
+    )
+    metric_values = (
+        row["metricValues"] if "metricValues" in row else row.get("metrics")
+    )
+    if (
+        not isinstance(dimension_values, list)
+        or len(dimension_values) != 2
+        or any(not _has_dimension_value_schema(value) for value in dimension_values)
+        or not isinstance(metric_values, list)
+        or len(metric_values) not in {2, 4}
+        or any(_metric_str(_metric_value(value)) is None for value in metric_values)
+    ):
+        return False
+    return True
+
+
+def _has_dimension_value_schema(value: object) -> bool:
+    if isinstance(value, str):
+        return True
+    return (
+        isinstance(value, dict)
+        and "value" in value
+        and isinstance(value["value"], str)
+    )
 
 
 def _dim_value(value: object) -> str:

@@ -10,10 +10,14 @@ from app.domain.memory import ConversationTurn
 from app.domain.sales import FitLevel, PainLevel, SalesState
 from app.domain.website_handoff_brief import (
     KIND_WEBSITE_WHATSAPP,
+    NOTIFICATION_DELIVERED,
+    NOTIFICATION_DUPLICATE_OR_AMBIGUOUS,
+    NOTIFICATION_FAILED,
     apply_website_whatsapp_handoff_brief,
     format_website_whatsapp_brief,
 )
 from app.integrations.owner_reply import OWNER_CAPABILITIES, SYSTEM_PROMPT
+from app.services.notifications import OwnerTelegramDelivery
 
 
 def _paste_line(brief: str) -> str:
@@ -44,7 +48,9 @@ class _FakeStore:
     def __init__(self, *, already: bool = False) -> None:
         self.already = already
         self.upserts: list[dict[str, str]] = []
-        self.claims: set[tuple[str, str, str]] = set()
+        self.legacy_claims: set[tuple[str, str, str]] = set()
+        self.recipient_claims: set[tuple[str, str, str, str]] = set()
+        self.delivery_state_commits = 0
         self.sales = _inventory_sales()
         self.turns = _inventory_turns()
 
@@ -60,9 +66,9 @@ class _FakeStore:
         if self.already:
             return False
         key = (kind, lead_id, conversation_id)
-        if key in self.claims:
+        if key in self.legacy_claims:
             return False
-        self.claims.add(key)
+        self.legacy_claims.add(key)
         self.upserts.append(
             {"kind": kind, "lead_id": lead_id, "scheduled_at": scheduled_at}
         )
@@ -84,9 +90,97 @@ class _FakeStore:
     def upsert_owner_notification(
         self, *, kind: str, lead_id: str, scheduled_at: str
     ) -> None:
+        if self.has_owner_notification(kind=kind, lead_id=lead_id):
+            return
         self.upserts.append(
             {"kind": kind, "lead_id": lead_id, "scheduled_at": scheduled_at}
         )
+
+    def try_claim_owner_notification_recipient(
+        self,
+        *,
+        kind: str,
+        lead_id: str,
+        notification_key: str,
+        recipient_id: str,
+        claimed_at: str,
+    ) -> bool:
+        _ = claimed_at
+        key = (kind, lead_id, notification_key, recipient_id)
+        if key in self.recipient_claims:
+            return False
+        self.recipient_claims.add(key)
+        return True
+
+    def try_claim_owner_notification_recipient_compatible(
+        self,
+        *,
+        kind: str,
+        compatible_kinds: tuple[str, ...],
+        lead_id: str,
+        notification_key: str,
+        recipient_id: str,
+        claimed_at: str,
+    ) -> bool:
+        if any(
+            claim[0] in compatible_kinds
+            and claim[1:] == (lead_id, notification_key, recipient_id)
+            for claim in self.recipient_claims
+        ):
+            return False
+        return self.try_claim_owner_notification_recipient(
+            kind=kind,
+            lead_id=lead_id,
+            notification_key=notification_key,
+            recipient_id=recipient_id,
+            claimed_at=claimed_at,
+        )
+
+    def release_owner_notification_recipient_claim(
+        self,
+        *,
+        kind: str,
+        lead_id: str,
+        notification_key: str,
+        recipient_id: str,
+    ) -> None:
+        self.recipient_claims.discard(
+            (kind, lead_id, notification_key, recipient_id)
+        )
+
+    def has_owner_notification_delivery_claim(
+        self, *, kind: str, lead_id: str, notification_key: str = ""
+    ) -> bool:
+        return (kind, lead_id, notification_key) in self.legacy_claims or any(
+            claim[:3] == (kind, lead_id, notification_key)
+            for claim in self.recipient_claims
+        )
+
+    def has_owner_notification_claim(
+        self, *, kind: str, lead_id: str, conversation_id: str = ""
+    ) -> bool:
+        return (kind, lead_id, conversation_id) in self.legacy_claims
+
+    def commit_owner_notification_delivery_state(self) -> bool:
+        self.delivery_state_commits += 1
+        return True
+
+    def release_owner_notification_recipient_claims_durably(
+        self,
+        *,
+        kind: str,
+        lead_id: str,
+        recipient_ids: tuple[str, ...],
+        notification_key: str = "",
+    ) -> bool:
+        for recipient_id in recipient_ids:
+            self.release_owner_notification_recipient_claim(
+                kind=kind,
+                lead_id=lead_id,
+                notification_key=notification_key,
+                recipient_id=recipient_id,
+            )
+        return self.commit_owner_notification_delivery_state()
 
 
 def test_handoff_brief_names_the_lead_and_tells_assaf_to_take_over() -> None:
@@ -207,44 +301,43 @@ def test_handoff_brief_module_has_no_llm() -> None:
 
 
 def test_apply_skips_kill_switch_and_demo(monkeypatch) -> None:
-    sent: list[str] = []
     monkeypatch.setattr(
         brief_mod,
-        "notify_owners",
-        lambda **kwargs: sent.append(kwargs["brief"]),
+        "_deliver_owner_brief",
+        lambda **kwargs: OwnerTelegramDelivery(delivered=("111",)),
     )
     store = _FakeStore()
-    assert (
-        apply_website_whatsapp_handoff_brief(
-            store,
-            lead_id="lead_abc123def456",
-            session_id="sess_1",
-            settings=Settings(kill_switch=True),
-        )
-        is None
+    killed = apply_website_whatsapp_handoff_brief(
+        store,
+        lead_id="lead_abc123def456",
+        session_id="sess_1",
+        settings=Settings(kill_switch=True),
     )
-    assert (
-        apply_website_whatsapp_handoff_brief(
-            store,
-            lead_id="lead_abc123def456",
-            session_id="sess_1",
-            settings=Settings(demo_mode=True),
-        )
-        is None
+    demo = apply_website_whatsapp_handoff_brief(
+        store,
+        lead_id="lead_abc123def456",
+        session_id="sess_1",
+        settings=Settings(demo_mode=True),
     )
+    assert killed.brief is None and killed.notification_status == NOTIFICATION_FAILED
+    assert demo.brief is None and demo.notification_status == NOTIFICATION_FAILED
     assert store.upserts == []
-    assert sent == []
 
 
 def test_apply_persists_once_per_lead(monkeypatch) -> None:
-    sent: list[str] = []
+    sent: list[tuple[str, ...]] = []
+
+    def deliver(**kwargs):
+        sent.append(kwargs["recipient_ids"])
+        return OwnerTelegramDelivery(delivered=kwargs["recipient_ids"])
+
     monkeypatch.setattr(
         brief_mod,
-        "notify_owners",
-        lambda **kwargs: sent.append(kwargs["brief"]),
+        "_deliver_owner_brief",
+        deliver,
     )
     store = _FakeStore()
-    settings = Settings()
+    settings = Settings(telegram_bot_token="tok", telegram_owner_user_ids="111")
     first = apply_website_whatsapp_handoff_brief(
         store,
         lead_id="lead_abc123def456",
@@ -257,12 +350,100 @@ def test_apply_persists_once_per_lead(monkeypatch) -> None:
         session_id="sess_1",
         settings=settings,
     )
-    assert first is not None
-    assert second is not None
-    assert "השורה שלך:" in first
+    assert first.notification_status == NOTIFICATION_DELIVERED
+    assert second.notification_status == NOTIFICATION_DUPLICATE_OR_AMBIGUOUS
+    assert first.brief is not None and "השורה שלך:" in first.brief
     assert len(store.upserts) == 1
     assert store.upserts[0]["kind"] == KIND_WEBSITE_WHATSAPP
     assert len(sent) == 1
+
+
+def test_missing_configuration_does_not_consume_click_brief_retry(monkeypatch) -> None:
+    sent: list[tuple[str, ...]] = []
+
+    def deliver(**kwargs):
+        sent.append(kwargs["recipient_ids"])
+        return OwnerTelegramDelivery(delivered=kwargs["recipient_ids"])
+
+    monkeypatch.setattr(brief_mod, "_deliver_owner_brief", deliver)
+    store = _FakeStore()
+    first = apply_website_whatsapp_handoff_brief(
+        store,
+        lead_id="lead_abc123def456",
+        session_id="sess_1",
+        settings=Settings(),
+    )
+    assert first.notification_status == NOTIFICATION_FAILED
+    assert store.recipient_claims == set()
+    assert store.delivery_state_commits == 0
+    second = apply_website_whatsapp_handoff_brief(
+        store,
+        lead_id="lead_abc123def456",
+        session_id="sess_1",
+        settings=Settings(telegram_bot_token="tok", telegram_owner_user_ids="111"),
+    )
+    assert second.notification_status == NOTIFICATION_DELIVERED
+    assert sent == [("111",)]
+
+
+def test_explicit_rejection_retries_only_rejected_owner(monkeypatch) -> None:
+    sends: list[tuple[str, ...]] = []
+
+    def deliver(**kwargs):
+        recipients = kwargs["recipient_ids"]
+        sends.append(recipients)
+        if len(sends) == 1:
+            return OwnerTelegramDelivery(delivered=("111",), rejected=("222",))
+        return OwnerTelegramDelivery(delivered=recipients)
+
+    monkeypatch.setattr(brief_mod, "_deliver_owner_brief", deliver)
+    store = _FakeStore()
+    settings = Settings(
+        telegram_bot_token="tok", telegram_owner_user_ids="111,222"
+    )
+    first = apply_website_whatsapp_handoff_brief(
+        store,
+        lead_id="lead_abc123def456",
+        session_id="sess_1",
+        settings=settings,
+    )
+    second = apply_website_whatsapp_handoff_brief(
+        store,
+        lead_id="lead_abc123def456",
+        session_id="sess_1",
+        settings=settings,
+    )
+    assert first.notification_status == NOTIFICATION_DELIVERED
+    assert second.notification_status == NOTIFICATION_DELIVERED
+    assert sends == [("111", "222"), ("222",)]
+    assert store.delivery_state_commits == 3
+
+
+def test_ambiguous_click_brief_is_not_resent(monkeypatch) -> None:
+    sends: list[tuple[str, ...]] = []
+
+    def deliver(**kwargs):
+        sends.append(kwargs["recipient_ids"])
+        return OwnerTelegramDelivery(ambiguous=kwargs["recipient_ids"])
+
+    monkeypatch.setattr(brief_mod, "_deliver_owner_brief", deliver)
+    store = _FakeStore()
+    settings = Settings(telegram_bot_token="tok", telegram_owner_user_ids="111")
+    first = apply_website_whatsapp_handoff_brief(
+        store,
+        lead_id="lead_abc123def456",
+        session_id="sess_1",
+        settings=settings,
+    )
+    second = apply_website_whatsapp_handoff_brief(
+        store,
+        lead_id="lead_abc123def456",
+        session_id="sess_1",
+        settings=settings,
+    )
+    assert first.notification_status == NOTIFICATION_DUPLICATE_OR_AMBIGUOUS
+    assert second.notification_status == NOTIFICATION_DUPLICATE_OR_AMBIGUOUS
+    assert sends == [("111",)]
 
 
 def test_handoff_compose_text_is_human_and_hides_the_token() -> None:

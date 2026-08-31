@@ -348,11 +348,26 @@ def test_handoff_card_explains_the_context_transfer_in_plural_hebrew() -> None:
     source = _source()
     card = _function_body(source, "paintHandoffCard")
     assert "אסף" in card
+    assert "מיה לא עונה שם" in card
+    assert "אסף מקבל את כל" not in card
     cta = _function_body(source, "makeWhatsAppCta")
     assert "נעבור" in cta
     # Customer-facing Hebrew stays 2nd-person plural / mixed so it addresses men and women.
     assert "פתח את" not in card
     assert "פתח את" not in cta
+
+
+def test_whatsapp_click_claims_delivery_only_after_telegram_acceptance() -> None:
+    source = _source()
+    notify = _function_body(source, "notifyHandoffIssued")
+    assert "response.json()" in notify
+    assert "notification_status === 'delivered'" in notify
+    assert "notification_status === 'failed'" in notify
+    assert "אסף קיבל את תקציר השיחה" in notify
+    assert "לא הצלחתי להעביר את השיחה לאסף" in notify
+    assert "link.addEventListener('click', notifyHandoffIssued)" in _function_body(
+        source, "makeWhatsAppCta"
+    )
 
 
 def test_widget_offers_whatsapp_on_handoff_as_well_as_offer_whatsapp() -> None:
@@ -411,7 +426,8 @@ def test_whatsapp_offer_is_a_tappable_button_not_a_raw_url() -> None:
     assert "handoff" in apply
     assert "isWaMeUrl(data.whatsapp_url)" in apply
     assert "placeWhatsAppCta" in apply
-    assert "requestWhatsAppCta" in apply
+    assert "requestWhatsAppCta" not in source
+    assert "status.textContent = WA_NA" in apply
     assert "waBtn.hidden = false" not in apply
     strip = _function_body(source, "stripWaMeUrls")
     assert "wa.me" in strip.replace("\\", "")

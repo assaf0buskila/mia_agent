@@ -9,8 +9,8 @@ from pydantic import BaseModel, ConfigDict
 
 from app.core.config import Settings
 from app.domain.memory import ConversationTurn
+from app.domain.owner_notification_delivery import WEBSITE_HANDOFF_DELIVERY_KINDS
 from app.domain.sales import SalesState
-from app.domain.website_handoff_brief import KIND_WEBSITE_WHATSAPP
 from app.services.conversation_facts import (
     describe_business,
     describe_meeting,
@@ -99,6 +99,21 @@ class NotificationStore(Protocol):
         notification_key: str,
         recipient_id: str,
     ) -> None: ...
+
+    def has_owner_notification_delivery_claim(
+        self, *, kind: str, lead_id: str, notification_key: str = ""
+    ) -> bool: ...
+
+    def commit_owner_notification_delivery_state(self) -> bool: ...
+
+    def release_owner_notification_recipient_claims_durably(
+        self,
+        *,
+        kind: str,
+        lead_id: str,
+        recipient_ids: tuple[str, ...],
+        notification_key: str = "",
+    ) -> bool: ...
 
 
 class WebsiteFinalizationStore(NotificationStore, Protocol):
@@ -189,15 +204,22 @@ def finalize_website_conversation(
     )
     if not claimed_recipients:
         return FinalizeResult(claimed=False, sent=False, duplicate=True, kind=kind)
+    # The recipient claim and owner inbox must be durable before Telegram. The API
+    # session otherwise commits only after the route returns, so a late commit failure
+    # could roll back an already accepted notification and let the retry send twice.
+    if not store.commit_owner_notification_delivery_state():
+        return FinalizeResult(claimed=False, sent=False, duplicate=False, kind=kind)
     delivery = deliver_owner_telegram(
         text=text, settings=settings, recipient_ids=claimed_recipients
     )
-    for recipient_id in delivery.rejected:
-        store.release_owner_notification_recipient_claim(
+    if delivery.rejected:
+        # The store repeats the idempotent release once if the first post-send commit
+        # rolls back, so a known rejection cannot become a permanent retained claim.
+        store.release_owner_notification_recipient_claims_durably(
             kind=kind,
             lead_id=lead_id,
             notification_key=summary.conversation_id,
-            recipient_id=recipient_id,
+            recipient_ids=delivery.rejected,
         )
     return FinalizeResult(claimed=True, sent=bool(delivery.delivered), kind=kind)
 
@@ -269,7 +291,12 @@ def qualify_and_finalize(
     now: datetime | None = None,
 ) -> FinalizeResult | None:
     """One finalization service. Skip empty sessions and WhatsApp-briefing duplicates."""
-    if store.has_owner_notification(kind=KIND_WEBSITE_WHATSAPP, lead_id=lead_id):
+    if any(
+        store.has_owner_notification_delivery_claim(
+            kind=kind, lead_id=lead_id, notification_key=""
+        )
+        for kind in WEBSITE_HANDOFF_DELIVERY_KINDS
+    ):
         return None
     if require_visitor_message and not store.has_website_prospect_message(
         lead_id, session_id

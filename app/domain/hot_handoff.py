@@ -12,9 +12,14 @@ from app.core.config import Settings
 from app.core.errors import PolicyDenied
 from app.core.risk import RiskAction, RiskLevel, assert_allowed
 from app.domain.conversation_scope import TakeoverState
+from app.domain.owner_notification_delivery import (
+    KIND_HOT_LEAD_LEGACY,
+    KIND_WEBSITE_HANDOFF_DELIVERY,
+    WEBSITE_HANDOFF_DELIVERY_KINDS,
+)
 from app.domain.sales import SalesState
 
-KIND_HOT_LEAD = "hot_lead"
+KIND_HOT_LEAD = KIND_HOT_LEAD_LEGACY
 
 _BRIEF_MAX = 500
 
@@ -146,6 +151,13 @@ def apply_hot_handoff(
     store.upsert_owner_notification(
         kind=KIND_HOT_LEAD, lead_id=lead_id, scheduled_at=now_iso
     )
+    if any(
+        store.has_owner_notification_claim(
+            kind=kind, lead_id=lead_id, conversation_id=""
+        )
+        for kind in WEBSITE_HANDOFF_DELIVERY_KINDS
+    ):
+        return OwnerNotifyAttempt((), False)
     token = settings.telegram_bot_token.strip()
     recipients = tuple(sorted(settings.telegram_owner_user_id_set()))
     if not token or not recipients or not text.strip():
@@ -155,8 +167,9 @@ def apply_hot_handoff(
     claimed_recipients = tuple(
         recipient_id
         for recipient_id in recipients
-        if store.try_claim_owner_notification_recipient(
-            kind=KIND_HOT_LEAD,
+        if store.try_claim_owner_notification_recipient_compatible(
+            kind=KIND_WEBSITE_HANDOFF_DELIVERY,
+            compatible_kinds=WEBSITE_HANDOFF_DELIVERY_KINDS,
             lead_id=lead_id,
             recipient_id=recipient_id,
             claimed_at=now_iso,
@@ -164,6 +177,11 @@ def apply_hot_handoff(
     )
     if not claimed_recipients:
         return OwnerNotifyAttempt((), False)
+    # FastAPI normally commits only after the route returns. Telegram must never be
+    # called while the takeover/inbox/recipient claims can still roll back, or an
+    # accepted owner ping can be duplicated by the next retry.
+    if not store.commit_owner_notification_delivery_state():
+        return OwnerNotifyAttempt((), False, True)
     delivery = _deliver_owners(
         brief=text,
         inbound_id=inbound_id,
@@ -171,8 +189,12 @@ def apply_hot_handoff(
         parse_mode=mode,
         recipient_ids=claimed_recipients,
     )
-    for recipient_id in delivery.rejected:
-        store.release_owner_notification_recipient_claim(
-            kind=KIND_HOT_LEAD, lead_id=lead_id, recipient_id=recipient_id
+    if delivery.rejected:
+        # A confirmed rejection is retryable only after its recipient claim release
+        # is durable. Accepted/ambiguous claims were committed before the send.
+        store.release_owner_notification_recipient_claims_durably(
+            kind=KIND_WEBSITE_HANDOFF_DELIVERY,
+            lead_id=lead_id,
+            recipient_ids=delivery.rejected,
         )
     return OwnerNotifyAttempt(delivery.delivered, True)

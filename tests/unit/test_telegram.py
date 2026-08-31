@@ -2,20 +2,27 @@
 
 from __future__ import annotations
 
+import json
 from itertools import count
 from typing import Any
 
 import httpx
 import pytest
 from app.api import owner as owner_api
+from app.api import telegram as telegram_api
 from app.api.deps import get_telegram_port, get_transcription_port
-from app.db.session import init_db
+from app.db.models import CanonicalEventRow
+from app.db.session import get_session_factory, init_db
+from app.db.store import LeadStore
 from app.domain.owner_brain import OwnerBrainResult
 from app.integrations.base import RecordingMessagePort
 from app.integrations.telegram import TelegramMediaError, TelegramPort
 from app.integrations.transcribe import FakeTranscriptionPort, TranscriptionError
 from app.main import app
 from fastapi.testclient import TestClient
+from sqlalchemy import func, select
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
 
 OWNER_ID = "551122"
 WEBHOOK_SECRET = "telegram-voice-test-secret"
@@ -79,6 +86,24 @@ class MalformedTelegramVoicePort(RecordingMessagePort):
         return self.result  # type: ignore[return-value]
 
 
+class FailingDownloadTelegramVoicePort(RecordingMessagePort):
+    async def download_voice(self, file_id: str) -> tuple[bytes, str]:
+        del file_id
+        raise TelegramMediaError("private provider detail")
+
+
+class FailFirstReplyTelegramVoicePort(RecordingTelegramVoicePort):
+    def __init__(self) -> None:
+        super().__init__()
+        self.send_attempts = 0
+
+    async def send(self, message) -> None:
+        self.send_attempts += 1
+        if self.send_attempts == 1:
+            raise RuntimeError("private Telegram failure detail")
+        await super().send(message)
+
+
 def _voice_update(*, update_id: int, file_id: str) -> dict[str, Any]:
     return {
         "update_id": update_id,
@@ -95,6 +120,63 @@ def _configure_owner(monkeypatch) -> None:
     monkeypatch.setenv("MIA_TELEGRAM_WEBHOOK_SECRET", WEBHOOK_SECRET)
     monkeypatch.setenv("MIA_TELEGRAM_OWNER_USER_IDS", OWNER_ID)
     monkeypatch.setenv("MIA_TELEGRAM_BOT_TOKEN", "test-bot-token")
+
+
+@pytest.mark.asyncio
+async def test_voice_failures_map_to_fixed_content_free_stages() -> None:
+    item = {"file_id": "voice-file-stage-test"}
+
+    _, unavailable, _ = await telegram_api._transcribe_telegram_voice(
+        item=dict(item),
+        media=object(),
+        transcribe_port=FakeTranscriptionPort("unused"),
+    )
+    _, download_failed, _ = await telegram_api._transcribe_telegram_voice(
+        item=dict(item),
+        media=FailingDownloadTelegramVoicePort(),
+        transcribe_port=FakeTranscriptionPort("unused"),
+    )
+    _, media_rejected, _ = await telegram_api._transcribe_telegram_voice(
+        item=dict(item),
+        media=InvalidMimeTelegramVoicePort("text/plain"),
+        transcribe_port=FakeTranscriptionPort("unused"),
+    )
+    _, stt_failed, _ = await telegram_api._transcribe_telegram_voice(
+        item=dict(item),
+        media=RecordingTelegramVoicePort(),
+        transcribe_port=FailingTranscriptionPort(),
+    )
+
+    assert (unavailable, download_failed, media_rejected, stt_failed) == (
+        "download_unavailable",
+        "download_failed",
+        "media_rejected",
+        "stt_failed",
+    )
+
+
+def _assert_one_failed_voice_outcome(*, update_id: int) -> None:
+    db = get_session_factory()()
+    provider_event_id = f"{update_id}:tool:voice_transcribe"
+    try:
+        row = LeadStore(db).get_canonical_event(
+            provider="telegram",
+            provider_event_id=provider_event_id,
+        )
+        assert row is not None
+        assert json.loads(row.payload_json) == {
+            "tool": "voice_transcribe",
+            "status": "empty",
+            "result_count": 0,
+        }
+        count = db.scalar(
+            select(func.count())
+            .select_from(CanonicalEventRow)
+            .where(CanonicalEventRow.provider_event_id == provider_event_id)
+        )
+        assert count == 1
+    finally:
+        db.close()
 
 
 def test_voice_note_downloads_transcribes_reaches_owner_graph_and_escapes_html(monkeypatch) -> None:
@@ -133,7 +215,9 @@ def test_voice_note_downloads_transcribes_reaches_owner_graph_and_escapes_html(m
         app.dependency_overrides.pop(get_transcription_port, None)
 
 
-def test_voice_transcription_failure_is_visible_and_does_not_enter_owner_graph(monkeypatch) -> None:
+def test_voice_transcription_failure_is_visible_classified_and_does_not_enter_owner_graph(
+    monkeypatch, caplog
+) -> None:
     _configure_owner(monkeypatch)
     init_db()
     telegram = RecordingTelegramVoicePort()
@@ -164,6 +248,10 @@ def test_voice_transcription_failure_is_visible_and_does_not_enter_owner_graph(m
         rendered = str(telegram.sent) + str(response.json())
         assert "provider said" not in rendered
         assert "transcript and token" not in rendered
+        assert "policy=stt_failed" in caplog.text
+        assert "provider said" not in caplog.text
+        assert "transcript and token" not in caplog.text
+        _assert_one_failed_voice_outcome(update_id=update_id)
     finally:
         app.dependency_overrides.pop(get_telegram_port, None)
         app.dependency_overrides.pop(get_transcription_port, None)
@@ -196,6 +284,99 @@ def test_retried_voice_transcription_failure_sends_one_visible_reply(monkeypatch
             "voice_error": True,
         }
         assert len(telegram.sent) == 1
+        _assert_one_failed_voice_outcome(update_id=update_id)
+    finally:
+        app.dependency_overrides.pop(get_telegram_port, None)
+        app.dependency_overrides.pop(get_transcription_port, None)
+
+
+def test_voice_failure_reply_send_failure_stays_retryable(monkeypatch) -> None:
+    _configure_owner(monkeypatch)
+    init_db()
+    telegram = FailFirstReplyTelegramVoicePort()
+    app.dependency_overrides[get_telegram_port] = lambda: telegram
+    app.dependency_overrides[get_transcription_port] = lambda: FailingTranscriptionPort()
+    try:
+        update_id = _fresh_update_id()
+        with TestClient(app) as client:
+            first = client.post(
+                "/v1/telegram/webhook",
+                json=_voice_update(update_id=update_id, file_id="voice-reply-retry"),
+                headers={"X-Telegram-Bot-Api-Secret-Token": WEBHOOK_SECRET},
+            )
+            retry = client.post(
+                "/v1/telegram/webhook",
+                json=_voice_update(update_id=update_id, file_id="voice-reply-retry"),
+                headers={"X-Telegram-Bot-Api-Secret-Token": WEBHOOK_SECRET},
+            )
+            duplicate = client.post(
+                "/v1/telegram/webhook",
+                json=_voice_update(update_id=update_id, file_id="voice-reply-retry"),
+                headers={"X-Telegram-Bot-Api-Secret-Token": WEBHOOK_SECRET},
+            )
+
+        assert first.json()["sent"] is False
+        assert retry.json()["sent"] is True
+        assert duplicate.json()["duplicates"] == 1
+        assert telegram.send_attempts == 2
+        assert len(telegram.sent) == 1
+        assert "private Telegram failure detail" not in first.text
+        _assert_one_failed_voice_outcome(update_id=update_id)
+    finally:
+        app.dependency_overrides.pop(get_telegram_port, None)
+        app.dependency_overrides.pop(get_transcription_port, None)
+
+
+def test_voice_failure_commit_happens_before_reply_and_retry_sends_once(
+    monkeypatch,
+) -> None:
+    _configure_owner(monkeypatch)
+    init_db()
+    telegram = RecordingTelegramVoicePort()
+    app.dependency_overrides[get_telegram_port] = lambda: telegram
+    app.dependency_overrides[get_transcription_port] = lambda: FailingTranscriptionPort()
+    original_commit = Session.commit
+    commit_calls = 0
+
+    def fail_first_commit(session: Session) -> None:
+        nonlocal commit_calls
+        commit_calls += 1
+        if commit_calls == 1:
+            raise SQLAlchemyError("private database detail")
+        original_commit(session)
+
+    monkeypatch.setattr(Session, "commit", fail_first_commit)
+    update_id = _fresh_update_id()
+    try:
+        with TestClient(app) as client:
+            first = client.post(
+                "/v1/telegram/webhook",
+                json=_voice_update(update_id=update_id, file_id="voice-file-commit-retry"),
+                headers={"X-Telegram-Bot-Api-Secret-Token": WEBHOOK_SECRET},
+            )
+            assert first.status_code == 503
+            assert first.json() == {"detail": "voice processing temporarily unavailable"}
+            assert telegram.sent == []
+
+            retry = client.post(
+                "/v1/telegram/webhook",
+                json=_voice_update(update_id=update_id, file_id="voice-file-commit-retry"),
+                headers={"X-Telegram-Bot-Api-Secret-Token": WEBHOOK_SECRET},
+            )
+            duplicate = client.post(
+                "/v1/telegram/webhook",
+                json=_voice_update(update_id=update_id, file_id="voice-file-commit-retry"),
+                headers={"X-Telegram-Bot-Api-Secret-Token": WEBHOOK_SECRET},
+            )
+
+        assert retry.status_code == 200
+        assert retry.json()["sent"] is True
+        assert duplicate.status_code == 200
+        assert duplicate.json()["duplicates"] == 1
+        assert len(telegram.sent) == 1
+        assert "private database detail" not in first.text
+        assert "private database detail" not in str(telegram.sent)
+        _assert_one_failed_voice_outcome(update_id=update_id)
     finally:
         app.dependency_overrides.pop(get_telegram_port, None)
         app.dependency_overrides.pop(get_transcription_port, None)
