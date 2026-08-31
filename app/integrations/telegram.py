@@ -1,5 +1,6 @@
 """Telegram Bot API owner channel. Numeric user ids only. No username auth."""
 
+from pathlib import PurePosixPath
 from typing import Any, NoReturn
 from urllib.parse import urlparse
 
@@ -17,15 +18,43 @@ _MAX_AUDIO_BYTES = 16_000_000
 _TIMEOUT = 20.0
 _SUPPORTED_AUDIO_MIME_TYPES = frozenset(
     {
+        "audio/aac",
+        "audio/flac",
         "audio/mpeg",
         "audio/mp4",
         "audio/ogg",
         "audio/opus",
         "audio/wav",
         "audio/webm",
+        "audio/x-m4a",
         "audio/x-wav",
     }
 )
+_MIME_BY_EXTENSION = {
+    ".aac": "audio/aac",
+    ".flac": "audio/flac",
+    ".m4a": "audio/x-m4a",
+    ".mp3": "audio/mpeg",
+    ".mp4": "audio/mp4",
+    ".ogg": "audio/ogg",
+    ".oga": "audio/ogg",
+    ".opus": "audio/opus",
+    ".wav": "audio/wav",
+    ".webm": "audio/webm",
+}
+_EXTENSION_BY_MIME = {
+    "audio/aac": ".aac",
+    "audio/flac": ".flac",
+    "audio/mpeg": ".mp3",
+    "audio/mp4": ".mp4",
+    "audio/ogg": ".ogg",
+    "audio/opus": ".opus",
+    "audio/wav": ".wav",
+    "audio/webm": ".webm",
+    "audio/x-m4a": ".m4a",
+    "audio/x-wav": ".wav",
+}
+_GENERIC_CDN_MEDIA_TYPES = frozenset({"", "application/octet-stream"})
 
 # Must be stated on every setWebhook call. Omitting it reuses the previous server-side
 # value, which silently drops button presses if it was ever narrowed to messages only.
@@ -66,6 +95,74 @@ def validate_telegram_voice_media(audio: object, content_type: object) -> tuple[
     if len(audio) > _MAX_AUDIO_BYTES:
         raise TelegramMediaError("Telegram media exceeds maximum size")
     return audio, normalize_telegram_audio_mime(content_type)
+
+
+def _mime_from_filename(value: object) -> str:
+    if not isinstance(value, str) or not value.strip():
+        return ""
+    return _MIME_BY_EXTENSION.get(PurePosixPath(value).suffix.lower(), "")
+
+
+def is_telegram_audio_document(document: object) -> bool:
+    """Only route an audio document to STT; ordinary documents remain documents."""
+    if not isinstance(document, dict):
+        return False
+    declared = document.get("mime_type")
+    try:
+        normalize_telegram_audio_mime(declared)
+        return True
+    except TelegramMediaError:
+        if isinstance(declared, str) and declared.split(";", 1)[0].strip().lower().startswith(
+            "audio/"
+        ):
+            # It is an audio document even when its codec is outside Mia's allowlist.
+            # Route it to the normal validation path so the owner receives the fixed,
+            # truthful retry explanation rather than seeing it disappear.
+            return True
+        return bool(_mime_from_filename(document.get("file_name")))
+
+
+def resolve_telegram_audio_mime(
+    *,
+    cdn_content_type: object,
+    declared_mime_type: object = "",
+    file_path: object = "",
+    declared_filename: object = "",
+) -> str:
+    """Prefer an explicit CDN audio type, with narrow Telegram metadata fallback.
+
+    Telegram's file CDN can return ``application/octet-stream`` for an otherwise valid
+    Voice/Audio upload.  That generic header is not evidence that the audio is invalid;
+    use the Bot API's declared MIME type or the trusted getFile extension in that one
+    case. A concrete non-audio CDN type still fails closed.
+    """
+    if isinstance(cdn_content_type, str):
+        base = cdn_content_type.split(";", 1)[0].strip().lower()
+    else:
+        base = ""
+    if base not in _GENERIC_CDN_MEDIA_TYPES:
+        return normalize_telegram_audio_mime(cdn_content_type)
+    try:
+        return normalize_telegram_audio_mime(declared_mime_type)
+    except TelegramMediaError:
+        from_path = _mime_from_filename(file_path)
+        if from_path:
+            return from_path
+        from_declared_name = _mime_from_filename(declared_filename)
+        if from_declared_name:
+            return from_declared_name
+        raise TelegramMediaError("Telegram media content type is unsupported") from None
+
+
+def transcription_filename(*, mime_type: str, file_path: object = "") -> str:
+    """Give OpenAI a safe extension consistent with the validated media type."""
+    extension = _EXTENSION_BY_MIME.get(mime_type)
+    if not extension:
+        raise TelegramMediaError("Telegram media type has no transcription extension")
+    candidate = PurePosixPath(str(file_path)).name if isinstance(file_path, str) else ""
+    if candidate and candidate.lower().endswith(extension):
+        return candidate
+    return f"telegram-audio{extension}"
 
 
 def _reraise_classified(error_cls: type[MiaError], prefix: str, exc: AdapterHttpError) -> NoReturn:
@@ -195,7 +292,9 @@ class TelegramPort:
             return {}
         return body.get("result", {}) if isinstance(body, dict) else {}
 
-    async def download_voice(self, file_id: str) -> tuple[bytes, str]:
+    async def download_voice(
+        self, file_id: str, *, declared_mime_type: str = "", declared_filename: str = ""
+    ) -> tuple[bytes, str, str]:
         headers = {"Content-Type": "application/json"}
         try:
             try:
@@ -223,11 +322,23 @@ class TelegramPort:
             parsed = urlparse(file_url)
             if parsed.scheme != "https" or (parsed.hostname or "") != "api.telegram.org":
                 raise TelegramMediaError("Telegram media host is not allowlisted")
-            return await self._download_voice_file(file_url)
+            return await self._download_voice_file(
+                file_url,
+                declared_mime_type=declared_mime_type,
+                declared_filename=declared_filename,
+                file_path=file_path,
+            )
         except AdapterHttpError as exc:
             _reraise_classified(TelegramMediaError, "Telegram media download failed", exc)
 
-    async def _download_voice_file(self, file_url: str) -> tuple[bytes, str]:
+    async def _download_voice_file(
+        self,
+        file_url: str,
+        *,
+        declared_mime_type: str = "",
+        declared_filename: str = "",
+        file_path: str = "",
+    ) -> tuple[bytes, str, str]:
         try:
             if self._client is not None:
                 media = await self._client.get(file_url)
@@ -238,7 +349,19 @@ class TelegramPort:
             raise AdapterHttpError(None) from exc
         if media.status_code >= 400:
             raise AdapterHttpError(media.status_code)
-        return validate_telegram_voice_media(media.content, media.headers.get("content-type"))
+        mime_type = resolve_telegram_audio_mime(
+            cdn_content_type=media.headers.get("content-type"),
+            declared_mime_type=declared_mime_type,
+            file_path=file_path,
+            declared_filename=declared_filename,
+        )
+        audio, mime_type = validate_telegram_voice_media(media.content, mime_type)
+        filename_evidence = (
+            file_path if _mime_from_filename(file_path) == mime_type else declared_filename
+        )
+        return audio, mime_type, transcription_filename(
+            mime_type=mime_type, file_path=filename_evidence
+        )
 
 
 def parse_telegram_update(payload: dict[str, Any]) -> dict[str, str] | None:
@@ -253,9 +376,14 @@ def parse_telegram_update(payload: dict[str, Any]) -> dict[str, str] | None:
     if update_id is None or not user_id:
         return None
     text = str(message.get("text") or message.get("caption") or "")
-    voice = message.get("voice") or message.get("audio") or {}
+    native_voice = message.get("voice")
+    voice = native_voice or message.get("audio") or {}
+    if not voice and is_telegram_audio_document(message.get("document")):
+        voice = message.get("document") or {}
     file_id = ""
-    mime_type = "audio/ogg"
+    # Telegram Voice is always OGG/Opus. Audio/document uploads need their own declared
+    # MIME or provider filename; fabricating OGG would mislabel an MP3 with a generic CDN header.
+    mime_type = "audio/ogg" if native_voice else ""
     if isinstance(voice, dict):
         file_id = str(voice.get("file_id") or "")
         mime_type = str(voice.get("mime_type") or mime_type) or mime_type
@@ -268,6 +396,7 @@ def parse_telegram_update(payload: dict[str, Any]) -> dict[str, str] | None:
         "text": text,
         "file_id": file_id,
         "mime_type": mime_type,
+        "file_name": str(voice.get("file_name") or "") if isinstance(voice, dict) else "",
     }
 
 

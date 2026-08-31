@@ -12,6 +12,7 @@ from app.integrations.sheets import (
     COMPOSIO_VALUES_UPDATE_TOOL,
     ComposioSheetsPort,
     FakeSheetsPort,
+    normalize_owner_spreadsheet_id,
 )
 
 _OWNER = Principal.owner(source="test", actor_id="123")
@@ -64,6 +65,54 @@ def test_owner_sheets_read_update_append_request_shapes() -> None:
     assert all(body["arguments"]["spreadsheetId"] == _SHEET for _, body in requests)
     assert requests[1][1]["arguments"]["valueInputOption"] == "RAW"
     assert requests[2][1]["arguments"]["valueInputOption"] == "RAW"
+
+
+def test_owner_sheets_pasted_google_url_uses_allowlisted_id_and_bounded_preview() -> None:
+    requests: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json={"successful": True, "data": {"values": [["ok"]]}})
+
+    port = _port(httpx.Client(transport=httpx.MockTransport(handler)))
+    handlers = sheets_handlers(port, allowed_spreadsheet_ids=frozenset({_SHEET}))
+    url = f"https://docs.google.com/spreadsheets/d/{_SHEET}/edit?gid=123#gid=123"
+    assert execute_capability(
+        "sheets.read",
+        principal=_OWNER,
+        args={"spreadsheet_id": url, "range": None},
+        handlers=handlers,
+    ) == {"count": 1, "rows": [["ok"]]}
+    assert requests[0]["arguments"] == {"spreadsheetId": _SHEET, "range": "A1:J20"}
+
+
+def test_owner_sheets_url_convenience_never_widens_writes() -> None:
+    called = False
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal called
+        called = True
+        return httpx.Response(200, json={"successful": True, "data": {}})
+
+    port = _port(httpx.Client(transport=httpx.MockTransport(handler)))
+    url = f"https://docs.google.com/spreadsheets/d/{_SHEET}/edit"
+    with pytest.raises(ValueError, match="allowlisted"):
+        port.update_values(spreadsheet_id=url, a1_range="A1", values=[["x"]])
+    with pytest.raises(ValueError, match="allowlisted"):
+        port.append_values(spreadsheet_id=url, a1_range="A1", values=[["x"]])
+    assert called is False
+
+
+@pytest.mark.parametrize(
+    "reference",
+    [
+        "https://evil.example/spreadsheets/d/sheet-allowed/edit",
+        "https://docs.google.com/document/d/sheet-allowed/edit",
+        "http://docs.google.com/spreadsheets/d/sheet-allowed/edit",
+    ],
+)
+def test_owner_sheets_rejects_non_google_sheet_urls(reference: str) -> None:
+    assert normalize_owner_spreadsheet_id(reference) == ""
 
 
 def test_owner_sheets_outside_allowlist_and_bad_values_do_not_call_http() -> None:

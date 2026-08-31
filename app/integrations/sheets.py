@@ -24,6 +24,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from time import perf_counter
 from typing import Any, Protocol
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -80,6 +81,8 @@ COMPOSIO_VALUES_UPDATE_TOOL = "GOOGLESHEETS_VALUES_UPDATE"
 COMPOSIO_VALUES_APPEND_TOOL = "GOOGLESHEETS_SPREADSHEETS_VALUES_APPEND"
 _COMPOSIO_EXECUTE_BASE = "https://backend.composio.dev/api/v3.1/tools/execute"
 _COMPOSIO_EXECUTE_URL = f"{_COMPOSIO_EXECUTE_BASE}/{COMPOSIO_UPSERT_ROWS_TOOL}"
+
+_GOOGLE_SHEETS_PATH = re.compile(r"^/spreadsheets/d/([A-Za-z0-9_-]{6,})(?:/|$)")
 
 LEADS_SHEET_NAME = "01 Leads"
 LEADS_KEY_COLUMN = "Lead ID"
@@ -226,7 +229,12 @@ def validate_owner_sheet_request(
     values: object | None,
     allowed_spreadsheet_ids: frozenset[str],
 ) -> tuple[str, str, list[list[str]]]:
-    target = spreadsheet_id.strip()
+    raw_target = spreadsheet_id.strip()
+    # URL convenience is read-only. A write must keep the original explicit opaque ID
+    # so the owner-text binding and audit target cannot be changed by URL parsing.
+    target = normalize_owner_spreadsheet_id(raw_target) if values is None else raw_target
+    if values is not None and "://" in target:
+        target = ""
     bounded_range = a1_range.strip()
     if not target or target not in allowed_spreadsheet_ids:
         raise ValueError("spreadsheet id is not allowlisted")
@@ -237,6 +245,27 @@ def validate_owner_sheet_request(
     if len(normalized) > max_rows or any(len(row) > max_columns for row in normalized):
         raise ValueError("values exceed the target A1 range")
     return target, bounded_range, normalized
+
+
+def normalize_owner_spreadsheet_id(reference: str) -> str:
+    """Accept an opaque ID or extract one from an exact Google Sheets URL.
+
+    A URL is only a convenient reference; the extracted ID must still pass the existing
+    owner allowlist. Other hosts and other Google document types are never accepted.
+    """
+    value = reference.strip()
+    if not value:
+        return ""
+    if "://" not in value:
+        return value
+    try:
+        parsed = urlparse(value)
+    except ValueError:
+        return ""
+    if parsed.scheme != "https" or (parsed.hostname or "").lower() != "docs.google.com":
+        return ""
+    match = _GOOGLE_SHEETS_PATH.match(parsed.path)
+    return match.group(1) if match is not None else ""
 
 
 def _parse_bounded_a1_range(a1_range: str) -> tuple[int, int]:

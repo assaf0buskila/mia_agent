@@ -55,6 +55,10 @@ Telegram access: `MIA_TELEGRAM_OWNER_USER_IDS` numeric only. Owner inbound repli
 ## Voice
 
 One `TranscriptionPort` (`app/integrations/transcribe.py`). Website and Telegram share it. Provider is replaceable; credentials stay in env. No TTS.
+Telegram carries declared MIME and provider file metadata through download, derives an
+extension-bearing transcription filename, and permits a generic CDN content type only when the
+Telegram update or provider path independently proves an allowed audio format. Audio documents
+enter the same path; ordinary documents never do.
 
 ## Memory and knowledge
 
@@ -77,6 +81,9 @@ using the channel-minted `Principal`; prompt text cannot add a tool. Sheets read
 Bounded value update/append is low-risk and requires an explicit authenticated owner request plus
 an Assaf-configured/allowlisted spreadsheet ID. No Drive discovery, create/delete/clear,
 formatting, formula generation, or client access is permitted.
+For `sheets.read`, the same ID may arrive inside an exact HTTPS Google Sheets URL; it is extracted
+locally and still checked against the allowlist. A missing read range becomes only `A1:J20` on the
+first visible tab. Writes never receive a default target or range.
 
 Client allowlist is dramatically narrower than owner. Website visitors never inherit the owner Composio session.
 
@@ -126,6 +133,10 @@ Widget `app/web/ask_mia.js` depends on:
 - `POST /v1/website/sessions/{id}/end`
 
 Preserve pill, bubbles, composer mic, palette, WhatsApp card. No TTS. No competing WhatsApp FAB.
+`GET /config` may expose only the server-configured `https://wa.me` URL. After session creation the
+existing composer WhatsApp action is visible when that URL is valid; its click opens immediately
+and independently posts the idempotent handoff notification. Never derive a destination from
+model or visitor text.
 
 ## Runtime
 

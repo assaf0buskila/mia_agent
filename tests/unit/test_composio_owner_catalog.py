@@ -500,19 +500,51 @@ def test_dynamic_execute_is_read_only_schema_checked_and_kill_switch_checked(mon
         ComposioCatalog, "from_settings", classmethod(lambda cls, settings: catalog)
     )
     ok = execute_tool(
-        "composio_execute_tool", {"tool_slug": "LINKEDIN_GET_MY_INFO", "arguments": {}}, _context()
+        "composio_execute_tool",
+        {"tool_slug": "LINKEDIN_GET_MY_INFO", "arguments_json": "{}"},
+        _context(),
     )
     assert ok.ok and "Assaf" in ok.text
     denied = execute_tool(
-        "composio_execute_tool", {"tool_slug": "GMAIL_DELETE_THREAD", "arguments": {}}, _context()
+        "composio_execute_tool",
+        {"tool_slug": "GMAIL_DELETE_THREAD", "arguments_json": "{}"},
+        _context(),
     )
     assert not denied.ok and "destructive" in denied.error
     killed = execute_tool(
         "composio_execute_tool",
-        {"tool_slug": "LINKEDIN_GET_MY_INFO", "arguments": {}},
+        {"tool_slug": "LINKEDIN_GET_MY_INFO", "arguments_json": "{}"},
         _context(kill_switch=True),
     )
     assert not killed.ok and "denied" in killed.error
+
+
+@pytest.mark.parametrize(
+    ("arguments_json", "error"),
+    [
+        ("{", "valid JSON"),
+        ("[]", "decode to a JSON object"),
+        ("null", "decode to a JSON object"),
+    ],
+)
+def test_dynamic_execute_rejects_malformed_or_non_object_json_before_catalog_lookup(
+    monkeypatch, arguments_json: str, error: str
+) -> None:
+    def forbidden_catalog(_cls, _settings):
+        raise AssertionError("invalid JSON must not reach catalog lookup")
+
+    monkeypatch.setattr(
+        ComposioCatalog,
+        "from_settings",
+        classmethod(forbidden_catalog),
+    )
+    result = execute_tool(
+        "composio_execute_tool",
+        {"tool_slug": "LINKEDIN_GET_MY_INFO", "arguments_json": arguments_json},
+        _context(),
+    )
+    assert not result.ok
+    assert error in result.error
 
 
 def test_all_meta_tools_deny_before_config_or_catalog_lookup(monkeypatch) -> None:
@@ -531,7 +563,7 @@ def test_all_meta_tools_deny_before_config_or_catalog_lookup(monkeypatch) -> Non
         ("composio_get_tool_schema", {"tool_slug": "GMAIL_SEARCH_EMAILS"}),
         (
             "composio_execute_tool",
-            {"tool_slug": "GMAIL_SEARCH_EMAILS", "arguments": {}},
+            {"tool_slug": "GMAIL_SEARCH_EMAILS", "arguments_json": "{}"},
         ),
     )
     for name, arguments in calls:
@@ -547,3 +579,19 @@ def test_owner_prompt_has_only_three_small_meta_tools_not_catalog_payload() -> N
         names
     )
     assert len(names) < 40
+
+
+def test_all_advertised_object_schemas_are_closed_recursively() -> None:
+    def assert_closed(schema: object) -> None:
+        if isinstance(schema, dict):
+            if schema.get("type") == "object":
+                assert schema.get("additionalProperties") is False
+            for value in schema.values():
+                assert_closed(value)
+        elif isinstance(schema, list):
+            for value in schema:
+                assert_closed(value)
+
+    for definition in tool_definitions():
+        assert definition["function"]["strict"] is True
+        assert_closed(definition["function"]["parameters"])

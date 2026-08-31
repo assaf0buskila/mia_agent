@@ -43,6 +43,22 @@ def test_panel_is_created_hidden() -> None:
     assert "panel.hidden = false" in _function_body(source, "openPanel")
 
 
+def test_configured_whatsapp_is_a_one_tap_action_not_a_model_phone_link() -> None:
+    source = _source()
+    init = _function_body(source, "initSession")
+    assert "showConfiguredWhatsApp(cfg.whatsapp_url)" in init
+    show = _function_body(source, "showConfiguredWhatsApp")
+    assert "isWaMeUrl(url)" in show
+    assert "waBtn.hidden = !configuredWhatsAppUrl" in show
+    handoff = _function_body(source, "handoff")
+    assert "openConfiguredWhatsApp()" in handoff
+    assert "fetchJson(" not in handoff
+    open_wa = _function_body(source, "openConfiguredWhatsApp")
+    assert "window.open(configuredWhatsAppUrl, '_blank', 'noopener,noreferrer')" in open_wa
+    assert open_wa.index("window.open") < open_wa.index("notifyHandoffIssued()")
+    assert "placeWhatsAppCta" not in handoff
+
+
 def test_no_auto_open_timer_scroll_or_exit_intent() -> None:
     source = _source()
     lowered = source.lower()
@@ -325,23 +341,20 @@ def test_widget_hebrew_addresses_both_genders() -> None:
     assert "כתבו" in source
 
 
-def test_whatsapp_handoff_shows_a_card_instead_of_a_page_redirect() -> None:
-    """The old flow jumped the whole page to a raw wa.me URL with no confirmation.
-
-    A card keeps the conversation on screen, says what Assaf will already know, and opens
-    WhatsApp in a new tab so the visitor can come back.
-    """
+def test_reply_handoff_keeps_a_card_but_the_persistent_action_opens_immediately() -> None:
+    """A reply CTA is a card; the persistent lazy-user action is one tap."""
     source = _source()
     handoff = _function_body(source, "handoff")
     assert "window.location.assign" not in handoff
-    assert "placeWhatsAppCta" in handoff
+    assert "openConfiguredWhatsApp" in handoff
 
     card = _function_body(source, "paintHandoffCard")
     assert "makeWhatsAppCta" in card
     assert "_blank" in _function_body(source, "makeWhatsAppCta")
     assert "noopener" in _function_body(source, "makeWhatsAppCta")
-    # The link is still validated as a wa.me URL before it is ever rendered.
-    assert "isWaMeUrl" in handoff
+    # Both the card and persistent route validate wa.me before navigation.
+    assert "isWaMeUrl" in _function_body(source, "makeWhatsAppCta")
+    assert "isWaMeUrl" in _function_body(source, "openConfiguredWhatsApp")
 
 
 def test_handoff_card_explains_the_context_transfer_in_plural_hebrew() -> None:
@@ -398,8 +411,10 @@ def test_widget_open_send_uses_textcontent_and_wa_me_href_only() -> None:
     assert "el.textContent = text" in paint
     assert "innerHTML" not in paint
     handoff = _function_body(source, "handoff")
-    assert "isWaMeUrl(data.whatsapp_url)" in handoff
-    assert "placeWhatsAppCta(data.whatsapp_url" in handoff
+    assert "openConfiguredWhatsApp" in handoff
+    configured = _function_body(source, "openConfiguredWhatsApp")
+    assert "isWaMeUrl(configuredWhatsAppUrl)" in configured
+    assert "window.open(configuredWhatsAppUrl" in configured
     cta = _function_body(source, "makeWhatsAppCta")
     assert "link.href = url" in cta
     assert "isWaMeUrl(url)" in cta

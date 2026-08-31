@@ -13,8 +13,14 @@ def _args(
 ) -> tuple[str, str, list[list[str]]]:
     spreadsheet_id = str(args.get("spreadsheet_id") or "").strip()
     a1_range = str(args.get("range") or "").strip()
-    if not spreadsheet_id or not a1_range:
-        raise InvalidArguments("spreadsheet_id and range are required")
+    if not spreadsheet_id:
+        raise InvalidArguments("spreadsheet_id is required")
+    if not a1_range and not include_values:
+        # A1:J20 is a deliberately small preview of the first visible tab. This makes a
+        # pasted allowlisted Google Sheets link useful without forcing Assaf to type A1.
+        a1_range = "A1:J20"
+    if not a1_range:
+        raise InvalidArguments("range is required for Sheets writes")
     values = args.get("values") if include_values else []
     if include_values and not isinstance(values, list):
         raise InvalidArguments("values must be a two-dimensional list")

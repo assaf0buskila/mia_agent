@@ -16,8 +16,8 @@ from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
 from app.domain.owner_brain import OwnerBrainResult
 from app.integrations.base import RecordingMessagePort
-from app.integrations.telegram import TelegramMediaError, TelegramPort
-from app.integrations.transcribe import FakeTranscriptionPort, TranscriptionError
+from app.integrations.telegram import TelegramMediaError, TelegramPort, parse_telegram_update
+from app.integrations.transcribe import FakeTranscriptionPort, TranscriptionError, TranscriptResult
 from app.main import app
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
@@ -39,9 +39,12 @@ class RecordingTelegramVoicePort(RecordingMessagePort):
         super().__init__()
         self.downloaded_file_ids: list[str] = []
 
-    async def download_voice(self, file_id: str) -> tuple[bytes, str]:
+    async def download_voice(
+        self, file_id: str, *, declared_mime_type: str = "", declared_filename: str = ""
+    ) -> tuple[bytes, str, str]:
+        del declared_mime_type, declared_filename
         self.downloaded_file_ids.append(file_id)
-        return b"synthetic-ogg", "audio/ogg"
+        return b"synthetic-ogg", "audio/ogg", "note.ogg"
 
 
 class FailingTranscriptionPort:
@@ -52,15 +55,29 @@ class FailingTranscriptionPort:
         raise TranscriptionError("provider said: transcript and token must stay private")
 
 
+class CapturingTranscriptionPort:
+    def __init__(self) -> None:
+        self.calls: list[tuple[bytes, str, str]] = []
+
+    async def transcribe(
+        self, *, audio: bytes, mime_type: str, filename: str = "note.ogg"
+    ) -> TranscriptResult:
+        self.calls.append((audio, mime_type, filename))
+        return TranscriptResult(text="בדיקת מסמך קולי", stt_provider="fake", stt_model="fake")
+
+
 class InvalidMimeTelegramVoicePort(RecordingMessagePort):
     def __init__(self, mime_type: str) -> None:
         super().__init__()
         self.mime_type = mime_type
         self.downloaded_file_ids: list[str] = []
 
-    async def download_voice(self, file_id: str) -> tuple[bytes, str]:
+    async def download_voice(
+        self, file_id: str, *, declared_mime_type: str = "", declared_filename: str = ""
+    ) -> tuple[bytes, str, str]:
+        del declared_mime_type, declared_filename
         self.downloaded_file_ids.append(file_id)
-        return b"not-audio", self.mime_type
+        return b"not-audio", self.mime_type, "note.ogg"
 
 
 class AlternateTelegramVoicePort(RecordingMessagePort):
@@ -70,9 +87,12 @@ class AlternateTelegramVoicePort(RecordingMessagePort):
         self.mime_type = mime_type
         self.downloaded_file_ids: list[str] = []
 
-    async def download_voice(self, file_id: str) -> tuple[bytes, str]:
+    async def download_voice(
+        self, file_id: str, *, declared_mime_type: str = "", declared_filename: str = ""
+    ) -> tuple[bytes, str, str]:
+        del declared_mime_type, declared_filename
         self.downloaded_file_ids.append(file_id)
-        return self.audio, self.mime_type  # type: ignore[return-value]
+        return self.audio, self.mime_type, "note.ogg"  # type: ignore[return-value]
 
 
 class MalformedTelegramVoicePort(RecordingMessagePort):
@@ -81,14 +101,19 @@ class MalformedTelegramVoicePort(RecordingMessagePort):
         self.result = result
         self.downloaded_file_ids: list[str] = []
 
-    async def download_voice(self, file_id: str) -> tuple[bytes, str]:
+    async def download_voice(
+        self, file_id: str, *, declared_mime_type: str = "", declared_filename: str = ""
+    ) -> tuple[bytes, str, str]:
+        del declared_mime_type, declared_filename
         self.downloaded_file_ids.append(file_id)
         return self.result  # type: ignore[return-value]
 
 
 class FailingDownloadTelegramVoicePort(RecordingMessagePort):
-    async def download_voice(self, file_id: str) -> tuple[bytes, str]:
-        del file_id
+    async def download_voice(
+        self, file_id: str, *, declared_mime_type: str = "", declared_filename: str = ""
+    ) -> tuple[bytes, str, str]:
+        del file_id, declared_mime_type, declared_filename
         raise TelegramMediaError("private provider detail")
 
 
@@ -427,7 +452,6 @@ def test_retried_voice_success_claims_before_download_stt_graph_and_reply(monkey
         "text/html",
         "application/json",
         "image/png",
-        "application/octet-stream",
         "audio/ogg; broken",
     ],
 )
@@ -436,7 +460,7 @@ async def test_telegram_download_voice_rejects_non_audio_and_malformed_content_t
 ) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/getFile"):
-            return httpx.Response(200, json={"ok": True, "result": {"file_path": "voice/note.ogg"}})
+            return httpx.Response(200, json={"ok": True, "result": {"file_path": "voice/note.bin"}})
         headers = {} if content_type is None else {"content-type": content_type}
         return httpx.Response(200, content=b"not-audio", headers=headers)
 
@@ -459,9 +483,197 @@ async def test_telegram_download_voice_normalizes_supported_audio_content_type()
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         port = TelegramPort(bot_token="test-bot-token", client=client)
-        audio, mime_type = await port.download_voice("voice-file-valid-mime")
+        audio, mime_type, filename = await port.download_voice("voice-file-valid-mime")
     assert audio == b"audio"
     assert mime_type == "audio/ogg"
+    assert filename == "note.ogg"
+
+
+@pytest.mark.asyncio
+async def test_telegram_download_voice_uses_declared_mime_when_cdn_is_generic() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/getFile"):
+            return httpx.Response(200, json={"ok": True, "result": {"file_path": "voice/note.ogg"}})
+        return httpx.Response(
+            200, content=b"audio", headers={"content-type": "application/octet-stream"}
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        port = TelegramPort(bot_token="test-bot-token", client=client)
+        audio, mime_type, filename = await port.download_voice(
+            "voice-file-generic-cdn", declared_mime_type="audio/ogg"
+        )
+    assert (audio, mime_type, filename) == (b"audio", "audio/ogg", "note.ogg")
+
+
+@pytest.mark.asyncio
+async def test_telegram_download_audio_uses_mp3_path_when_mime_is_missing_and_cdn_generic() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/getFile"):
+            return httpx.Response(
+                200, json={"ok": True, "result": {"file_path": "documents/owner.mp3"}}
+            )
+        return httpx.Response(
+            200, content=b"audio", headers={"content-type": "application/octet-stream"}
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        port = TelegramPort(bot_token="test-bot-token", client=client)
+        audio, mime_type, filename = await port.download_voice(
+            "audio-file-missing-mime", declared_filename="owner.mp3"
+        )
+    assert (audio, mime_type, filename) == (b"audio", "audio/mpeg", "owner.mp3")
+
+
+@pytest.mark.asyncio
+async def test_telegram_download_audio_uses_declared_mp3_name_with_generic_path() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/getFile"):
+            return httpx.Response(
+                200, json={"ok": True, "result": {"file_path": "documents/file.bin"}}
+            )
+        return httpx.Response(
+            200, content=b"audio", headers={"content-type": "application/octet-stream"}
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        port = TelegramPort(bot_token="test-bot-token", client=client)
+        audio, mime_type, filename = await port.download_voice(
+            "audio-file-generic-path", declared_filename="owner.mp3"
+        )
+    assert (audio, mime_type, filename) == (b"audio", "audio/mpeg", "owner.mp3")
+
+
+@pytest.mark.asyncio
+async def test_telegram_download_audio_uses_its_real_filename_and_extension() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/getFile"):
+            return httpx.Response(
+                200, json={"ok": True, "result": {"file_path": "audio/track.mp3"}}
+            )
+        return httpx.Response(200, content=b"audio", headers={"content-type": "audio/mpeg"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        port = TelegramPort(bot_token="test-bot-token", client=client)
+        _audio, mime_type, filename = await port.download_voice(
+            "audio-file-mp3", declared_mime_type="audio/mpeg", declared_filename="song.mp3"
+        )
+    assert (mime_type, filename) == ("audio/mpeg", "track.mp3")
+
+
+def test_parse_telegram_audio_document_as_voice_input() -> None:
+    parsed = parse_telegram_update(
+        {
+            "update_id": 991,
+            "message": {
+                "message_id": 992,
+                "from": {"id": int(OWNER_ID)},
+                "chat": {"id": int(OWNER_ID)},
+                "document": {
+                    "file_id": "audio-document-991",
+                    "file_name": "voice-note.webm",
+                    "mime_type": "audio/webm",
+                },
+            },
+        }
+    )
+    assert parsed is not None
+    assert parsed["file_id"] == "audio-document-991"
+    assert parsed["mime_type"] == "audio/webm"
+    assert parsed["file_name"] == "voice-note.webm"
+
+
+def test_audio_document_without_mime_keeps_filename_as_format_evidence() -> None:
+    parsed = parse_telegram_update(
+        {
+            "update_id": 997,
+            "message": {
+                "message_id": 998,
+                "from": {"id": int(OWNER_ID)},
+                "chat": {"id": int(OWNER_ID)},
+                "document": {"file_id": "audio-document-997", "file_name": "owner.mp3"},
+            },
+        }
+    )
+    assert parsed is not None
+    assert parsed["mime_type"] == ""
+    assert parsed["file_name"] == "owner.mp3"
+
+
+def test_non_audio_telegram_document_does_not_masquerade_as_voice() -> None:
+    parsed = parse_telegram_update(
+        {
+            "update_id": 993,
+            "message": {
+                "message_id": 994,
+                "from": {"id": int(OWNER_ID)},
+                "chat": {"id": int(OWNER_ID)},
+                "document": {
+                    "file_id": "pdf-993",
+                    "file_name": "brief.pdf",
+                    "mime_type": "application/pdf",
+                },
+            },
+        }
+    )
+    assert parsed is not None
+    assert parsed["file_id"] == ""
+
+
+def test_unsupported_audio_document_reaches_truthful_media_validation() -> None:
+    parsed = parse_telegram_update(
+        {
+            "update_id": 995,
+            "message": {
+                "message_id": 996,
+                "from": {"id": int(OWNER_ID)},
+                "chat": {"id": int(OWNER_ID)},
+                "document": {
+                    "file_id": "unsupported-audio-995",
+                    "file_name": "recording.vendor-codec",
+                    "mime_type": "audio/x-vendor-codec",
+                },
+            },
+        }
+    )
+    assert parsed is not None
+    assert parsed["file_id"] == "unsupported-audio-995"
+
+
+def test_audio_document_reaches_stt_and_owner_graph(monkeypatch) -> None:
+    _configure_owner(monkeypatch)
+    init_db()
+    telegram = RecordingTelegramVoicePort()
+    transcribe = CapturingTranscriptionPort()
+    graph_inputs: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        owner_api,
+        "answer_owner",
+        lambda **kwargs: graph_inputs.append(kwargs) or OwnerBrainResult("ok", True, ()),
+    )
+    app.dependency_overrides[get_telegram_port] = lambda: telegram
+    app.dependency_overrides[get_transcription_port] = lambda: transcribe
+    update_id = _fresh_update_id()
+    payload = _voice_update(update_id=update_id, file_id="audio-document-route")
+    payload["message"].pop("voice")
+    payload["message"]["document"] = {
+        "file_id": "audio-document-route",
+        "file_name": "owner-note.mp3",
+        "mime_type": "audio/mpeg",
+    }
+    try:
+        with TestClient(app) as client:
+            response = client.post(
+                "/v1/telegram/webhook",
+                json=payload,
+                headers={"X-Telegram-Bot-Api-Secret-Token": WEBHOOK_SECRET},
+            )
+        assert response.status_code == 200
+        assert transcribe.calls == [(b"synthetic-ogg", "audio/ogg", "note.ogg")]
+        assert graph_inputs[0]["owner_text"] == "בדיקת מסמך קולי"
+    finally:
+        app.dependency_overrides.pop(get_telegram_port, None)
+        app.dependency_overrides.pop(get_transcription_port, None)
 
 
 @pytest.mark.asyncio
@@ -575,7 +787,7 @@ def test_alternate_voice_port_cannot_bypass_media_validation(
     [
         None,
         (b"voice",),
-        (b"voice", "audio/ogg", "extra"),
+        (b"voice", "audio/ogg", "note.ogg", "extra"),
         "not-a-pair",
         {"audio": b"voice", "mime": "audio/ogg"},
     ],

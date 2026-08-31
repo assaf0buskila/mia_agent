@@ -33,6 +33,9 @@
   var SESSION_RE = /^web_[a-f0-9]{16}$/;
   var storedTranscript = [];
   var sessionEnded = false;
+  // Only populated from the server's config response. Never infer a destination
+  // from a Mia reply, a page link, or visitor text.
+  var configuredWhatsAppUrl = '';
   var SVG_NS = 'http://www.w3.org/2000/svg';
   var MIA_MARK_PATH =
     'M7 23V8h4.2L16 16.8 20.8 8H25v15h-3.4V13.1L16 21.2l-5.6-8.1V23H7z';
@@ -413,6 +416,23 @@
       });
   }
 
+  function openConfiguredWhatsApp() {
+    if (!isWaMeUrl(configuredWhatsAppUrl)) {
+      status.textContent = WA_NA;
+      return;
+    }
+    // This runs directly in the visitor's click handler, so WhatsApp opens even if
+    // the best-effort notification request is slow or fails.
+    window.open(configuredWhatsAppUrl, '_blank', 'noopener,noreferrer');
+    notifyHandoffIssued();
+  }
+
+  function showConfiguredWhatsApp(url) {
+    configuredWhatsAppUrl = isWaMeUrl(url) ? url : '';
+    waBtn.hidden = !configuredWhatsAppUrl;
+    waBtn.classList.toggle('offer', !!configuredWhatsAppUrl);
+  }
+
   function makeWhatsAppCta(url) {
     if (!isWaMeUrl(url)) return null;
     var link = document.createElement('a');
@@ -589,11 +609,17 @@
         }
         if (existing) {
           sessionId = existing;
+          showConfiguredWhatsApp(cfg.whatsapp_url);
           postEvent('page_viewed', { path: location.pathname });
           flushEventQueue();
           return existing;
         }
-        return createWebsiteSession();
+        return createWebsiteSession().then(function (id) {
+          // Do not offer a button that cannot identify a website session to the
+          // handoff endpoint. It appears as soon as setup is complete.
+          if (id) showConfiguredWhatsApp(cfg.whatsapp_url);
+          return id;
+        });
       })
       .catch(function () {
         status.textContent = ERR;
@@ -877,28 +903,7 @@
   }
 
   function handoff() {
-    if (busy || !sessionId) return;
-    busy = true;
-    status.textContent = '';
-    fetchJson(
-      api + '/v1/website/sessions/' + encodeURIComponent(sessionId) + '/handoff',
-      { method: 'POST' }
-    )
-      .then(function (data) {
-        if (typeof data.whatsapp_url === 'string' && isWaMeUrl(data.whatsapp_url)) {
-          placeWhatsAppCta(data.whatsapp_url, false);
-          waBtn.hidden = true;
-          waBtn.classList.remove('offer');
-        } else {
-          status.textContent = WA_NA;
-        }
-      })
-      .catch(function () {
-        status.textContent = ERR;
-      })
-      .finally(function () {
-        busy = false;
-      });
+    openConfiguredWhatsApp();
   }
 
   function onCtaClick(e) {

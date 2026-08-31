@@ -28,6 +28,10 @@ create/delete/clear/format/formula work, or Sheets read-back as Mia's truth. Oth
 approvals, sends, Meta changes, and deletions stay on the deterministic policy path — never
 because a prompt asked nicely.
 
+For reads, Assaf may paste an exact `docs.google.com/spreadsheets/d/...` URL. Mia extracts the
+spreadsheet ID locally, verifies the same allowlist, and uses a bounded first-tab preview when no
+A1 range was supplied. A link is convenience, not authorization.
+
 Across every ACTIVE Composio toolkit connected to `MIA_COMPOSIO_USER_ID`, Owner Mia may search
 for a tool on demand, fetch that exact tool's bounded current input schema, and execute a
 preflighted read recognized by the conservative classifier. The full catalog is never inserted
@@ -61,7 +65,7 @@ Finalization is one service. Triggers now: visitor closes the widget or leaves t
 
 The existing WhatsApp-click briefing (paste-ready first line for Assaf) stays. Finalization does not duplicate it for the same lead if that briefing already fired.
 
-When the website graph selects HANDOFF, Assaf gets a Telegram ping with the conversation. That ping is independent of `MIA_WHATSAPP_HANDOFF_SEND` (visitor WhatsApp send stays gated). The widget may still show a click-to-chat CTA. Visitor copy may claim a completed transfer only after Telegram accepted the ping. If the bot token, owner ids, or send fail, the widget says the transfer could not be completed — it does not invent a handoff.
+When the website graph selects HANDOFF, Assaf gets a Telegram ping with the conversation. That ping is independent of `MIA_WHATSAPP_HANDOFF_SEND` (visitor WhatsApp send stays gated). When a valid configured click-to-chat destination exists, the widget always exposes a one-tap WhatsApp action after session creation; reply handoff cards remain one tap as well. A tap opens WhatsApp immediately and sends the server-side handoff notification best-effort. Model-generated phone text is never converted into a destination. Visitor copy may claim a completed transfer only after Telegram accepted the ping. If the bot token, owner ids, or send fail, the widget says the transfer could not be completed — it does not invent a handoff.
 
 ## WhatsApp, Gmail, and the rest
 

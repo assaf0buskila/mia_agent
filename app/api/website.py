@@ -127,6 +127,9 @@ class WebsiteConfigOut(BaseModel):
     widget: str
     opening: str
     demo: bool
+    # This is deliberately derived server-side from the configured destination.  The
+    # widget must never turn a phone number from a model reply into a link.
+    whatsapp_url: str | None = None
 
 
 class HandoffOut(BaseModel):
@@ -610,12 +613,14 @@ def website_widget_preview() -> Response:
 @router.get("/config", response_model=WebsiteConfigOut)
 def website_config() -> WebsiteConfigOut:
     live = get_settings()
+    whatsapp_url = click_to_chat_url(live.whatsapp_click_to_chat) or None
     return WebsiteConfigOut(
         website_url=live.website_url,
         public_base_url=live.public_base_url,
         widget="ask_mia",
         opening=WEBSITE_REPLIES[NextAction.UNDERSTAND_WORKFLOW],
         demo=demo_mode_active(live),
+        whatsapp_url=whatsapp_url,
     )
 
 

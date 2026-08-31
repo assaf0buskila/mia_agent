@@ -64,7 +64,15 @@ def test_website_config_points_at_assafweb() -> None:
         assert body["website_url"] == "https://www.assafweb.com"
         assert body["widget"] == "ask_mia"
         assert body["demo"] is False
+        assert body["whatsapp_url"] is None
         assert "יום רגיל בעסק" in body["opening"]
+
+
+def test_website_config_exposes_only_a_config_derived_whatsapp_url(monkeypatch) -> None:
+    monkeypatch.setenv("MIA_WHATSAPP_CLICK_TO_CHAT", CLICK_CHAT)
+    with TestClient(app) as client:
+        body = client.get("/v1/website/config").json()
+    assert body["whatsapp_url"] == click_to_chat_url(CLICK_CHAT)
 
 
 def test_website_widget_js_served() -> None:

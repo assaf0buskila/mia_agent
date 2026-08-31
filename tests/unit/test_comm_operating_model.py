@@ -63,9 +63,12 @@ class RecordingTelegramPort(RecordingMessagePort):
         super().__init__()
         self.downloads = 0
 
-    async def download_voice(self, file_id: str) -> tuple[bytes, str]:
+    async def download_voice(
+        self, file_id: str, *, declared_mime_type: str = "", declared_filename: str = ""
+    ) -> tuple[bytes, str, str]:
+        del declared_mime_type, declared_filename
         self.downloads += 1
-        return b"ogg-bytes", "audio/ogg"
+        return b"ogg-bytes", "audio/ogg", "note.ogg"
 
 
 class _FailingTranscribe:

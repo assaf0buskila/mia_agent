@@ -78,11 +78,15 @@ async def _transcribe_telegram_voice(
     if not callable(download):
         return _voice_failure(item, stage="download_unavailable", started=started)
     try:
-        downloaded = await download(item["file_id"])
-    except (RuntimeError, TelegramMediaError, AdapterHttpError):
+        downloaded = await download(
+            item["file_id"],
+            declared_mime_type=item.get("mime_type", ""),
+            declared_filename=item.get("file_name", ""),
+        )
+    except (RuntimeError, TelegramMediaError, AdapterHttpError, TypeError, ValueError):
         return _voice_failure(item, stage="download_failed", started=started)
     try:
-        audio_bytes, mime_type = downloaded
+        audio_bytes, mime_type, filename = downloaded
     except (TypeError, ValueError):
         return _voice_failure(item, stage="download_failed", started=started)
     try:
@@ -90,7 +94,9 @@ async def _transcribe_telegram_voice(
     except TelegramMediaError:
         return _voice_failure(item, stage="media_rejected", started=started)
     try:
-        result = await transcribe_port.transcribe(audio=audio_bytes, mime_type=mime_type)
+        result = await transcribe_port.transcribe(
+            audio=audio_bytes, mime_type=mime_type, filename=filename
+        )
     except (RuntimeError, AdapterHttpError, TranscriptionError):
         return _voice_failure(item, stage="stt_failed", started=started)
     finally:
@@ -316,6 +322,7 @@ async def receive_webhook(
         "message_id": item.get("message_id") or "",
         "text": item.get("text") or "",
         "source": item.get("source", ""),
+        "file_name": item.get("file_name", ""),
         "stt_provider": item.get("stt_provider", ""),
         "stt_model": item.get("stt_model", ""),
         "language": item.get("language", ""),

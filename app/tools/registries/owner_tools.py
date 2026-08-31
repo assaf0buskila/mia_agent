@@ -138,10 +138,26 @@ def _enum_arg(name: str, description: str, *, enum: list[str]) -> dict[str, Any]
 
 
 def _sheet_args(*, include_values: bool) -> dict[str, Any]:
+    spreadsheet_description = "An Assaf-allowlisted spreadsheet ID."
+    if not include_values:
+        spreadsheet_description += (
+            " A full https://docs.google.com/spreadsheets/d/... URL is also accepted for reads."
+        )
     properties: dict[str, Any] = {
-        "spreadsheet_id": {"type": "string", "description": "An Assaf-allowlisted spreadsheet ID."},
-        "range": {"type": "string", "description": "One bounded A1 range, for example KPI!A1:C5."},
+        "spreadsheet_id": {
+            "type": "string",
+            "description": spreadsheet_description,
+        },
+        "range": {
+            "type": ["string", "null"] if not include_values else "string",
+            "description": (
+                "One bounded A1 range, for example KPI!A1:C5. For reads only, null uses "
+                "the bounded A1:J20 preview of the first visible tab."
+            ),
+        },
     }
+    # Strict tool schemas require every property in `required`; a null read range is the
+    # explicit lazy-user default. Writes still reject null and URLs in deterministic code.
     required = ["spreadsheet_id", "range"]
     if include_values:
         properties["values"] = {
@@ -1342,18 +1358,34 @@ def _composio_execute_tool(ctx: ToolContext, args: dict[str, Any]) -> ToolResult
         )
     except PermissionDenied:
         return ToolResult(ok=False, error="Composio execution denied")
+    values = _parse_composio_arguments(args)
+    if isinstance(values, ToolResult):
+        return values
     catalog = _catalog(ctx)
     if catalog is None:
         return ToolResult(ok=True, text=_NOT_CONNECTED)
     with catalog:
-        return _composio_execute_with_catalog(catalog, args)
+        return _composio_execute_with_catalog(catalog, args, values)
+
+
+def _parse_composio_arguments(args: dict[str, Any]) -> dict[str, Any] | ToolResult:
+    """Decode the dynamic argument map without making the strict tool schema open-ended."""
+    raw_arguments = args.get("arguments_json")
+    if not isinstance(raw_arguments, str):
+        return ToolResult(ok=False, error="arguments_json must be a JSON object")
+    try:
+        values = json.loads(raw_arguments)
+    except json.JSONDecodeError:
+        return ToolResult(ok=False, error="arguments_json must be valid JSON")
+    if not isinstance(values, dict):
+        return ToolResult(ok=False, error="arguments_json must decode to a JSON object")
+    return values
 
 
 def _composio_execute_with_catalog(
-    catalog: ComposioCatalog, args: dict[str, Any]
+    catalog: ComposioCatalog, args: dict[str, Any], values: dict[str, Any]
 ) -> ToolResult:
     slug = str(args.get("tool_slug") or "").strip().upper()
-    values = args.get("arguments")
     tool = catalog.detail(slug)
     if tool is None or tool.slug != slug:
         return ToolResult(ok=False, error="tool is not in an ACTIVE owner Composio toolkit")
@@ -1786,8 +1818,9 @@ _register(
         name="sheets_read",
         description=(
             "Reads one bounded A1 range from an explicitly Assaf-allowlisted Google Sheet. "
-            "Use only when Assaf explicitly names the spreadsheet ID and range. It is an "
-            "operational lookup, never Mia's source of truth; no Drive discovery."
+            "Accept a pasted Google Sheets URL and extract its ID locally. When Assaf gives "
+            "only the link, pass range=null for a bounded A1:J20 preview of the first visible "
+            "tab. It is an operational lookup, never Mia's source of truth; no Drive discovery."
         ),
         parameters=_sheet_args(include_values=False),
         handler=_sheets_read,
@@ -1899,12 +1932,15 @@ _register(
                     "type": "string",
                     "description": "Tool slug whose schema you just loaded.",
                 },
-                "arguments": {
-                    "type": "object",
-                    "description": "Arguments matching that exact schema.",
+                "arguments_json": {
+                    "type": "string",
+                    "description": (
+                        "A JSON object whose fields match that exact schema, for example "
+                        "{\"query\":\"from:daniel\"}."
+                    ),
                 },
             },
-            "required": ["tool_slug", "arguments"],
+            "required": ["tool_slug", "arguments_json"],
             "additionalProperties": False,
         },
         handler=_composio_execute_tool,
