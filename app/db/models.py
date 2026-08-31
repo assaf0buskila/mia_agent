@@ -358,6 +358,8 @@ class OwnerNotificationRecipientClaimRow(Base):
 
     A Telegram fan-out is not one atomic delivery: accepted owners must not receive a
     retry, known rejected owners must, and ambiguous recipients must remain protected.
+    ``delivery_status`` distinguishes a confirmed acceptance from the retained
+    ambiguous claim needed for truthful visitor copy on later graph replays.
     """
 
     __tablename__ = "owner_notification_recipient_claims"
@@ -367,6 +369,7 @@ class OwnerNotificationRecipientClaimRow(Base):
     notification_key: Mapped[str] = mapped_column(String(255), primary_key=True, default="")
     recipient_id: Mapped[str] = mapped_column(String(32), primary_key=True)
     claimed_at: Mapped[str] = mapped_column(String(32), default="")
+    delivery_status: Mapped[str] = mapped_column(String(16), default="pending")
 
 
 class OwnerBriefRow(Base):

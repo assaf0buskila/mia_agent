@@ -13,6 +13,7 @@ from app.domain.sales import (
     NextAction,
     PainLevel,
     SalesState,
+    discovery_ladder,
     select_next_action,
 )
 from app.graph.replies import reply_for
@@ -70,6 +71,52 @@ def test_the_ladder_does_not_step_back_into_discovery_after_acceptance() -> None
     assert state.reflected is False  # a discovery rung is still formally unmet
     accepted = extract_sales_signals(state, "כן בבקשה")
     assert select_next_action(accepted, channel="website") is not NextAction.REFLECT
+
+
+@pytest.mark.parametrize(
+    "request_text",
+    [
+        "אפשר להגיע לאסף?",
+        "אפשר לדבר עם אסף?",
+        "תחברו אותי לאסף",
+        "can I reach Assaf?",
+        "connect me with Assaf",
+    ],
+)
+def test_direct_request_for_assaf_bypasses_discovery(request_text: str) -> None:
+    """A direct human request is a completed next-step choice, not a discovery answer."""
+    state = extract_sales_signals(SalesState(lead_id="lead_direct_handoff"), request_text)
+    assert state.owner_required is True
+    assert select_next_action(state, channel="website") is NextAction.HANDOFF
+    assert discovery_ladder(state)  # The HANDOFF priority, not fake discovery completion, wins.
+
+
+@pytest.mark.parametrize(
+    "request_text",
+    [
+        "אני לא רוצה לדבר עם אסף",
+        "I do not want to talk to Assaf",
+        "please do not connect me with Assaf",
+    ],
+)
+def test_negated_direct_human_request_does_not_notify_owner(request_text: str) -> None:
+    state = extract_sales_signals(SalesState(lead_id="lead_declines_handoff"), request_text)
+    assert state.owner_required is False
+    assert select_next_action(state, channel="website") is not NextAction.HANDOFF
+
+
+@pytest.mark.parametrize("complaint", ["not satisfied", "לא מרוצה"])
+def test_complaint_negation_still_requires_owner(complaint: str) -> None:
+    state = extract_sales_signals(SalesState(lead_id="lead_complaint"), complaint)
+    assert state.owner_required is True
+    assert select_next_action(state, channel="website") is NextAction.HANDOFF
+
+
+@pytest.mark.parametrize("request_text", ["רוצה לקנות", "ready to buy"])
+def test_direct_sales_request_bypasses_discovery(request_text: str) -> None:
+    state = extract_sales_signals(SalesState(lead_id="lead_direct_sale"), request_text)
+    assert state.owner_required is True
+    assert select_next_action(state, channel="website") is NextAction.HANDOFF
 
 
 # ------------------------------------------------- price questions (NOT a defect)

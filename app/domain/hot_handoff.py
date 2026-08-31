@@ -161,6 +161,12 @@ def apply_hot_handoff(
     token = settings.telegram_bot_token.strip()
     recipients = tuple(sorted(settings.telegram_owner_user_id_set()))
     if not token or not recipients or not text.strip():
+        accepted = store.confirmed_owner_notification_recipients(
+            kind=KIND_WEBSITE_HANDOFF_DELIVERY,
+            lead_id=lead_id,
+        )
+        if accepted:
+            return OwnerNotifyAttempt(accepted, False)
         # Known no-attempt: no recipient claim is consumed, so a later valid replay
         # remains eligible.
         return OwnerNotifyAttempt((), False, True)
@@ -176,7 +182,13 @@ def apply_hot_handoff(
         )
     )
     if not claimed_recipients:
-        return OwnerNotifyAttempt((), False)
+        return OwnerNotifyAttempt(
+            store.confirmed_owner_notification_recipients(
+                kind=KIND_WEBSITE_HANDOFF_DELIVERY,
+                lead_id=lead_id,
+            ),
+            False,
+        )
     # FastAPI normally commits only after the route returns. Telegram must never be
     # called while the takeover/inbox/recipient claims can still roll back, or an
     # accepted owner ping can be duplicated by the next retry.
@@ -189,12 +201,14 @@ def apply_hot_handoff(
         parse_mode=mode,
         recipient_ids=claimed_recipients,
     )
-    if delivery.rejected:
-        # A confirmed rejection is retryable only after its recipient claim release
-        # is durable. Accepted/ambiguous claims were committed before the send.
-        store.release_owner_notification_recipient_claims_durably(
-            kind=KIND_WEBSITE_HANDOFF_DELIVERY,
-            lead_id=lead_id,
-            recipient_ids=delivery.rejected,
-        )
-    return OwnerNotifyAttempt(delivery.delivered, True)
+    store.record_owner_notification_recipient_delivery_outcomes_durably(
+        kind=KIND_WEBSITE_HANDOFF_DELIVERY,
+        lead_id=lead_id,
+        delivered_recipient_ids=delivery.delivered,
+        rejected_recipient_ids=delivery.rejected,
+    )
+    accepted = store.confirmed_owner_notification_recipients(
+        kind=KIND_WEBSITE_HANDOFF_DELIVERY,
+        lead_id=lead_id,
+    )
+    return OwnerNotifyAttempt(accepted, True)

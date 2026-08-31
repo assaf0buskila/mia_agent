@@ -357,8 +357,19 @@ _OWNER_REQUIRED = (
     "רוצה את אסף",
     "תנאים מיוחדים",
     "רוצה להתחיל",
+    "רוצה לקנות",
+    "רוצה לסגור",
     "הנחה מיוחדת",
     "משא ומתן",
+    # A visitor asking to reach Assaf or a human is already choosing the next step.
+    # Do not make them complete the discovery ladder merely because the wording is a
+    # question rather than the exact phrase "רוצה את אסף".
+    "אפשר להגיע לאסף",
+    "אפשר לדבר עם אסף",
+    "אפשר לדבר עם בן אדם",
+    "תחברו אותי לאסף",
+    "תעבירו לאסף",
+    "תעבירי לאסף",
     # A price question is owner-required on purpose: there is no public price list, and
     # Mia must never quote a number. `select_next_action` checks `owner_required` before
     # `active_objection`, so these phrases hand off rather than becoming a PRICE_QUESTION
@@ -375,6 +386,12 @@ _OWNER_REQUIRED = (
     "real person",
     "talk to someone",
     "representative",
+    "can i reach assaf",
+    "can i talk to assaf",
+    "connect me with assaf",
+    "put me through to assaf",
+    "i want to buy",
+    "ready to buy",
     "רוצה נציג",
     "בן אדם",
     "לדבר עם מישהו",
@@ -395,6 +412,44 @@ _OWNER_REQUIRED = (
     "ייעוץ משפטי",
     "medical advice",
     "legal advice",
+)
+_DIRECT_OWNER_REQUIRED = (
+    "speak with assaf",
+    "talk to assaf",
+    "speak with אסף",
+    "לדבר עם אסף",
+    "רוצה את אסף",
+    "אפשר להגיע לאסף",
+    "אפשר לדבר עם אסף",
+    "אפשר לדבר עם בן אדם",
+    "תחברו אותי לאסף",
+    "תעבירו לאסף",
+    "תעבירי לאסף",
+    "i want a person",
+    "speak to a human",
+    "real person",
+    "talk to someone",
+    "representative",
+    "can i reach assaf",
+    "can i talk to assaf",
+    "connect me with assaf",
+    "put me through to assaf",
+    "רוצה נציג",
+    "בן אדם",
+    "לדבר עם מישהו",
+    "נציג אנושי",
+)
+_NON_DIRECT_OWNER_REQUIRED = tuple(
+    token for token in _OWNER_REQUIRED if token not in _DIRECT_OWNER_REQUIRED
+)
+_EN_DIRECT_OWNER_NEGATION = re.compile(
+    r"\b(?:do\s+not|don['’]?t|dont|never|not)\s+"
+    r"(?:want\s+to\s+)?(?:talk|speak|connect|reach|put|transfer|want)\b"
+    r"[^.!?\n]{0,40}\b(?:assaf|human|person|someone|representative)\b"
+)
+_HE_DIRECT_OWNER_NEGATION = re.compile(
+    r"(?:^|\s)(?:לא|אל)\s+(?:רוצה\s+)?"
+    r"(?:לדבר|להגיע|לחבר|תחבר\w*|להעביר|תעביר\w*|בן\s+אדם|נציג\w*)"
 )
 
 _OBJECTION_TOKENS: tuple[tuple[ObjectionKind, tuple[str, ...]], ...] = (
@@ -624,7 +679,13 @@ def extract_sales_signals(state: SalesState, message: str) -> SalesState:
         updated.metric_known = True
     if _message_has_token(text, _TIMELINE) and updated.pain_level >= PainLevel.P3:
         updated.pain_level = PainLevel.P5
-    if _message_has_token(text, _OWNER_REQUIRED):
+    direct_owner_requested = _message_has_token(text, _DIRECT_OWNER_REQUIRED)
+    direct_owner_negated = bool(
+        _EN_DIRECT_OWNER_NEGATION.search(text) or _HE_DIRECT_OWNER_NEGATION.search(text)
+    )
+    if _message_has_token(text, _NON_DIRECT_OWNER_REQUIRED) or (
+        direct_owner_requested and not direct_owner_negated
+    ):
         updated.owner_required = True
     # Follow through on an offer already made. Without this the ladder falls back to an
     # unmet discovery rung, so Mia offers to pass the prospect to Assaf, they say yes,

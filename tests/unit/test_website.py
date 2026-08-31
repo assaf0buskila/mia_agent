@@ -609,7 +609,7 @@ def test_website_handoff_persists_whatsapp_handoff() -> None:
         db.close()
 
 
-def test_website_handoff_reports_delivery_then_duplicate(monkeypatch) -> None:
+def test_website_handoff_reports_durable_delivery_without_resending(monkeypatch) -> None:
     monkeypatch.setenv("MIA_TELEGRAM_BOT_TOKEN", "tok")
     monkeypatch.setenv("MIA_TELEGRAM_OWNER_USER_IDS", "111")
     sends: list[tuple[str, ...]] = []
@@ -662,7 +662,7 @@ def test_website_handoff_reports_delivery_then_duplicate(monkeypatch) -> None:
 
     assert first.status_code == 200
     assert first.json()["notification_status"] == "delivered"
-    assert second.json()["notification_status"] == "duplicate_or_ambiguous"
+    assert second.json()["notification_status"] == "delivered"
     assert sends == [("111",)]
     assert committed_before_send == [(True, True, 1, 1)]
 
@@ -810,7 +810,7 @@ def test_website_handoff_release_commit_failure_recovers_then_retries_once(
 
     assert rejected.json()["notification_status"] == "failed"
     assert retry.json()["notification_status"] == "delivered"
-    assert duplicate.json()["notification_status"] == "duplicate_or_ambiguous"
+    assert duplicate.json()["notification_status"] == "delivered"
     assert sends == [("111",), ("111",)]
     assert commit_calls >= 5
 
@@ -988,6 +988,28 @@ def test_website_funnel_reflect_hypothesis_qualify_meeting() -> None:
         )
         assert msg6.status_code == 200
         assert msg6.json()["next_action"] == "offer_meeting"
+
+
+def test_exact_direct_assaf_then_yalla_sequence_keeps_the_whatsapp_cta(monkeypatch) -> None:
+    """Regression for the reported mobile transcript: direct intent cannot restart discovery."""
+    monkeypatch.setenv("MIA_WHATSAPP_CLICK_TO_CHAT", CLICK_CHAT)
+    expected = click_to_chat_url(CLICK_CHAT)
+    with TestClient(app) as client:
+        session_id = client.post("/v1/website/sessions").json()["session_id"]
+        direct = client.post(
+            f"/v1/website/sessions/{session_id}/messages",
+            json={"text": "אפשר להגיע לאסף?"},
+        )
+        confirm = client.post(
+            f"/v1/website/sessions/{session_id}/messages",
+            json={"text": "יאללה"},
+        )
+    assert direct.status_code == 200
+    assert direct.json()["next_action"] == "handoff"
+    assert direct.json()["whatsapp_url"] == expected
+    assert confirm.status_code == 200
+    assert confirm.json()["next_action"] == "handoff"
+    assert confirm.json()["whatsapp_url"] == expected
 
 
 def test_website_shoe_conversation_offers_whatsapp_without_looping() -> None:

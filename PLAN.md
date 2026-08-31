@@ -123,3 +123,38 @@ Budget note: Multi-subsystem repair with production-facing integrations; impleme
   and successful bounded read of `10 Mia Activity!Z236`. Writes remain gated to a fresh
   authenticated owner Telegram request; current-tree parser behavior is not claimed
   live until the next exact-SHA deployment and re-probe.
+
+## Phase 1.7 contract: direct handoff and owner-authorized Composio breadth
+
+- Scope: repair the website direct-sales/human-handoff state boundary, prove truthful
+  website-to-Telegram delivery across graph and WhatsApp-click paths, and let the one
+  authenticated OwnerGraph agent discover the complete tool surface of ACTIVE Composio
+  toolkits without injecting a raw catalog into every model turn.
+- Safety: ClientGraph never receives owner tools. Numeric Telegram identity, `Principal`,
+  capability/risk policy, approval, kill switch, idempotency, audit logging, R5 denial,
+  and channel one-sender rules remain code-enforced. Composio OAuth selects connected
+  toolkits but does not replace Mia's execution policy.
+- Reproduction: the exact Hebrew sequence `אפשר להגיע לאסף?` then `יאללה` must produce
+  an actual handoff and CTA instead of returning to discovery. A generated sentence
+  cannot advertise a handoff unless deterministic graph state agrees.
+- Delivery: graph-selected HANDOFF and WhatsApp CTA click both notify the numerically
+  allowlisted Telegram owner independently of `MIA_WHATSAPP_HANDOFF_SEND`; confirmed or
+  ambiguous recipient outcomes are not duplicated, definite failures remain retryable,
+  and visitor copy never claims an unaccepted delivery.
+- Orchestration: three disjoint MID cleanup workers own client intent, notification
+  delivery, and Composio breadth. The HEAVY driver integrates them after a barrier and a
+  fresh HEAVY reviewer with no build context must be able to fail the result.
+- Finish line: focused regressions, whole-tree Ruff, full pytest, deterministic evals,
+  diff-check, and independent review pass locally. Production remains explicitly open
+  until an exact-SHA deployment and controlled live website-to-Telegram acceptance are
+  authorized and observed.
+
+- 2026-08-31 Assaf selected ADOPT after reviewing the execution prompt. Three disjoint
+  implementation/cleanup leaves were dispatched; no deployment or live side effect is
+  authorized by this phase.
+- 2026-08-31 Phase 1.7 local implementation is complete after three MID cleanup leaves
+  and an adversarial fresh HEAVY review. The current tree passes all 2,623 collected
+  tests, whole-tree Ruff, origin binding, 273/273 deterministic evals, JavaScript syntax,
+  and diff-check. The reviewer reports RELEASE PASS with no unresolved P0-P2 blocker.
+  Exact-SHA deployment, migration application, and controlled live acceptance remain
+  intentionally open.

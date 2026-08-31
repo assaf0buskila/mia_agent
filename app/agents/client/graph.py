@@ -145,7 +145,11 @@ def compile_client_graph(
         turn_kind = state.get("turn_kind") or "message"
         channel = state.get("channel") or ""
         owner_notified = False
-        overwrite_handoff = False
+        # A generated sales reply is never authoritative about a human transfer.
+        # Once the deterministic action is HANDOFF, this node owns the visitor copy,
+        # including when a prior ambiguous Telegram attempt retained the recipient
+        # claim and this replay therefore makes no new transport call.
+        overwrite_handoff = next_action == "handoff"
         if (
             next_action == "handoff"
             and settings is not None
@@ -171,9 +175,7 @@ def compile_client_graph(
                 brief=brief,
                 parse_mode=parse_mode,
             )
-            if attempt.attempted or attempt.known_unreachable:
-                overwrite_handoff = True
-                owner_notified = bool(attempt.delivered)
+            owner_notified = bool(attempt.delivered)
         if channel != "website":
             return {"finalized": False}
         if settings is None or not lead_id or not conversation_id:

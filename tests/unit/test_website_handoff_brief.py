@@ -50,6 +50,7 @@ class _FakeStore:
         self.upserts: list[dict[str, str]] = []
         self.legacy_claims: set[tuple[str, str, str]] = set()
         self.recipient_claims: set[tuple[str, str, str, str]] = set()
+        self.accepted_recipient_claims: set[tuple[str, str, str, str]] = set()
         self.delivery_state_commits = 0
         self.sales = _inventory_sales()
         self.turns = _inventory_turns()
@@ -174,6 +175,45 @@ class _FakeStore:
         notification_key: str = "",
     ) -> bool:
         for recipient_id in recipient_ids:
+            self.release_owner_notification_recipient_claim(
+                kind=kind,
+                lead_id=lead_id,
+                notification_key=notification_key,
+                recipient_id=recipient_id,
+            )
+        return self.commit_owner_notification_delivery_state()
+
+    def confirmed_owner_notification_recipients(
+        self, *, kind: str, lead_id: str, notification_key: str = ""
+    ) -> tuple[str, ...]:
+        return tuple(
+            sorted(
+                recipient_id
+                for (
+                    claim_kind,
+                    claim_lead_id,
+                    claim_key,
+                    recipient_id,
+                ) in self.accepted_recipient_claims
+                if (claim_kind, claim_lead_id, claim_key)
+                == (kind, lead_id, notification_key)
+            )
+        )
+
+    def record_owner_notification_recipient_delivery_outcomes_durably(
+        self,
+        *,
+        kind: str,
+        lead_id: str,
+        delivered_recipient_ids: tuple[str, ...],
+        rejected_recipient_ids: tuple[str, ...],
+        notification_key: str = "",
+    ) -> bool:
+        for recipient_id in delivered_recipient_ids:
+            self.accepted_recipient_claims.add(
+                (kind, lead_id, notification_key, recipient_id)
+            )
+        for recipient_id in rejected_recipient_ids:
             self.release_owner_notification_recipient_claim(
                 kind=kind,
                 lead_id=lead_id,
@@ -351,7 +391,7 @@ def test_apply_persists_once_per_lead(monkeypatch) -> None:
         settings=settings,
     )
     assert first.notification_status == NOTIFICATION_DELIVERED
-    assert second.notification_status == NOTIFICATION_DUPLICATE_OR_AMBIGUOUS
+    assert second.notification_status == NOTIFICATION_DELIVERED
     assert first.brief is not None and "השורה שלך:" in first.brief
     assert len(store.upserts) == 1
     assert store.upserts[0]["kind"] == KIND_WEBSITE_WHATSAPP
@@ -416,7 +456,7 @@ def test_explicit_rejection_retries_only_rejected_owner(monkeypatch) -> None:
     assert first.notification_status == NOTIFICATION_DELIVERED
     assert second.notification_status == NOTIFICATION_DELIVERED
     assert sends == [("111", "222"), ("222",)]
-    assert store.delivery_state_commits == 3
+    assert store.delivery_state_commits == 4
 
 
 def test_ambiguous_click_brief_is_not_resent(monkeypatch) -> None:

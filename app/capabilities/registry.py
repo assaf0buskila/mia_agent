@@ -25,6 +25,9 @@ ANALYTICS_GET_TRAFFIC = "analytics.get_traffic"
 SHEETS_READ = "sheets.read"
 SHEETS_UPDATE = "sheets.update"
 SHEETS_APPEND = "sheets.append"
+COMPOSIO_CATALOG_SEARCH = "composio.catalog_search"
+COMPOSIO_TOOL_SCHEMA = "composio.tool_schema"
+COMPOSIO_EXECUTE_READ = "composio.execute_read"
 
 _OWNER = frozenset({GraphName.OWNER})
 _CLIENT = frozenset({GraphName.CLIENT})
@@ -51,6 +54,12 @@ CAPABILITIES: tuple[CapabilitySpec, ...] = (
     spec(SHEETS_READ, Sensitivity.READ, _OWNER),
     spec(SHEETS_UPDATE, Sensitivity.WRITE, _OWNER, idempotent=False),
     spec(SHEETS_APPEND, Sensitivity.WRITE, _OWNER, idempotent=False),
+    # Dynamic Composio operations are still named capabilities.  The catalog adapter
+    # authorizes only ACTIVE owner connections and its deterministic slug classifier
+    # permits R0 reads here; unknown and side-effect actions never reach this handler.
+    spec(COMPOSIO_CATALOG_SEARCH, Sensitivity.READ, _OWNER),
+    spec(COMPOSIO_TOOL_SCHEMA, Sensitivity.READ, _OWNER),
+    spec(COMPOSIO_EXECUTE_READ, Sensitivity.READ, _OWNER),
     spec(BUSINESS_GET_INFORMATION, Sensitivity.READ, _CLIENT),
 )
 

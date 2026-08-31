@@ -284,6 +284,12 @@ def apply_website_whatsapp_handoff_brief(
     token = settings.telegram_bot_token.strip()
     recipients = tuple(sorted(settings.telegram_owner_user_id_set()))
     if not token or not recipients or not brief.strip():
+        if store.confirmed_owner_notification_recipients(
+            kind=KIND_WEBSITE_HANDOFF_DELIVERY,
+            lead_id=lead_id,
+            notification_key="",
+        ):
+            return WebsiteWhatsAppBriefResult(brief, NOTIFICATION_DELIVERED)
         return WebsiteWhatsAppBriefResult(brief, NOTIFICATION_FAILED)
     claimed_recipients = tuple(
         recipient_id
@@ -298,6 +304,12 @@ def apply_website_whatsapp_handoff_brief(
         )
     )
     if not claimed_recipients:
+        if store.confirmed_owner_notification_recipients(
+            kind=KIND_WEBSITE_HANDOFF_DELIVERY,
+            lead_id=lead_id,
+            notification_key="",
+        ):
+            return WebsiteWhatsAppBriefResult(brief, NOTIFICATION_DELIVERED)
         return WebsiteWhatsAppBriefResult(
             brief, NOTIFICATION_DUPLICATE_OR_AMBIGUOUS
         )
@@ -308,19 +320,20 @@ def apply_website_whatsapp_handoff_brief(
     delivery = _deliver_owner_brief(
         brief=brief, settings=settings, recipient_ids=claimed_recipients
     )
-    release_persisted = (
-        store.release_owner_notification_recipient_claims_durably(
-            kind=KIND_WEBSITE_HANDOFF_DELIVERY,
-            lead_id=lead_id,
-            notification_key="",
-            recipient_ids=delivery.rejected,
-        )
-        if delivery.rejected
-        else True
+    outcomes_persisted = store.record_owner_notification_recipient_delivery_outcomes_durably(
+        kind=KIND_WEBSITE_HANDOFF_DELIVERY,
+        lead_id=lead_id,
+        notification_key="",
+        delivered_recipient_ids=delivery.delivered,
+        rejected_recipient_ids=delivery.rejected,
     )
-    if delivery.delivered:
+    if delivery.delivered or store.confirmed_owner_notification_recipients(
+        kind=KIND_WEBSITE_HANDOFF_DELIVERY,
+        lead_id=lead_id,
+        notification_key="",
+    ):
         status = NOTIFICATION_DELIVERED
-    elif delivery.ambiguous or not release_persisted:
+    elif delivery.ambiguous or not outcomes_persisted:
         status = NOTIFICATION_DUPLICATE_OR_AMBIGUOUS
     elif delivery.rejected:
         status = NOTIFICATION_FAILED

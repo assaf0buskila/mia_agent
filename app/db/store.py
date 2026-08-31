@@ -2460,6 +2460,34 @@ class LeadStore:
         ).first()
         return row is not None
 
+    def confirmed_owner_notification_recipients(
+        self,
+        *,
+        kind: str,
+        lead_id: str,
+        notification_key: str = "",
+    ) -> tuple[str, ...]:
+        """Return only recipients with a durably confirmed Telegram acceptance.
+
+        Historical recipient rows predate outcome recording and deliberately remain
+        conservative: they protect against resend but never let the widget claim a
+        completed transfer.
+        """
+        if not kind or not lead_id or not isinstance(notification_key, str):
+            return ()
+        rows = self.session.scalars(
+            select(OwnerNotificationRecipientClaimRow.recipient_id)
+            .where(
+                OwnerNotificationRecipientClaimRow.kind == kind,
+                OwnerNotificationRecipientClaimRow.lead_id == lead_id,
+                OwnerNotificationRecipientClaimRow.notification_key
+                == notification_key,
+                OwnerNotificationRecipientClaimRow.delivery_status == "accepted",
+            )
+            .order_by(OwnerNotificationRecipientClaimRow.recipient_id)
+        )
+        return tuple(rows)
+
     def commit_owner_notification_delivery_state(self) -> bool:
         """Durably close local state before or after an external owner delivery.
 
@@ -2562,6 +2590,40 @@ class LeadStore:
                 return True
         return False
 
+    def record_owner_notification_recipient_delivery_outcomes_durably(
+        self,
+        *,
+        kind: str,
+        lead_id: str,
+        delivered_recipient_ids: tuple[str, ...],
+        rejected_recipient_ids: tuple[str, ...],
+        notification_key: str = "",
+    ) -> bool:
+        """Durably record accepted recipients and release known rejections.
+
+        A failed commit leaves every prior claim pending, which is intentionally
+        ambiguous and blocks a duplicate send. Retrying these local idempotent
+        updates once cannot cause an external side effect.
+        """
+        for _attempt in range(2):
+            for recipient_id in delivered_recipient_ids:
+                row = self.session.get(
+                    OwnerNotificationRecipientClaimRow,
+                    (kind, lead_id, notification_key, recipient_id),
+                )
+                if row is not None:
+                    row.delivery_status = "accepted"
+            for recipient_id in rejected_recipient_ids:
+                self.release_owner_notification_recipient_claim(
+                    kind=kind,
+                    lead_id=lead_id,
+                    notification_key=notification_key,
+                    recipient_id=recipient_id,
+                )
+            if self.commit_owner_notification_delivery_state():
+                return True
+        return False
+
     def release_owner_notification_claim(
         self, *, kind: str, lead_id: str, conversation_id: str = ""
     ) -> None:
@@ -2598,6 +2660,10 @@ class LeadStore:
                 "notification_key": notification_key,
                 "recipient_id": recipient_id,
                 "claimed_at": claimed_at,
+                # The migration defaults old/raw rows to ``legacy`` so historical
+                # claims cannot manufacture acceptance. New application claims must
+                # state ``pending`` explicitly; ambiguous sends retain that value.
+                "delivery_status": "pending",
             },
         )
 

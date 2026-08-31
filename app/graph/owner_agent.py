@@ -1,8 +1,8 @@
 """Owner agent loop.
 
 Replaces the keyword switchboard for Assaf's Telegram console when a model is configured.
-The model chooses pinned read or bounded ADR-042 Sheets value-write tools and may chain
-them across several steps,
+The model chooses pinned tools and small owner-only Composio meta-tools on demand and may
+chain them across several steps,
 so one message can answer several things at once — which the single-task classifier
 could never do.
 
@@ -13,7 +13,8 @@ What did NOT change, and must not:
 - Every write of consequence still goes through `app/domain/approvals.py` and
   `app/core/risk.py`. The loop cannot reach them.
 - Assaf's message is data. It cannot add a tool, raise permissions or bypass a gate.
-- The model never sees a Composio catalog — only the pinned registry.
+- The model never sees a Composio catalog — only the pinned registry and small on-demand
+  meta-tools. Provider schemas arrive only after it selects one active owner tool.
 - With no model configured this module is never constructed and the existing deterministic
   classifier answers, which is how the test suite and any key-less deploy run.
 - One agent, one model hop. No sub-agents, no router model, no rewrite model, no second
@@ -51,7 +52,7 @@ from app.tools.registries.owner_tools import (
     tool_definitions,
 )
 
-PROMPT_VERSION = "owner_agent_v4"
+PROMPT_VERSION = "owner_agent_v5"
 
 # 8 steps, tools dropped on the last, gives 7 tool-calling turns: enough for
 # search -> read -> second source -> read -> answer with headroom, without leaving a
@@ -106,8 +107,13 @@ SYSTEM_PROMPT = (
     "Assaf explicitly asks in this authenticated turn and the spreadsheet ID is allowlisted. "
     "Never discover Drive files, read Sheets as Mia's internal truth, or create, delete, "
     "clear, format, or generate formulas.\n"
-    "Never ask him to rephrase. If a follow-up like \"him\", \"that lead\", \"the last "
-    "one\" or \"האחרון\" / \"מה הוא כתב\" clearly points at something from the recent "
+    "- Composio on demand (composio_search_tools, composio_get_tool_schema, "
+    "composio_execute_tool): when no pinned tool covers his need, search only ACTIVE "
+    "connected owner toolkits, load one exact current schema, then use it. This never "
+    "dumps a catalog. Python preflights arguments and permits deterministic reads only; "
+    "writes and unknown side effects require a named approval/idempotency/audit workflow.\n"
+    'Never ask him to rephrase. If a follow-up like "him", "that lead", "the last '
+    'one" or "האחרון" / "מה הוא כתב" clearly points at something from the recent '
     "conversation, resolve it yourself. Ask one short question only when it genuinely does "
     "not resolve — never guess at a name, id, or number that was not actually said.\n"
     "\n"
@@ -139,16 +145,17 @@ SYSTEM_PROMPT = (
     "\n"
     "GROUNDING\n"
     "Answer only from tool results, the context you were given, and what he actually said. "
-    "When something is not there, say so plainly and precisely — \"no email from Daniel in "
-    "the last week\" beats a hedge. Never invent a client, a number, a date, a lead id or "
+    'When something is not there, say so plainly and precisely — "no email from Daniel in '
+    'the last week" beats a hedge. Never invent a client, a number, a date, a lead id or '
     "an email.\n"
     "When you learn something durable about him that memory does not already hold, call "
     "remember once. Do not store small talk or a question he asked.\n"
     "\n"
     "WHAT YOU CANNOT DO\n"
     "Your tools are reads and owner-memory writes, plus ADR-042 bounded authenticated "
-    "allowlisted Sheets value writes. You cannot send a message, book, approve, pay, publish, "
-    "change a campaign or delete anything. If he asks for one of those, say plainly what "
+    "allowlisted Sheets value writes. On-demand Composio can only execute a preflighted read. "
+    "You cannot send a message, book, approve, pay, publish, change a campaign or delete "
+    "anything. If he asks for one of those, say plainly what "
     "would happen and that it needs his explicit go-ahead. Never claim you did it.\n"
     "To send email: you have no send tool. Tell him to write "
     "'שלח מייל ל email@x.com נושא: ... והתוכן'. Python will draft it and wait for Approve.\n"
@@ -280,13 +287,9 @@ def run_owner_agent(
     fall back to the deterministic classifier instead of showing Assaf an error.
     """
     if not owner_message.strip():
-        return AgentOutcome(
-            "", (), 0, 0, (), False, "empty message", 0, (), "empty_reply"
-        )
+        return AgentOutcome("", (), 0, 0, (), False, "empty message", 0, (), "empty_reply")
     if not client.enabled():
-        return AgentOutcome(
-            "", (), 0, 0, (), False, "llm not configured", 0, (), "no_model"
-        )
+        return AgentOutcome("", (), 0, 0, (), False, "llm not configured", 0, (), "no_model")
 
     messages = build_messages(
         owner_message=owner_message,
@@ -294,9 +297,7 @@ def run_owner_agent(
         context=context,
         now_line=now_line,
     )
-    definitions = tool_definitions(
-        allow_memory_writes=ctx.settings.memory_write_enabled
-    )
+    definitions = tool_definitions(allow_memory_writes=ctx.settings.memory_write_enabled)
     steps: list[AgentStep] = []
     tools_used: list[str] = []
     tools_failed: list[str] = []
@@ -435,9 +436,7 @@ def run_owner_agent(
                 continue
             seen_calls.add(key)
             result = execute_tool(call.name, call.arguments, ctx)
-            steps.append(
-                AgentStep(tool=call.name, ok=result.ok, detail=result.error or "ok")
-            )
+            steps.append(AgentStep(tool=call.name, ok=result.ok, detail=result.error or "ok"))
             if result.ok:
                 tools_used.append(call.name)
                 if _looks_empty(result.text):

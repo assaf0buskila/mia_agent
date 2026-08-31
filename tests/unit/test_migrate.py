@@ -82,6 +82,34 @@ def test_apply_migrations_second_run_moves_to_already(tmp_path: Path) -> None:
         engine.dispose()
 
 
+def test_recipient_delivery_status_migration_marks_existing_rows_legacy(
+    tmp_path: Path,
+) -> None:
+    engine = make_engine(f"sqlite:///{tmp_path / 'delivery-status.db'}")
+    try:
+        _create_stub_tables(engine)
+        summary = apply_migrations(engine)
+        assert summary.failed == ""
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO owner_notification_recipient_claims "
+                    "(kind, lead_id, notification_key, recipient_id, claimed_at) "
+                    "VALUES ('website_owner_handoff', 'lead_1', '', '111', 'now')"
+                )
+            )
+        with engine.connect() as conn:
+            status = conn.execute(
+                text(
+                    "SELECT delivery_status FROM owner_notification_recipient_claims "
+                    "WHERE lead_id = 'lead_1'"
+                )
+            ).scalar_one()
+        assert status == "legacy"
+    finally:
+        engine.dispose()
+
+
 def test_postgres_only_file_does_not_split_on_comment_semicolons() -> None:
     path = (
         Path(__file__).resolve().parents[2]

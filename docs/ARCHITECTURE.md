@@ -32,7 +32,9 @@ Two LangGraph entry points, shared core, thin channels. Decisions: `docs/DECISIO
 | OwnerGraph | Assaf on Telegram | Allowlisted owner capabilities | Run client sales NBA; dump Composio catalog |
 | ClientGraph | Website visitors | Approved knowledge, meeting/handoff, lead capture | Execute owner capabilities or see other visitors |
 
-Deterministic code owns identity, NBA, scoring, permissions, idempotency. Models paraphrase and, on the owner side, choose among pinned tools. Untrusted text is data.
+Deterministic code owns identity, NBA, scoring, permissions, idempotency. Models paraphrase and,
+on the owner side, choose among pinned tools plus on-demand Composio search/schema/read
+meta-tools. Untrusted text is data.
 
 Graph state is serializable domain data only. No SDK clients, no secrets.
 
@@ -82,7 +84,15 @@ Existing risk map: R0 read AUTO, R1 low write AUTO, R2 customer message AUTO in 
 
 ## Composio
 
-Tool supplier behind adapters. Pin schemas. No catalog dump. Stable owner identity → one Composio user/session (`MIA_COMPOSIO_USER_ID`), not a new session per message.
+Tool supplier behind adapters. Stable owner identity → one Composio user/session
+(`MIA_COMPOSIO_USER_ID`), not a new session per message. The owner registry exposes only
+small meta-tools: list/search only ACTIVE connected toolkits, fetch the selected tool's bounded
+current schema, preflight common argument constraints locally, and execute conservatively
+recognized deterministic reads. Catalog/tool/schema caches are bounded to the process; schemas
+are supplied after selection, never dumped into every prompt. Unfamiliar actions and oversized
+schemas fail closed.
+Slug-based Python risk classification denies destructive actions and refuses every side effect or
+unknown action until it has a named capability, approval, idempotency, and audit contract.
 
 Direct APIs remain where they win (Meta inbound HMAC and STT). LinkedIn is profile-only under
 ADR-034/039; member analytics is not a current product capability.

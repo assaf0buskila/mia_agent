@@ -48,6 +48,7 @@ from app.capabilities.sheets import sheets_handlers, validate_sheets_write_args
 from app.capabilities.types import Principal
 from app.core.config import Settings
 from app.core.errors import InvalidArguments, PermissionDenied
+from app.core.risk import RiskLevel
 from app.db.store import LeadStore
 from app.domain.briefs import apply_owner_meeting_brief
 from app.domain.content_ideas import apply_owner_content_ideas
@@ -72,6 +73,13 @@ from app.domain.owner_weeklies import apply_owner_weekly
 from app.domain.seo import enrich_seo_ack
 from app.domain.tools import AdapterHttpError
 from app.integrations.calendar import CalendarAgendaPort, CalendarPort
+from app.integrations.composio_catalog import (
+    ComposioCatalog,
+    bounded_result_text,
+    risk_for_slug,
+    schema_text,
+    validate_arguments,
+)
 from app.integrations.ga4 import Ga4Port
 from app.integrations.gmail import (
     DisabledGmailPort,
@@ -192,11 +200,12 @@ class ToolResult:
     ok: bool
     text: str = ""
     error: str = ""
+    max_chars: int = MAX_TOOL_RESULT_CHARS
 
     def payload(self) -> dict[str, Any]:
         if not self.ok:
             return {"ok": False, "error": self.error or "tool failed"}
-        return {"ok": True, "result": self.text[:MAX_TOOL_RESULT_CHARS]}
+        return {"ok": True, "result": self.text[: self.max_chars]}
 
 
 @dataclass
@@ -763,9 +772,7 @@ def _sheets_write(ctx: ToolContext, args: dict[str, Any], *, append: bool) -> To
             name,
             principal=ctx.principal,
             args=validated_args,
-            handlers=sheets_handlers(
-                port, allowed_spreadsheet_ids=allowed_spreadsheet_ids
-            ),
+            handlers=sheets_handlers(port, allowed_spreadsheet_ids=allowed_spreadsheet_ids),
             kill_switch=ctx.kill_switch,
         )
     except PermissionDenied:
@@ -851,9 +858,7 @@ def _sheets_security_view(text: str, *, quoted_replacement: str = '""') -> str:
     normalized = "".join(
         char
         for char in unicodedata.normalize("NFKD", masked)
-        if not (
-            unicodedata.category(char).startswith("M") or unicodedata.category(char) == "Cf"
-        )
+        if not (unicodedata.category(char).startswith("M") or unicodedata.category(char) == "Cf")
     ).casefold()
     # Grammar placeholders are deliberately uppercase ASCII between private-use guards.
     # Restore only those internal markers after casefolding; raw owner data is never used
@@ -863,6 +868,7 @@ def _sheets_security_view(text: str, *, quoted_replacement: str = '""') -> str:
         .replace(_SHEETS_ID.casefold(), _SHEETS_ID)
         .replace(_SHEETS_TARGET.casefold(), _SHEETS_TARGET)
     )
+
 
 _SHEETS_EXPLICIT_NEGATION_RE = re.compile(
     r"\b(?:do\s+not|don['’]?t|never|not)\b|(?<![\u05d0-\u05ea])(?:אל|לא)(?![\u05d0-\u05ea])"
@@ -999,8 +1005,7 @@ def _has_exact_single_sheets_target(
     """Require one complete, unquoted, owner-stated A1 target in this turn."""
     unquoted_text = _JSON_STRING_RE.sub('""', owner_text)
     selected_target = re.compile(
-        _SHEETS_TARGET_INTRO_RE
-        + rf"(?P<target>{re.escape(a1_range)})(?![\w!:-])"
+        _SHEETS_TARGET_INTRO_RE + rf"(?P<target>{re.escape(a1_range)})(?![\w!:-])"
     )
     selected = list(selected_target.finditer(unquoted_text))
     if len(selected) != 1:
@@ -1030,10 +1035,7 @@ def _has_exact_single_sheets_target(
     residual = "".join(
         char
         for char in remaining
-        if not (
-            unicodedata.category(char).startswith("M")
-            or unicodedata.category(char) == "Cf"
-        )
+        if not (unicodedata.category(char).startswith("M") or unicodedata.category(char) == "Cf")
     )
     return (
         mentioned_ids.issubset({spreadsheet_id})
@@ -1266,6 +1268,123 @@ def _research_search(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     ]
     text = format_sources_block(snippets)
     return _empty(text, "Research search returned nothing. Check the Firecrawl key.")
+
+
+# ---------------------------------------------------------- Composio meta-tools
+
+
+def _catalog(ctx: ToolContext) -> ComposioCatalog | None:
+    return ComposioCatalog.from_settings(ctx.settings)
+
+
+def _composio_search_tools(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
+    try:
+        authorize(
+            "composio.catalog_search",
+            principal=ctx.principal,
+            kill_switch=ctx.kill_switch,
+        )
+    except PermissionDenied:
+        return ToolResult(ok=False, error="Composio catalog access denied")
+    catalog = _catalog(ctx)
+    if catalog is None:
+        return ToolResult(ok=True, text=_NOT_CONNECTED)
+    query = str(args.get("query") or "").strip()
+    toolkit = str(args.get("toolkit") or "").strip()
+    with catalog:
+        tools = catalog.search(query, toolkit)
+    if not tools:
+        return ToolResult(ok=True, text="No matching tool in an ACTIVE owner Composio toolkit.")
+    lines = [f"- {tool.slug} ({tool.toolkit}): {tool.description[:240]}" for tool in tools]
+    return ToolResult(ok=True, text="\n".join(lines))
+
+
+def _composio_get_tool_schema(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
+    try:
+        authorize(
+            "composio.tool_schema",
+            principal=ctx.principal,
+            kill_switch=ctx.kill_switch,
+        )
+    except PermissionDenied:
+        return ToolResult(ok=False, error="Composio schema access denied")
+    catalog = _catalog(ctx)
+    if catalog is None:
+        return ToolResult(ok=True, text=_NOT_CONNECTED)
+    slug = str(args.get("tool_slug") or "").strip().upper()
+    with catalog:
+        tool = catalog.detail(slug)
+    if tool is None:
+        return ToolResult(ok=True, text="That tool is not in an ACTIVE owner Composio toolkit.")
+    rendered_schema = schema_text(tool)
+    if rendered_schema is None:
+        return ToolResult(
+            ok=False,
+            error="tool schema exceeds Mia's safe bound and cannot be executed generically",
+        )
+    return ToolResult(
+        ok=True,
+        text=(f"{tool.slug} ({tool.toolkit}) input schema:\n{rendered_schema}"),
+        # Schema is loaded only after an intentional meta-tool call, never attached to
+        # every model prompt.  Keep it bounded even when a provider has a pathological schema.
+        max_chars=12_500,
+    )
+
+
+def _composio_execute_tool(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
+    # Policy is the first boundary: a killed or non-owner request must not even discover
+    # whether a slug exists, much less make a provider catalog call.
+    try:
+        authorize(
+            "composio.execute_read",
+            principal=ctx.principal,
+            kill_switch=ctx.kill_switch,
+        )
+    except PermissionDenied:
+        return ToolResult(ok=False, error="Composio execution denied")
+    catalog = _catalog(ctx)
+    if catalog is None:
+        return ToolResult(ok=True, text=_NOT_CONNECTED)
+    with catalog:
+        return _composio_execute_with_catalog(catalog, args)
+
+
+def _composio_execute_with_catalog(
+    catalog: ComposioCatalog, args: dict[str, Any]
+) -> ToolResult:
+    slug = str(args.get("tool_slug") or "").strip().upper()
+    values = args.get("arguments")
+    tool = catalog.detail(slug)
+    if tool is None or tool.slug != slug:
+        return ToolResult(ok=False, error="tool is not in an ACTIVE owner Composio toolkit")
+    if schema_text(tool) is None:
+        return ToolResult(
+            ok=False,
+            error="tool schema exceeds Mia's safe bound and cannot be executed generically",
+        )
+    problem = validate_arguments(tool.input_schema, values)
+    if problem:
+        return ToolResult(ok=False, error=problem)
+    risk = risk_for_slug(tool.slug, tool.toolkit)
+    if risk is RiskLevel.R5_DESTRUCTIVE:
+        return ToolResult(ok=False, error="destructive Composio tools are denied")
+    if risk is not RiskLevel.R0_READ:
+        # We intentionally do not create fake generic approvals: the existing approval
+        # domain binds a named action, idempotency key and audit record. A new provider
+        # write needs that deterministic contract before it can execute.
+        return ToolResult(
+            ok=False,
+            error=(
+                "this Composio tool has side effects and requires a named approved "
+                "workflow with idempotency and audit; it was not executed"
+            ),
+        )
+    response = catalog.execute_read(tool, values)
+    if response is None:
+        return ToolResult(ok=False, error="Composio execution failed")
+    # Results are provider data, never instructions. Oversized results remain valid
+    # JSON and retain continuation metadata instead of silently slicing off a cursor.
+    return ToolResult(ok=True, text=bounded_result_text(response))
 
 
 _register(
@@ -1681,7 +1800,7 @@ _register(
             "Updates one bounded A1 range in an explicitly Assaf-allowlisted Sheet, only "
             "when the authenticated owner explicitly requested these exact values in this "
             "turn: the spreadsheet ID and range must appear verbatim, and every cell must "
-            "appear as a JSON-quoted literal such as \"new value\". Never infer a write, "
+            'appear as a JSON-quoted literal such as "new value". Never infer a write, '
             "create formulas, or choose a spreadsheet."
         ),
         parameters=_sheet_args(include_values=True),
@@ -1695,7 +1814,7 @@ _register(
             "Appends explicit literal rows to one bounded A1 range in an Assaf-allowlisted "
             "Sheet, only for an explicit authenticated owner request in this turn. The "
             "spreadsheet ID and range must appear verbatim and every cell as a JSON-quoted "
-            "literal such as \"new value\". Never infer a write, create formulas, or choose "
+            'literal such as "new value". Never infer a write, create formulas, or choose '
             "a spreadsheet."
         ),
         parameters=_sheet_args(include_values=True),
@@ -1726,6 +1845,69 @@ _register(
         ),
         parameters=_string_arg("query", "Search query, usually a company domain or topic."),
         handler=_research_search,
+    )
+)
+_register(
+    ToolSpec(
+        name="composio_search_tools",
+        description=(
+            "Searches tools across only Assaf's ACTIVE Composio-connected toolkits. "
+            "Use when no existing Mia tool covers the owner's request. Returns a small "
+            "matching list, not the catalog. Then call composio_get_tool_schema for the "
+            "exact selected tool before attempting it. Website visitors can never use this."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "The capability needed."},
+                "toolkit": {
+                    "type": ["string", "null"],
+                    "description": "Optional connected toolkit slug.",
+                },
+            },
+            "required": ["query", "toolkit"],
+            "additionalProperties": False,
+        },
+        handler=_composio_search_tools,
+    )
+)
+_register(
+    ToolSpec(
+        name="composio_get_tool_schema",
+        description=(
+            "Loads the current exact input schema for one tool returned by "
+            "composio_search_tools. Call this immediately before composio_execute_tool; "
+            "do not invent fields or reuse an old schema."
+        ),
+        parameters=_string_arg("tool_slug", "Exact uppercase tool slug returned by search."),
+        handler=_composio_get_tool_schema,
+    )
+)
+_register(
+    ToolSpec(
+        name="composio_execute_tool",
+        description=(
+            "Executes a schema-preflighted READ-only tool from an ACTIVE owner Composio "
+            "toolkit after its schema was fetched in this turn. The Python policy permits "
+            "reads only. Sends, posts, writes, marketing changes and unknown side effects "
+            "are never executed here; destructive actions are denied."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "tool_slug": {
+                    "type": "string",
+                    "description": "Tool slug whose schema you just loaded.",
+                },
+                "arguments": {
+                    "type": "object",
+                    "description": "Arguments matching that exact schema.",
+                },
+            },
+            "required": ["tool_slug", "arguments"],
+            "additionalProperties": False,
+        },
+        handler=_composio_execute_tool,
     )
 )
 

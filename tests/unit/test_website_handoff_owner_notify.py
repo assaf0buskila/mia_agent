@@ -165,10 +165,7 @@ def test_graph_handoff_and_whatsapp_click_share_one_owner_delivery_both_orders(
         _drive_handoff(store, click_first_session, click_first_lead, settings)
 
         assert graph_out["reply"] == HANDOFF_OWNER_NOTIFIED
-        assert (
-            click_after_graph.notification_status
-            == NOTIFICATION_DUPLICATE_OR_AMBIGUOUS
-        )
+        assert click_after_graph.notification_status == NOTIFICATION_DELIVERED
         assert click_before_graph.notification_status == NOTIFICATION_DELIVERED
         assert [send["chat_id"] for send in telegram.sends] == ["111", "111"]
     finally:
@@ -466,6 +463,32 @@ def test_website_handoff_ambiguous_recipient_is_not_retried(monkeypatch) -> None
         db.close()
 
 
+def test_ambiguous_handoff_replay_keeps_fail_closed_visitor_copy(monkeypatch) -> None:
+    """A durable ambiguous claim prevents a duplicate Telegram ping, not the
+    deterministic visitor reply from reporting that no acceptance was observed."""
+    telegram = _PerRecipientTelegram({"111": httpx.ConnectError("down")})
+    _patch_telegram(monkeypatch, telegram)
+    init_db()
+    db = get_session_factory()()
+    try:
+        store = LeadStore(db)
+        session_id = "web_handoff_ambiguous_copy"
+        _, lead_id = store.open_channel_lead(
+            channel=Channel.WEBSITE, external_id=session_id
+        )
+        db.commit()
+        settings = Settings(telegram_bot_token="tok", telegram_owner_user_ids="111")
+
+        first = _drive_handoff(store, session_id, lead_id, settings)
+        second = _drive_handoff(store, session_id, lead_id, settings)
+
+        assert first["reply"] == HANDOFF_OWNER_UNREACHABLE
+        assert second["reply"] == HANDOFF_OWNER_UNREACHABLE
+        assert [send["chat_id"] for send in telegram.sends] == ["111"]
+    finally:
+        db.close()
+
+
 def test_website_handoff_successful_replay_does_not_resend(monkeypatch) -> None:
     telegram = _RecordingTelegram()
     _patch_telegram(monkeypatch, telegram)
@@ -477,8 +500,10 @@ def test_website_handoff_successful_replay_does_not_resend(monkeypatch) -> None:
         _, lead_id = store.open_channel_lead(channel=Channel.WEBSITE, external_id=session_id)
         db.commit()
         settings = Settings(telegram_bot_token="tok", telegram_owner_user_ids="111,222")
-        _drive_handoff(store, session_id, lead_id, settings)
-        _drive_handoff(store, session_id, lead_id, settings)
+        first = _drive_handoff(store, session_id, lead_id, settings)
+        second = _drive_handoff(store, session_id, lead_id, settings)
+        assert first["reply"] == HANDOFF_OWNER_NOTIFIED
+        assert second["reply"] == HANDOFF_OWNER_NOTIFIED
         assert [send["chat_id"] for send in telegram.sends] == ["111", "222"]
     finally:
         db.close()

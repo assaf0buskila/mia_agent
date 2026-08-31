@@ -28,6 +28,14 @@ create/delete/clear/format/formula work, or Sheets read-back as Mia's truth. Oth
 approvals, sends, Meta changes, and deletions stay on the deterministic policy path — never
 because a prompt asked nicely.
 
+Across every ACTIVE Composio toolkit connected to `MIA_COMPOSIO_USER_ID`, Owner Mia may search
+for a tool on demand, fetch that exact tool's bounded current input schema, and execute a
+preflighted read recognized by the conservative classifier. The full catalog is never inserted
+into a prompt. Unfamiliar actions fail closed. Python classifies recognized side effects:
+destructive tools are denied; writes, sends, posts, marketing actions, and unknown actions need
+a named approval, idempotency, and audit workflow before they can execute. Client Mia never has
+this surface.
+
 ## Client Mia (Website)
 
 Sales conversation on AssafWeb via the Ask Mia widget. Natural discovery, not a qualification form.
@@ -76,4 +84,5 @@ ping, and an accepted contract for API-backed GSC/GA4 owner reads and explicitly
 low-risk Sheets reads/updates through the capability layer. Ask Mia UX is preserved. Knowledge
 retrieve and conversation complete live on the graph nodes.
 
-**Not this product:** dumping the Composio catalog into the model, a third graph for WhatsApp, TTS, auto-deploy.
+**Not this product:** dumping the Composio catalog into the model, generic side-effect execution
+without a named approval contract, a third graph for WhatsApp, TTS, auto-deploy.

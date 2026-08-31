@@ -115,6 +115,7 @@ class _FakeHotHandoffStore:
         self.upserts: list[dict[str, str]] = []
         self.released: list[tuple[str, str, str]] = []
         self.recipient_claims: set[tuple[str, str, str]] = set()
+        self.accepted_recipient_claims: set[tuple[str, str, str]] = set()
         self.delivery_state_commits = 0
         self.sales = SalesState(
             lead_id="lead_hot123456", fit=FitLevel.GOOD, pain_level=PainLevel.P3
@@ -209,6 +210,36 @@ class _FakeHotHandoffStore:
             )
         return self.commit_owner_notification_delivery_state()
 
+    def confirmed_owner_notification_recipients(
+        self, *, kind: str, lead_id: str, notification_key: str = ""
+    ) -> tuple[str, ...]:
+        del notification_key
+        return tuple(
+            sorted(
+                recipient_id
+                for claim_kind, claim_lead_id, recipient_id in self.accepted_recipient_claims
+                if (claim_kind, claim_lead_id) == (kind, lead_id)
+            )
+        )
+
+    def record_owner_notification_recipient_delivery_outcomes_durably(
+        self,
+        *,
+        kind: str,
+        lead_id: str,
+        delivered_recipient_ids: tuple[str, ...],
+        rejected_recipient_ids: tuple[str, ...],
+        notification_key: str = "",
+    ) -> bool:
+        del notification_key
+        for recipient_id in delivered_recipient_ids:
+            self.accepted_recipient_claims.add((kind, lead_id, recipient_id))
+        for recipient_id in rejected_recipient_ids:
+            self.release_owner_notification_recipient_claim(
+                kind=kind, lead_id=lead_id, recipient_id=recipient_id
+            )
+        return self.commit_owner_notification_delivery_state()
+
     def has_owner_notification_claim(
         self, *, kind: str, lead_id: str, conversation_id: str = ""
     ) -> bool:
@@ -236,7 +267,8 @@ def test_apply_hot_handoff_notifies_every_owner(monkeypatch) -> None:
     assert [call["chat_id"] for call in client.calls] == ["111", "222"]
     assert len(store.upserts) == 1
     assert store.upserts[0]["kind"] == KIND_HOT_LEAD
-    assert store.delivery_state_commits == 1
+    # One commit protects the send claim; the second durably records acceptance.
+    assert store.delivery_state_commits == 2
 
 
 def test_hot_handoff_releases_only_after_confirmed_full_rejection(monkeypatch) -> None:
