@@ -442,13 +442,26 @@ def _has_report_header_schema(
                 return False
             continue
         values = data[key]
+        if key == "pivotHeaders" and require_empty_pivots:
+            if not _has_rowless_pivot_headers(values):
+                return False
+            continue
         if not isinstance(values, list) or not all(validator(value) for value in values):
-            return False
-        if key == "pivotHeaders" and require_empty_pivots and values:
             return False
     if "metadata" not in data:
         return not require_all
     return isinstance(data["metadata"], dict)
+
+
+def _has_rowless_pivot_headers(value: object) -> bool:
+    """Accept only the two provider shapes observed for an empty two-pivot report."""
+    if value == []:
+        return True
+    return (
+        isinstance(value, list)
+        and len(value) == len(_PIVOT_DIMENSIONS)
+        and all(item == {} for item in value)
+    )
 
 
 def _has_dimension_header_schema(header: object) -> bool:

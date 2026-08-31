@@ -134,6 +134,44 @@ def test_composio_ga4_well_formed_no_data_returns_empty() -> None:
     assert port.run_pivot_report(start_date="2026-08-29", end_date="2026-08-29") == []
 
 
+def test_composio_ga4_live_rowless_pivot_headers_return_empty() -> None:
+    client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                json={
+                    "successful": True,
+                    "data": {
+                        "dimensionHeaders": [
+                            {"name": "landingPage"},
+                            {"name": "sessionSource"},
+                        ],
+                        "metricHeaders": [
+                            {"name": "activeUsers", "type": "TYPE_INTEGER"},
+                            {"name": "sessions", "type": "TYPE_INTEGER"},
+                            {"name": "conversions", "type": "TYPE_FLOAT"},
+                            {"name": "engagedSessions", "type": "TYPE_INTEGER"},
+                        ],
+                        "pivotHeaders": [{}, {}],
+                        "metadata": {
+                            "currencyCode": "ILS",
+                            "timeZone": "Asia/Jerusalem",
+                        },
+                    },
+                },
+            )
+        )
+    )
+    port = ComposioGa4Port(
+        api_key="cmp-test",
+        user_id="user-123",
+        property_id="properties/1",
+        client=client,
+    )
+
+    assert port.run_pivot_report(start_date="2026-08-03", end_date="2026-08-30") == []
+
+
 def test_composio_ga4_rowless_nonempty_pivot_headers_fail_closed() -> None:
     client = httpx.Client(
         transport=httpx.MockTransport(
@@ -193,6 +231,8 @@ def test_composio_ga4_rowless_nonempty_pivot_headers_fail_closed() -> None:
         ("metricHeaders", [{"name": "sessions", "type": {}}]),
         ("pivotHeaders", [None]),
         ("pivotHeaders", [{}]),
+        ("pivotHeaders", [{}, {"unexpected": 1}]),
+        ("pivotHeaders", [{}, {}, {}]),
         (
             "pivotHeaders",
             [{"pivotDimensionHeaders": None, "rowCount": 0}],
@@ -279,6 +319,7 @@ def test_composio_ga4_malformed_no_data_headers_fail_closed(
         ("dimensionHeaders", [None]),
         ("metricHeaders", [None]),
         ("pivotHeaders", [None]),
+        ("pivotHeaders", [{}, {}]),
         ("metadata", None),
     ],
 )
