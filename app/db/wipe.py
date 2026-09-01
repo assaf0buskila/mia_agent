@@ -28,7 +28,7 @@ def _wipe_postgres(engine: Engine) -> list[str]:
                 "WHERE schemaname = 'public' AND tablename <> 'schema_migrations'"
             )
         ).fetchall()
-        for (name,) in sorted(row[0] for row in rows):
+        for name in sorted(row[0] for row in rows):
             conn.execute(text(f'TRUNCATE TABLE "{name}" RESTART IDENTITY CASCADE'))
             wiped.append(name)
     return wiped

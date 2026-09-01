@@ -13,6 +13,24 @@ SERVICE = "mia"
 CONTAINER = "mia"
 
 
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--task-definition", required=True)
+    parser.add_argument(
+        "command",
+        nargs=argparse.REMAINDER,
+        help="Container command argv after --, e.g. -- mia-wipe-data --confirm fresh-start",
+    )
+    args = parser.parse_args()
+    command = list(args.command)
+    if command and command[0] == "--":
+        command = command[1:]
+    if not command:
+        parser.error("container command is required after --")
+    args.command = command
+    return args
+
+
 def _aws(*args: str) -> dict:
     proc = subprocess.run(
         ["aws", *args, "--output", "json"],
@@ -27,15 +45,7 @@ def _aws(*args: str) -> dict:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--task-definition", required=True)
-    parser.add_argument(
-        "--command",
-        nargs="+",
-        required=True,
-        help="Container command argv, e.g. mia-wipe-data --confirm fresh-start",
-    )
-    args = parser.parse_args()
+    args = _parse_args()
 
     service = _aws(
         "ecs", "describe-services", "--cluster", CLUSTER, "--services", SERVICE
