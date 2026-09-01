@@ -1,6 +1,7 @@
 """Owner-requested Gmail send stays; unsolicited send and delete-forever stay denied."""
 
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 from app.capabilities.policy import authorize
@@ -21,7 +22,7 @@ from app.integrations.composio_catalog import (
     OWNER_REQUESTED_GMAIL_SEND_SLUGS,
     risk_for_slug,
 )
-from app.integrations.gmail import FakeGmailPort
+from app.integrations.gmail import FakeGmailPort, GmailDraft
 from app.tools.registries.owner_tools import tool_names
 
 _APP = Path(__file__).resolve().parents[2] / "app"
@@ -87,12 +88,24 @@ def test_website_handoff_and_due_scan_modules_cannot_send_mail() -> None:
         assert "apply_owner_gmail_draft" not in source
 
 
+class _UniqueDraftPort(FakeGmailPort):
+    def create_draft(self, *, to: str, subject: str, body: str) -> GmailDraft | None:
+        del body
+        draft = GmailDraft(
+            draft_id=f"draft_owner_{uuid4().hex[:12]}",
+            to=to.strip(),
+            subject=subject.strip(),
+        )
+        self.created_drafts.append(draft)
+        return draft
+
+
 def test_owner_telegram_asked_then_approved_send_calls_send_draft() -> None:
     init_db()
     session = get_session_factory()()
     try:
         store = LeadStore(session)
-        port = FakeGmailPort()
+        port = _UniqueDraftPort()
         ack = apply_owner_gmail_draft(
             store,
             text="שלח מייל ל dane@example.com נושא: היי והתוכן שלום",
