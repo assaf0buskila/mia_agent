@@ -432,7 +432,10 @@ def test_documented_composio_input_parameter_map_is_normalized() -> None:
         ("GMAIL_DELETE_FILTER", "R5"),
         ("GMAIL_DELETE_LABEL", "R5"),
         ("GOOGLE_SEARCH_CONSOLE_DELETE_SITE", "R5"),
+        ("GOOGLE_SEARCH_CONSOLE_ADD_SITE", "R3"),
         ("GOOGLE_ANALYTICS_SEND_EVENTS", "R3"),
+        ("GOOGLE_ANALYTICS_ARCHIVE_CUSTOM_DIMENSION", "R3"),
+        ("GMAIL_MOVE_TO_TRASH", "R3"),
         ("GOOGLESHEETS_DELETE_DIMENSION", "R5"),
         ("GOOGLESHEETS_CLEAR_VALUES", "R5"),
         ("GOOGLESHEETS_EXECUTE_SQL", "R5"),
@@ -496,8 +499,12 @@ class _Catalog:
             "GMAIL_SEND_DRAFT",
             "GMAIL_REPLY_TO_THREAD",
             "GMAIL_FORWARD_MESSAGE",
+            "GMAIL_MOVE_TO_TRASH",
             "GOOGLE_SEARCH_CONSOLE_DELETE_SITE",
+            "GOOGLE_SEARCH_CONSOLE_ADD_SITE",
+            "GOOGLE_SEARCH_CONSOLE_SUBMIT_SITEMAP",
             "GOOGLE_ANALYTICS_SEND_EVENTS",
+            "GOOGLE_ANALYTICS_ARCHIVE_CUSTOM_DIMENSION",
             "GOOGLESHEETS_DELETE_DIMENSION",
             "GOOGLESHEETS_CLEAR_VALUES",
             "GOOGLESHEETS_VALUES_UPDATE",
@@ -685,6 +692,27 @@ def test_gmail_send_is_never_auto_executed_and_delete_forever_stays_denied(
             ctx,
         )
         assert not denied.ok and "destructive" in denied.error
+    trash = execute_tool(
+        "composio_execute_tool",
+        {"tool_slug": "GMAIL_MOVE_TO_TRASH", "arguments_json": "{}"},
+        ctx,
+    )
+    assert not trash.ok
+    assert "destructive" not in trash.error
+    assert "named approved workflow" in trash.error
+    for slug in (
+        "GOOGLE_SEARCH_CONSOLE_ADD_SITE",
+        "GOOGLE_SEARCH_CONSOLE_SUBMIT_SITEMAP",
+        "GOOGLE_ANALYTICS_ARCHIVE_CUSTOM_DIMENSION",
+    ):
+        write = execute_tool(
+            "composio_execute_tool",
+            {"tool_slug": slug, "arguments_json": "{}"},
+            ctx,
+        )
+        assert not write.ok
+        assert "destructive" not in write.error
+        assert "named approved workflow" in write.error
 
 
 def test_linkedin_side_effect_is_bound_for_approval_and_never_executes_at_proposal_time() -> None:

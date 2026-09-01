@@ -63,6 +63,46 @@ def test_delete_forever_class_is_denied_and_unofficial_forever_slug_is_r5() -> N
     assert risk_for_slug("GMAIL_DELETE_FOREVER").value == "R5"
 
 
+def test_recoverable_gmail_trash_is_not_delete_forever() -> None:
+    for slug in ("GMAIL_MOVE_TO_TRASH", "GMAIL_MOVE_THREAD_TO_TRASH"):
+        assert slug not in DENIED_COMPOSIO_SLUGS
+        assert risk_for_slug(slug).value == "R3"
+
+
+def test_gsc_and_ga_follow_official_catalog_without_invented_pins() -> None:
+    from app.tools.registries.mia_preloaded_tools import PRELOADED_TOOLS, preloaded_tool
+
+    assert "GOOGLE_SEARCH_CONSOLE_DELETE_SITE" in DENIED_COMPOSIO_SLUGS
+    for slug, toolkit in (
+        ("GOOGLE_SEARCH_CONSOLE_ADD_SITE", "GOOGLE_SEARCH_CONSOLE"),
+        ("GOOGLE_SEARCH_CONSOLE_SUBMIT_SITEMAP", "GOOGLE_SEARCH_CONSOLE"),
+        ("GOOGLE_ANALYTICS_ARCHIVE_CUSTOM_DIMENSION", "GOOGLE_ANALYTICS"),
+    ):
+        assert slug not in DENIED_COMPOSIO_SLUGS
+        assert risk_for_slug(slug, toolkit).value == "R3"
+    assert risk_for_slug(
+        "GOOGLE_SEARCH_CONSOLE_GET_SITE", "GOOGLE_SEARCH_CONSOLE"
+    ).value == "R0"
+    assert risk_for_slug(
+        "GOOGLE_SEARCH_CONSOLE_LIST_SITEMAPS", "GOOGLE_SEARCH_CONSOLE"
+    ).value == "R0"
+    toolkits = {tool.toolkit for tool in PRELOADED_TOOLS}
+    assert "GMAIL" in toolkits
+    assert "GOOGLE_ANALYTICS" in toolkits
+    assert "GOOGLE_SEARCH_CONSOLE" in toolkits
+    assert "GOOGLE_SEARCH" not in toolkits
+    assert "SERPAPI" not in toolkits
+    assert "COMPOSIO_SEARCH" not in toolkits
+    assert preloaded_tool("GOOGLE_SEARCH_CONSOLE_ADD_SITE") is None
+    assert preloaded_tool("GOOGLE_SEARCH_CONSOLE_SUBMIT_SITEMAP") is None
+    assert preloaded_tool("GOOGLE_ANALYTICS_SEND_EVENTS") is None
+    visitor = Principal.client(source="website")
+    with pytest.raises(PermissionDenied):
+        authorize("search_console.query", principal=visitor)
+    with pytest.raises(PermissionDenied):
+        authorize("analytics.get_traffic", principal=visitor)
+
+
 def test_llm_owner_registry_still_has_no_gmail_send_tool() -> None:
     names = tool_names()
     assert "gmail_inbox" in names

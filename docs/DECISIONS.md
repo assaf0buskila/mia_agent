@@ -1149,6 +1149,10 @@ Pin already-wired Gmail reads/draft/send-draft, GA4 reads including
 `GOOGLE_ANALYTICS_LIST_ACCOUNT_SUMMARIES`, and existing Search Console reads.
 Do not invent 63/69 pins. Do not pin `GMAIL_SEND_EMAIL` until an adapter uses
 it. `GOOGLE_ANALYTICS_SEND_EVENTS` stays unpinned and never auto-fires.
+Trash is not delete-forever. `GOOGLE_SEARCH_CONSOLE_ADD_SITE` /
+`SUBMIT_SITEMAP` are owner writes, not visitor, not auto, not pinned until an
+adapter exists. No `GOOGLE_SEARCH` / SERPAPI toolkit. GA
+`ARCHIVE_CUSTOM_DIMENSION` is archive, not denied as delete.
 
 **Consequences**
 Owner-requested mail on Telegram can send. Visitors and unsolicited paths cannot.
