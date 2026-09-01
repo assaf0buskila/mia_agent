@@ -12,6 +12,7 @@ from app.capabilities.types import (
 MAIL_SEARCH = "mail.search"
 MAIL_READ = "mail.read"
 MAIL_CREATE_DRAFT = "mail.create_draft"
+MAIL_SEND = "mail.send"
 MAIL_DELETE = "mail.delete"
 CALENDAR_GET_SCHEDULE = "calendar.get_schedule"
 BUSINESS_GET_INFORMATION = "business.get_information"
@@ -44,6 +45,10 @@ CAPABILITIES: tuple[CapabilitySpec, ...] = (
     # WRITE already implies confirmation_required=False, so no override is needed --
     # the old explicit `confirmation_required=False` read like a deliberate bypass.
     spec(MAIL_CREATE_DRAFT, Sensitivity.WRITE, _OWNER),
+    # Owner Telegram may send after he asked, a draft exists, and he approved.
+    # Unsolicited send (cron, visitor, catalog auto-fire, marketing blast) stays
+    # off this capability. The model registry still has no gmail_send tool.
+    spec(MAIL_SEND, Sensitivity.SENSITIVE_WRITE, _OWNER),
     spec(MAIL_DELETE, Sensitivity.DESTRUCTIVE, _OWNER),
     spec(CALENDAR_GET_SCHEDULE, Sensitivity.READ, _OWNER),
     spec(LEADS_GET_RECENT, Sensitivity.READ, _OWNER),

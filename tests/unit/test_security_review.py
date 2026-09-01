@@ -13,9 +13,14 @@ _ALLOWED_WRITE_PINS = frozenset(
         "GOOGLECALENDAR_CREATE_EVENT",
         "GOOGLECALENDAR_PATCH_EVENT",
         "GOOGLESHEETS_UPSERT_ROWS",
+        "GOOGLESHEETS_VALUES_UPDATE",
+        "GOOGLESHEETS_SPREADSHEETS_VALUES_APPEND",
         "INSTAGRAM_SEND_TEXT_MESSAGE",
         # ADR-016: one outbound WhatsApp owner, production is composio.
         "WHATSAPP_SEND_MESSAGE",
+        # Named owner Telegram draft → approve → send. Not catalog auto-fire.
+        "GMAIL_CREATE_EMAIL_DRAFT",
+        "GMAIL_SEND_DRAFT",
     }
 )
 
@@ -63,8 +68,12 @@ def test_preloaded_writes_are_allowlisted_only() -> None:
     assert preloaded_tool("WHATSAPP_SEND_TEMPLATE_MESSAGE") is None
     assert preloaded_tool("METAADS_UPDATE_CAMPAIGN") is None
     assert preloaded_tool("INSTAGRAM_CREATE_POST") is None
+    assert preloaded_tool("INSTAGRAM_CREATE_MEDIA_CONTAINER") is None
+    assert preloaded_tool("INSTAGRAM_POST_IG_USER_MEDIA_PUBLISH") is None
     assert preloaded_tool("GOOGLE_ANALYTICS_SEND_EVENTS") is None
     assert preloaded_tool("GOOGLECALENDAR_DELETE") is None
+    assert preloaded_tool("GOOGLESHEETS_DELETE_DIMENSION") is None
+    assert preloaded_tool("LINKEDIN_DELETE_POST") is None
 
 
 def test_r4_approval_r5_deny_not_flag_overridable() -> None:

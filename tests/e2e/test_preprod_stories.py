@@ -483,10 +483,15 @@ def test_story_high_risk_write_stays_gated() -> None:
     assert write_flag_enabled(settings, "meta_write") is False
 
     # ADR-016: WHATSAPP_SEND_MESSAGE is the one legitimate WhatsApp write pin
-    # (sender=composio). Every other SEND/PAUSE/DELETE stays out of the catalog.
+    # (sender=composio). GMAIL_SEND_DRAFT is the named owner Telegram send pin.
+    # Every other SEND/PAUSE/DELETE stays out of the catalog.
     for name in PRELOADED_TOOL_NAMES:
         upper = name.upper()
-        if name in {"INSTAGRAM_SEND_TEXT_MESSAGE", "WHATSAPP_SEND_MESSAGE"}:
+        if name in {
+            "INSTAGRAM_SEND_TEXT_MESSAGE",
+            "WHATSAPP_SEND_MESSAGE",
+            "GMAIL_SEND_DRAFT",
+        }:
             continue
         assert "SEND" not in upper
         assert "PAUSE" not in upper
@@ -494,6 +499,9 @@ def test_story_high_risk_write_stays_gated() -> None:
     assert preloaded_tool("GOOGLECALENDAR_DELETE") is None
     assert preloaded_tool("INSTAGRAM_SEND_TEXT_MESSAGE") is not None
     assert preloaded_tool("INSTAGRAM_SEND_TEXT_MESSAGE").write is True
+    assert preloaded_tool("INSTAGRAM_POST_IG_USER_MEDIA_PUBLISH") is None
+    assert preloaded_tool("GOOGLESHEETS_DELETE_DIMENSION") is None
+    assert preloaded_tool("LINKEDIN_DELETE_POST") is None
     # Mass outbound stays unwired regardless of sender (ADR-016).
     assert preloaded_tool("WHATSAPP_SEND_TEMPLATE_MESSAGE") is None
 

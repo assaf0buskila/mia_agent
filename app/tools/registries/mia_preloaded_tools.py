@@ -20,12 +20,16 @@ from app.integrations.calendar_booking import (
 )
 from app.integrations.ga4 import (
     COMPOSIO_GA4_VERSION,
+    COMPOSIO_LIST_ACCOUNT_SUMMARIES_TOOL,
     COMPOSIO_LIST_CONVERSION_EVENTS_TOOL,
     COMPOSIO_PIVOT_REPORT_TOOL,
 )
 from app.integrations.gmail import (
+    COMPOSIO_CREATE_DRAFT_TOOL,
+    COMPOSIO_FETCH_EMAILS_TOOL,
     COMPOSIO_FETCH_MESSAGE_TOOL,
     COMPOSIO_GMAIL_VERSION,
+    COMPOSIO_SEND_DRAFT_TOOL,
     GMAIL_NEW_MESSAGE_TRIGGER,
 )
 from app.integrations.instagram import (
@@ -45,8 +49,12 @@ from app.integrations.search_console import (
     COMPOSIO_SEARCH_ANALYTICS_TOOL,
 )
 from app.integrations.sheets import (
+    COMPOSIO_GET_SHEET_NAMES_TOOL,
     COMPOSIO_GOOGLESHEETS_VERSION,
     COMPOSIO_UPSERT_ROWS_TOOL,
+    COMPOSIO_VALUES_APPEND_TOOL,
+    COMPOSIO_VALUES_GET_TOOL,
+    COMPOSIO_VALUES_UPDATE_TOOL,
 )
 
 # Aliased: app.integrations.instagram exports the same COMPOSIO_SEND_TEXT_TOOL name.
@@ -74,6 +82,32 @@ PRELOADED_TOOLS: tuple[PreloadedTool, ...] = (
         version=COMPOSIO_GMAIL_VERSION,
         risk="R0",
         write=False,
+        enabled=True,
+    ),
+    PreloadedTool(
+        name=COMPOSIO_FETCH_EMAILS_TOOL,
+        toolkit="GMAIL",
+        version=COMPOSIO_GMAIL_VERSION,
+        risk="R0",
+        write=False,
+        enabled=True,
+    ),
+    PreloadedTool(
+        name=COMPOSIO_CREATE_DRAFT_TOOL,
+        toolkit="GMAIL",
+        version=COMPOSIO_GMAIL_VERSION,
+        risk="R1",
+        write=True,
+        enabled=True,
+    ),
+    # Adapter pin for the named owner Telegram draft→approve path. Generic
+    # catalog execute never auto-fires this slug (NEVER_AUTO_SEND_SLUGS).
+    PreloadedTool(
+        name=COMPOSIO_SEND_DRAFT_TOOL,
+        toolkit="GMAIL",
+        version=COMPOSIO_GMAIL_VERSION,
+        risk="R3",
+        write=True,
         enabled=True,
     ),
     PreloadedTool(
@@ -126,6 +160,38 @@ PRELOADED_TOOLS: tuple[PreloadedTool, ...] = (
     ),
     PreloadedTool(
         name=COMPOSIO_UPSERT_ROWS_TOOL,
+        toolkit="GOOGLESHEETS",
+        version=COMPOSIO_GOOGLESHEETS_VERSION,
+        risk="R1",
+        write=True,
+        enabled=True,
+    ),
+    PreloadedTool(
+        name=COMPOSIO_VALUES_GET_TOOL,
+        toolkit="GOOGLESHEETS",
+        version=COMPOSIO_GOOGLESHEETS_VERSION,
+        risk="R0",
+        write=False,
+        enabled=True,
+    ),
+    PreloadedTool(
+        name=COMPOSIO_GET_SHEET_NAMES_TOOL,
+        toolkit="GOOGLESHEETS",
+        version=COMPOSIO_GOOGLESHEETS_VERSION,
+        risk="R0",
+        write=False,
+        enabled=True,
+    ),
+    PreloadedTool(
+        name=COMPOSIO_VALUES_UPDATE_TOOL,
+        toolkit="GOOGLESHEETS",
+        version=COMPOSIO_GOOGLESHEETS_VERSION,
+        risk="R1",
+        write=True,
+        enabled=True,
+    ),
+    PreloadedTool(
+        name=COMPOSIO_VALUES_APPEND_TOOL,
         toolkit="GOOGLESHEETS",
         version=COMPOSIO_GOOGLESHEETS_VERSION,
         risk="R1",
@@ -209,6 +275,14 @@ PRELOADED_TOOLS: tuple[PreloadedTool, ...] = (
     ),
     PreloadedTool(
         name=COMPOSIO_LIST_CONVERSION_EVENTS_TOOL,
+        toolkit="GOOGLE_ANALYTICS",
+        version=COMPOSIO_GA4_VERSION,
+        risk="R0",
+        write=False,
+        enabled=True,
+    ),
+    PreloadedTool(
+        name=COMPOSIO_LIST_ACCOUNT_SUMMARIES_TOOL,
         toolkit="GOOGLE_ANALYTICS",
         version=COMPOSIO_GA4_VERSION,
         risk="R0",

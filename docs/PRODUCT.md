@@ -70,7 +70,10 @@ When a meaningful website conversation is finalized, Mia sends Assaf one concise
 
 Finalization is one service. Triggers now: visitor closes the widget or leaves the page (after at least one message), configurable inactivity (`MIA_WEBSITE_INACTIVITY_MINUTES`, default 30, via `mia-due-scan`), and meeting/handoff completing the thread. Idempotent on `conversation_id + final_summary_version`. Empty opens are not pinged.
 
-The existing WhatsApp-click briefing (paste-ready first line for Assaf) stays. Notification
+The existing WhatsApp-click briefing stays: a paste-ready first line for Assaf,
+plus a flag-only summary (workflow known, lead stage, next action, whether WhatsApp
+was offered) and a heads-up that the visitor moved to him. It is not a transcript
+or a PII dump. Notification
 deduplication is scoped to the website conversation/session: graph handoff and click in the same
 session do not double-ping, while a returning lead in a new conversation can alert Assaf again.
 
@@ -80,8 +83,11 @@ When the website graph selects HANDOFF, Assaf gets a Telegram ping with the conv
 
 WhatsApp is Assaf’s human inbox until official Cloud API inbound exists. Website may offer WhatsApp after real buying context. Mia does not reply on WhatsApp.
 
-Gmail: read / draft; an exact draft sends only after one-tap Telegram approval and when the
-production send flag is enabled.
+Gmail: read / draft on owner Telegram. Unsolicited send is denied (no cron, no visitor
+trigger, no marketing blast, no catalog auto-fire). If Assaf asks her on Telegram to write
+and send mail, that is a named owner request: she drafts, he approves, then
+`GMAIL_SEND_DRAFT` may send. Website visitors cannot trigger Gmail send. Delete-forever
+Gmail tools stay denied.
 Calendar: free/busy; exact create and reschedule actions require one-tap Telegram approval.
 Search Console and GA4 answer AssafWeb KPI questions from APIs: traffic, users, sessions,
 conversions, pages, clicks, impressions, CTR, position, and queries. LinkedIn reads use the active

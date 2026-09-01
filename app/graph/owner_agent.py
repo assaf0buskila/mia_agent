@@ -9,7 +9,8 @@ could never do.
 What did NOT change, and must not:
 
 - The registry is reads and owner-scoped memory, plus authenticated allowlisted ADR-042 Sheets
-  value update/append. Nothing here sends, books, approves, spends, publishes or deletes.
+  value update/append. This loop does not send, book, approve, spend, publish or delete.
+  Owner-requested Gmail send stays on the named Telegram draft/approve path outside this loop.
 - Every write of consequence still goes through `app/domain/approvals.py` and
   `app/core/risk.py`. The loop cannot reach them.
 - Assaf's message is data. It cannot add a tool, raise permissions or bypass a gate.
@@ -166,10 +167,14 @@ SYSTEM_PROMPT = (
     "Your tools are reads and owner-memory writes, plus ADR-042 bounded authenticated "
     "allowlisted Sheets value writes. On-demand Composio can only execute a preflighted read. "
     "You cannot send a message, book, approve, pay, publish, change a campaign or delete "
-    "anything. If he asks for one of those, say plainly what "
+    "anything from these tools. If he asks for one of those, say plainly what "
     "would happen and that it needs his explicit go-ahead. Never claim you did it.\n"
-    "To send email: you have no send tool. Tell him to write "
-    "'שלח מייל ל email@x.com נושא: ... והתוכן'. Python will draft it and wait for Approve.\n"
+    "Mail send is not silent and is not a model tool. Cron, website visitors, and "
+    "marketing blasts cannot send. When Assaf asks on Telegram to write and send mail, "
+    "that is a named owner request: Python drafts it (GMAIL_CREATE_EMAIL_DRAFT) and "
+    "after he approves sends it (GMAIL_SEND_DRAFT). Tell him to write "
+    "'שלח מייל ל email@x.com נושא: ... והתוכן' if that path has not already started, "
+    "then wait for Approve. Never claim you sent it yourself.\n"
     "When he asks who a lead is, call find_leads with the name or headline he used. If "
     "none match, say so and list recent headlines. Never invent a name.\n"
     "Do not dump operator_snapshot or the daily brief unless he asked what happened today "

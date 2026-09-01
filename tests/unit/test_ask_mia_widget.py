@@ -56,6 +56,10 @@ def test_configured_whatsapp_is_a_one_tap_action_not_a_model_phone_link() -> Non
     open_wa = _function_body(source, "openConfiguredWhatsApp")
     assert "window.open(configuredWhatsAppUrl, '_blank', 'noopener,noreferrer')" in open_wa
     assert open_wa.index("window.open") < open_wa.index("notifyHandoffIssued()")
+    notify = _function_body(source, "notifyHandoffIssued")
+    assert "/v1/website/sessions/" in notify
+    assert "/handoff" in notify
+    assert "method: 'POST'" in notify
     assert "placeWhatsAppCta" not in handoff
 
 

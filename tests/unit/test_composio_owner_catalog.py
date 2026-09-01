@@ -421,8 +421,33 @@ def test_documented_composio_input_parameter_map_is_normalized() -> None:
     [
         ("LINKEDIN_GET_MY_INFO", "R0"),
         ("GMAIL_SEND_EMAIL", "R3"),
+        ("GMAIL_SEND_DRAFT", "R3"),
+        ("GMAIL_REPLY_TO_THREAD", "R3"),
+        ("GMAIL_FORWARD_MESSAGE", "R3"),
         ("LINKEDIN_POST_UPDATE", "R4"),
         ("GMAIL_DELETE_THREAD", "R5"),
+        ("GMAIL_DELETE_MESSAGE", "R5"),
+        ("GMAIL_BATCH_DELETE_MESSAGES", "R5"),
+        ("GMAIL_DELETE_DRAFT", "R5"),
+        ("GMAIL_DELETE_FILTER", "R5"),
+        ("GMAIL_DELETE_LABEL", "R5"),
+        ("GOOGLE_SEARCH_CONSOLE_DELETE_SITE", "R5"),
+        ("GOOGLE_SEARCH_CONSOLE_ADD_SITE", "R3"),
+        ("GOOGLE_ANALYTICS_SEND_EVENTS", "R3"),
+        ("GOOGLE_ANALYTICS_ARCHIVE_CUSTOM_DIMENSION", "R3"),
+        ("GMAIL_MOVE_TO_TRASH", "R3"),
+        ("GOOGLESHEETS_DELETE_DIMENSION", "R5"),
+        ("GOOGLESHEETS_CLEAR_VALUES", "R5"),
+        ("GOOGLESHEETS_EXECUTE_SQL", "R5"),
+        ("GOOGLESHEETS_VALUES_UPDATE", "R1"),
+        ("GOOGLESHEETS_UPSERT_ROWS", "R1"),
+        ("GOOGLESHEETS_SPREADSHEETS_VALUES_APPEND", "R1"),
+        ("GOOGLESHEETS_VALUES_GET", "R0"),
+        ("INSTAGRAM_DELETE_COMMENT", "R5"),
+        ("INSTAGRAM_DELETE_MESSAGGER_PROFILE", "R5"),
+        ("LINKEDIN_DELETE_POST", "R5"),
+        ("LINKEDIN_DELETE_UGC_POST", "R5"),
+        ("LINKEDIN_DELETE_LINKED_IN_POST", "R5"),
         ("OBSCURE_PROVIDER_DO_THING", "R3"),
         ("CRM_TARGET_AUDIENCE", "R3"),
         ("SLACK_LIST_AND_JOIN_CHANNEL", "R3"),
@@ -465,14 +490,52 @@ class _Catalog:
     def detail(self, slug: str):
         if slug == self.tool.slug:
             return self.tool
-        if slug == "GMAIL_DELETE_THREAD":
-            return CatalogTool(slug, "GMAIL", "delete", self.tool.input_schema)
+        if slug in {
+            "GMAIL_DELETE_THREAD",
+            "GMAIL_DELETE_MESSAGE",
+            "GMAIL_BATCH_DELETE_MESSAGES",
+            "GMAIL_DELETE_DRAFT",
+            "GMAIL_SEND_EMAIL",
+            "GMAIL_SEND_DRAFT",
+            "GMAIL_REPLY_TO_THREAD",
+            "GMAIL_FORWARD_MESSAGE",
+            "GMAIL_MOVE_TO_TRASH",
+            "GOOGLE_SEARCH_CONSOLE_DELETE_SITE",
+            "GOOGLE_SEARCH_CONSOLE_ADD_SITE",
+            "GOOGLE_SEARCH_CONSOLE_SUBMIT_SITEMAP",
+            "GOOGLE_ANALYTICS_SEND_EVENTS",
+            "GOOGLE_ANALYTICS_ARCHIVE_CUSTOM_DIMENSION",
+            "GOOGLESHEETS_DELETE_DIMENSION",
+            "GOOGLESHEETS_CLEAR_VALUES",
+            "GOOGLESHEETS_VALUES_UPDATE",
+            "GOOGLESHEETS_UPSERT_ROWS",
+            "GOOGLESHEETS_SPREADSHEETS_VALUES_APPEND",
+            "GOOGLESHEETS_VALUES_GET",
+            "INSTAGRAM_GET_IG_USER_MEDIA",
+            "INSTAGRAM_DELETE_COMMENT",
+            "INSTAGRAM_POST_IG_USER_MEDIA_PUBLISH",
+            "LINKEDIN_DELETE_POST",
+            "LINKEDIN_POST_UPDATE",
+        }:
+            toolkit = slug.split("_", 1)[0]
+            if slug.startswith("GOOGLESHEETS_"):
+                toolkit = "GOOGLESHEETS"
+            elif slug.startswith("INSTAGRAM_"):
+                toolkit = "INSTAGRAM"
+            elif slug.startswith("LINKEDIN_"):
+                toolkit = "LINKEDIN"
+            elif slug.startswith("GMAIL_"):
+                toolkit = "GMAIL"
+            elif slug.startswith("GOOGLE_SEARCH_CONSOLE_"):
+                toolkit = "GOOGLE_SEARCH_CONSOLE"
+            elif slug.startswith("GOOGLE_ANALYTICS_"):
+                toolkit = "GOOGLE_ANALYTICS"
+            return CatalogTool(slug, toolkit, slug.lower(), self.tool.input_schema)
         return None
 
     def execute_read(self, tool, arguments):
-        assert tool == self.tool
-        assert arguments == {}
-        return {"successful": True, "data": {"name": "Assaf"}}
+        del arguments
+        return {"successful": True, "data": {"slug": tool.slug, "name": "Assaf"}}
 
 
 def _context(*, kill_switch: bool = False) -> ToolContext:
@@ -509,6 +572,147 @@ def test_dynamic_execute_is_read_only_schema_checked_and_kill_switch_checked(mon
         _context(kill_switch=True),
     )
     assert not killed.ok and "denied" in killed.error
+
+
+def test_official_sheet_ig_linkedin_policy_keeps_deletes_off_and_does_not_autopublish(
+    monkeypatch,
+) -> None:
+    catalog = _Catalog()
+    monkeypatch.setattr(
+        ComposioCatalog, "from_settings", classmethod(lambda cls, settings: catalog)
+    )
+    ctx = _context()
+    delete_denied = execute_tool(
+        "composio_execute_tool",
+        {"tool_slug": "GOOGLESHEETS_DELETE_DIMENSION", "arguments_json": "{}"},
+        ctx,
+    )
+    assert not delete_denied.ok and "destructive" in delete_denied.error
+    clear_denied = execute_tool(
+        "composio_execute_tool",
+        {"tool_slug": "GOOGLESHEETS_CLEAR_VALUES", "arguments_json": "{}"},
+        ctx,
+    )
+    assert not clear_denied.ok and "destructive" in clear_denied.error
+    ig_delete = execute_tool(
+        "composio_execute_tool",
+        {"tool_slug": "INSTAGRAM_DELETE_COMMENT", "arguments_json": "{}"},
+        ctx,
+    )
+    assert not ig_delete.ok and "destructive" in ig_delete.error
+    li_delete = execute_tool(
+        "composio_execute_tool",
+        {"tool_slug": "LINKEDIN_DELETE_POST", "arguments_json": "{}"},
+        ctx,
+    )
+    assert not li_delete.ok and "destructive" in li_delete.error
+
+    sheet_read = execute_tool(
+        "composio_execute_tool",
+        {"tool_slug": "GOOGLESHEETS_VALUES_GET", "arguments_json": "{}"},
+        ctx,
+    )
+    assert sheet_read.ok and "GOOGLESHEETS_VALUES_GET" in sheet_read.text
+    ig_read = execute_tool(
+        "composio_execute_tool",
+        {"tool_slug": "INSTAGRAM_GET_IG_USER_MEDIA", "arguments_json": "{}"},
+        ctx,
+    )
+    assert ig_read.ok and "INSTAGRAM_GET_IG_USER_MEDIA" in ig_read.text
+    li_read = execute_tool(
+        "composio_execute_tool",
+        {"tool_slug": "LINKEDIN_GET_MY_INFO", "arguments_json": "{}"},
+        ctx,
+    )
+    assert li_read.ok
+
+    for slug in (
+        "GOOGLESHEETS_VALUES_UPDATE",
+        "GOOGLESHEETS_UPSERT_ROWS",
+        "GOOGLESHEETS_SPREADSHEETS_VALUES_APPEND",
+    ):
+        result = execute_tool(
+            "composio_execute_tool",
+            {"tool_slug": slug, "arguments_json": "{}"},
+            ctx,
+        )
+        assert not result.ok
+        assert "destructive" not in result.error
+        assert "named approved workflow" in result.error
+
+    publish = execute_tool(
+        "composio_execute_tool",
+        {"tool_slug": "INSTAGRAM_POST_IG_USER_MEDIA_PUBLISH", "arguments_json": "{}"},
+        ctx,
+    )
+    assert not publish.ok
+    assert "never auto-executed" in publish.error
+    li_post = execute_tool(
+        "composio_execute_tool",
+        {"tool_slug": "LINKEDIN_POST_UPDATE", "arguments_json": "{}"},
+        ctx,
+    )
+    assert not li_post.ok
+    assert "never auto-executed" in li_post.error
+
+
+def test_gmail_send_is_never_auto_executed_and_delete_forever_stays_denied(
+    monkeypatch,
+) -> None:
+    catalog = _Catalog()
+    monkeypatch.setattr(
+        ComposioCatalog, "from_settings", classmethod(lambda cls, settings: catalog)
+    )
+    ctx = _context()
+    for slug in (
+        "GMAIL_SEND_EMAIL",
+        "GMAIL_SEND_DRAFT",
+        "GMAIL_REPLY_TO_THREAD",
+        "GMAIL_FORWARD_MESSAGE",
+        "GOOGLE_ANALYTICS_SEND_EVENTS",
+    ):
+        result = execute_tool(
+            "composio_execute_tool",
+            {"tool_slug": slug, "arguments_json": "{}"},
+            ctx,
+        )
+        assert not result.ok
+        assert "never auto-executed" in result.error
+        assert "destructive" not in result.error
+    for slug in (
+        "GMAIL_DELETE_THREAD",
+        "GMAIL_DELETE_MESSAGE",
+        "GMAIL_BATCH_DELETE_MESSAGES",
+        "GMAIL_DELETE_DRAFT",
+        "GOOGLE_SEARCH_CONSOLE_DELETE_SITE",
+    ):
+        denied = execute_tool(
+            "composio_execute_tool",
+            {"tool_slug": slug, "arguments_json": "{}"},
+            ctx,
+        )
+        assert not denied.ok and "destructive" in denied.error
+    trash = execute_tool(
+        "composio_execute_tool",
+        {"tool_slug": "GMAIL_MOVE_TO_TRASH", "arguments_json": "{}"},
+        ctx,
+    )
+    assert not trash.ok
+    assert "destructive" not in trash.error
+    assert "named approved workflow" in trash.error
+    for slug in (
+        "GOOGLE_SEARCH_CONSOLE_ADD_SITE",
+        "GOOGLE_SEARCH_CONSOLE_SUBMIT_SITEMAP",
+        "GOOGLE_ANALYTICS_ARCHIVE_CUSTOM_DIMENSION",
+    ):
+        write = execute_tool(
+            "composio_execute_tool",
+            {"tool_slug": slug, "arguments_json": "{}"},
+            ctx,
+        )
+        assert not write.ok
+        assert "destructive" not in write.error
+        assert "named approved workflow" in write.error
 
 
 def test_linkedin_side_effect_is_bound_for_approval_and_never_executes_at_proposal_time() -> None:

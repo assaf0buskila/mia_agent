@@ -81,6 +81,9 @@ from app.domain.seo import enrich_seo_ack
 from app.domain.tools import AdapterHttpError
 from app.integrations.calendar import CalendarAgendaPort, CalendarPort
 from app.integrations.composio_catalog import (
+    DENIED_COMPOSIO_SLUGS,
+    NEVER_AUTO_PUBLISH_SLUGS,
+    NEVER_AUTO_SEND_SLUGS,
     ComposioCatalog,
     bounded_result_text,
     risk_for_slug,
@@ -1537,12 +1540,29 @@ def _composio_execute_with_catalog(
     if problem:
         return ToolResult(ok=False, error=problem)
     risk = risk_for_slug(tool.slug, tool.toolkit)
-    if risk is RiskLevel.R5_DESTRUCTIVE:
+    if tool.slug in DENIED_COMPOSIO_SLUGS or risk is RiskLevel.R5_DESTRUCTIVE:
         return ToolResult(ok=False, error="destructive Composio tools are denied")
+    if tool.slug in NEVER_AUTO_PUBLISH_SLUGS:
+        return ToolResult(
+            ok=False,
+            error=(
+                "this Composio tool publishes or posts and is never auto-executed; "
+                "it needs a named approval workflow"
+            ),
+        )
+    if tool.slug in NEVER_AUTO_SEND_SLUGS:
+        return ToolResult(
+            ok=False,
+            error=(
+                "this Composio tool sends and is never auto-executed; "
+                "owner-requested Gmail send uses the named Telegram draft "
+                "and approve path"
+            ),
+        )
     if risk is not RiskLevel.R0_READ:
-        # We intentionally do not create fake generic approvals: the existing approval
-        # domain binds a named action, idempotency key and audit record. A new provider
-        # write needs that deterministic contract before it can execute.
+        # Bounded Sheets writes stay on named sheets.read/update/append (spreadsheet
+        # allowlist). Other side effects need a named approval, idempotency, and audit
+        # contract before they can execute. Generic catalog execute is reads only.
         return ToolResult(
             ok=False,
             error=(
@@ -2089,8 +2109,9 @@ _register(
         description=(
             "Executes a schema-preflighted READ-only tool from an ACTIVE owner Composio "
             "toolkit after its schema was fetched in this turn. The Python policy permits "
-            "reads only. Sends, posts, writes, marketing changes and unknown side effects "
-            "are never executed here; destructive actions are denied."
+            "reads only. Official destructive slugs (Sheets row/sheet delete and clear, "
+            "Instagram/LinkedIn deletes) are denied. Sends, posts, bounded Sheets writes, "
+            "marketing changes and unknown side effects are never executed here."
         ),
         parameters={
             "type": "object",

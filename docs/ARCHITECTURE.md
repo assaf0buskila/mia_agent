@@ -110,8 +110,10 @@ unknown action until it has a named capability, approval, idempotency, and audit
 LinkedIn now has such a contract for exact non-destructive side effects: the proposed slug and
 arguments are schema-checked and hash-bound to a Telegram approval, then the active tool, schema,
 risk, expiry, kill switch, and idempotency are rechecked before execution. LinkedIn delete/remove,
-revoke, message, DM, and InMail tools remain denied. Gmail draft send and Calendar create/move use
-their own typed approval contracts.
+revoke, message, DM, and InMail tools remain denied. Gmail send is not silent: cron, website
+visitors, and catalog auto-execute cannot send. Owner Telegram may draft and, after Approve,
+send via `GMAIL_SEND_DRAFT`. Calendar create/move uses its own typed approval contract.
+Gmail delete-forever slugs and `GOOGLE_SEARCH_CONSOLE_DELETE_SITE` stay denied.
 
 Direct APIs remain where they win (Meta inbound HMAC and STT). Instagram stays analytics-only;
 when a provider rejects a mixed insight metric request, the adapter retries the metrics
@@ -151,10 +153,11 @@ Widget `app/web/ask_mia.js` depends on:
 Preserve pill, bubbles, composer mic, palette, WhatsApp card. No TTS. No competing WhatsApp FAB.
 `GET /config` may expose only the server-configured `https://wa.me` URL. After session creation the
 existing composer WhatsApp action is visible when that URL is valid; its click opens immediately
-and independently posts the handoff notification. The claim key is conversation/session scoped:
-the graph and click dedupe within one session, but an old lead-level claim cannot suppress a new
-conversation. Delivery logs contain only the outcome class, never visitor text. Never derive a
-destination from model or visitor text.
+and independently posts the handoff notification. The owner card is a summary (workflow, stage,
+next action, WhatsApp offered), not a visitor-text dump. The claim key is conversation/session
+scoped: the graph and click dedupe within one session, but an old lead-level claim cannot suppress
+a new conversation. Delivery logs contain only the outcome class, never visitor text. Never derive
+a destination from model or visitor text.
 
 ## Runtime
 
