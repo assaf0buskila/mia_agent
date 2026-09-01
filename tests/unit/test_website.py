@@ -623,7 +623,7 @@ def test_website_message_does_not_ping_whatsapp_move_handoff_does(monkeypatch) -
     click_briefs: list[str] = []
 
     def deliver(**kwargs):
-        click_briefs.append(kwargs["text"])
+        click_briefs.append(kwargs["brief"])
         return OwnerTelegramDelivery(delivered=kwargs["recipient_ids"])
 
     monkeypatch.setattr(website_handoff_brief_mod, "_deliver_owner_brief", deliver)

@@ -257,18 +257,18 @@ def test_handoff_brief_names_the_lead_and_tells_assaf_to_take_over() -> None:
 
 def test_whatsapp_click_brief_is_a_summary_not_a_pii_dump() -> None:
     sales = SalesState(
-        lead_id="lead_pii123456789",
+        lead_id="lead_pii_abcdef12",
         workflow_known=True,
         whatsapp_handoff_offered=True,
     )
     turns = [
         ConversationTurn(
             role="prospect",
-            text="קוראים לי דניאל 0501234567 danny@example.com תעודת זהות 123456789",
+            text="קוראים לי דניאל 0501234567 danny@example.com תעודת זהות 987654321",
         )
     ]
     brief = format_website_whatsapp_brief(
-        lead_id="lead_pii123456789", sales=sales, turns=turns, stage="open"
+        lead_id="lead_pii_abcdef12", sales=sales, turns=turns, stage="open"
     )
     assert "מישהו עבר אליך" in brief
     assert "תהליך" in brief and "ידוע" in brief
@@ -278,7 +278,7 @@ def test_whatsapp_click_brief_is_a_summary_not_a_pii_dump() -> None:
     assert "נלחץ" in brief
     assert "0501234567" not in brief
     assert "danny@example.com" not in brief
-    assert "123456789" not in brief
+    assert "987654321" not in brief
     assert "דניאל" not in brief
     assert "השיחה:" not in brief
 
@@ -287,7 +287,7 @@ def test_apply_click_brief_sends_summary_and_only_that_path_pings(monkeypatch) -
     sent: list[str] = []
 
     def deliver(**kwargs):
-        sent.append(kwargs["text"])
+        sent.append(kwargs["brief"])
         return OwnerTelegramDelivery(delivered=kwargs["recipient_ids"])
 
     monkeypatch.setattr(brief_mod, "_deliver_owner_brief", deliver)
