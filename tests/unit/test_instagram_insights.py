@@ -367,7 +367,11 @@ def test_graph_port_does_not_retry_generic_metric_error_individually() -> None:
     assert requested_metrics == ["views,reach,likes,comments,saved"]
 
 
-def test_graph_port_enforces_total_audit_call_budget() -> None:
+def test_graph_port_enforces_total_audit_call_budget(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.integrations.instagram_insights._insight_budget_for_limit",
+        lambda _limit: 11,
+    )
     calls: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:

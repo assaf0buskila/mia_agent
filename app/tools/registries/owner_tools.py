@@ -50,7 +50,12 @@ from app.core.config import Settings
 from app.core.errors import InvalidArguments, PermissionDenied
 from app.core.risk import RiskLevel
 from app.db.store import LeadStore
-from app.domain.approvals import ACTION_LINKEDIN_COMPOSIO_WRITE, RESOURCE_LINKEDIN_TOOL
+from app.domain.approvals import (
+    ACTION_COMPOSIO_WRITE,
+    ACTION_LINKEDIN_COMPOSIO_WRITE,
+    RESOURCE_COMPOSIO_TOOL,
+    RESOURCE_LINKEDIN_TOOL,
+)
 from app.domain.briefs import apply_owner_meeting_brief
 from app.domain.content_ideas import apply_owner_content_ideas
 from app.domain.events import Channel
@@ -63,6 +68,10 @@ from app.domain.owner_calendar import (
     apply_owner_calendar,
     format_calendar_agenda,
     resolve_agenda_window,
+)
+from app.domain.owner_composio_writes import (
+    composio_approval_resource_id,
+    propose_composio_write,
 )
 from app.domain.owner_connection_audit import OwnerAuditResult, format_owner_connection_audit
 from app.domain.owner_linkedin_writes import (
@@ -81,9 +90,8 @@ from app.domain.seo import enrich_seo_ack
 from app.domain.tools import AdapterHttpError
 from app.integrations.calendar import CalendarAgendaPort, CalendarPort
 from app.integrations.composio_catalog import (
-    DENIED_COMPOSIO_SLUGS,
-    NEVER_AUTO_PUBLISH_SLUGS,
     NEVER_AUTO_SEND_SLUGS,
+    SHEETS_BOUNDED_WRITE_SLUGS,
     ComposioCatalog,
     bounded_result_text,
     risk_for_slug,
@@ -99,6 +107,8 @@ from app.integrations.gmail import (
     format_inbox_rows,
 )
 from app.integrations.instagram_insights import (
+    _DEFAULT_OWNER_IG_LIMIT,
+    _MAX_IG_INSIGHTS_LIMIT,
     InstagramInsightsPort,
     enrich_content_insights_ack,
 )
@@ -1344,7 +1354,15 @@ def _blank_spans(text: str, spans: list[tuple[int, int]]) -> str:
 
 
 def _instagram_insights(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
-    del args
+    raw_limit = args.get("limit")
+    if raw_limit is None or raw_limit == "":
+        limit = _DEFAULT_OWNER_IG_LIMIT
+    else:
+        try:
+            limit = int(raw_limit)
+        except (TypeError, ValueError):
+            return ToolResult(ok=False, error="limit must be an integer")
+        limit = max(1, min(limit, _MAX_IG_INSIGHTS_LIMIT))
     if ctx.instagram_insights is None:
         return ToolResult(ok=True, text=_NOT_CONNECTED)
     text, outcome = enrich_content_insights_ack(
@@ -1352,8 +1370,10 @@ def _instagram_insights(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
         ctx.instagram_insights,
         ctx.store,
         ctx.kill_switch,
+        limit=limit,
+        detail=True,
     )
-    if outcome.status not in {"ok", "empty"}:
+    if outcome.status not in {"ok", "empty", "partial"}:
         return ToolResult(
             ok=False,
             error=f"Instagram insights status: {outcome.status}.",
@@ -1412,11 +1432,20 @@ def _composio_search_tools(ctx: ToolContext, args: dict[str, Any]) -> ToolResult
         return ToolResult(ok=True, text=_NOT_CONNECTED)
     query = str(args.get("query") or "").strip()
     toolkit = str(args.get("toolkit") or "").strip()
+    raw_limit = args.get("limit")
+    if raw_limit is None or raw_limit == "":
+        search_limit = 25
+    else:
+        try:
+            search_limit = int(raw_limit)
+        except (TypeError, ValueError):
+            return ToolResult(ok=False, error="limit must be an integer")
+        search_limit = max(1, min(search_limit, 50))
     with catalog:
-        tools = catalog.search(query, toolkit)
+        tools = catalog.search(query, toolkit, limit=search_limit)
     if not tools:
         return ToolResult(ok=True, text="No matching tool in an ACTIVE owner Composio toolkit.")
-    lines = [f"- {tool.slug} ({tool.toolkit}): {tool.description[:240]}" for tool in tools]
+    lines = [f"- {tool.slug} ({tool.toolkit}): {tool.description[:320]}" for tool in tools]
     return ToolResult(ok=True, text="\n".join(lines))
 
 
@@ -1470,7 +1499,51 @@ def _composio_execute_tool(ctx: ToolContext, args: dict[str, Any]) -> ToolResult
     if catalog is None:
         return ToolResult(ok=True, text=_NOT_CONNECTED)
     with catalog:
-        return _composio_execute_with_catalog(catalog, args, values)
+        return _composio_execute_with_catalog(ctx, catalog, args, values)
+
+
+def _composio_propose_side_effect(
+    ctx: ToolContext, catalog: ComposioCatalog, slug: str, values: dict[str, Any]
+) -> ToolResult:
+    try:
+        authorize(
+            "composio.propose_write",
+            principal=ctx.principal,
+            kill_switch=ctx.kill_switch,
+        )
+    except PermissionDenied:
+        return ToolResult(ok=False, error="Composio execution denied")
+    text = propose_composio_write(
+        store=ctx.store,
+        channel=Channel.TELEGRAM,
+        catalog=catalog,
+        slug=slug,
+        arguments=values,
+        kill_switch=ctx.kill_switch,
+    )
+    ready_prefixes = ("Composio action is ready", "Composio destructive action is ready")
+    if not any(text.startswith(prefix) for prefix in ready_prefixes):
+        return ToolResult(ok=False, text=text, error=text)
+    resource_id = composio_approval_resource_id(slug, values)
+    row = ctx.store.get_approval_by_resource(
+        RESOURCE_COMPOSIO_TOOL, resource_id, ACTION_COMPOSIO_WRITE
+    )
+    approval_id = str(row.approval_id or "").strip() if row is not None else ""
+    if not approval_id:
+        return ToolResult(ok=False, error="Composio approval binding was not persisted")
+    return ToolResult(ok=True, text=text, approval_id=approval_id)
+
+
+def _composio_propose_action_tool(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
+    values = _parse_composio_arguments(args)
+    if isinstance(values, ToolResult):
+        return values
+    catalog = _catalog(ctx)
+    if catalog is None:
+        return ToolResult(ok=True, text=_NOT_CONNECTED)
+    slug = str(args.get("tool_slug") or "").strip().upper()
+    with catalog:
+        return _composio_propose_side_effect(ctx, catalog, slug, values)
 
 
 def _composio_propose_linkedin_tool(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
@@ -1525,7 +1598,10 @@ def _parse_composio_arguments(args: dict[str, Any]) -> dict[str, Any] | ToolResu
 
 
 def _composio_execute_with_catalog(
-    catalog: ComposioCatalog, args: dict[str, Any], values: dict[str, Any]
+    ctx: ToolContext,
+    catalog: ComposioCatalog,
+    args: dict[str, Any],
+    values: dict[str, Any],
 ) -> ToolResult:
     slug = str(args.get("tool_slug") or "").strip().upper()
     tool = catalog.detail(slug)
@@ -1540,16 +1616,6 @@ def _composio_execute_with_catalog(
     if problem:
         return ToolResult(ok=False, error=problem)
     risk = risk_for_slug(tool.slug, tool.toolkit)
-    if tool.slug in DENIED_COMPOSIO_SLUGS or risk is RiskLevel.R5_DESTRUCTIVE:
-        return ToolResult(ok=False, error="destructive Composio tools are denied")
-    if tool.slug in NEVER_AUTO_PUBLISH_SLUGS:
-        return ToolResult(
-            ok=False,
-            error=(
-                "this Composio tool publishes or posts and is never auto-executed; "
-                "it needs a named approval workflow"
-            ),
-        )
     if tool.slug in NEVER_AUTO_SEND_SLUGS:
         return ToolResult(
             ok=False,
@@ -1559,17 +1625,16 @@ def _composio_execute_with_catalog(
                 "and approve path"
             ),
         )
-    if risk is not RiskLevel.R0_READ:
-        # Bounded Sheets writes stay on named sheets.read/update/append (spreadsheet
-        # allowlist). Other side effects need a named approval, idempotency, and audit
-        # contract before they can execute. Generic catalog execute is reads only.
+    if tool.slug in SHEETS_BOUNDED_WRITE_SLUGS:
         return ToolResult(
             ok=False,
             error=(
-                "this Composio tool has side effects and requires a named approved "
-                "workflow with idempotency and audit; it was not executed"
+                "bounded Sheets writes use the named sheets_read / sheets_update / "
+                "sheets_append tools with the allowlisted spreadsheet id"
             ),
         )
+    if risk is not RiskLevel.R0_READ:
+        return _composio_propose_side_effect(ctx, catalog, slug, values)
     response = catalog.execute_read(tool, values)
     if response is None:
         return ToolResult(ok=False, error="Composio execution failed")
@@ -2046,11 +2111,24 @@ _register(
         name="instagram_insights",
         description=(
             "Performance of Assaf's recent organic Instagram posts: views, reach, "
-            "likes, comments and saves for each of the last few posts. Use when Assaf "
-            "asks how his Instagram content is doing. Takes no input. Never replies or "
-            "publishes."
+            "likes, comments and saves for each post returned. Use when Assaf asks "
+            "how his Instagram content is doing. Optional limit (default 20, max 25). "
+            "Never replies or publishes."
         ),
-        parameters=_NO_ARGS,
+        parameters={
+            "type": "object",
+            "properties": {
+                "limit": {
+                    "type": ["integer", "null"],
+                    "description": (
+                        f"How many recent posts to fetch (default {_DEFAULT_OWNER_IG_LIMIT}, "
+                        f"max {_MAX_IG_INSIGHTS_LIMIT})."
+                    ),
+                },
+            },
+            "required": ["limit"],
+            "additionalProperties": False,
+        },
         handler=_instagram_insights,
     )
 )
@@ -2072,9 +2150,10 @@ _register(
         name="composio_search_tools",
         description=(
             "Searches tools across only Assaf's ACTIVE Composio-connected toolkits. "
-            "Use when no existing Mia tool covers the owner's request. Returns a small "
-            "matching list, not the catalog. Then call composio_get_tool_schema for the "
-            "exact selected tool before attempting it. Website visitors can never use this."
+            "Use when no existing Mia tool covers the owner's request. Returns up to 25 "
+            "matching tools by default (max 50 with limit). Then call "
+            "composio_get_tool_schema for the exact selected tool before attempting it. "
+            "Website visitors can never use this."
         ),
         parameters={
             "type": "object",
@@ -2084,8 +2163,12 @@ _register(
                     "type": ["string", "null"],
                     "description": "Optional connected toolkit slug.",
                 },
+                "limit": {
+                    "type": ["integer", "null"],
+                    "description": "Optional result cap (default 25, max 50).",
+                },
             },
-            "required": ["query", "toolkit"],
+            "required": ["query", "toolkit", "limit"],
             "additionalProperties": False,
         },
         handler=_composio_search_tools,
@@ -2107,11 +2190,11 @@ _register(
     ToolSpec(
         name="composio_execute_tool",
         description=(
-            "Executes a schema-preflighted READ-only tool from an ACTIVE owner Composio "
-            "toolkit after its schema was fetched in this turn. The Python policy permits "
-            "reads only. Official destructive slugs (Sheets row/sheet delete and clear, "
-            "Instagram/LinkedIn deletes) are denied. Sends, posts, bounded Sheets writes, "
-            "marketing changes and unknown side effects are never executed here."
+            "Executes a schema-preflighted tool from an ACTIVE owner Composio toolkit "
+            "after its schema was fetched in this turn. Reads run immediately. Writes, "
+            "posts, deletes, and other side effects are not executed here — they create "
+            "a Telegram approval request instead. Gmail send uses the named draft path; "
+            "bounded Sheets writes use sheets_update/sheets_append."
         ),
         parameters={
             "type": "object",
@@ -2156,6 +2239,31 @@ _register(
             "additionalProperties": False,
         },
         handler=_composio_propose_linkedin_tool,
+    )
+)
+_register(
+    ToolSpec(
+        name="composio_propose_action",
+        description=(
+            "Prepares one exact Composio side-effect (write, post, delete, update, etc.) "
+            "from any ACTIVE connected toolkit. Validates the current schema and creates "
+            "a Telegram approval; it never executes the action itself. Prefer "
+            "composio_execute_tool — it auto-proposes side effects after schema preflight. "
+            "Gmail send and bounded Sheets writes stay on their named paths."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "tool_slug": {"type": "string", "description": "Exact Composio tool slug."},
+                "arguments_json": {
+                    "type": "string",
+                    "description": "Exact JSON arguments for that current schema.",
+                },
+            },
+            "required": ["tool_slug", "arguments_json"],
+            "additionalProperties": False,
+        },
+        handler=_composio_propose_action_tool,
     )
 )
 

@@ -50,8 +50,7 @@ def _status(result: OwnerAuditResult) -> str:
 def format_owner_connection_audit(results: list[OwnerAuditResult]) -> str:
     """Render every requested surface with evidence, never a blanket verdict."""
     lines = [
-        "בדיקת מערכת מלאה: כל שורה היא קריאה נפרדת שבוצעה עכשיו. "
-        "אין כאן מגבלת שתי קריאות.",
+        "בדיקת מערכת מלאה: כל שורה היא קריאה נפרדת שבוצעה עכשיו.",
     ]
     for result in results:
         detail = " ".join(result.text.split())[:420] if result.text.strip() else "ללא פירוט."

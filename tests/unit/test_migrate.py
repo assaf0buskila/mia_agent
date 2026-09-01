@@ -50,6 +50,7 @@ def test_apply_migrations_first_run_sqlite(tmp_path: Path) -> None:
         assert "20260821_approval_campaign_resource.sql" in summary.skipped
         assert "20260901_approval_resource_id_varchar80.sql" in summary.skipped
         assert "20260901_linkedin_approval_parameters_text.sql" in summary.skipped
+        assert "20260901_owner_brief_drop_campaign_columns.sql" in summary.skipped
         assert summary.failed == ""
         assert summary.applied or summary.already
 
@@ -65,6 +66,7 @@ def test_apply_migrations_first_run_sqlite(tmp_path: Path) -> None:
         assert "20260821_approval_campaign_resource.sql" not in recorded
         assert "20260901_approval_resource_id_varchar80.sql" not in recorded
         assert "20260901_linkedin_approval_parameters_text.sql" not in recorded
+        assert "20260901_owner_brief_drop_campaign_columns.sql" not in recorded
         assert sqlite_safe in recorded
     finally:
         engine.dispose()
@@ -84,6 +86,7 @@ def test_apply_migrations_second_run_moves_to_already(tmp_path: Path) -> None:
         assert "20260821_approval_campaign_resource.sql" in second.skipped
         assert "20260901_approval_resource_id_varchar80.sql" in second.skipped
         assert "20260901_linkedin_approval_parameters_text.sql" in second.skipped
+        assert "20260901_owner_brief_drop_campaign_columns.sql" in second.skipped
         assert set(first.applied).issubset(set(second.already))
     finally:
         engine.dispose()
@@ -157,6 +160,7 @@ def test_postgres_only_skip_contract() -> None:
             "20260821_approval_campaign_resource.sql",
             "20260901_approval_resource_id_varchar80.sql",
             "20260901_linkedin_approval_parameters_text.sql",
+            "20260901_owner_brief_drop_campaign_columns.sql",
         }
     )
 

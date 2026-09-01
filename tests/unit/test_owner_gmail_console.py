@@ -347,7 +347,7 @@ def test_owner_agent_prompt_plans_mail_paraphrases() -> None:
     assert "composio_search_tools" in SYSTEM_PROMPT
     assert "composio_get_tool_schema" in SYSTEM_PROMPT
     assert "composio_execute_tool" in SYSTEM_PROMPT
-    assert "deterministic reads only" in SYSTEM_PROMPT
+    assert "Telegram approval" in SYSTEM_PROMPT
 
     # Live reads before memory (ADR-031): inbox/calendar/leads/today come from live
     # tools every time, never memory or assumption.

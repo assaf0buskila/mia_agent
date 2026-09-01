@@ -19,6 +19,7 @@ from app.db.store import LeadStore
 from app.domain.approvals import (
     ACTION_CALENDAR_CREATE,
     ACTION_CALENDAR_RESCHEDULE,
+    ACTION_COMPOSIO_WRITE,
     ACTION_GMAIL_SEND,
     ACTION_LINKEDIN_COMPOSIO_WRITE,
     ACTION_PROPOSAL_HANDOFF,
@@ -27,6 +28,7 @@ from app.domain.approvals import (
     DECISION_PENDING,
     DECISION_REJECTED,
     RESOURCE_CALENDAR,
+    RESOURCE_COMPOSIO_TOOL,
     RESOURCE_GMAIL,
     RESOURCE_LEAD,
     RESOURCE_LINKEDIN_TOOL,
@@ -53,6 +55,7 @@ class OwnerCallbackResolution:
     gmail_draft_id_to_send: str | None = None
     calendar_resource_id_to_execute: str | None = None
     linkedin_resource_id_to_execute: str | None = None
+    composio_resource_id_to_execute: str | None = None
 
 
 def approval_token(approval_id: str) -> str:
@@ -117,6 +120,14 @@ def _callback_binding_is_valid(row) -> bool:
             and not is_approval_expired(row, now=now)
             and linkedin_row_valid(row) is not None
         )
+    if row.action == ACTION_COMPOSIO_WRITE:
+        from app.domain.owner_composio_writes import composio_row_valid
+
+        return (
+            row.resource_type == RESOURCE_COMPOSIO_TOOL
+            and not is_approval_expired(row, now=now)
+            and composio_row_valid(row) is not None
+        )
     return False
 
 
@@ -137,6 +148,8 @@ def _apply_callback_decision(store: LeadStore, row, *, decision: str) -> bool:
         return store.decide_website_approval(resource_id=row.resource_id, decision=decision)
     if row.action == ACTION_LINKEDIN_COMPOSIO_WRITE:
         return store.decide_linkedin_approval(resource_id=row.resource_id, decision=decision)
+    if row.action == ACTION_COMPOSIO_WRITE:
+        return store.decide_composio_approval(resource_id=row.resource_id, decision=decision)
     return False
 
 
@@ -185,6 +198,15 @@ def resolve_owner_callback_result(
                 join_sections(bold(_APPROVED_HEAD), _ALREADY, f"מזהה: {code(token)}"),
                 linkedin_resource_id_to_execute=row.resource_id,
             )
+        if row.action == ACTION_COMPOSIO_WRITE and row.decision == DECISION_APPROVED:
+            if not _callback_binding_is_valid(row):
+                return OwnerCallbackResolution(
+                    join_sections(bold("האישור אינו תקף"), _UNKNOWN, f"מזהה: {code(token)}")
+                )
+            return OwnerCallbackResolution(
+                join_sections(bold(_APPROVED_HEAD), _ALREADY, f"מזהה: {code(token)}"),
+                composio_resource_id_to_execute=row.resource_id,
+            )
         return OwnerCallbackResolution(
             join_sections(
                 bold(_APPROVED_HEAD if row.decision == DECISION_APPROVED else _REJECTED_HEAD),
@@ -217,6 +239,11 @@ def resolve_owner_callback_result(
         linkedin_resource_id_to_execute=(
             row.resource_id
             if row.action == ACTION_LINKEDIN_COMPOSIO_WRITE and target_decision == DECISION_APPROVED
+            else None
+        ),
+        composio_resource_id_to_execute=(
+            row.resource_id
+            if row.action == ACTION_COMPOSIO_WRITE and target_decision == DECISION_APPROVED
             else None
         ),
     )

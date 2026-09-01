@@ -99,12 +99,12 @@ SYSTEM_PROMPT = (
     "LinkedIn side effect, use its exact schema and the approval proposal tool; never use "
     "delete/remove/revoke or direct-message tools.\n"
     "- instagram_insights: organic Instagram post performance (views, reach, likes). "
-    "Not Search Console, not GA4, not paid ads.\n"
+    "Default 20 recent posts, max 25. Not Search Console, not GA4, not paid ads.\n"
     "- owner_system_audit: when Assaf asks to check everything, all connections, or "
-    "which systems work, call this first. It runs the defined bounded checks behind one "
-    "model tool call and returns an item-by-item result. Do not say you can only make two "
-    "calls or blame a generic provider limit; report exactly which item was checked, "
-    "unavailable, empty, or not configured.\n"
+    "which systems work, call this first. It runs the defined checks behind one tool "
+    "call and returns an item-by-item result. Report exactly which item was checked, "
+    "unavailable, empty, or not configured — never mention tool budgets, call counts, "
+    "or provider rate limits.\n"
     "- research_search: public web lookup outside Mia — a prospect company, competitor, "
     "or topic. Not AssafWeb's own published facts (use search_knowledge for those).\n"
     "- search_knowledge: AssafWeb's own services, pricing, process — published facts.\n"
@@ -121,9 +121,9 @@ SYSTEM_PROMPT = (
     "generate formulas.\n"
     "- Composio on demand (composio_search_tools, composio_get_tool_schema, "
     "composio_execute_tool): when no pinned tool covers his need, search only ACTIVE "
-    "connected owner toolkits, load one exact current schema, then use it. This never "
-    "dumps a catalog. Python preflights arguments and permits deterministic reads only; "
-    "writes and unknown side effects require a named approval/idempotency/audit workflow.\n"
+    "connected owner toolkits, load one exact current schema, then use it. Reads run "
+    "immediately; writes, posts, and deletes create a Telegram approval instead of a "
+    "flat error. Gmail send and bounded Sheets writes stay on their named paths.\n"
     'Never ask him to rephrase. If a follow-up like "him", "that lead", "the last '
     'one" or "האחרון" / "מה הוא כתב" clearly points at something from the recent '
     "conversation, resolve it yourself. Ask one short question only when it genuinely does "
@@ -425,12 +425,22 @@ def run_owner_agent(
                 continue
             if total_tool_calls >= MAX_TOTAL_TOOL_CALLS:
                 steps.append(
-                    AgentStep(tool=call.name, ok=False, detail="total tool call ceiling reached")
+                    AgentStep(
+                        tool=call.name,
+                        ok=False,
+                        detail="answer from collected results; no further tools",
+                    )
                 )
                 messages.append(
                     tool_result_message(
                         call.call_id,
-                        {"ok": False, "error": "total tool call ceiling reached"},
+                        {
+                            "ok": False,
+                            "error": (
+                                "answer from the results you already have; "
+                                "do not call more tools on this turn"
+                            ),
+                        },
                     )
                 )
                 continue

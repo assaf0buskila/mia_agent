@@ -321,7 +321,8 @@ def test_owner_system_audit_reports_each_surface_without_a_blanket_provider_clai
         ctx = _ctx(session)
         result = execute_tool("owner_system_audit", {}, ctx)
         assert result.ok is True
-        assert "אין כאן מגבלת שתי קריאות" in result.text
+        assert "בדיקת מערכת מלאה" in result.text
+        assert "מגבלת שתי קריאות" not in result.text
         for label in (
             "Gmail",
             "Calendar agenda (today)",
@@ -386,7 +387,7 @@ def test_owner_system_audit_keeps_unseen_booked_meetings_unconsumed() -> None:
         session.close()
 
 
-def test_owner_system_audit_reports_bounded_instagram_read_as_partial_failure() -> None:
+def test_owner_system_audit_reports_bounded_instagram_read_as_partial_empty() -> None:
     from app.integrations.instagram_insights import InstagramInsightBudgetExceeded
 
     class BudgetLimitedInstagramPort:
@@ -400,8 +401,8 @@ def test_owner_system_audit_reports_bounded_instagram_read_as_partial_failure() 
         ctx.instagram_insights = BudgetLimitedInstagramPort()
         result = execute_tool("owner_system_audit", {}, ctx)
         assert result.ok is True
-        assert "Instagram Insights: לא נבדק: הקריאה נכשלה" in result.text
-        assert "Instagram insights status: partial." in result.text
+        assert "Instagram Insights: נבדק: אין נתונים בטווח שנבדק" in result.text
+        assert "instagram insights returned nothing" in result.text.casefold()
     finally:
         session.close()
 

@@ -85,7 +85,7 @@ def test_active_toolkits_and_tool_list_cache_per_owner_and_never_use_unconnected
                 },
             )
         assert request.url.params.get("query") == "my info"
-        assert request.url.params.get("limit") == "12"
+        assert request.url.params.get("limit") == "25"
         assert request.url.params.get("cursor") is None
         return httpx.Response(
             200,
@@ -329,10 +329,10 @@ def test_execute_read_treats_provider_level_failure_as_failure(body: dict) -> No
 
 def test_bounded_result_is_valid_json_and_preserves_nested_cursor() -> None:
     text = bounded_result_text(
-        {"successful": True, "data": {"rows": ["x" * 5_000], "next_cursor": "page-2"}}
+        {"successful": True, "data": {"rows": ["x" * 10_000], "next_cursor": "page-2"}}
     )
     parsed = json.loads(text)
-    assert len(text) <= 3_000
+    assert len(text) <= 8_000
     assert parsed["truncated"] is True
     assert parsed["continuation"]["data.next_cursor"] == "page-2"
 
@@ -538,9 +538,35 @@ class _Catalog:
         return {"successful": True, "data": {"slug": tool.slug, "name": "Assaf"}}
 
 
+class _ComposioStore:
+    def __init__(self) -> None:
+        self.saved: list[dict] = []
+        self.row = None
+
+    def upsert_composio_approval(self, **kwargs):
+        self.saved.append(kwargs)
+        self.row = SimpleNamespace(
+            **kwargs,
+            resource_type="composio_tool",
+            approval_id="apr_composio_test",
+        )
+
+    def get_approval_by_resource(self, *_args):
+        return self.row
+
+    def claim_operation(self, **_kwargs):
+        return True
+
+    def save_canonical_event(self, **_kwargs):
+        pass
+
+    def complete_operation(self, **_kwargs):
+        pass
+
+
 def _context(*, kill_switch: bool = False) -> ToolContext:
     return ToolContext(
-        store=None,
+        store=_ComposioStore(),
         brain=None,
         settings=SimpleNamespace(),
         principal=Principal.owner(source="telegram", actor_id="1"),
@@ -565,7 +591,7 @@ def test_dynamic_execute_is_read_only_schema_checked_and_kill_switch_checked(mon
         {"tool_slug": "GMAIL_DELETE_THREAD", "arguments_json": "{}"},
         _context(),
     )
-    assert not denied.ok and "destructive" in denied.error
+    assert denied.ok and "destructive action is ready" in denied.text
     killed = execute_tool(
         "composio_execute_tool",
         {"tool_slug": "LINKEDIN_GET_MY_INFO", "arguments_json": "{}"},
@@ -587,25 +613,25 @@ def test_official_sheet_ig_linkedin_policy_keeps_deletes_off_and_does_not_autopu
         {"tool_slug": "GOOGLESHEETS_DELETE_DIMENSION", "arguments_json": "{}"},
         ctx,
     )
-    assert not delete_denied.ok and "destructive" in delete_denied.error
+    assert delete_denied.ok and "destructive action is ready" in delete_denied.text
     clear_denied = execute_tool(
         "composio_execute_tool",
         {"tool_slug": "GOOGLESHEETS_CLEAR_VALUES", "arguments_json": "{}"},
         ctx,
     )
-    assert not clear_denied.ok and "destructive" in clear_denied.error
+    assert clear_denied.ok and "destructive action is ready" in clear_denied.text
     ig_delete = execute_tool(
         "composio_execute_tool",
         {"tool_slug": "INSTAGRAM_DELETE_COMMENT", "arguments_json": "{}"},
         ctx,
     )
-    assert not ig_delete.ok and "destructive" in ig_delete.error
+    assert ig_delete.ok and "destructive action is ready" in ig_delete.text
     li_delete = execute_tool(
         "composio_execute_tool",
         {"tool_slug": "LINKEDIN_DELETE_POST", "arguments_json": "{}"},
         ctx,
     )
-    assert not li_delete.ok and "destructive" in li_delete.error
+    assert li_delete.ok and "destructive action is ready" in li_delete.text
 
     sheet_read = execute_tool(
         "composio_execute_tool",
@@ -637,26 +663,24 @@ def test_official_sheet_ig_linkedin_policy_keeps_deletes_off_and_does_not_autopu
             ctx,
         )
         assert not result.ok
-        assert "destructive" not in result.error
-        assert "named approved workflow" in result.error
+        assert "destructive" not in (result.error or "")
+        assert "sheets_update" in (result.error or "")
 
     publish = execute_tool(
         "composio_execute_tool",
         {"tool_slug": "INSTAGRAM_POST_IG_USER_MEDIA_PUBLISH", "arguments_json": "{}"},
         ctx,
     )
-    assert not publish.ok
-    assert "never auto-executed" in publish.error
+    assert publish.ok and "Composio action is ready" in publish.text
     li_post = execute_tool(
         "composio_execute_tool",
         {"tool_slug": "LINKEDIN_POST_UPDATE", "arguments_json": "{}"},
         ctx,
     )
-    assert not li_post.ok
-    assert "never auto-executed" in li_post.error
+    assert li_post.ok and "Composio action is ready" in li_post.text
 
 
-def test_gmail_send_is_never_auto_executed_and_delete_forever_stays_denied(
+def test_gmail_send_is_never_auto_executed_and_delete_requires_approval(
     monkeypatch,
 ) -> None:
     catalog = _Catalog()
@@ -691,15 +715,13 @@ def test_gmail_send_is_never_auto_executed_and_delete_forever_stays_denied(
             {"tool_slug": slug, "arguments_json": "{}"},
             ctx,
         )
-        assert not denied.ok and "destructive" in denied.error
+        assert denied.ok and "destructive action is ready" in denied.text
     trash = execute_tool(
         "composio_execute_tool",
         {"tool_slug": "GMAIL_MOVE_TO_TRASH", "arguments_json": "{}"},
         ctx,
     )
-    assert not trash.ok
-    assert "destructive" not in trash.error
-    assert "named approved workflow" in trash.error
+    assert trash.ok and "Composio action is ready" in trash.text
     for slug in (
         "GOOGLE_SEARCH_CONSOLE_ADD_SITE",
         "GOOGLE_SEARCH_CONSOLE_SUBMIT_SITEMAP",
@@ -710,9 +732,7 @@ def test_gmail_send_is_never_auto_executed_and_delete_forever_stays_denied(
             {"tool_slug": slug, "arguments_json": "{}"},
             ctx,
         )
-        assert not write.ok
-        assert "destructive" not in write.error
-        assert "named approved workflow" in write.error
+        assert write.ok and "Composio action is ready" in write.text
 
 
 def test_linkedin_side_effect_is_bound_for_approval_and_never_executes_at_proposal_time() -> None:

@@ -24,9 +24,10 @@ from app.core.risk import RiskLevel
 
 _BASE = "https://backend.composio.dev/api/v3.1"
 _TIMEOUT = 20.0
-_MAX_RESULTS = 12
+_MAX_RESULTS_DEFAULT = 25
+_MAX_RESULTS_CAP = 50
 _MAX_SCHEMA_CHARS = 12_000
-_MAX_RESULT_CHARS = 3_000
+_MAX_RESULT_CHARS = 8_000
 _PAGE_LIMIT = 500
 _CACHE_TTL_SECONDS = 300.0
 _SLUG_RE = re.compile(r"^[A-Z][A-Z0-9_]{1,160}$")
@@ -209,7 +210,7 @@ class ComposioCatalog:
 
     _toolkits_cache: dict[tuple[str, str], tuple[float, tuple[str, ...]]] = {}
     _search_cache: dict[
-        tuple[str, str, tuple[str, ...], str], tuple[float, tuple[CatalogTool, ...]]
+        tuple[str, str, tuple[str, ...], str, int], tuple[float, tuple[CatalogTool, ...]]
     ] = {}
     _detail_cache: dict[tuple[str, str, str], tuple[float, CatalogTool | None]] = {}
 
@@ -353,14 +354,17 @@ class ComposioCatalog:
             version=str(item.get("version") or ""),
         )
 
-    def search(self, query: str, toolkit: str = "") -> tuple[CatalogTool, ...]:
+    def search(
+        self, query: str, toolkit: str = "", *, limit: int = _MAX_RESULTS_DEFAULT
+    ) -> tuple[CatalogTool, ...]:
         needle = query.strip().lower()
         active_toolkits = self.active_toolkits()
         if not self._active_lookup_authoritative:
             return ()
+        capped_limit = max(1, min(int(limit), _MAX_RESULTS_CAP))
         toolkits = (toolkit.upper(),) if toolkit.strip() else active_toolkits
         active = frozenset(active_toolkits)
-        cache_key = (self._project_cache_key, self._user_id, toolkits, needle)
+        cache_key = (self._project_cache_key, self._user_id, toolkits, needle, capped_limit)
         cached = self._search_cache.get(cache_key)
         if cached is not None and cached[0] > monotonic():
             return cached[1]
@@ -376,7 +380,7 @@ class ComposioCatalog:
                 params={
                     "toolkit_slug": item,
                     "query": needle,
-                    "limit": str(_MAX_RESULTS),
+                    "limit": str(capped_limit),
                     "include_deprecated": "false",
                 },
             )
@@ -389,7 +393,7 @@ class ComposioCatalog:
                 if tool is None or tool.toolkit != item:
                     continue
                 candidates.append(tool)
-                if len(candidates) >= _MAX_RESULTS:
+                if len(candidates) >= capped_limit:
                     result = tuple(candidates)
                     if complete:
                         self._search_cache[cache_key] = (
@@ -397,7 +401,7 @@ class ComposioCatalog:
                             result,
                         )
                     return result
-        result = tuple(candidates[:_MAX_RESULTS])
+        result = tuple(candidates[:capped_limit])
         if complete:
             self._search_cache[cache_key] = (monotonic() + _CACHE_TTL_SECONDS, result)
         return result

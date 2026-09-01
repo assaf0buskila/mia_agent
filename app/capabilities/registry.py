@@ -31,6 +31,7 @@ COMPOSIO_CATALOG_SEARCH = "composio.catalog_search"
 COMPOSIO_TOOL_SCHEMA = "composio.tool_schema"
 COMPOSIO_EXECUTE_READ = "composio.execute_read"
 COMPOSIO_PROPOSE_LINKEDIN_WRITE = "composio.propose_linkedin_write"
+COMPOSIO_PROPOSE_WRITE = "composio.propose_write"
 
 _OWNER = frozenset({GraphName.OWNER})
 _CLIENT = frozenset({GraphName.CLIENT})
@@ -71,6 +72,7 @@ CAPABILITIES: tuple[CapabilitySpec, ...] = (
     # This low write records an approval request only. Provider execution remains
     # R3/R4 and occurs solely through the separately bound approval callback.
     spec(COMPOSIO_PROPOSE_LINKEDIN_WRITE, Sensitivity.WRITE, _OWNER),
+    spec(COMPOSIO_PROPOSE_WRITE, Sensitivity.WRITE, _OWNER),
     spec(BUSINESS_GET_INFORMATION, Sensitivity.READ, _CLIENT),
 )
 

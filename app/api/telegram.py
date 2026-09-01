@@ -28,6 +28,7 @@ from app.domain.events import (
 from app.domain.gmail_drafts import execute_approved_gmail_send
 from app.domain.owner_calendar_writes import execute_approved_calendar_change
 from app.domain.owner_callbacks import resolve_owner_callback_result
+from app.domain.owner_composio_writes import execute_approved_composio_write
 from app.domain.owner_linkedin_writes import execute_approved_linkedin_write
 from app.domain.tools import AdapterHttpError
 from app.integrations.base import MessagePort
@@ -199,6 +200,13 @@ async def _handle_callback(
             store=store,
             settings=settings,
             resource_id=resolved.linkedin_resource_id_to_execute,
+            kill_switch=settings.kill_switch,
+        )
+    if resolved.composio_resource_id_to_execute is not None:
+        reply_text = execute_approved_composio_write(
+            store=store,
+            settings=settings,
+            resource_id=resolved.composio_resource_id_to_execute,
             kill_switch=settings.kill_switch,
         )
     edit = getattr(port, "edit_message_text", None)

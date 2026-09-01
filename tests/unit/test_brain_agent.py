@@ -235,7 +235,8 @@ def test_agent_can_complete_a_broad_audit_with_one_aggregate_tool_call() -> None
     assert len(transport.requests) == 2
     tool_messages = [m for m in transport.requests[1]["messages"] if m.get("role") == "tool"]
     assert len(tool_messages) == 1
-    assert "אין כאן מגבלת שתי קריאות" in tool_messages[0]["content"]
+    assert "בדיקת מערכת מלאה" in tool_messages[0]["content"]
+    assert "מגבלת שתי קריאות" not in tool_messages[0]["content"]
 
 
 def test_unknown_tool_name_is_refused_not_executed() -> None:
@@ -469,8 +470,8 @@ def test_total_tool_call_ceiling_refuses_excess_calls_in_one_parallel_batch(
     assert outcome.tools_used == ("hot_leads",)
     assert [step.detail for step in outcome.steps] == [
         "ok",
-        "total tool call ceiling reached",
-        "total tool call ceiling reached",
+        "answer from collected results; no further tools",
+        "answer from collected results; no further tools",
     ]
     tool_messages = [
         message
@@ -478,7 +479,7 @@ def test_total_tool_call_ceiling_refuses_excess_calls_in_one_parallel_batch(
         if message["role"] == "tool"
     ]
     assert [message["tool_call_id"] for message in tool_messages] == ["c1", "c2", "c3"]
-    assert "total tool call ceiling reached" in tool_messages[1]["content"]
+    assert "do not call more tools" in tool_messages[1]["content"]
     assert "tools" not in transport.requests[1]
 
 

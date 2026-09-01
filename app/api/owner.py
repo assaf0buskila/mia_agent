@@ -771,8 +771,12 @@ async def process_owner_item(
     last_reply = ack_text
     linkedin_approval_id = (
         brain_result.approval_ids[0]
-        if "composio_propose_linkedin_action" in brain_result.tools_used
-        and brain_result.approval_ids
+        if brain_result.approval_ids
+        and (
+            "composio_propose_linkedin_action" in brain_result.tools_used
+            or "composio_execute_tool" in brain_result.tools_used
+            or "composio_propose_action" in brain_result.tools_used
+        )
         else ""
     )
     owner_markup = owner_telegram_reply_markup(

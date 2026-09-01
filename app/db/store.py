@@ -1707,6 +1707,49 @@ class LeadStore:
         self.session.flush()
         return True
 
+    def upsert_composio_approval(
+        self, *, channel: str, action: str, risk: str, payload_hash: str,
+        decision: str, resource_id: str, expires_at: str, proposed_parameters: str,
+    ) -> None:
+        """Persist one exact Composio provider write; arguments are rehashed at execute."""
+        if action != "composio_write" or risk not in ("R3", "R4", "R5"):
+            return
+        if decision != DECISION_PENDING or not resource_id or len(resource_id) > 80:
+            return
+        from app.domain.owner_composio_writes import composio_parameters_within_bound
+
+        if not composio_parameters_within_bound(proposed_parameters):
+            return
+        try:
+            datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+        except ValueError:
+            return
+        row = self.get_approval_by_resource("composio_tool", resource_id, action)
+        if row is None:
+            self.session.add(ApprovalRow(
+                lead_id=None, channel=channel, action=action, risk=risk,
+                payload_hash=payload_hash, decision=decision, approver="",
+                resource_type="composio_tool", resource_id=resource_id,
+                expires_at=expires_at, approval_id=new_approval_id(),
+                proposed_parameters=proposed_parameters,
+            ))
+        elif row.decision == DECISION_PENDING:
+            row.channel, row.risk, row.payload_hash = channel, risk, payload_hash
+            row.expires_at, row.proposed_parameters = expires_at, proposed_parameters
+        self.session.flush()
+
+    def decide_composio_approval(self, *, resource_id: str, decision: str) -> bool:
+        if decision not in (DECISION_APPROVED, DECISION_REJECTED):
+            return False
+        row = self.get_approval_by_resource("composio_tool", resource_id, "composio_write")
+        if row is None or row.decision != DECISION_PENDING:
+            return False
+        row.decision, row.approver = decision, ""
+        if decision == DECISION_APPROVED:
+            row.approved_at = datetime.now(UTC).isoformat()
+        self.session.flush()
+        return True
+
     def decide_calendar_approval(
         self,
         *,

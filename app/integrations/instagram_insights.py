@@ -41,11 +41,15 @@ _MEDIA_LIST_FIELDS = "id,media_type"
 
 _INSIGHT_METRICS = ("views", "reach", "likes", "comments", "saved")
 _ALLOWED_GRAPH_HOSTS = frozenset({"graph.instagram.com", "graph.facebook.com"})
-# Owner audits request at most five media items.  This leaves room for the normal
-# five combined insight reads and one complete per-metric compatibility retry,
-# while preventing a provider-side incompatibility from multiplying calls across
-# every item in the audit.
-_MAX_INSIGHT_PROVIDER_CALLS = 11
+# Each media item needs one list call plus insight read(s). Mixed-metric fallback can
+# require up to six provider calls per post; scale the budget with the requested limit.
+_DEFAULT_OWNER_IG_LIMIT = 20
+_MAX_IG_INSIGHTS_LIMIT = 25
+
+
+def _insight_budget_for_limit(limit: int) -> int:
+    capped = max(1, min(int(limit), _MAX_IG_INSIGHTS_LIMIT))
+    return 1 + capped * 6
 
 
 class InstagramInsightBudgetExceeded(AdapterHttpError):
@@ -57,7 +61,11 @@ class InstagramInsightBudgetExceeded(AdapterHttpError):
 
 @dataclass
 class _InsightCallBudget:
-    remaining: int = _MAX_INSIGHT_PROVIDER_CALLS
+    remaining: int
+
+    @classmethod
+    def for_limit(cls, limit: int) -> _InsightCallBudget:
+        return cls(remaining=_insight_budget_for_limit(limit))
 
     def consume(self) -> None:
         if self.remaining <= 0:
@@ -111,8 +119,8 @@ class GraphInstagramInsightsPort:
         self._client = client
 
     def list_recent_insights(self, *, limit: int = 5) -> list[ContentInsight]:
-        capped = max(1, min(limit, 25))
-        budget = _InsightCallBudget()
+        capped = max(1, min(limit, _MAX_IG_INSIGHTS_LIMIT))
+        budget = _InsightCallBudget.for_limit(capped)
         try:
             media_items = self._fetch_media_list(limit=capped, budget=budget)
             results: list[ContentInsight] = []
@@ -256,8 +264,8 @@ class ComposioInstagramInsightsPort:
         self._client = client
 
     def list_recent_insights(self, *, limit: int = 5) -> list[ContentInsight]:
-        capped = max(1, min(limit, 25))
-        budget = _InsightCallBudget()
+        capped = max(1, min(limit, _MAX_IG_INSIGHTS_LIMIT))
+        budget = _InsightCallBudget.for_limit(capped)
         media_items = self._fetch_media_list(limit=capped, budget=budget)
         results: list[ContentInsight] = []
         for media_id, media_type in media_items:
@@ -552,6 +560,28 @@ def format_content_insights_line(
     return f"תוכן: {n} פוסטים, לידים מתוכן {total_signals}."
 
 
+def format_content_insights_detail(
+    items: list[ContentInsight], *, total_signals: int = 0
+) -> str:
+    """Per-post metrics for the owner agent tool (no captions or media URLs)."""
+    if not items:
+        return ""
+    lines = [
+        f"Instagram: {len(items)} recent posts (newest first, API cap {_MAX_IG_INSIGHTS_LIMIT})."
+    ]
+    for index, item in enumerate(items, start=1):
+        parts: list[str] = []
+        for name in _INSIGHT_METRICS:
+            value = getattr(item, name, None)
+            if value:
+                parts.append(f"{name}={value}")
+        metric_text = ", ".join(parts) if parts else "no metrics returned"
+        lines.append(f"{index}. {item.media_type} id={item.media_id}: {metric_text}")
+    if total_signals:
+        lines.append(f"Lead signals attributed to these posts: {total_signals}.")
+    return "\n".join(lines)
+
+
 def _instagram_content_metrics_outcome(
     *,
     base_status: str,
@@ -584,6 +614,9 @@ def enrich_content_insights_ack(
     settings: Settings | None = None,
     extra_outcomes: list[ToolOutcome] | None = None,
     inbound_id: str = "",
+    *,
+    limit: int = 5,
+    detail: bool = False,
 ) -> tuple[str, ToolOutcome]:
     try:
         assert_allowed(
@@ -600,7 +633,8 @@ def enrich_content_insights_ack(
     started = perf_counter()
     now = datetime.now(UTC)
     try:
-        items = port.list_recent_insights(limit=5)
+        capped = max(1, min(int(limit), _MAX_IG_INSIGHTS_LIMIT))
+        items = port.list_recent_insights(limit=capped)
         latency = elapsed_ms(started)
         if not items:
             return ack, _instagram_content_metrics_outcome(
@@ -627,7 +661,11 @@ def enrich_content_insights_ack(
             for record in store.list_content_insights()
             if record.media_id in wanted
         )
-        line = format_content_insights_line(items, total_signals=total_signals)
+        line = (
+            format_content_insights_detail(items, total_signals=total_signals)
+            if detail
+            else format_content_insights_line(items, total_signals=total_signals)
+        )
         if not line:
             return ack, _instagram_content_metrics_outcome(
                 base_status="empty",
