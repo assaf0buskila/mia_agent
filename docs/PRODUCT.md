@@ -70,7 +70,10 @@ When a meaningful website conversation is finalized, Mia sends Assaf one concise
 
 Finalization is one service. Triggers now: visitor closes the widget or leaves the page (after at least one message), configurable inactivity (`MIA_WEBSITE_INACTIVITY_MINUTES`, default 30, via `mia-due-scan`), and meeting/handoff completing the thread. Idempotent on `conversation_id + final_summary_version`. Empty opens are not pinged.
 
-The existing WhatsApp-click briefing (paste-ready first line for Assaf) stays. Notification
+The existing WhatsApp-click briefing stays: a paste-ready first line for Assaf,
+plus a flag-only summary (workflow known, lead stage, next action, whether WhatsApp
+was offered) and a heads-up that the visitor moved to him. It is not a transcript
+or a PII dump. Notification
 deduplication is scoped to the website conversation/session: graph handoff and click in the same
 session do not double-ping, while a returning lead in a new conversation can alert Assaf again.
 

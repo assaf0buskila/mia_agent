@@ -69,6 +69,7 @@ def test_instagram_send_pin_is_write_not_publish() -> None:
     assert send.risk == "R2"
     assert preloaded_tool("INSTAGRAM_CREATE_POST") is None
     assert preloaded_tool("INSTAGRAM_CREATE_MEDIA_CONTAINER") is None
+    assert preloaded_tool("INSTAGRAM_POST_IG_USER_MEDIA_PUBLISH") is None
 
 
 def test_unknown_preloaded_tool_is_none() -> None:

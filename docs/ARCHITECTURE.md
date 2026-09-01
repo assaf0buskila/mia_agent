@@ -151,10 +151,11 @@ Widget `app/web/ask_mia.js` depends on:
 Preserve pill, bubbles, composer mic, palette, WhatsApp card. No TTS. No competing WhatsApp FAB.
 `GET /config` may expose only the server-configured `https://wa.me` URL. After session creation the
 existing composer WhatsApp action is visible when that URL is valid; its click opens immediately
-and independently posts the handoff notification. The claim key is conversation/session scoped:
-the graph and click dedupe within one session, but an old lead-level claim cannot suppress a new
-conversation. Delivery logs contain only the outcome class, never visitor text. Never derive a
-destination from model or visitor text.
+and independently posts the handoff notification. The owner card is a summary (workflow, stage,
+next action, WhatsApp offered), not a visitor-text dump. The claim key is conversation/session
+scoped: the graph and click dedupe within one session, but an old lead-level claim cannot suppress
+a new conversation. Delivery logs contain only the outcome class, never visitor text. Never derive
+a destination from model or visitor text.
 
 ## Runtime
 

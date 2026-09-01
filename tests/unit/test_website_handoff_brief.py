@@ -85,6 +85,10 @@ class _FakeStore:
     def get_sales(self, lead_id: str) -> SalesState:
         return self.sales
 
+    def get_lead_stage(self, lead_id: str) -> str:
+        _ = lead_id
+        return "open"
+
     def list_conversation_turns(self, session_id: str) -> list[ConversationTurn]:
         return self.turns
 
@@ -228,19 +232,82 @@ def test_handoff_brief_names_the_lead_and_tells_assaf_to_take_over() -> None:
         lead_id="lead_abc123def456",
         sales=_inventory_sales(),
         turns=_inventory_turns(),
+        stage="open",
     )
     assert "lead_abc123def456" in brief
+    assert "מישהו עבר אליך" in brief
     assert "מיה לא תענה שם" in brief
     assert "תטפל אתה" in brief
-    assert "שעתיים כל פעם" in brief
-    assert "נעליים" in brief
+    assert "תהליך" in brief
+    assert "שלב" in brief
+    assert "הפעולה הבאה" in brief
+    assert "וואטסאפ" in brief
+    assert "נלחץ" in brief
     assert "השורה שלך:" in brief
     paste = _paste_line(brief)
     assert "מלאי" in paste
     assert "שיטס" in paste
     assert "מיה תענה" not in paste
     assert "mia1_" not in paste
-    assert "mia1_" not in brief.split("השורה שלך:", 1)[1].split("השיחה:", 1)[0]
+    assert "שעתיים כל פעם" not in brief
+    assert "נעליים" not in brief
+    assert "השיחה:" not in brief
+    assert "0501234567" not in brief
+
+
+def test_whatsapp_click_brief_is_a_summary_not_a_pii_dump() -> None:
+    sales = SalesState(
+        lead_id="lead_pii123456789",
+        workflow_known=True,
+        whatsapp_handoff_offered=True,
+    )
+    turns = [
+        ConversationTurn(
+            role="prospect",
+            text="קוראים לי דניאל 0501234567 danny@example.com תעודת זהות 123456789",
+        )
+    ]
+    brief = format_website_whatsapp_brief(
+        lead_id="lead_pii123456789", sales=sales, turns=turns, stage="open"
+    )
+    assert "מישהו עבר אליך" in brief
+    assert "תהליך" in brief and "ידוע" in brief
+    assert "שלב" in brief
+    assert "הפעולה הבאה" in brief
+    assert "הוצע" in brief
+    assert "נלחץ" in brief
+    assert "0501234567" not in brief
+    assert "danny@example.com" not in brief
+    assert "123456789" not in brief
+    assert "דניאל" not in brief
+    assert "השיחה:" not in brief
+
+
+def test_apply_click_brief_sends_summary_and_only_that_path_pings(monkeypatch) -> None:
+    sent: list[str] = []
+
+    def deliver(**kwargs):
+        sent.append(kwargs["text"])
+        return OwnerTelegramDelivery(delivered=kwargs["recipient_ids"])
+
+    monkeypatch.setattr(brief_mod, "_deliver_owner_brief", deliver)
+    store = _FakeStore()
+    store.turns = [
+        ConversationTurn(role="prospect", text="אני מוכר נעליים ומזין מלאי לשיטס 0509998887"),
+    ]
+    settings = Settings(telegram_bot_token="tok", telegram_owner_user_ids="111")
+    result = apply_website_whatsapp_handoff_brief(
+        store,
+        lead_id="lead_abc123def456",
+        session_id="sess_click_only",
+        settings=settings,
+    )
+    assert result.notification_status == NOTIFICATION_DELIVERED
+    assert len(sent) == 1
+    assert "מישהו עבר אליך" in sent[0]
+    assert "תהליך" in sent[0]
+    assert "0509998887" not in sent[0]
+    assert "נעליים" not in sent[0]
 
 
 def test_human_handoff_brief_includes_the_conversation_and_is_not_a_whatsapp_claim() -> None:

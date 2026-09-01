@@ -8,8 +8,8 @@ the console could not connect the two.
 This derives a label from what the prospect actually said — their words, not an inferred
 summary — and is shown **to Assaf only**. That is the important distinction from
 `website_handoff_brief._recommended_first_line`, which is copied into a message sent to the
-*customer* and therefore stays on a strict topic allowlist. Assaf already sees the full
-transcript in the briefing, so echoing a fragment back to him exposes nothing new.
+*customer* and therefore stays on a strict topic allowlist. The WhatsApp-click owner ping
+uses this label plus flag-only sales context; it does not paste the visitor transcript.
 
 Sanitising is still real: no digits runs, no URLs, no emails, no currency, no newlines, hard
 length cap. A label is a glance, not a quote.

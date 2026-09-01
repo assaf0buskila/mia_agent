@@ -24,7 +24,12 @@ def test_owner_composio_reads_are_registered() -> None:
 
 def test_sheets_owner_capabilities_are_explicit_and_not_client_visible() -> None:
     names = {item.name for item in CAPABILITIES}
-    assert {"sheets.read", "sheets.update", "sheets.append"}.issubset(names)
-    for name in ("sheets.read", "sheets.update", "sheets.append"):
+    assert {"sheets.read", "sheets.update", "sheets.append", "sheets.list_tabs"}.issubset(
+        names
+    )
+    for name in ("sheets.read", "sheets.update", "sheets.append", "sheets.list_tabs"):
         assert name in OWNER_CAPABILITIES
         assert name not in CLIENT_CAPABILITIES
+    assert get_capability("sheets.read").sensitivity is Sensitivity.READ
+    assert get_capability("sheets.update").sensitivity is Sensitivity.WRITE
+    assert get_capability("sheets.append").sensitivity is Sensitivity.WRITE

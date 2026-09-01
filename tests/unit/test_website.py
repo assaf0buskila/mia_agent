@@ -617,6 +617,38 @@ def test_website_handoff_persists_whatsapp_handoff() -> None:
         db.close()
 
 
+def test_website_message_does_not_ping_whatsapp_move_handoff_does(monkeypatch) -> None:
+    monkeypatch.setenv("MIA_TELEGRAM_BOT_TOKEN", "tok")
+    monkeypatch.setenv("MIA_TELEGRAM_OWNER_USER_IDS", "111")
+    click_briefs: list[str] = []
+
+    def deliver(**kwargs):
+        click_briefs.append(kwargs["text"])
+        return OwnerTelegramDelivery(delivered=kwargs["recipient_ids"])
+
+    monkeypatch.setattr(website_handoff_brief_mod, "_deliver_owner_brief", deliver)
+    with TestClient(app) as client:
+        session_id = client.post("/v1/website/sessions").json()["session_id"]
+        reply = client.post(
+            f"/v1/website/sessions/{session_id}/messages",
+            json={"text": "היי תתקשרו ל-0501234567"},
+        )
+        assert reply.status_code == 200
+        assert click_briefs == []
+        handoff = client.post(f"/v1/website/sessions/{session_id}/handoff")
+        assert handoff.status_code == 200
+        assert handoff.json()["notification_status"] == "delivered"
+
+    assert len(click_briefs) == 1
+    brief = click_briefs[0]
+    assert "מישהו עבר אליך" in brief
+    assert "תהליך" in brief
+    assert "שלב" in brief
+    assert "הפעולה הבאה" in brief
+    assert "וואטסאפ" in brief
+    assert "0501234567" not in brief
+
+
 def test_website_handoff_reports_durable_delivery_without_resending(monkeypatch) -> None:
     monkeypatch.setenv("MIA_TELEGRAM_BOT_TOKEN", "tok")
     monkeypatch.setenv("MIA_TELEGRAM_OWNER_USER_IDS", "111")

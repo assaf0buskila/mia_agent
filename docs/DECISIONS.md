@@ -63,6 +63,7 @@ Proposed is not accepted. Build may follow a proposed default only when `AGENTS.
 | ADR-043 | Owner-only on-demand Composio tool breadth | accepted |
 | ADR-044 | Repair strict provider contracts and remove lazy-user handoff friction | accepted |
 | ADR-045 | Complete-work owner actions and Mia-managed CRM workspace | accepted |
+| ADR-046 | Official Composio destructive slugs stay denied; WhatsApp-move ping is a summary | accepted |
 
 ## Template
 
@@ -1079,3 +1080,41 @@ does not supply Mia's approval, hash binding, expiry, kill-switch, or idempotenc
 Assaf to name every tab/range forever — rejected because this is Mia's own managed workspace. Raise
 the model step budget and keep many separate checks — rejected because it remains incomplete and
 expensive; the aggregate audit is deterministic and gives one complete result.
+
+### ADR-046 Official Composio destructive slugs stay denied; WhatsApp-move ping is a summary
+
+- **Status:** accepted
+- **Date:** 2026-09-01
+- **Assaf:** ADOPT (chat)
+
+**Context**
+The on-demand Composio classifier was word-based and over-guardrailed bounded Sheets
+upsert/update/append as unknown/commercial, while official destructive slugs (there is no
+`delete-lead` tool) needed an explicit pin. Website WhatsApp-move already POSTs `/handoff`
+and pings Telegram via `sendMessage`; the card dumped recent visitor turns.
+
+**Decision**
+Pin official destructive slugs as R5 deny: `GOOGLESHEETS_DELETE_DIMENSION` (delete-lead-row),
+Sheets clear/delete-sheet/chart/`EXECUTE_SQL`, `INSTAGRAM_DELETE_COMMENT`,
+`INSTAGRAM_DELETE_MESSAGGER_PROFILE`, `LINKEDIN_DELETE_POST`, `LINKEDIN_DELETE_UGC_POST`,
+`LINKEDIN_DELETE_LINKED_IN_POST`. Adapter-pinned Sheets writes already in this repo
+(`GOOGLESHEETS_UPSERT_ROWS`, `GOOGLESHEETS_VALUES_UPDATE`,
+`GOOGLESHEETS_SPREADSHEETS_VALUES_APPEND`) are R1 and stay on named allowlisted
+`sheets.update` / `sheets.append` / CRM upsert — generic catalog execute does not run them.
+Instagram/LinkedIn reads stay R0; publish/post slugs never auto-fire. LinkedIn non-delete
+writes keep the existing one-tap approval path. WhatsApp-click owner ping keeps the paste
+line and adds a flag-only summary (workflow, stage, next action, WhatsApp offered) plus
+"someone moved to you"; it does not dump the transcript. Delivery remains
+`POST https://api.telegram.org/bot<token>/sendMessage` to stored numeric owner chat ids.
+
+**Consequences**
+Assaf gets a usable heads-up when a visitor taps WhatsApp. Bounded Sheets writes are not
+classified as deletes. Official row/sheet/social deletes stay denied. No new Composio app
+is connected. No silent Instagram/LinkedIn publish.
+
+**Alternatives considered**
+Invent a `delete-lead` slug — rejected; official catalog has none. Generic-execute Sheets
+writes from the catalog — rejected; that would skip the spreadsheet allowlist. Auto-publish
+IG/LinkedIn because the tools exist — rejected. New Telegram webhook for the ping — rejected;
+outbound `sendMessage` already exists.
+

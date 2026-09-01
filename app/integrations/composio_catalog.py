@@ -124,6 +124,49 @@ _WRITE_WORDS = frozenset(
 )
 _COMPOUND_WORDS = frozenset({"AND", "OR", "THEN"})
 
+# Official destructive slugs. There is no Composio tool named delete-lead;
+# GOOGLESHEETS_DELETE_DIMENSION is the product meaning of deleting a lead row.
+DENIED_COMPOSIO_SLUGS: frozenset[str] = frozenset(
+    {
+        "GOOGLESHEETS_DELETE_DIMENSION",
+        "GOOGLESHEETS_CLEAR_VALUES",
+        "GOOGLESHEETS_SPREADSHEETS_VALUES_BATCH_CLEAR",
+        "GOOGLESHEETS_BATCH_CLEAR_VALUES_BY_DATA_FILTER",
+        "GOOGLESHEETS_DELETE_SHEET",
+        "GOOGLESHEETS_DELETE_CHART",
+        "GOOGLESHEETS_EXECUTE_SQL",
+        "INSTAGRAM_DELETE_COMMENT",
+        "INSTAGRAM_DELETE_MESSAGGER_PROFILE",
+        "LINKEDIN_DELETE_LINKED_IN_POST",
+        "LINKEDIN_DELETE_POST",
+        "LINKEDIN_DELETE_UGC_POST",
+    }
+)
+
+# Adapter-pinned Sheets writes already in this repo. Classifier treats them as
+# low-risk writes, not destructive. Generic catalog execute still refuses them
+# so they keep the named allowlisted Sheets path.
+SHEETS_BOUNDED_WRITE_SLUGS: frozenset[str] = frozenset(
+    {
+        "GOOGLESHEETS_UPSERT_ROWS",
+        "GOOGLESHEETS_VALUES_UPDATE",
+        "GOOGLESHEETS_SPREADSHEETS_VALUES_APPEND",
+    }
+)
+
+# Publish exists on the official pages. These must never auto-fire; LinkedIn
+# non-delete writes already have a named Telegram approval path.
+NEVER_AUTO_PUBLISH_SLUGS: frozenset[str] = frozenset(
+    {
+        "INSTAGRAM_POST_IG_USER_MEDIA",
+        "INSTAGRAM_POST_IG_USER_MEDIA_PUBLISH",
+        "INSTAGRAM_CREATE_MEDIA_CONTAINER",
+        "INSTAGRAM_CREATE_POST",
+        "LINKEDIN_CREATE_LINKED_IN_POST",
+        "LINKEDIN_POST_UPDATE",
+    }
+)
+
 
 @dataclass(frozen=True)
 class CatalogTool:
@@ -378,6 +421,10 @@ class ComposioCatalog:
 def risk_for_slug(slug: str, toolkit: str = "") -> RiskLevel:
     """Conservative deterministic classification; unknown is approval, never read."""
     action = slug.upper()
+    if action in DENIED_COMPOSIO_SLUGS:
+        return RiskLevel.R5_DESTRUCTIVE
+    if action in SHEETS_BOUNDED_WRITE_SLUGS:
+        return RiskLevel.R1_LOW_WRITE
     toolkit_prefix = f"{toolkit.strip().upper()}_" if toolkit.strip() else ""
     if toolkit_prefix and action.startswith(toolkit_prefix):
         action = action[len(toolkit_prefix) :]

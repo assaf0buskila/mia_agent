@@ -21,7 +21,7 @@ from app.domain.owner_notification_delivery import (
     KIND_WEBSITE_WHATSAPP_LEGACY,
     WEBSITE_HANDOFF_DELIVERY_KINDS,
 )
-from app.domain.sales import PainLevel, SalesState
+from app.domain.sales import NextAction, PainLevel, SalesState, select_next_action
 from app.integrations.telegram_format import blockquote, bold, esc
 
 KIND_WEBSITE_WHATSAPP = KIND_WEBSITE_WHATSAPP_LEGACY
@@ -66,6 +66,27 @@ _FORBIDDEN_PASTE = re.compile(
 _FAKE_URGENCY = ("רק היום", "הזדמנות אחרונה", "limited time", "act now")
 _MIA_WILL_REPLY = ("מיה תענה", "מיה תחזיר", "מיה תכתוב")
 
+# Lead.stage is code-owned. Only echo allowlisted values into the owner card.
+_LEAD_STAGE_HE = {
+    "open": "פתוח",
+    "meeting_offered": "הוצעה פגישה",
+    "proposal": "הצעה",
+}
+_NEXT_ACTION_HE = {
+    NextAction.UNDERSTAND_WORKFLOW.value: "הבנת תהליך",
+    NextAction.DEEPEN_PAIN.value: "העמקת כאב",
+    NextAction.QUANTIFY.value: "כימות",
+    NextAction.REFLECT.value: "שיקוף",
+    NextAction.OFFER_HYPOTHESIS.value: "השערת אוטומציה",
+    NextAction.QUALIFY.value: "כישור",
+    NextAction.OFFER_MEETING.value: "הצעת פגישה",
+    NextAction.OFFER_WHATSAPP.value: "הצעת וואטסאפ",
+    NextAction.HANDOFF.value: "העברה",
+    NextAction.HANDLE_OBJECTION.value: "התנגדות",
+    NextAction.DISQUALIFY.value: "פסילה",
+    NextAction.STOP.value: "עצירה",
+}
+
 
 class WebsiteWhatsAppBriefResult(NamedTuple):
     brief: str | None
@@ -102,6 +123,27 @@ def _fact_lines(sales: SalesState) -> list[str]:
     if not lines:
         lines.append("עדיין בתחילת discovery")
     return lines
+
+
+def _lead_stage_label(stage: str) -> str:
+    return _LEAD_STAGE_HE.get(stage.strip().lower(), _LEAD_STAGE_HE["open"])
+
+
+def _next_action_label(sales: SalesState) -> str:
+    action = select_next_action(sales, channel="website")
+    return _NEXT_ACTION_HE.get(action.value, action.value)
+
+
+def _conversation_summary_lines(*, sales: SalesState, stage: str) -> list[str]:
+    """Flag-only summary. Never copies visitor text, phones, or emails."""
+    workflow = "ידוע" if sales.workflow_known else "עדיין לא"
+    offered = "הוצע" if sales.whatsapp_handoff_offered else "לא הוצע"
+    return [
+        f"{bold('תהליך')}: " + esc(workflow),
+        f"{bold('שלב')}: " + esc(_lead_stage_label(stage)),
+        f"{bold('הפעולה הבאה')}: " + esc(_next_action_label(sales)),
+        f"{bold('וואטסאפ')}: " + esc(f"{offered} · נלחץ"),
+    ]
 
 
 def _transcript_lines(turns: list[ConversationTurn]) -> list[str]:
@@ -178,15 +220,14 @@ def format_website_whatsapp_brief(
     lead_id: str,
     sales: SalesState,
     turns: list[ConversationTurn],
+    stage: str = "open",
 ) -> str:
     """Owner-facing briefing, HTML. No prices, no invented facts, no customer phone.
 
-    Short on purpose. The previous version opened with two lines of preamble, then an
-    opaque lead id, then facts one per line, then the whole transcript inline — so the one
-    thing Assaf needs (who is this, and what do I send) was buried under everything else.
-
-    Now: who it is on line one, the facts on a single line, the paste line, and the
-    transcript collapsed into an expandable quote that costs one tap to open.
+    This fires only after the visitor used the WhatsApp move control. Assaf gets a
+    heads-up that someone moved to him, plus flag-only context (workflow, stage, next
+    action, whether WhatsApp was offered) and the paste-ready first line. Turns are
+    used only to pick that allowlisted paste line — never dumped as a transcript.
     """
     paste = _recommended_first_line(sales=sales, turns=turns)
     headline = (sales.headline or "").strip()
@@ -194,19 +235,16 @@ def format_website_whatsapp_brief(
     blocks = [
         f"{bold('ליד מהאתר → וואטסאפ')}",
         esc(who),
+        esc("מישהו עבר אליך."),
         esc("מיה לא תענה שם. תטפל אתה."),
+        "",
+        *_conversation_summary_lines(sales=sales, stage=stage),
         "",
         f"{bold('מה ידוע')}: " + esc(" · ".join(_fact_lines(sales))),
         "",
         "השורה שלך:",
         esc(paste),
     ]
-    transcript = _transcript_lines(turns)
-    if transcript:
-        # Collapsed by default: the transcript is evidence, not the message.
-        blocks.extend(
-            ["", "השיחה:", blockquote("\n".join(transcript), expandable=True)]
-        )
     return "\n".join(blocks)[:_BRIEF_MAX]
 
 
@@ -257,8 +295,15 @@ def apply_website_whatsapp_handoff_brief(
         return WebsiteWhatsAppBriefResult(None, NOTIFICATION_FAILED)
     sales = store.get_sales(lead_id)
     turns = store.list_conversation_turns(session_id)
+    stage = "open"
+    getter = getattr(store, "get_lead_stage", None)
+    if callable(getter):
+        try:
+            stage = str(getter(lead_id) or "open")
+        except KeyError:
+            stage = "open"
     brief = format_website_whatsapp_brief(
-        lead_id=lead_id, sales=sales, turns=turns
+        lead_id=lead_id, sales=sales, turns=turns, stage=stage
     )
     # The owner inbox records the local business event. Delivery idempotency is a
     # separate per-recipient ledger: accepted/ambiguous recipients remain claimed,
