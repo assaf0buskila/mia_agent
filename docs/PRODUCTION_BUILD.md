@@ -339,8 +339,14 @@ Use `{MIA_PUBLIC_BASE_URL}` from step 3 — not the tunnel.
 ## 6. Website widget (Assaf on assafweb.com)
 
 ```html
-<script src="{MIA_PUBLIC_BASE_URL}/v1/website/widget.js" defer></script>
+<script
+  src="{MIA_PUBLIC_BASE_URL}/v1/website/widget.js"
+  data-mia-api="{MIA_PUBLIC_BASE_URL}"
+  defer
+></script>
 ```
+
+`data-mia-api` is required when the host loads the script via Next.js `<Script>` (or any loader where `document.currentScript` is null). AssafWeb `AskMiaWidget` must pass the same HTTPS origin as `NEXT_PUBLIC_MIA_BASE_URL`.
 
 `GET /v1/website/widget.js` is `Cache-Control: no-cache` so contrast/script fixes reach the browser without a stuck cache. Hard-refresh still works.
 

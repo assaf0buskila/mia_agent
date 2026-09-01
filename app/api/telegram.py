@@ -6,25 +6,19 @@ import json
 from time import perf_counter
 from typing import Literal
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db, get_telegram_port, get_transcription_port
-from app.api.inbound_common import event_conversation_id, outbound_reply
-from app.api.owner import process_owner_texts
+from app.api.inbound_common import outbound_reply
 from app.core.config import AutomationMode, get_settings
 from app.core.demo import demo_mode_active
-from app.core.logging import log_comm
 from app.core.outbound import send_inbound_reply
 from app.core.webhooks import verify_telegram_secret
 from app.db.store import LeadStore
 from app.domain.ai_runs import elapsed_ms
-from app.domain.events import (
-    Channel,
-    persist_tool_outcome,
-    transcription_outcome,
-)
+from app.domain.events import Channel, webhook_envelope_kind
 from app.domain.gmail_drafts import execute_approved_gmail_send
 from app.domain.owner_calendar_writes import execute_approved_calendar_change
 from app.domain.owner_callbacks import resolve_owner_callback_result
@@ -44,6 +38,7 @@ from app.integrations.telegram import (
 )
 from app.integrations.telegram_format import parse_callback_token
 from app.integrations.transcribe import TranscriptionError, TranscriptionPort
+from app.workers.telegram_owner import process_telegram_owner_update
 
 router = APIRouter(prefix="/v1/telegram", tags=["telegram"])
 
@@ -223,9 +218,16 @@ async def _handle_callback(
     return {"processed": 1, "decision": decision, "sent": True}
 
 
+def _webhook_accepted(*, duplicate: bool, voice: bool = False) -> dict:
+    if duplicate:
+        return {"accepted": False, "duplicate": True, "voice": voice}
+    return {"accepted": True, "duplicate": False}
+
+
 @router.post("/webhook")
 async def receive_webhook(
     request: Request,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     port: MessagePort = Depends(get_telegram_port),
     transcribe_port: TranscriptionPort = Depends(get_transcription_port),
@@ -270,103 +272,29 @@ async def receive_webhook(
         return {"processed": 0, "ignored": True, "reason": "unauthorized"}
     store = LeadStore(db)
     item = dict(parsed)
-    if item.get("file_id"):
-        if not store.claim_webhook(
-            provider="telegram",
-            provider_event_id=item["id"],
-            channel=Channel.TELEGRAM.value,
-            envelope_kind="audio",
-        ):
-            return {
-                "processed": 0,
-                "duplicates": 1,
-                "sent": False,
-                "voice_error": True,
-            }
-        item, voice_failure_stage, voice_latency_ms = await _transcribe_telegram_voice(
-            item=item, media=port, transcribe_port=transcribe_port
-        )
-        if voice_failure_stage:
-            # Persist the claim and content-free outcome before the external reply.
-            # A flush is not durability: get_db normally commits only after this route
-            # returns, which would allow a commit failure to happen after Telegram sent.
-            persist_tool_outcome(
-                store,
-                provider="telegram",
-                channel=Channel.TELEGRAM,
-                inbound_provider_event_id=item["id"],
-                conversation_id=event_conversation_id(item),
-                lead_id=None,
-                outcome=transcription_outcome(
-                    transcribed=False,
-                    latency_ms=voice_latency_ms,
-                ),
-            )
-            try:
-                db.commit()
-            except SQLAlchemyError:
-                db.rollback()
-                # Telegram should retry this update. Never send before the claim and
-                # outcome are durable, and never expose database/provider detail.
-                raise HTTPException(
-                    status_code=503,
-                    detail="voice processing temporarily unavailable",
-                ) from None
-            log_comm(
-                channel=Channel.TELEGRAM.value,
-                provider="telegram",
-                actor_type="owner",
-                direction="in",
-                external_message_id=item["id"],
-                conversation_id=event_conversation_id(item),
-                policy_result=voice_failure_stage,
-                latency_ms=voice_latency_ms,
-                success=False,
-                automation_mode=settings.automation_mode.value,
-            )
-            sent = await _send_transcription_failure_reply(
-                item=item,
-                port=port,
-                kill_switch=settings.kill_switch,
-                automation_mode=settings.automation_mode,
-            )
-            store.mark_webhook(
-                provider="telegram",
-                provider_event_id=item["id"],
-                # A definite outbound failure must stay reclaimable. Marking it
-                # processed permanently deduplicates the only safe owner-facing
-                # explanation even though Telegram received nothing.
-                status="sent" if sent else "failed",
-            )
-            return {
-                "processed": 1,
-                "duplicates": 0,
-                "sent": sent,
-                "voice_error": True,
-            }
-    inbound = {
-        "id": item["id"],
-        "from": item["from"],
-        "chat_id": item.get("chat_id") or item["from"],
-        "message_id": item.get("message_id") or "",
-        "text": item.get("text") or "",
-        "source": item.get("source", ""),
-        "file_name": item.get("file_name", ""),
-        "stt_provider": item.get("stt_provider", ""),
-        "stt_model": item.get("stt_model", ""),
-        "language": item.get("language", ""),
-        "duration_ms": item.get("duration_ms", "0"),
-        "confidence": item.get("confidence", ""),
-        "stt_latency_ms": item.get("stt_latency_ms", "0"),
-    }
-    return await process_owner_texts(
+    voice = bool(item.get("file_id"))
+    envelope_kind = "audio" if voice else webhook_envelope_kind(item)
+    if not store.claim_webhook(
         provider="telegram",
-        channel=Channel.TELEGRAM,
-        items=[inbound],
-        store=store,
+        provider_event_id=item["id"],
+        channel=Channel.TELEGRAM.value,
+        envelope_kind=envelope_kind,
+    ):
+        return _webhook_accepted(duplicate=True, voice=voice)
+    try:
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(
+            status_code=503,
+            detail="telegram processing temporarily unavailable",
+        ) from None
+    background_tasks.add_task(
+        process_telegram_owner_update,
+        item=item,
+        envelope_kind=envelope_kind,
+        voice_file_id=item.get("file_id") or None,
         port=port,
-        kill_switch=settings.kill_switch,
-        owner_ids=owner_ids,
-        preclaimed_event_id=item["id"] if item.get("file_id") else None,
-        preclaimed_envelope_kind="audio" if item.get("file_id") else None,
+        transcribe_port=transcribe_port,
     )
+    return _webhook_accepted(duplicate=False)

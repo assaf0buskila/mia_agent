@@ -26,6 +26,9 @@ def test_widget_source_is_present() -> None:
     assert WIDGET.is_file()
     source = _source()
     assert source.startswith("(function () {")
+    assert "data-mia-api" in source
+    assert "resolveWidgetScript" in source
+    assert "resolveApiOrigin" in source
     assert "innerHTML" not in source
     assert "eval(" not in source
     assert "document.write" not in source

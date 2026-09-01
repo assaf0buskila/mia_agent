@@ -1,8 +1,23 @@
 (function () {
   'use strict';
-  var script = document.currentScript;
-  if (!script || !script.src) return;
-  var api = new URL(script.src).origin;
+  function resolveWidgetScript() {
+    var tagged = document.querySelectorAll('script[data-mia-api]');
+    if (tagged.length) return tagged[tagged.length - 1];
+    var current = document.currentScript;
+    if (current && current.src) return current;
+    var bySrc = document.querySelectorAll('script[src*="/v1/website/widget.js"]');
+    return bySrc.length ? bySrc[bySrc.length - 1] : null;
+  }
+  function resolveApiOrigin(script) {
+    var explicit = script.getAttribute('data-mia-api');
+    if (explicit) return explicit.replace(/\/$/, '');
+    if (script.src) return new URL(script.src).origin;
+    return '';
+  }
+  var script = resolveWidgetScript();
+  if (!script) return;
+  var api = resolveApiOrigin(script);
+  if (!api) return;
   var sessionId = null;
   var opened = false;
   var busy = false;

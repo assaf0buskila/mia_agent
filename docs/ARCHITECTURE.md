@@ -142,6 +142,7 @@ Events: `WebsiteConversationCompleted`, `LeadNeedsHuman`, `MeetingBooked`, `High
 
 Widget `app/web/ask_mia.js` depends on:
 
+- Host embed: `data-mia-api="{MIA_PUBLIC_BASE_URL}"` on the widget `<script>` (required for Next.js `afterInteractive` injection; optional for plain `defer` tags where `document.currentScript` works)
 - `GET /v1/website/widget.js`, `GET /v1/website/config`, `GET /v1/website/preview`
 - `POST /v1/website/sessions`
 - `POST /v1/website/sessions/{id}/messages`

@@ -233,7 +233,7 @@ def test_telegram_authorized_text_owner_path(monkeypatch) -> None:
                 client, _tg_update(update_id=1, user_id=OWNER_TG, text="What happened today?")
             )
         assert response.status_code == 200
-        assert response.json()["processed"] == 1
+        assert response.json()["accepted"] is True
         assert port.sent
         assert port.sent[0].channel == Channel.TELEGRAM.value
         assert port.sent[0].conversation_id == OWNER_TG
@@ -254,7 +254,7 @@ def test_telegram_hi_returns_owner_status_not_loop(monkeypatch) -> None:
                 client, _tg_update(update_id=11, user_id=OWNER_TG, text="היי")
             )
         assert response.status_code == 200
-        assert response.json()["processed"] == 1
+        assert response.json()["accepted"] is True
         assert port.sent
         ack = port.sent[0].text
         assert ack == "היי אסף, אני כאן."
@@ -322,7 +322,7 @@ def test_telegram_voice_note(monkeypatch) -> None:
                 _tg_update(update_id=5, user_id=OWNER_TG, file_id="file-1"),
             )
         assert response.status_code == 200
-        assert response.json()["processed"] == 1
+        assert response.json()["accepted"] is True
         assert port.downloads == 1
         db = get_session_factory()()
         try:
@@ -349,7 +349,7 @@ def test_telegram_stt_failure_still_acks(monkeypatch) -> None:
                 _tg_update(update_id=6, user_id=OWNER_TG, file_id="file-fail"),
             )
         assert response.status_code == 200
-        assert response.json()["processed"] == 1
+        assert response.json()["accepted"] is True
         assert port.sent
     finally:
         app.dependency_overrides.pop(get_telegram_port, None)
@@ -369,9 +369,8 @@ def test_telegram_duplicate_update(monkeypatch) -> None:
             second = _post_telegram(
                 client, _tg_update(update_id=7, user_id=OWNER_TG, text="daily brief")
             )
-        assert first.json()["processed"] == 1
-        assert second.json()["duplicates"] == 1
-        assert second.json()["processed"] == 0
+        assert first.json()["accepted"] is True
+        assert second.json()["duplicate"] is True
     finally:
         app.dependency_overrides.pop(get_telegram_port, None)
 
@@ -797,7 +796,7 @@ def test_telegram_takeover_and_release_commands(monkeypatch) -> None:
                     text=f"Take over this lead {lead_id}",
                 ),
             )
-            assert take.json()["processed"] == 1
+            assert take.json()["accepted"] is True
             release = _post_telegram(
                 client,
                 _tg_update(
@@ -806,7 +805,7 @@ def test_telegram_takeover_and_release_commands(monkeypatch) -> None:
                     text=f"Give this lead back to Mia {lead_id}",
                 ),
             )
-            assert release.json()["processed"] == 1
+            assert release.json()["accepted"] is True
         db = get_session_factory()()
         try:
             store = LeadStore(db)

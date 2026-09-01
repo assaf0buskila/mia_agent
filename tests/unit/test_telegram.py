@@ -228,7 +228,7 @@ def test_voice_note_downloads_transcribes_reaches_owner_graph_and_escapes_html(m
                 headers={"X-Telegram-Bot-Api-Secret-Token": WEBHOOK_SECRET},
             )
         assert response.status_code == 200
-        assert response.json()["processed"] == 1
+        assert response.json()["accepted"] is True
         assert telegram.downloaded_file_ids == ["voice-file-701"]
         assert transcribe.call_count == 1
         assert len(graph_inputs) == 1
@@ -259,12 +259,7 @@ def test_voice_transcription_failure_is_visible_classified_and_does_not_enter_ow
                 headers={"X-Telegram-Bot-Api-Secret-Token": WEBHOOK_SECRET},
             )
         assert response.status_code == 200
-        assert response.json() == {
-            "processed": 1,
-            "duplicates": 0,
-            "sent": True,
-            "voice_error": True,
-        }
+        assert response.json() == {"accepted": True, "duplicate": False}
         assert telegram.sent[0].text == (
             "לא הצלחתי לתמלל את ההודעה הקולית. אפשר לנסות שוב או לשלוח טקסט."
         )
@@ -301,12 +296,11 @@ def test_retried_voice_transcription_failure_sends_one_visible_reply(monkeypatch
                 json=_voice_update(update_id=update_id, file_id="voice-file-703"),
                 headers={"X-Telegram-Bot-Api-Secret-Token": WEBHOOK_SECRET},
             )
-        assert first.json()["sent"] is True
+        assert first.json()["accepted"] is True
         assert retry.json() == {
-            "processed": 0,
-            "duplicates": 1,
-            "sent": False,
-            "voice_error": True,
+            "accepted": False,
+            "duplicate": True,
+            "voice": True,
         }
         assert len(telegram.sent) == 1
         _assert_one_failed_voice_outcome(update_id=update_id)
@@ -340,9 +334,9 @@ def test_voice_failure_reply_send_failure_stays_retryable(monkeypatch) -> None:
                 headers={"X-Telegram-Bot-Api-Secret-Token": WEBHOOK_SECRET},
             )
 
-        assert first.json()["sent"] is False
-        assert retry.json()["sent"] is True
-        assert duplicate.json()["duplicates"] == 1
+        assert first.json()["accepted"] is True
+        assert retry.json()["accepted"] is True
+        assert duplicate.json()["duplicate"] is True
         assert telegram.send_attempts == 2
         assert len(telegram.sent) == 1
         assert "private Telegram failure detail" not in first.text
@@ -380,7 +374,7 @@ def test_voice_failure_commit_happens_before_reply_and_retry_sends_once(
                 headers={"X-Telegram-Bot-Api-Secret-Token": WEBHOOK_SECRET},
             )
             assert first.status_code == 503
-            assert first.json() == {"detail": "voice processing temporarily unavailable"}
+            assert first.json() == {"detail": "telegram processing temporarily unavailable"}
             assert telegram.sent == []
 
             retry = client.post(
@@ -395,9 +389,9 @@ def test_voice_failure_commit_happens_before_reply_and_retry_sends_once(
             )
 
         assert retry.status_code == 200
-        assert retry.json()["sent"] is True
+        assert retry.json()["accepted"] is True
         assert duplicate.status_code == 200
-        assert duplicate.json()["duplicates"] == 1
+        assert duplicate.json()["duplicate"] is True
         assert len(telegram.sent) == 1
         assert "private database detail" not in first.text
         assert "private database detail" not in str(telegram.sent)
@@ -433,8 +427,8 @@ def test_retried_voice_success_claims_before_download_stt_graph_and_reply(monkey
                 json=_voice_update(update_id=update_id, file_id="voice-file-704"),
                 headers={"X-Telegram-Bot-Api-Secret-Token": WEBHOOK_SECRET},
             )
-        assert first.json()["processed"] == 1
-        assert retry.json()["duplicates"] == 1
+        assert first.json()["accepted"] is True
+        assert retry.json()["duplicate"] is True
         assert telegram.downloaded_file_ids == ["voice-file-704"]
         assert transcribe.call_count == 1
         assert len(graph_calls) == len(telegram.sent) == 1
@@ -723,7 +717,7 @@ def test_invalid_voice_mime_is_visible_and_never_reaches_stt_or_owner_graph(
                 headers={"X-Telegram-Bot-Api-Secret-Token": WEBHOOK_SECRET},
             )
         assert response.status_code == 200
-        assert response.json()["voice_error"] is True
+        assert response.json()["accepted"] is True
         assert telegram.downloaded_file_ids == ["voice-file-invalid-mime"]
         assert transcribe.call_count == 0
         assert graph_calls == []
@@ -772,7 +766,7 @@ def test_alternate_voice_port_cannot_bypass_media_validation(
                 json=_voice_update(update_id=update_id, file_id="alternate-voice"),
                 headers={"X-Telegram-Bot-Api-Secret-Token": WEBHOOK_SECRET},
             )
-        assert response.json()["voice_error"] is True
+        assert response.json()["accepted"] is True
         assert telegram.downloaded_file_ids == ["alternate-voice"]
         assert transcribe.call_count == 0
         assert graph_calls == []
@@ -816,8 +810,8 @@ def test_malformed_voice_download_result_is_visible_once_and_never_reaches_stt_o
                 json=_voice_update(update_id=update_id, file_id="malformed-voice"),
                 headers={"X-Telegram-Bot-Api-Secret-Token": WEBHOOK_SECRET},
             )
-        assert first.json()["voice_error"] is True
-        assert retry.json()["duplicates"] == 1
+        assert first.json()["accepted"] is True
+        assert retry.json()["duplicate"] is True
         assert telegram.downloaded_file_ids == ["malformed-voice"]
         assert transcribe.call_count == 0
         assert graph_calls == []

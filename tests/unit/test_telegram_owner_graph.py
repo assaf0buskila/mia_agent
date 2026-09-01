@@ -45,8 +45,10 @@ def test_owner_turn_uses_telegram_channel_adapter() -> None:
     assert owner_brain.message_to_owner_state is message_to_owner_state
 
 
-def test_telegram_owner_entry_is_process_owner_texts() -> None:
-    assert telegram_api.process_owner_texts is process_owner_texts
+def test_telegram_owner_entry_is_deferred_worker() -> None:
+    from app.workers.telegram_owner import process_telegram_owner_update
+
+    assert telegram_api.process_telegram_owner_update is process_telegram_owner_update
     assert process_owner_texts is not process_inbound_texts
 
 
