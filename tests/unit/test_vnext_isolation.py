@@ -21,6 +21,20 @@ def test_client_graph_cannot_execute_owner_mail_read() -> None:
         )
 
 
+def test_client_cannot_create_draft_or_send_mail_even_when_preapproved() -> None:
+    from app.capabilities.policy import authorize
+
+    visitor = Principal.client(source="website")
+    with pytest.raises(PermissionDenied):
+        authorize("mail.create_draft", principal=visitor)
+    with pytest.raises(PermissionDenied):
+        authorize("mail.send", principal=visitor)
+    with pytest.raises(PermissionDenied):
+        authorize("mail.send", principal=visitor, preapproved=True)
+    with pytest.raises(PermissionDenied):
+        authorize("mail.delete", principal=visitor)
+
+
 def test_prompt_injection_string_does_not_grant_owner_mail() -> None:
     with pytest.raises(PermissionDenied):
         execute_capability(

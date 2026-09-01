@@ -1,7 +1,7 @@
 import pytest
 from app.capabilities.policy import authorize, is_safe_read
 from app.capabilities.types import Principal
-from app.core.errors import PermissionDenied
+from app.core.errors import ApprovalRequired, PermissionDenied
 
 
 def test_safe_reads_need_no_confirmation() -> None:
@@ -38,3 +38,10 @@ def test_kill_switch_blocks_reads() -> None:
 def test_draft_write_is_not_a_read() -> None:
     assert is_safe_read("mail.create_draft") is False
     authorize("mail.create_draft", principal=Principal.owner(source="test"))
+
+
+def test_owner_mail_send_needs_approval_and_is_not_a_read() -> None:
+    assert is_safe_read("mail.send") is False
+    with pytest.raises(ApprovalRequired):
+        authorize("mail.send", principal=Principal.owner(source="test"))
+    authorize("mail.send", principal=Principal.owner(source="test"), preapproved=True)

@@ -83,8 +83,11 @@ When the website graph selects HANDOFF, Assaf gets a Telegram ping with the conv
 
 WhatsApp is Assaf’s human inbox until official Cloud API inbound exists. Website may offer WhatsApp after real buying context. Mia does not reply on WhatsApp.
 
-Gmail: read / draft; an exact draft sends only after one-tap Telegram approval and when the
-production send flag is enabled.
+Gmail: read / draft on owner Telegram. Unsolicited send is denied (no cron, no visitor
+trigger, no marketing blast, no catalog auto-fire). If Assaf asks her on Telegram to write
+and send mail, that is a named owner request: she drafts, he approves, then
+`GMAIL_SEND_DRAFT` may send. Website visitors cannot trigger Gmail send. Delete-forever
+Gmail tools stay denied.
 Calendar: free/busy; exact create and reschedule actions require one-tap Telegram approval.
 Search Console and GA4 answer AssafWeb KPI questions from APIs: traffic, users, sessions,
 conversions, pages, clicks, impressions, CTR, position, and queries. LinkedIn reads use the active

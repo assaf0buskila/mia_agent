@@ -126,6 +126,9 @@ _COMPOUND_WORDS = frozenset({"AND", "OR", "THEN"})
 
 # Official destructive slugs. There is no Composio tool named delete-lead;
 # GOOGLESHEETS_DELETE_DIMENSION is the product meaning of deleting a lead row.
+# There is no GMAIL_DELETE_FOREVER slug; the delete-forever class below is the
+# official permanent-delete set. Recoverable trash (GMAIL_MOVE_TO_TRASH /
+# GMAIL_MOVE_THREAD_TO_TRASH) is not in this set.
 DENIED_COMPOSIO_SLUGS: frozenset[str] = frozenset(
     {
         "GOOGLESHEETS_DELETE_DIMENSION",
@@ -140,8 +143,32 @@ DENIED_COMPOSIO_SLUGS: frozenset[str] = frozenset(
         "LINKEDIN_DELETE_LINKED_IN_POST",
         "LINKEDIN_DELETE_POST",
         "LINKEDIN_DELETE_UGC_POST",
+        "GMAIL_DELETE_MESSAGE",
+        "GMAIL_BATCH_DELETE_MESSAGES",
+        "GMAIL_DELETE_THREAD",
+        "GMAIL_DELETE_DRAFT",
+        "GMAIL_DELETE_FILTER",
+        "GMAIL_DELETE_LABEL",
+        "GOOGLE_SEARCH_CONSOLE_DELETE_SITE",
     }
 )
+
+# Official Gmail send slugs. Owner Telegram may use the named draft/approve
+# path (GMAIL_SEND_DRAFT). Generic catalog execute, cron, and visitors must
+# never auto-fire any of these. There is no slug GMAIL_SEND.
+OWNER_REQUESTED_GMAIL_SEND_SLUGS: frozenset[str] = frozenset(
+    {
+        "GMAIL_SEND_EMAIL",
+        "GMAIL_SEND_DRAFT",
+        "GMAIL_REPLY_TO_THREAD",
+        "GMAIL_FORWARD_MESSAGE",
+    }
+)
+
+# Send-like slugs that exist on allowlisted apps but must not auto-fire.
+NEVER_AUTO_SEND_SLUGS: frozenset[str] = OWNER_REQUESTED_GMAIL_SEND_SLUGS | {
+    "GOOGLE_ANALYTICS_SEND_EVENTS",
+}
 
 # Adapter-pinned Sheets writes already in this repo. Classifier treats them as
 # low-risk writes, not destructive. Generic catalog execute still refuses them

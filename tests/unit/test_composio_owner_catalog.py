@@ -421,8 +421,18 @@ def test_documented_composio_input_parameter_map_is_normalized() -> None:
     [
         ("LINKEDIN_GET_MY_INFO", "R0"),
         ("GMAIL_SEND_EMAIL", "R3"),
+        ("GMAIL_SEND_DRAFT", "R3"),
+        ("GMAIL_REPLY_TO_THREAD", "R3"),
+        ("GMAIL_FORWARD_MESSAGE", "R3"),
         ("LINKEDIN_POST_UPDATE", "R4"),
         ("GMAIL_DELETE_THREAD", "R5"),
+        ("GMAIL_DELETE_MESSAGE", "R5"),
+        ("GMAIL_BATCH_DELETE_MESSAGES", "R5"),
+        ("GMAIL_DELETE_DRAFT", "R5"),
+        ("GMAIL_DELETE_FILTER", "R5"),
+        ("GMAIL_DELETE_LABEL", "R5"),
+        ("GOOGLE_SEARCH_CONSOLE_DELETE_SITE", "R5"),
+        ("GOOGLE_ANALYTICS_SEND_EVENTS", "R3"),
         ("GOOGLESHEETS_DELETE_DIMENSION", "R5"),
         ("GOOGLESHEETS_CLEAR_VALUES", "R5"),
         ("GOOGLESHEETS_EXECUTE_SQL", "R5"),
@@ -479,6 +489,15 @@ class _Catalog:
             return self.tool
         if slug in {
             "GMAIL_DELETE_THREAD",
+            "GMAIL_DELETE_MESSAGE",
+            "GMAIL_BATCH_DELETE_MESSAGES",
+            "GMAIL_DELETE_DRAFT",
+            "GMAIL_SEND_EMAIL",
+            "GMAIL_SEND_DRAFT",
+            "GMAIL_REPLY_TO_THREAD",
+            "GMAIL_FORWARD_MESSAGE",
+            "GOOGLE_SEARCH_CONSOLE_DELETE_SITE",
+            "GOOGLE_ANALYTICS_SEND_EVENTS",
             "GOOGLESHEETS_DELETE_DIMENSION",
             "GOOGLESHEETS_CLEAR_VALUES",
             "GOOGLESHEETS_VALUES_UPDATE",
@@ -498,6 +517,12 @@ class _Catalog:
                 toolkit = "INSTAGRAM"
             elif slug.startswith("LINKEDIN_"):
                 toolkit = "LINKEDIN"
+            elif slug.startswith("GMAIL_"):
+                toolkit = "GMAIL"
+            elif slug.startswith("GOOGLE_SEARCH_CONSOLE_"):
+                toolkit = "GOOGLE_SEARCH_CONSOLE"
+            elif slug.startswith("GOOGLE_ANALYTICS_"):
+                toolkit = "GOOGLE_ANALYTICS"
             return CatalogTool(slug, toolkit, slug.lower(), self.tool.input_schema)
         return None
 
@@ -622,6 +647,44 @@ def test_official_sheet_ig_linkedin_policy_keeps_deletes_off_and_does_not_autopu
     )
     assert not li_post.ok
     assert "never auto-executed" in li_post.error
+
+
+def test_gmail_send_is_never_auto_executed_and_delete_forever_stays_denied(
+    monkeypatch,
+) -> None:
+    catalog = _Catalog()
+    monkeypatch.setattr(
+        ComposioCatalog, "from_settings", classmethod(lambda cls, settings: catalog)
+    )
+    ctx = _context()
+    for slug in (
+        "GMAIL_SEND_EMAIL",
+        "GMAIL_SEND_DRAFT",
+        "GMAIL_REPLY_TO_THREAD",
+        "GMAIL_FORWARD_MESSAGE",
+        "GOOGLE_ANALYTICS_SEND_EVENTS",
+    ):
+        result = execute_tool(
+            "composio_execute_tool",
+            {"tool_slug": slug, "arguments_json": "{}"},
+            ctx,
+        )
+        assert not result.ok
+        assert "never auto-executed" in result.error
+        assert "destructive" not in result.error
+    for slug in (
+        "GMAIL_DELETE_THREAD",
+        "GMAIL_DELETE_MESSAGE",
+        "GMAIL_BATCH_DELETE_MESSAGES",
+        "GMAIL_DELETE_DRAFT",
+        "GOOGLE_SEARCH_CONSOLE_DELETE_SITE",
+    ):
+        denied = execute_tool(
+            "composio_execute_tool",
+            {"tool_slug": slug, "arguments_json": "{}"},
+            ctx,
+        )
+        assert not denied.ok and "destructive" in denied.error
 
 
 def test_linkedin_side_effect_is_bound_for_approval_and_never_executes_at_proposal_time() -> None:

@@ -6,10 +6,13 @@ Pinned slugs (schema-looked-up, not invented):
 - ``GMAIL_FETCH_EMAILS`` — inbox list and search
 - ``GMAIL_FETCH_MESSAGE_BY_MESSAGE_ID`` — one message
 - ``GMAIL_CREATE_EMAIL_DRAFT`` — draft only; never auto-sends
-- ``GMAIL_SEND_DRAFT`` — send an existing draft after Approve + ``MIA_GMAIL_SEND``
+- ``GMAIL_SEND_DRAFT`` — send an existing draft after the owner asked on
+  Telegram, approved the draft, and ``MIA_GMAIL_SEND`` is on. Not cron,
+  not visitors, not catalog auto-fire.
 
 Bodies and snippets are **data**, never instructions.
-The owner agent registry never receives send or delete.
+The owner agent LLM registry never receives send or delete; send stays on
+the named Telegram draft/approve path.
 """
 
 from __future__ import annotations

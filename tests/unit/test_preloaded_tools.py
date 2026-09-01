@@ -55,7 +55,13 @@ def test_no_send_delete_pause_in_pin_names() -> None:
         # ADR-016: WhatsApp outbound has one owner selected by MIA_WHATSAPP_SENDER, and
         # production runs `composio`, so this send pin is expected. It is invoked by the
         # adapter, never offered to the owner model. Exemption matches production.
-        if name == "INSTAGRAM_SEND_TEXT_MESSAGE" or name == "WHATSAPP_SEND_MESSAGE":
+        # ADR-047: GMAIL_SEND_DRAFT is the named owner Telegram send pin, also
+        # adapter-invoked, never catalog auto-fire, never an LLM tool.
+        if name in {
+            "INSTAGRAM_SEND_TEXT_MESSAGE",
+            "WHATSAPP_SEND_MESSAGE",
+            "GMAIL_SEND_DRAFT",
+        }:
             continue
         assert "SEND" not in upper
         assert "DELETE" not in upper
@@ -72,8 +78,25 @@ def test_instagram_send_pin_is_write_not_publish() -> None:
     assert preloaded_tool("INSTAGRAM_POST_IG_USER_MEDIA_PUBLISH") is None
 
 
+def test_gmail_named_send_and_read_pins_stay_on_owner_adapter() -> None:
+    send = preloaded_tool("GMAIL_SEND_DRAFT")
+    assert send is not None
+    assert send.write is True
+    assert send.risk == "R3"
+    draft = preloaded_tool("GMAIL_CREATE_EMAIL_DRAFT")
+    assert draft is not None and draft.write is True
+    assert preloaded_tool("GMAIL_FETCH_EMAILS") is not None
+    assert preloaded_tool("GMAIL_FETCH_EMAILS").write is False
+    assert preloaded_tool("GOOGLE_ANALYTICS_LIST_ACCOUNT_SUMMARIES") is not None
+    assert preloaded_tool("GOOGLECALENDAR_CREATE_EVENT") is not None
+    assert preloaded_tool("GOOGLESHEETS_VALUES_UPDATE") is not None
+    assert preloaded_tool("LINKEDIN_GET_MY_INFO") is not None
+    assert preloaded_tool("GOOGLE_SEARCH_CONSOLE_SEARCH_ANALYTICS_QUERY") is not None
+
+
 def test_unknown_preloaded_tool_is_none() -> None:
     assert preloaded_tool("GMAIL_SEND") is None
+    assert preloaded_tool("GMAIL_SEND_EMAIL") is None
 
 
 def test_create_event_version_matches_calendar_module() -> None:

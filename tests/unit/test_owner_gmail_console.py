@@ -371,6 +371,8 @@ def test_owner_agent_prompt_plans_mail_paraphrases() -> None:
     assert "cannot send a message, book, approve, pay, publish" in SYSTEM_PROMPT
     assert "change a campaign or delete" in SYSTEM_PROMPT
     assert "Never claim you did it" in SYSTEM_PROMPT
+    assert "GMAIL_SEND_DRAFT" in SYSTEM_PROMPT
+    assert "website visitors" in SYSTEM_PROMPT
 
     # Regression guard: the deleted literal trigger-keyword list must not come back.
     # The old prompt spelled out "Mail / inbox / mailbox / דואר / תיבה / מייל /

@@ -83,6 +83,7 @@ from app.integrations.calendar import CalendarAgendaPort, CalendarPort
 from app.integrations.composio_catalog import (
     DENIED_COMPOSIO_SLUGS,
     NEVER_AUTO_PUBLISH_SLUGS,
+    NEVER_AUTO_SEND_SLUGS,
     ComposioCatalog,
     bounded_result_text,
     risk_for_slug,
@@ -1547,6 +1548,15 @@ def _composio_execute_with_catalog(
             error=(
                 "this Composio tool publishes or posts and is never auto-executed; "
                 "it needs a named approval workflow"
+            ),
+        )
+    if tool.slug in NEVER_AUTO_SEND_SLUGS:
+        return ToolResult(
+            ok=False,
+            error=(
+                "this Composio tool sends and is never auto-executed; "
+                "owner-requested Gmail send uses the named Telegram draft "
+                "and approve path"
             ),
         )
     if risk is not RiskLevel.R0_READ:

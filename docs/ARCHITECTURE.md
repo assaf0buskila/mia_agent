@@ -110,8 +110,10 @@ unknown action until it has a named capability, approval, idempotency, and audit
 LinkedIn now has such a contract for exact non-destructive side effects: the proposed slug and
 arguments are schema-checked and hash-bound to a Telegram approval, then the active tool, schema,
 risk, expiry, kill switch, and idempotency are rechecked before execution. LinkedIn delete/remove,
-revoke, message, DM, and InMail tools remain denied. Gmail draft send and Calendar create/move use
-their own typed approval contracts.
+revoke, message, DM, and InMail tools remain denied. Gmail send is not silent: cron, website
+visitors, and catalog auto-execute cannot send. Owner Telegram may draft and, after Approve,
+send via `GMAIL_SEND_DRAFT`. Calendar create/move uses its own typed approval contract.
+Gmail delete-forever slugs and `GOOGLE_SEARCH_CONSOLE_DELETE_SITE` stay denied.
 
 Direct APIs remain where they win (Meta inbound HMAC and STT). Instagram stays analytics-only;
 when a provider rejects a mixed insight metric request, the adapter retries the metrics

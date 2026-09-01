@@ -18,6 +18,9 @@ _ALLOWED_WRITE_PINS = frozenset(
         "INSTAGRAM_SEND_TEXT_MESSAGE",
         # ADR-016: one outbound WhatsApp owner, production is composio.
         "WHATSAPP_SEND_MESSAGE",
+        # Named owner Telegram draft → approve → send. Not catalog auto-fire.
+        "GMAIL_CREATE_EMAIL_DRAFT",
+        "GMAIL_SEND_DRAFT",
     }
 )
 
