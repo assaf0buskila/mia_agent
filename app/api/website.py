@@ -30,9 +30,9 @@ from app.domain.events import (
     transcription_outcome,
 )
 from app.domain.handoff import click_to_chat_url
+from app.domain.tools import AdapterHttpError
 from app.integrations.base import MessagePort
 from app.integrations.sheets import SheetsPort
-from app.domain.tools import AdapterHttpError
 from app.integrations.transcribe import (
     TranscriptionError,
     TranscriptionPort,

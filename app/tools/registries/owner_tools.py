@@ -104,7 +104,7 @@ from app.integrations.composio_catalog import (
     schema_text,
     validate_arguments,
 )
-from app.integrations.ga4 import Ga4Port, build_ga4_port
+from app.integrations.ga4 import Ga4Port, build_ga4_port, normalize_ga4_property_id
 from app.integrations.gmail import (
     DisabledGmailPort,
     GmailPort,
@@ -123,7 +123,11 @@ from app.integrations.instagram_insights import (
 from app.integrations.linkedin import LinkedInPort, build_linkedin_port, enrich_linkedin_ack
 from app.integrations.llm_client import function_tool
 from app.integrations.research import ResearchPort, ResearchSnippet, format_sources_block
-from app.integrations.search_console import SearchConsolePort, build_search_console_port
+from app.integrations.search_console import (
+    SearchConsolePort,
+    build_search_console_port,
+    resolve_gsc_site_url,
+)
 from app.integrations.seo_audit import SeoAuditPort, build_seo_audit_port
 from app.integrations.sheets import DisabledSheetsPort, SheetsPort, build_sheets_port
 from app.surfaces.crm import (
@@ -766,7 +770,16 @@ def _website_kpis(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
         search_console_handlers(search_console),
     )
     period = f"{date_args['start_date']} to {date_args['end_date']}"
-    lines = [f"AssafWeb KPIs ({period}; GA4 and Search Console APIs):"]
+    site = resolve_gsc_site_url(ctx.settings) or "unknown"
+    property_id = (
+        normalize_ga4_property_id(ctx.settings.ga4_property_id.strip())
+        or ctx.settings.ga4_property_id.strip()
+        or "unknown"
+    )
+    lines = [
+        f"AssafWeb KPIs ({period}; GA4 property {property_id}; GSC {site}; "
+        "numbers from the API):"
+    ]
     if isinstance(traffic, str):
         lines.append(f"GA4 traffic: unavailable ({traffic}).")
     else:
