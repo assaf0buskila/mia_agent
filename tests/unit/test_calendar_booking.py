@@ -11,7 +11,7 @@ import pytest
 from app.api.deps import get_calendar_booking_port, get_calendar_port
 from app.api.inbound import process_inbound_texts
 from app.core.config import Settings
-from app.db.models import MeetingRow, OwnerNotificationRow
+from app.db.models import OwnerNotificationRow
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
 from app.domain.booking_voice import BOOKING_RETRY
