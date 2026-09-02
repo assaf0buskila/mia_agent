@@ -6,15 +6,14 @@ from typing import Any
 
 from app.core.errors import InvalidArguments
 from app.integrations.sheets import SheetsPort, validate_owner_sheet_request
+from app.surfaces.crm import LOCKED_SPREADSHEET_ID
 
 
 def _args(
     args: dict[str, Any], *, include_values: bool, allowed_spreadsheet_ids: frozenset[str]
 ) -> tuple[str, str, list[list[str]]]:
-    spreadsheet_id = str(args.get("spreadsheet_id") or "").strip()
+    spreadsheet_id = str(args.get("spreadsheet_id") or "").strip() or LOCKED_SPREADSHEET_ID
     a1_range = str(args.get("range") or "").strip()
-    if not spreadsheet_id:
-        raise InvalidArguments("spreadsheet_id is required")
     if not a1_range and not include_values:
         # A1:J20 is a deliberately small preview of the first visible tab. This makes a
         # pasted allowlisted Google Sheets link useful without forcing Assaf to type A1.
@@ -48,9 +47,7 @@ def sheets_read(
 def sheets_list_tabs(
     port: SheetsPort, args: dict[str, Any], *, allowed_spreadsheet_ids: frozenset[str]
 ) -> dict[str, Any]:
-    reference = str(args.get("spreadsheet_id") or "").strip()
-    if not reference:
-        raise InvalidArguments("spreadsheet_id is required")
+    reference = str(args.get("spreadsheet_id") or "").strip() or LOCKED_SPREADSHEET_ID
     try:
         spreadsheet_id, _range, _ = validate_owner_sheet_request(
             spreadsheet_id=reference,

@@ -57,6 +57,7 @@ from app.integrations.llm_client import (
 from app.integrations.research import ResearchPort
 from app.integrations.search_console import SearchConsolePort
 from app.integrations.seo_audit import SeoAuditPort
+from app.integrations.sheets import SheetsPort, build_sheets_port
 from app.integrations.telegram_format import hebrew_datetime
 from app.tools.registries.owner_tools import ToolContext
 
@@ -243,6 +244,7 @@ def answer_owner(
     seo_audit: SeoAuditPort | None = None,
     instagram_insights: InstagramInsightsPort | None = None,
     research: ResearchPort | None = None,
+    sheets: SheetsPort | None = None,
     embedding_port: EmbeddingPort | None = None,
     client: LlmClient | None = None,
     source_ref: str = "",
@@ -294,6 +296,7 @@ def answer_owner(
         seo_audit=seo_audit,
         instagram_insights=instagram_insights,
         research=research,
+        sheets=sheets if sheets is not None else build_sheets_port(settings),
         kill_switch=kill_switch,
         demo_active=demo_active,
         source_ref=source_ref,

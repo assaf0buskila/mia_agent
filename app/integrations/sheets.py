@@ -437,6 +437,8 @@ class SheetsPort(Protocol):
 
     def append_locked_activity(self, cells: list[str]) -> None: ...
 
+    def read_locked_contacts(self) -> list[list[str]]: ...
+
 
 class DisabledSheetsPort:
     def ensure_crm_workspace(self) -> None:
@@ -485,6 +487,9 @@ class DisabledSheetsPort:
 
     def append_locked_activity(self, cells: list[str]) -> None:
         del cells
+
+    def read_locked_contacts(self) -> list[list[str]]:
+        return []
 
 
 class ComposioSheetsPort:
@@ -748,8 +753,9 @@ class ComposioSheetsPort:
         key_column: str,
         headers: list[str],
         values: list[list[object]],
+        spreadsheet_id: str | None = None,
     ) -> None:
-        spreadsheet_id = self._spreadsheet_id
+        spreadsheet_id = (spreadsheet_id or self._spreadsheet_id or LOCKED_SPREADSHEET_ID).strip()
         if not spreadsheet_id:
             return
         payload = {
@@ -800,23 +806,39 @@ class ComposioSheetsPort:
             return
 
     def write_locked_contact(self, cells: list[str], *, key_column: str) -> None:
-        spreadsheet_id = self._spreadsheet_id or LOCKED_SPREADSHEET_ID
-        if spreadsheet_id != LOCKED_SPREADSHEET_ID:
-            spreadsheet_id = LOCKED_SPREADSHEET_ID
         payload_values = [list(cells)]
         self._execute_upsert(
             sheet_name=CONTACTS_TAB,
             key_column=key_column,
             headers=list(CONTACTS_HEADERS),
             values=payload_values,
+            spreadsheet_id=self._spreadsheet_id or LOCKED_SPREADSHEET_ID,
         )
-        del spreadsheet_id
+
+    def read_locked_contacts(self) -> list[list[str]]:
+        data = self._execute_tool(
+            COMPOSIO_VALUES_GET_TOOL,
+            {
+                "spreadsheetId": self._spreadsheet_id or LOCKED_SPREADSHEET_ID,
+                "range": f"{CONTACTS_TAB}!A1:N100",
+            },
+        )
+        raw_values = (data or {}).get("values")
+        if not isinstance(raw_values, list):
+            return []
+        rows: list[list[str]] = []
+        for row in raw_values[:100]:
+            if not isinstance(row, list):
+                continue
+            cells = [str(cell) if cell is not None else "" for cell in row[:14]]
+            rows.append(cells)
+        return rows
 
     def append_locked_activity(self, cells: list[str]) -> None:
         self._execute_tool(
             COMPOSIO_VALUES_APPEND_TOOL,
             {
-                "spreadsheetId": LOCKED_SPREADSHEET_ID,
+                "spreadsheetId": self._spreadsheet_id or LOCKED_SPREADSHEET_ID,
                 "range": f"{CONTACTS_ACTIVITY_TAB}!A:E",
                 "values": [list(cells)],
                 "valueInputOption": "RAW",
@@ -965,6 +987,7 @@ class FakeSheetsPort:
         self.owner_values: dict[tuple[str, str], list[list[str]]] = {}
         self.owner_operations: list[tuple[str, str, str, list[list[str]]]] = []
         self.sheet_names: dict[str, list[str]] = {}
+        self.locked_contacts: list[list[str]] = []
         self.crm_workspace_ensures = 0
 
     def ensure_crm_workspace(self) -> None:
@@ -1019,9 +1042,14 @@ class FakeSheetsPort:
         return dict(self._content_rows)
 
     def write_locked_contact(self, cells: list[str], *, key_column: str) -> None:
+        row = list(cells)
+        self.locked_contacts.append(row)
         self.owner_operations.append(
-            ("contact", LOCKED_SPREADSHEET_ID, key_column, [list(cells)])
+            ("contact", LOCKED_SPREADSHEET_ID, key_column, [row])
         )
+
+    def read_locked_contacts(self) -> list[list[str]]:
+        return [list(CONTACTS_HEADERS), *[list(row) for row in self.locked_contacts]]
 
     def append_locked_activity(self, cells: list[str]) -> None:
         self.owner_operations.append(
@@ -1581,7 +1609,7 @@ def build_sheets_port(settings: Settings) -> SheetsPort:
         return ComposioSheetsPort(
             api_key=api_key,
             user_id=user_id,
-            spreadsheet_id=settings.sheets_spreadsheet_id.strip(),
+            spreadsheet_id=settings.resolved_sheets_spreadsheet_id(),
             allowed_spreadsheet_ids=settings.allowed_sheets_spreadsheet_ids(),
         )
     return DisabledSheetsPort()
@@ -1596,7 +1624,7 @@ def maintain_crm_workspace(settings: Settings) -> str:
     if settings.kill_switch:
         return "disabled"
     port = build_sheets_port(settings)
-    if isinstance(port, DisabledSheetsPort) or not settings.sheets_spreadsheet_id.strip():
+    if isinstance(port, DisabledSheetsPort):
         return "not_configured"
     try:
         port.ensure_crm_workspace()

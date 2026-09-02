@@ -32,6 +32,7 @@ _LIVE_READS = (
     "instagram_insights",
     "owner_system_audit",
     "research_search",
+    "crm_search",
 )
 
 
@@ -338,7 +339,7 @@ def test_owner_system_audit_reports_each_surface_without_a_blanket_provider_clai
             "New booked meetings",
         ):
             assert label in result.text
-        assert "לא נבדק: אין גיליון מורשה מוגדר" in result.text
+        assert "אין גיליון מורשה מוגדר" not in result.text
         assert "לא נבדקו ולא בוצעו" in result.text
     finally:
         session.close()

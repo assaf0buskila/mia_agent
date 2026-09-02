@@ -122,6 +122,7 @@ class Settings(BaseSettings):
     instagram_sender: str = Field(default="direct")
 
     calendar_timezone: str = Field(default="Asia/Jerusalem")
+    # Empty env still resolves to the locked Contacts workbook. Live cannot forget.
     sheets_spreadsheet_id: str = Field(default="")
     sheets_allowed_spreadsheet_ids: str = Field(default="")
     firecrawl_api_key: str = Field(default="")
@@ -132,15 +133,23 @@ class Settings(BaseSettings):
     def cors_origin_list(self) -> list[str]:
         return [item.strip() for item in self.cors_origins.split(",") if item.strip()]
 
+    def resolved_sheets_spreadsheet_id(self) -> str:
+        """Env override if set; otherwise the locked Contacts workbook."""
+        from app.surfaces.crm import LOCKED_SPREADSHEET_ID
+
+        return self.sheets_spreadsheet_id.strip() or LOCKED_SPREADSHEET_ID
+
     def allowed_sheets_spreadsheet_ids(self) -> frozenset[str]:
-        """Explicit owner-operational targets; primary mirror stays eligible."""
+        """Locked CRM workbook is always eligible. Extra IDs stay optional."""
+        from app.surfaces.crm import LOCKED_SPREADSHEET_ID
+
         configured = {
             item.strip()
             for item in self.sheets_allowed_spreadsheet_ids.split(",")
             if item.strip()
         }
-        if self.sheets_spreadsheet_id.strip():
-            configured.add(self.sheets_spreadsheet_id.strip())
+        configured.add(self.resolved_sheets_spreadsheet_id())
+        configured.add(LOCKED_SPREADSHEET_ID)
         return frozenset(configured)
 
     def whatsapp_owner_phone_set(self) -> set[str]:

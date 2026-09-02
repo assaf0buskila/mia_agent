@@ -142,7 +142,7 @@ def owner_integrations(settings) -> dict[str, object]:
     """
     composio = settings.composio_ready()
     discovery = bool(settings.composio_discovery) and composio
-    sheets_id = settings.sheets_spreadsheet_id.strip()
+    sheets_id = settings.resolved_sheets_spreadsheet_id()
     authorized_sheets = bool(settings.allowed_sheets_spreadsheet_ids())
     gsc_site = settings.gsc_site_url.strip()
     ga4_property = settings.ga4_property_id.strip()
@@ -153,8 +153,6 @@ def owner_integrations(settings) -> dict[str, object]:
         missing.extend(["MIA_COMPOSIO_API_KEY", "MIA_COMPOSIO_USER_ID"])
     if not firecrawl and not apify:
         missing.append("MIA_FIRECRAWL_API_KEY")
-    if not sheets_id:
-        missing.append("MIA_SHEETS_SPREADSHEET_ID")
     if not discovery:
         if not gsc_site:
             missing.append("MIA_GSC_SITE_URL")
@@ -167,6 +165,7 @@ def owner_integrations(settings) -> dict[str, object]:
         "calendar_read": composio,
         "calendar_write": settings.calendar_write,
         "sheets_mirror": composio and bool(sheets_id),
+        "sheets_crm": composio and bool(sheets_id),
         # ADR-042 readiness is deliberately config-only: health never makes an
         # authenticated provider call and never returns credentials.
         "sheets_read": composio and authorized_sheets,

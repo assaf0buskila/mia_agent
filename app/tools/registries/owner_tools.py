@@ -118,6 +118,7 @@ from app.integrations.research import ResearchPort, ResearchSnippet, format_sour
 from app.integrations.search_console import SearchConsolePort
 from app.integrations.seo_audit import SeoAuditPort
 from app.integrations.sheets import DisabledSheetsPort, SheetsPort, build_sheets_port
+from app.surfaces.crm import ContactRecord, CrmDenied, build_contacts_crm, log_contact
 
 MAX_TOOL_RESULT_CHARS = 3000
 _NO_ARGS: dict[str, Any] = {
@@ -158,14 +159,12 @@ def _enum_arg(name: str, description: str, *, enum: list[str]) -> dict[str, Any]
 
 
 def _sheet_args(*, include_values: bool) -> dict[str, Any]:
-    spreadsheet_description = "An Assaf-allowlisted spreadsheet ID."
-    if not include_values:
-        spreadsheet_description += (
-            " A full https://docs.google.com/spreadsheets/d/... URL is also accepted for reads."
-        )
+    spreadsheet_description = (
+        "Optional. Defaults to Assaf's locked Contacts workbook. Never ask him for a URL."
+    )
     properties: dict[str, Any] = {
         "spreadsheet_id": {
-            "type": "string",
+            "type": ["string", "null"],
             "description": spreadsheet_description,
         },
         "range": {
@@ -452,22 +451,11 @@ def _owner_system_audit(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
             return OwnerAuditResult(label=label, ok=False, text=type(exc).__name__)
         return OwnerAuditResult(label=label, ok=result.ok, text=result.text or result.error)
 
-    allowed_sheets = sorted(ctx.settings.allowed_sheets_spreadsheet_ids())
-    if allowed_sheets:
-        audit_sheet = ctx.settings.sheets_spreadsheet_id.strip() or allowed_sheets[0]
-        sheets_result = probe(
-            "Google Sheets (גיליון מורשה)",
-            lambda: _sheets_read(ctx, {"spreadsheet_id": audit_sheet, "range": None}),
-        )
-    else:
-        sheets_result = OwnerAuditResult(
-            label="Google Sheets (גיליון מורשה)",
-            ok=True,
-            text=(
-                "No allowlisted spreadsheet is configured, so no Sheets read was attempted "
-                "safely."
-            ),
-        )
+    audit_sheet = ctx.settings.resolved_sheets_spreadsheet_id()
+    sheets_result = probe(
+        "Google Sheets (גיליון מורשה)",
+        lambda: _sheets_read(ctx, {"spreadsheet_id": audit_sheet, "range": None}),
+    )
 
     results = [
         probe("Gmail", lambda: _gmail_inbox(ctx, {})),
@@ -794,7 +782,75 @@ def _owner_sheets_port(ctx: ToolContext) -> SheetsPort | None:
     return None if isinstance(port, DisabledSheetsPort) else port
 
 
+def _crm_spreadsheet_id(ctx: ToolContext) -> str:
+    return ctx.settings.resolved_sheets_spreadsheet_id()
+
+
+def _crm_search(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
+    query = str(args.get("query") or ctx.owner_text or "").strip()
+    port = ctx.sheets or build_sheets_port(ctx.settings)
+    reader = getattr(port, "read_locked_contacts", None)
+    rows = reader() if callable(reader) else []
+    if not rows:
+        return ToolResult(ok=True, text="Contacts is empty so far.")
+    body = rows[1:] if len(rows) > 1 else rows
+    needle = query.casefold()
+    matches: list[str] = []
+    for row in body:
+        blob = " | ".join(str(cell) for cell in row)
+        if "lead_" in blob.lower() or "01 Leads" in blob:
+            continue
+        if not needle or needle in blob.casefold():
+            matches.append(blob)
+        if len(matches) >= 8:
+            break
+    if not matches:
+        return ToolResult(ok=True, text="No Contacts row matched.")
+    return ToolResult(ok=True, text="Contacts:\n" + "\n".join(matches))
+
+
+def _crm_upsert(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
+    record = ContactRecord(
+        name=str(args.get("name") or "").strip(),
+        phone=str(args.get("phone") or "").strip(),
+        email=str(args.get("email") or "").strip(),
+        date=str(args.get("date") or "").strip(),
+        business=str(args.get("business") or "").strip(),
+        source=str(args.get("source") or "telegram").strip() or "telegram",
+        language=str(args.get("language") or "").strip(),
+        want=str(args.get("want") or "").strip(),
+        status=str(args.get("status") or "").strip(),
+        summary=str(args.get("summary") or ctx.owner_text or "").strip()[:500],
+        next_step=str(args.get("next_step") or "").strip(),
+    )
+    if not record.has_contact_key():
+        return ToolResult(ok=True, text="Need a phone or email before I write Contacts.")
+    blob = " ".join(record.cells())
+    if "lead_" in blob.lower():
+        return ToolResult(ok=False, error="lead ids are not used")
+    port = ctx.sheets or build_sheets_port(ctx.settings)
+    crm = build_contacts_crm(ctx.settings, port)
+    try:
+        log_contact(
+            crm,
+            record,
+            who="אסף",
+            channel="telegram",
+            action="עדכון איש קשר",
+            result="נרשם",
+        )
+    except CrmDenied as exc:
+        return ToolResult(ok=False, error=str(exc) or "lead ids are not used")
+    return ToolResult(
+        ok=True,
+        text=f"Wrote Contacts on {_crm_spreadsheet_id(ctx)}.",
+    )
+
+
 def _sheets_read(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
+    filled = dict(args)
+    if not str(filled.get("spreadsheet_id") or "").strip():
+        filled["spreadsheet_id"] = _crm_spreadsheet_id(ctx)
     port = _owner_sheets_port(ctx)
     if port is None:
         return ToolResult(ok=True, text=_NOT_CONNECTED)
@@ -802,7 +858,7 @@ def _sheets_read(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
         out = execute_capability(
             "sheets.read",
             principal=ctx.principal,
-            args=args,
+            args=filled,
             handlers=sheets_handlers(
                 port, allowed_spreadsheet_ids=ctx.settings.allowed_sheets_spreadsheet_ids()
             ),
@@ -821,6 +877,9 @@ def _sheets_read(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
 
 
 def _sheets_list_tabs(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
+    filled = dict(args)
+    if not str(filled.get("spreadsheet_id") or "").strip():
+        filled["spreadsheet_id"] = _crm_spreadsheet_id(ctx)
     port = _owner_sheets_port(ctx)
     if port is None:
         return ToolResult(ok=True, text=_NOT_CONNECTED)
@@ -828,7 +887,7 @@ def _sheets_list_tabs(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
         out = execute_capability(
             "sheets.list_tabs",
             principal=ctx.principal,
-            args=args,
+            args=filled,
             handlers=sheets_handlers(
                 port, allowed_spreadsheet_ids=ctx.settings.allowed_sheets_spreadsheet_ids()
             ),
@@ -1831,9 +1890,8 @@ _register(
     ToolSpec(
         name="sheets_list_tabs",
         description=(
-            "Lists tab names only inside one explicitly Assaf-allowlisted Google Sheet. "
-            "Accept a pasted Google Sheets URL and extract its ID locally. Use this when "
-            "the first-tab preview is empty; never search Drive or another spreadsheet."
+            "Lists tab names on Assaf's locked Contacts workbook. spreadsheet_id may be "
+            "null — Mia already has the ID. Never ask him for a URL."
         ),
         parameters=_sheet_args(include_values=False),
         handler=_sheets_list_tabs,
@@ -2067,12 +2125,62 @@ _register(
 )
 _register(
     ToolSpec(
+        name="crm_search",
+        description=(
+            "Search Assaf's Contacts CRM. Always uses the locked spreadsheet. "
+            "Never ask for a URL. No lead ids. No 01 Leads."
+        ),
+        parameters=_string_arg("query", "Name, phone, email, or what they want."),
+        handler=_crm_search,
+    )
+)
+_register(
+    ToolSpec(
+        name="crm_upsert",
+        description=(
+            "Upsert a Contacts row and append Activity on the locked CRM sheet. "
+            "Requires phone or email. Never ask for a URL. Never invent a lead id."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "name": {"type": ["string", "null"], "description": "Contact name."},
+                "phone": {"type": ["string", "null"], "description": "Phone."},
+                "email": {"type": ["string", "null"], "description": "Email."},
+                "date": {"type": ["string", "null"], "description": "Date they mentioned."},
+                "business": {"type": ["string", "null"], "description": "Business."},
+                "source": {"type": ["string", "null"], "description": "Source channel."},
+                "language": {"type": ["string", "null"], "description": "Language."},
+                "want": {"type": ["string", "null"], "description": "What they want."},
+                "status": {"type": ["string", "null"], "description": "Status."},
+                "summary": {"type": ["string", "null"], "description": "Conversation summary."},
+                "next_step": {"type": ["string", "null"], "description": "Next step."},
+            },
+            "required": [
+                "name",
+                "phone",
+                "email",
+                "date",
+                "business",
+                "source",
+                "language",
+                "want",
+                "status",
+                "summary",
+                "next_step",
+            ],
+            "additionalProperties": False,
+        },
+        handler=_crm_upsert,
+    )
+)
+_register(
+    ToolSpec(
         name="sheets_read",
         description=(
-            "Reads one bounded A1 range from an explicitly Assaf-allowlisted Google Sheet. "
-            "Accept a pasted Google Sheets URL and extract its ID locally. When Assaf gives "
-            "only the link, pass range=null for a bounded A1:J20 preview of the first visible "
-            "tab. It is an operational lookup, never Mia's source of truth; no Drive discovery."
+            "Reads a bounded A1 range from Assaf's locked Contacts workbook. "
+            "spreadsheet_id may be null. Default range is a Contacts preview. "
+            "Never ask him for a URL. Never say the sheet is unavailable."
         ),
         parameters=_sheet_args(include_values=False),
         handler=_sheets_read,
@@ -2082,11 +2190,8 @@ _register(
     ToolSpec(
         name="sheets_update",
         description=(
-            "Updates one bounded A1 range in an explicitly Assaf-allowlisted Sheet, only "
-            "when the authenticated owner explicitly requested these exact values in this "
-            "turn: the spreadsheet ID and range must appear verbatim, and every cell must "
-            'appear as a JSON-quoted literal such as "new value". Never infer a write, '
-            "create formulas, or choose a spreadsheet."
+            "Bounded literal update on the locked workbook when Assaf asked for those "
+            "exact values. Prefer crm_upsert for Contacts. Never ask for a URL."
         ),
         parameters=_sheet_args(include_values=True),
         handler=_sheets_update,
@@ -2096,11 +2201,8 @@ _register(
     ToolSpec(
         name="sheets_append",
         description=(
-            "Appends explicit literal rows to one bounded A1 range in an Assaf-allowlisted "
-            "Sheet, only for an explicit authenticated owner request in this turn. The "
-            "spreadsheet ID and range must appear verbatim and every cell as a JSON-quoted "
-            'literal such as "new value". Never infer a write, create formulas, or choose '
-            "a spreadsheet."
+            "Bounded literal append on the locked workbook. Prefer crm_upsert for Contacts "
+            "and Activity. Never ask for a URL."
         ),
         parameters=_sheet_args(include_values=True),
         handler=_sheets_append,

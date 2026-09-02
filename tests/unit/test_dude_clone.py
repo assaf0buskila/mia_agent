@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import pytest
+from app.brain.embeddings import FakeEmbeddingPort
+from app.brain.store import BrainStore
+from app.capabilities.types import Principal
 from app.core.config import Settings
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
+from app.graph.owner_agent import SYSTEM_PROMPT
 from app.integrations.base import RecordingMessagePort
 from app.integrations.sheets import FakeSheetsPort
 from app.main import app
@@ -18,8 +22,9 @@ from app.surfaces.crm import (
     log_contact,
 )
 from app.surfaces.identity import extract_fields
-from app.surfaces.owner import run_owner_loop, talk_as_dude
+from app.surfaces.owner import _asks_for_sheet_url, run_owner_loop, talk_as_dude
 from app.surfaces.site import reset_site_book, run_site_turn, site_book, site_opening
+from app.tools.registries.owner_tools import ToolContext, execute_tool, get_tool, tool_names
 from fastapi.testclient import TestClient
 
 OWNER_ID = "550077"
@@ -364,4 +369,127 @@ def test_live_sheets_upsert_lead_is_noop() -> None:
             next_action="ask",
         )
     )
+
+
+def test_empty_env_still_resolves_locked_spreadsheet() -> None:
+    settings = Settings(_env_file=None, sheets_spreadsheet_id="")
+    assert settings.resolved_sheets_spreadsheet_id() == LOCKED_SPREADSHEET_ID
+    assert LOCKED_SPREADSHEET_ID in settings.allowed_sheets_spreadsheet_ids()
+    override = Settings(_env_file=None, sheets_spreadsheet_id="custom-sheet-id")
+    assert override.resolved_sheets_spreadsheet_id() == "custom-sheet-id"
+    assert LOCKED_SPREADSHEET_ID in override.allowed_sheets_spreadsheet_ids()
+
+
+def test_owner_prompt_never_asks_for_sheet_url() -> None:
+    assert "Never ask him for a Google Sheet URL" in SYSTEM_PROMPT
+    assert "docs.google.com/spreadsheets" not in SYSTEM_PROMPT
+    assert "limited access" not in SYSTEM_PROMPT.lower()
+    assert "not the source of truth" not in SYSTEM_PROMPT
+    assert "crm_search" in SYSTEM_PROMPT
+    assert "crm_upsert" in SYSTEM_PROMPT
+    assert "No unsolicited Gmail" in SYSTEM_PROMPT
+    assert "01 Leads" in SYSTEM_PROMPT
+    assert get_tool("crm_search") is not None
+    assert get_tool("crm_upsert") is not None
+    assert get_tool("gmail_send") is None
+    assert "paste" not in get_tool("crm_search").description.lower()
+    assert "paste" not in get_tool("crm_upsert").description.lower()
+    assert "docs.google.com" not in get_tool("crm_upsert").description.lower()
+
+
+def test_owner_turn_does_not_ask_for_spreadsheet_url() -> None:
+    reply, wrote = talk_as_dude(text="תראי לי את ה-CRM", crm=FakeContactsCrm())
+    assert wrote is False
+    assert "http" not in reply.lower()
+    assert "spreadsheet" not in reply.lower()
+    assert "docs.google.com" not in reply
+    assert _asks_for_sheet_url(
+        "I can only access a sheet if you paste the Google Sheet URL"
+    )
+    assert not _asks_for_sheet_url("רשמתי ב-Contacts.")
+
+
+def test_crm_tools_use_locked_id_and_never_write_leads_tab() -> None:
+    init_db()
+    db = get_session_factory()()
+    sheets = FakeSheetsPort()
+    try:
+        ctx = ToolContext(
+            principal=Principal.owner(source="telegram", actor_id=OWNER_ID),
+            store=LeadStore(db),
+            brain=BrainStore(db),
+            settings=Settings(_env_file=None, sheets_spreadsheet_id=""),
+            embedding_port=FakeEmbeddingPort(),
+            sheets=sheets,
+            owner_text="תרשמי את דנה 0501234567",
+            source_ref="tg.crm.1",
+        )
+        wrote = execute_tool(
+            "crm_upsert",
+            {
+                "name": "דנה",
+                "phone": "0501234567",
+                "email": None,
+                "date": "2026-09-02",
+                "business": None,
+                "source": "telegram",
+                "language": "he",
+                "want": "אתר",
+                "status": None,
+                "summary": "שיחה",
+                "next_step": None,
+            },
+            ctx,
+        )
+        assert wrote.ok is True
+        assert LOCKED_SPREADSHEET_ID in wrote.text
+        assert "01 Leads" not in wrote.text
+        assert "lead_" not in wrote.text.lower()
+        assert all(op[1] == LOCKED_SPREADSHEET_ID for op in sheets.owner_operations)
+        assert all(op[0] != "lead" for op in sheets.owner_operations)
+        assert "01 Leads" not in str(sheets.owner_operations)
+        blob = " ".join(" ".join(row) for row in sheets.locked_contacts)
+        assert "lead_" not in blob.lower()
+        found = execute_tool("crm_search", {"query": "דנה"}, ctx)
+        assert found.ok is True
+        assert "דנה" in found.text
+        assert "lead_" not in found.text.lower()
+        assert "01 Leads" not in found.text
+        refused = execute_tool(
+            "crm_upsert",
+            {
+                "name": "רק שם",
+                "phone": None,
+                "email": None,
+                "date": None,
+                "business": None,
+                "source": None,
+                "language": None,
+                "want": None,
+                "status": None,
+                "summary": None,
+                "next_step": None,
+            },
+            ctx,
+        )
+        assert refused.ok is True
+        assert "phone or email" in refused.text.lower()
+    finally:
+        db.close()
+    assert "crm_search" in tool_names()
+    assert "crm_upsert" in tool_names()
+
+
+def test_sheets_read_without_id_uses_locked_workbook() -> None:
+    from app.capabilities.sheets import sheets_read
+
+    sheets = FakeSheetsPort()
+    sheets.owner_values[(LOCKED_SPREADSHEET_ID, "A1:J20")] = [["שם", "טלפון"]]
+    allowed = Settings(_env_file=None, sheets_spreadsheet_id="").allowed_sheets_spreadsheet_ids()
+    out = sheets_read(
+        sheets,
+        {"spreadsheet_id": "", "range": None},
+        allowed_spreadsheet_ids=allowed,
+    )
+    assert out["rows"] == [["שם", "טלפון"]]
 
