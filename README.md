@@ -22,7 +22,7 @@ Do not read `docs/archive/` unless you need history.
 
 ## CRM
 
-Locked spreadsheet `1HW8mnc9GFXraS6oG5VIxFcJvZq9gMDJBFRxY2mpVOhI`. Tabs **Contacts** and **Activity** only.
+Locked spreadsheet `1HW8mnc9GFXraS6oG5VIxFcJvZq9gMDJBFRxY2mpVOhI`. Live tabs **Contacts** and **Activity** only. Archive tabs are gone.
 
 Contacts A1:N1: `שם | טלפון | אימייל | תאריך | עסק | מקור | שפה | מה רוצים | סטטוס | סיכום שיחה | הבא | נוצר | עודכן | פינג לאסף`
 
