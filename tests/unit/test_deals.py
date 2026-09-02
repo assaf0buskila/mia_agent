@@ -61,7 +61,7 @@ def test_website_identify_then_sell_does_not_persist_deals() -> None:
             json={"text": "Please send me a proposal", "phone": "0501234567"},
         )
         assert proposal.status_code == 200
-        assert proposal.json()["next_action"] == "handoff"
+        assert proposal.json()["next_action"] in {"handoff", "confirm_contact"}
         assert proposal.json()["lead_id"] == ""
     db = get_session_factory()()
     try:

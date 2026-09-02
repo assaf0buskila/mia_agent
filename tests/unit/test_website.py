@@ -58,7 +58,9 @@ def test_website_config_points_at_assafweb() -> None:
         assert body["widget"] == "ask_mia"
         assert body["demo"] is False
         assert body["whatsapp_url"] is None
-        assert "טלפון או באימייל" in body["opening"]
+        assert "ספרו לי בקצרה מה אתם מחפשים" in body["opening"]
+        assert "טלפון" not in body["opening"]
+        assert "אימייל" not in body["opening"]
 
 
 def test_website_config_exposes_only_a_config_derived_whatsapp_url(monkeypatch) -> None:
@@ -492,7 +494,7 @@ def test_website_message_pings_assaf_after_contact(monkeypatch) -> None:
                 json={"text": "0501234567", "phone": "0501234567", "name": "דנה"},
             )
             assert captured.status_code == 200
-            assert captured.json()["next_action"] == "handoff"
+            assert captured.json()["next_action"] == "confirm_contact"
             handoff = client.post(f"/v1/website/sessions/{session_id}/handoff")
             assert handoff.status_code == 200
     finally:

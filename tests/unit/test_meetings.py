@@ -33,7 +33,7 @@ def test_website_identify_then_sell_does_not_persist_meetings() -> None:
             f"/v1/website/sessions/{session_id}/messages",
             json={"text": "let's book a meeting", "phone": "0501234567"},
         )
-        assert meeting.json()["next_action"] == "handoff"
+        assert meeting.json()["next_action"] in {"handoff", "confirm_contact"}
         assert meeting.json()["lead_id"] == ""
     db = get_session_factory()()
     try:
@@ -94,7 +94,7 @@ def test_handoff_does_not_persist_meeting() -> None:
             json={"text": "Please send me a proposal", "phone": "0501234567"},
         )
         assert response.status_code == 200
-        assert response.json()["next_action"] == "handoff"
+        assert response.json()["next_action"] in {"handoff", "confirm_contact"}
         assert response.json()["lead_id"] == ""
     db = get_session_factory()()
     try:

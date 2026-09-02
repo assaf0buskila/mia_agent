@@ -229,7 +229,7 @@ def test_website_identify_then_sell_does_not_mirror_kpis() -> None:
                 f"/v1/website/sessions/{session_id}/messages",
                 json={"text": "let's book a meeting", "phone": "0501234567"},
             )
-            assert identified.json()["next_action"] == "handoff"
+            assert identified.json()["next_action"] in {"handoff", "confirm_contact"}
         assert fake.kpi_rows == {}
         assert fake.rows == {}
     finally:

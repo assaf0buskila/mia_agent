@@ -21,10 +21,7 @@ from app.surfaces.site_policy import (
     pick_language,
 )
 
-SITE_OPENING = (
-    "שלום, אני מיה. ספרו לי בקצרה מה אתם מחפשים, "
-    "ואיך אפשר לחזור אליכם בטלפון או באימייל."
-)
+SITE_OPENING = "שלום, אני מיה. ספרו לי בקצרה מה אתם מחפשים."
 ASK_CONTACT = "כדי שאסף יוכל להמשיך אתכם, צריך טלפון או אימייל."
 ASK_NEED = ASK_NEED_HE
 AFTER_CAPTURE = (

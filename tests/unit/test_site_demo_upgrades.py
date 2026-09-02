@@ -4,11 +4,10 @@ from __future__ import annotations
 
 from app.api.deps import get_transcription_port
 from app.core.config import Settings
-from app.integrations.base import RecordingMessagePort
 from app.integrations.transcribe import FakeTranscriptionPort
 from app.main import app
 from app.surfaces.crm import FakeContactsCrm
-from app.surfaces.site import reset_site_book, run_site_turn, site_book
+from app.surfaces.site import reset_site_book, run_site_turn, site_book, site_opening
 from app.surfaces.site_policy import (
     KNOWLEDGE_TOOL,
     SITE_ACTIONS,
@@ -42,7 +41,6 @@ def _turn(
     tools_ran: tuple[str, ...] = (),
     now: float | None = None,
     voice_failed: bool = False,
-    owner_port: RecordingMessagePort | None = None,
     settings: Settings | None = None,
 ) -> object:
     book = site_book()
@@ -53,7 +51,6 @@ def _turn(
         text=text,
         settings=settings or Settings(),
         crm=FakeContactsCrm(),
-        owner_port=owner_port,
         name=name,
         phone=phone,
         email=email,
@@ -115,7 +112,6 @@ def test_answer_first_phone_only_when_next_step_is_assaf_or_sheet() -> None:
 
 
 def test_number_already_in_session_confirms_once_then_pings() -> None:
-    port = RecordingMessagePort()
     settings = Settings().model_copy(
         update={"telegram_owner_user_ids": "550077", "whatsapp_click_to_chat": "972501111111"}
     )
@@ -124,25 +120,53 @@ def test_number_already_in_session_confirms_once_then_pings() -> None:
         "צריכים אתר",
         phone="0501234567",
         name="דנה",
-        owner_port=port,
         settings=settings,
     )
+    session = site_book().get("web_num1")
     assert first.next_action == "confirm_contact"
     assert first.crm_wrote is True
-    assert first.owner_pinged is True
+    assert session is not None
+    assert session.confirmed is True
+    assert session.awaiting_ping is True
     assert "טלפון או אימייל" not in first.reply
     assert "מעבירה לאסף" in first.reply or "יש לי את המספר" in first.reply
-    assert len(port.sent) == 1
     again = _turn(
         "web_num1",
         "עוד שאלה על האתר",
         phone="0501234567",
-        owner_port=port,
         settings=settings,
     )
     assert "טלפון או אימייל" not in again.reply
     assert again.owner_pinged is False
-    assert len(port.sent) == 1
+    assert site_book().get("web_num1").confirmed is True
+
+
+def test_http_confirm_pings_assaf_once(monkeypatch) -> None:
+    from app.api.deps import get_telegram_port
+    from app.integrations.base import RecordingMessagePort
+
+    port = RecordingMessagePort()
+    app.dependency_overrides[get_telegram_port] = lambda: port
+    monkeypatch.setenv("MIA_TELEGRAM_OWNER_USER_IDS", "111")
+    try:
+        with TestClient(app) as client:
+            session_id = client.post("/v1/website/sessions").json()["session_id"]
+            first = client.post(
+                f"/v1/website/sessions/{session_id}/messages",
+                json={"text": "צריכים אתר", "phone": "0501234567", "name": "דנה"},
+            )
+            assert first.json()["next_action"] == "confirm_contact"
+            assert port.sent
+            assert "שיחה מהאתר" in port.sent[0].text
+            assert "0501234567" not in str(first.json())
+            second = client.post(
+                f"/v1/website/sessions/{session_id}/messages",
+                json={"text": "עוד שאלה", "phone": "0501234567"},
+            )
+            assert "טלפון או אימייל" not in second.json()["message"]
+            assert len(port.sent) == 1
+    finally:
+        app.dependency_overrides.pop(get_telegram_port, None)
 
 
 def test_complaint_no_jokes_offer_assaf_capture_identity_stop_selling() -> None:
@@ -304,3 +328,26 @@ def test_site_actions_stay_closed() -> None:
     assert classify_site_intent("Are you a bot?") == "bot"
     assert classify_site_intent("כמה עולה") == "price"
     assert classify_site_intent("json-ld") == "tool_status"
+
+
+def test_opening_does_not_ask_identity() -> None:
+    opening = site_opening()
+    assert opening
+    assert "טלפון" not in opening
+    assert "אימייל" not in opening
+    assert "phone" not in opening.lower()
+    assert "email" not in opening.lower()
+
+
+def test_greeting_with_number_confirms_once_and_never_silent() -> None:
+    turn = _turn("web_hi_num", "hi", phone="0501234567")
+    assert turn.next_action == "confirm_contact"
+    assert turn.reply
+    assert "טלפון או אימייל" not in turn.reply
+    empty_voice = _turn("web_hi_num", "", voice_failed=True)
+    assert empty_voice.next_action == "voice_fail"
+    assert empty_voice.reply
+    toolkit = _turn("web_hi_num", "did you run a search console check?")
+    assert toolkit.next_action == "tool_status"
+    assert toolkit.reply
+    assert "Search Console" in toolkit.reply

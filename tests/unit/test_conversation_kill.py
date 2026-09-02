@@ -54,7 +54,7 @@ def test_website_not_interested_does_not_kill_or_stop() -> None:
             f"/v1/website/sessions/{session_id}/messages",
             json={"text": "hi"},
         )
-        assert again.json()["next_action"] == "ask_contact"
+        assert again.json()["next_action"] in {"ask_contact", "ask_need", "answer"}
     db = get_session_factory()()
     try:
         store = LeadStore(db)

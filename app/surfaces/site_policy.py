@@ -485,7 +485,17 @@ def decide_site_turn(
             confirm_contact=False,
         )
 
-    # Greeting or leftover: one question, no contact ask.
+    # Greeting or leftover: one question, unless they already left a number.
+    if has_contact and not already_confirmed:
+        return SiteDecision(
+            reply=f"{line(ASK_NEED_HE, ASK_NEED_EN, language)} {line(CONFIRM_HE, CONFIRM_EN, language)}",
+            action="confirm_contact",
+            ask_contact=False,
+            write_sheet=True,
+            ping_assaf=not already_pinged,
+            stop_selling=selling_stopped,
+            confirm_contact=True,
+        )
     return SiteDecision(
         reply=line(ASK_NEED_HE, ASK_NEED_EN, language),
         action="ask_need",
