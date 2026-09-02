@@ -48,7 +48,7 @@ Locked spreadsheet `1HW8mnc9GFXraS6oG5VIxFcJvZq9gMDJBFRxY2mpVOhI`. Tabs Contacts
 
 ## Website UX
 
-Widget `app/web/ask_mia.js` depends on the same HTTP routes. WhatsApp is shown only after a reply that already has phone or email. Config never pre-shows it. Origin-bind stays.
+Glass Hebrew widget `app/web/ask_mia.js` (`/v1/website/widget.js`). WhatsApp is shown only after a reply that already has phone or email. Config never pre-shows it. Origin-bind stays.
 
 ## Runtime
 

@@ -25,7 +25,7 @@ Telegram (voice or text)
 
 Every layer degrades independently. No model keys → the deterministic classifier answers,
 exactly as before. No embeddings → retrieval falls back to BM25. Model outage → the canned
-result is phrased and sent. Kill switch → nothing new runs at all.
+result is phrased and sent. Kill switch blocks high-risk writes; it does not 503 owner talk or site chat.
 
 ---
 

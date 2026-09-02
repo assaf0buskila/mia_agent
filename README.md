@@ -18,7 +18,7 @@ Do not read `docs/archive/` unless you need history.
 ## Surfaces
 
 1. **Telegram owner** — Dude talk. House Composio tools. Writes Contacts + Activity without asking for a URL.
-2. **Website visitors** — identify-then-sell on `https://mia.assafweb.com/v1/website/widget.js`. No Contacts row, WhatsApp handoff, or Telegram ping until phone or email exists.
+2. **Website visitors** — identify-then-sell on the glass Hebrew widget at `https://mia.assafweb.com/v1/website/widget.js`. No Contacts row, WhatsApp handoff, or Telegram ping until phone or email exists.
 
 ## CRM
 

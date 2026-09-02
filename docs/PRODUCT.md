@@ -56,6 +56,6 @@ Voice output. Auto-publish social. Self-edit production graph or prompts. Autono
 
 ## Current vs later
 
-**Now:** two simple loops, Contacts/Activity CRM, Ask Mia widget, Hebrew, origin-bind, Telegram webhook secret.
+**Now:** two simple loops, Contacts/Activity CRM, glass Hebrew `widget.js`, identify-then-sell, origin-bind, Telegram webhook secret. No invented metrics.
 
 **Not this product:** a third graph for WhatsApp, TTS, auto-deploy, invented prices, a seventh agent persona.
