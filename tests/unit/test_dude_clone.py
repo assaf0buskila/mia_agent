@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from app.brain.embeddings import FakeEmbeddingPort
 from app.brain.store import BrainStore
@@ -607,4 +609,43 @@ def test_owner_prompt_forbids_invented_counts() -> None:
     assert "Do not say they are disconnected" in SYSTEM_PROMPT
     assert "Contacts!A1:N20" in SYSTEM_PROMPT
     assert "No Lead ID" in SYSTEM_PROMPT
+    assert "No unsolicited Gmail" in SYSTEM_PROMPT
+    flags = Settings(_env_file=None)
+    assert flags.gmail_send is False
+    assert flags.auto_reply_instagram is False
+    assert flags.meta_write is False
+
+
+def test_public_surfaces_do_not_ship_assaf_private_or_my_studio() -> None:
+    root = Path(__file__).resolve().parents[2]
+    living = [
+        (root / name).read_text(encoding="utf-8").lower()
+        for name in (
+            "README.md",
+            "docs/PRODUCT.md",
+            "docs/ARCHITECTURE.md",
+            "docs/WIRING.md",
+            "docs/BRAIN_ARCHITECTURE.md",
+            "docs/RUNBOOK.md",
+        )
+    ]
+    widget = (root / "app/web/ask_mia.js").read_text(encoding="utf-8").lower()
+    env_example = (root / ".env.example").read_text(encoding="utf-8")
+    ecs_example = (root / "deploy/ecs-task-definition.example.json").read_text(
+        encoding="utf-8"
+    )
+    from app.integrations.transcribe import _ASSAFWEB_STT_KEYWORDS
+
+    for blob in (*living, widget):
+        assert "mystudio" not in blob
+        assert "mystudio.pics" not in blob
+        assert "972523393768" not in blob
+    assert "MYstudio" not in _ASSAFWEB_STT_KEYWORDS
+    assert "972523393768" not in env_example
+    assert "972523393768" not in ecs_example
+    assert "gmail.com" not in widget
+    assert "unread" not in widget
+    assert "calendar" not in widget
+    assert "lead_" not in widget
+    assert "01 leads" not in widget
 

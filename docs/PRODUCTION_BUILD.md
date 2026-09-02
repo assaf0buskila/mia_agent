@@ -4,6 +4,8 @@
 **Status:** First AWS live (ADR-014). Live host `https://mia.assafweb.com` in **eu-north-1** (ADR-019; Assaf ADOPT 2026-08-22). Not a grant of gated writes. Not AgentCore. Not Lambda for LangGraph.  
 **Related:** `.env.example`, ADR-015 in `docs/DECISIONS.md`, `docs/RUNBOOK.md`, `docs/ARCHITECTURE.md`, `deploy/`
 
+Live product: Contacts + Activity CRM, Dude Telegram, glass identify-then-sell `widget.js`. No 01 Leads, no invented metrics, no My Studio. `MIA_GMAIL_SEND` stays false unless Assaf asked. Example files never hold a real phone or token.
+
 Package manager is **uv**. Python `>=3.12`. PowerShell: `;` not `&&`. Local laptop uses `.env`. Production keys live in the **Secrets Manager box**, not in a file on the host.
 
 Cloudflare Tunnel is **test only**. Do not deploy Mia to Vercel, Cloudflare Workers, or Lambda.
@@ -373,10 +375,10 @@ Full steps: `docs/RUNBOOK.md`.
 
 | Need | Action |
 | --- | --- |
-| Emergency stop | `MIA_KILL_SWITCH=true` + restart; `/health` `"killed"` (`/health/live` stays `ok` if the process is up) |
+| Emergency stop | `MIA_KILL_SWITCH=true` + restart; high-risk writes denied; `/health` `"killed"`; owner Telegram and site chat stay up (`/health/live` stays `ok`) |
 | Stop prospect DMs only | keep `MIA_AUTOMATION_MODE=shadow` + restart |
 | Stop calendar provider writes | `MIA_CALENDAR_WRITE=false` + restart |
-| Human takeover | Owner WhatsApp phrase **and** `lead_<12 hex>` |
+| Human takeover | Assaf on Telegram or WhatsApp. No `lead_` ids. |
 | Stale webhooks | `uv run mia-reconcile --inspect` (no replay) |
 
 ---

@@ -51,7 +51,7 @@ def test_sales_llm_ready_needs_key_and_model() -> None:
     assert no_owner.whatsapp_ingest_ready() is False
     owner = Settings(
         _env_file=None,
-        whatsapp_owner_phones="972523393768",
+        whatsapp_owner_phones="15555550100",
         whatsapp_verify_token="v",
         whatsapp_app_secret="s",
     )

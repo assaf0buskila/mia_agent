@@ -52,7 +52,7 @@ Voice is an input modality on both surfaces. Same loop as text after speech-to-t
 
 ## Hard never
 
-Voice output. Auto-publish social. Self-edit production graph or prompts. Autonomous Meta budget/launch/pause. ManyChat/Make as the brain. Cold Instagram DMs. Fake urgency or unsupported claims. Website visitors executing owner tools. Dual WhatsApp or Instagram send. Telegram owner access by username. Invented metrics or prices.
+Voice output. Auto-publish social. Self-edit production graph or prompts. Autonomous Meta budget/launch/pause. ManyChat/Make as the brain. Cold Instagram DMs. Fake urgency or unsupported claims. Website visitors executing owner tools. Dual WhatsApp or Instagram send. Telegram owner access by username. Invented metrics or prices. My Studio. Assaf's phone, Gmail, CV, ID, calendar, or unread mail on the public widget. Unsolicited Gmail. Secrets in git.
 
 ## Current vs later
 

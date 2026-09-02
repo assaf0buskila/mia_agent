@@ -44,4 +44,6 @@ uv run ruff check app tests
 uv run uvicorn app.main:app --reload
 ```
 
-Fill `.env` from `.env.example`. Never commit `.env`. Never copy it onto Fargate.
+Fill `.env` from `.env.example`. Never commit `.env`. Never copy it onto Fargate. Example files stay empty of real phones and tokens.
+
+Public surfaces (the glass widget and website JSON) never ship Assaf's phone, Gmail, calendar, unread mail, CV, ID, My Studio, or a `lead_` id.
