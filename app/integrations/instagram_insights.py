@@ -2,7 +2,7 @@
 
 Read-only: recent media list + per-media insights. Composio when sender=composio
 or when Graph tokens are empty. Graph remains the default-direct path.
-No publish, comments write, captions, or media URLs.
+No publish or comments write. Owner output names each post; no anonymous totals.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from time import perf_counter
 from typing import Any, Protocol
+from urllib.parse import urlparse
 
 import httpx
 
@@ -37,7 +38,9 @@ from app.integrations.instagram import (
 from app.integrations.sheets import SheetsPort, maybe_mirror_content_insights
 
 _COMPOSIO_EXECUTE_BASE = "https://backend.composio.dev/api/v3.1/tools/execute"
-_MEDIA_LIST_FIELDS = "id,media_type"
+_MEDIA_LIST_FIELDS = "id,media_type,caption,timestamp,permalink"
+_PERMALINK_HOSTS = frozenset({"instagram.com", "www.instagram.com"})
+_UNLABELED_ACCOUNT = "unlabeled (playground vs personal unknown)"
 
 _INSIGHT_METRICS = ("views", "reach", "likes", "comments", "saved")
 _ALLOWED_GRAPH_HOSTS = frozenset({"graph.instagram.com", "graph.facebook.com"})
@@ -90,6 +93,88 @@ class _ComposioExecutionError(AdapterHttpError):
         return "error"
 
 
+@dataclass(frozen=True)
+class _MediaRef:
+    media_id: str
+    media_type: str
+    caption: str = ""
+    timestamp: str = ""
+    permalink: str = ""
+
+
+def _caption_hook(raw: object) -> str:
+    if not isinstance(raw, str):
+        return ""
+    first = raw.strip().splitlines()[0].strip() if raw.strip() else ""
+    return first[:80]
+
+
+def _sanitize_timestamp(raw: object) -> str:
+    if not isinstance(raw, str):
+        return ""
+    text = raw.strip()
+    if len(text) < 8 or len(text) > 40:
+        return ""
+    return text
+
+
+def _sanitize_permalink(raw: object) -> str:
+    if not isinstance(raw, str):
+        return ""
+    text = raw.strip()
+    try:
+        parsed = urlparse(text)
+    except ValueError:
+        return ""
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme != "https" or host not in _PERMALINK_HOSTS:
+        return ""
+    return text.split("?", 1)[0][:200]
+
+
+def _parse_media_entry(entry: object) -> _MediaRef | None:
+    if not isinstance(entry, dict):
+        return None
+    raw_id = entry.get("id")
+    if isinstance(raw_id, int) and not isinstance(raw_id, bool):
+        raw_id = str(raw_id)
+    raw_type = entry.get("media_type")
+    if not isinstance(raw_id, str) or not isinstance(raw_type, str):
+        return None
+    media_id = raw_id.strip()
+    media_type = raw_type.strip().upper()
+    if not is_allowlisted_media_id(media_id):
+        return None
+    if media_type not in ALLOWLISTED_MEDIA_TYPES:
+        return None
+    return _MediaRef(
+        media_id=media_id,
+        media_type=media_type,
+        caption=_caption_hook(entry.get("caption")),
+        timestamp=_sanitize_timestamp(entry.get("timestamp")),
+        permalink=_sanitize_permalink(entry.get("permalink")),
+    )
+
+
+def _insight_from_media(
+    media: _MediaRef, metrics: dict[str, str | None] | None
+) -> ContentInsight:
+    payload = dict(metrics or {})
+    return ContentInsight(
+        media_id=media.media_id,
+        media_type=media.media_type,
+        caption=media.caption,
+        timestamp=media.timestamp,
+        permalink=media.permalink,
+        account_kind="",
+        views=payload.get("views"),
+        reach=payload.get("reach"),
+        likes=payload.get("likes"),
+        comments=payload.get("comments"),
+        saved=payload.get("saved"),
+    )
+
+
 class InstagramInsightsPort(Protocol):
     def list_recent_insights(self, *, limit: int = 5) -> list[ContentInsight]: ...
 
@@ -124,17 +209,9 @@ class GraphInstagramInsightsPort:
         try:
             media_items = self._fetch_media_list(limit=capped, budget=budget)
             results: list[ContentInsight] = []
-            for media_id, media_type in media_items:
-                metrics = self._fetch_insights(media_id, budget=budget)
-                if metrics is None:
-                    continue
-                results.append(
-                    ContentInsight(
-                        media_id=media_id,
-                        media_type=media_type,
-                        **metrics,
-                    )
-                )
+            for media in media_items:
+                metrics = self._fetch_insights(media.media_id, budget=budget)
+                results.append(_insight_from_media(media, metrics))
             return results
         except (
             httpx.HTTPError,

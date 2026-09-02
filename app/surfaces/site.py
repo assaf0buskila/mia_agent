@@ -21,6 +21,36 @@ AFTER_CAPTURE = (
     "אני לא ממציאה מחיר או התחייבות מכאן."
 )
 NO_PRICE = "אין לי מחיר לתת כאן. אסף ידבר איתכם על זה."
+VOICE_ANSWER = (
+    "כן. אפשר להקליט כאן, אני ממירה לטקסט וממשיכה משם. "
+    "אם ההקלטה לא נקלטה, נסו שוב או כתבו."
+)
+PRODUCT_ANSWER = (
+    "אסף בונה עובדים דיגיטליים לעסקים: אוטומציות, סוכני AI באתר ובוואטסאפ, "
+    "ואתרים בעברית. אין לי מחיר לתת כאן."
+)
+_VOICE_MARKERS = (
+    "voice",
+    "קול",
+    "הקלטה",
+    "דיבור",
+    "שומעת",
+    "שומע",
+    "מבינה קול",
+    "מבינים קול",
+    "understand voice",
+)
+_PRODUCT_MARKERS = (
+    "מה אתם",
+    "מה מיה",
+    "what do you",
+    "do you",
+    "can you",
+    "שירותים",
+    "אוטומציה",
+    "עובד דיגיטלי",
+    "ai agent",
+)
 
 
 @dataclass
@@ -102,7 +132,12 @@ def run_site_turn(
         date=date,
         text=text,
     )
-    if not session.fields.want and text.strip() and not _is_contact_only(text):
+    if (
+        not session.fields.want
+        and text.strip()
+        and not _is_contact_only(text)
+        and not _is_product_question(text)
+    ):
         session.fields = CapturedFields(
             name=session.fields.name,
             phone=session.fields.phone,
@@ -191,11 +226,36 @@ def _conversation_summary(session: SiteSession) -> str:
 def _site_reply(fields: CapturedFields, text: str) -> tuple[str, str]:
     if _asks_price(text):
         return NO_PRICE, "no_price"
+    product = _product_answer(text)
+    if product:
+        if fields.has_phone_or_email():
+            return f"{product} {AFTER_CAPTURE}", "handoff"
+        return product, "answer"
     if not fields.has_phone_or_email():
         if fields.want:
             return ASK_CONTACT, "ask_contact"
         return ASK_NEED, "ask_need"
     return AFTER_CAPTURE, "handoff"
+
+
+def _is_voice_question(text: str) -> bool:
+    lowered = text.lower()
+    return any(marker in lowered for marker in _VOICE_MARKERS)
+
+
+def _is_product_question(text: str) -> bool:
+    if _is_voice_question(text):
+        return True
+    lowered = text.lower()
+    return any(marker in lowered for marker in _PRODUCT_MARKERS)
+
+
+def _product_answer(text: str) -> str:
+    if _is_voice_question(text):
+        return VOICE_ANSWER
+    if _is_product_question(text):
+        return PRODUCT_ANSWER
+    return ""
 
 
 def _asks_price(text: str) -> bool:
