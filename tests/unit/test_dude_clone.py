@@ -522,7 +522,83 @@ def test_crm_range_is_contacts_and_rejects_01_leads() -> None:
     )
     assert listed["tabs"] == ["Contacts", "Activity"]
     assert "01 Leads" not in listed["tabs"]
+    assert prefer_crm_tabs(["Contacts", "Activity"]) == ["Contacts", "Activity"]
     assert prefer_crm_tabs(["01 Leads", "KPI", "Contacts"]) == ["Contacts", "KPI"]
+
+
+def test_live_workbook_writers_target_contacts_and_activity_only() -> None:
+    """Live sheet has those two tabs only. Leftover mirrors must not recreate archive tabs."""
+    import httpx
+    from app.integrations.sheets import (
+        CONTACTS_ACTIVITY_TAB,
+        CONTACTS_TAB,
+        CRM_WORKSPACE_TABS,
+        ActivityMirrorRow,
+        ComposioSheetsPort,
+        LeadMirrorRow,
+        SourceMirrorRow,
+    )
+
+    assert [name for name, _headers in CRM_WORKSPACE_TABS] == ["Contacts", "Activity"]
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = request.content.decode()
+        calls.append(f"{request.url} {body}")
+        return httpx.Response(200, json={"successful": True, "data": {}})
+
+    port = ComposioSheetsPort(
+        api_key="cmp-test",
+        user_id="house-entity",
+        spreadsheet_id=LOCKED_SPREADSHEET_ID,
+        allowed_spreadsheet_ids=frozenset({LOCKED_SPREADSHEET_ID}),
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    port.write_locked_contact(
+        ["דנה", "0501234567", "", "", "", "", "", "אתר", "", "", "", "", "", ""],
+        key_column="טלפון",
+    )
+    port.append_locked_activity(["2026-09-02", "מיה", "telegram", "רשמה", "נרשם"])
+    port.upsert_lead(
+        LeadMirrorRow(
+            lead_id="lead_x",
+            channel="website",
+            stage="open",
+            fit="good",
+            pain_level=1,
+            next_action="ask",
+        )
+    )
+    port.upsert_source(
+        SourceMirrorRow(
+            lead_id="lead_x",
+            utm_source="meta",
+            utm_medium="cpc",
+            utm_campaign="",
+            utm_content="",
+            landing_page="",
+            referrer="",
+        )
+    )
+    port.upsert_activity(
+        ActivityMirrorRow(
+            run_id="run_x",
+            occurred_on="2026-09-02",
+            channel="website",
+            next_action="ask",
+            model="canned",
+            kill_switch=False,
+            cost_usd=0,
+            lead_id="lead_x",
+        )
+    )
+    blob = " ".join(calls)
+    assert CONTACTS_TAB in blob
+    assert CONTACTS_ACTIVITY_TAB in blob
+    assert "01 Leads" not in blob
+    assert "10 Mia Activity" not in blob
+    assert "06 Lead Sources" not in blob
+    assert blob.count("GOOGLESHEETS") == 2
 
 
 def test_owner_prompt_forbids_invented_counts() -> None:

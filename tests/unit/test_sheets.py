@@ -19,24 +19,7 @@ from app.domain.meetings import STATUS_OFFERED
 from app.domain.sales import FitLevel, NextAction, PainLevel, SalesState
 from app.integrations.base import RecordingMessagePort
 from app.integrations.sheets import (
-    ACTIVITY_HEADERS,
-    ACTIVITY_KEY_COLUMN,
-    ACTIVITY_SHEET_NAME,
-    COMPOSIO_GOOGLESHEETS_VERSION,
-    COMPOSIO_UPSERT_ROWS_TOOL,
-    FOLLOWUPS_HEADERS,
-    FOLLOWUPS_KEY_COLUMN,
-    FOLLOWUPS_SHEET_NAME,
-    KPI_HEADERS,
-    KPI_KEY_COLUMN,
-    KPI_SHEET_NAME,
-    MEETINGS_HEADERS,
-    MEETINGS_KEY_COLUMN,
-    MEETINGS_SHEET_NAME,
     SHEETS_MIRROR_SCOPE,
-    SOURCES_HEADERS,
-    SOURCES_KEY_COLUMN,
-    SOURCES_SHEET_NAME,
     ActivityMirrorRow,
     ComposioSheetsPort,
     ContentMirrorRow,
@@ -1416,225 +1399,74 @@ def test_composio_sheets_port_request_shape() -> None:
     assert captured == {}
 
 
-def test_composio_sheets_port_follow_up_request_shape() -> None:
-    captured: dict[str, object] = {}
+def _composio_port_counting_calls() -> tuple[ComposioSheetsPort, list[str]]:
+    calls: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        captured["url"] = str(request.url)
-        captured["json"] = json.loads(request.content)
-        return httpx.Response(
-            200,
-            json={"data": {}, "error": None, "successful": True},
-        )
+        calls.append(str(request.url))
+        return httpx.Response(200, json={"data": {}, "error": None, "successful": True})
 
-    transport = httpx.MockTransport(handler)
-    client = httpx.Client(transport=transport)
     port = ComposioSheetsPort(
         api_key="cmp-test",
         user_id="user-abc",
         spreadsheet_id="spreadsheet-xyz",
-        client=client,
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
     )
-    row = FollowUpMirrorRow(
-        lead_id="lead_fu_mirror_1",
-        due_at="2026-08-22",
-        channel="whatsapp",
-        status=STATUS_PENDING,
-        result=REASON_MEETING_OFFERED,
-    )
-    port.upsert_follow_up(row)
-
-    assert str(captured["url"]).endswith(f"/{COMPOSIO_UPSERT_ROWS_TOOL}")
-    body = captured["json"]
-    assert isinstance(body, dict)
-    assert body["version"] == COMPOSIO_GOOGLESHEETS_VERSION
-    arguments = body["arguments"]
-    assert isinstance(arguments, dict)
-    assert arguments["sheetName"] == FOLLOWUPS_SHEET_NAME
-    assert arguments["keyColumn"] == FOLLOWUPS_KEY_COLUMN
-    assert arguments["headers"] == FOLLOWUPS_HEADERS
-    assert arguments["rows"] == [
-        ["lead_fu_mirror_1", "2026-08-22", "whatsapp", STATUS_PENDING, REASON_MEETING_OFFERED]
-    ]
+    return port, calls
 
 
-def test_composio_sheets_port_activity_request_shape() -> None:
-    captured: dict[str, object] = {}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        captured["url"] = str(request.url)
-        captured["json"] = json.loads(request.content)
-        return httpx.Response(
-            200,
-            json={"data": {}, "error": None, "successful": True},
+def test_composio_sheets_port_retired_mirrors_do_not_write_deleted_tabs() -> None:
+    port, calls = _composio_port_counting_calls()
+    port.upsert_follow_up(
+        FollowUpMirrorRow(
+            lead_id="lead_fu_mirror_1",
+            due_at="2026-08-22",
+            channel="whatsapp",
+            status=STATUS_PENDING,
+            result=REASON_MEETING_OFFERED,
         )
-
-    transport = httpx.MockTransport(handler)
-    client = httpx.Client(transport=transport)
-    port = ComposioSheetsPort(
-        api_key="cmp-test",
-        user_id="user-abc",
-        spreadsheet_id="spreadsheet-xyz",
-        client=client,
     )
-    row = ActivityMirrorRow(
-        run_id="run_act_mirror_1",
-        occurred_on="2026-08-21",
-        channel="website",
-        next_action="understand_workflow",
-        model=MODEL_CANNED,
-        kill_switch=False,
-        cost_usd=0,
-        lead_id="lead_mirror_1",
-    )
-    port.upsert_activity(row)
-
-    assert str(captured["url"]).endswith(f"/{COMPOSIO_UPSERT_ROWS_TOOL}")
-    body = captured["json"]
-    assert isinstance(body, dict)
-    assert body["version"] == COMPOSIO_GOOGLESHEETS_VERSION
-    arguments = body["arguments"]
-    assert isinstance(arguments, dict)
-    assert arguments["sheetName"] == ACTIVITY_SHEET_NAME
-    assert arguments["keyColumn"] == ACTIVITY_KEY_COLUMN
-    assert arguments["headers"] == ACTIVITY_HEADERS
-    assert arguments["rows"] == [
-        [
-            "run_act_mirror_1",
-            "2026-08-21",
-            "website",
-            "understand_workflow",
-            MODEL_CANNED,
-            "false",
-            0,
-            "lead_mirror_1",
-        ]
-    ]
-
-
-def test_composio_sheets_port_source_request_shape() -> None:
-    captured: dict[str, object] = {}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        captured["url"] = str(request.url)
-        captured["json"] = json.loads(request.content)
-        return httpx.Response(
-            200,
-            json={"data": {}, "error": None, "successful": True},
+    port.upsert_activity(
+        ActivityMirrorRow(
+            run_id="run_act_mirror_1",
+            occurred_on="2026-08-21",
+            channel="website",
+            next_action="understand_workflow",
+            model=MODEL_CANNED,
+            kill_switch=False,
+            cost_usd=0,
+            lead_id="lead_mirror_1",
         )
-
-    transport = httpx.MockTransport(handler)
-    client = httpx.Client(transport=transport)
-    port = ComposioSheetsPort(
-        api_key="cmp-test",
-        user_id="user-abc",
-        spreadsheet_id="spreadsheet-xyz",
-        client=client,
     )
-    row = SourceMirrorRow(
-        lead_id="lead_src_mirror_1",
-        utm_source="meta",
-        utm_medium="cpc",
-        utm_campaign="yuma",
-        utm_content="",
-        landing_page="/pricing",
-        referrer="",
-    )
-    port.upsert_source(row)
-
-    assert str(captured["url"]).endswith(f"/{COMPOSIO_UPSERT_ROWS_TOOL}")
-    body = captured["json"]
-    assert isinstance(body, dict)
-    assert body["version"] == COMPOSIO_GOOGLESHEETS_VERSION
-    arguments = body["arguments"]
-    assert isinstance(arguments, dict)
-    assert arguments["sheetName"] == SOURCES_SHEET_NAME
-    assert arguments["keyColumn"] == SOURCES_KEY_COLUMN
-    assert arguments["headers"] == SOURCES_HEADERS
-    assert arguments["rows"] == [
-        ["lead_src_mirror_1", "meta", "cpc", "yuma", "", "/pricing", ""]
-    ]
-
-
-def test_composio_sheets_port_meeting_request_shape() -> None:
-    captured: dict[str, object] = {}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        captured["url"] = str(request.url)
-        captured["json"] = json.loads(request.content)
-        return httpx.Response(
-            200,
-            json={"data": {}, "error": None, "successful": True},
+    port.upsert_source(
+        SourceMirrorRow(
+            lead_id="lead_src_mirror_1",
+            utm_source="meta",
+            utm_medium="cpc",
+            utm_campaign="yuma",
+            utm_content="",
+            landing_page="/pricing",
+            referrer="",
         )
-
-    transport = httpx.MockTransport(handler)
-    client = httpx.Client(transport=transport)
-    port = ComposioSheetsPort(
-        api_key="cmp-test",
-        user_id="user-abc",
-        spreadsheet_id="spreadsheet-xyz",
-        client=client,
     )
-    row = MeetingMirrorRow(
-        lead_id="lead_meet_mirror_1",
-        status=STATUS_OFFERED,
-        source="website",
-    )
-    port.upsert_meeting(row)
-
-    assert str(captured["url"]).endswith(f"/{COMPOSIO_UPSERT_ROWS_TOOL}")
-    body = captured["json"]
-    assert isinstance(body, dict)
-    assert body["version"] == COMPOSIO_GOOGLESHEETS_VERSION
-    arguments = body["arguments"]
-    assert isinstance(arguments, dict)
-    assert arguments["sheetName"] == MEETINGS_SHEET_NAME
-    assert arguments["keyColumn"] == MEETINGS_KEY_COLUMN
-    assert arguments["headers"] == MEETINGS_HEADERS
-    assert arguments["rows"] == [
-        ["lead_meet_mirror_1", STATUS_OFFERED, "website", "", "", ""]
-    ]
-
-
-def test_composio_sheets_port_kpi_request_shape() -> None:
-    captured: dict[str, object] = {}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        captured["url"] = str(request.url)
-        captured["json"] = json.loads(request.content)
-        return httpx.Response(
-            200,
-            json={"data": {}, "error": None, "successful": True},
+    port.upsert_meeting(
+        MeetingMirrorRow(
+            lead_id="lead_meet_mirror_1",
+            status=STATUS_OFFERED,
+            source="website",
         )
-
-    transport = httpx.MockTransport(handler)
-    client = httpx.Client(transport=transport)
-    port = ComposioSheetsPort(
-        api_key="cmp-test",
-        user_id="user-abc",
-        spreadsheet_id="spreadsheet-xyz",
-        client=client,
     )
-    row = KpiMirrorRow(
-        week_start="2026-08-17",
-        leads=3,
-        meetings_offered=1,
-        handoffs=0,
-        messages_in=5,
-        follow_ups_pending=2,
+    port.upsert_kpi(
+        KpiMirrorRow(
+            week_start="2026-08-17",
+            leads=3,
+            meetings_offered=1,
+            handoffs=0,
+            messages_in=5,
+            follow_ups_pending=2,
+        )
     )
-    port.upsert_kpi(row)
-
-    assert str(captured["url"]).endswith(f"/{COMPOSIO_UPSERT_ROWS_TOOL}")
-    body = captured["json"]
-    assert isinstance(body, dict)
-    assert body["version"] == COMPOSIO_GOOGLESHEETS_VERSION
-    arguments = body["arguments"]
-    assert isinstance(arguments, dict)
-    assert arguments["sheetName"] == KPI_SHEET_NAME
-    assert arguments["keyColumn"] == KPI_KEY_COLUMN
-    assert arguments["headers"] == KPI_HEADERS
-    assert arguments["rows"] == [["2026-08-17", 3, 1, 0, 5, 2]]
+    assert calls == []
 
 
 def test_composio_sheets_port_protocol_has_only_allowlisted_owner_operations() -> None:

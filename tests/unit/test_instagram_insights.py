@@ -23,11 +23,6 @@ from app.integrations.instagram_insights import (
     format_content_insights_line,
 )
 from app.integrations.sheets import (
-    COMPOSIO_GOOGLESHEETS_VERSION,
-    COMPOSIO_UPSERT_ROWS_TOOL,
-    CONTENT_HEADERS,
-    CONTENT_KEY_COLUMN,
-    CONTENT_SHEET_NAME,
     ContentMirrorRow,
     FakeSheetsPort,
     mirror_content,
@@ -775,18 +770,7 @@ def test_composio_sheets_port_content_request_shape() -> None:
     )
     port.upsert_content(row)
 
-    assert str(captured["url"]).endswith(f"/{COMPOSIO_UPSERT_ROWS_TOOL}")
-    body = captured["json"]
-    assert isinstance(body, dict)
-    assert body["version"] == COMPOSIO_GOOGLESHEETS_VERSION
-    arguments = body["arguments"]
-    assert isinstance(arguments, dict)
-    assert arguments["sheetName"] == CONTENT_SHEET_NAME
-    assert arguments["keyColumn"] == CONTENT_KEY_COLUMN
-    assert arguments["headers"] == CONTENT_HEADERS
-    assert arguments["rows"] == [
-        [MEDIA_ID_1, "IMAGE", "1200", "900", "45", "3", "12", 2]
-    ]
+    assert captured == {}
 
 
 def test_build_insights_composio_when_sender_composio() -> None:

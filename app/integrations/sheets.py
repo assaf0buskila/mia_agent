@@ -1,8 +1,10 @@
 """Google Sheets port.
 
 Live CRM writes go to the locked Contacts + Activity workbook only.
-``upsert_lead`` is a no-op so ``01 Leads`` is never written. Postgres remains
-recoverable memory. Owner reads/updates of other allowlisted Sheets stay bounded.
+Archive tabs are gone. Leftover mirror upserts (``01 Leads``, ``10 Mia Activity``,
+and the numbered 04–09 tabs) are no-ops so they cannot recreate them.
+Postgres remains recoverable memory. Owner reads/updates of other allowlisted
+Sheets stay bounded.
 
 Production adapter: Composio ``GOOGLESHEETS`` toolkit version ``20260826_00``,
 pins the legacy mirror ``GOOGLESHEETS_UPSERT_ROWS`` plus owner-operational
@@ -864,127 +866,25 @@ class ComposioSheetsPort:
         del row
 
     def upsert_source(self, row: SourceMirrorRow) -> None:
-        self._execute_upsert(
-            sheet_name=SOURCES_SHEET_NAME,
-            key_column=SOURCES_KEY_COLUMN,
-            headers=SOURCES_HEADERS,
-            values=[
-                [
-                    row.lead_id,
-                    row.utm_source,
-                    row.utm_medium,
-                    row.utm_campaign,
-                    row.utm_content,
-                    row.landing_page,
-                    row.referrer,
-                ]
-            ],
-        )
+        del row
 
     def upsert_follow_up(self, row: FollowUpMirrorRow) -> None:
-        self._execute_upsert(
-            sheet_name=FOLLOWUPS_SHEET_NAME,
-            key_column=FOLLOWUPS_KEY_COLUMN,
-            headers=FOLLOWUPS_HEADERS,
-            values=[
-                [
-                    row.lead_id,
-                    row.due_at,
-                    row.channel,
-                    row.status,
-                    row.result,
-                ]
-            ],
-        )
+        del row
 
     def upsert_deal(self, row: DealMirrorRow) -> None:
-        self._execute_upsert(
-            sheet_name=DEALS_SHEET_NAME,
-            key_column=DEALS_KEY_COLUMN,
-            headers=DEALS_HEADERS,
-            values=[
-                [
-                    row.lead_id,
-                    row.stage,
-                    row.source,
-                    row.attribution_confidence,
-                    row.expected_value,
-                    row.closed_value,
-                ]
-            ],
-        )
+        del row
 
     def upsert_meeting(self, row: MeetingMirrorRow) -> None:
-        self._execute_upsert(
-            sheet_name=MEETINGS_SHEET_NAME,
-            key_column=MEETINGS_KEY_COLUMN,
-            headers=MEETINGS_HEADERS,
-            values=[
-                [
-                    row.lead_id,
-                    row.status,
-                    row.source,
-                    row.scheduled_at,
-                    row.calendar_event_id,
-                    row.summary,
-                ]
-            ],
-        )
+        del row
 
     def upsert_activity(self, row: ActivityMirrorRow) -> None:
-        self._execute_upsert(
-            sheet_name=ACTIVITY_SHEET_NAME,
-            key_column=ACTIVITY_KEY_COLUMN,
-            headers=ACTIVITY_HEADERS,
-            values=[
-                [
-                    row.run_id,
-                    row.occurred_on,
-                    row.channel,
-                    row.next_action,
-                    row.model,
-                    str(row.kill_switch).lower(),
-                    row.cost_usd,
-                    row.lead_id or "",
-                ]
-            ],
-        )
+        del row
 
     def upsert_kpi(self, row: KpiMirrorRow) -> None:
-        self._execute_upsert(
-            sheet_name=KPI_SHEET_NAME,
-            key_column=KPI_KEY_COLUMN,
-            headers=KPI_HEADERS,
-            values=[
-                [
-                    row.week_start,
-                    row.leads,
-                    row.meetings_offered,
-                    row.handoffs,
-                    row.messages_in,
-                    row.follow_ups_pending,
-                ]
-            ],
-        )
+        del row
 
     def upsert_content(self, row: ContentMirrorRow) -> None:
-        self._execute_upsert(
-            sheet_name=CONTENT_SHEET_NAME,
-            key_column=CONTENT_KEY_COLUMN,
-            headers=CONTENT_HEADERS,
-            values=[
-                [
-                    row.media_id,
-                    row.media_type,
-                    row.views,
-                    row.reach,
-                    row.likes,
-                    row.comments,
-                    row.saved,
-                    row.lead_signals,
-                ]
-            ],
-        )
+        del row
 
 
 class FakeSheetsPort:
