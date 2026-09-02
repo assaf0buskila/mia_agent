@@ -614,6 +614,10 @@ def test_owner_prompt_forbids_invented_counts() -> None:
     assert flags.gmail_send is False
     assert flags.auto_reply_instagram is False
     assert flags.meta_write is False
+    from app.integrations.composio_catalog import NEVER_AUTO_PUBLISH_SLUGS
+
+    assert "INSTAGRAM_CREATE_POST" in NEVER_AUTO_PUBLISH_SLUGS
+    assert "LINKEDIN_CREATE_LINKED_IN_POST" in NEVER_AUTO_PUBLISH_SLUGS
 
 
 def test_public_surfaces_do_not_ship_assaf_private_or_my_studio() -> None:
@@ -648,4 +652,10 @@ def test_public_surfaces_do_not_ship_assaf_private_or_my_studio() -> None:
     assert "calendar" not in widget
     assert "lead_" not in widget
     assert "01 leads" not in widget
+    website = (root / "app/api/website.py").read_text(encoding="utf-8")
+    demo = (root / "app/api/demo.py").read_text(encoding="utf-8")
+    assert "get_calendar_port" not in website
+    assert "get_calendar_booking_port" not in website
+    assert "get_calendar_port" not in demo
+    assert "CalendarPort" not in website
 

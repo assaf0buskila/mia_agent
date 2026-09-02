@@ -95,6 +95,7 @@ from app.integrations.calendar import (
     build_calendar_port,
 )
 from app.integrations.composio_catalog import (
+    NEVER_AUTO_PUBLISH_SLUGS,
     NEVER_AUTO_SEND_SLUGS,
     SHEETS_BOUNDED_WRITE_SLUGS,
     ComposioCatalog,
@@ -1744,6 +1745,15 @@ def _composio_execute_with_catalog(
                 "this Composio tool sends and is never auto-executed; "
                 "owner-requested Gmail send uses the named Telegram draft "
                 "and approve path"
+            ),
+        )
+    if tool.slug in NEVER_AUTO_PUBLISH_SLUGS:
+        return ToolResult(
+            ok=False,
+            error=(
+                "this Composio tool publishes and is never auto-executed; "
+                "Instagram is analytics-only; LinkedIn writes use the named "
+                "Telegram approval path"
             ),
         )
     if tool.slug in SHEETS_BOUNDED_WRITE_SLUGS:

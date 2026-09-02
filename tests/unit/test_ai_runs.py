@@ -26,7 +26,6 @@ from app.domain.sales import NextAction
 from app.domain.tools import ToolOutcome
 from app.integrations.base import RecordingMessagePort
 from app.integrations.calendar import DisabledCalendarPort
-from app.integrations.calendar_booking import DisabledCalendarBookingPort
 from app.integrations.sales_reply import (
     _SYSTEM_PROMPT,
     FakeSalesReplyPort,
@@ -131,8 +130,6 @@ def test_kill_switch_stops_website_chat_without_ai_run() -> None:
             session_id="web_kill_switch",
             text=VISITOR_TEXT,
             settings=settings,
-            calendar=DisabledCalendarPort(),
-            calendar_booking=DisabledCalendarBookingPort(),
             sheets=DisabledSheetsPort(),
         )
         assert out.message

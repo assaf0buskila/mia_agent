@@ -513,9 +513,13 @@ class _Catalog:
             "GOOGLESHEETS_VALUES_GET",
             "INSTAGRAM_GET_IG_USER_MEDIA",
             "INSTAGRAM_DELETE_COMMENT",
+            "INSTAGRAM_POST_IG_USER_MEDIA",
             "INSTAGRAM_POST_IG_USER_MEDIA_PUBLISH",
+            "INSTAGRAM_CREATE_MEDIA_CONTAINER",
+            "INSTAGRAM_CREATE_POST",
             "LINKEDIN_DELETE_POST",
             "LINKEDIN_POST_UPDATE",
+            "LINKEDIN_CREATE_LINKED_IN_POST",
         }:
             toolkit = slug.split("_", 1)[0]
             if slug.startswith("GOOGLESHEETS_"):
@@ -666,18 +670,22 @@ def test_official_sheet_ig_linkedin_policy_keeps_deletes_off_and_does_not_autopu
         assert "destructive" not in (result.error or "")
         assert "sheets_update" in (result.error or "")
 
-    publish = execute_tool(
-        "composio_execute_tool",
-        {"tool_slug": "INSTAGRAM_POST_IG_USER_MEDIA_PUBLISH", "arguments_json": "{}"},
-        ctx,
-    )
-    assert publish.ok and "Composio action is ready" in publish.text
-    li_post = execute_tool(
-        "composio_execute_tool",
-        {"tool_slug": "LINKEDIN_POST_UPDATE", "arguments_json": "{}"},
-        ctx,
-    )
-    assert li_post.ok and "Composio action is ready" in li_post.text
+    for slug in (
+        "INSTAGRAM_POST_IG_USER_MEDIA",
+        "INSTAGRAM_POST_IG_USER_MEDIA_PUBLISH",
+        "INSTAGRAM_CREATE_MEDIA_CONTAINER",
+        "INSTAGRAM_CREATE_POST",
+        "LINKEDIN_CREATE_LINKED_IN_POST",
+        "LINKEDIN_POST_UPDATE",
+    ):
+        result = execute_tool(
+            "composio_execute_tool",
+            {"tool_slug": slug, "arguments_json": "{}"},
+            ctx,
+        )
+        assert not result.ok
+        assert "never auto-executed" in result.error
+        assert "destructive" not in (result.error or "")
 
 
 def test_gmail_send_is_never_auto_executed_and_delete_requires_approval(

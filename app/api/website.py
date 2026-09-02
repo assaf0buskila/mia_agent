@@ -8,8 +8,6 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.api.deps import (
-    get_calendar_booking_port,
-    get_calendar_port,
     get_db,
     get_sheets_port,
     get_telegram_port,
@@ -33,8 +31,6 @@ from app.domain.events import (
 )
 from app.domain.handoff import click_to_chat_url
 from app.integrations.base import MessagePort
-from app.integrations.calendar import CalendarPort
-from app.integrations.calendar_booking import CalendarBookingPort
 from app.integrations.sheets import SheetsPort
 from app.integrations.transcribe import TranscriptionPort, TranscriptResult
 from app.surfaces.crm import build_contacts_crm
@@ -227,8 +223,6 @@ def process_website_message(
     session_id: str,
     text: str,
     settings: Settings,
-    calendar: CalendarPort,
-    calendar_booking: CalendarBookingPort,
     sheets: SheetsPort,
     audio_meta: TranscriptResult | None = None,
     stt_latency_ms: int = 0,
@@ -238,7 +232,7 @@ def process_website_message(
     date: str = "",
     owner_port: MessagePort | None = None,
 ) -> MessageOut:
-    del calendar, calendar_booking, owner_port
+    del owner_port
     if not store.website_session_exists(session_id):
         raise HTTPException(status_code=404, detail="session not found")
     if site_book().get(session_id) is None:
@@ -519,8 +513,6 @@ async def post_message(
     session_id: str,
     body: MessageIn,
     db: Session = Depends(get_db),
-    calendar: CalendarPort = Depends(get_calendar_port),
-    calendar_booking: CalendarBookingPort = Depends(get_calendar_booking_port),
     sheets: SheetsPort = Depends(get_sheets_port),
     owner_port: MessagePort = Depends(get_telegram_port),
 ) -> MessageOut:
@@ -533,8 +525,6 @@ async def post_message(
         session_id=session_id,
         text=body.text,
         settings=settings,
-        calendar=calendar,
-        calendar_booking=calendar_booking,
         sheets=sheets,
         name=body.name,
         phone=body.phone,
@@ -557,8 +547,6 @@ async def post_message(
 async def post_voice(
     session_id: str,
     db: Session = Depends(get_db),
-    calendar: CalendarPort = Depends(get_calendar_port),
-    calendar_booking: CalendarBookingPort = Depends(get_calendar_booking_port),
     sheets: SheetsPort = Depends(get_sheets_port),
     transcribe_port: TranscriptionPort = Depends(get_transcription_port),
     owner_port: MessagePort = Depends(get_telegram_port),
@@ -594,8 +582,6 @@ async def post_voice(
         session_id=session_id,
         text=text,
         settings=settings,
-        calendar=calendar,
-        calendar_booking=calendar_booking,
         sheets=sheets,
         audio_meta=result,
         stt_latency_ms=elapsed_ms(started),
