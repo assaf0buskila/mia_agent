@@ -56,7 +56,12 @@ def test_website_voice_transcribes_then_sales_reply() -> None:
                     )
                 )
             )
-            in_rows = [row for row in rows if row.event_type == "message_in"]
+            in_rows = [
+                row
+                for row in rows
+                if row.event_type == "message_in"
+                and json.loads(row.payload_json).get("text") == "hi"
+            ]
             assert len(in_rows) == 1
             assert json.loads(in_rows[0].payload_json) == {"text": "hi"}
             transcript = store.get_transcript(

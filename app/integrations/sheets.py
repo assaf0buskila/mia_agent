@@ -71,7 +71,11 @@ from app.domain.tools import (
 )
 from app.surfaces.crm import (
     ACTIVITY_HEADERS as CONTACTS_ACTIVITY_HEADERS,
+)
+from app.surfaces.crm import (
     ACTIVITY_TAB as CONTACTS_ACTIVITY_TAB,
+)
+from app.surfaces.crm import (
     CONTACTS_HEADERS,
     CONTACTS_TAB,
     LOCKED_SPREADSHEET_ID,
@@ -188,6 +192,12 @@ CRM_WORKSPACE_TABS: tuple[tuple[str, list[str]], ...] = (
 )
 CRM_WORKSPACE_SCHEMA_VERSION = "mia-contacts-v1"
 CRM_WORKSPACE_SCHEMA_RANGE = f"{CONTACTS_ACTIVITY_TAB}!F1"
+
+
+def _crm_header_range(sheet_name: str, headers: list[str]) -> str:
+    """Contacts is A1:N1 (14 cols). Owner-read 10-col bound does not apply here."""
+    end = chr(ord("A") + len(headers) - 1)
+    return f"{sheet_name}!A1:{end}1"
 _METRIC_PATTERN = re.compile(r"^[0-9]*$")
 _A1_RANGE_PATTERN = re.compile(
     r"^(?:[A-Za-z0-9 _-]{1,80}!)?[A-Z]{1,3}[1-9][0-9]{0,5}(?::[A-Z]{1,3}[1-9][0-9]{0,5})?$"
@@ -679,11 +689,14 @@ class ComposioSheetsPort:
                 if sheet_name not in existing:
                     header_is_current[sheet_name] = False
                     continue
-                final_column = chr(ord("A") + len(headers) - 1)
-                header_is_current[sheet_name] = self.read_values(
-                    spreadsheet_id=spreadsheet_id,
-                    a1_range=f"{sheet_name}!A1:{final_column}1",
-                ) == [headers]
+                header_range = _crm_header_range(sheet_name, headers)
+                header_data = self._execute_tool(
+                    COMPOSIO_VALUES_GET_TOOL,
+                    {"spreadsheetId": spreadsheet_id, "range": header_range},
+                )
+                header_is_current[sheet_name] = (header_data or {}).get("values") == [
+                    headers
+                ]
 
             if marker_is_current and all(header_is_current.values()):
                 self._workspace_ready_until[self._workspace_key] = (
@@ -705,16 +718,23 @@ class ComposioSheetsPort:
             for sheet_name, headers in CRM_WORKSPACE_TABS:
                 if header_is_current[sheet_name]:
                     continue
-                final_column = chr(ord("A") + len(headers) - 1)
-                self.update_values(
-                    spreadsheet_id=spreadsheet_id,
-                    a1_range=f"{sheet_name}!A1:{final_column}1",
-                    values=[headers],
+                self._execute_tool(
+                    COMPOSIO_VALUES_UPDATE_TOOL,
+                    {
+                        "spreadsheetId": spreadsheet_id,
+                        "range": _crm_header_range(sheet_name, headers),
+                        "values": [headers],
+                        "valueInputOption": "RAW",
+                    },
                 )
-            self.update_values(
-                spreadsheet_id=spreadsheet_id,
-                a1_range=CRM_WORKSPACE_SCHEMA_RANGE,
-                values=[[CRM_WORKSPACE_SCHEMA_VERSION]],
+            self._execute_tool(
+                COMPOSIO_VALUES_UPDATE_TOOL,
+                {
+                    "spreadsheetId": spreadsheet_id,
+                    "range": CRM_WORKSPACE_SCHEMA_RANGE,
+                    "values": [[CRM_WORKSPACE_SCHEMA_VERSION]],
+                    "valueInputOption": "RAW",
+                },
             )
             self._workspace_ready_until[self._workspace_key] = (
                 monotonic() + self._workspace_refresh_seconds

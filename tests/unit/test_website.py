@@ -187,9 +187,12 @@ def test_website_api_session_and_message() -> None:
         )
         in_rows = [row for row in rows if row.event_type == "message_in"]
         created_rows = [row for row in rows if row.event_type == "lead_created"]
-        assert len([row for row in in_rows if json.loads(row.payload_json).get("text") == "hi"]) == 1
+        visitor_in = [
+            row for row in in_rows if json.loads(row.payload_json).get("text") == "hi"
+        ]
+        assert len(visitor_in) == 1
         assert created_rows == []
-        visitor_in = [row for row in in_rows if json.loads(row.payload_json).get("text") == "hi"][0]
+        visitor_in = visitor_in[0]
         assert visitor_in.actor_role == "prospect"
         assert visitor_in.lead_id in {None, ""}
         assert not str(visitor_in.lead_id or "").startswith("lead_")

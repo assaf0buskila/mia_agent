@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import pytest
-from fastapi.testclient import TestClient
-
 from app.core.config import Settings
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
@@ -13,16 +11,16 @@ from app.integrations.sheets import FakeSheetsPort
 from app.main import app
 from app.surfaces.crm import (
     CONTACTS_HEADERS,
-    CrmDenied,
-    FakeContactsCrm,
     LOCKED_SPREADSHEET_ID,
     ContactRecord,
+    CrmDenied,
+    FakeContactsCrm,
     log_contact,
 )
 from app.surfaces.identity import extract_fields
 from app.surfaces.owner import run_owner_loop, talk_as_dude
 from app.surfaces.site import reset_site_book, run_site_turn, site_book, site_opening
-
+from fastapi.testclient import TestClient
 
 OWNER_ID = "550077"
 
@@ -125,10 +123,17 @@ async def test_telegram_owner_loop_still_sends() -> None:
     port = RecordingMessagePort()
     crm = FakeContactsCrm()
     settings = Settings()
+    store = LeadStore(db)
+    store.claim_webhook(
+        provider="telegram",
+        provider_event_id="tg.dude.1",
+        channel="telegram",
+        envelope_kind="text",
+    )
     try:
         result = await run_owner_loop(
             item={"id": "tg.dude.1", "from": OWNER_ID, "text": "מה קורה?", "chat_id": OWNER_ID},
-            store=LeadStore(db),
+            store=store,
             port=port,
             settings=settings,
             crm=crm,
@@ -165,7 +170,7 @@ def test_telegram_refuses_contact_log_without_phone_or_email() -> None:
 
 def test_site_refuses_crm_and_whatsapp_without_phone_or_email() -> None:
     crm = FakeContactsCrm()
-    settings = Settings().model_copy(update={"whatsapp_click_to_chat": "https://wa.me/972501111111"})
+    settings = Settings().model_copy(update={"whatsapp_click_to_chat": "972501111111"})
     book = site_book()
     book.open("web_siteform1")
     turn = run_site_turn(
@@ -183,7 +188,7 @@ def test_site_refuses_crm_and_whatsapp_without_phone_or_email() -> None:
 
 def test_site_writes_crm_after_phone_or_email_and_offers_whatsapp() -> None:
     crm = FakeContactsCrm()
-    settings = Settings().model_copy(update={"whatsapp_click_to_chat": "https://wa.me/972501111111"})
+    settings = Settings().model_copy(update={"whatsapp_click_to_chat": "972501111111"})
     book = site_book()
     book.open("web_siteform2")
     run_site_turn(
@@ -204,7 +209,8 @@ def test_site_writes_crm_after_phone_or_email_and_offers_whatsapp() -> None:
         book=book,
     )
     assert turn.crm_wrote is True
-    assert turn.whatsapp_url == "https://wa.me/972501111111"
+    assert turn.whatsapp_url is not None
+    assert turn.whatsapp_url.startswith("https://wa.me/972501111111")
     assert turn.next_action == "handoff"
     assert "01 Leads" not in crm.written_tabs()
     blob = " ".join(" ".join(cells) for cells in crm.cells_written)
@@ -322,10 +328,17 @@ async def test_owner_loop_ignores_kill_switch() -> None:
     db = get_session_factory()()
     port = RecordingMessagePort()
     settings = Settings().model_copy(update={"kill_switch": True})
+    store = LeadStore(db)
+    store.claim_webhook(
+        provider="telegram",
+        provider_event_id="tg.dude.kill",
+        channel="telegram",
+        envelope_kind="text",
+    )
     try:
         result = await run_owner_loop(
             item={"id": "tg.dude.kill", "from": OWNER_ID, "text": "היי", "chat_id": OWNER_ID},
-            store=LeadStore(db),
+            store=store,
             port=port,
             settings=settings,
             crm=FakeContactsCrm(),

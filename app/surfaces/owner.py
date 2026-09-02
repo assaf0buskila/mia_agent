@@ -12,6 +12,7 @@ from app.capabilities.types import Principal
 from app.core.config import Settings
 from app.core.demo import demo_mode_active
 from app.db.store import LeadStore
+from app.domain.approvals import DECISION_APPROVED
 from app.domain.events import (
     Channel,
     build_message_in_event,
@@ -23,7 +24,6 @@ from app.domain.gmail_drafts import apply_gmail_send_decision, execute_approved_
 from app.domain.owner_tasks import OwnerTaskType
 from app.integrations.base import MessagePort
 from app.integrations.gmail import GmailPort
-from app.domain.approvals import DECISION_APPROVED
 from app.surfaces.crm import ContactsCrm, log_contact
 from app.surfaces.identity import extract_fields
 
