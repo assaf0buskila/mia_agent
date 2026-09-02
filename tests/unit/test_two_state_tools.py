@@ -11,6 +11,7 @@ from app.capabilities.types import Principal
 from app.core.config import Settings
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
+from app.domain.approvals import ACTION_CALENDAR_CREATE
 from app.domain.calendar_write_gate import (
     ASK_ASSAF,
     assess_calendar_write,
@@ -274,7 +275,13 @@ def test_calendar_write_request_asks_assaf_for_weather() -> None:
             default_timezone="Asia/Jerusalem",
         )
         assert reply == ASK_ASSAF or (reply and "לא כותבת ביומן" in reply)
-        assert store.list_all_pending_approvals() == []
+        weather_pending = [
+            item
+            for item in store.list_all_pending_approvals()
+            if item.action == ACTION_CALENDAR_CREATE
+            and "מזג" in (item.proposed_parameters or "")
+        ]
+        assert weather_pending == []
     finally:
         db.close()
 

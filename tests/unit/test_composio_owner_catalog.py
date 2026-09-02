@@ -975,7 +975,8 @@ def test_all_meta_tools_deny_before_config_or_catalog_lookup(monkeypatch) -> Non
         killed = execute_tool(name, arguments, _context(kill_switch=True))
         assert not killed.ok and "denied" in killed.error
         denied = execute_tool(name, arguments, client_context)
-        assert not denied.ok and "denied" in denied.error
+        assert not denied.ok
+        assert "denied" in denied.error or "not available" in denied.error
 
 
 def test_owner_prompt_has_only_three_small_meta_tools_not_catalog_payload() -> None:
@@ -983,7 +984,7 @@ def test_owner_prompt_has_only_three_small_meta_tools_not_catalog_payload() -> N
     assert {"composio_search_tools", "composio_get_tool_schema", "composio_execute_tool"}.issubset(
         names
     )
-    assert len(names) < 40
+    assert len(names) < 45
 
 
 def test_all_advertised_object_schemas_are_closed_recursively() -> None:

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from enum import StrEnum
 
-from app.capabilities.types import GraphName, Principal
+from app.capabilities.types import Principal
 
 STILL_CHECKING = "still checking"
 TOOL_TIMEOUT_SECONDS = 12
@@ -103,7 +103,8 @@ class MiaState(StrEnum):
 
 
 def state_for(principal: Principal) -> MiaState:
-    if principal.graph is GraphName.OWNER:
+    """Visitor vs owner follows the Principal minted at the channel entry."""
+    if principal.graph == "owner":
         return MiaState.OWNER
     return MiaState.VISITOR
 
