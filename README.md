@@ -12,6 +12,7 @@ Assaf’s public Dude-clone demo. Hebrew-native. Named Mia. Two surfaces, one Co
 | [`docs/WIRING.md`](docs/WIRING.md) | Who calls whom |
 | [`docs/DECISIONS.md`](docs/DECISIONS.md) | ADRs that still constrain |
 | [`docs/PRODUCTION_BUILD.md`](docs/PRODUCTION_BUILD.md) | Operator: AWS go-live |
+| [`docs/RUNBOOK.md`](docs/RUNBOOK.md) | Emergency stop for high-risk writes |
 
 Do not read `docs/archive/` unless you need history.
 
@@ -28,11 +29,11 @@ Contacts A1:N1: `שם | טלפון | אימייל | תאריך | עסק | מקו
 
 Activity: `מתי | מי | ערוץ | מה עשתה | תוצאה`
 
-No `lead_` ids. No `01 Leads`. No row without phone or email.
+No `lead_` ids. No row without phone or email.
 
 ## Composio
 
-House entity (`MIA_COMPOSIO_USER_ID`). Same apps as Cursor: Sheets, Gmail, Instagram, LinkedIn, GA, GSC, Calendar, WhatsApp. Reads run. Mail send only if the owner asked. No social publish. Assaf sends customer WhatsApp.
+House entity (`MIA_COMPOSIO_USER_ID`). Same apps as Cursor: Sheets, Gmail, Instagram, LinkedIn, GA, GSC, Calendar, WhatsApp. Reads run. Mail send only if the owner asked. No social publish. Assaf sends customer WhatsApp. If `/health` is true, Telegram must not say disconnected.
 
 ## Local
 

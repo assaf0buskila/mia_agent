@@ -6,7 +6,7 @@
 
 Package manager is **uv**. Python `>=3.12`. PowerShell: `;` not `&&`. Local laptop uses `.env`. Production keys live in the **Secrets Manager box**, not in a file on the host.
 
-Cloudflare Tunnel is **test only**. Do not deploy Mia’s sales graph to Vercel, Cloudflare Workers, or Lambda.
+Cloudflare Tunnel is **test only**. Do not deploy Mia to Vercel, Cloudflare Workers, or Lambda.
 
 ---
 
@@ -23,7 +23,7 @@ Cloudflare Tunnel is **test only**. Do not deploy Mia’s sales graph to Vercel,
 | Prospect send | `MIA_AUTOMATION_MODE=auto_approved` (ADR-022). Unknown WhatsApp still silent. Instagram send stays off. |
 | Calendar writes | `MIA_CALENDAR_WRITE=true` (Assaf ADOPT 2026-08-22). Exact create/move proposals execute only after Assaf's one-tap Telegram approval. |
 | Gmail / Meta send | Gmail draft send is wired but stays approval-only and additionally requires `MIA_GMAIL_SEND=true`; Meta writes remain off. R4/R5 are not env knobs. Follow-up persist/due-scan is alive; no auto-send flag. |
-| Kill switch | `MIA_KILL_SWITCH=false` for live; `true` + new deployment is the emergency stop |
+| Kill switch | `MIA_KILL_SWITCH=false` for live; `true` + restart denies high-risk writes and does not 503 owner talk or site chat |
 | Lambda / AgentCore / SQS / WAF | Specified later. Not first live |
 
 First live is this FastAPI process on Fargate + RDS with writes gated. Cursor Composio plugin Calendar Active does not prove Mia Calendar — `/health` `composio` must be true and `MIA_COMPOSIO_USER_ID` must be the Composio debug `@user_id`.
