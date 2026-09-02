@@ -624,15 +624,12 @@
         }
         if (existing) {
           sessionId = existing;
-          showConfiguredWhatsApp(cfg.whatsapp_url);
           postEvent('page_viewed', { path: location.pathname });
           flushEventQueue();
           return existing;
         }
         return createWebsiteSession().then(function (id) {
-          // Do not offer a button that cannot identify a website session to the
-          // handoff endpoint. It appears as soon as setup is complete.
-          if (id) showConfiguredWhatsApp(cfg.whatsapp_url);
+          // WhatsApp is offered only after a reply that already has phone or email.
           return id;
         });
       })

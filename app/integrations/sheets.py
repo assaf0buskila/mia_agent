@@ -1,13 +1,8 @@
-"""Google Sheets mirror port.
+"""Google Sheets port.
 
-Postgres is the system of record. This port upserts snapshots to ``01 Leads``,
-``04 Meetings``, ``05 Deals``, ``06 Lead Sources``, ``08 Follow-ups``, ``09 Weekly KPI``, and
-``10 Mia Activity`` — and owns the tab/header structure of the one configured Mia
-CRM spreadsheet. It also exposes bounded reads plus values-only updates/appends
-for explicitly authorized owner spreadsheets. It never reads Sheets back as Mia's
-internal truth, decision input, or recovery source. Lead source and weekly KPI
-rows upsert on website session create; lead, follow-up, deal, meeting, activity, and
-weekly KPI rows upsert after sales graph turns.
+Live CRM writes go to the locked Contacts + Activity workbook only.
+``upsert_lead`` is a no-op so ``01 Leads`` is never written. Postgres remains
+recoverable memory. Owner reads/updates of other allowlisted Sheets stay bounded.
 
 Production adapter: Composio ``GOOGLESHEETS`` toolkit version ``20260826_00``,
 pins the legacy mirror ``GOOGLESHEETS_UPSERT_ROWS`` plus owner-operational
@@ -73,6 +68,13 @@ from app.domain.tools import (
     AdapterResponseError,
     AdapterSchemaError,
     ToolOutcome,
+)
+from app.surfaces.crm import (
+    ACTIVITY_HEADERS as CONTACTS_ACTIVITY_HEADERS,
+    ACTIVITY_TAB as CONTACTS_ACTIVITY_TAB,
+    CONTACTS_HEADERS,
+    CONTACTS_TAB,
+    LOCKED_SPREADSHEET_ID,
 )
 
 SHEETS_MIRROR_SCOPE = "sheets_mirror"
@@ -181,17 +183,11 @@ CONTENT_HEADERS = [
 ]
 
 CRM_WORKSPACE_TABS: tuple[tuple[str, list[str]], ...] = (
-    (LEADS_SHEET_NAME, LEADS_HEADERS),
-    (MEETINGS_SHEET_NAME, MEETINGS_HEADERS),
-    (DEALS_SHEET_NAME, DEALS_HEADERS),
-    (SOURCES_SHEET_NAME, SOURCES_HEADERS),
-    (CONTENT_SHEET_NAME, CONTENT_HEADERS),
-    (FOLLOWUPS_SHEET_NAME, FOLLOWUPS_HEADERS),
-    (KPI_SHEET_NAME, KPI_HEADERS),
-    (ACTIVITY_SHEET_NAME, ACTIVITY_HEADERS),
+    (CONTACTS_TAB, list(CONTACTS_HEADERS)),
+    (CONTACTS_ACTIVITY_TAB, list(CONTACTS_ACTIVITY_HEADERS)),
 )
-CRM_WORKSPACE_SCHEMA_VERSION = "mia-crm-v1"
-CRM_WORKSPACE_SCHEMA_RANGE = f"{ACTIVITY_SHEET_NAME}!J1"
+CRM_WORKSPACE_SCHEMA_VERSION = "mia-contacts-v1"
+CRM_WORKSPACE_SCHEMA_RANGE = f"{CONTACTS_ACTIVITY_TAB}!F1"
 _METRIC_PATTERN = re.compile(r"^[0-9]*$")
 _A1_RANGE_PATTERN = re.compile(
     r"^(?:[A-Za-z0-9 _-]{1,80}!)?[A-Z]{1,3}[1-9][0-9]{0,5}(?::[A-Z]{1,3}[1-9][0-9]{0,5})?$"
@@ -427,6 +423,10 @@ class SheetsPort(Protocol):
 
     def upsert_content(self, row: ContentMirrorRow) -> None: ...
 
+    def write_locked_contact(self, cells: list[str], *, key_column: str) -> None: ...
+
+    def append_locked_activity(self, cells: list[str]) -> None: ...
+
 
 class DisabledSheetsPort:
     def ensure_crm_workspace(self) -> None:
@@ -469,6 +469,12 @@ class DisabledSheetsPort:
 
     def upsert_content(self, row: ContentMirrorRow) -> None:
         del row
+
+    def write_locked_contact(self, cells: list[str], *, key_column: str) -> None:
+        del cells, key_column
+
+    def append_locked_activity(self, cells: list[str]) -> None:
+        del cells
 
 
 class ComposioSheetsPort:
@@ -656,7 +662,7 @@ class ComposioSheetsPort:
                 return
             existing = set(self.list_sheet_names(spreadsheet_id=spreadsheet_id))
             marker_is_current = False
-            if ACTIVITY_SHEET_NAME in existing:
+            if CONTACTS_ACTIVITY_TAB in existing:
                 marker_data = self._execute_tool(
                     COMPOSIO_VALUES_GET_TOOL,
                     {
@@ -773,22 +779,32 @@ class ComposioSheetsPort:
         ):
             return
 
-    def upsert_lead(self, row: LeadMirrorRow) -> None:
+    def write_locked_contact(self, cells: list[str], *, key_column: str) -> None:
+        spreadsheet_id = self._spreadsheet_id or LOCKED_SPREADSHEET_ID
+        if spreadsheet_id != LOCKED_SPREADSHEET_ID:
+            spreadsheet_id = LOCKED_SPREADSHEET_ID
+        payload_values = [list(cells)]
         self._execute_upsert(
-            sheet_name=LEADS_SHEET_NAME,
-            key_column=LEADS_KEY_COLUMN,
-            headers=LEADS_HEADERS,
-            values=[
-                [
-                    row.lead_id,
-                    row.channel,
-                    row.stage,
-                    row.fit,
-                    row.pain_level,
-                    row.next_action,
-                ]
-            ],
+            sheet_name=CONTACTS_TAB,
+            key_column=key_column,
+            headers=list(CONTACTS_HEADERS),
+            values=payload_values,
         )
+        del spreadsheet_id
+
+    def append_locked_activity(self, cells: list[str]) -> None:
+        self._execute_tool(
+            COMPOSIO_VALUES_APPEND_TOOL,
+            {
+                "spreadsheetId": LOCKED_SPREADSHEET_ID,
+                "range": f"{CONTACTS_ACTIVITY_TAB}!A:E",
+                "values": [list(cells)],
+                "valueInputOption": "RAW",
+            },
+        )
+
+    def upsert_lead(self, row: LeadMirrorRow) -> None:
+        del row
 
     def upsert_source(self, row: SourceMirrorRow) -> None:
         self._execute_upsert(
@@ -981,6 +997,16 @@ class FakeSheetsPort:
     @property
     def content_rows(self) -> dict[str, ContentMirrorRow]:
         return dict(self._content_rows)
+
+    def write_locked_contact(self, cells: list[str], *, key_column: str) -> None:
+        self.owner_operations.append(
+            ("contact", LOCKED_SPREADSHEET_ID, key_column, [list(cells)])
+        )
+
+    def append_locked_activity(self, cells: list[str]) -> None:
+        self.owner_operations.append(
+            ("activity", LOCKED_SPREADSHEET_ID, CONTACTS_ACTIVITY_TAB, [list(cells)])
+        )
 
     def upsert_lead(self, row: LeadMirrorRow) -> None:
         self._rows[row.lead_id] = row

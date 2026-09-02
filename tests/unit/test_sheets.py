@@ -1550,27 +1550,8 @@ def test_composio_sheets_port_request_shape() -> None:
     )
     port.upsert_lead(row)
 
-    assert calls == 1
-    assert str(captured["url"]).endswith(f"/{COMPOSIO_UPSERT_ROWS_TOOL}")
-    body = captured["json"]
-    assert isinstance(body, dict)
-    assert body["user_id"] == "user-abc"
-    assert body["version"] == COMPOSIO_GOOGLESHEETS_VERSION
-    arguments = body["arguments"]
-    assert isinstance(arguments, dict)
-    assert arguments["spreadsheetId"] == "spreadsheet-xyz"
-    assert arguments["sheetName"] == LEADS_SHEET_NAME
-    assert arguments["keyColumn"] == LEADS_KEY_COLUMN
-    assert arguments["headers"] == LEADS_HEADERS
-    assert arguments["rows"] == [
-        ["lead_mirror_1", "website", "open", "good", 2, "deepen_pain"]
-    ]
-    assert arguments["strictMode"] is True
-    assert "text" not in body
-    assert "text" not in arguments
-    serialized = json.dumps(body)
-    for forbidden in ("VALUES_GET", "CLEAR", "DELETE", "CREATE"):
-        assert forbidden not in serialized.upper()
+    assert calls == 0
+    assert captured == {}
 
 
 def test_composio_sheets_port_follow_up_request_shape() -> None:

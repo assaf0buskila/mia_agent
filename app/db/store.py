@@ -234,6 +234,37 @@ class LeadStore:
     def __init__(self, session: Session) -> None:
         self.session = session
 
+    def open_website_session(self, session_id: str) -> str:
+        """Remember a website conversation without minting a lead_ id."""
+        row = self.session.scalars(
+            select(ChannelIdentityRow).where(
+                ChannelIdentityRow.channel == Channel.WEBSITE.value,
+                ChannelIdentityRow.external_id == session_id,
+            )
+        ).one_or_none()
+        if row is not None:
+            return row.customer_id
+        customer = CustomerRow(id=_new_id("cust"))
+        identity = ChannelIdentityRow(
+            customer_id=customer.id,
+            channel=Channel.WEBSITE.value,
+            external_id=session_id,
+            verified=False,
+        )
+        customer.identities.append(identity)
+        self.session.add(customer)
+        self.session.flush()
+        return customer.id
+
+    def website_session_exists(self, session_id: str) -> bool:
+        identity = self.session.scalars(
+            select(ChannelIdentityRow).where(
+                ChannelIdentityRow.channel == Channel.WEBSITE.value,
+                ChannelIdentityRow.external_id == session_id,
+            )
+        ).one_or_none()
+        return identity is not None
+
     def open_channel_lead(self, *, channel: Channel, external_id: str) -> tuple[str, str]:
         row = self.session.scalars(
             select(ChannelIdentityRow).where(

@@ -65,6 +65,7 @@ Proposed is not accepted. Build may follow a proposed default only when `AGENTS.
 | ADR-045 | Complete-work owner actions and Mia-managed CRM workspace | accepted |
 | ADR-046 | Official Composio destructive slugs stay denied; WhatsApp-move ping is a summary | accepted |
 | ADR-047 | Owner-requested Gmail send stays; unsolicited send and delete-forever stay denied | accepted |
+| ADR-048 | Rebuild Mia as a Dude clone with Contacts/Activity CRM | accepted |
 
 ## Template
 
@@ -1164,4 +1165,35 @@ Deny every Gmail send slug — rejected; that would break owner-requested send.
 Give the LLM a `gmail_send` tool — rejected; the model must not send.
 Flip `MIA_GMAIL_SEND` default to true in this PR — deferred; production flag
 stays an ops choice. The code path is kept.
+
+### ADR-048 Rebuild Mia as a Dude clone with Contacts/Activity CRM
+
+- **Status:** accepted
+- **Date:** 2026-09-02
+- **Assaf:** ADOPT (chat via Dude, named YES)
+
+**Context**
+Owner Telegram was buried under a task classifier, kill-switch, and ClientGraph
+ceremony. The website minted `lead_` ids, wrote `01 Leads`, and showed WhatsApp
+before identity existed. Assaf asked for a Dude clone: talk freely on Telegram,
+log contacts to one locked Sheet, identify-then-sell on the site.
+
+**Decision**
+Replace runtime OwnerGraph/ClientGraph with two simple loops. CRM is the locked
+spreadsheet `1HW8mnc9GFXraS6oG5VIxFcJvZq9gMDJBFRxY2mpVOhI`, tabs Contacts and
+Activity only. Contacts headers are A1:N1 with `תאריך` after `אימייל`. No row
+without phone or email. No lead IDs. No `01 Leads`. Kill-switch does not 503
+owner talk or site chat. WhatsApp is offered only after phone or email. Site
+pings Assaf on Telegram after capture. LangGraph stays in-repo as leftover
+ceremony; the live paths do not invoke it.
+
+**Consequences**
+Telegram talk and Sheet writes work without stacked policy. Visitors cannot
+open WhatsApp or create a CRM row anonymously. Old NBA/qualification tests no
+longer describe the live site path.
+
+**Alternatives considered**
+Wait for a new schema — rejected; Assaf locked A1:N1. Keep LangGraph wrappers
+— rejected as ceremony after verification. A second rebuild PR — rejected;
+this branch is the rebuild.
 

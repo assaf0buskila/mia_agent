@@ -14,6 +14,7 @@ from app.integrations.sheets import (
     COMPOSIO_VALUES_UPDATE_TOOL,
     CRM_WORKSPACE_SCHEMA_RANGE,
     CRM_WORKSPACE_SCHEMA_VERSION,
+    CONTACTS_TAB,
     CRM_WORKSPACE_TABS,
     LEADS_SHEET_NAME,
     ComposioSheetsPort,
@@ -161,13 +162,17 @@ def test_configured_mia_sheet_initializes_fixed_crm_workspace_idempotently() -> 
     assert len(requests) == first_call_count
     assert requests[0][0] == COMPOSIO_GET_SHEET_NAMES_TOOL
     add_requests = [body for tool, body in requests if tool == COMPOSIO_ADD_SHEET_TOOL]
-    assert len(add_requests) == 6
+    assert len(add_requests) == 2
     assert all(body["arguments"]["spreadsheetId"] == _SHEET for body in add_requests)
+    assert {body["arguments"]["properties"]["title"] for body in add_requests} == {
+        "Contacts",
+        "Activity",
+    }
     assert not any(
         body["arguments"]["properties"]["title"] == LEADS_SHEET_NAME for body in add_requests
     )
     update_requests = [body for tool, body in requests if tool == COMPOSIO_VALUES_UPDATE_TOOL]
-    assert len(update_requests) == 7
+    assert len(update_requests) == 3
     assert not any(
         body["arguments"]["range"].startswith(f"{LEADS_SHEET_NAME}!")
         for body in update_requests
@@ -261,7 +266,7 @@ def test_crm_schema_marker_repairs_a_damaged_fixed_header() -> None:
                     for name, headers in CRM_WORKSPACE_TABS
                     if name == sheet_name
                 )
-                if sheet_name == LEADS_SHEET_NAME:
+                if sheet_name == CONTACTS_TAB:
                     values = [["Damaged header"]]
             return httpx.Response(200, json={"successful": True, "data": {"values": values}})
         return httpx.Response(200, json={"successful": True, "data": {}})
@@ -277,7 +282,7 @@ def test_crm_schema_marker_repairs_a_damaged_fixed_header() -> None:
     updates = [body for tool, body in requests if tool == COMPOSIO_VALUES_UPDATE_TOOL]
     assert len(updates) == 2
     assert {body["arguments"]["range"] for body in updates} == {
-        f"{LEADS_SHEET_NAME}!A1:F1",
+        f"{CONTACTS_TAB}!A1:N1",
         CRM_WORKSPACE_SCHEMA_RANGE,
     }
 

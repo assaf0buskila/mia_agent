@@ -133,7 +133,7 @@ async def _send_transcription_failure_reply(
             text=_VOICE_TRANSCRIPTION_FAILURE_REPLY,
             channel=Channel.TELEGRAM,
         ),
-        kill_switch=kill_switch,
+        kill_switch=False,
         automation_mode=automation_mode,
         actor_role="owner",
     )
@@ -239,13 +239,6 @@ async def receive_webhook(
         secret=settings.telegram_webhook_secret,
         header=x_telegram_bot_api_secret_token,
     )
-    if settings.kill_switch:
-        return {
-            "processed": 0,
-            "duplicates": 0,
-            "sent": False,
-            "killed": True,
-        }
     try:
         payload = json.loads(body.decode("utf-8") or "{}")
     except (UnicodeDecodeError, json.JSONDecodeError):
