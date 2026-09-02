@@ -304,7 +304,11 @@ def process_website_message(
                 ),
                 correlation_id=run_id,
             )
-    message = turn.reply
+    message = (turn.reply or "").strip()
+    if not message:
+        from app.surfaces.site_policy import never_silent
+
+        message = never_silent("", "he")
     if message:
         website_message_out = build_message_out_event(
             provider="website",
@@ -346,7 +350,7 @@ def _published_facts_for_turn(
     if voice_failed or not text.strip():
         return (), ()
     intent = classify_site_intent(text)
-    if intent not in {"price", "need", "other"}:
+    if intent not in {"price", "need", "other", "metric"}:
         return (), ()
     try:
         from app.brain.context import retrieve_knowledge

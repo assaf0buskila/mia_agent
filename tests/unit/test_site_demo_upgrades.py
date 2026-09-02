@@ -351,3 +351,73 @@ def test_greeting_with_number_confirms_once_and_never_silent() -> None:
     assert toolkit.next_action == "tool_status"
     assert toolkit.reply
     assert "Search Console" in toolkit.reply
+
+
+def test_toolkit_question_is_answered_before_weather_or_sell() -> None:
+    mixed = _turn("web_tk1", "What's the weather and did you run a JSON-LD check?")
+    assert mixed.next_action == "tool_status"
+    assert "JSON-LD" in mixed.reply
+    assert mixed.reply
+    rain = _turn("web_tk2", "how much rain tomorrow")
+    assert rain.next_action == "off_topic"
+    assert "AssafWeb" in rain.reply
+    assert "api" not in rain.reply.lower()
+
+
+def test_session_names_the_tool_that_already_ran() -> None:
+    first = _turn("web_ran1", "צריכים אתר", tools_ran=(KNOWLEDGE_TOOL,))
+    assert first.reply
+    asked = _turn("web_ran1", "what tool did you run")
+    assert asked.next_action == "tool_status"
+    assert KNOWLEDGE_TOOL in asked.reply
+
+
+def test_missing_metrics_are_allowed_never_invented() -> None:
+    turn = _turn("web_met1", "How many clients do you have? What's the conversion rate?")
+    assert turn.next_action == "no_metric"
+    assert "invent" in turn.reply.lower() or "ממציאה" in turn.reply
+    assert not any(ch.isdigit() for ch in turn.reply)
+    assert "73" not in turn.reply
+    foreign = PublishedFact(
+        text="We have 480 clients and 91% conversion.",
+        url="https://metrics.example/funnel",
+    )
+    ignored = _turn("web_met2", "how many clients", facts=(foreign,))
+    assert ignored.next_action == "no_metric"
+    assert "480" not in ignored.reply
+    assert "91" not in ignored.reply
+
+
+def test_stop_sell_does_not_reask_identity() -> None:
+    first = _turn("web_stop1", "not interested")
+    assert first.next_action == "answer"
+    assert "טלפון" not in first.reply
+    again = _turn("web_stop1", "hi")
+    assert again.next_action != "ask_contact"
+    assert "phone" not in again.reply.lower()
+    assert "email" not in again.reply.lower()
+    assert again.reply
+
+
+def test_site_path_has_no_leads_studio_gmail_or_social() -> None:
+    from pathlib import Path
+
+    from app.core.config import Settings as LiveSettings
+
+    blob = (
+        Path("app/surfaces/site.py").read_text(encoding="utf-8")
+        + Path("app/surfaces/site_policy.py").read_text(encoding="utf-8")
+        + Path("app/api/website.py").read_text(encoding="utf-8")
+        + Path("app/web/ask_mia.js").read_text(encoding="utf-8")
+    )
+    lowered = blob.lower()
+    assert "01 leads" not in lowered
+    assert "my studio" not in lowered
+    assert "gmail_send" not in lowered
+    assert "kill_switch" not in lowered
+    assert "instagram" not in lowered
+    assert "social publish" not in lowered
+    assert "linkedin.com/feed" not in lowered
+    assert LiveSettings().gmail_send is False
+    assert LiveSettings().auto_reply_instagram is False
+    assert LiveSettings().meta_write is False

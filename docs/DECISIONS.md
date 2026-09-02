@@ -1225,7 +1225,9 @@ short burst window.
 
 **Consequences**
 Need statements get an answer, not an immediate contact ask. CRM and Telegram
-ping still require phone or email. Leftover NBA tests that expected
+ping still require phone or email. A seen visitor turn always gets a visible
+reply. Toolkit questions are answered before weather or a sell. Missing
+metrics are said missing, never invented. Leftover NBA tests that expected
 `ask_contact` after a need no longer describe the live path.
 
 **Alternatives considered**

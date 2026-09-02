@@ -685,6 +685,7 @@
         ? data.whatsapp_url
         : '';
     var painted = visible ? appendMsg('mia', visible) : false;
+    if (!visible) status.textContent = ERR;
     if (offering) {
       waBtn.hidden = true;
       waBtn.classList.remove('offer');

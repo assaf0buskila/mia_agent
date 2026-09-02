@@ -18,6 +18,7 @@ from app.surfaces.site_policy import (
     append_burst,
     classify_site_intent,
     decide_site_turn,
+    never_silent,
     pick_language,
 )
 
@@ -41,6 +42,7 @@ class SiteSession:
     finalized: bool = False
     confirmed: bool = False
     selling_stopped: bool = False
+    complaint_open: bool = False
     awaiting_ping: bool = False
     language: str = ""
     tools_ran: tuple[str, ...] = ()
@@ -159,6 +161,10 @@ def run_site_turn(
         )
     if not voice_failed:
         session.turns.append(("visitor", raw.strip()))
+    intent = classify_site_intent(thought or raw)
+    if tools_ran:
+        session.tools_ran = tuple(dict.fromkeys((*session.tools_ran, *tools_ran)))
+    named_tools = session.tools_ran if intent == "tool_status" else tools_ran
     decision = decide_site_turn(
         thought=thought or raw,
         language=session.language,
@@ -167,16 +173,18 @@ def run_site_turn(
         selling_stopped=session.selling_stopped,
         already_pinged=session.pinged,
         facts=facts,
-        tools_ran=tools_ran,
+        tools_ran=named_tools,
         voice_failed=voice_failed,
+        complaint_open=session.complaint_open,
     )
     if decision.stop_selling:
         session.selling_stopped = True
+    if intent == "complaint":
+        session.complaint_open = True
     if decision.confirm_contact:
         session.confirmed = True
     session.awaiting_ping = bool(decision.ping_assaf and not session.pinged)
-    session.tools_ran = tools_ran
-    reply = decision.reply
+    reply = never_silent(decision.reply, session.language)
     action = decision.action
     if action not in SITE_ACTIONS:
         action = "answer"

@@ -20,6 +20,7 @@ SITE_ACTIONS = frozenset(
         "confirm_contact",
         "voice_fail",
         "tool_status",
+        "no_metric",
     }
 )
 
@@ -75,14 +76,18 @@ COMPLAINT_CONFIRM_EN = (
 )
 OFF_TOPIC_JOKE_HE = "אין לי תחזית בכיס."
 OFF_TOPIC_JOKE_EN = "I do not do weather."
+OFF_TOPIC_JOKE_OTHER_HE = "אין לי כדור בדולח."
+OFF_TOPIC_JOKE_OTHER_EN = "I left my crystal ball at home."
 ANSWER_HE = f"{ASSAFWEB_HOOK_HE} ספרו עוד על מה שצריך לפתור."
 ANSWER_EN = f"{ASSAFWEB_HOOK_EN} Tell me more about what you need solved."
 TOOL_NONE_HE = "לא רץ כאן כלי. אני לא ממציאה JSON-LD או נתוני Search Console."
 TOOL_NONE_EN = "No tool ran here. I do not invent JSON-LD or Search Console numbers."
 NO_GSC_HE = "לא רץ כלי JSON-LD או Search Console."
 NO_GSC_EN = "No JSON-LD or Search Console tool ran."
+NO_METRIC_HE = "אין לי את המספר הזה מכאן. אני לא ממציאה מדדים."
+NO_METRIC_EN = "I do not have that number from here. I do not invent metrics."
 
-_OFF_TOPIC = (
+_WEATHER = (
     "weather",
     "forecast",
     "temperature",
@@ -94,6 +99,9 @@ _OFF_TOPIC = (
     "כמה מעלות",
     "חם בחוץ",
     "קר בחוץ",
+)
+_OFF_TOPIC = (
+    *_WEATHER,
     "horoscope",
     "lottery",
     "הורוסקופ",
@@ -125,6 +133,19 @@ _COMPLAINT = (
     "שירות גרוע",
 )
 _PRICE = ("מחיר", "כמה עולה", "כמה זה עולה", "מה המחיר", "price", "cost", "how much")
+_METRIC = (
+    "how many",
+    "conversion",
+    "roi",
+    "impressions",
+    "metrics",
+    "funnel",
+    "כמה לקוחות",
+    "כמה לידים",
+    "אחוז המרה",
+    "מדדים",
+    "כמה כניסות",
+)
 _TOOL_STATUS = (
     "json-ld",
     "jsonld",
@@ -261,12 +282,14 @@ def classify_site_intent(text: str) -> str:
         return "bot"
     if _has(blob, _TOOL_STATUS):
         return "tool_status"
-    if _has(blob, _PRICE):
-        return "price"
-    if _has(blob, _ASK_ASSAF):
-        return "ask_assaf"
     if _has(blob, _OFF_TOPIC):
         return "off_topic"
+    if _has(blob, _PRICE):
+        return "price"
+    if _has(blob, _METRIC):
+        return "metric"
+    if _has(blob, _ASK_ASSAF):
+        return "ask_assaf"
     if _has(blob, _STOP_SELL):
         return "stop_sell"
     if _is_greeting(text):
@@ -284,6 +307,31 @@ def _is_greeting(text: str) -> bool:
 def _has(blob: str, needles: tuple[str, ...]) -> bool:
     lowered = blob.lower()
     return any(needle in blob or needle in lowered for needle in needles)
+
+
+def never_silent(reply: str, language: str) -> str:
+    """Every seen visitor turn gets a visible line. Missing is allowed; silence is not."""
+    stripped = (reply or "").strip()
+    if stripped:
+        return stripped
+    return line(ANSWER_HE, ANSWER_EN, language)
+
+
+def _published_metric_line(facts: tuple[PublishedFact, ...]) -> str:
+    """Quote a published assafweb.com metric sentence. Never invent a count."""
+    for fact in facts:
+        if not fact.from_assafweb():
+            continue
+        text = " ".join(fact.text.split())
+        if not text:
+            continue
+        lowered = text.lower()
+        if any(
+            mark in lowered
+            for mark in ("metric", "conversion", "roi", "clients", "מדד", "המרה", "לקוחות")
+        ):
+            return text[:280]
+    return ""
 
 
 def published_price_line(facts: tuple[PublishedFact, ...]) -> str:
@@ -320,8 +368,13 @@ def tool_status_reply(tools_ran: tuple[str, ...], language: str) -> str:
     return f"רץ {joined}. {no_gsc}"
 
 
-def off_topic_reply(language: str) -> str:
-    joke = line(OFF_TOPIC_JOKE_HE, OFF_TOPIC_JOKE_EN, language)
+def off_topic_reply(language: str, thought: str = "") -> str:
+    weather = _has(f"{thought} {thought.lower()}", _WEATHER)
+    joke = (
+        line(OFF_TOPIC_JOKE_HE, OFF_TOPIC_JOKE_EN, language)
+        if weather
+        else line(OFF_TOPIC_JOKE_OTHER_HE, OFF_TOPIC_JOKE_OTHER_EN, language)
+    )
     hook = line(ASSAFWEB_HOOK_HE, ASSAFWEB_HOOK_EN, language)
     cta = line(CTA_ASSAF_HE, CTA_ASSAF_EN, language)
     return f"{joke} {hook} {cta}"
@@ -338,6 +391,7 @@ def decide_site_turn(
     facts: tuple[PublishedFact, ...] = (),
     tools_ran: tuple[str, ...] = (),
     voice_failed: bool = False,
+    complaint_open: bool = False,
 ) -> SiteDecision:
     """Pick one canned reply. Phone/email only when the next step is Assaf or Sheet."""
     if voice_failed:
@@ -352,7 +406,13 @@ def decide_site_turn(
         )
 
     intent = classify_site_intent(thought)
-    if selling_stopped and intent not in {"complaint", "ask_assaf", "bot", "tool_status"}:
+    if complaint_open and intent not in {
+        "complaint",
+        "ask_assaf",
+        "bot",
+        "tool_status",
+        "metric",
+    }:
         return _assaf_or_confirm(
             language,
             has_contact=has_contact,
@@ -426,9 +486,32 @@ def decide_site_turn(
             confirm_contact=False,
         )
 
+    if intent == "metric":
+        published = _published_metric_line(facts)
+        if published:
+            cite = line("מאתר assafweb.com:", "From assafweb.com:", language)
+            return SiteDecision(
+                reply=f"{cite} {published}",
+                action="answer",
+                ask_contact=False,
+                write_sheet=False,
+                ping_assaf=False,
+                stop_selling=selling_stopped,
+                confirm_contact=False,
+            )
+        return SiteDecision(
+            reply=line(NO_METRIC_HE, NO_METRIC_EN, language),
+            action="no_metric",
+            ask_contact=False,
+            write_sheet=False,
+            ping_assaf=False,
+            stop_selling=selling_stopped,
+            confirm_contact=False,
+        )
+
     if intent == "off_topic":
         return SiteDecision(
-            reply=off_topic_reply(language),
+            reply=off_topic_reply(language, thought),
             action="off_topic",
             ask_contact=False,
             write_sheet=False,
