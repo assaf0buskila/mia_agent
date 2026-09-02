@@ -17,7 +17,6 @@ from app.domain.events import Channel
 from app.domain.followups import REASON_MEETING_OFFERED, STATUS_PENDING
 from app.domain.meetings import STATUS_OFFERED
 from app.domain.sales import FitLevel, NextAction, PainLevel, SalesState
-from app.domain.tools import AdapterHttpError
 from app.integrations.base import RecordingMessagePort
 from app.integrations.sheets import (
     ACTIVITY_HEADERS,

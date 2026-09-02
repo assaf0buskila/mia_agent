@@ -1,4 +1,3 @@
-import json
 from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
@@ -12,7 +11,6 @@ from app.integrations.sheets import FakeSheetsPort, KpiMirrorRow, mirror_kpi
 from app.main import app
 from fastapi.testclient import TestClient
 from sqlalchemy import delete
-
 
 
 def test_kpi_event_types_excludes_owner_brief_types() -> None:

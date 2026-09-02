@@ -37,7 +37,7 @@ def test_website_identify_then_sell_does_not_persist_meetings() -> None:
         assert meeting.json()["lead_id"] == ""
     db = get_session_factory()()
     try:
-        assert db.scalars(select(MeetingRow)).all() == []
+        assert _meeting_for_lead(db, session_id) is None
         assert LeadStore(db).get_website_lead_id(session_id) is None
     finally:
         db.close()
@@ -98,7 +98,7 @@ def test_handoff_does_not_persist_meeting() -> None:
         assert response.json()["lead_id"] == ""
     db = get_session_factory()()
     try:
-        assert db.scalars(select(MeetingRow)).all() == []
+        assert _meeting_for_lead(db, session_id) is None
     finally:
         db.close()
 
@@ -177,6 +177,6 @@ def test_env_kill_switch_does_not_503_website_and_does_not_persist_meeting(
     db = get_session_factory()()
     try:
         assert LeadStore(db).get_website_lead_id(session_id) is None
-        assert db.scalars(select(MeetingRow)).all() == []
+        assert _meeting_for_lead(db, session_id) is None
     finally:
         db.close()

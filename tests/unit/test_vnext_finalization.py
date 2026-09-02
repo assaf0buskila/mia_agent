@@ -899,6 +899,7 @@ def test_summary_leaves_undiscussed_facts_out_rather_than_guessing() -> None:
 def test_website_session_end_route_pings_the_owner_exactly_once(monkeypatch) -> None:
     from app.api.deps import get_telegram_port
     from app.integrations.base import RecordingMessagePort
+
     from tests.conftest import identify_website_visitor
 
     port = RecordingMessagePort()
@@ -931,6 +932,7 @@ def test_website_session_end_route_pings_the_owner_exactly_once(monkeypatch) -> 
 def test_website_session_end_route_is_idempotent(monkeypatch) -> None:
     from app.api.deps import get_telegram_port
     from app.integrations.base import RecordingMessagePort
+
     from tests.conftest import identify_website_visitor
 
     port = RecordingMessagePort()

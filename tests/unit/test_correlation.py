@@ -203,7 +203,9 @@ def test_website_message_in_and_out_share_correlation_without_ai_run() -> None:
         assert response.json()["lead_id"] == ""
     db = get_session_factory()()
     try:
-        assert db.scalars(select(AiRunRow)).all() == []
+        assert (
+            db.scalars(select(AiRunRow).where(AiRunRow.lead_id == session_id)).all() == []
+        )
         rows = list(
             db.scalars(
                 select(CanonicalEventRow).where(

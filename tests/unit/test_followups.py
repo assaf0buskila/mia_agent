@@ -96,10 +96,16 @@ def test_website_identify_then_sell_does_not_create_follow_ups() -> None:
         assert student.json()["lead_id"] == ""
     db = get_session_factory()()
     try:
-        assert db.scalars(select(FollowUpRow)).all() == []
+        assert (
+            db.scalars(select(FollowUpRow).where(FollowUpRow.lead_id == session_id)).all()
+            == []
+        )
         events = list(
             db.scalars(
-                select(CanonicalEventRow).where(CanonicalEventRow.event_type == "follow_up")
+                select(CanonicalEventRow).where(
+                    CanonicalEventRow.conversation_id == session_id,
+                    CanonicalEventRow.event_type == "follow_up",
+                )
             )
         )
         assert events == []

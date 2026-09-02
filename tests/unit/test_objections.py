@@ -12,9 +12,7 @@ from app.domain.sales import (
     select_next_action,
 )
 from app.graph.replies import (
-    OBJECTION_REPLIES_EN,
     REFRAME_REPLIES,
-    REFRAME_REPLIES_EN,
     reply_for,
 )
 from app.main import app

@@ -9,13 +9,13 @@ from typing import Any
 import httpx
 import pytest
 from app.api import owner as owner_api
-from app.core.config import Settings
-from app.domain import owner_brain as owner_brain_module
 from app.api import telegram as telegram_api
 from app.api.deps import get_telegram_port, get_transcription_port
+from app.core.config import Settings
 from app.db.models import CanonicalEventRow
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
+from app.domain import owner_brain as owner_brain_module
 from app.domain.owner_brain import OwnerBrainResult
 from app.integrations.base import RecordingMessagePort
 from app.integrations.telegram import TelegramMediaError, TelegramPort, parse_telegram_update

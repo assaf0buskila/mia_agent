@@ -9,7 +9,6 @@ from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
 from app.domain.deals import (
     CONFIDENCE_UNKNOWN,
-    CONFIDENCE_UTM,
     STAGE_MEETING_OFFERED,
     STAGE_PROPOSAL,
     apply_deal_policy,
@@ -68,8 +67,8 @@ def test_website_identify_then_sell_does_not_persist_deals() -> None:
     try:
         store = LeadStore(db)
         assert store.get_website_lead_id(session_id) is None
-        assert db.scalars(select(DealRow)).all() == []
-        assert _deal_events_for_lead(db, "") == []
+        assert _deal_for_lead(db, session_id) is None
+        assert _deal_events_for_lead(db, session_id) == []
     finally:
         db.close()
 
@@ -183,8 +182,8 @@ def test_disqualify_does_not_create_deal() -> None:
         assert response.json()["lead_id"] == ""
     db = get_session_factory()()
     try:
-        assert db.scalars(select(DealRow)).all() == []
-        assert _deal_events_for_lead(db, "") == []
+        assert _deal_for_lead(db, session_id) is None
+        assert _deal_events_for_lead(db, session_id) == []
     finally:
         db.close()
 
@@ -204,7 +203,7 @@ def test_kill_switch_does_not_503_website_and_does_not_persist_deal(monkeypatch)
     try:
         store = LeadStore(db)
         assert store.get_website_lead_id(session_id) is None
-        assert db.scalars(select(DealRow)).all() == []
+        assert _deal_for_lead(db, session_id) is None
     finally:
         db.close()
 

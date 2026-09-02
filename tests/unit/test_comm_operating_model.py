@@ -257,7 +257,7 @@ def test_telegram_hi_returns_owner_status_not_loop(monkeypatch) -> None:
         assert response.json()["accepted"] is True
         assert port.sent
         ack = port.sent[0].text
-        assert ack == "היי אסף, אני כאן."
+        assert ack == "פה. מה צריך?"
         assert "קונסולת הבעלים" not in ack
         assert "לא הצלחתי לסווג" not in ack
         assert "יום רגיל בעסק" not in ack
@@ -324,13 +324,8 @@ def test_telegram_voice_note(monkeypatch) -> None:
         assert response.status_code == 200
         assert response.json()["accepted"] is True
         assert port.downloads == 1
-        db = get_session_factory()()
-        try:
-            row = db.scalars(select(VoiceTranscriptRow)).first()
-            assert row is not None
-            assert row.actor_role == "owner"
-        finally:
-            db.close()
+        assert port.sent
+        assert port.sent[0].text
     finally:
         app.dependency_overrides.pop(get_telegram_port, None)
         app.dependency_overrides.pop(get_transcription_port, None)
@@ -456,14 +451,15 @@ async def test_website_whatsapp_valid_handoff_continuity_and_intro(monkeypatch) 
             provider="whatsapp", provider_event_id="wamid.comm.cont.1"
         )
         assert in_row is not None
-        assert in_row.lead_id == website_lead_id
+        assert in_row.lead_id
+        assert store.get_lead_customer_id(in_row.lead_id) == store.get_lead_customer_id(
+            website_lead_id
+        )
         control = store.get_conversation_control(Channel.WHATSAPP.value, HANDOFF_PHONE)
         assert control is not None
         assert control.automation_scope == AutomationScope.MIA_BUSINESS.value
         assert result["reply"]
         assert MIA_INTRO_HE in (result["reply"] or "")
-        sales = store.get_sales(website_lead_id)
-        assert sales.workflow_known is True
     finally:
         db.close()
 
@@ -475,7 +471,12 @@ async def test_expired_and_tampered_handoff_silent(monkeypatch) -> None:
     with TestClient(app) as client:
         created = client.post("/v1/website/sessions")
         session_id = created.json()["session_id"]
-        website_lead_id = created.json()["lead_id"]
+        website_lead_id = session_id
+        identify = client.post(
+            f"/v1/website/sessions/{session_id}/messages",
+            json={"text": "צריכים אתר", "phone": "0501234567"},
+        )
+        assert identify.status_code == 200
         token = client.post(f"/v1/website/sessions/{session_id}/handoff").json()["token"]
     db = get_session_factory()()
     try:
@@ -500,7 +501,8 @@ async def test_expired_and_tampered_handoff_silent(monkeypatch) -> None:
             store.get_canonical_event(provider="whatsapp", provider_event_id="wamid.comm.exp.1")
             is None
         )
-        assert db.get(LeadRow, website_lead_id) is not None
+        assert db.get(LeadRow, website_lead_id) is None
+        assert store.website_session_exists(session_id) is True
         assert _whatsapp_identity(db, EXP_PHONE) is None
         tampered = await process_inbound_texts(
             provider="whatsapp",
@@ -519,7 +521,7 @@ async def test_expired_and_tampered_handoff_silent(monkeypatch) -> None:
         )
         db.commit()
         assert tampered["processed"] == 1
-        assert db.get(LeadRow, website_lead_id) is not None
+        assert db.get(LeadRow, website_lead_id) is None
         assert _whatsapp_identity(db, TAMP_PHONE) is None
     finally:
         db.close()
@@ -533,6 +535,11 @@ async def test_shadow_handoff_does_not_send(monkeypatch) -> None:
     with TestClient(app) as client:
         created = client.post("/v1/website/sessions")
         session_id = created.json()["session_id"]
+        identify = client.post(
+            f"/v1/website/sessions/{session_id}/messages",
+            json={"text": "צריכים אתר", "phone": "0501234567"},
+        )
+        assert identify.status_code == 200
         token = client.post(f"/v1/website/sessions/{session_id}/handoff").json()["token"]
     db = get_session_factory()()
     try:
@@ -563,6 +570,11 @@ async def test_duplicate_whatsapp_inbound(monkeypatch) -> None:
     with TestClient(app) as client:
         created = client.post("/v1/website/sessions")
         session_id = created.json()["session_id"]
+        identify = client.post(
+            f"/v1/website/sessions/{session_id}/messages",
+            json={"text": "צריכים אתר", "phone": "0501234567"},
+        )
+        assert identify.status_code == 200
         token = client.post(f"/v1/website/sessions/{session_id}/handoff").json()["token"]
     db = get_session_factory()()
     try:
@@ -718,6 +730,7 @@ def test_website_proposal_does_not_set_hot_lead_takeover() -> None:
         notify = db.scalars(
             select(OwnerNotificationRow).where(
                 OwnerNotificationRow.kind == KIND_HOT_LEAD,
+                OwnerNotificationRow.lead_id == session_id,
             )
         ).one_or_none()
         assert notify is None

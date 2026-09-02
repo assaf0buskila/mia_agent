@@ -23,7 +23,6 @@ from app.domain.approvals import (
     apply_owner_approval_decision,
     apply_website_edit_approval_policy,
     approval_expires_at,
-    is_approval_expired,
     payload_hash,
     proposed_parameters_json,
     resource_hash_matches,
@@ -92,7 +91,10 @@ def test_website_proposal_without_phone_asks_contact_and_creates_no_approval() -
         assert body["lead_id"] == ""
     db = get_session_factory()()
     try:
-        assert db.scalars(select(ApprovalRow)).all() == []
+        assert (
+            db.scalars(select(ApprovalRow).where(ApprovalRow.lead_id == session_id)).all()
+            == []
+        )
     finally:
         db.close()
 
@@ -129,7 +131,10 @@ def test_website_proposal_with_phone_handoffs_without_approval_row() -> None:
         assert again.json()["next_action"] == "handoff"
     db = get_session_factory()()
     try:
-        assert db.scalars(select(ApprovalRow)).all() == []
+        assert (
+            db.scalars(select(ApprovalRow).where(ApprovalRow.lead_id == session_id)).all()
+            == []
+        )
         events = list(
             db.scalars(
                 select(CanonicalEventRow).where(
@@ -277,7 +282,10 @@ def test_clinic_funnel_to_meeting_no_approval_row() -> None:
         assert meeting.json()["next_action"] == "handoff"
     db = get_session_factory()()
     try:
-        assert db.scalars(select(ApprovalRow)).all() == []
+        assert (
+            db.scalars(select(ApprovalRow).where(ApprovalRow.lead_id == session_id)).all()
+            == []
+        )
     finally:
         db.close()
 

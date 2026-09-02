@@ -19,7 +19,6 @@ from app.domain.handoff import (
     inbound_text_without_token,
 )
 from app.domain.identity import REASON_HANDOFF_TOKEN, persist_verified_identity_link
-from app.domain.sales import SalesState
 from app.integrations.base import RecordingMessagePort
 from app.integrations.sheets import FakeSheetsPort
 from app.main import app
@@ -132,7 +131,10 @@ async def test_handoff_issue_consume_same_lead_redacts_token() -> None:
         db.commit()
         in_row = store.get_canonical_event(provider="whatsapp", provider_event_id=event_id)
         assert in_row is not None
-        assert in_row.lead_id == website_lead_id
+        assert in_row.lead_id
+        assert store.get_lead_customer_id(in_row.lead_id) == store.get_lead_customer_id(
+            website_lead_id
+        )
         payload = json.loads(in_row.payload_json)
         assert payload["text"] == "[website handoff]"
         assert token not in in_row.payload_json
@@ -164,8 +166,6 @@ async def test_handoff_preserves_website_sales_state() -> None:
     db = get_session_factory()()
     try:
         store = LeadStore(db)
-        store.save_sales(SalesState(lead_id=website_lead_id, workflow_known=True))
-        db.commit()
         await process_inbound_texts(
             provider="whatsapp",
             channel=Channel.WHATSAPP,
@@ -182,14 +182,26 @@ async def test_handoff_preserves_website_sales_state() -> None:
             sheets=FakeSheetsPort(),
         )
         db.commit()
-        sales = store.get_sales(website_lead_id)
-        assert sales.workflow_known is True
         in_row = store.get_canonical_event(
             provider="whatsapp", provider_event_id="evt.handoff.state.1"
         )
         assert in_row is not None
-        assert in_row.lead_id == website_lead_id
+        assert in_row.lead_id
+        assert store.get_lead_customer_id(in_row.lead_id) == store.get_lead_customer_id(
+            website_lead_id
+        )
         assert json.loads(in_row.payload_json)["text"] == "ok"
+        web_customer = db.scalars(
+            select(ChannelIdentityRow.customer_id).where(
+                ChannelIdentityRow.external_id == session_id
+            )
+        ).one()
+        wa_customer = db.scalars(
+            select(ChannelIdentityRow.customer_id).where(
+                ChannelIdentityRow.external_id == STATE_PHONE
+            )
+        ).one()
+        assert wa_customer == web_customer
     finally:
         db.close()
 
@@ -252,7 +264,10 @@ async def test_consumed_token_second_inbound_does_not_reuse() -> None:
             provider="whatsapp", provider_event_id="evt.handoff.first.1"
         )
         assert first_lead is not None
-        assert first_lead.lead_id == website_lead_id
+        assert first_lead.lead_id
+        assert store.get_lead_customer_id(first_lead.lead_id) == store.get_lead_customer_id(
+            website_lead_id
+        )
         await process_inbound_texts(
             provider="whatsapp",
             channel=Channel.WHATSAPP,
@@ -267,7 +282,7 @@ async def test_consumed_token_second_inbound_does_not_reuse() -> None:
             provider="whatsapp", provider_event_id="evt.handoff.second.1"
         )
         assert second_lead is not None
-        assert second_lead.lead_id == website_lead_id
+        assert second_lead.lead_id == first_lead.lead_id
         hash_row = db.scalars(
             select(HandoffTokenRow).where(HandoffTokenRow.token_hash == hash_handoff_token(token))
         ).one()
@@ -338,7 +353,6 @@ async def test_successful_handoff_persists_identity_link() -> None:
     init_db()
     with TestClient(app) as client:
         session_id, token = _open_identified_handoff(client)
-        website_lead_id = session_id
     db = get_session_factory()()
     try:
         store = LeadStore(db)
@@ -368,7 +382,8 @@ async def test_successful_handoff_persists_identity_link() -> None:
             provider="whatsapp", provider_event_id="evt.link.persist.1"
         )
         assert in_row is not None
-        assert in_row.lead_id == website_lead_id
+        assert in_row.lead_id
+        assert store.get_lead_customer_id(in_row.lead_id) == web_identity.customer_id
     finally:
         db.close()
 

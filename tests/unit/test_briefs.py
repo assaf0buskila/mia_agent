@@ -78,11 +78,17 @@ def test_website_identify_then_sell_does_not_create_meeting_brief() -> None:
         assert again.json()["lead_id"] == ""
     db = get_session_factory()()
     try:
-        assert db.scalars(select(MeetingBriefRow)).all() == []
+        assert (
+            db.scalars(
+                select(MeetingBriefRow).where(MeetingBriefRow.lead_id == session_id)
+            ).all()
+            == []
+        )
         events = list(
             db.scalars(
                 select(CanonicalEventRow).where(
-                    CanonicalEventRow.event_type == EventType.MEETING_BRIEF.value
+                    CanonicalEventRow.conversation_id == session_id,
+                    CanonicalEventRow.event_type == EventType.MEETING_BRIEF.value,
                 )
             )
         )
@@ -104,10 +110,16 @@ def test_student_disqualify_no_brief() -> None:
         assert response.json()["lead_id"] == ""
     db = get_session_factory()()
     try:
-        assert db.scalars(select(MeetingBriefRow)).all() == []
+        assert (
+            db.scalars(
+                select(MeetingBriefRow).where(MeetingBriefRow.lead_id == session_id)
+            ).all()
+            == []
+        )
         events = list(
             db.scalars(
                 select(CanonicalEventRow).where(
+                    CanonicalEventRow.conversation_id == session_id,
                     CanonicalEventRow.event_type == EventType.MEETING_BRIEF.value,
                 )
             )
