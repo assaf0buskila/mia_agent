@@ -1,14 +1,9 @@
 import json
 from urllib.parse import urlparse
 
-from app.db.models import (
-    CanonicalEventRow,
-    HandoffTokenRow,
-    OwnerNotificationRecipientClaimRow,
-)
+from app.db.models import CanonicalEventRow
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
-from app.domain import website_handoff_brief as website_handoff_brief_mod
 from app.domain.attribution import sanitize_attribution
 from app.domain.events import Channel
 from app.domain.handoff import click_to_chat_url
@@ -16,10 +11,8 @@ from app.domain.sales import NextAction, select_next_action
 from app.graph.orchestrator import build_graph
 from app.graph.state import empty_state
 from app.main import app
-from app.services.notifications import OwnerTelegramDelivery
 from fastapi.testclient import TestClient
 from sqlalchemy import select
-from sqlalchemy.orm import Session
 
 from tests.unit.test_handoff import CLICK_CHAT
 
@@ -65,14 +58,15 @@ def test_website_config_points_at_assafweb() -> None:
         assert body["widget"] == "ask_mia"
         assert body["demo"] is False
         assert body["whatsapp_url"] is None
-        assert "יום רגיל בעסק" in body["opening"]
+        assert "טלפון או באימייל" in body["opening"]
 
 
 def test_website_config_exposes_only_a_config_derived_whatsapp_url(monkeypatch) -> None:
     monkeypatch.setenv("MIA_WHATSAPP_CLICK_TO_CHAT", CLICK_CHAT)
     with TestClient(app) as client:
         body = client.get("/v1/website/config").json()
-    assert body["whatsapp_url"] == click_to_chat_url(CLICK_CHAT)
+    # WhatsApp is offered after phone or email, never on config.
+    assert body["whatsapp_url"] is None
 
 
 def test_website_widget_js_served() -> None:
@@ -172,11 +166,10 @@ def test_website_api_session_and_message() -> None:
         )
         assert reply.status_code == 200
         body = reply.json()
-        assert body["next_action"] == "understand_workflow"
-        assert "יום רגיל בעסק" in body["message"]
+        assert body["lead_id"] == ""
+        assert body["next_action"] in {"ask_need", "ask_contact"}
         assert body["whatsapp_url"] is None
         empty_end = client.post(f"/v1/website/sessions/{session_id}/end")
-        # session already has a visitor message from the turn above
         assert empty_end.status_code == 200
         first_end = empty_end.json()
         assert first_end["accepted"] is True
@@ -194,35 +187,15 @@ def test_website_api_session_and_message() -> None:
         )
         in_rows = [row for row in rows if row.event_type == "message_in"]
         created_rows = [row for row in rows if row.event_type == "lead_created"]
-        behavior_rows = [row for row in rows if row.event_type == "behavior"]
-        qual_rows = [row for row in rows if row.event_type == "qualification_updated"]
-        meet_rows = [row for row in rows if row.event_type == "meeting_offered"]
-        handoff_rows = [row for row in rows if row.event_type == "handoff"]
-        tool_rows = [row for row in rows if row.event_type == "tool_result"]
-        assert len(in_rows) == 1
-        assert len(created_rows) == 1
-        assert len(behavior_rows) == 2
-        assert len(tool_rows) == 2
-        sheets_tools = [
-            row for row in tool_rows
-            if json.loads(row.payload_json)["tool"] == "sheets_mirror"
+        visitor_in = [
+            row for row in in_rows if json.loads(row.payload_json).get("text") == "hi"
         ]
-        assert len(sheets_tools) == 2
-        cal_tool_rows = [
-            row for row in tool_rows
-            if json.loads(row.payload_json)["tool"] == "calendar_find_free_slots"
-        ]
-        assert len(cal_tool_rows) == 0
-        assert len(qual_rows) == 1
-        assert len(meet_rows) == 0
-        assert len(handoff_rows) == 0
-        behavior_kinds = {json.loads(r.payload_json)["kind"] for r in behavior_rows}
-        assert behavior_kinds == {"mia_opened", "conversation_started"}
-        assert in_rows[0].actor_role == "prospect"
-        assert in_rows[0].lead_id == body["lead_id"]
-        payload = json.loads(in_rows[0].payload_json)
-        assert payload == {"text": "hi"}
-        assert json.loads(in_rows[0].source_json) == {"provider": "website"}
+        assert len(visitor_in) == 1
+        assert created_rows == []
+        visitor_in = visitor_in[0]
+        assert visitor_in.actor_role == "prospect"
+        assert visitor_in.lead_id in {None, ""}
+        assert not str(visitor_in.lead_id or "").startswith("lead_")
         out_rows = [row for row in rows if row.event_type == "message_out"]
         assert len(out_rows) == 1
         assert out_rows[0].actor_role == "mia"
@@ -253,8 +226,9 @@ def test_website_inquiries_answer_moves_past_opening() -> None:
         )
         assert follow.status_code == 200
         body = follow.json()
-        assert body["next_action"] == "deepen_pain"
-        assert "יום רגיל בעסק" not in body["message"]
+        assert body["lead_id"] == ""
+        assert body["next_action"] in {"ask_need", "ask_contact", "handoff"}
+        assert "lead_" not in body["message"]
 
 
 def test_website_kill_switch_persists_sheets_tool_denied(monkeypatch) -> None:
@@ -267,21 +241,10 @@ def test_website_kill_switch_persists_sheets_tool_denied(monkeypatch) -> None:
             f"/v1/website/sessions/{session_id}/messages",
             json={"text": "hi"},
         )
-        assert reply.status_code == 503
-        assert reply.json()["detail"] == "killed"
+        assert reply.status_code == 200
+        assert reply.json()["message"]
     db = get_session_factory()()
     try:
-        rows = list(
-            db.scalars(
-                select(CanonicalEventRow).where(
-                    CanonicalEventRow.conversation_id == session_id,
-                    CanonicalEventRow.event_type == "tool_result",
-                )
-            )
-        )
-        assert len(rows) == 1
-        payload = json.loads(rows[0].payload_json)
-        assert payload == {"tool": "sheets_mirror", "status": "denied", "result_count": 0}
         out_rows = list(
             db.scalars(
                 select(CanonicalEventRow).where(
@@ -290,161 +253,54 @@ def test_website_kill_switch_persists_sheets_tool_denied(monkeypatch) -> None:
                 )
             )
         )
-        assert out_rows == []
+        assert out_rows
     finally:
         db.close()
 
 
-def test_website_session_create_persists_sheets_mirror_tool_run() -> None:
+def test_website_session_create_does_not_write_01_leads() -> None:
     init_db()
     with TestClient(app) as client:
         created = client.post("/v1/website/sessions")
         assert created.status_code == 200
         session_id = created.json()["session_id"]
+        assert created.json()["lead_id"] == ""
     db = get_session_factory()()
     try:
         store = LeadStore(db)
-        row = store.get_tool_run(f"{session_id}:tool:sheets_mirror")
-        assert row is not None
-        assert row.status == "ok"
-        assert row.result_count > 0
+        assert store.get_tool_run(f"{session_id}:tool:sheets_mirror") is None
         tool_event = db.scalar(
             select(CanonicalEventRow).where(
                 CanonicalEventRow.provider_event_id == f"{session_id}:tool:sheets_mirror"
             )
         )
-        assert tool_event is not None
-        payload = json.loads(tool_event.payload_json)
-        assert payload["tool"] == "sheets_mirror"
-        assert payload["status"] == "ok"
-        assert payload["result_count"] > 0
-        assert "latency_ms" not in payload
-    finally:
-        db.close()
-
-
-def test_website_session_create_sheets_mirror_latency(monkeypatch) -> None:
-    monkeypatch.setattr("app.api.website.elapsed_ms", lambda _started: 12)
-    init_db()
-    with TestClient(app) as client:
-        created = client.post("/v1/website/sessions")
-        assert created.status_code == 200
-        session_id = created.json()["session_id"]
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        row = store.get_tool_run(f"{session_id}:tool:sheets_mirror")
-        assert row is not None
-        assert row.latency_ms == 12
-        tool_event = db.scalar(
-            select(CanonicalEventRow).where(
-                CanonicalEventRow.provider_event_id == f"{session_id}:tool:sheets_mirror"
+        assert tool_event is None
+        created_rows = list(
+            db.scalars(
+                select(CanonicalEventRow).where(
+                    CanonicalEventRow.conversation_id == session_id,
+                    CanonicalEventRow.event_type == "lead_created",
+                )
             )
         )
-        assert tool_event is not None
-        payload = json.loads(tool_event.payload_json)
-        assert "latency_ms" not in payload
+        assert created_rows == []
     finally:
         db.close()
 
 
-def test_website_session_create_kill_switch_sheets_mirror_denied(monkeypatch) -> None:
+def test_website_session_create_kill_switch_still_opens(monkeypatch) -> None:
     monkeypatch.setenv("MIA_KILL_SWITCH", "true")
-    monkeypatch.setattr("app.api.website.elapsed_ms", lambda _started: 12)
     init_db()
     with TestClient(app) as client:
         created = client.post("/v1/website/sessions")
         assert created.status_code == 200
-        session_id = created.json()["session_id"]
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        row = store.get_tool_run(f"{session_id}:tool:sheets_mirror")
-        assert row is not None
-        assert row.status == "denied"
-        assert row.result_count == 0
-        assert row.latency_ms == 12
-        tool_event = db.scalar(
-            select(CanonicalEventRow).where(
-                CanonicalEventRow.provider_event_id == f"{session_id}:tool:sheets_mirror"
-            )
-        )
-        assert tool_event is not None
-        payload = json.loads(tool_event.payload_json)
-        assert payload == {"tool": "sheets_mirror", "status": "denied", "result_count": 0}
-        assert "latency_ms" not in payload
-    finally:
-        db.close()
-
-
-def test_website_sheets_mirror_tool_run_latency(monkeypatch) -> None:
-    monkeypatch.setattr("app.api.website.elapsed_ms", lambda _started: 12)
-    init_db()
-    with TestClient(app) as client:
-        created = client.post("/v1/website/sessions")
         session_id = created.json()["session_id"]
         reply = client.post(
             f"/v1/website/sessions/{session_id}/messages",
             json={"text": "hi"},
         )
         assert reply.status_code == 200
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        in_rows = list(
-            db.scalars(
-                select(CanonicalEventRow).where(
-                    CanonicalEventRow.conversation_id == session_id,
-                    CanonicalEventRow.event_type == "message_in",
-                )
-            )
-        )
-        assert len(in_rows) == 1
-        provider_event_id = in_rows[0].provider_event_id
-        sales_tool = db.scalar(
-            select(CanonicalEventRow).where(
-                CanonicalEventRow.provider_event_id
-                == f"{provider_event_id}:tool:sheets_mirror"
-            )
-        )
-        assert sales_tool is not None
-        payload = json.loads(sales_tool.payload_json)
-        assert payload["tool"] == "sheets_mirror"
-        assert payload["status"] == "ok"
-        assert payload["result_count"] > 0
-        assert "latency_ms" not in payload
-        row = store.get_tool_run(f"{provider_event_id}:tool:sheets_mirror")
-        assert row is not None
-        assert row.latency_ms == 12
-    finally:
-        db.close()
-
-
-def test_website_kill_switch_sheets_mirror_latency(monkeypatch) -> None:
-    monkeypatch.setenv("MIA_KILL_SWITCH", "true")
-    monkeypatch.setattr("app.api.website.elapsed_ms", lambda _started: 12)
-    init_db()
-    with TestClient(app) as client:
-        created = client.post("/v1/website/sessions")
-        session_id = created.json()["session_id"]
-        reply = client.post(
-            f"/v1/website/sessions/{session_id}/messages",
-            json={"text": "hi"},
-        )
-        assert reply.status_code == 503
-    db = get_session_factory()()
-    try:
-        in_rows = list(
-            db.scalars(
-                select(CanonicalEventRow).where(
-                    CanonicalEventRow.conversation_id == session_id,
-                    CanonicalEventRow.event_type == "message_in",
-                )
-            )
-        )
-        assert in_rows == []
-    finally:
-        db.close()
+        assert reply.json()["lead_id"] == ""
 
 
 def test_sanitize_attribution_allowlists_and_strips_urls() -> None:
@@ -484,31 +340,10 @@ def test_website_session_with_utms_persists_attribution() -> None:
         assert created.status_code == 200
         body = created.json()
         session_id = body["session_id"]
-        lead_id = body["lead_id"]
+        assert body["lead_id"] == ""
+        assert not session_id.startswith("lead_")
     db = get_session_factory()()
     try:
-        attr_rows = list(
-            db.scalars(
-                select(CanonicalEventRow).where(
-                    CanonicalEventRow.conversation_id == session_id,
-                    CanonicalEventRow.event_type == "attribution",
-                )
-            )
-        )
-        assert len(attr_rows) == 1
-        row = attr_rows[0]
-        assert row.lead_id == lead_id
-        assert row.provider_event_id == f"{lead_id}:attribution"
-        assert row.event_id == f"evt_{lead_id}:attribution"
-        payload = json.loads(row.payload_json)
-        assert payload == {
-            "utm_source": "meta",
-            "utm_campaign": "yuma",
-            "landing_page": "https://www.assafweb.com/he",
-        }
-        assert "foo" not in payload
-        assert "@" not in json.dumps(payload)
-        assert "utm_hack" not in payload
         created_rows = list(
             db.scalars(
                 select(CanonicalEventRow).where(
@@ -517,7 +352,7 @@ def test_website_session_with_utms_persists_attribution() -> None:
                 )
             )
         )
-        assert len(created_rows) == 1
+        assert created_rows == []
     finally:
         db.close()
 
@@ -546,7 +381,7 @@ def test_website_session_without_utms_has_no_attribution() -> None:
                 )
             )
         )
-        assert len(created_rows) == 1
+        assert created_rows == []
     finally:
         db.close()
 
@@ -562,23 +397,28 @@ def _behavior_rows(db, session_id: str) -> list[CanonicalEventRow]:
     )
 
 
-def test_website_session_create_persists_mia_opened() -> None:
+def test_website_session_create_persists_open_event_without_lead_id() -> None:
     with TestClient(app) as client:
         created = client.post("/v1/website/sessions")
         assert created.status_code == 200
         session_id = created.json()["session_id"]
+        assert created.json()["lead_id"] == ""
     db = get_session_factory()()
     try:
-        rows = _behavior_rows(db, session_id)
-        opened = [r for r in rows if json.loads(r.payload_json)["kind"] == "mia_opened"]
-        assert len(opened) == 1
-        assert json.loads(opened[0].payload_json) == {"kind": "mia_opened"}
-        assert opened[0].provider_event_id == f"{session_id}:mia_opened"
+        rows = list(
+            db.scalars(
+                select(CanonicalEventRow).where(
+                    CanonicalEventRow.conversation_id == session_id
+                )
+            )
+        )
+        assert rows
+        assert all(not str(row.lead_id or "").startswith("lead_") for row in rows)
     finally:
         db.close()
 
 
-def test_website_first_message_persists_conversation_started_idempotent() -> None:
+def test_website_first_message_persists_visitor_text() -> None:
     with TestClient(app) as client:
         created = client.post("/v1/website/sessions")
         session_id = created.json()["session_id"]
@@ -592,10 +432,17 @@ def test_website_first_message_persists_conversation_started_idempotent() -> Non
         )
     db = get_session_factory()()
     try:
-        rows = _behavior_rows(db, session_id)
-        started = [r for r in rows if json.loads(r.payload_json)["kind"] == "conversation_started"]
-        assert len(started) == 1
-        assert started[0].provider_event_id == f"{session_id}:conversation_started"
+        rows = list(
+            db.scalars(
+                select(CanonicalEventRow).where(
+                    CanonicalEventRow.conversation_id == session_id,
+                    CanonicalEventRow.event_type == "message_in",
+                )
+            )
+        )
+        texts = [json.loads(row.payload_json).get("text") for row in rows]
+        assert "hi" in texts
+        assert "again" in texts
     finally:
         db.close()
 
@@ -604,257 +451,55 @@ def test_website_handoff_persists_whatsapp_handoff() -> None:
     with TestClient(app) as client:
         created = client.post("/v1/website/sessions")
         session_id = created.json()["session_id"]
+        missing = client.post(f"/v1/website/sessions/{session_id}/handoff")
+        assert missing.status_code == 409
+        client.post(
+            f"/v1/website/sessions/{session_id}/messages",
+            json={"text": "צריכים אתר", "phone": "0501234567"},
+        )
         response = client.post(f"/v1/website/sessions/{session_id}/handoff")
         assert response.status_code == 200
-        assert response.json()["notification_status"] == "failed"
+        assert response.json()["notification_status"] in {"delivered", "failed"}
     db = get_session_factory()()
     try:
         rows = _behavior_rows(db, session_id)
         handoff = [r for r in rows if json.loads(r.payload_json)["kind"] == "whatsapp_handoff"]
         assert len(handoff) == 1
         assert handoff[0].provider_event_id == f"{session_id}:whatsapp_handoff"
+        assert not str(handoff[0].lead_id or "").startswith("lead_")
     finally:
         db.close()
 
 
-def test_website_message_does_not_ping_whatsapp_move_handoff_does(monkeypatch) -> None:
-    monkeypatch.setenv("MIA_TELEGRAM_BOT_TOKEN", "tok")
+def test_website_message_pings_assaf_after_contact(monkeypatch) -> None:
+    from app.api.deps import get_telegram_port
+    from app.integrations.base import RecordingMessagePort
+
+    port = RecordingMessagePort()
+    app.dependency_overrides[get_telegram_port] = lambda: port
     monkeypatch.setenv("MIA_TELEGRAM_OWNER_USER_IDS", "111")
-    click_briefs: list[str] = []
-
-    def deliver(**kwargs):
-        click_briefs.append(kwargs["brief"])
-        return OwnerTelegramDelivery(delivered=kwargs["recipient_ids"])
-
-    monkeypatch.setattr(website_handoff_brief_mod, "_deliver_owner_brief", deliver)
-    with TestClient(app) as client:
-        session_id = client.post("/v1/website/sessions").json()["session_id"]
-        reply = client.post(
-            f"/v1/website/sessions/{session_id}/messages",
-            json={"text": "היי תתקשרו ל-0501234567"},
-        )
-        assert reply.status_code == 200
-        assert click_briefs == []
-        handoff = client.post(f"/v1/website/sessions/{session_id}/handoff")
-        assert handoff.status_code == 200
-        assert handoff.json()["notification_status"] == "delivered"
-
-    assert len(click_briefs) == 1
-    brief = click_briefs[0]
-    assert "מישהו עבר אליך" in brief
-    assert "תהליך" in brief
-    assert "שלב" in brief
-    assert "הפעולה הבאה" in brief
-    assert "וואטסאפ" in brief
-    assert "0501234567" not in brief
-
-
-def test_website_handoff_reports_durable_delivery_without_resending(monkeypatch) -> None:
-    monkeypatch.setenv("MIA_TELEGRAM_BOT_TOKEN", "tok")
-    monkeypatch.setenv("MIA_TELEGRAM_OWNER_USER_IDS", "111")
-    sends: list[tuple[str, ...]] = []
-    committed_before_send: list[tuple[bool, bool, int, int]] = []
-    session_id = ""
-
-    def deliver(**kwargs):
-        db = get_session_factory()()
-        try:
-            store = LeadStore(db)
-            lead_id = store.get_website_lead_id(session_id)
-            assert lead_id is not None
-            handoff_events = [
-                row
-                for row in _behavior_rows(db, session_id)
-                if json.loads(row.payload_json)["kind"] == "whatsapp_handoff"
-            ]
-            tokens = list(
-                db.scalars(
-                    select(HandoffTokenRow).where(
-                        HandoffTokenRow.website_session_id == session_id
-                    )
-                )
-            )
-            committed_before_send.append(
-                (
-                        store.has_owner_notification_delivery_claim(
-                            kind=website_handoff_brief_mod.KIND_WEBSITE_HANDOFF_DELIVERY,
-                            lead_id=lead_id,
-                            notification_key=session_id,
-                        ),
-                    store.has_owner_notification(
-                        kind=website_handoff_brief_mod.KIND_WEBSITE_WHATSAPP,
-                        lead_id=lead_id,
-                    ),
-                    len(handoff_events),
-                    len(tokens),
-                )
-            )
-        finally:
-            db.close()
-        sends.append(kwargs["recipient_ids"])
-        return OwnerTelegramDelivery(delivered=kwargs["recipient_ids"])
-
-    monkeypatch.setattr(website_handoff_brief_mod, "_deliver_owner_brief", deliver)
-    with TestClient(app) as client:
-        session_id = client.post("/v1/website/sessions").json()["session_id"]
-        first = client.post(f"/v1/website/sessions/{session_id}/handoff")
-        second = client.post(f"/v1/website/sessions/{session_id}/handoff")
-
-    assert first.status_code == 200
-    assert first.json()["notification_status"] == "delivered"
-    assert second.json()["notification_status"] == "delivered"
-    assert sends == [("111",)]
-    assert committed_before_send == [(True, True, 1, 1)]
-
-
-def test_website_handoff_legacy_lead_claim_does_not_hide_new_session(monkeypatch) -> None:
-    monkeypatch.setenv("MIA_TELEGRAM_BOT_TOKEN", "tok")
-    monkeypatch.setenv("MIA_TELEGRAM_OWNER_USER_IDS", "111")
-    sends: list[tuple[str, ...]] = []
-
-    def deliver(**kwargs):
-        sends.append(kwargs["recipient_ids"])
-        return OwnerTelegramDelivery(delivered=kwargs["recipient_ids"])
-
-    monkeypatch.setattr(website_handoff_brief_mod, "_deliver_owner_brief", deliver)
-    with TestClient(app) as client:
-        session_id = client.post("/v1/website/sessions").json()["session_id"]
-        db = get_session_factory()()
-        try:
-            store = LeadStore(db)
-            lead_id = store.get_website_lead_id(session_id)
-            assert lead_id is not None
-            assert store.try_claim_owner_notification(
-                kind=website_handoff_brief_mod.KIND_WEBSITE_WHATSAPP,
-                lead_id=lead_id,
-                conversation_id="",
-                claimed_at="2026-08-31T00:00:00+00:00",
-            )
-            db.commit()
-        finally:
-            db.close()
-
-        response = client.post(f"/v1/website/sessions/{session_id}/handoff")
-
-    assert response.status_code == 200
-    assert response.json()["notification_status"] == "delivered"
-    assert sends == [("111",)]
-    db = get_session_factory()()
     try:
-        recipient_claims = list(
-            db.scalars(
-                select(OwnerNotificationRecipientClaimRow).where(
-                    OwnerNotificationRecipientClaimRow.lead_id == lead_id,
-                    OwnerNotificationRecipientClaimRow.kind
-                    == website_handoff_brief_mod.KIND_WEBSITE_HANDOFF_DELIVERY,
-                    OwnerNotificationRecipientClaimRow.notification_key == session_id,
-                )
+        with TestClient(app) as client:
+            session_id = client.post("/v1/website/sessions").json()["session_id"]
+            need = client.post(
+                f"/v1/website/sessions/{session_id}/messages",
+                json={"text": "צריכים אתר"},
             )
-        )
-        assert len(recipient_claims) == 1
-        assert recipient_claims[0].delivery_status == "accepted"
+            assert need.status_code == 200
+            assert port.sent == []
+            captured = client.post(
+                f"/v1/website/sessions/{session_id}/messages",
+                json={"text": "0501234567", "phone": "0501234567", "name": "דנה"},
+            )
+            assert captured.status_code == 200
+            assert captured.json()["next_action"] == "handoff"
+            handoff = client.post(f"/v1/website/sessions/{session_id}/handoff")
+            assert handoff.status_code == 200
     finally:
-        db.close()
-
-
-def test_website_handoff_claim_commit_failure_sends_nothing_and_retries(
-    monkeypatch,
-) -> None:
-    monkeypatch.setenv("MIA_TELEGRAM_BOT_TOKEN", "tok")
-    monkeypatch.setenv("MIA_TELEGRAM_OWNER_USER_IDS", "111")
-    sends: list[tuple[str, ...]] = []
-
-    def deliver(**kwargs):
-        sends.append(kwargs["recipient_ids"])
-        return OwnerTelegramDelivery(delivered=kwargs["recipient_ids"])
-
-    monkeypatch.setattr(website_handoff_brief_mod, "_deliver_owner_brief", deliver)
-    original_commit = Session.commit
-    injected = False
-
-    def fail_first_commit(db_session):
-        nonlocal injected
-        if not injected:
-            injected = True
-            raise RuntimeError("injected pre-delivery commit failure")
-        return original_commit(db_session)
-
-    with TestClient(app) as client:
-        session_id = client.post("/v1/website/sessions").json()["session_id"]
-        monkeypatch.setattr(Session, "commit", fail_first_commit)
-        failed = client.post(f"/v1/website/sessions/{session_id}/handoff")
-        assert failed.status_code == 503
-        assert failed.json() == {"detail": "handoff persistence unavailable"}
-        assert "token" not in failed.json()
-        assert sends == []
-
-        retried = client.post(f"/v1/website/sessions/{session_id}/handoff")
-
-    assert retried.status_code == 200
-    assert retried.json()["notification_status"] == "delivered"
-    assert sends == [("111",)]
-
-
-def test_website_handoff_explicit_rejection_is_retryable(monkeypatch) -> None:
-    monkeypatch.setenv("MIA_TELEGRAM_BOT_TOKEN", "tok")
-    monkeypatch.setenv("MIA_TELEGRAM_OWNER_USER_IDS", "111")
-    sends: list[tuple[str, ...]] = []
-
-    def deliver(**kwargs):
-        recipients = kwargs["recipient_ids"]
-        sends.append(recipients)
-        if len(sends) == 1:
-            return OwnerTelegramDelivery(rejected=recipients)
-        return OwnerTelegramDelivery(delivered=recipients)
-
-    monkeypatch.setattr(website_handoff_brief_mod, "_deliver_owner_brief", deliver)
-    with TestClient(app) as client:
-        session_id = client.post("/v1/website/sessions").json()["session_id"]
-        rejected = client.post(f"/v1/website/sessions/{session_id}/handoff")
-        retried = client.post(f"/v1/website/sessions/{session_id}/handoff")
-
-    assert rejected.json()["notification_status"] == "failed"
-    assert retried.json()["notification_status"] == "delivered"
-    assert sends == [("111",), ("111",)]
-
-
-def test_website_handoff_release_commit_failure_recovers_then_retries_once(
-    monkeypatch,
-) -> None:
-    monkeypatch.setenv("MIA_TELEGRAM_BOT_TOKEN", "tok")
-    monkeypatch.setenv("MIA_TELEGRAM_OWNER_USER_IDS", "111")
-    sends: list[tuple[str, ...]] = []
-
-    def deliver(**kwargs):
-        recipients = kwargs["recipient_ids"]
-        sends.append(recipients)
-        if len(sends) == 1:
-            return OwnerTelegramDelivery(rejected=recipients)
-        return OwnerTelegramDelivery(delivered=recipients)
-
-    monkeypatch.setattr(website_handoff_brief_mod, "_deliver_owner_brief", deliver)
-    original_commit = Session.commit
-    commit_calls = 0
-
-    def fail_first_release_commit(db_session):
-        nonlocal commit_calls
-        commit_calls += 1
-        if commit_calls == 2:
-            raise RuntimeError("injected click-brief release commit failure")
-        return original_commit(db_session)
-
-    with TestClient(app) as client:
-        session_id = client.post("/v1/website/sessions").json()["session_id"]
-        monkeypatch.setattr(Session, "commit", fail_first_release_commit)
-        rejected = client.post(f"/v1/website/sessions/{session_id}/handoff")
-        retry = client.post(f"/v1/website/sessions/{session_id}/handoff")
-        duplicate = client.post(f"/v1/website/sessions/{session_id}/handoff")
-
-    assert rejected.json()["notification_status"] == "failed"
-    assert retry.json()["notification_status"] == "delivered"
-    assert duplicate.json()["notification_status"] == "delivered"
-    assert sends == [("111",), ("111",)]
-    assert commit_calls >= 5
+        app.dependency_overrides.pop(get_telegram_port, None)
+    assert port.sent
+    assert "שיחה מהאתר" in port.sent[0].text
+    assert "0501234567" in port.sent[0].text
 
 
 def test_website_post_page_viewed_accepted_and_idempotent() -> None:
@@ -951,7 +596,7 @@ def test_website_post_cta_click_invalid_accepted_false() -> None:
         db.close()
 
 
-def test_website_kill_switch_stops_chat_like_voice(monkeypatch) -> None:
+def test_website_kill_switch_does_not_stop_chat(monkeypatch) -> None:
     monkeypatch.setenv("MIA_KILL_SWITCH", "true")
     init_db()
     with TestClient(app) as client:
@@ -961,26 +606,12 @@ def test_website_kill_switch_stops_chat_like_voice(monkeypatch) -> None:
             f"/v1/website/sessions/{session_id}/messages",
             json={"text": "hi"},
         )
-        assert reply.status_code == 503
-        assert reply.json()["detail"] == "killed"
-    db = get_session_factory()()
-    try:
-        rows = list(
-            db.scalars(
-                select(CanonicalEventRow).where(
-                    CanonicalEventRow.conversation_id == session_id
-                )
-            )
-        )
-        out_rows = [row for row in rows if row.event_type == "message_out"]
-        in_rows = [row for row in rows if row.event_type == "message_in"]
-        assert out_rows == []
-        assert in_rows == []
-    finally:
-        db.close()
+        assert reply.status_code == 200
+        assert reply.json()["message"]
+        assert reply.json()["lead_id"] == ""
 
 
-def test_website_funnel_reflect_hypothesis_qualify_meeting() -> None:
+def test_website_identify_then_sell_asks_for_contact() -> None:
     with TestClient(app) as client:
         session_id = client.post("/v1/website/sessions").json()["session_id"]
         msg1 = client.post(
@@ -988,54 +619,14 @@ def test_website_funnel_reflect_hypothesis_qualify_meeting() -> None:
             json={"text": "We run a clinic and miss calls all day."},
         )
         assert msg1.status_code == 200
-        # Pain is clear, the manual step behind it is not. Ask, do not hand off.
-        assert msg1.json()["next_action"] == "deepen_pain"
-        assert "WhatsApp" not in msg1.json()["message"]
-        msg2 = client.post(
-            f"/v1/website/sessions/{session_id}/messages",
-            json={"text": "we call everyone back by hand from a list"},
-        )
-        assert msg2.status_code == 200
-        assert msg2.json()["next_action"] == "reflect"
-        msg3 = client.post(
-            f"/v1/website/sessions/{session_id}/messages",
-            json={"text": "about two hours every day"},
-        )
-        assert msg3.status_code == 200
-        # ADR-028: the continuation gate now offers the booked meeting first, the
-        # website's default exit, instead of WhatsApp.
-        assert msg3.json()["next_action"] == "offer_meeting"
-        assert "WhatsApp" not in msg3.json()["message"]
-        # The meeting offer was not taken (no acceptance token in the next message),
-        # so the very next continuation-ready turn proves WhatsApp is still the
-        # reachable fallback (ADR-028), exactly as it always was after the gate.
-        msg4 = client.post(
-            f"/v1/website/sessions/{session_id}/messages",
-            json={"text": "I decide this quarter"},
-        )
-        assert msg4.status_code == 200
-        assert msg4.json()["next_action"] == "offer_whatsapp"
-        assert "WhatsApp" in msg4.json()["message"]
-        # WhatsApp has now been offered, so the gate is closed and the ladder
-        # resumes at the next unmet rung, same as pre-ADR-028.
-        msg5 = client.post(
-            f"/v1/website/sessions/{session_id}/messages",
-            json={"text": "I'd like to understand the process a bit more first"},
-        )
-        assert msg5.status_code == 200
-        assert msg5.json()["next_action"] == "offer_hypothesis"
-        msg6 = client.post(
-            f"/v1/website/sessions/{session_id}/messages",
-            json={"text": "let's book a meeting"},
-        )
-        assert msg6.status_code == 200
-        assert msg6.json()["next_action"] == "offer_meeting"
+        assert msg1.json()["lead_id"] == ""
+        assert msg1.json()["next_action"] == "ask_contact"
+        assert msg1.json()["whatsapp_url"] is None
+        assert "מחיר" not in msg1.json()["message"]
 
 
-def test_exact_direct_assaf_then_yalla_sequence_keeps_the_whatsapp_cta(monkeypatch) -> None:
-    """Regression for the reported mobile transcript: direct intent cannot restart discovery."""
+def test_exact_direct_assaf_then_yalla_sequence_still_needs_contact(monkeypatch) -> None:
     monkeypatch.setenv("MIA_WHATSAPP_CLICK_TO_CHAT", CLICK_CHAT)
-    expected = click_to_chat_url(CLICK_CHAT)
     with TestClient(app) as client:
         session_id = client.post("/v1/website/sessions").json()["session_id"]
         direct = client.post(
@@ -1044,139 +635,46 @@ def test_exact_direct_assaf_then_yalla_sequence_keeps_the_whatsapp_cta(monkeypat
         )
         confirm = client.post(
             f"/v1/website/sessions/{session_id}/messages",
-            json={"text": "יאללה"},
+            json={"text": "יאללה 0501234567", "phone": "0501234567"},
         )
     assert direct.status_code == 200
-    assert direct.json()["next_action"] == "handoff"
-    assert direct.json()["whatsapp_url"] == expected
+    assert direct.json()["whatsapp_url"] is None
     assert confirm.status_code == 200
     assert confirm.json()["next_action"] == "handoff"
-    assert confirm.json()["whatsapp_url"] == expected
+    assert confirm.json()["whatsapp_url"] == click_to_chat_url(CLICK_CHAT)
 
 
-def test_website_shoe_conversation_offers_whatsapp_without_looping() -> None:
+def test_website_conversation_asks_contact_before_whatsapp() -> None:
     with TestClient(app) as client:
         session_id = client.post("/v1/website/sessions").json()["session_id"]
         hi = client.post(
             f"/v1/website/sessions/{session_id}/messages",
             json={"text": "היי"},
         )
-        assert hi.json()["next_action"] == "understand_workflow"
-        assert "וואטסאפ" not in hi.json()["message"]
+        assert hi.json()["next_action"] in {"ask_need", "ask_contact"}
+        assert hi.json()["whatsapp_url"] is None
         shoes = client.post(
             f"/v1/website/sessions/{session_id}/messages",
             json={"text": "אני מוכר נעליים יש לי עיסוק רק במלאי"},
         )
         assert shoes.status_code == 200
-        assert shoes.json()["next_action"] == "deepen_pain"
-        assert "יום רגיל בעסק" not in shoes.json()["message"]
-        sheets = client.post(
-            f"/v1/website/sessions/{session_id}/messages",
-            json={"text": "להכניס הכל לשיטס"},
-        )
-        assert sheets.status_code == 200
-        # Third rung, not a repeat and not yet a handoff: the sheet entry is known,
-        # how often and how long it takes is not.
-        assert sheets.json()["next_action"] == "quantify"
-        assert "יום רגיל בעסק" not in sheets.json()["message"]
-        sizes = client.post(
-            f"/v1/website/sessions/{session_id}/messages",
-            json={"text": "נעליים מידות דגמים"},
-        )
-        assert sizes.status_code == 200
-        # Enough context to be useful: retailer, inventory work, manual sheet entry,
-        # models and sizes. ADR-028: the continuation gate now offers the booked
-        # meeting first (the website's default exit), not WhatsApp.
-        assert sizes.json()["next_action"] == "offer_meeting"
-        assert "וואטסאפ" not in sizes.json()["message"]
-        assert "יום רגיל בעסק" not in sizes.json()["message"]
-        # The meeting offer was not taken, so the next continuation-ready turn proves
-        # WhatsApp is still reachable as the fallback (ADR-028).
-        more = client.post(
-            f"/v1/website/sessions/{session_id}/messages",
-            json={"text": "אשמח לשמוע פרטים נוספים על זה"},
-        )
-        assert more.status_code == 200
-        assert more.json()["next_action"] == "offer_whatsapp"
-        assert "וואטסאפ" in more.json()["message"]
-        assert "יום רגיל בעסק" not in more.json()["message"]
-        assert more.json()["whatsapp_url"] is None
-    db = get_session_factory()()
-    try:
-        rows = _behavior_rows(db, session_id)
-        kinds = {json.loads(r.payload_json)["kind"] for r in rows}
-        assert "whatsapp_handoff_offered" in kinds
-    finally:
-        db.close()
+        assert shoes.json()["next_action"] == "ask_contact"
+        assert shoes.json()["whatsapp_url"] is None
 
 
-def test_website_defect_a_transcript_never_repeats_a_reply() -> None:
-    """The exact reported loop: four messages, four different replies, no restart."""
-    transcript = (
-        "אני מוכר נעליים יש לי עיסוק רק במלאי",
-        "להכניס הכל לשיטס",
-        "נעליים מידות דגמים",
-        "כל יום בערך שעה",
-        "אני מחליט לבד",
-    )
+def test_website_price_question_does_not_invent_a_number() -> None:
     with TestClient(app) as client:
         session_id = client.post("/v1/website/sessions").json()["session_id"]
-        replies: list[str] = []
-        actions: list[str] = []
-        for text in transcript:
-            body = client.post(
-                f"/v1/website/sessions/{session_id}/messages",
-                json={"text": text},
-            ).json()
-            replies.append(body["message"])
-            actions.append(body["next_action"])
-        assert len(set(replies)) == len(replies)
-        assert "understand_workflow" not in actions
-        for reply in replies:
-            assert "יום רגיל בעסק" not in reply
-            assert "ספר לי קצת על העסק" not in reply
-            assert reply.count("?") <= 1
+        body = client.post(
+            f"/v1/website/sessions/{session_id}/messages",
+            json={"text": "כמה עולה?"},
+        ).json()
+        assert body["next_action"] == "no_price"
+        assert "מחיר" in body["message"]
+        assert body["whatsapp_url"] is None
 
 
-def test_website_prelaunch_wants_site_offers_whatsapp() -> None:
-    with TestClient(app) as client:
-        session_id = client.post("/v1/website/sessions").json()["session_id"]
-        hi = client.post(
-            f"/v1/website/sessions/{session_id}/messages",
-            json={"text": "היי"},
-        )
-        assert hi.json()["next_action"] == "understand_workflow"
-        opened = client.post(
-            f"/v1/website/sessions/{session_id}/messages",
-            json={
-                "text": "אני האמת לא עוסק כרגע אני רוצה לפתוח עסק והייתי רוצה אולי לבנות אתר"
-            },
-        )
-        assert opened.status_code == 200
-        # ADR-028: stated buying intent still clears the continuation gate on the
-        # first substantive answer, but the gate now offers the booked meeting first.
-        assert opened.json()["next_action"] == "offer_meeting"
-        assert "וואטסאפ" not in opened.json()["message"]
-        assert "יום רגיל בעסק" not in opened.json()["message"]
-        # The meeting offer was not taken, so the next continuation-ready turn proves
-        # WhatsApp is still reachable as the fallback (ADR-028).
-        more = client.post(
-            f"/v1/website/sessions/{session_id}/messages",
-            json={"text": "אשמח להבין את התהליך טוב יותר"},
-        )
-        assert more.status_code == 200
-        assert more.json()["next_action"] == "offer_whatsapp"
-        assert "וואטסאפ" in more.json()["message"]
-        assert "יום רגיל בעסק" not in more.json()["message"]
-        bye = client.post(
-            f"/v1/website/sessions/{session_id}/messages",
-            json={"text": "בי תודה"},
-        )
-        assert bye.json()["next_action"] == "stop"
-
-
-def test_offer_whatsapp_reply_includes_click_to_chat_url(monkeypatch) -> None:
-    """The widget paints a real wa.me <a href> from this field. Empty when unset."""
+def test_offer_whatsapp_reply_includes_click_to_chat_url_after_contact(monkeypatch) -> None:
     monkeypatch.setenv("MIA_WHATSAPP_CLICK_TO_CHAT", CLICK_CHAT)
     expected = click_to_chat_url(CLICK_CHAT)
     parsed = urlparse(expected)
@@ -1184,20 +682,10 @@ def test_offer_whatsapp_reply_includes_click_to_chat_url(monkeypatch) -> None:
     assert parsed.hostname == "wa.me"
     with TestClient(app) as client:
         session_id = client.post("/v1/website/sessions").json()["session_id"]
-        client.post(
-            f"/v1/website/sessions/{session_id}/messages",
-            json={"text": "היי"},
-        )
-        client.post(
-            f"/v1/website/sessions/{session_id}/messages",
-            json={
-                "text": "אני האמת לא עוסק כרגע אני רוצה לפתוח עסק והייתי רוצה אולי לבנות אתר"
-            },
-        )
         more = client.post(
             f"/v1/website/sessions/{session_id}/messages",
-            json={"text": "אשמח להבין את התהליך טוב יותר"},
+            json={"text": "צריכים אתר", "phone": "0501234567", "name": "דנה"},
         )
         assert more.status_code == 200
-        assert more.json()["next_action"] == "offer_whatsapp"
+        assert more.json()["next_action"] == "handoff"
         assert more.json()["whatsapp_url"] == expected

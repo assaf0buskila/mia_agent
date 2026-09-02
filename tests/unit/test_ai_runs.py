@@ -38,7 +38,6 @@ from app.integrations.sales_reply import (
 )
 from app.integrations.sheets import DisabledSheetsPort
 from app.main import app
-from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
@@ -83,38 +82,16 @@ def test_website_first_message_persists_ai_run() -> None:
             json={"text": VISITOR_TEXT},
         )
         assert response.status_code == 200
-        lead_id = response.json()["lead_id"]
-        assert response.json()["next_action"] == NextAction.UNDERSTAND_WORKFLOW.value
+        assert response.json()["lead_id"] == ""
+        assert response.json()["next_action"] in {"ask_need", "ask_contact"}
     db = get_session_factory()()
     try:
-        rows = list(db.scalars(select(AiRunRow).where(AiRunRow.lead_id == lead_id)).all())
-        assert len(rows) == 1
-        row = rows[0]
-        assert row.run_id.startswith("run_")
-        assert row.channel == Channel.WEBSITE.value
-        assert row.graph_version == GRAPH_VERSION
-        assert row.model == MODEL_CANNED
-        assert row.next_action == NextAction.UNDERSTAND_WORKFLOW.value
-        assert row.tokens_in == 0
-        assert row.tokens_out == 0
-        assert row.cost_usd == 0
-        assert row.latency_ms >= 0
-        assert row.kill_switch is False
-        assert row.policy_version == POLICY_VERSION
-        assert row.prompt_version == PROMPT_VERSION
-        assert row.decision_confidence == "1.0"
-        assert row.automation_mode == "auto_approved"
-        assert VISITOR_TEXT not in row.model
-        assert VISITOR_TEXT not in row.graph_version
-        assert VISITOR_TEXT not in row.next_action
-        assert VISITOR_TEXT not in row.policy_version
-        assert VISITOR_TEXT not in row.prompt_version
-        assert VISITOR_TEXT not in _all_ai_run_values(row)
+        assert db.scalars(select(AiRunRow).where(AiRunRow.lead_id == session_id)).all() == []
     finally:
         db.close()
 
 
-def test_website_second_message_persists_second_ai_run() -> None:
+def test_website_second_message_does_not_persist_ai_run() -> None:
     init_db()
     with TestClient(app) as client:
         session_id = client.post("/v1/website/sessions").json()["session_id"]
@@ -122,22 +99,15 @@ def test_website_second_message_persists_second_ai_run() -> None:
             f"/v1/website/sessions/{session_id}/messages",
             json={"text": VISITOR_TEXT},
         )
-        client.post(
+        second = client.post(
             f"/v1/website/sessions/{session_id}/messages",
             json={"text": "We run a clinic and miss calls all day."},
         )
-        lead_id = first.json()["lead_id"]
+        assert first.json()["lead_id"] == ""
+        assert second.json()["next_action"] == "ask_contact"
     db = get_session_factory()()
     try:
-        rows = list(
-            db.scalars(
-                select(AiRunRow).where(AiRunRow.lead_id == lead_id).order_by(AiRunRow.id)
-            ).all()
-        )
-        assert len(rows) == 2
-        assert rows[0].run_id != rows[1].run_id
-        assert rows[0].run_id.startswith("run_")
-        assert rows[1].run_id.startswith("run_")
+        assert db.scalars(select(AiRunRow).where(AiRunRow.lead_id == session_id)).all() == []
     finally:
         db.close()
 
@@ -152,17 +122,21 @@ def test_kill_switch_stops_website_chat_without_ai_run() -> None:
         )
         db.commit()
         settings = get_settings().model_copy(update={"kill_switch": True})
-        with pytest.raises(HTTPException) as exc:
-            process_website_message(
-                store,
-                session_id="web_kill_switch",
-                text=VISITOR_TEXT,
-                settings=settings,
-                calendar=DisabledCalendarPort(),
-                calendar_booking=DisabledCalendarBookingPort(),
-                sheets=DisabledSheetsPort(),
-            )
-        assert exc.value.status_code == 503
+        from app.surfaces.site import reset_site_book, site_book
+
+        reset_site_book()
+        site_book().open("web_kill_switch")
+        out = process_website_message(
+            store,
+            session_id="web_kill_switch",
+            text=VISITOR_TEXT,
+            settings=settings,
+            calendar=DisabledCalendarPort(),
+            calendar_booking=DisabledCalendarBookingPort(),
+            sheets=DisabledSheetsPort(),
+        )
+        assert out.message
+        assert out.lead_id == ""
         db.commit()
         rows = list(db.scalars(select(AiRunRow).where(AiRunRow.lead_id == lead_id)))
         assert rows == []

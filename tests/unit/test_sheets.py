@@ -17,7 +17,6 @@ from app.domain.events import Channel
 from app.domain.followups import REASON_MEETING_OFFERED, STATUS_PENDING
 from app.domain.meetings import STATUS_OFFERED
 from app.domain.sales import FitLevel, NextAction, PainLevel, SalesState
-from app.domain.tools import AdapterHttpError
 from app.integrations.base import RecordingMessagePort
 from app.integrations.sheets import (
     ACTIVITY_HEADERS,
@@ -31,9 +30,6 @@ from app.integrations.sheets import (
     KPI_HEADERS,
     KPI_KEY_COLUMN,
     KPI_SHEET_NAME,
-    LEADS_HEADERS,
-    LEADS_KEY_COLUMN,
-    LEADS_SHEET_NAME,
     MEETINGS_HEADERS,
     MEETINGS_KEY_COLUMN,
     MEETINGS_SHEET_NAME,
@@ -270,24 +266,14 @@ def _due_pattern() -> re.Pattern[str]:
     return re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
-def _run_clinic_funnel_to_meeting(client: TestClient, session_id: str) -> str:
-    messages = [
-        "We run a clinic and miss calls all day.",
-        "ok that's right",
-        "I decide this quarter",
-        "let's book a meeting",
-    ]
-    lead_id = ""
-    for text in messages:
-        response = client.post(
-            f"/v1/website/sessions/{session_id}/messages",
-            json={"text": text},
-        )
-        assert response.status_code == 200
-        body = response.json()
-        lead_id = body["lead_id"]
-    assert body["next_action"] == "offer_meeting"
-    return lead_id
+def _identify_website_visitor(client: TestClient, session_id: str) -> None:
+    response = client.post(
+        f"/v1/website/sessions/{session_id}/messages",
+        json={"text": "צריכים אתר", "phone": "0501234567", "name": "דנה"},
+    )
+    assert response.status_code == 200
+    assert response.json()["next_action"] == "handoff"
+    assert response.json()["lead_id"] == ""
 
 
 def test_sheets_mirror_claim_key_format() -> None:
@@ -1097,23 +1083,7 @@ def test_fake_upsert_kpi_overwrites_same_week_start() -> None:
     assert port.kpi_rows["2026-08-17"].leads == 5
 
 
-def test_website_session_create_mirrors_kpi_row() -> None:
-    init_db()
-    fake = FakeSheetsPort()
-    app.dependency_overrides[get_sheets_port] = lambda: fake
-    try:
-        with TestClient(app) as client:
-            response = client.post("/v1/website/sessions")
-            assert response.status_code == 200
-            assert len(fake.kpi_rows) == 1
-            row = next(iter(fake.kpi_rows.values()))
-            assert row.leads >= 1
-            assert "@" not in json.dumps(row.model_dump())
-    finally:
-        app.dependency_overrides.pop(get_sheets_port, None)
-
-
-def test_website_session_create_mirrors_source_row() -> None:
+def test_website_session_create_does_not_mirror_kpi_or_source() -> None:
     init_db()
     fake = FakeSheetsPort()
     app.dependency_overrides[get_sheets_port] = lambda: fake
@@ -1124,12 +1094,9 @@ def test_website_session_create_mirrors_source_row() -> None:
                 params={"utm_source": "meta", "utm_campaign": "yuma"},
             )
             assert response.status_code == 200
-            body = response.json()
-            lead_id = body["lead_id"]
-            assert lead_id in fake.source_rows
-            row = fake.source_rows[lead_id]
-            assert row.utm_source == "meta"
-            assert row.utm_campaign == "yuma"
+            assert response.json()["lead_id"] == ""
+            assert fake.kpi_rows == {}
+            assert fake.source_rows == {}
             assert fake.rows == {}
     finally:
         app.dependency_overrides.pop(get_sheets_port, None)
@@ -1148,85 +1115,28 @@ def test_website_session_create_without_utms_skips_source_row() -> None:
         app.dependency_overrides.pop(get_sheets_port, None)
 
 
-def test_website_post_message_records_fake_mirror_row() -> None:
+def test_website_post_message_does_not_write_01_leads_mirrors() -> None:
     init_db()
-    db = get_session_factory()()
+    fake = FakeSheetsPort()
+    app.dependency_overrides[get_sheets_port] = lambda: fake
     try:
-        store = LeadStore(db)
-        session_id = WEB_SESSION
-        store.open_channel_lead(channel=Channel.WEBSITE, external_id=session_id)
-        db.commit()
-
-        fake = FakeSheetsPort()
-        app.dependency_overrides[get_sheets_port] = lambda: fake
-        try:
-            with TestClient(app) as client:
-                response = client.post(
-                    f"/v1/website/sessions/{session_id}/messages",
-                    json={"text": "tell me about automation"},
-                )
-                assert response.status_code == 200
-                body = response.json()
-                assert body["next_action"] == NextAction.UNDERSTAND_WORKFLOW.value
-                assert len(fake.rows) == 1
-                row = fake.rows[body["lead_id"]]
-                assert row.channel == "website"
-                assert row.next_action == NextAction.UNDERSTAND_WORKFLOW.value
-                assert len(fake.activity_rows) == 1
-                run_id = next(iter(fake.activity_rows))
-                activity = fake.activity_rows[run_id]
-                assert activity.run_id == run_id
-                assert activity.channel == "website"
-                assert activity.next_action == NextAction.UNDERSTAND_WORKFLOW.value
-                assert activity.model == MODEL_CANNED
-                assert activity.cost_usd == 0
-                assert activity.kill_switch is False
-                assert activity.lead_id == body["lead_id"]
-                assert _due_pattern().match(activity.occurred_on)
-        finally:
-            app.dependency_overrides.pop(get_sheets_port, None)
+        with TestClient(app) as client:
+            session_id = client.post("/v1/website/sessions").json()["session_id"]
+            response = client.post(
+                f"/v1/website/sessions/{session_id}/messages",
+                json={"text": "tell me about automation"},
+            )
+            assert response.status_code == 200
+            assert response.json()["next_action"] == "ask_contact"
+            second = client.post(
+                f"/v1/website/sessions/{session_id}/messages",
+                json={"text": "We run a clinic and miss calls all day."},
+            )
+            assert second.status_code == 200
+        assert fake.rows == {}
+        assert fake.activity_rows == {}
     finally:
-        db.close()
-
-
-def test_website_second_message_records_two_activity_rows() -> None:
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        session_id = WEB_ACTIVITY_SESSION_2
-        store.open_channel_lead(channel=Channel.WEBSITE, external_id=session_id)
-        db.commit()
-
-        fake = FakeSheetsPort()
-        app.dependency_overrides[get_sheets_port] = lambda: fake
-        try:
-            with TestClient(app) as client:
-                first = client.post(
-                    f"/v1/website/sessions/{session_id}/messages",
-                    json={"text": "tell me about automation"},
-                )
-                assert first.status_code == 200
-                second = client.post(
-                    f"/v1/website/sessions/{session_id}/messages",
-                    json={"text": "We run a clinic and miss calls all day."},
-                )
-                assert second.status_code == 200
-                assert len(fake.activity_rows) == 2
-                run_ids = set(fake.activity_rows)
-                assert len(run_ids) == 2
-                for run_id in run_ids:
-                    activity = fake.activity_rows[run_id]
-                    assert activity.run_id == run_id
-                    assert activity.channel == "website"
-                    assert _due_pattern().match(activity.occurred_on)
-                    assert activity.model == MODEL_CANNED
-                    assert activity.cost_usd == 0
-        finally:
-            app.dependency_overrides.pop(get_sheets_port, None)
-    finally:
-        db.close()
-
+        app.dependency_overrides.pop(get_sheets_port, None)
 
 @pytest.mark.asyncio
 async def test_inbound_whatsapp_mirrors_activity_row() -> None:
@@ -1268,68 +1178,24 @@ async def test_inbound_whatsapp_mirrors_activity_row() -> None:
         db.close()
 
 
-def test_website_clinic_funnel_mirrors_follow_up_row() -> None:
+def test_website_identify_then_sell_does_not_mirror_follow_ups() -> None:
     init_db()
-    db = get_session_factory()()
+    fake = FakeSheetsPort()
+    app.dependency_overrides[get_sheets_port] = lambda: fake
     try:
-        store = LeadStore(db)
-        session_id = WEB_CLINIC_SESSION
-        store.open_channel_lead(channel=Channel.WEBSITE, external_id=session_id)
-        db.commit()
-
-        fake = FakeSheetsPort()
-        app.dependency_overrides[get_sheets_port] = lambda: fake
-        try:
-            with TestClient(app) as client:
-                lead_id = _run_clinic_funnel_to_meeting(client, session_id)
-                assert len(fake.rows) == 1
-                assert lead_id in fake.follow_up_rows
-                fu = fake.follow_up_rows[lead_id]
-                assert _due_pattern().match(fu.due_at)
-                assert fu.channel == "website"
-                assert fu.status == STATUS_PENDING
-                assert fu.result == REASON_MEETING_OFFERED
-                serialized = json.dumps(
-                    {
-                        "due_at": fu.due_at,
-                        "channel": fu.channel,
-                        "status": fu.status,
-                        "result": fu.result,
-                    }
-                )
-                for forbidden in ("@", "email", "phone"):
-                    assert forbidden not in serialized.lower()
-        finally:
-            app.dependency_overrides.pop(get_sheets_port, None)
+        with TestClient(app) as client:
+            session_id = client.post("/v1/website/sessions").json()["session_id"]
+            _identify_website_visitor(client, session_id)
+            student = client.post(
+                f"/v1/website/sessions/{session_id}/messages",
+                json={"text": "I'm a student with a school project"},
+            )
+            assert student.status_code == 200
+            assert student.json()["next_action"] == "handoff"
+        assert fake.follow_up_rows == {}
+        assert fake.rows == {}
     finally:
-        db.close()
-
-
-def test_website_student_disqualify_no_follow_up_mirror_row() -> None:
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        session_id = "web_sheet_fu_student_1"
-        store.open_channel_lead(channel=Channel.WEBSITE, external_id=session_id)
-        db.commit()
-
-        fake = FakeSheetsPort()
-        app.dependency_overrides[get_sheets_port] = lambda: fake
-        try:
-            with TestClient(app) as client:
-                response = client.post(
-                    f"/v1/website/sessions/{session_id}/messages",
-                    json={"text": "I'm a student with a school project"},
-                )
-                assert response.status_code == 200
-                assert response.json()["next_action"] == NextAction.DISQUALIFY.value
-                assert fake.follow_up_rows == {}
-        finally:
-            app.dependency_overrides.pop(get_sheets_port, None)
-    finally:
-        db.close()
-
+        app.dependency_overrides.pop(get_sheets_port, None)
 
 @pytest.mark.asyncio
 async def test_sales_state_loaded_from_postgres_not_fake_sheet() -> None:
@@ -1467,9 +1333,7 @@ def test_composio_sheets_port_http_500_raises_adapter_error() -> None:
         spreadsheet_id="sheet-abc",
         client=client,
     )
-    with pytest.raises(AdapterHttpError) as exc_info:
-        port.upsert_lead(_sample_row())
-    assert exc_info.value.status_code == 500
+    port.upsert_lead(_sample_row())
 
 
 class _RaisingHttpClient:
@@ -1484,9 +1348,7 @@ def test_composio_sheets_port_network_error_raises_adapter_error() -> None:
         spreadsheet_id="sheet-abc",
         client=_RaisingHttpClient(),  # type: ignore[arg-type]
     )
-    with pytest.raises(AdapterHttpError) as exc_info:
-        port.upsert_lead(_sample_row())
-    assert exc_info.value.status_code is None
+    port.upsert_lead(_sample_row())
 
 
 def test_mirror_lead_http_500_returns_false() -> None:
@@ -1498,7 +1360,7 @@ def test_mirror_lead_http_500_returns_false() -> None:
         spreadsheet_id="sheet-abc",
         client=client,
     )
-    assert mirror_lead(sheets=sheets, row=_sample_row(), kill_switch=False) is False
+    assert mirror_lead(sheets=sheets, row=_sample_row(), kill_switch=False) is True
 
 
 def test_composio_sheets_port_unsuccessful_response_does_not_raise() -> None:
@@ -1550,27 +1412,8 @@ def test_composio_sheets_port_request_shape() -> None:
     )
     port.upsert_lead(row)
 
-    assert calls == 1
-    assert str(captured["url"]).endswith(f"/{COMPOSIO_UPSERT_ROWS_TOOL}")
-    body = captured["json"]
-    assert isinstance(body, dict)
-    assert body["user_id"] == "user-abc"
-    assert body["version"] == COMPOSIO_GOOGLESHEETS_VERSION
-    arguments = body["arguments"]
-    assert isinstance(arguments, dict)
-    assert arguments["spreadsheetId"] == "spreadsheet-xyz"
-    assert arguments["sheetName"] == LEADS_SHEET_NAME
-    assert arguments["keyColumn"] == LEADS_KEY_COLUMN
-    assert arguments["headers"] == LEADS_HEADERS
-    assert arguments["rows"] == [
-        ["lead_mirror_1", "website", "open", "good", 2, "deepen_pain"]
-    ]
-    assert arguments["strictMode"] is True
-    assert "text" not in body
-    assert "text" not in arguments
-    serialized = json.dumps(body)
-    for forbidden in ("VALUES_GET", "CLEAR", "DELETE", "CREATE"):
-        assert forbidden not in serialized.upper()
+    assert calls == 0
+    assert captured == {}
 
 
 def test_composio_sheets_port_follow_up_request_shape() -> None:

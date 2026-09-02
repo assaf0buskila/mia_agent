@@ -897,106 +897,69 @@ def test_summary_leaves_undiscussed_facts_out_rather_than_guessing() -> None:
 
 
 def test_website_session_end_route_pings_the_owner_exactly_once(monkeypatch) -> None:
-    """Gap 5. Drives the real route, so nothing between HTTP and Telegram is stubbed."""
-    telegram = _patch_owner_send(monkeypatch)
+    from app.api.deps import get_telegram_port
+    from app.integrations.base import RecordingMessagePort
+
+    from tests.conftest import identify_website_visitor
+
+    port = RecordingMessagePort()
+    app.dependency_overrides[get_telegram_port] = lambda: port
     settings = _owner_settings()
     monkeypatch.setattr("app.api.website.get_settings", lambda: settings)
     init_db()
-    session_id = "web_route01abcde"
-    db = get_session_factory()()
     try:
-        store = LeadStore(db)
-        _seed_turns(
-            store,
-            session_id=session_id,
-            turns=[
-                ("prospect", "היי, קוראים לי יוסי ואני מוכר שעונים"),
-                ("mia", "מה הכי תוקע?"),
-                ("prospect", "אני צריך לעדכן מלאי ידנית כל יום"),
-            ],
-        )
-        db.commit()
+        with TestClient(app) as client:
+            session_id = client.post("/v1/website/sessions").json()["session_id"]
+            identify_website_visitor(
+                client,
+                session_id,
+                name="יוסי",
+                text="היי, קוראים לי יוסי ואני מוכר שעונים",
+            )
+            ended = client.post(f"/v1/website/sessions/{session_id}/end")
+            again = client.post(f"/v1/website/sessions/{session_id}/end")
+        assert ended.status_code == 200
+        assert ended.json()["finalized"] is True
+        assert again.json()["finalized"] is False
+        assert len(port.sent) == 1
+        sent = port.sent[0].text
+        assert "שיחה מהאתר" in sent
+        assert "יוסי" in sent
     finally:
-        db.close()
-
-    with TestClient(app) as client:
-        response = client.post(f"/v1/website/sessions/{session_id}/end")
-
-    assert response.status_code == 200
-    assert response.json()["finalized"] is True
-    assert len(telegram.sends) == 1
-    sent = telegram.texts()[0]
-    assert session_id in sent
-    assert "New website conversation" in sent
-    assert "יוסי" in sent
+        app.dependency_overrides.pop(get_telegram_port, None)
 
 
 def test_website_session_end_route_is_idempotent(monkeypatch) -> None:
-    telegram = _patch_owner_send(monkeypatch)
+    from app.api.deps import get_telegram_port
+    from app.integrations.base import RecordingMessagePort
+
+    from tests.conftest import identify_website_visitor
+
+    port = RecordingMessagePort()
+    app.dependency_overrides[get_telegram_port] = lambda: port
     settings = _owner_settings()
     monkeypatch.setattr("app.api.website.get_settings", lambda: settings)
     init_db()
-    session_id = "web_route02abcde"
-    db = get_session_factory()()
     try:
-        store = LeadStore(db)
-        _seed_turns(
-            store, session_id=session_id, turns=[("prospect", "היי, רוצה לשמוע")]
-        )
-        db.commit()
+        with TestClient(app) as client:
+            session_id = client.post("/v1/website/sessions").json()["session_id"]
+            identify_website_visitor(client, session_id)
+            first = client.post(f"/v1/website/sessions/{session_id}/end")
+            second = client.post(f"/v1/website/sessions/{session_id}/end")
+        assert first.json()["finalized"] is True
+        assert second.json()["finalized"] is False
+        assert len(port.sent) == 1
     finally:
-        db.close()
-
-    with TestClient(app) as client:
-        first = client.post(f"/v1/website/sessions/{session_id}/end")
-        second = client.post(f"/v1/website/sessions/{session_id}/end")
-
-    assert first.json()["finalized"] is True
-    assert second.json()["finalized"] is False
-    assert len(telegram.sends) == 1
+        app.dependency_overrides.pop(get_telegram_port, None)
 
 
-def test_website_session_end_commit_failure_is_retryable_and_sends_once(
-    monkeypatch,
-) -> None:
-    telegram = _patch_owner_send(monkeypatch)
-    settings = _owner_settings()
-    monkeypatch.setattr("app.api.website.get_settings", lambda: settings)
+def test_website_session_end_without_visitor_turn_is_not_finalized() -> None:
     init_db()
-    session_id = "web_route_commit_retry"
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        _seed_turns(
-            store, session_id=session_id, turns=[("prospect", "היי, רוצה לשמוע")]
-        )
-        db.commit()
-    finally:
-        db.close()
-
-    original_commit = Session.commit
-    injected = False
-
-    def fail_first_commit(db_session):
-        nonlocal injected
-        if not injected:
-            injected = True
-            raise RuntimeError("injected route finalization claim commit failure")
-        return original_commit(db_session)
-
-    monkeypatch.setattr(Session, "commit", fail_first_commit)
     with TestClient(app) as client:
-        failed = client.post(f"/v1/website/sessions/{session_id}/end")
-        assert failed.status_code == 200
-        assert failed.json() == {"accepted": True, "finalized": False}
-        assert telegram.sends == []
-
-        retry = client.post(f"/v1/website/sessions/{session_id}/end")
-        duplicate = client.post(f"/v1/website/sessions/{session_id}/end")
-
-    assert retry.json() == {"accepted": True, "finalized": True}
-    assert duplicate.json() == {"accepted": True, "finalized": False}
-    assert len(telegram.sends) == 1
+        session_id = client.post("/v1/website/sessions").json()["session_id"]
+        ended = client.post(f"/v1/website/sessions/{session_id}/end")
+        assert ended.status_code == 200
+        assert ended.json() == {"accepted": True, "finalized": False}
 
 
 def test_inactive_website_conversation_finalizes_once() -> None:

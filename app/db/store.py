@@ -234,6 +234,37 @@ class LeadStore:
     def __init__(self, session: Session) -> None:
         self.session = session
 
+    def open_website_session(self, session_id: str) -> str:
+        """Remember a website conversation without minting a lead_ id."""
+        row = self.session.scalars(
+            select(ChannelIdentityRow).where(
+                ChannelIdentityRow.channel == Channel.WEBSITE.value,
+                ChannelIdentityRow.external_id == session_id,
+            )
+        ).one_or_none()
+        if row is not None:
+            return row.customer_id
+        customer = CustomerRow(id=_new_id("cust"))
+        identity = ChannelIdentityRow(
+            customer_id=customer.id,
+            channel=Channel.WEBSITE.value,
+            external_id=session_id,
+            verified=False,
+        )
+        customer.identities.append(identity)
+        self.session.add(customer)
+        self.session.flush()
+        return customer.id
+
+    def website_session_exists(self, session_id: str) -> bool:
+        identity = self.session.scalars(
+            select(ChannelIdentityRow).where(
+                ChannelIdentityRow.channel == Channel.WEBSITE.value,
+                ChannelIdentityRow.external_id == session_id,
+            )
+        ).one_or_none()
+        return identity is not None
+
     def open_channel_lead(self, *, channel: Channel, external_id: str) -> tuple[str, str]:
         row = self.session.scalars(
             select(ChannelIdentityRow).where(
@@ -3129,7 +3160,26 @@ class LeadStore:
 
     def get_lead_customer_id(self, lead_id: str) -> str | None:
         row = self.session.get(LeadRow, lead_id)
-        return row.customer_id if row is not None else None
+        if row is not None:
+            return row.customer_id
+        return self._website_customer_id(lead_id)
+
+    def _website_customer_id(self, session_id: str) -> str | None:
+        if not session_id:
+            return None
+        identity = self.session.scalars(
+            select(ChannelIdentityRow).where(
+                ChannelIdentityRow.channel == Channel.WEBSITE.value,
+                ChannelIdentityRow.external_id == session_id,
+            )
+        ).one_or_none()
+        return identity.customer_id if identity is not None else None
+
+    def _customer_id_for_handoff(self, lead_id: str, website_session_id: str) -> str | None:
+        lead = self.session.get(LeadRow, lead_id)
+        if lead is not None:
+            return lead.customer_id
+        return self._website_customer_id(website_session_id or lead_id)
 
     def get_channel_identity(self, *, channel: str, external_id: str) -> ChannelIdentityRow | None:
         return self.session.scalars(
@@ -3306,8 +3356,8 @@ class LeadStore:
             expires_at = expires_at.replace(tzinfo=UTC)
         if datetime.now(UTC) >= expires_at:
             return None
-        lead = self.session.get(LeadRow, row.lead_id)
-        if lead is None:
+        customer_id = self._customer_id_for_handoff(row.lead_id, row.website_session_id)
+        if customer_id is None:
             return None
         wa_identity = self.session.scalars(
             select(ChannelIdentityRow).where(
@@ -3315,12 +3365,12 @@ class LeadStore:
                 ChannelIdentityRow.external_id == whatsapp_external_id,
             )
         ).one_or_none()
-        if wa_identity is not None and wa_identity.customer_id != lead.customer_id:
+        if wa_identity is not None and wa_identity.customer_id != customer_id:
             return None
         if wa_identity is None:
             self.session.add(
                 ChannelIdentityRow(
-                    customer_id=lead.customer_id,
+                    customer_id=customer_id,
                     channel=Channel.WHATSAPP.value,
                     external_id=whatsapp_external_id,
                     verified=True,

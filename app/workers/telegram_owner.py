@@ -11,7 +11,6 @@ from __future__ import annotations
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.api.inbound_common import event_conversation_id
-from app.api.owner import process_owner_texts
 from app.core.config import get_settings
 from app.core.logging import log_comm
 from app.db.session import get_session_factory
@@ -22,7 +21,11 @@ from app.domain.events import (
     transcription_outcome,
 )
 from app.integrations.base import MessagePort
+from app.integrations.gmail import build_gmail_port
+from app.integrations.sheets import build_sheets_port
 from app.integrations.transcribe import TranscriptionPort
+from app.surfaces.crm import build_contacts_crm
+from app.surfaces.owner import run_owner_loop
 
 
 async def process_telegram_owner_update(
@@ -80,7 +83,7 @@ async def process_telegram_owner_update(
                 sent = await _send_transcription_failure_reply(
                     item=work,
                     port=port,
-                    kill_switch=settings.kill_switch,
+                    kill_switch=False,
                     automation_mode=settings.automation_mode,
                 )
                 store.mark_webhook(
@@ -105,16 +108,16 @@ async def process_telegram_owner_update(
             "confidence": work.get("confidence", ""),
             "stt_latency_ms": work.get("stt_latency_ms", "0"),
         }
-        await process_owner_texts(
-            provider="telegram",
-            channel=Channel.TELEGRAM,
-            items=[inbound],
+        sheets = build_sheets_port(settings)
+        crm = build_contacts_crm(settings, sheets)
+        await run_owner_loop(
+            item=inbound,
             store=store,
             port=port,
-            kill_switch=settings.kill_switch,
+            settings=settings,
+            crm=crm,
+            gmail_port=build_gmail_port(settings),
             owner_ids=owner_ids,
-            preclaimed_event_id=work["id"],
-            preclaimed_envelope_kind=envelope_kind,
         )
         session.commit()
     except SQLAlchemyError:

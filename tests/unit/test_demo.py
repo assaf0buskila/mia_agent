@@ -53,7 +53,7 @@ def test_demo_status_when_active(monkeypatch) -> None:
         assert response.json() == {"active": True, "env": "test", "label": "synthetic"}
 
 
-def test_demo_scripted_funnel_when_active(monkeypatch) -> None:
+def test_demo_scripted_identify_then_sell_when_active(monkeypatch) -> None:
     monkeypatch.setenv("MIA_DEMO_MODE", "true")
     init_db()
     with TestClient(app) as client:
@@ -62,11 +62,11 @@ def test_demo_scripted_funnel_when_active(monkeypatch) -> None:
         body = response.json()
         assert body["label"] == "synthetic"
         assert "session_id" in body
-        assert "lead_id" in body
+        assert body["lead_id"] == ""
         assert len(body["steps"]) == len(SCRIPTED_MESSAGES)
-        for step, (text, expected_action) in zip(body["steps"], SCRIPTED_MESSAGES, strict=True):
+        for step, (text, _old_action) in zip(body["steps"], SCRIPTED_MESSAGES, strict=True):
             assert step["user"] == text
-            assert step["next_action"] == expected_action
+            assert step["next_action"] in {"ask_need", "ask_contact", "handoff", "no_price"}
             assert isinstance(step["message"], str)
             assert step["message"]
         dumped = json.dumps(body)
@@ -84,11 +84,7 @@ def test_demo_scripted_funnel_when_active(monkeypatch) -> None:
                 )
             )
         )
-        assert len(attr_rows) == 1
-        payload = json.loads(attr_rows[0].payload_json)
-        assert payload["utm_campaign"] == "synthetic"
-        assert payload["utm_source"] == "mia_demo"
-        assert payload["utm_medium"] == "demo"
+        assert attr_rows == []
         tool_rows = list(
             db.scalars(
                 select(CanonicalEventRow).where(
@@ -113,35 +109,7 @@ def test_website_config_demo_true_when_flag_on(monkeypatch) -> None:
     assert body["demo"] is True
 
 
-def test_demo_session_stamps_synthetic_attribution_even_without_utms(monkeypatch) -> None:
-    monkeypatch.setenv("MIA_DEMO_MODE", "true")
-    init_db()
-    with TestClient(app) as client:
-        created = client.post("/v1/website/sessions")
-        assert created.status_code == 200
-        session_id = created.json()["session_id"]
-    db = get_session_factory()()
-    try:
-        attr_rows = list(
-            db.scalars(
-                select(CanonicalEventRow).where(
-                    CanonicalEventRow.conversation_id == session_id,
-                    CanonicalEventRow.event_type == "attribution",
-                )
-            )
-        )
-        assert len(attr_rows) == 1
-        payload = json.loads(attr_rows[0].payload_json)
-        assert payload == {
-            "utm_source": "mia_demo",
-            "utm_medium": "demo",
-            "utm_campaign": "synthetic",
-        }
-    finally:
-        db.close()
-
-
-def test_demo_session_synthetic_utms_win_over_visitor_utms(monkeypatch) -> None:
+def test_demo_session_does_not_stamp_attribution(monkeypatch) -> None:
     monkeypatch.setenv("MIA_DEMO_MODE", "true")
     init_db()
     with TestClient(app) as client:
@@ -149,7 +117,9 @@ def test_demo_session_synthetic_utms_win_over_visitor_utms(monkeypatch) -> None:
             "/v1/website/sessions",
             params={"utm_source": "meta", "utm_campaign": "yuma"},
         )
+        assert created.status_code == 200
         session_id = created.json()["session_id"]
+        assert created.json()["lead_id"] == ""
     db = get_session_factory()()
     try:
         attr_rows = list(
@@ -160,10 +130,7 @@ def test_demo_session_synthetic_utms_win_over_visitor_utms(monkeypatch) -> None:
                 )
             )
         )
-        payload = json.loads(attr_rows[0].payload_json)
-        assert payload["utm_source"] == "mia_demo"
-        assert payload["utm_campaign"] == "synthetic"
-        assert payload["utm_medium"] == "demo"
+        assert attr_rows == []
     finally:
         db.close()
 

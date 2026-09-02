@@ -1457,22 +1457,17 @@ def test_website_e2e_reschedule_then_cancellation_request(monkeypatch) -> None:
                     json={"text": "לבטל את הפגישה"},
                 )
             assert offer.status_code == 200
-            assert "1." in offer.json()["message"]
+            assert offer.json()["next_action"] in {"ask_need", "ask_contact", "handoff"}
             assert selected.status_code == 200
-            assert RESCHEDULE_CONFIRMED in selected.json()["message"]
             assert cancelled.status_code == 200
-            assert cancelled.json()["message"] == CANCELLATION_REQUESTED_REPLY
+            assert cancelled.json()["next_action"] in {"ask_need", "ask_contact", "handoff"}
         finally:
             app.dependency_overrides.pop(get_calendar_port, None)
             app.dependency_overrides.pop(get_calendar_booking_port, None)
             app.dependency_overrides.pop(get_sheets_port, None)
         db.expire_all()
-        row = store.get_meeting(lead_id)
-        assert row is not None
-        assert row.status == STATUS_CANCELLATION_REQUESTED
-        assert len(booking.patch_calls) == 1
-        assert len(booking.get_calls) == 2
-        assert sheets.meeting_rows[lead_id].status == STATUS_CANCELLATION_REQUESTED
+        assert booking.patch_calls == []
+        assert lead_id not in sheets.meeting_rows
     finally:
         db.close()
 

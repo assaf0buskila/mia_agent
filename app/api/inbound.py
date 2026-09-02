@@ -287,8 +287,13 @@ async def process_inbound_texts(
                 confidence=item.get("confidence", ""),
             )
         if handoff_lead_id is not None:
-            lead_id = handoff_lead_id
             customer_id = store.get_lead_customer_id(handoff_lead_id)
+            if store.get_lead(handoff_lead_id) is None:
+                _customer_id, lead_id = store.open_channel_lead(
+                    channel=channel, external_id=item["from"]
+                )
+            else:
+                lead_id = handoff_lead_id
             if customer_id is not None:
                 persist_verified_identity_link(
                     store,

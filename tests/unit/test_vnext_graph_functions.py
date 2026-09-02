@@ -20,7 +20,9 @@ def test_website_end_and_due_scan_invoke_client_graph() -> None:
     website = Path("app/api/website.py").read_text(encoding="utf-8")
     due_scan = Path("app/workers/due_scan.py").read_text(encoding="utf-8")
     inbound = Path("app/api/inbound.py").read_text(encoding="utf-8")
-    assert 'turn_kind="session_end"' in website
+    assert 'turn_kind="session_end"' not in website
+    assert "compile_client_graph" not in website
+    assert "run_site_turn" in website
     assert "qualify_and_finalize" not in website
     assert "finalize_inactive_website_conversations" in due_scan
     assert "scan_inactive_website_conversations" not in due_scan

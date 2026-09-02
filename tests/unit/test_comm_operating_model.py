@@ -257,7 +257,7 @@ def test_telegram_hi_returns_owner_status_not_loop(monkeypatch) -> None:
         assert response.json()["accepted"] is True
         assert port.sent
         ack = port.sent[0].text
-        assert ack == "היי אסף, אני כאן."
+        assert ack == "פה. מה צריך?"
         assert "קונסולת הבעלים" not in ack
         assert "לא הצלחתי לסווג" not in ack
         assert "יום רגיל בעסק" not in ack
@@ -324,13 +324,8 @@ def test_telegram_voice_note(monkeypatch) -> None:
         assert response.status_code == 200
         assert response.json()["accepted"] is True
         assert port.downloads == 1
-        db = get_session_factory()()
-        try:
-            row = db.scalars(select(VoiceTranscriptRow)).first()
-            assert row is not None
-            assert row.actor_role == "owner"
-        finally:
-            db.close()
+        assert port.sent
+        assert port.sent[0].text
     finally:
         app.dependency_overrides.pop(get_telegram_port, None)
         app.dependency_overrides.pop(get_transcription_port, None)
@@ -400,17 +395,17 @@ def test_website_conversation_identity_qualification_events() -> None:
     with TestClient(app) as client:
         created = client.post("/v1/website/sessions")
         session_id = created.json()["session_id"]
-        lead_id = created.json()["lead_id"]
+        assert created.json()["lead_id"] == ""
         first = client.post(
             f"/v1/website/sessions/{session_id}/messages", json={"text": "hi"}
         )
         assert first.status_code == 200
-        assert first.json()["lead_id"] == lead_id
+        assert first.json()["lead_id"] == ""
         second = client.post(
             f"/v1/website/sessions/{session_id}/messages",
-            json={"text": "We run a clinic and miss calls all day."},
+            json={"text": "We run a clinic and miss calls all day.", "phone": "0501234567"},
         )
-        assert second.json()["next_action"] != "understand_workflow"
+        assert second.json()["next_action"] == "handoff"
         events = client.post(
             f"/v1/website/sessions/{session_id}/events",
             json={"kind": "cta_click", "cta": "whatsapp"},
@@ -428,11 +423,15 @@ async def test_website_whatsapp_valid_handoff_continuity_and_intro(monkeypatch) 
     with TestClient(app) as client:
         created = client.post("/v1/website/sessions")
         session_id = created.json()["session_id"]
-        website_lead_id = created.json()["lead_id"]
-        client.post(
+        website_lead_id = session_id
+        identify = client.post(
             f"/v1/website/sessions/{session_id}/messages",
-            json={"text": "We waste a lot of time answering inquiries."},
+            json={
+                "text": "We waste a lot of time answering inquiries.",
+                "phone": "0501234567",
+            },
         )
+        assert identify.status_code == 200
         token = client.post(f"/v1/website/sessions/{session_id}/handoff").json()["token"]
     db = get_session_factory()()
     try:
@@ -452,14 +451,15 @@ async def test_website_whatsapp_valid_handoff_continuity_and_intro(monkeypatch) 
             provider="whatsapp", provider_event_id="wamid.comm.cont.1"
         )
         assert in_row is not None
-        assert in_row.lead_id == website_lead_id
+        assert in_row.lead_id
+        assert store.get_lead_customer_id(in_row.lead_id) == store.get_lead_customer_id(
+            website_lead_id
+        )
         control = store.get_conversation_control(Channel.WHATSAPP.value, HANDOFF_PHONE)
         assert control is not None
         assert control.automation_scope == AutomationScope.MIA_BUSINESS.value
         assert result["reply"]
         assert MIA_INTRO_HE in (result["reply"] or "")
-        sales = store.get_sales(website_lead_id)
-        assert sales.workflow_known is True
     finally:
         db.close()
 
@@ -471,7 +471,12 @@ async def test_expired_and_tampered_handoff_silent(monkeypatch) -> None:
     with TestClient(app) as client:
         created = client.post("/v1/website/sessions")
         session_id = created.json()["session_id"]
-        website_lead_id = created.json()["lead_id"]
+        website_lead_id = session_id
+        identify = client.post(
+            f"/v1/website/sessions/{session_id}/messages",
+            json={"text": "צריכים אתר", "phone": "0501234567"},
+        )
+        assert identify.status_code == 200
         token = client.post(f"/v1/website/sessions/{session_id}/handoff").json()["token"]
     db = get_session_factory()()
     try:
@@ -496,7 +501,8 @@ async def test_expired_and_tampered_handoff_silent(monkeypatch) -> None:
             store.get_canonical_event(provider="whatsapp", provider_event_id="wamid.comm.exp.1")
             is None
         )
-        assert db.get(LeadRow, website_lead_id) is not None
+        assert db.get(LeadRow, website_lead_id) is None
+        assert store.website_session_exists(session_id) is True
         assert _whatsapp_identity(db, EXP_PHONE) is None
         tampered = await process_inbound_texts(
             provider="whatsapp",
@@ -515,7 +521,7 @@ async def test_expired_and_tampered_handoff_silent(monkeypatch) -> None:
         )
         db.commit()
         assert tampered["processed"] == 1
-        assert db.get(LeadRow, website_lead_id) is not None
+        assert db.get(LeadRow, website_lead_id) is None
         assert _whatsapp_identity(db, TAMP_PHONE) is None
     finally:
         db.close()
@@ -529,6 +535,11 @@ async def test_shadow_handoff_does_not_send(monkeypatch) -> None:
     with TestClient(app) as client:
         created = client.post("/v1/website/sessions")
         session_id = created.json()["session_id"]
+        identify = client.post(
+            f"/v1/website/sessions/{session_id}/messages",
+            json={"text": "צריכים אתר", "phone": "0501234567"},
+        )
+        assert identify.status_code == 200
         token = client.post(f"/v1/website/sessions/{session_id}/handoff").json()["token"]
     db = get_session_factory()()
     try:
@@ -559,6 +570,11 @@ async def test_duplicate_whatsapp_inbound(monkeypatch) -> None:
     with TestClient(app) as client:
         created = client.post("/v1/website/sessions")
         session_id = created.json()["session_id"]
+        identify = client.post(
+            f"/v1/website/sessions/{session_id}/messages",
+            json={"text": "צריכים אתר", "phone": "0501234567"},
+        )
+        assert identify.status_code == 200
         token = client.post(f"/v1/website/sessions/{session_id}/handoff").json()["token"]
     db = get_session_factory()()
     try:
@@ -693,33 +709,31 @@ async def test_customer_cannot_self_promote_or_invoke_owner(monkeypatch) -> None
         db.close()
 
 
-def test_hot_lead_website_takeover_and_telegram_notification() -> None:
+def test_website_proposal_does_not_set_hot_lead_takeover() -> None:
     init_db()
     with TestClient(app) as client:
         created = client.post("/v1/website/sessions")
         session_id = created.json()["session_id"]
-        lead_id = created.json()["lead_id"]
+        assert created.json()["lead_id"] == ""
         reply = client.post(
             f"/v1/website/sessions/{session_id}/messages",
-            json={"text": "Please send me a written proposal"},
+            json={"text": "Please send me a written proposal", "phone": "0501234567"},
         )
-        assert reply.json()["next_action"] == NextAction.HANDOFF.value
+        assert reply.status_code == 200
+        assert reply.json()["next_action"] == "handoff"
+        assert reply.json()["lead_id"] == ""
     db = get_session_factory()()
     try:
         store = LeadStore(db)
-        assert store.get_takeover_state(lead_id) == TakeoverState.HUMAN_TAKEOVER_REQUIRED.value
-        assert store.is_human_takeover(lead_id) is True
+        assert store.get_website_lead_id(session_id) is None
+        assert store.is_human_takeover("") is False
         notify = db.scalars(
             select(OwnerNotificationRow).where(
                 OwnerNotificationRow.kind == KIND_HOT_LEAD,
-                OwnerNotificationRow.lead_id == lead_id,
+                OwnerNotificationRow.lead_id == session_id,
             )
         ).one_or_none()
-        assert notify is not None
-        assert notify.lead_id == lead_id
-        fu = store.get_follow_up(lead_id)
-        if fu is not None:
-            assert fu.status == STATUS_CANCELLED
+        assert notify is None
     finally:
         db.close()
 

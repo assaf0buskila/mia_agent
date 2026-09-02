@@ -9,7 +9,6 @@ from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
 from app.domain.deals import (
     CONFIDENCE_UNKNOWN,
-    CONFIDENCE_UTM,
     STAGE_MEETING_OFFERED,
     STAGE_PROPOSAL,
     apply_deal_policy,
@@ -27,26 +26,6 @@ WEB_SESSION_SHEETS = "web_deal_sheet_997009"
 WA_PHONE_MEETING = "972509997101"
 
 
-def _run_clinic_funnel_to_meeting(client: TestClient, session_id: str) -> str:
-    messages = [
-        "We run a clinic and miss calls all day.",
-        "ok that's right",
-        "I decide this quarter",
-        "let's book a meeting",
-    ]
-    lead_id = ""
-    for text in messages:
-        response = client.post(
-            f"/v1/website/sessions/{session_id}/messages",
-            json={"text": text},
-        )
-        assert response.status_code == 200
-        body = response.json()
-        lead_id = body["lead_id"]
-    assert body["next_action"] == NextAction.OFFER_MEETING.value
-    return lead_id
-
-
 def _deal_for_lead(db, lead_id: str) -> DealRow | None:
     return db.scalars(select(DealRow).where(DealRow.lead_id == lead_id)).one_or_none()
 
@@ -62,28 +41,7 @@ def _deal_events_for_lead(db, lead_id: str) -> list[CanonicalEventRow]:
     )
 
 
-def test_offer_meeting_persists_deal_meeting_offered_unknown_confidence() -> None:
-    init_db()
-    with TestClient(app) as client:
-        session_id = client.post("/v1/website/sessions").json()["session_id"]
-        lead_id = _run_clinic_funnel_to_meeting(client, session_id)
-    db = get_session_factory()()
-    try:
-        row = _deal_for_lead(db, lead_id)
-        assert row is not None
-        assert row.stage == STAGE_MEETING_OFFERED
-        assert row.expected_value == ""
-        assert row.closed_value == ""
-        assert row.source == Channel.WEBSITE.value
-        assert row.attribution_confidence == CONFIDENCE_UNKNOWN
-        events = _deal_events_for_lead(db, lead_id)
-        assert len(events) == 1
-        assert events[0].provider_event_id == f"{lead_id}:deal:{STAGE_MEETING_OFFERED}"
-    finally:
-        db.close()
-
-
-def test_website_utm_then_offer_meeting_confidence_utm() -> None:
+def test_website_identify_then_sell_does_not_persist_deals() -> None:
     init_db()
     with TestClient(app) as client:
         created = client.post(
@@ -91,57 +49,26 @@ def test_website_utm_then_offer_meeting_confidence_utm() -> None:
             params={"utm_source": "meta", "utm_campaign": "yuma"},
         )
         session_id = created.json()["session_id"]
-        lead_id = _run_clinic_funnel_to_meeting(client, session_id)
-    db = get_session_factory()()
-    try:
-        row = _deal_for_lead(db, lead_id)
-        assert row is not None
-        assert row.attribution_confidence == CONFIDENCE_UTM
-    finally:
-        db.close()
-
-
-def test_proposal_handoff_persists_deal_proposal() -> None:
-    init_db()
-    with TestClient(app) as client:
-        session_id = client.post("/v1/website/sessions").json()["session_id"]
-        response = client.post(
+        assert created.json()["lead_id"] == ""
+        clinic = client.post(
             f"/v1/website/sessions/{session_id}/messages",
-            json={"text": "Please send me a proposal"},
+            json={"text": "We run a clinic and miss calls all day."},
         )
-        assert response.status_code == 200
-        assert response.json()["next_action"] == NextAction.HANDOFF.value
-        lead_id = response.json()["lead_id"]
-    db = get_session_factory()()
-    try:
-        row = _deal_for_lead(db, lead_id)
-        assert row is not None
-        assert row.stage == STAGE_PROPOSAL
-        assert row.expected_value == ""
-        assert row.closed_value == ""
-    finally:
-        db.close()
-
-
-def test_meeting_offered_then_proposal_upgrades_stage() -> None:
-    init_db()
-    with TestClient(app) as client:
-        session_id = client.post("/v1/website/sessions").json()["session_id"]
-        lead_id = _run_clinic_funnel_to_meeting(client, session_id)
+        assert clinic.status_code == 200
+        assert clinic.json()["next_action"] == "ask_contact"
         proposal = client.post(
             f"/v1/website/sessions/{session_id}/messages",
-            json={"text": "Please send me a proposal"},
+            json={"text": "Please send me a proposal", "phone": "0501234567"},
         )
-        assert proposal.json()["next_action"] == NextAction.HANDOFF.value
+        assert proposal.status_code == 200
+        assert proposal.json()["next_action"] == "handoff"
+        assert proposal.json()["lead_id"] == ""
     db = get_session_factory()()
     try:
-        row = _deal_for_lead(db, lead_id)
-        assert row is not None
-        assert row.stage == STAGE_PROPOSAL
-        events = _deal_events_for_lead(db, lead_id)
-        stages = {json.loads(event.payload_json)["stage"] for event in events}
-        assert STAGE_MEETING_OFFERED in stages
-        assert STAGE_PROPOSAL in stages
+        store = LeadStore(db)
+        assert store.get_website_lead_id(session_id) is None
+        assert _deal_for_lead(db, session_id) is None
+        assert _deal_events_for_lead(db, session_id) == []
     finally:
         db.close()
 
@@ -250,18 +177,18 @@ def test_disqualify_does_not_create_deal() -> None:
             f"/v1/website/sessions/{session_id}/messages",
             json={"text": "I'm a student with a school project"},
         )
-        assert response.json()["next_action"] == NextAction.DISQUALIFY.value
-        lead_id = response.json()["lead_id"]
+        assert response.status_code == 200
+        assert response.json()["next_action"] == "ask_contact"
+        assert response.json()["lead_id"] == ""
     db = get_session_factory()()
     try:
-        assert _deal_for_lead(db, lead_id) is None
-        assert _deal_events_for_lead(db, lead_id) == []
+        assert _deal_for_lead(db, session_id) is None
+        assert _deal_events_for_lead(db, session_id) == []
     finally:
         db.close()
 
 
-def test_kill_switch_skips_deal_persist(monkeypatch) -> None:
-    """Env kill switch 503s website chat, so the funnel never persists a deal."""
+def test_kill_switch_does_not_503_website_and_does_not_persist_deal(monkeypatch) -> None:
     monkeypatch.setenv("MIA_KILL_SWITCH", "true")
     init_db()
     with TestClient(app) as client:
@@ -270,15 +197,13 @@ def test_kill_switch_skips_deal_persist(monkeypatch) -> None:
             f"/v1/website/sessions/{session_id}/messages",
             json={"text": "We run a clinic and miss calls all day."},
         )
-        assert response.status_code == 503
-        assert response.json()["detail"] == "killed"
+        assert response.status_code == 200
+        assert response.json()["next_action"] == "ask_contact"
     db = get_session_factory()()
     try:
         store = LeadStore(db)
-        lead_id = store.get_website_lead_id(session_id)
-        assert lead_id
-        assert _deal_for_lead(db, lead_id) is None
-        assert _deal_events_for_lead(db, lead_id) == []
+        assert store.get_website_lead_id(session_id) is None
+        assert _deal_for_lead(db, session_id) is None
     finally:
         db.close()
 
@@ -312,39 +237,39 @@ def test_deals_module_never_imports_message_port() -> None:
     assert "integrations.base" not in source
 
 
-def test_fake_sheets_port_after_offer_meeting_has_deal_row_empty_values() -> None:
+def test_website_path_does_not_mirror_01_leads_deals() -> None:
     init_db()
-    db = get_session_factory()()
+    fake = FakeSheetsPort()
+    app.dependency_overrides[get_sheets_port] = lambda: fake
     try:
-        store = LeadStore(db)
-        session_id = WEB_SESSION_SHEETS
-        store.open_channel_lead(channel=Channel.WEBSITE, external_id=session_id)
-        db.commit()
-
-        fake = FakeSheetsPort()
-        app.dependency_overrides[get_sheets_port] = lambda: fake
-        try:
-            with TestClient(app) as client:
-                lead_id = _run_clinic_funnel_to_meeting(client, session_id)
-                assert lead_id in fake.deal_rows
-                deal = fake.deal_rows[lead_id]
-                assert deal.stage == STAGE_MEETING_OFFERED
-                assert deal.expected_value == ""
-                assert deal.closed_value == ""
-                assert deal.source == Channel.WEBSITE.value
-        finally:
-            app.dependency_overrides.pop(get_sheets_port, None)
+        with TestClient(app) as client:
+            session_id = client.post("/v1/website/sessions").json()["session_id"]
+            client.post(
+                f"/v1/website/sessions/{session_id}/messages",
+                json={"text": "We run a clinic", "phone": "0501234567"},
+            )
+        assert fake.deal_rows == {}
+        assert fake.rows == {}
     finally:
-        db.close()
+        app.dependency_overrides.pop(get_sheets_port, None)
 
 
 def test_deal_updated_event_payload_has_no_value_keys() -> None:
     init_db()
-    with TestClient(app) as client:
-        session_id = client.post("/v1/website/sessions").json()["session_id"]
-        lead_id = _run_clinic_funnel_to_meeting(client, session_id)
     db = get_session_factory()()
     try:
+        store = LeadStore(db)
+        _, lead_id = store.open_channel_lead(
+            channel=Channel.WEBSITE, external_id="web_deal_payload_997341"
+        )
+        apply_deal_policy(
+            store,
+            lead_id=lead_id,
+            channel=Channel.WEBSITE,
+            action=NextAction.OFFER_MEETING.value,
+            kill_switch=False,
+        )
+        db.commit()
         events = _deal_events_for_lead(db, lead_id)
         assert len(events) == 1
         payload = json.loads(events[0].payload_json)

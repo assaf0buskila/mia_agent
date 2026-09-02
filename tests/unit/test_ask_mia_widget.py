@@ -49,7 +49,7 @@ def test_panel_is_created_hidden() -> None:
 def test_configured_whatsapp_is_a_one_tap_action_not_a_model_phone_link() -> None:
     source = _source()
     init = _function_body(source, "initSession")
-    assert "showConfiguredWhatsApp(cfg.whatsapp_url)" in init
+    assert "showConfiguredWhatsApp(cfg.whatsapp_url)" not in init
     show = _function_body(source, "showConfiguredWhatsApp")
     assert "isWaMeUrl(url)" in show
     assert "waBtn.hidden = !configuredWhatsAppUrl" in show

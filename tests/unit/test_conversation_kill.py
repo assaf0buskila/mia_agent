@@ -26,25 +26,6 @@ from sqlalchemy import select
 OWNER_CONV_KILL_PHONE = "972509994101"
 
 
-def _run_clinic_funnel_to_meeting(client: TestClient, session_id: str) -> str:
-    messages = [
-        "We run a clinic and miss calls all day.",
-        "ok that's right",
-        "I decide this quarter",
-        "let's book a meeting",
-    ]
-    lead_id = ""
-    for text in messages:
-        response = client.post(
-            f"/v1/website/sessions/{session_id}/messages",
-            json={"text": text},
-        )
-        assert response.status_code == 200
-        lead_id = response.json()["lead_id"]
-    assert response.json()["next_action"] == "offer_meeting"
-    return lead_id
-
-
 def _good_sales(lead_id: str) -> SalesState:
     return SalesState(
         lead_id=lead_id,
@@ -58,95 +39,63 @@ def _good_sales(lead_id: str) -> SalesState:
     )
 
 
-def test_website_stop_sets_conversation_killed() -> None:
+def test_website_not_interested_does_not_kill_or_stop() -> None:
     init_db()
     with TestClient(app) as client:
         session_id = client.post("/v1/website/sessions").json()["session_id"]
-        lead_id = _run_clinic_funnel_to_meeting(client, session_id)
         stop = client.post(
             f"/v1/website/sessions/{session_id}/messages",
             json={"text": "not interested"},
         )
-        assert stop.json()["next_action"] == "stop"
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        assert store.is_conversation_killed(lead_id) is True
-    finally:
-        db.close()
-
-
-def test_website_stop_then_hi_still_killed() -> None:
-    init_db()
-    with TestClient(app) as client:
-        session_id = client.post("/v1/website/sessions").json()["session_id"]
-        lead_id = _run_clinic_funnel_to_meeting(client, session_id)
-        client.post(
-            f"/v1/website/sessions/{session_id}/messages",
-            json={"text": "not interested"},
-        )
+        assert stop.status_code == 200
+        assert stop.json()["next_action"] == "ask_contact"
+        assert stop.json()["lead_id"] == ""
         again = client.post(
             f"/v1/website/sessions/{session_id}/messages",
             json={"text": "hi"},
         )
-        assert again.json()["next_action"] == "stop"
+        assert again.json()["next_action"] == "ask_contact"
     db = get_session_factory()()
     try:
         store = LeadStore(db)
-        assert store.is_conversation_killed(lead_id) is True
+        assert store.get_website_lead_id(session_id) is None
+        assert store.is_conversation_killed("") is False
     finally:
         db.close()
 
 
-def test_website_stop_then_meeting_recovers_conversation_kill() -> None:
+def test_website_identify_then_sell_never_sets_conversation_killed() -> None:
     init_db()
     with TestClient(app) as client:
         session_id = client.post("/v1/website/sessions").json()["session_id"]
-        client.post(
-            f"/v1/website/sessions/{session_id}/messages",
-            json={"text": "not interested"},
-        )
-        recover = client.post(
-            f"/v1/website/sessions/{session_id}/messages",
-            json={"text": "let's book a meeting"},
-        )
-        assert recover.json()["next_action"] == "qualify"
-        lead_id = recover.json()["lead_id"]
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        assert store.is_conversation_killed(lead_id) is False
-    finally:
-        db.close()
-
-
-def test_clinic_funnel_never_conversation_killed() -> None:
-    init_db()
-    with TestClient(app) as client:
-        session_id = client.post("/v1/website/sessions").json()["session_id"]
-        lead_id = _run_clinic_funnel_to_meeting(client, session_id)
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        assert store.is_conversation_killed(lead_id) is False
-    finally:
-        db.close()
-
-
-def test_student_disqualify_not_conversation_killed() -> None:
-    init_db()
-    with TestClient(app) as client:
-        session_id = client.post("/v1/website/sessions").json()["session_id"]
-        response = client.post(
+        for text in (
+            "We run a clinic and miss calls all day.",
+            "ok that's right",
+            "I decide this quarter",
+            "let's book a meeting",
+        ):
+            response = client.post(
+                f"/v1/website/sessions/{session_id}/messages",
+                json={"text": text},
+            )
+            assert response.status_code == 200
+            assert response.json()["next_action"] in {
+                "ask_need",
+                "ask_contact",
+                "handoff",
+                "no_price",
+            }
+            assert response.json()["lead_id"] == ""
+        student = client.post(
             f"/v1/website/sessions/{session_id}/messages",
             json={"text": "I'm a student with a school project"},
         )
-        assert response.json()["next_action"] == "disqualify"
-        lead_id = response.json()["lead_id"]
+        assert student.json()["next_action"] == "ask_contact"
     db = get_session_factory()()
     try:
         store = LeadStore(db)
-        assert store.is_conversation_killed(lead_id) is False
+        assert store.get_website_lead_id(session_id) is None
+        assert store.is_conversation_killed("") is False
     finally:
         db.close()
 

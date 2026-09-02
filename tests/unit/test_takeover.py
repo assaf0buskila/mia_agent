@@ -198,37 +198,23 @@ async def test_prospect_whatsapp_after_takeover_skips_send_graph_runs() -> None:
         db.close()
 
 
-def test_nba_stop_sets_conversation_killed_not_human_takeover() -> None:
+def test_website_not_interested_does_not_set_kill_or_takeover() -> None:
     init_db()
     with TestClient(app) as client:
         session_id = client.post("/v1/website/sessions").json()["session_id"]
-        client.post(
-            f"/v1/website/sessions/{session_id}/messages",
-            json={"text": "We run a clinic and miss calls all day."},
-        )
-        client.post(
-            f"/v1/website/sessions/{session_id}/messages",
-            json={"text": "ok that's right"},
-        )
-        client.post(
-            f"/v1/website/sessions/{session_id}/messages",
-            json={"text": "I decide this quarter"},
-        )
-        client.post(
-            f"/v1/website/sessions/{session_id}/messages",
-            json={"text": "let's book a meeting"},
-        )
         stop = client.post(
             f"/v1/website/sessions/{session_id}/messages",
             json={"text": "not interested"},
         )
-        assert stop.json()["next_action"] == "stop"
-        lead_id = stop.json()["lead_id"]
+        assert stop.status_code == 200
+        assert stop.json()["next_action"] == "ask_contact"
+        assert stop.json()["lead_id"] == ""
     db = get_session_factory()()
     try:
         store = LeadStore(db)
-        assert store.is_conversation_killed(lead_id) is True
-        assert store.is_human_takeover(lead_id) is False
+        assert store.get_website_lead_id(session_id) is None
+        assert store.is_conversation_killed("") is False
+        assert store.is_human_takeover("") is False
     finally:
         db.close()
 

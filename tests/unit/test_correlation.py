@@ -191,7 +191,7 @@ async def test_owner_inbound_message_in_out_share_correlation_id() -> None:
         db.close()
 
 
-def test_website_session_and_message_share_correlation_with_ai_run() -> None:
+def test_website_message_in_and_out_share_correlation_without_ai_run() -> None:
     init_db()
     with TestClient(app) as client:
         session_id = client.post("/v1/website/sessions").json()["session_id"]
@@ -200,22 +200,33 @@ def test_website_session_and_message_share_correlation_with_ai_run() -> None:
             json={"text": VISITOR_TEXT},
         )
         assert response.status_code == 200
-        lead_id = response.json()["lead_id"]
+        assert response.json()["lead_id"] == ""
     db = get_session_factory()()
     try:
-        ai_row = db.scalars(select(AiRunRow).where(AiRunRow.lead_id == lead_id)).one()
+        assert (
+            db.scalars(select(AiRunRow).where(AiRunRow.lead_id == session_id)).all() == []
+        )
         rows = list(
             db.scalars(
                 select(CanonicalEventRow).where(
-                    CanonicalEventRow.lead_id == lead_id,
+                    CanonicalEventRow.conversation_id == session_id,
                     CanonicalEventRow.event_type.in_(
                         [EventType.MESSAGE_IN.value, EventType.MESSAGE_OUT.value]
                     ),
                 )
             ).all()
         )
-        assert len(rows) == 2
-        assert all(row.correlation_id == ai_row.run_id for row in rows)
+        visitor_in = [
+            row
+            for row in rows
+            if row.event_type == EventType.MESSAGE_IN.value
+            and json.loads(row.payload_json).get("text") == VISITOR_TEXT
+        ]
+        visitor_out = [row for row in rows if row.event_type == EventType.MESSAGE_OUT.value]
+        assert len(visitor_in) == 1
+        assert len(visitor_out) == 1
+        assert visitor_in[0].correlation_id.startswith("run_")
+        assert visitor_in[0].correlation_id == visitor_out[0].correlation_id
     finally:
         db.close()
 
