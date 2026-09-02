@@ -565,16 +565,10 @@ async def test_inbound_prospect_persists_meeting_research_tool_outcome() -> None
         db.close()
 
 
-def test_website_path_persists_meeting_research_tool_outcome(
+def test_website_path_does_not_run_meeting_research(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    research = FakeResearchPort(
-        [ResearchSnippet(title="Clinic", url="https://clinic.co.il/about", excerpt="x")]
-    )
-    monkeypatch.setattr(
-        "app.api.website.build_research_port",
-        lambda _settings: research,
-    )
+    del monkeypatch
     init_db()
     with TestClient(app) as client:
         session_id = client.post("/v1/website/sessions").json()["session_id"]
@@ -585,39 +579,30 @@ def test_website_path_persists_meeting_research_tool_outcome(
             "let's book a meeting",
             "clinic.co.il",
         ]
-        lead_id = ""
         for text in messages:
             response = client.post(
                 f"/v1/website/sessions/{session_id}/messages",
                 json={"text": text},
             )
             assert response.status_code == 200
-            lead_id = response.json()["lead_id"]
+            assert response.json()["lead_id"] == ""
+            assert response.json()["next_action"] in {
+                "ask_need",
+                "ask_contact",
+                "handoff",
+                "no_price",
+            }
     db = get_session_factory()()
     try:
         tool_rows = list(
             db.scalars(
                 select(ToolRunRow).where(
-                    ToolRunRow.lead_id == lead_id,
+                    ToolRunRow.conversation_id == session_id,
                     ToolRunRow.tool == "meeting_research",
                 )
             )
         )
-        assert len(tool_rows) == 1
-        assert tool_rows[0].status == "ok"
-        assert tool_rows[0].result_count == 1
-        event_row = db.scalars(
-            select(CanonicalEventRow).where(
-                CanonicalEventRow.provider_event_id == tool_rows[0].provider_event_id
-            )
-        ).one()
-        payload = json.loads(event_row.payload_json)
-        assert payload == {
-            "tool": tool_rows[0].tool,
-            "status": tool_rows[0].status,
-            "result_count": tool_rows[0].result_count,
-        }
-        assert "clinic.co.il" not in json.dumps(payload)
+        assert tool_rows == []
     finally:
         db.close()
 

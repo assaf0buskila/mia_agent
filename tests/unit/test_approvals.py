@@ -138,6 +138,7 @@ def test_website_proposal_with_phone_handoffs_without_approval_row() -> None:
         events = list(
             db.scalars(
                 select(CanonicalEventRow).where(
+                    CanonicalEventRow.conversation_id == session_id,
                     CanonicalEventRow.event_type == EventType.APPROVAL_REQUIRED.value,
                 )
             )

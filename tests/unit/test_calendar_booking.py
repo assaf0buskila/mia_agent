@@ -1355,15 +1355,11 @@ def test_website_e2e_booking() -> None:
                 )
                 assert response.status_code == 200
                 body = response.json()
-                assert "נקבעה פגישה" in body["message"]
-                assert len(fake_book.create_calls) == 1
+                assert body["next_action"] in {"ask_need", "ask_contact"}
+                assert "נקבעה פגישה" not in body["message"]
+                assert fake_book.create_calls == []
         finally:
             app.dependency_overrides.pop(get_calendar_port, None)
             app.dependency_overrides.pop(get_calendar_booking_port, None)
-        row = db.scalars(
-            select(MeetingRow).where(MeetingRow.lead_id == lead_id)
-        ).one_or_none()
-        assert row is not None
-        assert row.status == STATUS_BOOKED
     finally:
         db.close()

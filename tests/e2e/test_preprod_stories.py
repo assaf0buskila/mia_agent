@@ -56,6 +56,7 @@ INJECTION_S8 = (
 )
 
 _SALES_NBA = frozenset(action.value for action in NextAction)
+_DUDE_SITE = frozenset({"ask_need", "ask_contact", "handoff", "no_price"})
 
 
 def _local_dt(*, days_ahead: int, hour: int, minute: int = 0) -> datetime:
@@ -585,9 +586,9 @@ def test_story_prompt_injection_email_or_website() -> None:
         )
         assert response.status_code == 200
         body = response.json()
-        assert body["next_action"] in _SALES_NBA
+        assert body["next_action"] in _DUDE_SITE
         assert "password" not in body["message"].lower()
-        lead_id = body["lead_id"]
+        assert body["lead_id"] == ""
 
     db = get_session_factory()()
     try:
@@ -597,17 +598,10 @@ def test_story_prompt_injection_email_or_website() -> None:
             ).all()
         )
         assert rows == []
-
         ai_rows = list(
-            db.scalars(select(AiRunRow).where(AiRunRow.lead_id == lead_id)).all()
+            db.scalars(select(AiRunRow).where(AiRunRow.lead_id == session_id)).all()
         )
-        assert len(ai_rows) == 1
-        row = ai_rows[0]
-        assert row.tokens_in == 0
-        assert row.tokens_out == 0
-        serialized = _all_ai_run_values(row)
-        assert INJECTION_S8 not in serialized
-        assert "password" not in serialized.lower()
+        assert ai_rows == []
     finally:
         db.close()
 
@@ -629,12 +623,12 @@ def test_story_website_funnel_attribution_handoff() -> None:
         assert viewed.json()["accepted"] is True
         reply = client.post(
             f"/v1/website/sessions/{session_id}/messages",
-            json={"text": "hi"},
+            json={"text": "hi", "phone": "0501234567"},
         )
         assert reply.status_code == 200
         body = reply.json()
-        assert body["next_action"] in _SALES_NBA
-        lead_id = body["lead_id"]
+        assert body["next_action"] in _DUDE_SITE
+        assert body["lead_id"] == ""
         handoff = client.post(f"/v1/website/sessions/{session_id}/handoff")
         assert handoff.status_code == 200
         token = handoff.json()["token"]
@@ -645,33 +639,30 @@ def test_story_website_funnel_attribution_handoff() -> None:
     try:
         store = LeadStore(db)
         attr = store.get_canonical_event(
-            provider="website", provider_event_id=f"{lead_id}:attribution"
+            provider="website", provider_event_id=f"{session_id}:attribution"
         )
-        assert attr is not None
-        payload = json.loads(attr.payload_json)
-        assert payload.get("utm_source") == "google"
-        assert payload.get("utm_campaign") == "e2e"
+        assert attr is None
         kinds = {
             json.loads(row.payload_json)["kind"]
             for row in db.scalars(
                 select(CanonicalEventRow).where(
-                    CanonicalEventRow.lead_id == lead_id,
+                    CanonicalEventRow.conversation_id == session_id,
                     CanonicalEventRow.event_type == EventType.BEHAVIOR.value,
                 )
             ).all()
             if json.loads(row.payload_json).get("kind")
         }
-        assert "mia_opened" in kinds
         assert "page_viewed" in kinds
-        assert "conversation_started" in kinds
         assert "whatsapp_handoff" in kinds
-        lead_payloads = [
+        payloads = [
             row.payload_json
             for row in db.scalars(
-                select(CanonicalEventRow).where(CanonicalEventRow.lead_id == lead_id)
+                select(CanonicalEventRow).where(
+                    CanonicalEventRow.conversation_id == session_id
+                )
             ).all()
         ]
-        assert token not in "".join(lead_payloads)
+        assert token not in "".join(payloads)
     finally:
         db.close()
 
@@ -729,23 +720,19 @@ def test_story_sheets_mirror_on_website_session() -> None:
             json={"text": "hi"},
         )
         assert reply.status_code == 200
-        lead_id = reply.json()["lead_id"]
+        assert reply.json()["lead_id"] == ""
     db = get_session_factory()()
     try:
         tool_rows = list(
             db.scalars(
                 select(CanonicalEventRow).where(
-                    CanonicalEventRow.lead_id == lead_id,
+                    CanonicalEventRow.conversation_id == session_id,
                     CanonicalEventRow.event_type == EventType.TOOL_RESULT.value,
                 )
             ).all()
         )
-        tools = [json.loads(row.payload_json)["tool"] for row in tool_rows]
-        assert "sheets_mirror" in tools
-        for row in tool_rows:
-            dumped = json.dumps(json.loads(row.payload_json))
-            assert "e2e.gmail@" not in dumped
-            assert "@" not in dumped
+        tools = [json.loads(row.payload_json).get("tool") for row in tool_rows]
+        assert "sheets_mirror" not in tools
     finally:
         db.close()
 
