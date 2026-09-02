@@ -72,7 +72,7 @@ def test_allowed_origin_still_creates_session_and_message() -> None:
             headers={"Origin": _ALLOWED},
         )
         assert reply.status_code == 200
-        assert reply.json()["next_action"] in {"ask_need", "ask_contact"}
+        assert reply.json()["next_action"] in {"ask_need", "ask_contact", "product_answer"}
 
 
 def test_apex_origin_is_allowed() -> None:

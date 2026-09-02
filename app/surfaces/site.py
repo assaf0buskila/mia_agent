@@ -9,6 +9,7 @@ from app.domain.handoff import click_to_chat_url
 from app.integrations.base import MessagePort, OutboundMessage
 from app.surfaces.crm import ContactRecord, ContactsCrm, log_contact
 from app.surfaces.identity import CapturedFields, apply_form
+from app.surfaces.published_facts import asks_product_question, lookup_published_fact
 
 SITE_OPENING = (
     "שלום, אני מיה. ספרו לי בקצרה מה אתם מחפשים, "
@@ -102,7 +103,12 @@ def run_site_turn(
         date=date,
         text=text,
     )
-    if not session.fields.want and text.strip() and not _is_contact_only(text):
+    if (
+        not session.fields.want
+        and text.strip()
+        and not _is_contact_only(text)
+        and not asks_product_question(text)
+    ):
         session.fields = CapturedFields(
             name=session.fields.name,
             phone=session.fields.phone,
@@ -191,11 +197,32 @@ def _conversation_summary(session: SiteSession) -> str:
 def _site_reply(fields: CapturedFields, text: str) -> tuple[str, str]:
     if _asks_price(text):
         return NO_PRICE, "no_price"
+    product = ""
+    if asks_product_question(text) or _looks_like_product_want(text):
+        product = lookup_published_fact(text)
+    if asks_product_question(text) and not fields.has_phone_or_email() and not _wants_human(text):
+        return product, "product_answer"
     if not fields.has_phone_or_email():
-        if fields.want:
+        if fields.want or _wants_human(text):
+            if product:
+                return f"{product} {ASK_CONTACT}", "ask_contact"
             return ASK_CONTACT, "ask_contact"
         return ASK_NEED, "ask_need"
     return AFTER_CAPTURE, "handoff"
+
+
+def _looks_like_product_want(text: str) -> bool:
+    lowered = text.casefold()
+    markers = ("אתר", "website", "אוטומצ", "automation")
+    return any(word in lowered or word in text for word in markers)
+
+
+def _wants_human(text: str) -> bool:
+    lowered = text.casefold()
+    return any(
+        word in lowered or word in text
+        for word in ("וואטסאפ", "whatsapp", "אסף", "תתקשרו", "תחזרו", "call me", "ping")
+    )
 
 
 def _asks_price(text: str) -> bool:

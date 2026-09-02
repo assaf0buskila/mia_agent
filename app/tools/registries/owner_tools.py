@@ -57,8 +57,10 @@ from app.domain.approvals import (
     RESOURCE_LINKEDIN_TOOL,
 )
 from app.domain.briefs import apply_owner_meeting_brief
+from app.domain.calendar_write_gate import ASK_ASSAF
 from app.domain.content_ideas import apply_owner_content_ideas
 from app.domain.events import Channel
+from app.domain.gmail_drafts import apply_owner_gmail_draft
 from app.domain.gmail_query import normalize_gmail_query
 from app.domain.gmail_summaries import apply_owner_gmail_summary
 from app.domain.hot_handoff import format_hot_leads_ack
@@ -69,6 +71,7 @@ from app.domain.owner_calendar import (
     format_calendar_agenda,
     resolve_agenda_window,
 )
+from app.domain.owner_calendar_writes import apply_owner_calendar_change_request
 from app.domain.owner_composio_writes import (
     composio_approval_resource_id,
     propose_composio_write,
@@ -88,6 +91,8 @@ from app.domain.owner_status import format_owner_status_ack
 from app.domain.owner_weeklies import apply_owner_weekly
 from app.domain.seo import enrich_seo_ack
 from app.domain.tools import AdapterHttpError
+from app.domain.two_state import may_run, state_for
+from app.domain.whatsapp_drafts import draft_whatsapp_for_assaf
 from app.integrations.calendar import (
     CalendarAgendaPort,
     CalendarPort,
@@ -640,6 +645,60 @@ def _calendar_availability(ctx: ToolContext, args: dict[str, Any]) -> ToolResult
     return _empty(text, "No free slots found.")
 
 
+def _gmail_create_draft(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
+    to = str(args.get("to") or "").strip()
+    subject = str(args.get("subject") or "").strip()
+    body = str(args.get("body") or "").strip()
+    if not to or not (subject or body):
+        return ToolResult(ok=False, error="to and subject or body are required")
+    port = _gmail_port(ctx)
+    if port is None:
+        return _house_unavailable(ctx, "Gmail")
+    text = f"שלח מייל ל {to} נושא: {subject}\n{body}"
+    reply = apply_owner_gmail_draft(
+        ctx.store,
+        text=text,
+        channel=Channel.TELEGRAM,
+        port=port,
+        kill_switch=ctx.kill_switch,
+        demo_active=ctx.demo_active,
+    )
+    return ToolResult(ok=True, text=reply)
+
+
+def _whatsapp_draft_assaf(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
+    del ctx
+    drafted = draft_whatsapp_for_assaf(
+        body=str(args.get("body") or ""),
+        destination=str(args.get("destination") or "assaf"),
+    )
+    if isinstance(drafted, str):
+        return ToolResult(ok=True, text=drafted)
+    return ToolResult(
+        ok=True,
+        text=f"WhatsApp draft for Assaf (not sent): {drafted.body}",
+    )
+
+
+def _calendar_create_meeting(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
+    title = str(args.get("title") or "").strip()
+    start = str(args.get("start") or "").strip()
+    minutes = str(args.get("minutes") or "30").strip()
+    location = str(args.get("location") or "").strip()
+    if not title or not start:
+        return ToolResult(ok=False, error="title and start are required")
+    line = f"צור אירוע: {title} {location} | {start} | {minutes} | {ctx.timezone()}"
+    reply = apply_owner_calendar_change_request(
+        ctx.store,
+        text=line,
+        channel=Channel.TELEGRAM,
+        kill_switch=ctx.kill_switch,
+        demo_active=ctx.demo_active,
+        default_timezone=ctx.timezone(),
+    )
+    return ToolResult(ok=True, text=reply or ASK_ASSAF)
+
+
 def _calendar_agenda(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     """What is actually on the calendar for one window. Read only: only ever calls
     CalendarAgendaPort.list_events, never create/patch/delete.
@@ -766,7 +825,7 @@ def _website_kpis(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
         search_console_handlers(search_console),
     )
     period = f"{date_args['start_date']} to {date_args['end_date']}"
-    lines = [f"AssafWeb KPIs ({period}; GA4 and Search Console APIs):"]
+    lines = [f"Google Search Console and GA4 ({period}):"]
     if isinstance(traffic, str):
         lines.append(f"GA4 traffic: unavailable ({traffic}).")
     else:
@@ -2068,6 +2127,37 @@ _register(
 )
 _register(
     ToolSpec(
+        name="calendar_create_meeting",
+        description=(
+            "Propose a calendar write only when the event is a meeting near Tel Aviv, "
+            "09:00-17:00 Asia/Jerusalem. Weather chats never become meetings. "
+            "If the gate fails, ask Assaf. Never invent a location or time."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "Meeting title."},
+                "start": {
+                    "type": "string",
+                    "description": "ISO start, for example 2026-09-02T10:00.",
+                },
+                "minutes": {
+                    "type": ["string", "null"],
+                    "description": "Duration in minutes. Default 30.",
+                },
+                "location": {
+                    "type": ["string", "null"],
+                    "description": "Must be near Tel Aviv.",
+                },
+            },
+            "required": ["title", "start", "minutes", "location"],
+            "additionalProperties": False,
+        },
+        handler=_calendar_create_meeting,
+    )
+)
+_register(
+    ToolSpec(
         name="booked_meetings",
         description=(
             "Meeting bookings, reschedules and cancellations Assaf has not been shown "
@@ -2154,6 +2244,48 @@ _register(
         ),
         parameters=_string_arg("message_id", "Gmail message id, not a thread id."),
         handler=_gmail_read,
+    )
+)
+_register(
+    ToolSpec(
+        name="gmail_create_draft",
+        description=(
+            "Create a Gmail draft. Never sends. gmail_send stays off. "
+            "Assaf must approve any later send on the named Telegram path."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "to": {"type": "string", "description": "Recipient email."},
+                "subject": {"type": ["string", "null"], "description": "Subject."},
+                "body": {"type": ["string", "null"], "description": "Body."},
+            },
+            "required": ["to", "subject", "body"],
+            "additionalProperties": False,
+        },
+        handler=_gmail_create_draft,
+    )
+)
+_register(
+    ToolSpec(
+        name="whatsapp_draft_assaf",
+        description=(
+            "Draft a WhatsApp note for Assaf. Never sends. Never fires at a lead. "
+            "Destination is Assaf only."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "body": {"type": "string", "description": "Draft text for Assaf."},
+                "destination": {
+                    "type": ["string", "null"],
+                    "description": "Must be Assaf. Lead phones are refused.",
+                },
+            },
+            "required": ["body", "destination"],
+            "additionalProperties": False,
+        },
+        handler=_whatsapp_draft_assaf,
     )
 )
 _register(
@@ -2471,6 +2603,8 @@ def tool_definitions(*, allow_memory_writes: bool = True) -> list[dict[str, Any]
 
 def execute_tool(name: str, arguments: dict[str, Any], ctx: ToolContext) -> ToolResult:
     """Run one allowlisted tool. An unknown name is refused, never guessed at."""
+    if not may_run(state=state_for(ctx.principal), tool=name):
+        return ToolResult(ok=False, error="this tool is not available in this state")
     spec = get_tool(name)
     if spec is None:
         return ToolResult(ok=False, error=f"unknown tool: {name}")

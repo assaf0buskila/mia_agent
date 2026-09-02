@@ -37,7 +37,7 @@ from app.integrations.instagram import (
 from app.integrations.sheets import SheetsPort, maybe_mirror_content_insights
 
 _COMPOSIO_EXECUTE_BASE = "https://backend.composio.dev/api/v3.1/tools/execute"
-_MEDIA_LIST_FIELDS = "id,media_type"
+_MEDIA_LIST_FIELDS = "id,media_type,shortcode"
 
 _INSIGHT_METRICS = ("views", "reach", "likes", "comments", "saved")
 _ALLOWED_GRAPH_HOSTS = frozenset({"graph.instagram.com", "graph.facebook.com"})
@@ -124,7 +124,7 @@ class GraphInstagramInsightsPort:
         try:
             media_items = self._fetch_media_list(limit=capped, budget=budget)
             results: list[ContentInsight] = []
-            for media_id, media_type in media_items:
+            for media_id, media_type, post_name in media_items:
                 metrics = self._fetch_insights(media_id, budget=budget)
                 if metrics is None:
                     continue
@@ -132,6 +132,8 @@ class GraphInstagramInsightsPort:
                     ContentInsight(
                         media_id=media_id,
                         media_type=media_type,
+                        account=self._account_id,
+                        post_name=post_name or media_id,
                         **metrics,
                     )
                 )
@@ -190,16 +192,16 @@ class GraphInstagramInsightsPort:
 
     def _fetch_media_list(
         self, *, limit: int, budget: _InsightCallBudget
-    ) -> list[tuple[str, str]]:
+    ) -> list[tuple[str, str, str]]:
         url = self._base_url(f"{self._account_id}/media")
-        params = {"fields": "id,media_type", "limit": str(limit)}
+        params = {"fields": _MEDIA_LIST_FIELDS, "limit": str(limit)}
         body = self._get_json(url, params, budget=budget, classify_http=True)
         if body is None:
             return []
         data = body.get("data")
         if not isinstance(data, list):
             return []
-        items: list[tuple[str, str]] = []
+        items: list[tuple[str, str, str]] = []
         for entry in data:
             if not isinstance(entry, dict):
                 continue
@@ -215,7 +217,8 @@ class GraphInstagramInsightsPort:
                 continue
             if media_type not in ALLOWLISTED_MEDIA_TYPES:
                 continue
-            items.append((media_id, media_type))
+            shortcode = str(entry.get("shortcode") or "").strip()
+            items.append((media_id, media_type, shortcode or media_id))
         return items
 
     def _fetch_insights(
@@ -268,7 +271,7 @@ class ComposioInstagramInsightsPort:
         budget = _InsightCallBudget.for_limit(capped)
         media_items = self._fetch_media_list(limit=capped, budget=budget)
         results: list[ContentInsight] = []
-        for media_id, media_type in media_items:
+        for media_id, media_type, post_name in media_items:
             metrics = self._fetch_insights(media_id, budget=budget)
             if metrics is None:
                 continue
@@ -276,6 +279,8 @@ class ComposioInstagramInsightsPort:
                 ContentInsight(
                     media_id=media_id,
                     media_type=media_type,
+                    account=self._account_id,
+                    post_name=post_name or media_id,
                     **metrics,
                 )
             )
@@ -335,7 +340,7 @@ class ComposioInstagramInsightsPort:
 
     def _fetch_media_list(
         self, *, limit: int, budget: _InsightCallBudget
-    ) -> list[tuple[str, str]]:
+    ) -> list[tuple[str, str, str]]:
         body = self._execute(
             COMPOSIO_GET_USER_MEDIA_TOOL,
             {
@@ -350,7 +355,7 @@ class ComposioInstagramInsightsPort:
         data = body.get("data")
         if not isinstance(data, list):
             return []
-        items: list[tuple[str, str]] = []
+        items: list[tuple[str, str, str]] = []
         for entry in data:
             if not isinstance(entry, dict):
                 continue
@@ -366,7 +371,8 @@ class ComposioInstagramInsightsPort:
                 continue
             if media_type not in ALLOWLISTED_MEDIA_TYPES:
                 continue
-            items.append((media_id, media_type))
+            shortcode = str(entry.get("shortcode") or "").strip()
+            items.append((media_id, media_type, shortcode or media_id))
         return items
 
     def _fetch_insights(
@@ -557,17 +563,23 @@ def format_content_insights_line(
     n = len(items)
     if n == 0:
         return ""
-    return f"תוכן: {n} פוסטים, לידים מתוכן {total_signals}."
+    account = next((item.account for item in items if item.account), "missing")
+    return (
+        f"Instagram Insights — account {account}: "
+        f"{n} named posts, לידים מתוכן {total_signals}."
+    )
 
 
 def format_content_insights_detail(
     items: list[ContentInsight], *, total_signals: int = 0
 ) -> str:
-    """Per-post metrics for the owner agent tool (no captions or media URLs)."""
+    """Per-post metrics. Tool name, account, and post name before any number."""
     if not items:
         return ""
+    account = next((item.account for item in items if item.account), "missing")
     lines = [
-        f"Instagram: {len(items)} recent posts (newest first, API cap {_MAX_IG_INSIGHTS_LIMIT})."
+        f"Instagram Insights — account {account}: "
+        f"{len(items)} named posts (newest first, API cap {_MAX_IG_INSIGHTS_LIMIT})."
     ]
     for index, item in enumerate(items, start=1):
         parts: list[str] = []
@@ -576,7 +588,12 @@ def format_content_insights_detail(
             if value:
                 parts.append(f"{name}={value}")
         metric_text = ", ".join(parts) if parts else "no metrics returned"
-        lines.append(f"{index}. {item.media_type} id={item.media_id}: {metric_text}")
+        post_name = item.post_name.strip() or item.media_id
+        item_account = item.account.strip() or account
+        lines.append(
+            f"{index}. post {post_name} on account {item_account} "
+            f"({item.media_type}): {metric_text}"
+        )
     if total_signals:
         lines.append(f"Lead signals attributed to these posts: {total_signals}.")
     return "\n".join(lines)

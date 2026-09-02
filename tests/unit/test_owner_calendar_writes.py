@@ -27,7 +27,7 @@ def _store():
 
 
 def _request() -> str:
-    return "צור אירוע: פגישת תכנון | 2026-09-02T10:00 | 60 | Asia/Jerusalem"
+    return "צור אירוע: פגישת תכנון בתל אביב | 2026-09-02T10:00 | 60 | Asia/Jerusalem"
 
 
 def test_owner_calendar_create_is_payload_bound_and_waits_for_approval() -> None:
@@ -49,7 +49,7 @@ def test_owner_calendar_create_is_payload_bound_and_waits_for_approval() -> None
         assert "לא שיניתי" in reply
         assert row.decision == DECISION_PENDING
         assert row.resource_type == RESOURCE_CALENDAR
-        assert json.loads(row.proposed_parameters)["title"] == "פגישת תכנון"
+        assert json.loads(row.proposed_parameters)["title"] == "פגישת תכנון בתל אביב"
         decision, resource_id = decide_calendar_change(
             store,
             text=f"אשר אירוע {row.approval_id}",
@@ -98,7 +98,7 @@ def test_approved_owner_calendar_create_preflights_then_executes_once() -> None:
             demo_active=False,
         )
         assert result == "יצרתי את האירוע ביומן."
-        assert booking.create_calls[0]["summary"] == "פגישת תכנון"
+        assert booking.create_calls[0]["summary"] == "פגישת תכנון בתל אביב"
         assert booking.create_calls[0]["create_meeting_room"] is False
         replay = execute_approved_calendar_change(
             store=store,

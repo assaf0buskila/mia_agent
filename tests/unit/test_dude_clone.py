@@ -265,7 +265,7 @@ def test_website_http_session_has_empty_lead_id_and_no_leads_write() -> None:
             assert message["lead_id"] == ""
             assert not str(message["lead_id"]).startswith("lead_")
             assert message["whatsapp_url"] is None
-            assert message["next_action"] in {"ask_need", "ask_contact"}
+            assert message["next_action"] in {"ask_need", "ask_contact", "product_answer"}
             config = client.get("/v1/website/config").json()
             assert config["opening"] == site_opening()
             assert config["whatsapp_url"] is None

@@ -16,6 +16,8 @@ _MEDIA_ID_RE = re.compile(r"^\d{1,32}$")
 class ContentInsight(BaseModel):
     media_id: str
     media_type: str = ""
+    account: str = ""
+    post_name: str = ""
     views: str | None = None
     reach: str | None = None
     likes: str | None = None

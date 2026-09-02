@@ -190,7 +190,8 @@ def test_website_client_graph_executes_knowledge_once(monkeypatch) -> None:
         )
 
     assert response.status_code == 200
-    assert response.json()["next_action"] in {"ask_need", "ask_contact", "no_price"}
+    allowed = {"ask_need", "ask_contact", "no_price", "product_answer"}
+    assert response.json()["next_action"] in allowed
     assert capability_calls == 0
     assert retrieval_paths == []
 

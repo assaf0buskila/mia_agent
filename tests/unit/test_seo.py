@@ -61,8 +61,8 @@ def test_enrich_seo_ack_fake_appends_facts_and_website_line() -> None:
     enriched, outcomes = enrich_seo_ack(
         ack, gsc, ga4, audit, principal=_OWNER, kill_switch=False
     )
-    assert "נתוני חיפוש (GSC)" in enriched
-    assert "תנועה (GA4)" in enriched
+    assert "Google Search Console" in enriched
+    assert "GA4" in enriched
     assert "ביקורת דף בית" in enriched
     assert "המלצה:" in enriched
     assert len(outcomes) == 3
@@ -153,7 +153,7 @@ async def test_owner_seo_inbound_fake_ports() -> None:
         sent = port.sent[0].text
         assert "לא ביצעתי" in sent
         assert "לא אשנה את האתר בלי אישור" in sent
-        assert "נתוני חיפוש (GSC)" in sent
+        assert "Google Search Console" in sent
         rec = db.scalars(select(SeoRecommendationRow)).one_or_none()
         assert rec is not None
         tool_rows = list(

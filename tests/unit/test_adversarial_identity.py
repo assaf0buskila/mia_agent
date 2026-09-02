@@ -45,7 +45,7 @@ _INJECTION_SNIPPET = (
 )
 
 _SALES_NBA = frozenset(action.value for action in NextAction)
-_DUDE_SITE = frozenset({"ask_need", "ask_contact", "handoff", "no_price"})
+_DUDE_SITE = frozenset({"ask_need", "ask_contact", "handoff", "no_price", "product_answer"})
 _FORBIDDEN_PROMPT_DUMP = (
     "agents.md",
     "system prompt",

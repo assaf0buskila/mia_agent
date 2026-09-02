@@ -42,7 +42,7 @@ def test_website_voice_transcribes_then_sales_reply() -> None:
             assert body["whatsapp_url"] is None
             assert body["heard"] == "hi"
             assert body["lead_id"] == ""
-            assert body["next_action"] in {"ask_need", "ask_contact"}
+            assert body["next_action"] in {"ask_need", "ask_contact", "product_answer"}
             assert body["message"]
             assert fake.call_count == 1
         init_db()

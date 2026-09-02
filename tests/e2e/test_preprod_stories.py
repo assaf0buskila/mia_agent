@@ -56,7 +56,7 @@ INJECTION_S8 = (
 )
 
 _SALES_NBA = frozenset(action.value for action in NextAction)
-_DUDE_SITE = frozenset({"ask_need", "ask_contact", "handoff", "no_price"})
+_DUDE_SITE = frozenset({"ask_need", "ask_contact", "handoff", "no_price", "product_answer"})
 
 
 def _local_dt(*, days_ahead: int, hour: int, minute: int = 0) -> datetime:

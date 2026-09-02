@@ -82,7 +82,7 @@ def test_website_first_message_persists_ai_run() -> None:
         )
         assert response.status_code == 200
         assert response.json()["lead_id"] == ""
-        assert response.json()["next_action"] in {"ask_need", "ask_contact"}
+        assert response.json()["next_action"] in {"ask_need", "ask_contact", "product_answer"}
     db = get_session_factory()()
     try:
         assert db.scalars(select(AiRunRow).where(AiRunRow.lead_id == session_id)).all() == []

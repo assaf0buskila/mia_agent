@@ -643,7 +643,12 @@ def build_ga4_port(settings: Settings) -> Ga4Port:
     )
 
 
-def format_ga4_rows_block(rows: list[Ga4PivotRow]) -> str:
+def format_ga4_rows_block(
+    rows: list[Ga4PivotRow],
+    *,
+    start_date: str = "",
+    end_date: str = "",
+) -> str:
     lines: list[str] = []
     for row in rows:
         label = (row.landing_page or row.session_source).strip()
@@ -664,7 +669,10 @@ def format_ga4_rows_block(rows: list[Ga4PivotRow]) -> str:
             break
     if not lines:
         return ""
-    return "תנועה (GA4):\n" + "\n".join(f"- {line}" for line in lines)
+    header = "GA4"
+    if start_date and end_date:
+        header = f"GA4 ({start_date} to {end_date})"
+    return f"{header}:\n" + "\n".join(f"- {line}" for line in lines)
 
 
 def format_conversion_events_block(events: list[str]) -> str:

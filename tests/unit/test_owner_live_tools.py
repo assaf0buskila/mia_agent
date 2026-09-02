@@ -115,7 +115,7 @@ def test_owner_linkedin_and_seo_tools_use_fake_ports() -> None:
         assert "LINKEDIN_GET_MY_INFO" not in linkedin.text
         seo = execute_tool("seo_snapshot", {}, ctx)
         assert seo.ok is True
-        assert "נתוני חיפוש" in seo.text
+        assert "Google Search Console" in seo.text
         assert "GOOGLE_SEARCH_CONSOLE" not in seo.text
         assert "GOOGLE_ANALYTICS" not in seo.text
         denied_ctx = ToolContext(
@@ -131,11 +131,11 @@ def test_owner_linkedin_and_seo_tools_use_fake_ports() -> None:
             source_ref="website:test",
         )
         denied_li = execute_tool("linkedin_snapshot", {}, denied_ctx)
-        assert denied_li.ok is True
-        assert "Assaf Web" not in denied_li.text
+        assert denied_li.ok is False
+        assert "not available in this state" in denied_li.error
         denied_seo = execute_tool("seo_snapshot", {}, denied_ctx)
-        assert denied_seo.ok is True
-        assert "נתוני חיפוש" not in denied_seo.text
+        assert denied_seo.ok is False
+        assert "not available in this state" in denied_seo.error
     finally:
         session.close()
 
@@ -183,6 +183,7 @@ def test_owner_website_kpis_uses_separate_page_and_query_reads_and_formats_metri
         result = execute_tool("website_kpis", {}, ctx)
         assert result.ok is True
         assert gsc.calls == [["page"], ["query"]]
+        assert result.text.startswith("Google Search Console and GA4 (2026-07-31 to 2026-08-27)")
         assert "2026-07-31 to 2026-08-27" in result.text
         assert "users 8, sessions 12, conversions 2" in result.text
         assert "clicks 9, impressions 100, CTR 0.09, position 4.2" in result.text

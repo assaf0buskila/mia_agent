@@ -167,7 +167,7 @@ def test_website_api_session_and_message() -> None:
         assert reply.status_code == 200
         body = reply.json()
         assert body["lead_id"] == ""
-        assert body["next_action"] in {"ask_need", "ask_contact"}
+        assert body["next_action"] in {"ask_need", "ask_contact", "product_answer"}
         assert body["whatsapp_url"] is None
         empty_end = client.post(f"/v1/website/sessions/{session_id}/end")
         assert empty_end.status_code == 200
@@ -227,7 +227,7 @@ def test_website_inquiries_answer_moves_past_opening() -> None:
         assert follow.status_code == 200
         body = follow.json()
         assert body["lead_id"] == ""
-        assert body["next_action"] in {"ask_need", "ask_contact", "handoff"}
+        assert body["next_action"] in {"ask_need", "ask_contact", "handoff", "product_answer"}
         assert "lead_" not in body["message"]
 
 
@@ -651,7 +651,7 @@ def test_website_conversation_asks_contact_before_whatsapp() -> None:
             f"/v1/website/sessions/{session_id}/messages",
             json={"text": "היי"},
         )
-        assert hi.json()["next_action"] in {"ask_need", "ask_contact"}
+        assert hi.json()["next_action"] in {"ask_need", "ask_contact", "product_answer"}
         assert hi.json()["whatsapp_url"] is None
         shoes = client.post(
             f"/v1/website/sessions/{session_id}/messages",

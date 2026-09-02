@@ -31,6 +31,7 @@ from app.domain.approvals import (
     extract_approval_id,
     is_approval_expired,
 )
+from app.domain.calendar_write_gate import ASK_ASSAF, assess_calendar_write
 from app.domain.events import Channel, build_approval_required_event
 from app.domain.meeting_slots import sanitize_event_id
 from app.integrations.calendar import CalendarPort
@@ -202,6 +203,14 @@ def apply_owner_calendar_change_request(
     change = parse_calendar_change_request(text, default_timezone=default_timezone)
     if change is None:
         return calendar_request_help()
+    gate = assess_calendar_write(
+        title=change.title,
+        start=change.start,
+        end=change.end,
+        location=change.title,
+    )
+    if not gate.allowed:
+        return gate.ask_assaf or ASK_ASSAF
     try:
         assert_allowed(
             RiskAction(name="calendar_change_proposal", risk=RiskLevel.R1_LOW_WRITE),
@@ -423,9 +432,15 @@ def execute_approved_calendar_change(
             duration_minutes=duration_minutes,
             timezone=change.timezone,
         )
-        exact = any(slot.start <= change.start and slot.end >= change.end for slot in slots)
-        if not exact:
-            return "לא שיניתי ביומן כי המועד כבר אינו פנוי."
+        gate = assess_calendar_write(
+            title=change.title,
+            start=change.start,
+            end=change.end,
+            location=change.title,
+            slots=slots,
+        )
+        if not gate.allowed:
+            return gate.ask_assaf or ASK_ASSAF
         if isinstance(booking, DisabledCalendarBookingPort):
             return "Calendar לא מחובר לכתיבה. לא שיניתי כלום."
     except Exception:

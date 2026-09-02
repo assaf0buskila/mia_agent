@@ -411,7 +411,7 @@ def test_enrich_appends_hebrew_line_and_persists() -> None:
             kill_switch=False,
         )
         db.commit()
-        assert "תוכן: 2 פוסטים, לידים מתוכן 0." in enriched
+        assert "Instagram Insights" in enriched
         rows = [
             row
             for row in store.list_content_insights()
@@ -663,7 +663,7 @@ async def test_owner_analytics_inbound_tool_result_instagram_insights() -> None:
         assert task is not None
         assert task.task_type == "analytics"
         sent = port.sent[0].text
-        assert "תוכן: 2 פוסטים" in sent
+        assert "Instagram Insights" in sent
         tool_row = store.get_canonical_event(
             provider="whatsapp",
             provider_event_id="evt.owner.ig.content.1:tool:instagram_insights",
@@ -868,7 +868,7 @@ def test_composio_insights_parses_media_no_captions_or_urls() -> None:
     assert urls[1].endswith(f"/{COMPOSIO_GET_MEDIA_INSIGHTS_TOOL}")
     assert captured[0]["version"] == COMPOSIO_INSTAGRAM_VERSION
     media_args = captured[0]["arguments"]
-    assert media_args["fields"] == "id,media_type"
+    assert media_args["fields"] == "id,media_type,shortcode"
     assert "caption" not in media_args["fields"]
     assert media_args["ig_user_id"] == "17841400000000000"
     insight_args = captured[1]["arguments"]
