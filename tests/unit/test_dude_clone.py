@@ -484,7 +484,7 @@ def test_sheets_read_without_id_uses_locked_workbook() -> None:
     from app.capabilities.sheets import sheets_read
 
     sheets = FakeSheetsPort()
-    sheets.owner_values[(LOCKED_SPREADSHEET_ID, "A1:J20")] = [["שם", "טלפון"]]
+    sheets.owner_values[(LOCKED_SPREADSHEET_ID, "Contacts!A1:N20")] = [["שם", "טלפון"]]
     allowed = Settings(_env_file=None, sheets_spreadsheet_id="").allowed_sheets_spreadsheet_ids()
     out = sheets_read(
         sheets,
@@ -492,4 +492,43 @@ def test_sheets_read_without_id_uses_locked_workbook() -> None:
         allowed_spreadsheet_ids=allowed,
     )
     assert out["rows"] == [["שם", "טלפון"]]
+
+
+def test_crm_range_is_contacts_and_rejects_01_leads() -> None:
+    from app.capabilities.sheets import sheets_list_tabs, sheets_read
+    from app.core.errors import InvalidArguments
+    from app.surfaces.crm import DEFAULT_CONTACTS_READ_RANGE, prefer_crm_tabs
+
+    assert DEFAULT_CONTACTS_READ_RANGE.startswith("Contacts!")
+    assert "01 Leads" not in DEFAULT_CONTACTS_READ_RANGE
+    sheets = FakeSheetsPort()
+    allowed = Settings(_env_file=None, sheets_spreadsheet_id="").allowed_sheets_spreadsheet_ids()
+    with pytest.raises(InvalidArguments, match="01 Leads"):
+        sheets_read(
+            sheets,
+            {"spreadsheet_id": LOCKED_SPREADSHEET_ID, "range": "01 Leads!A1:F20"},
+            allowed_spreadsheet_ids=allowed,
+        )
+    sheets.sheet_names[LOCKED_SPREADSHEET_ID] = [
+        "01 Leads",
+        "Activity",
+        "Contacts",
+        "10 Mia Activity",
+    ]
+    listed = sheets_list_tabs(
+        sheets,
+        {"spreadsheet_id": ""},
+        allowed_spreadsheet_ids=allowed,
+    )
+    assert listed["tabs"] == ["Contacts", "Activity"]
+    assert "01 Leads" not in listed["tabs"]
+    assert prefer_crm_tabs(["01 Leads", "KPI", "Contacts"]) == ["Contacts", "KPI"]
+
+
+def test_owner_prompt_forbids_invented_counts() -> None:
+    assert "Never invent metrics, counts, or pipeline numbers" in SYSTEM_PROMPT
+    assert "say you do not know" in SYSTEM_PROMPT
+    assert "Do not say they are disconnected" in SYSTEM_PROMPT
+    assert "Contacts!A1:N20" in SYSTEM_PROMPT
+    assert "No Lead ID" in SYSTEM_PROMPT
 

@@ -1192,7 +1192,8 @@ Telegram talk and Sheet writes work without stacked policy. Visitors cannot
 open WhatsApp or create a CRM row anonymously. Old NBA/qualification tests no
 longer describe the live site path. Owner Telegram uses `crm_search` /
 `crm_upsert` on the locked workbook and never asks Assaf for a Sheet URL.
-Empty `MIA_SHEETS_SPREADSHEET_ID` still resolves to the locked ID.
+Empty `MIA_SHEETS_SPREADSHEET_ID` still resolves to the locked ID. House
+Composio ports bind from `MIA_COMPOSIO_USER_ID`. Archive tab `01 Leads` is banned.
 
 **Alternatives considered**
 Wait for a new schema — rejected; Assaf locked A1:N1. Keep LangGraph wrappers

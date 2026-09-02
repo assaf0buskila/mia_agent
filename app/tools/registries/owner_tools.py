@@ -88,7 +88,12 @@ from app.domain.owner_status import format_owner_status_ack
 from app.domain.owner_weeklies import apply_owner_weekly
 from app.domain.seo import enrich_seo_ack
 from app.domain.tools import AdapterHttpError
-from app.integrations.calendar import CalendarAgendaPort, CalendarPort
+from app.integrations.calendar import (
+    CalendarAgendaPort,
+    CalendarPort,
+    build_calendar_agenda_port,
+    build_calendar_port,
+)
 from app.integrations.composio_catalog import (
     NEVER_AUTO_SEND_SLUGS,
     SHEETS_BOUNDED_WRITE_SLUGS,
@@ -98,11 +103,12 @@ from app.integrations.composio_catalog import (
     schema_text,
     validate_arguments,
 )
-from app.integrations.ga4 import Ga4Port
+from app.integrations.ga4 import Ga4Port, build_ga4_port
 from app.integrations.gmail import (
     DisabledGmailPort,
     GmailPort,
     InboundEmail,
+    build_gmail_port,
     format_email_body,
     format_inbox_rows,
 )
@@ -110,15 +116,23 @@ from app.integrations.instagram_insights import (
     _DEFAULT_OWNER_IG_LIMIT,
     _MAX_IG_INSIGHTS_LIMIT,
     InstagramInsightsPort,
+    build_instagram_insights_port,
     enrich_content_insights_ack,
 )
-from app.integrations.linkedin import LinkedInPort, enrich_linkedin_ack
+from app.integrations.linkedin import LinkedInPort, build_linkedin_port, enrich_linkedin_ack
 from app.integrations.llm_client import function_tool
 from app.integrations.research import ResearchPort, ResearchSnippet, format_sources_block
-from app.integrations.search_console import SearchConsolePort
-from app.integrations.seo_audit import SeoAuditPort
+from app.integrations.search_console import SearchConsolePort, build_search_console_port
+from app.integrations.seo_audit import SeoAuditPort, build_seo_audit_port
 from app.integrations.sheets import DisabledSheetsPort, SheetsPort, build_sheets_port
-from app.surfaces.crm import ContactRecord, CrmDenied, build_contacts_crm, log_contact
+from app.surfaces.crm import (
+    ContactRecord,
+    CrmDenied,
+    a1_targets_archive_tab,
+    build_contacts_crm,
+    is_archive_tab,
+    log_contact,
+)
 
 MAX_TOOL_RESULT_CHARS = 3000
 _NO_ARGS: dict[str, Any] = {
@@ -170,8 +184,8 @@ def _sheet_args(*, include_values: bool) -> dict[str, Any]:
         "range": {
             "type": ["string", "null"] if not include_values else "string",
             "description": (
-                "One bounded A1 range, for example KPI!A1:C5. For reads only, null uses "
-                "the bounded A1:J20 preview of the first visible tab."
+                "One bounded A1 range, for example Contacts!A1:N20. For reads only, null "
+                "uses Contacts!A1:N20. Never 01 Leads."
             ),
         },
     }
@@ -507,18 +521,30 @@ def _find_leads(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     return _empty(format_lead_matches(ctx.store, query), "No matching lead.")
 
 
+def _house_unavailable(ctx: ToolContext, label: str) -> ToolResult:
+    if ctx.settings.composio_ready():
+        return ToolResult(ok=False, error=f"{label} failed on the house Composio account.")
+    return ToolResult(ok=True, text=_NOT_CONNECTED)
+
+
 def _gmail_port(ctx: ToolContext) -> GmailPort | None:
-    if ctx.gmail is None or isinstance(ctx.gmail, DisabledGmailPort):
+    port = ctx.gmail
+    if port is None and ctx.settings.composio_ready():
+        port = build_gmail_port(ctx.settings)
+    if port is None or isinstance(port, DisabledGmailPort):
         return None
-    return ctx.gmail
+    return port
 
 
 def _gmail_inbox(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     del args
     port = _gmail_port(ctx)
     if port is None:
-        return ToolResult(ok=True, text=_NOT_CONNECTED)
-    rows = port.list_recent()
+        return _house_unavailable(ctx, "Gmail")
+    try:
+        rows = port.list_recent()
+    except AdapterHttpError as exc:
+        return ToolResult(ok=False, error=f"Gmail read failed ({exc.tool_status()})")
     text = format_inbox_rows(rows, timezone=ctx.timezone(), now=ctx.now)
     return _empty(text, "אין מיילים בתיבה.")
 
@@ -529,7 +555,7 @@ def _gmail_search(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
         return ToolResult(ok=False, error="query is required")
     port = _gmail_port(ctx)
     if port is None:
-        return ToolResult(ok=True, text=_NOT_CONNECTED)
+        return _house_unavailable(ctx, "Gmail")
     normalized = normalize_gmail_query(query, now=ctx.now)
     rows = port.search(normalized.query)
     text = format_inbox_rows(rows, timezone=ctx.timezone(), now=ctx.now)
@@ -553,7 +579,7 @@ def _gmail_read(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
         return ToolResult(ok=False, error="message_id is required")
     port = _gmail_port(ctx)
     if port is None:
-        return ToolResult(ok=True, text=_NOT_CONNECTED)
+        return _house_unavailable(ctx, "Gmail")
     try:
         payload = execute_capability(
             "mail.read",
@@ -596,11 +622,14 @@ def _meeting_brief(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
 
 def _calendar_availability(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     del args
-    if ctx.calendar is None:
-        return ToolResult(ok=False, error="calendar is not configured")
+    calendar = ctx.calendar
+    if calendar is None and ctx.settings.composio_ready():
+        calendar = build_calendar_port(ctx.settings)
+    if calendar is None:
+        return _house_unavailable(ctx, "Calendar")
     text, _outcome = apply_owner_calendar(
         "",
-        ctx.calendar,
+        calendar,
         principal=ctx.principal,
         kill_switch=ctx.kill_switch,
         timezone=ctx.timezone(),
@@ -614,12 +643,15 @@ def _calendar_agenda(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     """What is actually on the calendar for one window. Read only: only ever calls
     CalendarAgendaPort.list_events, never create/patch/delete.
     """
-    if ctx.calendar_agenda is None:
-        return ToolResult(ok=True, text=_NOT_CONNECTED)
+    agenda = ctx.calendar_agenda
+    if agenda is None and ctx.settings.composio_ready():
+        agenda = build_calendar_agenda_port(ctx.settings)
+    if agenda is None:
+        return _house_unavailable(ctx, "Calendar")
     range_key = str(args.get("range") or "").strip()
     moment = ctx.now or datetime.now(UTC)
     start, end = resolve_agenda_window(range_key, now=moment, timezone=ctx.timezone())
-    events = ctx.calendar_agenda.list_events(start=start, end=end)
+    events = agenda.list_events(start=start, end=end)
     text = format_calendar_agenda(events, range_key=range_key, timezone=ctx.timezone(), now=moment)
     return ToolResult(ok=True, text=text)
 
@@ -666,13 +698,20 @@ def _gmail_summary(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
 
 def _seo_snapshot(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     del args
-    if ctx.search_console is None or ctx.ga4 is None or ctx.seo_audit is None:
-        return ToolResult(ok=True, text=_NOT_CONNECTED)
+    search_console = ctx.search_console
+    ga4 = ctx.ga4
+    seo_audit = ctx.seo_audit
+    if ctx.settings.composio_ready():
+        search_console = search_console or build_search_console_port(ctx.settings)
+        ga4 = ga4 or build_ga4_port(ctx.settings)
+        seo_audit = seo_audit or build_seo_audit_port(ctx.settings)
+    if search_console is None or ga4 is None or seo_audit is None:
+        return _house_unavailable(ctx, "GSC/GA4")
     text, _outcomes = enrich_seo_ack(
         "",
-        ctx.search_console,
-        ctx.ga4,
-        ctx.seo_audit,
+        search_console,
+        ga4,
+        seo_audit,
         principal=ctx.principal,
         kill_switch=ctx.kill_switch,
         store=ctx.store,
@@ -685,8 +724,13 @@ def _seo_snapshot(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
 def _website_kpis(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     """API-backed, normalized owner KPI read; provider payloads never reach the model."""
     del args
-    if ctx.search_console is None or ctx.ga4 is None:
-        return ToolResult(ok=True, text=_NOT_CONNECTED)
+    search_console = ctx.search_console
+    ga4 = ctx.ga4
+    if ctx.settings.composio_ready():
+        search_console = search_console or build_search_console_port(ctx.settings)
+        ga4 = ga4 or build_ga4_port(ctx.settings)
+    if search_console is None or ga4 is None:
+        return _house_unavailable(ctx, "GSC/GA4")
     end_date = (ctx.now or datetime.now(UTC)).date() - timedelta(days=1)
     start_date = end_date - timedelta(days=27)
     date_args = {"start_date": start_date.isoformat(), "end_date": end_date.isoformat()}
@@ -709,16 +753,16 @@ def _website_kpis(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
         except (RuntimeError, ValueError, OSError):
             return "unavailable"
 
-    traffic = call("analytics.get_traffic", date_args, analytics_handlers(ctx.ga4))
+    traffic = call("analytics.get_traffic", date_args, analytics_handlers(ga4))
     pages = call(
         "search_console.query",
         {**date_args, "dimensions": ["page"]},
-        search_console_handlers(ctx.search_console),
+        search_console_handlers(search_console),
     )
     queries = call(
         "search_console.query",
         {**date_args, "dimensions": ["query"]},
-        search_console_handlers(ctx.search_console),
+        search_console_handlers(search_console),
     )
     period = f"{date_args['start_date']} to {date_args['end_date']}"
     lines = [f"AssafWeb KPIs ({period}; GA4 and Search Console APIs):"]
@@ -771,14 +815,19 @@ def _website_kpis(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
 
 def _linkedin_snapshot(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     del args
-    if ctx.linkedin is None:
-        return ToolResult(ok=True, text=_NOT_CONNECTED)
-    text, _outcome = enrich_linkedin_ack("", ctx.linkedin, ctx.kill_switch, principal=ctx.principal)
-    return _empty(text, "LinkedIn returned nothing. Reconnect LinkedIn in Composio.")
+    port = ctx.linkedin
+    if port is None and ctx.settings.composio_ready():
+        port = build_linkedin_port(ctx.settings)
+    if port is None:
+        return _house_unavailable(ctx, "LinkedIn")
+    text, _outcome = enrich_linkedin_ack("", port, ctx.kill_switch, principal=ctx.principal)
+    return _empty(text, "LinkedIn returned nothing.")
 
 
 def _owner_sheets_port(ctx: ToolContext) -> SheetsPort | None:
-    port = ctx.sheets or build_sheets_port(ctx.settings)
+    port = ctx.sheets
+    if port is None:
+        port = build_sheets_port(ctx.settings)
     return None if isinstance(port, DisabledSheetsPort) else port
 
 
@@ -853,7 +902,7 @@ def _sheets_read(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
         filled["spreadsheet_id"] = _crm_spreadsheet_id(ctx)
     port = _owner_sheets_port(ctx)
     if port is None:
-        return ToolResult(ok=True, text=_NOT_CONNECTED)
+        return _house_unavailable(ctx, "Sheets")
     try:
         out = execute_capability(
             "sheets.read",
@@ -882,7 +931,7 @@ def _sheets_list_tabs(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
         filled["spreadsheet_id"] = _crm_spreadsheet_id(ctx)
     port = _owner_sheets_port(ctx)
     if port is None:
-        return ToolResult(ok=True, text=_NOT_CONNECTED)
+        return _house_unavailable(ctx, "Sheets")
     try:
         out = execute_capability(
             "sheets.list_tabs",
@@ -1422,11 +1471,14 @@ def _instagram_insights(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
         except (TypeError, ValueError):
             return ToolResult(ok=False, error="limit must be an integer")
         limit = max(1, min(limit, _MAX_IG_INSIGHTS_LIMIT))
-    if ctx.instagram_insights is None:
-        return ToolResult(ok=True, text=_NOT_CONNECTED)
+    insights = ctx.instagram_insights
+    if insights is None and ctx.settings.composio_ready():
+        insights = build_instagram_insights_port(ctx.settings)
+    if insights is None:
+        return _house_unavailable(ctx, "Instagram")
     text, outcome = enrich_content_insights_ack(
         "",
-        ctx.instagram_insights,
+        insights,
         ctx.store,
         ctx.kill_switch,
         limit=limit,
@@ -1656,6 +1708,14 @@ def _parse_composio_arguments(args: dict[str, Any]) -> dict[str, Any] | ToolResu
     return values
 
 
+def _composio_sheet_args_banned(values: dict[str, Any]) -> bool:
+    for key in ("range", "a1_range", "sheetName", "sheet_name"):
+        raw = str(values.get(key) or "")
+        if a1_targets_archive_tab(raw) or is_archive_tab(raw):
+            return True
+    return False
+
+
 def _composio_execute_with_catalog(
     ctx: ToolContext,
     catalog: ComposioCatalog,
@@ -1663,6 +1723,8 @@ def _composio_execute_with_catalog(
     values: dict[str, Any],
 ) -> ToolResult:
     slug = str(args.get("tool_slug") or "").strip().upper()
+    if slug.startswith("GOOGLESHEETS") and _composio_sheet_args_banned(values):
+        return ToolResult(ok=False, error="01 Leads is an archive tab and is banned")
     tool = catalog.detail(slug)
     if tool is None or tool.slug != slug:
         return ToolResult(ok=False, error="tool is not in an ACTIVE owner Composio toolkit")
@@ -1890,8 +1952,9 @@ _register(
     ToolSpec(
         name="sheets_list_tabs",
         description=(
-            "Lists tab names on Assaf's locked Contacts workbook. spreadsheet_id may be "
-            "null — Mia already has the ID. Never ask him for a URL."
+            "Lists tab names on Assaf's locked Contacts workbook. Prefers Contacts and "
+            "Activity. Skips archive tabs. spreadsheet_id may be null. Never ask him "
+            "for a URL."
         ),
         parameters=_sheet_args(include_values=False),
         handler=_sheets_list_tabs,
@@ -2179,8 +2242,8 @@ _register(
         name="sheets_read",
         description=(
             "Reads a bounded A1 range from Assaf's locked Contacts workbook. "
-            "spreadsheet_id may be null. Default range is a Contacts preview. "
-            "Never ask him for a URL. Never say the sheet is unavailable."
+            "spreadsheet_id may be null. Default range is Contacts!A1:N20. "
+            "Never 01 Leads. Never ask him for a URL."
         ),
         parameters=_sheet_args(include_values=False),
         handler=_sheets_read,

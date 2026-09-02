@@ -1,6 +1,6 @@
 # Mia
 
-AssafWeb’s AI Growth & Sales Operator.
+Assaf’s public Dude-clone demo. Hebrew-native. Named Mia. Two surfaces, one Contacts CRM. Composio actually runs.
 
 **Start here:** [`AGENTS.md`](AGENTS.md) → [`docs/PRODUCT.md`](docs/PRODUCT.md) → [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) → [`docs/DECISIONS.md`](docs/DECISIONS.md)
 
@@ -8,13 +8,31 @@ AssafWeb’s AI Growth & Sales Operator.
 | --- | --- |
 | [`AGENTS.md`](AGENTS.md) | How to work in this repo |
 | [`docs/PRODUCT.md`](docs/PRODUCT.md) | What Mia is |
-| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Two graphs, channels, policy |
-| [`docs/WIRING.md`](docs/WIRING.md) | Who calls whom (short map) |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Two loops, Contacts CRM, channels |
+| [`docs/WIRING.md`](docs/WIRING.md) | Who calls whom |
 | [`docs/DECISIONS.md`](docs/DECISIONS.md) | ADRs that still constrain |
-| [`docs/RUNBOOK.md`](docs/RUNBOOK.md) | Operator: kill switch, flags, health |
 | [`docs/PRODUCTION_BUILD.md`](docs/PRODUCTION_BUILD.md) | Operator: AWS go-live |
 
-Do not read `docs/archive/` unless you need history. The VNext rebuild spec is `docs/archive/MIA_REBUILD.MD`.
+Do not read `docs/archive/` unless you need history.
+
+## Surfaces
+
+1. **Telegram owner** — Dude talk. House Composio tools. Writes Contacts + Activity without asking for a URL.
+2. **Website visitors** — identify-then-sell on `https://mia.assafweb.com/v1/website/widget.js`. No Contacts row, WhatsApp handoff, or Telegram ping until phone or email exists.
+
+## CRM
+
+Locked spreadsheet `1HW8mnc9GFXraS6oG5VIxFcJvZq9gMDJBFRxY2mpVOhI`. Tabs **Contacts** and **Activity** only.
+
+Contacts A1:N1: `שם | טלפון | אימייל | תאריך | עסק | מקור | שפה | מה רוצים | סטטוס | סיכום שיחה | הבא | נוצר | עודכן | פינג לאסף`
+
+Activity: `מתי | מי | ערוץ | מה עשתה | תוצאה`
+
+No `lead_` ids. No `01 Leads`. No row without phone or email.
+
+## Composio
+
+House entity (`MIA_COMPOSIO_USER_ID`). Same apps as Cursor: Sheets, Gmail, Instagram, LinkedIn, GA, GSC, Calendar, WhatsApp. Reads run. Mail send only if the owner asked. No social publish. Assaf sends customer WhatsApp.
 
 ## Local
 

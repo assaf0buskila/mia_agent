@@ -147,7 +147,7 @@
     '.ask-mia-launch-mark{width:2rem;height:2rem;border-radius:999px;background:#d9eeff;color:#061b35;display:inline-flex;align-items:center;justify-content:center;font-weight:700;font-size:1rem;flex:0 0 auto}' +
     '.ask-mia-launch-mark svg,.ask-mia-avatar svg,.ask-mia-bubble-avatar svg{width:1.2rem;height:1.2rem;display:block}' +
     '#ask-mia-launch-label{white-space:nowrap;font-size:.92rem;font-weight:800;color:#fff}' +
-    '#ask-mia-panel{width:min(22rem,calc(100vw - 2rem));background:linear-gradient(180deg,#F8FBFF,#eef7ff);color:#061b35;border:1px solid #2f5f9321;border-radius:1rem;box-shadow:0 16px 40px rgba(6,27,53,.22);display:flex;flex-direction:column;overflow:hidden}' +
+    '#ask-mia-panel{width:min(22rem,calc(100vw - 2rem));background:linear-gradient(180deg,#F8FBFF,#eef7ff);color:#061b35;border:1px solid #2f5f9321;border-radius:1rem;box-shadow:0 16px 40px rgba(6,27,53,.22);display:flex;flex-direction:column;overflow:hidden;backdrop-filter:saturate(1.25) blur(18px);-webkit-backdrop-filter:saturate(1.25) blur(18px)}' +
     '#ask-mia-header{display:flex;align-items:center;gap:.65rem;padding:.7rem .85rem;background:#061b35;color:#fff;border-bottom:3px solid #2563eb}' +
     '.ask-mia-avatar{width:2.15rem;height:2.15rem;border-radius:999px;background:#d9eeff;color:#061b35;display:inline-flex;align-items:center;justify-content:center;font-weight:700;flex:0 0 auto}' +
     '.ask-mia-name{display:block;color:#fff;font-weight:700;font-size:.95rem;line-height:1.2}' +
@@ -224,7 +224,7 @@
   nameEl.textContent = 'מיה';
   var subEl = document.createElement('span');
   subEl.className = 'ask-mia-sub';
-  subEl.textContent = 'AssafWeb';
+  subEl.textContent = 'שאלו. מיה תבין.';
   brand.appendChild(nameEl);
   brand.appendChild(subEl);
   header.appendChild(avatar);

@@ -144,6 +144,7 @@ def test_whatsapp_green_and_assafweb_brand_tokens() -> None:
     assert "#d9eeff" in source
     assert "#ask-mia-send{background:#2f5f93;color:#fff}" in source
     assert "linear-gradient(135deg,#2f5f93,#2563eb)" in source
+    assert "backdrop-filter:saturate(1.25) blur(18px)" in source
     assert "#ask-mia-launcher:focus-visible{outline:2px solid #2563eb" in source
 
 

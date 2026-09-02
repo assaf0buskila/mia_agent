@@ -77,8 +77,11 @@ from app.surfaces.crm import (
 )
 from app.surfaces.crm import (
     CONTACTS_HEADERS,
+    CONTACTS_READ_COLUMNS,
     CONTACTS_TAB,
     LOCKED_SPREADSHEET_ID,
+    a1_targets_archive_tab,
+    sheet_tab_from_a1,
 )
 
 SHEETS_MIRROR_SCOPE = "sheets_mirror"
@@ -198,6 +201,8 @@ def _crm_header_range(sheet_name: str, headers: list[str]) -> str:
     """Contacts is A1:N1 (14 cols). Owner-read 10-col bound does not apply here."""
     end = chr(ord("A") + len(headers) - 1)
     return f"{sheet_name}!A1:{end}1"
+
+
 _METRIC_PATTERN = re.compile(r"^[0-9]*$")
 _A1_RANGE_PATTERN = re.compile(
     r"^(?:[A-Za-z0-9 _-]{1,80}!)?[A-Z]{1,3}[1-9][0-9]{0,5}(?::[A-Z]{1,3}[1-9][0-9]{0,5})?$"
@@ -231,12 +236,14 @@ def _normalize_sheet_values(raw: object) -> list[list[str]]:
     return values
 
 
-def _normalize_sheet_read_values(raw: object) -> list[list[str]]:
+def _normalize_sheet_read_values(
+    raw: object, *, max_columns: int = MAX_OWNER_SHEET_COLUMNS
+) -> list[list[str]]:
     if not isinstance(raw, list) or len(raw) > MAX_OWNER_SHEET_ROWS:
         raise AdapterSchemaError()
     values: list[list[str]] = []
     for row in raw:
-        if not isinstance(row, list) or len(row) > MAX_OWNER_SHEET_COLUMNS:
+        if not isinstance(row, list) or len(row) > max_columns:
             raise AdapterSchemaError()
         normalized_row: list[str] = []
         for cell in row:
@@ -261,6 +268,10 @@ def validate_owner_sheet_request(
     if values is not None and "://" in target:
         target = ""
     bounded_range = a1_range.strip()
+    if a1_targets_archive_tab(bounded_range):
+        raise ValueError("01 Leads is an archive tab and is banned")
+    if "!" not in bounded_range:
+        bounded_range = f"{CONTACTS_TAB}!{bounded_range}"
     if not target or target not in allowed_spreadsheet_ids:
         raise ValueError("spreadsheet id is not allowlisted")
     max_rows, max_columns = _parse_bounded_a1_range(bounded_range)
@@ -315,7 +326,9 @@ def _parse_bounded_a1_range(a1_range: str) -> tuple[int, int]:
         raise ValueError("range endpoints must be ordered")
     row_span = end_row - start_row + 1
     column_span = end_column - start_column + 1
-    if row_span > MAX_OWNER_SHEET_ROWS or column_span > MAX_OWNER_SHEET_COLUMNS:
+    tab = sheet_tab_from_a1(a1_range)
+    column_limit = CONTACTS_READ_COLUMNS if tab == CONTACTS_TAB else MAX_OWNER_SHEET_COLUMNS
+    if row_span > MAX_OWNER_SHEET_ROWS or column_span > column_limit:
         raise ValueError("range exceeds the 20-row by 10-column limit")
     return row_span, column_span
 
@@ -582,7 +595,9 @@ class ComposioSheetsPort:
         raw_values = (data or {}).get("values")
         if not isinstance(raw_values, list):
             raise AdapterSchemaError()
-        return _normalize_sheet_read_values(raw_values)
+        tab = sheet_tab_from_a1(bounded_range)
+        max_columns = CONTACTS_READ_COLUMNS if tab == CONTACTS_TAB else MAX_OWNER_SHEET_COLUMNS
+        return _normalize_sheet_read_values(raw_values, max_columns=max_columns)
 
     def list_sheet_names(self, *, spreadsheet_id: str) -> list[str]:
         """Discover tabs only inside an already allowlisted spreadsheet.

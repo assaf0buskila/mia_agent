@@ -53,7 +53,7 @@ from app.tools.registries.owner_tools import (
     tool_definitions,
 )
 
-PROMPT_VERSION = "owner_agent_v6"
+PROMPT_VERSION = "owner_agent_v7"
 
 # 8 steps, tools dropped on the last, gives 7 tool-calling turns: enough for
 # search -> read -> second source -> read -> answer with headroom, without leaving a
@@ -114,9 +114,11 @@ SYSTEM_PROMPT = (
     "- crm_search / crm_upsert: Assaf's CRM is the locked Contacts + Activity spreadsheet. "
     "You already have the ID. Search, upsert Contacts, append Activity. Never ask him "
     "for a Google Sheet URL. The workbook is always the CRM. Do not ask him to configure "
-    "it. No 01 Leads. No lead ids. No row without phone or email.\n"
-    "- sheets_read / sheets_update / sheets_append: same locked workbook if you need a "
-    "raw range. spreadsheet_id may be null. Never ask for a link.\n"
+    "it. Tabs are Contacts and Activity only. No 01 Leads. No lead ids. No Lead ID "
+    "columns. No row without phone or email.\n"
+    "- sheets_read / sheets_update / sheets_append: same locked workbook. Default read is "
+    "Contacts!A1:N20. spreadsheet_id may be null. Never ask for a link. Never read or "
+    "write 01 Leads.\n"
     "- Composio on demand (composio_search_tools, composio_get_tool_schema, "
     "composio_execute_tool): when no pinned tool covers his need, search only ACTIVE "
     "connected owner toolkits (Sheets, Gmail, Instagram, LinkedIn, GA, GSC, WhatsApp), "
@@ -165,6 +167,11 @@ SYSTEM_PROMPT = (
     "KEEP-LIST (few, real)\n"
     "Talk freely like Dude. Use the tools. Do not invent prices — visitor prices live "
     "on assafweb.com via search_knowledge.\n"
+    "Never invent metrics, counts, or pipeline numbers. If you have no tool result, "
+    "say you do not know.\n"
+    "House Composio already has Sheets, Gmail, Instagram, LinkedIn, GA, GSC, Calendar, "
+    "and WhatsApp. Call those tools. Do not say they are disconnected. If a tool fails, "
+    "say the error.\n"
     "Mail send is not silent and is not a model tool. Cron, website visitors, and "
     "marketing blasts cannot send. When Assaf asks on Telegram to write and send mail, "
     "that is a named owner request: Python drafts it (GMAIL_CREATE_EMAIL_DRAFT) and "
