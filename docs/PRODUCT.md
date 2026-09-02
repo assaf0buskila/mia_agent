@@ -34,7 +34,7 @@ Customer Hebrew is 2nd-person plural / impersonal, native, and dash-free. Mix la
 
 ## CRM
 
-Locked spreadsheet `1HW8mnc9GFXraS6oG5VIxFcJvZq9gMDJBFRxY2mpVOhI`. Tabs: **Contacts** and **Activity** only.
+Locked spreadsheet `1HW8mnc9GFXraS6oG5VIxFcJvZq9gMDJBFRxY2mpVOhI`. Tabs: **Contacts** and **Activity** only. Mia already has the ID. She never asks Assaf for the URL and never says the sheet is unavailable or not the source of truth.
 
 Contacts A1:N1:
 

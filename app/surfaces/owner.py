@@ -30,6 +30,19 @@ from app.surfaces.identity import extract_fields
 OWNER_FALLBACK = "פה. מה צריך?"
 CONTACT_LOGGED = "רשמתי ב-Contacts."
 CONTACT_REFUSED = "בלי טלפון או אימייל אני לא כותבת שורה."
+_SHEET_WALLS = (
+    "spreadsheet url",
+    "google sheet url",
+    "paste the google sheet",
+    "paste the sheet url",
+    "send me the link",
+    "limited access",
+    "not the source of truth",
+    "not source of truth",
+    "קישור לשיט",
+    "תשלח את הלינק",
+    "תדביק קישור",
+)
 
 
 @dataclass(frozen=True)
@@ -205,6 +218,14 @@ def _talk_with_optional_agent(
             source_ref=item.get("id", ""),
             now=datetime.now(UTC),
         )
-        return (result.text or fallback), wrote
+        reply = result.text or fallback
+        if _asks_for_sheet_url(reply):
+            return fallback, wrote
+        return reply, wrote
     except Exception:
         return fallback, wrote
+
+
+def _asks_for_sheet_url(text: str) -> bool:
+    lowered = text.lower()
+    return any(wall in lowered or wall in text for wall in _SHEET_WALLS)

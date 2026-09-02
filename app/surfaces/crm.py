@@ -259,11 +259,23 @@ class SheetsContactsCrm:
         return tuple(self._tabs)
 
 
+def resolved_spreadsheet_id(settings: object | None = None) -> str:
+    """Env override if set; otherwise the locked Contacts workbook."""
+    if settings is not None:
+        resolver = getattr(settings, "resolved_sheets_spreadsheet_id", None)
+        if callable(resolver):
+            return str(resolver())
+        raw = str(getattr(settings, "sheets_spreadsheet_id", "") or "").strip()
+        if raw:
+            return raw
+    return LOCKED_SPREADSHEET_ID
+
+
 def build_contacts_crm(settings: object | None = None, port: object | None = None) -> ContactsCrm:
-    del settings
+    spreadsheet_id = resolved_spreadsheet_id(settings)
     if port is not None and hasattr(port, "write_locked_contact"):
-        return SheetsContactsCrm(port)
-    return DisabledContactsCrm()
+        return SheetsContactsCrm(port, spreadsheet_id=spreadsheet_id)
+    return DisabledContactsCrm(spreadsheet_id=spreadsheet_id)
 
 
 def log_contact(

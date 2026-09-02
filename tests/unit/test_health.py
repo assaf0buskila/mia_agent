@@ -237,7 +237,7 @@ def test_health_is_alive() -> None:
     assert "MIA_COMPOSIO_API_KEY" in integrations["missing"]
     assert "MIA_GSC_SITE_URL" in integrations["missing"]
     assert "MIA_GA4_PROPERTY_ID" in integrations["missing"]
-    assert "MIA_SHEETS_SPREADSHEET_ID" in integrations["missing"]
+    assert "MIA_SHEETS_SPREADSHEET_ID" not in integrations["missing"]
     assert "MIA_FIRECRAWL_API_KEY" in integrations["missing"]
 
 
@@ -256,15 +256,15 @@ def test_owner_integrations_discovery_off_lists_ids_honestly() -> None:
     assert integrations["composio"] is True
     assert integrations["search_console"] is False
     assert integrations["ga4"] is False
-    assert integrations["sheets_mirror"] is False
-    assert integrations["sheets_read"] is False
-    assert integrations["sheets_update"] is False
-    assert integrations["sheets_append"] is False
+    assert integrations["sheets_mirror"] is True
+    assert integrations["sheets_crm"] is True
+    assert integrations["sheets_read"] is True
+    assert integrations["sheets_update"] is True
+    assert integrations["sheets_append"] is True
     assert integrations["linkedin_profile"] is True
     assert integrations["research_firecrawl"] is False
     assert integrations["missing"] == [
         "MIA_FIRECRAWL_API_KEY",
-        "MIA_SHEETS_SPREADSHEET_ID",
         "MIA_GSC_SITE_URL",
         "MIA_GA4_PROPERTY_ID",
     ]
@@ -284,15 +284,14 @@ def test_owner_integrations_discovery_on_drops_listable_ids() -> None:
     integrations = owner_integrations(settings)
     assert integrations["search_console"] is True
     assert integrations["ga4"] is True
-    assert integrations["sheets_mirror"] is False
-    assert integrations["sheets_read"] is False
-    assert integrations["sheets_update"] is False
-    assert integrations["sheets_append"] is False
+    assert integrations["sheets_mirror"] is True
+    assert integrations["sheets_read"] is True
+    assert integrations["sheets_update"] is True
+    assert integrations["sheets_append"] is True
     assert "MIA_GSC_SITE_URL" not in integrations["missing"]
     assert "MIA_GA4_PROPERTY_ID" not in integrations["missing"]
     assert integrations["missing"] == [
         "MIA_FIRECRAWL_API_KEY",
-        "MIA_SHEETS_SPREADSHEET_ID",
     ]
 
 
@@ -305,11 +304,11 @@ def test_owner_integrations_sheets_allowlist_enables_adr042_operations() -> None
         sheets_allowed_spreadsheet_ids="allowed-one, allowed-two",
     )
     integrations = owner_integrations(settings)
-    assert integrations["sheets_mirror"] is False
+    assert integrations["sheets_mirror"] is True
     assert integrations["sheets_read"] is True
     assert integrations["sheets_update"] is True
     assert integrations["sheets_append"] is True
-    assert "MIA_SHEETS_SPREADSHEET_ID" in integrations["missing"]
+    assert "MIA_SHEETS_SPREADSHEET_ID" not in integrations["missing"]
 
 
 def test_owner_integrations_apify_covers_research_without_firecrawl() -> None:
