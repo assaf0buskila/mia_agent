@@ -415,7 +415,7 @@ def test_owner_system_audit_reads_one_configured_sheet_preview_without_writing()
     try:
         ctx = _ctx(session)
         sheets = FakeSheetsPort()
-        sheets.owner_values[("mia-crm", "A1:J20")] = [["Lead ID", "Stage"]]
+        sheets.owner_values[("mia-crm", "Contacts!A1:N20")] = [["שם", "טלפון"]]
         ctx.sheets = sheets
         ctx.settings = ctx.settings.model_copy(
             update={
@@ -425,7 +425,8 @@ def test_owner_system_audit_reads_one_configured_sheet_preview_without_writing()
         )
         result = execute_tool("owner_system_audit", {}, ctx)
         assert result.ok is True
-        assert "Sheet values: Lead ID | Stage" in result.text
+        assert "Sheet values: שם | טלפון" in result.text
+        assert "Lead ID" not in result.text
         assert sheets.owner_operations == []
     finally:
         session.close()

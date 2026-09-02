@@ -90,7 +90,7 @@ def test_owner_sheets_pasted_google_url_uses_allowlisted_id_and_bounded_preview(
         args={"spreadsheet_id": url, "range": None},
         handlers=handlers,
     ) == {"count": 1, "rows": [["ok"]]}
-    assert requests[0]["arguments"] == {"spreadsheetId": _SHEET, "range": "A1:J20"}
+    assert requests[0]["arguments"] == {"spreadsheetId": _SHEET, "range": "Contacts!A1:N20"}
 
 
 def test_owner_sheets_lists_tabs_only_inside_the_allowlisted_sheet() -> None:
@@ -100,7 +100,10 @@ def test_owner_sheets_lists_tabs_only_inside_the_allowlisted_sheet() -> None:
         requests.append((str(request.url), json.loads(request.content)))
         return httpx.Response(
             200,
-            json={"successful": True, "data": {"sheetNames": ["01 Leads", "10 Mia Activity"]}},
+            json={
+                "successful": True,
+                "data": {"sheetNames": ["01 Leads", "Activity", "Contacts", "10 Mia Activity"]},
+            },
         )
 
     port = _port(httpx.Client(transport=httpx.MockTransport(handler)))
@@ -111,7 +114,7 @@ def test_owner_sheets_lists_tabs_only_inside_the_allowlisted_sheet() -> None:
         principal=_OWNER,
         args={"spreadsheet_id": url},
         handlers=handlers,
-    ) == {"count": 2, "tabs": ["01 Leads", "10 Mia Activity"]}
+    ) == {"count": 2, "tabs": ["Contacts", "Activity"]}
     assert requests[0][0].endswith(COMPOSIO_GET_SHEET_NAMES_TOOL)
     assert requests[0][1] == {
         "user_id": "user-test",

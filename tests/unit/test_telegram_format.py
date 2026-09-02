@@ -199,7 +199,7 @@ def test_ltr_runs_are_bidi_isolated() -> None:
     """A Hebrew line ending in a Latin token reorders visibly without isolation.
 
     FIRST STRONG ISOLATE (U+2068) rather than LRI (U+2066): it takes direction from the
-    first strong character, so it is correct for both `14:30` and `MYstudio` without the
+    first strong character, so it is correct for both `14:30` and `AssafWeb` without the
     caller having to know which it is wrapping.
     """
     wrapped = isolate("14:30")

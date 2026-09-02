@@ -2,13 +2,11 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_calendar_booking_port, get_calendar_port, get_db, get_sheets_port
+from app.api.deps import get_db, get_sheets_port
 from app.api.website import process_website_message, process_website_session
 from app.core.config import get_settings
 from app.core.demo import DEMO_LABEL, SCRIPTED_MESSAGES, demo_mode_active
 from app.db.store import LeadStore
-from app.integrations.calendar import CalendarPort
-from app.integrations.calendar_booking import CalendarBookingPort
 from app.integrations.sheets import SheetsPort
 
 router = APIRouter(prefix="/v1/demo", tags=["demo"])
@@ -38,8 +36,6 @@ def demo_status() -> dict[str, str | bool]:
 @router.post("/scripted", response_model=ScriptedOut)
 def demo_scripted(
     db: Session = Depends(get_db),
-    calendar: CalendarPort = Depends(get_calendar_port),
-    calendar_booking: CalendarBookingPort = Depends(get_calendar_booking_port),
     sheets: SheetsPort = Depends(get_sheets_port),
 ) -> ScriptedOut:
     settings = get_settings()
@@ -54,8 +50,6 @@ def demo_scripted(
             session_id=session.session_id,
             text=text,
             settings=settings,
-            calendar=calendar,
-            calendar_booking=calendar_booking,
             sheets=sheets,
         )
         steps.append(

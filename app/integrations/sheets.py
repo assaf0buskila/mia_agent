@@ -1,8 +1,10 @@
 """Google Sheets port.
 
 Live CRM writes go to the locked Contacts + Activity workbook only.
-``upsert_lead`` is a no-op so ``01 Leads`` is never written. Postgres remains
-recoverable memory. Owner reads/updates of other allowlisted Sheets stay bounded.
+Archive tabs are gone. Leftover mirror upserts (``01 Leads``, ``10 Mia Activity``,
+and the numbered 04–09 tabs) are no-ops so they cannot recreate them.
+Postgres remains recoverable memory. Owner reads/updates of other allowlisted
+Sheets stay bounded.
 
 Production adapter: Composio ``GOOGLESHEETS`` toolkit version ``20260826_00``,
 pins the legacy mirror ``GOOGLESHEETS_UPSERT_ROWS`` plus owner-operational
@@ -77,8 +79,11 @@ from app.surfaces.crm import (
 )
 from app.surfaces.crm import (
     CONTACTS_HEADERS,
+    CONTACTS_READ_COLUMNS,
     CONTACTS_TAB,
     LOCKED_SPREADSHEET_ID,
+    a1_targets_archive_tab,
+    sheet_tab_from_a1,
 )
 
 SHEETS_MIRROR_SCOPE = "sheets_mirror"
@@ -198,6 +203,8 @@ def _crm_header_range(sheet_name: str, headers: list[str]) -> str:
     """Contacts is A1:N1 (14 cols). Owner-read 10-col bound does not apply here."""
     end = chr(ord("A") + len(headers) - 1)
     return f"{sheet_name}!A1:{end}1"
+
+
 _METRIC_PATTERN = re.compile(r"^[0-9]*$")
 _A1_RANGE_PATTERN = re.compile(
     r"^(?:[A-Za-z0-9 _-]{1,80}!)?[A-Z]{1,3}[1-9][0-9]{0,5}(?::[A-Z]{1,3}[1-9][0-9]{0,5})?$"
@@ -231,12 +238,14 @@ def _normalize_sheet_values(raw: object) -> list[list[str]]:
     return values
 
 
-def _normalize_sheet_read_values(raw: object) -> list[list[str]]:
+def _normalize_sheet_read_values(
+    raw: object, *, max_columns: int = MAX_OWNER_SHEET_COLUMNS
+) -> list[list[str]]:
     if not isinstance(raw, list) or len(raw) > MAX_OWNER_SHEET_ROWS:
         raise AdapterSchemaError()
     values: list[list[str]] = []
     for row in raw:
-        if not isinstance(row, list) or len(row) > MAX_OWNER_SHEET_COLUMNS:
+        if not isinstance(row, list) or len(row) > max_columns:
             raise AdapterSchemaError()
         normalized_row: list[str] = []
         for cell in row:
@@ -261,6 +270,10 @@ def validate_owner_sheet_request(
     if values is not None and "://" in target:
         target = ""
     bounded_range = a1_range.strip()
+    if a1_targets_archive_tab(bounded_range):
+        raise ValueError("01 Leads is an archive tab and is banned")
+    if "!" not in bounded_range:
+        bounded_range = f"{CONTACTS_TAB}!{bounded_range}"
     if not target or target not in allowed_spreadsheet_ids:
         raise ValueError("spreadsheet id is not allowlisted")
     max_rows, max_columns = _parse_bounded_a1_range(bounded_range)
@@ -315,7 +328,9 @@ def _parse_bounded_a1_range(a1_range: str) -> tuple[int, int]:
         raise ValueError("range endpoints must be ordered")
     row_span = end_row - start_row + 1
     column_span = end_column - start_column + 1
-    if row_span > MAX_OWNER_SHEET_ROWS or column_span > MAX_OWNER_SHEET_COLUMNS:
+    tab = sheet_tab_from_a1(a1_range)
+    column_limit = CONTACTS_READ_COLUMNS if tab == CONTACTS_TAB else MAX_OWNER_SHEET_COLUMNS
+    if row_span > MAX_OWNER_SHEET_ROWS or column_span > column_limit:
         raise ValueError("range exceeds the 20-row by 10-column limit")
     return row_span, column_span
 
@@ -582,7 +597,9 @@ class ComposioSheetsPort:
         raw_values = (data or {}).get("values")
         if not isinstance(raw_values, list):
             raise AdapterSchemaError()
-        return _normalize_sheet_read_values(raw_values)
+        tab = sheet_tab_from_a1(bounded_range)
+        max_columns = CONTACTS_READ_COLUMNS if tab == CONTACTS_TAB else MAX_OWNER_SHEET_COLUMNS
+        return _normalize_sheet_read_values(raw_values, max_columns=max_columns)
 
     def list_sheet_names(self, *, spreadsheet_id: str) -> list[str]:
         """Discover tabs only inside an already allowlisted spreadsheet.
@@ -849,127 +866,25 @@ class ComposioSheetsPort:
         del row
 
     def upsert_source(self, row: SourceMirrorRow) -> None:
-        self._execute_upsert(
-            sheet_name=SOURCES_SHEET_NAME,
-            key_column=SOURCES_KEY_COLUMN,
-            headers=SOURCES_HEADERS,
-            values=[
-                [
-                    row.lead_id,
-                    row.utm_source,
-                    row.utm_medium,
-                    row.utm_campaign,
-                    row.utm_content,
-                    row.landing_page,
-                    row.referrer,
-                ]
-            ],
-        )
+        del row
 
     def upsert_follow_up(self, row: FollowUpMirrorRow) -> None:
-        self._execute_upsert(
-            sheet_name=FOLLOWUPS_SHEET_NAME,
-            key_column=FOLLOWUPS_KEY_COLUMN,
-            headers=FOLLOWUPS_HEADERS,
-            values=[
-                [
-                    row.lead_id,
-                    row.due_at,
-                    row.channel,
-                    row.status,
-                    row.result,
-                ]
-            ],
-        )
+        del row
 
     def upsert_deal(self, row: DealMirrorRow) -> None:
-        self._execute_upsert(
-            sheet_name=DEALS_SHEET_NAME,
-            key_column=DEALS_KEY_COLUMN,
-            headers=DEALS_HEADERS,
-            values=[
-                [
-                    row.lead_id,
-                    row.stage,
-                    row.source,
-                    row.attribution_confidence,
-                    row.expected_value,
-                    row.closed_value,
-                ]
-            ],
-        )
+        del row
 
     def upsert_meeting(self, row: MeetingMirrorRow) -> None:
-        self._execute_upsert(
-            sheet_name=MEETINGS_SHEET_NAME,
-            key_column=MEETINGS_KEY_COLUMN,
-            headers=MEETINGS_HEADERS,
-            values=[
-                [
-                    row.lead_id,
-                    row.status,
-                    row.source,
-                    row.scheduled_at,
-                    row.calendar_event_id,
-                    row.summary,
-                ]
-            ],
-        )
+        del row
 
     def upsert_activity(self, row: ActivityMirrorRow) -> None:
-        self._execute_upsert(
-            sheet_name=ACTIVITY_SHEET_NAME,
-            key_column=ACTIVITY_KEY_COLUMN,
-            headers=ACTIVITY_HEADERS,
-            values=[
-                [
-                    row.run_id,
-                    row.occurred_on,
-                    row.channel,
-                    row.next_action,
-                    row.model,
-                    str(row.kill_switch).lower(),
-                    row.cost_usd,
-                    row.lead_id or "",
-                ]
-            ],
-        )
+        del row
 
     def upsert_kpi(self, row: KpiMirrorRow) -> None:
-        self._execute_upsert(
-            sheet_name=KPI_SHEET_NAME,
-            key_column=KPI_KEY_COLUMN,
-            headers=KPI_HEADERS,
-            values=[
-                [
-                    row.week_start,
-                    row.leads,
-                    row.meetings_offered,
-                    row.handoffs,
-                    row.messages_in,
-                    row.follow_ups_pending,
-                ]
-            ],
-        )
+        del row
 
     def upsert_content(self, row: ContentMirrorRow) -> None:
-        self._execute_upsert(
-            sheet_name=CONTENT_SHEET_NAME,
-            key_column=CONTENT_KEY_COLUMN,
-            headers=CONTENT_HEADERS,
-            values=[
-                [
-                    row.media_id,
-                    row.media_type,
-                    row.views,
-                    row.reach,
-                    row.likes,
-                    row.comments,
-                    row.saved,
-                    row.lead_signals,
-                ]
-            ],
-        )
+        del row
 
 
 class FakeSheetsPort:

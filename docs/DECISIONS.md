@@ -13,7 +13,7 @@ Bible layout shows both `docs/ADR/` and `docs/DECISIONS.md`. This file is the lo
 | superseded | Replaced by a later ADR |
 | rejected | Assaf chose not to take this path |
 
-Proposed is not accepted. Build may follow a proposed default only when `AGENTS.md` / `BUILD_STATUS.md` say to.
+Proposed is not accepted. Build may follow a proposed default only when `AGENTS.md` and the accepted ADRs say to.
 
 ## Index
 
@@ -1192,7 +1192,8 @@ Telegram talk and Sheet writes work without stacked policy. Visitors cannot
 open WhatsApp or create a CRM row anonymously. Old NBA/qualification tests no
 longer describe the live site path. Owner Telegram uses `crm_search` /
 `crm_upsert` on the locked workbook and never asks Assaf for a Sheet URL.
-Empty `MIA_SHEETS_SPREADSHEET_ID` still resolves to the locked ID.
+Empty `MIA_SHEETS_SPREADSHEET_ID` still resolves to the locked ID. House
+Composio ports bind from `MIA_COMPOSIO_USER_ID`. Live workbook is Contacts + Activity only; archive tabs are gone.
 
 **Alternatives considered**
 Wait for a new schema — rejected; Assaf locked A1:N1. Keep LangGraph wrappers

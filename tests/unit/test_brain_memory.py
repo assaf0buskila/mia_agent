@@ -198,7 +198,7 @@ def test_what_projects_am_i_working_on() -> None:
                 9,
             ),
             (
-                "MYstudio is Assaf's AI content platform with payments",
+                "AssafWeb is Assaf's AI growth studio with payments",
                 MemoryKind.WORKING,
                 MemoryCategory.PROJECT,
                 8,
@@ -210,7 +210,7 @@ def test_what_projects_am_i_working_on() -> None:
         brain, query="what projects am I building right now", embedding_port=emb, weights=WEIGHTS
     )
     top = " ".join(hit.text for hit in hits[:2])
-    assert "Mia" in top or "MYstudio" in top
+    assert "Mia" in top or "AssafWeb" in top
     assert "coffee" not in hits[0].text
 
 
@@ -591,12 +591,12 @@ def test_exact_restatement_is_a_noop_without_calling_the_model() -> None:
 def test_first_ever_fact_is_added_without_a_model_call() -> None:
     operation, target, text = reconcile_candidate(
         LlmClient(api_key="", model=""),
-        candidate=MemoryCandidate(text="Assaf launched MYstudio", importance=8),
+        candidate=MemoryCandidate(text="Assaf launched AssafWeb", importance=8),
         neighbours=[],
     )
     assert operation is MemoryOperation.ADD
     assert target == ""
-    assert text == "Assaf launched MYstudio"
+    assert text == "Assaf launched AssafWeb"
 
 
 def test_gaps_are_opened_once_and_resolved() -> None:
@@ -615,27 +615,27 @@ def test_gaps_are_opened_once_and_resolved() -> None:
 def test_entities_are_linked_and_counted() -> None:
     brain, emb = _brain(), FakeEmbeddingPort()
     brain.save_memory(
-        text="MYstudio handles payments",
+        text="AssafWeb handles payments",
         kind=MemoryKind.SEMANTIC,
         category=MemoryCategory.PROJECT,
         importance=7,
         source=MemorySource.TELEGRAM,
-        entities=("MYstudio",),
-        embedding=emb.embed(["MYstudio handles payments"])[0],
+        entities=("AssafWeb",),
+        embedding=emb.embed(["AssafWeb handles payments"])[0],
         embedding_model=emb.model,
     )
     brain.save_memory(
-        text="MYstudio has user accounts",
+        text="AssafWeb has user accounts",
         kind=MemoryKind.SEMANTIC,
         category=MemoryCategory.PROJECT,
         importance=7,
         source=MemorySource.TELEGRAM,
-        entities=("mystudio",),
-        embedding=emb.embed(["MYstudio has user accounts"])[0],
+        entities=("assafweb",),
+        embedding=emb.embed(["AssafWeb has user accounts"])[0],
         embedding_model=emb.model,
     )
     entities = {entity.name.lower(): entity for entity in brain.list_entities()}
-    assert "mystudio" in entities
-    # Case-insensitive key: 'MYstudio' and 'mystudio' are one entity, not two.
-    assert entities["mystudio"].mention_count == 2
-    assert len(brain.memory_ids_for_entity("MYstudio")) == 2
+    assert "assafweb" in entities
+    # Case-insensitive key: 'AssafWeb' and 'assafweb' are one entity, not two.
+    assert entities["assafweb"].mention_count == 2
+    assert len(brain.memory_ids_for_entity("AssafWeb")) == 2

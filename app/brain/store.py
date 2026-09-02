@@ -67,7 +67,7 @@ def new_entity_id() -> str:
 
 
 def entity_key(name: str) -> str:
-    """Case- and whitespace-insensitive key so 'MYstudio' and 'mystudio' are one entity."""
+    """Case- and whitespace-insensitive key so 'AssafWeb' and 'assafweb' are one entity."""
     return " ".join(name.strip().lower().split())[:MAX_ENTITY_NAME]
 
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from app.brain.embeddings import FakeEmbeddingPort
 from app.brain.store import BrainStore
@@ -484,7 +486,7 @@ def test_sheets_read_without_id_uses_locked_workbook() -> None:
     from app.capabilities.sheets import sheets_read
 
     sheets = FakeSheetsPort()
-    sheets.owner_values[(LOCKED_SPREADSHEET_ID, "A1:J20")] = [["שם", "טלפון"]]
+    sheets.owner_values[(LOCKED_SPREADSHEET_ID, "Contacts!A1:N20")] = [["שם", "טלפון"]]
     allowed = Settings(_env_file=None, sheets_spreadsheet_id="").allowed_sheets_spreadsheet_ids()
     out = sheets_read(
         sheets,
@@ -492,4 +494,168 @@ def test_sheets_read_without_id_uses_locked_workbook() -> None:
         allowed_spreadsheet_ids=allowed,
     )
     assert out["rows"] == [["שם", "טלפון"]]
+
+
+def test_crm_range_is_contacts_and_rejects_01_leads() -> None:
+    from app.capabilities.sheets import sheets_list_tabs, sheets_read
+    from app.core.errors import InvalidArguments
+    from app.surfaces.crm import DEFAULT_CONTACTS_READ_RANGE, prefer_crm_tabs
+
+    assert DEFAULT_CONTACTS_READ_RANGE.startswith("Contacts!")
+    assert "01 Leads" not in DEFAULT_CONTACTS_READ_RANGE
+    sheets = FakeSheetsPort()
+    allowed = Settings(_env_file=None, sheets_spreadsheet_id="").allowed_sheets_spreadsheet_ids()
+    with pytest.raises(InvalidArguments, match="01 Leads"):
+        sheets_read(
+            sheets,
+            {"spreadsheet_id": LOCKED_SPREADSHEET_ID, "range": "01 Leads!A1:F20"},
+            allowed_spreadsheet_ids=allowed,
+        )
+    sheets.sheet_names[LOCKED_SPREADSHEET_ID] = [
+        "01 Leads",
+        "Activity",
+        "Contacts",
+        "10 Mia Activity",
+    ]
+    listed = sheets_list_tabs(
+        sheets,
+        {"spreadsheet_id": ""},
+        allowed_spreadsheet_ids=allowed,
+    )
+    assert listed["tabs"] == ["Contacts", "Activity"]
+    assert "01 Leads" not in listed["tabs"]
+    assert prefer_crm_tabs(["Contacts", "Activity"]) == ["Contacts", "Activity"]
+    assert prefer_crm_tabs(["01 Leads", "KPI", "Contacts"]) == ["Contacts", "KPI"]
+
+
+def test_live_workbook_writers_target_contacts_and_activity_only() -> None:
+    """Live sheet has those two tabs only. Leftover mirrors must not recreate archive tabs."""
+    import httpx
+    from app.integrations.sheets import (
+        CONTACTS_ACTIVITY_TAB,
+        CONTACTS_TAB,
+        CRM_WORKSPACE_TABS,
+        ActivityMirrorRow,
+        ComposioSheetsPort,
+        LeadMirrorRow,
+        SourceMirrorRow,
+    )
+
+    assert [name for name, _headers in CRM_WORKSPACE_TABS] == ["Contacts", "Activity"]
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = request.content.decode()
+        calls.append(f"{request.url} {body}")
+        return httpx.Response(200, json={"successful": True, "data": {}})
+
+    port = ComposioSheetsPort(
+        api_key="cmp-test",
+        user_id="house-entity",
+        spreadsheet_id=LOCKED_SPREADSHEET_ID,
+        allowed_spreadsheet_ids=frozenset({LOCKED_SPREADSHEET_ID}),
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    port.write_locked_contact(
+        ["דנה", "0501234567", "", "", "", "", "", "אתר", "", "", "", "", "", ""],
+        key_column="טלפון",
+    )
+    port.append_locked_activity(["2026-09-02", "מיה", "telegram", "רשמה", "נרשם"])
+    port.upsert_lead(
+        LeadMirrorRow(
+            lead_id="lead_x",
+            channel="website",
+            stage="open",
+            fit="good",
+            pain_level=1,
+            next_action="ask",
+        )
+    )
+    port.upsert_source(
+        SourceMirrorRow(
+            lead_id="lead_x",
+            utm_source="meta",
+            utm_medium="cpc",
+            utm_campaign="",
+            utm_content="",
+            landing_page="",
+            referrer="",
+        )
+    )
+    port.upsert_activity(
+        ActivityMirrorRow(
+            run_id="run_x",
+            occurred_on="2026-09-02",
+            channel="website",
+            next_action="ask",
+            model="canned",
+            kill_switch=False,
+            cost_usd=0,
+            lead_id="lead_x",
+        )
+    )
+    blob = " ".join(calls)
+    assert CONTACTS_TAB in blob
+    assert CONTACTS_ACTIVITY_TAB in blob
+    assert "01 Leads" not in blob
+    assert "10 Mia Activity" not in blob
+    assert "06 Lead Sources" not in blob
+    assert blob.count("GOOGLESHEETS") == 2
+
+
+def test_owner_prompt_forbids_invented_counts() -> None:
+    assert "Never invent metrics, counts, or pipeline numbers" in SYSTEM_PROMPT
+    assert "say you do not know" in SYSTEM_PROMPT
+    assert "Do not say they are disconnected" in SYSTEM_PROMPT
+    assert "Contacts!A1:N20" in SYSTEM_PROMPT
+    assert "No Lead ID" in SYSTEM_PROMPT
+    assert "No unsolicited Gmail" in SYSTEM_PROMPT
+    flags = Settings(_env_file=None)
+    assert flags.gmail_send is False
+    assert flags.auto_reply_instagram is False
+    assert flags.meta_write is False
+    from app.integrations.composio_catalog import NEVER_AUTO_PUBLISH_SLUGS
+
+    assert "INSTAGRAM_CREATE_POST" in NEVER_AUTO_PUBLISH_SLUGS
+    assert "LINKEDIN_CREATE_LINKED_IN_POST" in NEVER_AUTO_PUBLISH_SLUGS
+
+
+def test_public_surfaces_do_not_ship_assaf_private_or_my_studio() -> None:
+    root = Path(__file__).resolve().parents[2]
+    living = [
+        (root / name).read_text(encoding="utf-8").lower()
+        for name in (
+            "README.md",
+            "docs/PRODUCT.md",
+            "docs/ARCHITECTURE.md",
+            "docs/WIRING.md",
+            "docs/BRAIN_ARCHITECTURE.md",
+            "docs/RUNBOOK.md",
+        )
+    ]
+    widget = (root / "app/web/ask_mia.js").read_text(encoding="utf-8").lower()
+    env_example = (root / ".env.example").read_text(encoding="utf-8")
+    ecs_example = (root / "deploy/ecs-task-definition.example.json").read_text(
+        encoding="utf-8"
+    )
+    from app.integrations.transcribe import _ASSAFWEB_STT_KEYWORDS
+
+    for blob in (*living, widget):
+        assert "mystudio" not in blob
+        assert "mystudio.pics" not in blob
+        assert "972523393768" not in blob
+    assert "MYstudio" not in _ASSAFWEB_STT_KEYWORDS
+    assert "972523393768" not in env_example
+    assert "972523393768" not in ecs_example
+    assert "gmail.com" not in widget
+    assert "unread" not in widget
+    assert "calendar" not in widget
+    assert "lead_" not in widget
+    assert "01 leads" not in widget
+    website = (root / "app/api/website.py").read_text(encoding="utf-8")
+    demo = (root / "app/api/demo.py").read_text(encoding="utf-8")
+    assert "get_calendar_port" not in website
+    assert "get_calendar_booking_port" not in website
+    assert "get_calendar_port" not in demo
+    assert "CalendarPort" not in website
 

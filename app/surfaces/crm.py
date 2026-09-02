@@ -10,8 +10,11 @@ from zoneinfo import ZoneInfo
 LOCKED_SPREADSHEET_ID = "1HW8mnc9GFXraS6oG5VIxFcJvZq9gMDJBFRxY2mpVOhI"
 CONTACTS_TAB = "Contacts"
 ACTIVITY_TAB = "Activity"
+CRM_TABS = (CONTACTS_TAB, ACTIVITY_TAB)
 FORBIDDEN_TABS = frozenset({"01 Leads", "10 Mia Activity"})
 LEAD_ID_PREFIX = "lead_"
+DEFAULT_CONTACTS_READ_RANGE = f"{CONTACTS_TAB}!A1:N20"
+CONTACTS_READ_COLUMNS = 14
 
 CONTACTS_HEADERS: tuple[str, ...] = (
     "שם",
@@ -39,6 +42,39 @@ ACTIVITY_HEADERS: tuple[str, ...] = (
 )
 
 _IL_TZ = ZoneInfo("Asia/Jerusalem")
+
+
+def sheet_tab_from_a1(a1_range: str) -> str:
+    """Tab title from an A1 range, or empty when the first visible tab would be used."""
+    prefix, bang, _rest = a1_range.strip().partition("!")
+    if not bang:
+        return ""
+    return prefix.strip().strip("'")
+
+
+def is_archive_tab(name: str) -> bool:
+    """True for leftover archive tabs. Live CRM is Contacts + Activity only."""
+    cleaned = name.strip().strip("'")
+    return cleaned in FORBIDDEN_TABS or cleaned.casefold() in {
+        item.casefold() for item in FORBIDDEN_TABS
+    }
+
+
+def a1_targets_archive_tab(a1_range: str) -> bool:
+    """True when a range names an archive tab, including 01 Leads."""
+    tab = sheet_tab_from_a1(a1_range)
+    if tab:
+        return is_archive_tab(tab)
+    lowered = a1_range.casefold()
+    return any(item.casefold() in lowered for item in FORBIDDEN_TABS)
+
+
+def prefer_crm_tabs(names: list[str]) -> list[str]:
+    """Contacts and Activity first. Archive tabs never appear."""
+    live = [name for name in names if not is_archive_tab(name)]
+    preferred = [name for name in CRM_TABS if name in live]
+    rest = [name for name in live if name not in set(CRM_TABS)]
+    return preferred + rest
 
 
 class CrmDenied(ValueError):

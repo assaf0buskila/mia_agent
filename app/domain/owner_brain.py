@@ -43,20 +43,28 @@ from app.db.store import LeadStore
 from app.domain.memory import ConversationTurn
 from app.domain.owner_tasks import OwnerTaskType
 from app.graph.owner_agent import AgentOutcome, run_owner_agent
-from app.integrations.calendar import CalendarAgendaPort, CalendarPort
-from app.integrations.ga4 import Ga4Port
-from app.integrations.gmail import GmailPort
-from app.integrations.instagram_insights import InstagramInsightsPort
-from app.integrations.linkedin import LinkedInPort
+from app.integrations.calendar import (
+    CalendarAgendaPort,
+    CalendarPort,
+    build_calendar_agenda_port,
+    build_calendar_port,
+)
+from app.integrations.ga4 import Ga4Port, build_ga4_port
+from app.integrations.gmail import GmailPort, build_gmail_port
+from app.integrations.instagram_insights import (
+    InstagramInsightsPort,
+    build_instagram_insights_port,
+)
+from app.integrations.linkedin import LinkedInPort, build_linkedin_port
 from app.integrations.llm_client import (
     GEMINI_CHAT_URL,
     OPENAI_CHAT_URL,
     LlmClient,
     LlmModelChain,
 )
-from app.integrations.research import ResearchPort
-from app.integrations.search_console import SearchConsolePort
-from app.integrations.seo_audit import SeoAuditPort
+from app.integrations.research import ResearchPort, build_research_port
+from app.integrations.search_console import SearchConsolePort, build_search_console_port
+from app.integrations.seo_audit import SeoAuditPort, build_seo_audit_port
 from app.integrations.sheets import SheetsPort, build_sheets_port
 from app.integrations.telegram_format import hebrew_datetime
 from app.tools.registries.owner_tools import ToolContext
@@ -221,6 +229,22 @@ def _weights(settings: Settings) -> MemoryScoreWeights:
     )
 
 
+def bind_owner_house_ports(settings: Settings) -> dict[str, object]:
+    """Same house Composio entity as Cursor. Never invent a second login."""
+    return {
+        "calendar": build_calendar_port(settings),
+        "calendar_agenda": build_calendar_agenda_port(settings),
+        "gmail": build_gmail_port(settings),
+        "linkedin": build_linkedin_port(settings),
+        "search_console": build_search_console_port(settings),
+        "ga4": build_ga4_port(settings),
+        "seo_audit": build_seo_audit_port(settings),
+        "instagram_insights": build_instagram_insights_port(settings),
+        "research": build_research_port(settings),
+        "sheets": build_sheets_port(settings),
+    }
+
+
 def answer_owner(
     *,
     principal: Principal,
@@ -236,8 +260,7 @@ def answer_owner(
     calendar: CalendarPort | None = None,
     calendar_agenda: CalendarAgendaPort | None = None,
     gmail: GmailPort | None = None,
-    # Typed read ports, passed straight through to the tool registry. Any left None makes
-    # its tool answer "not connected" instead of failing the turn.
+    # Typed read ports. None binds the house Composio adapters from settings.
     linkedin: LinkedInPort | None = None,
     search_console: SearchConsolePort | None = None,
     ga4: Ga4Port | None = None,
@@ -281,22 +304,31 @@ def answer_owner(
             weights=_weights(settings),
             now=moment,
         )
+    house = bind_owner_house_ports(settings)
     ctx = ToolContext(
         principal=principal,
         store=store,
         brain=brain,
         settings=settings,
         embedding_port=port,
-        calendar=calendar,
-        calendar_agenda=calendar_agenda,
-        gmail=gmail,
-        linkedin=linkedin,
-        search_console=search_console,
-        ga4=ga4,
-        seo_audit=seo_audit,
-        instagram_insights=instagram_insights,
-        research=research,
-        sheets=sheets if sheets is not None else build_sheets_port(settings),
+        calendar=calendar if calendar is not None else house["calendar"],
+        calendar_agenda=(
+            calendar_agenda if calendar_agenda is not None else house["calendar_agenda"]
+        ),
+        gmail=gmail if gmail is not None else house["gmail"],
+        linkedin=linkedin if linkedin is not None else house["linkedin"],
+        search_console=(
+            search_console if search_console is not None else house["search_console"]
+        ),
+        ga4=ga4 if ga4 is not None else house["ga4"],
+        seo_audit=seo_audit if seo_audit is not None else house["seo_audit"],
+        instagram_insights=(
+            instagram_insights
+            if instagram_insights is not None
+            else house["instagram_insights"]
+        ),
+        research=research if research is not None else house["research"],
+        sheets=sheets if sheets is not None else house["sheets"],
         kill_switch=kill_switch,
         demo_active=demo_active,
         source_ref=source_ref,

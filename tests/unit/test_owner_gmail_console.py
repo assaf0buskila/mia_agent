@@ -335,7 +335,7 @@ def test_owner_agent_prompt_plans_mail_paraphrases() -> None:
     """
     from app.graph.owner_agent import PROMPT_VERSION, SYSTEM_PROMPT
 
-    assert PROMPT_VERSION == "owner_agent_v6"
+    assert PROMPT_VERSION == "owner_agent_v7"
     assert "gmail_inbox" in SYSTEM_PROMPT
     assert "Hebrew" in SYSTEM_PROMPT and "English" in SYSTEM_PROMPT
     assert "seo_snapshot" in SYSTEM_PROMPT

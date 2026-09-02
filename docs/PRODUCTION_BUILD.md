@@ -4,9 +4,11 @@
 **Status:** First AWS live (ADR-014). Live host `https://mia.assafweb.com` in **eu-north-1** (ADR-019; Assaf ADOPT 2026-08-22). Not a grant of gated writes. Not AgentCore. Not Lambda for LangGraph.  
 **Related:** `.env.example`, ADR-015 in `docs/DECISIONS.md`, `docs/RUNBOOK.md`, `docs/ARCHITECTURE.md`, `deploy/`
 
+Live product: Contacts + Activity CRM, Dude Telegram, glass identify-then-sell `widget.js`. No 01 Leads, no invented metrics, no My Studio. `MIA_GMAIL_SEND` stays false unless Assaf asked. Example files never hold a real phone or token.
+
 Package manager is **uv**. Python `>=3.12`. PowerShell: `;` not `&&`. Local laptop uses `.env`. Production keys live in the **Secrets Manager box**, not in a file on the host.
 
-Cloudflare Tunnel is **test only**. Do not deploy Mia’s sales graph to Vercel, Cloudflare Workers, or Lambda.
+Cloudflare Tunnel is **test only**. Do not deploy Mia to Vercel, Cloudflare Workers, or Lambda.
 
 ---
 
@@ -23,7 +25,7 @@ Cloudflare Tunnel is **test only**. Do not deploy Mia’s sales graph to Vercel,
 | Prospect send | `MIA_AUTOMATION_MODE=auto_approved` (ADR-022). Unknown WhatsApp still silent. Instagram send stays off. |
 | Calendar writes | `MIA_CALENDAR_WRITE=true` (Assaf ADOPT 2026-08-22). Exact create/move proposals execute only after Assaf's one-tap Telegram approval. |
 | Gmail / Meta send | Gmail draft send is wired but stays approval-only and additionally requires `MIA_GMAIL_SEND=true`; Meta writes remain off. R4/R5 are not env knobs. Follow-up persist/due-scan is alive; no auto-send flag. |
-| Kill switch | `MIA_KILL_SWITCH=false` for live; `true` + new deployment is the emergency stop |
+| Kill switch | `MIA_KILL_SWITCH=false` for live; `true` + restart denies high-risk writes and does not 503 owner talk or site chat |
 | Lambda / AgentCore / SQS / WAF | Specified later. Not first live |
 
 First live is this FastAPI process on Fargate + RDS with writes gated. Cursor Composio plugin Calendar Active does not prove Mia Calendar — `/health` `composio` must be true and `MIA_COMPOSIO_USER_ID` must be the Composio debug `@user_id`.
@@ -373,10 +375,10 @@ Full steps: `docs/RUNBOOK.md`.
 
 | Need | Action |
 | --- | --- |
-| Emergency stop | `MIA_KILL_SWITCH=true` + restart; `/health` `"killed"` (`/health/live` stays `ok` if the process is up) |
+| Emergency stop | `MIA_KILL_SWITCH=true` + restart; high-risk writes denied; `/health` `"killed"`; owner Telegram and site chat stay up (`/health/live` stays `ok`) |
 | Stop prospect DMs only | keep `MIA_AUTOMATION_MODE=shadow` + restart |
 | Stop calendar provider writes | `MIA_CALENDAR_WRITE=false` + restart |
-| Human takeover | Owner WhatsApp phrase **and** `lead_<12 hex>` |
+| Human takeover | Assaf on Telegram or WhatsApp. No `lead_` ids. |
 | Stale webhooks | `uv run mia-reconcile --inspect` (no replay) |
 
 ---

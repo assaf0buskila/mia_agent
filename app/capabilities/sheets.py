@@ -6,7 +6,7 @@ from typing import Any
 
 from app.core.errors import InvalidArguments
 from app.integrations.sheets import SheetsPort, validate_owner_sheet_request
-from app.surfaces.crm import LOCKED_SPREADSHEET_ID
+from app.surfaces.crm import DEFAULT_CONTACTS_READ_RANGE, LOCKED_SPREADSHEET_ID, prefer_crm_tabs
 
 
 def _args(
@@ -15,9 +15,7 @@ def _args(
     spreadsheet_id = str(args.get("spreadsheet_id") or "").strip() or LOCKED_SPREADSHEET_ID
     a1_range = str(args.get("range") or "").strip()
     if not a1_range and not include_values:
-        # A1:J20 is a deliberately small preview of the first visible tab. This makes a
-        # pasted allowlisted Google Sheets link useful without forcing Assaf to type A1.
-        a1_range = "A1:J20"
+        a1_range = DEFAULT_CONTACTS_READ_RANGE
     if not a1_range:
         raise InvalidArguments("range is required for Sheets writes")
     values = args.get("values") if include_values else []
@@ -57,7 +55,7 @@ def sheets_list_tabs(
         )
     except ValueError as exc:
         raise InvalidArguments(str(exc)) from None
-    names = port.list_sheet_names(spreadsheet_id=spreadsheet_id)
+    names = prefer_crm_tabs(port.list_sheet_names(spreadsheet_id=spreadsheet_id))
     return {"count": len(names), "tabs": names}
 
 

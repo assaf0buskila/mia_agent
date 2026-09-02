@@ -144,6 +144,17 @@ def test_whatsapp_green_and_assafweb_brand_tokens() -> None:
     assert "#d9eeff" in source
     assert "#ask-mia-send{background:#2f5f93;color:#fff}" in source
     assert "linear-gradient(135deg,#2f5f93,#2563eb)" in source
+    assert "backdrop-filter:saturate(1.25) blur(18px)" in source
+    assert "width:min(24rem,calc(100vw - 1.5rem))" in source
+    assert "border-radius:1.35rem" in source
+    assert "ask-mia-live" in source
+    assert "ask-mia-glow" in source
+    assert "ask-mia-rise" in source
+    assert "isolation:isolate" in source
+    assert "inset 0 1px 0 #ffffff59" in source
+    assert "linear-gradient(135deg,#061b35,#2f5f93)" in source
+    assert "ask-mia-close" in source
+    assert "סגירה" in source
     assert "#ask-mia-launcher:focus-visible{outline:2px solid #2563eb" in source
 
 
@@ -223,6 +234,7 @@ def test_accessibility_invariants() -> None:
     close_fn = _function_body(source, "closePanel")
     assert "aria-expanded', 'true'" in open_fn
     assert "aria-expanded', 'false'" in close_fn
+    assert "closeBtn.addEventListener('click', closePanel)" in source
 
 
 def test_svg_mark_with_letter_fallback() -> None:

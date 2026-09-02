@@ -138,8 +138,8 @@
 
   var style = document.createElement('style');
   style.textContent =
-    '#ask-mia-root{position:fixed;inset-inline-end:1.1rem;bottom:max(1.1rem,env(safe-area-inset-bottom,0px));z-index:9999;display:flex;flex-direction:column-reverse;align-items:flex-end;gap:.55rem;font:16px/1.5 Assistant,system-ui,sans-serif;color:#061b35;color-scheme:light}' +
-    '#ask-mia-launcher{display:inline-flex;align-items:center;justify-content:center;gap:.45rem;border:1px solid #ffffff59;border-radius:999px;padding-block:0;padding-inline-start:.4rem;padding-inline-end:1.05rem;height:56px;min-height:56px;min-width:56px;background:linear-gradient(135deg,#2f5f93,#2563eb);color:#fff;cursor:pointer;box-shadow:0 18px 44px #2563eb59;transition:transform .16s ease,box-shadow .16s ease;font:inherit;font-weight:800;line-height:1}' +
+    '#ask-mia-root{position:fixed;inset-inline-end:1.1rem;bottom:max(1.1rem,env(safe-area-inset-bottom,0px));z-index:9999;display:flex;flex-direction:column-reverse;align-items:flex-end;gap:.65rem;font:16px/1.55 Assistant,system-ui,sans-serif;color:#061b35;color-scheme:light;-webkit-font-smoothing:antialiased}' +
+    '#ask-mia-launcher{display:inline-flex;align-items:center;justify-content:center;gap:.45rem;border:1px solid #ffffff59;border-radius:999px;padding-block:0;padding-inline-start:.4rem;padding-inline-end:1.05rem;height:56px;min-height:56px;min-width:56px;background:linear-gradient(135deg,#2f5f93,#2563eb);color:#fff;cursor:pointer;box-shadow:0 18px 44px #2563eb59;transition:transform .16s ease,box-shadow .16s ease;font:inherit;font-weight:800;line-height:1;animation:ask-mia-glow 2.8s ease-in-out infinite}' +
     '#ask-mia-launcher:hover{transform:translateY(-2px)}' +
     '#ask-mia-launcher:focus-visible{outline:2px solid #2563eb;outline-offset:2px}' +
     '#ask-mia-panel[hidden],#ask-mia-wa[hidden]{display:none!important}' +
@@ -147,28 +147,36 @@
     '.ask-mia-launch-mark{width:2rem;height:2rem;border-radius:999px;background:#d9eeff;color:#061b35;display:inline-flex;align-items:center;justify-content:center;font-weight:700;font-size:1rem;flex:0 0 auto}' +
     '.ask-mia-launch-mark svg,.ask-mia-avatar svg,.ask-mia-bubble-avatar svg{width:1.2rem;height:1.2rem;display:block}' +
     '#ask-mia-launch-label{white-space:nowrap;font-size:.92rem;font-weight:800;color:#fff}' +
-    '#ask-mia-panel{width:min(22rem,calc(100vw - 2rem));background:linear-gradient(180deg,#F8FBFF,#eef7ff);color:#061b35;border:1px solid #2f5f9321;border-radius:1rem;box-shadow:0 16px 40px rgba(6,27,53,.22);display:flex;flex-direction:column;overflow:hidden}' +
-    '#ask-mia-header{display:flex;align-items:center;gap:.65rem;padding:.7rem .85rem;background:#061b35;color:#fff;border-bottom:3px solid #2563eb}' +
-    '.ask-mia-avatar{width:2.15rem;height:2.15rem;border-radius:999px;background:#d9eeff;color:#061b35;display:inline-flex;align-items:center;justify-content:center;font-weight:700;flex:0 0 auto}' +
-    '.ask-mia-name{display:block;color:#fff;font-weight:700;font-size:.95rem;line-height:1.2}' +
-    '.ask-mia-sub{display:block;color:#d9eeff;font-size:.72rem;font-weight:500}' +
-    '#ask-mia-transcript{max-height:14rem;overflow:auto;padding:.75rem;display:flex;flex-direction:column;gap:.75rem}' +
+    '#ask-mia-panel{width:min(24rem,calc(100vw - 1.5rem));background:linear-gradient(180deg,#F8FBFF,#eef7ff);color:#061b35;border:1px solid #ffffff59;border-radius:1.35rem;box-shadow:0 28px 70px rgba(6,27,53,.28),0 0 0 1px #2f5f9321,inset 0 1px 0 #ffffff59;display:flex;flex-direction:column;overflow:hidden;isolation:isolate;backdrop-filter:saturate(1.25) blur(18px);-webkit-backdrop-filter:saturate(1.25) blur(18px)}' +
+    '#ask-mia-panel:not([hidden]){animation:ask-mia-rise .28s ease}' +
+    '#ask-mia-header{display:flex;align-items:center;gap:.7rem;padding:.9rem 1rem;background:linear-gradient(135deg,#061b35,#2f5f93);color:#fff;border-bottom:3px solid #2563eb}' +
+    '#ask-mia-close{margin-inline-start:auto;border:0;background:#2f5f93;color:#fff;border-radius:.65rem;padding:.35rem .7rem;min-height:44px;cursor:pointer;font:inherit;font-size:.78rem;font-weight:700}' +
+    '#ask-mia-close:focus-visible{outline:2px solid #2563eb;outline-offset:2px}' +
+    '.ask-mia-avatar{width:2.25rem;height:2.25rem;border-radius:999px;background:#d9eeff;color:#061b35;display:inline-flex;align-items:center;justify-content:center;font-weight:700;flex:0 0 auto;box-shadow:0 0 0 3px #2563eb59}' +
+    '.ask-mia-title{display:flex;align-items:center;gap:.4rem}' +
+    '.ask-mia-name{display:block;color:#fff;font-weight:700;font-size:1rem;line-height:1.2;letter-spacing:.01em}' +
+    '.ask-mia-live{width:.42rem;height:.42rem;border-radius:999px;background:#2563eb;box-shadow:0 0 0 .22rem #2563eb59;animation:ask-mia-pulse 1.8s ease-in-out infinite}' +
+    '.ask-mia-sub{display:block;color:#d9eeff;font-size:.74rem;font-weight:500}' +
+    '#ask-mia-transcript{max-height:17.5rem;overflow:auto;padding:1rem;display:flex;flex-direction:column;gap:.85rem}' +
     '.ask-mia-row{display:flex;align-items:flex-end;gap:.5rem;max-width:100%}' +
     '.ask-mia-row-mia{align-self:flex-start}' +
     '.ask-mia-row-user{align-self:flex-end;flex-direction:row-reverse}' +
     '.ask-mia-bubble-avatar{width:2rem;height:2rem;border-radius:999px;flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;font-weight:700;font-size:.72rem}' +
     '.ask-mia-row-mia .ask-mia-bubble-avatar{background:#d9eeff;color:#061b35}' +
     '.ask-mia-row-user .ask-mia-bubble-avatar{background:#2f5f93;color:#fff}' +
-    '.ask-mia-msg{padding:.55rem .7rem;border-radius:.65rem;white-space:pre-wrap;word-break:break-word}' +
-    '.ask-mia-mia{background:#eef7ff;color:#061b35;max-width:min(90%,16rem);border:1px solid #2f5f9321;border-end-start-radius:.2rem}' +
-    '.ask-mia-user{background:#2f5f93;color:#fff;max-width:min(90%,16rem);border-end-end-radius:.2rem}' +
+    '.ask-mia-msg{padding:.65rem .8rem;border-radius:.85rem;white-space:pre-wrap;word-break:break-word}' +
+    '.ask-mia-mia{background:#eef7ff;color:#061b35;max-width:min(90%,16rem);border:1px solid #2f5f9321;border-end-start-radius:.2rem;box-shadow:0 8px 20px rgba(6,27,53,.06)}' +
+    '.ask-mia-user{background:#2f5f93;color:#fff;max-width:min(90%,16rem);border-end-end-radius:.2rem;box-shadow:0 8px 20px rgba(6,27,53,.12)}' +
     '.ask-mia-dots{display:inline-flex;align-items:center;gap:.2rem;height:1.1rem}' +
     '.ask-mia-dots span{width:.35rem;height:.35rem;border-radius:999px;background:#061b35;display:block;animation:ask-mia-bounce .6s ease-in-out infinite}' +
     '.ask-mia-dots span:nth-child(2){animation-delay:.1s}' +
     '.ask-mia-dots span:nth-child(3){animation-delay:.2s}' +
     '@keyframes ask-mia-bounce{0%,100%{transform:translateY(0)}50%{transform:translateY(-4px)}}' +
-    '#ask-mia-compose{display:flex;flex-direction:column;gap:.35rem;padding:.75rem;border-top:1px solid #2f5f9321;background:#F8FBFF}' +
-    '#ask-mia-input{resize:vertical;min-height:2.5rem;max-height:8rem;padding:.55rem .65rem;border:1px solid #7ba7d3;border-radius:.65rem;font:inherit;font-size:16px;color:#061b35;background:#fff}' +
+    '@keyframes ask-mia-pulse{0%,100%{opacity:1}50%{opacity:.45}}' +
+    '@keyframes ask-mia-glow{0%,100%{box-shadow:0 18px 44px #2563eb59}50%{box-shadow:0 22px 56px #2563eb59}}' +
+    '@keyframes ask-mia-rise{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}' +
+    '#ask-mia-compose{display:flex;flex-direction:column;gap:.45rem;padding:1rem;border-top:1px solid #2f5f9321;background:#F8FBFF}' +
+    '#ask-mia-input{resize:vertical;min-height:2.75rem;max-height:8rem;padding:.65rem .75rem;border:1px solid #7ba7d3;border-radius:.85rem;font:inherit;font-size:16px;color:#061b35;background:#fff}' +
     '#ask-mia-input:focus{outline:2px solid #2563eb;outline-offset:1px;border-color:#2563eb}' +
     '#ask-mia-hint{margin:0;font-size:.75rem;color:#2f5f93}' +
     '#ask-mia-actions{display:flex;gap:.35rem;flex-wrap:wrap}' +
@@ -188,7 +196,7 @@
     '.ask-mia-handoff-cta:focus-visible{outline:2px solid #2563eb;outline-offset:2px}' +
     '#ask-mia-wa.offer{box-shadow:0 0 0 2px #2563eb}' +
     '#ask-mia-status{min-height:1rem;padding:0 .75rem .5rem;color:#b00;font-size:.85rem}' +
-    '@media (prefers-reduced-motion:reduce){#ask-mia-launcher,#ask-mia-send,#ask-mia-mic,#ask-mia-wa,#ask-mia-input{transition:none}#ask-mia-launcher:hover{transform:none}.ask-mia-dots span{animation:none}}';
+    '@media (prefers-reduced-motion:reduce){#ask-mia-launcher,#ask-mia-send,#ask-mia-mic,#ask-mia-wa,#ask-mia-input,#ask-mia-panel:not([hidden]){transition:none;animation:none}#ask-mia-launcher:hover{transform:none}.ask-mia-dots span,.ask-mia-live{animation:none}}';
 
   var root = document.createElement('div');
   root.id = 'ask-mia-root';
@@ -219,16 +227,29 @@
   avatar.className = 'ask-mia-avatar';
   paintBrandMark(avatar);
   var brand = document.createElement('div');
+  var titleRow = document.createElement('span');
+  titleRow.className = 'ask-mia-title';
   var nameEl = document.createElement('strong');
   nameEl.className = 'ask-mia-name';
   nameEl.textContent = 'מיה';
+  var live = document.createElement('span');
+  live.className = 'ask-mia-live';
+  live.setAttribute('aria-hidden', 'true');
+  titleRow.appendChild(nameEl);
+  titleRow.appendChild(live);
   var subEl = document.createElement('span');
   subEl.className = 'ask-mia-sub';
-  subEl.textContent = 'AssafWeb';
-  brand.appendChild(nameEl);
+  subEl.textContent = 'שאלו. מיה תבין.';
+  brand.appendChild(titleRow);
   brand.appendChild(subEl);
+  var closeBtn = document.createElement('button');
+  closeBtn.id = 'ask-mia-close';
+  closeBtn.type = 'button';
+  closeBtn.setAttribute('aria-label', 'סגירה');
+  closeBtn.textContent = 'סגירה';
   header.appendChild(avatar);
   header.appendChild(brand);
+  header.appendChild(closeBtn);
 
   var transcript = document.createElement('div');
   transcript.id = 'ask-mia-transcript';
@@ -1039,6 +1060,7 @@
   }
 
   launcher.addEventListener('click', togglePanel);
+  closeBtn.addEventListener('click', closePanel);
   sendBtn.addEventListener('click', sendMessage);
   micBtn.addEventListener('click', toggleRecord);
   waBtn.addEventListener('click', handoff);

@@ -20,7 +20,6 @@ _ASSAFWEB_STT_PROMPT = (
 _ASSAFWEB_STT_KEYWORDS: tuple[str, ...] = (
     "AssafWeb",
     "Mia",
-    "MYstudio",
     "עובד דיגיטלי",
     "אוטומציה",
     "ליד",

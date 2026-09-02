@@ -40,7 +40,7 @@
         { "name": "MIA_SALES_GEMINI_MODEL", "value": "gemini-3.6-flash" },
         { "name": "MIA_OPENAI_TRANSCRIBE_MODEL", "value": "gpt-transcribe" },
         { "name": "MIA_WHATSAPP_GRAPH_VERSION", "value": "v25.0" },
-        { "name": "MIA_WHATSAPP_CLICK_TO_CHAT", "value": "972523393768" },
+        { "name": "MIA_WHATSAPP_CLICK_TO_CHAT", "value": "" },
         { "name": "MIA_INSTAGRAM_SENDER", "value": "direct" },
         { "name": "MIA_WHATSAPP_SENDER", "value": "composio" },
         { "name": "MIA_WHATSAPP_REQUIRE_BUSINESS_SCOPE", "value": "true" },
