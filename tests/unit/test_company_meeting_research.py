@@ -591,6 +591,8 @@ def test_website_path_does_not_run_meeting_research(
                 "ask_contact",
                 "handoff",
                 "no_price",
+                "answer",
+                "confirm_contact",
             }
     db = get_session_factory()()
     try:

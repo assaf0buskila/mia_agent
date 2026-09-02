@@ -77,7 +77,7 @@ def test_website_identify_then_sell_does_not_create_follow_ups() -> None:
             json={"text": "We run a clinic and miss calls all day."},
         )
         assert clinic.status_code == 200
-        assert clinic.json()["next_action"] == "ask_contact"
+        assert clinic.json()["next_action"] == "answer"
         meeting = client.post(
             f"/v1/website/sessions/{session_id}/messages",
             json={"text": "let's book a meeting", "phone": "0501234567"},

@@ -82,7 +82,7 @@ def test_website_first_message_persists_ai_run() -> None:
         )
         assert response.status_code == 200
         assert response.json()["lead_id"] == ""
-        assert response.json()["next_action"] in {"ask_need", "ask_contact"}
+        assert response.json()["next_action"] in {"ask_need", "ask_contact", "answer"}
     db = get_session_factory()()
     try:
         assert db.scalars(select(AiRunRow).where(AiRunRow.lead_id == session_id)).all() == []
@@ -103,7 +103,7 @@ def test_website_second_message_does_not_persist_ai_run() -> None:
             json={"text": "We run a clinic and miss calls all day."},
         )
         assert first.json()["lead_id"] == ""
-        assert second.json()["next_action"] == "ask_contact"
+        assert second.json()["next_action"] == "answer"
     db = get_session_factory()()
     try:
         assert db.scalars(select(AiRunRow).where(AiRunRow.lead_id == session_id)).all() == []

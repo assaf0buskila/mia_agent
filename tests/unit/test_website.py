@@ -167,7 +167,7 @@ def test_website_api_session_and_message() -> None:
         assert reply.status_code == 200
         body = reply.json()
         assert body["lead_id"] == ""
-        assert body["next_action"] in {"ask_need", "ask_contact"}
+        assert body["next_action"] in {"ask_need", "ask_contact", "answer"}
         assert body["whatsapp_url"] is None
         empty_end = client.post(f"/v1/website/sessions/{session_id}/end")
         assert empty_end.status_code == 200
@@ -227,7 +227,7 @@ def test_website_inquiries_answer_moves_past_opening() -> None:
         assert follow.status_code == 200
         body = follow.json()
         assert body["lead_id"] == ""
-        assert body["next_action"] in {"ask_need", "ask_contact", "handoff"}
+        assert body["next_action"] in {"ask_need", "ask_contact", "handoff", "answer"}
         assert "lead_" not in body["message"]
 
 
@@ -620,7 +620,7 @@ def test_website_identify_then_sell_asks_for_contact() -> None:
         )
         assert msg1.status_code == 200
         assert msg1.json()["lead_id"] == ""
-        assert msg1.json()["next_action"] == "ask_contact"
+        assert msg1.json()["next_action"] == "answer"
         assert msg1.json()["whatsapp_url"] is None
         assert "מחיר" not in msg1.json()["message"]
 
@@ -640,7 +640,7 @@ def test_exact_direct_assaf_then_yalla_sequence_still_needs_contact(monkeypatch)
     assert direct.status_code == 200
     assert direct.json()["whatsapp_url"] is None
     assert confirm.status_code == 200
-    assert confirm.json()["next_action"] == "handoff"
+    assert confirm.json()["next_action"] == "confirm_contact"
     assert confirm.json()["whatsapp_url"] == click_to_chat_url(CLICK_CHAT)
 
 
@@ -651,14 +651,14 @@ def test_website_conversation_asks_contact_before_whatsapp() -> None:
             f"/v1/website/sessions/{session_id}/messages",
             json={"text": "היי"},
         )
-        assert hi.json()["next_action"] in {"ask_need", "ask_contact"}
+        assert hi.json()["next_action"] in {"ask_need", "ask_contact", "answer"}
         assert hi.json()["whatsapp_url"] is None
         shoes = client.post(
             f"/v1/website/sessions/{session_id}/messages",
             json={"text": "אני מוכר נעליים יש לי עיסוק רק במלאי"},
         )
         assert shoes.status_code == 200
-        assert shoes.json()["next_action"] == "ask_contact"
+        assert shoes.json()["next_action"] == "answer"
         assert shoes.json()["whatsapp_url"] is None
 
 
@@ -687,5 +687,5 @@ def test_offer_whatsapp_reply_includes_click_to_chat_url_after_contact(monkeypat
             json={"text": "צריכים אתר", "phone": "0501234567", "name": "דנה"},
         )
         assert more.status_code == 200
-        assert more.json()["next_action"] == "handoff"
+        assert more.json()["next_action"] == "confirm_contact"
         assert more.json()["whatsapp_url"] == expected

@@ -48,7 +48,7 @@ def test_website_not_interested_does_not_kill_or_stop() -> None:
             json={"text": "not interested"},
         )
         assert stop.status_code == 200
-        assert stop.json()["next_action"] == "ask_contact"
+        assert stop.json()["next_action"] == "answer"
         assert stop.json()["lead_id"] == ""
         again = client.post(
             f"/v1/website/sessions/{session_id}/messages",
@@ -84,13 +84,15 @@ def test_website_identify_then_sell_never_sets_conversation_killed() -> None:
                 "ask_contact",
                 "handoff",
                 "no_price",
+                "answer",
+                "confirm_contact",
             }
             assert response.json()["lead_id"] == ""
         student = client.post(
             f"/v1/website/sessions/{session_id}/messages",
             json={"text": "I'm a student with a school project"},
         )
-        assert student.json()["next_action"] == "ask_contact"
+        assert student.json()["next_action"] == "answer"
     db = get_session_factory()()
     try:
         store = LeadStore(db)

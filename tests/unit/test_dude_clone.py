@@ -189,7 +189,7 @@ def test_site_refuses_crm_and_whatsapp_without_phone_or_email() -> None:
     )
     assert turn.crm_wrote is False
     assert turn.whatsapp_url is None
-    assert turn.next_action == "ask_contact"
+    assert turn.next_action == "answer"
     assert crm.written_tabs() == ()
 
 
@@ -218,7 +218,7 @@ def test_site_writes_crm_after_phone_or_email_and_offers_whatsapp() -> None:
     assert turn.crm_wrote is True
     assert turn.whatsapp_url is not None
     assert turn.whatsapp_url.startswith("https://wa.me/972501111111")
-    assert turn.next_action == "handoff"
+    assert turn.next_action == "confirm_contact"
     assert "01 Leads" not in crm.written_tabs()
     blob = " ".join(" ".join(cells) for cells in crm.cells_written)
     assert "lead_" not in blob.lower()
@@ -265,7 +265,7 @@ def test_website_http_session_has_empty_lead_id_and_no_leads_write() -> None:
             assert message["lead_id"] == ""
             assert not str(message["lead_id"]).startswith("lead_")
             assert message["whatsapp_url"] is None
-            assert message["next_action"] in {"ask_need", "ask_contact"}
+            assert message["next_action"] in {"ask_need", "ask_contact", "answer"}
             config = client.get("/v1/website/config").json()
             assert config["opening"] == site_opening()
             assert config["whatsapp_url"] is None

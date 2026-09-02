@@ -1457,10 +1457,22 @@ def test_website_e2e_reschedule_then_cancellation_request(monkeypatch) -> None:
                     json={"text": "לבטל את הפגישה"},
                 )
             assert offer.status_code == 200
-            assert offer.json()["next_action"] in {"ask_need", "ask_contact", "handoff"}
+            assert offer.json()["next_action"] in {
+                "ask_need",
+                "ask_contact",
+                "handoff",
+                "answer",
+                "confirm_contact",
+            }
             assert selected.status_code == 200
             assert cancelled.status_code == 200
-            assert cancelled.json()["next_action"] in {"ask_need", "ask_contact", "handoff"}
+            assert cancelled.json()["next_action"] in {
+                "ask_need",
+                "ask_contact",
+                "handoff",
+                "answer",
+                "confirm_contact",
+            }
         finally:
             app.dependency_overrides.pop(get_calendar_port, None)
             app.dependency_overrides.pop(get_calendar_booking_port, None)
