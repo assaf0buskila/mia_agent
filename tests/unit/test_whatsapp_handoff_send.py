@@ -47,11 +47,17 @@ def _handoff_env(monkeypatch) -> None:
 def _issue_token() -> str:
     with TestClient(app) as client:
         session_id = client.post("/v1/website/sessions").json()["session_id"]
-        client.post(
+        identify = client.post(
             f"/v1/website/sessions/{session_id}/messages",
-            json={"text": "אני מוכר נעליים ומזין הכל ידנית לשיטס"},
+            json={
+                "text": "אני מוכר נעליים ומזין הכל ידנית לשיטס",
+                "phone": "0501234567",
+            },
         )
-        return client.post(f"/v1/website/sessions/{session_id}/handoff").json()["token"]
+        assert identify.status_code == 200
+        handoff = client.post(f"/v1/website/sessions/{session_id}/handoff")
+        assert handoff.status_code == 200
+        return handoff.json()["token"]
 
 
 def test_handoff_send_is_off_by_default() -> None:

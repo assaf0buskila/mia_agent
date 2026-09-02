@@ -78,27 +78,7 @@ def _assert_reserved_identity_empty(row: ApprovalRow) -> None:
     assert row.actor_id == ""
 
 
-def _run_clinic_funnel_to_meeting(client: TestClient, session_id: str) -> str:
-    messages = [
-        "We run a clinic and miss calls all day.",
-        "ok that's right",
-        "I decide this quarter",
-        "let's book a meeting",
-    ]
-    lead_id = ""
-    for text in messages:
-        response = client.post(
-            f"/v1/website/sessions/{session_id}/messages",
-            json={"text": text},
-        )
-        assert response.status_code == 200
-        body = response.json()
-        lead_id = body["lead_id"]
-    assert body["next_action"] == "offer_meeting"
-    return lead_id
-
-
-def test_website_proposal_handoff_creates_pending_approval() -> None:
+def test_website_proposal_without_phone_asks_contact_and_creates_no_approval() -> None:
     init_db()
     with TestClient(app) as client:
         session_id = client.post("/v1/website/sessions").json()["session_id"]
@@ -108,50 +88,11 @@ def test_website_proposal_handoff_creates_pending_approval() -> None:
         )
         assert response.status_code == 200
         body = response.json()
-        assert body["next_action"] == "handoff"
-        lead_id = body["lead_id"]
+        assert body["next_action"] == "ask_contact"
+        assert body["lead_id"] == ""
     db = get_session_factory()()
     try:
-        row = db.scalars(
-            select(ApprovalRow).where(ApprovalRow.lead_id == lead_id)
-        ).one()
-        assert row.action == ACTION_PROPOSAL_HANDOFF
-        assert row.risk == RISK_R3
-        assert row.decision == DECISION_PENDING
-        assert row.approver == ""
-        assert row.channel == Channel.WEBSITE.value
-        assert row.resource_type == RESOURCE_LEAD
-        assert row.resource_id == lead_id
-        assert row.expires_at
-        assert not is_approval_expired(row, now=datetime.now(UTC))
-        assert _HEX64.match(row.payload_hash)
-        expected_hash = payload_hash(
-            action=ACTION_PROPOSAL_HANDOFF,
-            risk=RISK_R3,
-            channel=Channel.WEBSITE.value,
-            resource_type=RESOURCE_LEAD,
-            resource_id=lead_id,
-        )
-        assert row.payload_hash == expected_hash
-        assert resource_hash_matches(row)
-        events = list(
-            db.scalars(
-                select(CanonicalEventRow).where(
-                    CanonicalEventRow.lead_id == lead_id,
-                    CanonicalEventRow.event_type == EventType.APPROVAL_REQUIRED.value,
-                )
-            )
-        )
-        assert len(events) == 1
-        assert events[0].provider_event_id == f"{lead_id}:approval:proposal_handoff"
-        event_payload = json.loads(events[0].payload_json)
-        assert set(event_payload.keys()) == _APPROVAL_PAYLOAD_KEYS
-        assert event_payload == {
-            "action": ACTION_PROPOSAL_HANDOFF,
-            "risk": RISK_R3,
-            "decision": DECISION_PENDING,
-        }
-        assert "@" not in events[0].payload_json
+        assert db.scalars(select(ApprovalRow)).all() == []
     finally:
         db.close()
 
@@ -171,16 +112,16 @@ def test_campaign_pause_cannot_queue_any_approval() -> None:
         db.close()
 
 
-def test_second_proposal_message_still_one_approval_row() -> None:
+def test_website_proposal_with_phone_handoffs_without_approval_row() -> None:
     init_db()
     with TestClient(app) as client:
         session_id = client.post("/v1/website/sessions").json()["session_id"]
         first = client.post(
             f"/v1/website/sessions/{session_id}/messages",
-            json={"text": "Please send me a proposal"},
+            json={"text": "Please send me a proposal", "phone": "0501234567"},
         )
         assert first.json()["next_action"] == "handoff"
-        lead_id = first.json()["lead_id"]
+        assert first.json()["lead_id"] == ""
         again = client.post(
             f"/v1/website/sessions/{session_id}/messages",
             json={"text": "Please send me a proposal"},
@@ -188,19 +129,15 @@ def test_second_proposal_message_still_one_approval_row() -> None:
         assert again.json()["next_action"] == "handoff"
     db = get_session_factory()()
     try:
-        rows = list(
-            db.scalars(select(ApprovalRow).where(ApprovalRow.lead_id == lead_id))
-        )
-        assert len(rows) == 1
+        assert db.scalars(select(ApprovalRow)).all() == []
         events = list(
             db.scalars(
                 select(CanonicalEventRow).where(
-                    CanonicalEventRow.lead_id == lead_id,
                     CanonicalEventRow.event_type == EventType.APPROVAL_REQUIRED.value,
                 )
             )
         )
-        assert len(events) == 1
+        assert events == []
     finally:
         db.close()
 
@@ -328,13 +265,19 @@ def test_clinic_funnel_to_meeting_no_approval_row() -> None:
     init_db()
     with TestClient(app) as client:
         session_id = client.post("/v1/website/sessions").json()["session_id"]
-        lead_id = _run_clinic_funnel_to_meeting(client, session_id)
+        clinic = client.post(
+            f"/v1/website/sessions/{session_id}/messages",
+            json={"text": "We run a clinic and miss calls all day."},
+        )
+        assert clinic.status_code == 200
+        meeting = client.post(
+            f"/v1/website/sessions/{session_id}/messages",
+            json={"text": "let's book a meeting", "phone": "0501234567"},
+        )
+        assert meeting.json()["next_action"] == "handoff"
     db = get_session_factory()()
     try:
-        row = db.scalars(
-            select(ApprovalRow).where(ApprovalRow.lead_id == lead_id)
-        ).one_or_none()
-        assert row is None
+        assert db.scalars(select(ApprovalRow)).all() == []
     finally:
         db.close()
 

@@ -1017,32 +1017,34 @@ def test_website_post_message_persists_message_in_and_out() -> None:
         in_rows = [row for row in rows if row.event_type == "message_in"]
         out_rows = [row for row in rows if row.event_type == "message_out"]
         created_rows = [row for row in rows if row.event_type == "lead_created"]
-        behavior_rows = [row for row in rows if row.event_type == "behavior"]
         qual_rows = [row for row in rows if row.event_type == "qualification_updated"]
         meet_rows = [row for row in rows if row.event_type == "meeting_offered"]
-        handoff_rows = [row for row in rows if row.event_type == "handoff"]
         tool_rows = [row for row in rows if row.event_type == "tool_result"]
-        assert len(in_rows) == 1
-        assert len(out_rows) == 1
-        assert len(created_rows) == 1
-        assert len(behavior_rows) == 2
-        assert len(tool_rows) == 2
-        sheets_tools = [
-            row for row in tool_rows
-            if json.loads(row.payload_json)["tool"] == "sheets_mirror"
+        visitor_in = [
+            row
+            for row in in_rows
+            if json.loads(row.payload_json).get("text") == "hi"
         ]
-        assert len(sheets_tools) == 2
-        assert len(qual_rows) == 1
-        assert len(meet_rows) == 0
-        assert len(handoff_rows) == 0
-        assert in_rows[0].actor_role == "prospect"
+        assert len(visitor_in) == 1
+        assert len(out_rows) == 1
+        assert created_rows == []
+        assert qual_rows == []
+        assert meet_rows == []
+        sheets_tools = [
+            row
+            for row in tool_rows
+            if json.loads(row.payload_json).get("tool") == "sheets_mirror"
+        ]
+        assert sheets_tools == []
+        assert visitor_in[0].actor_role == "prospect"
         assert out_rows[0].actor_role == "mia"
-        assert in_rows[0].lead_id == body["lead_id"]
-        assert out_rows[0].lead_id == body["lead_id"]
-        assert out_rows[0].provider_event_id == f"{in_rows[0].provider_event_id}:out"
-        assert json.loads(in_rows[0].payload_json) == {"text": "hi"}
+        assert visitor_in[0].lead_id in {"", None}
+        assert out_rows[0].lead_id in {"", None}
+        assert body["lead_id"] == ""
+        assert out_rows[0].provider_event_id == f"{visitor_in[0].provider_event_id}:out"
+        assert json.loads(visitor_in[0].payload_json) == {"text": "hi"}
         assert json.loads(out_rows[0].payload_json)["text"] == body["message"]
-        assert json.loads(in_rows[0].source_json) == {"provider": "website"}
+        assert json.loads(visitor_in[0].source_json) == {"provider": "website"}
         assert json.loads(out_rows[0].source_json) == {"provider": "website"}
     finally:
         db.close()

@@ -55,96 +55,38 @@ _MEETING_BRIEF_PAYLOAD_KEYS = frozenset({
 })
 
 
-def _run_clinic_funnel_to_meeting(client: TestClient, session_id: str) -> str:
-    messages = [
-        "We run a clinic and miss calls all day.",
-        "we call everyone back by hand from a list",
-        "about two hours every day",
-        "I decide this quarter",
-        "let's book a meeting",
-    ]
-    lead_id = ""
-    for text in messages:
-        response = client.post(
+def test_website_identify_then_sell_does_not_create_meeting_brief() -> None:
+    init_db()
+    with TestClient(app) as client:
+        session_id = client.post("/v1/website/sessions").json()["session_id"]
+        clinic = client.post(
             f"/v1/website/sessions/{session_id}/messages",
-            json={"text": text},
+            json={"text": "We run a clinic and miss calls all day."},
         )
-        assert response.status_code == 200
-        body = response.json()
-        lead_id = body["lead_id"]
-    assert body["next_action"] == "offer_meeting"
-    return lead_id
-
-
-def test_website_clinic_funnel_creates_meeting_brief() -> None:
-    init_db()
-    with TestClient(app) as client:
-        session_id = client.post("/v1/website/sessions").json()["session_id"]
-        lead_id = _run_clinic_funnel_to_meeting(client, session_id)
-    db = get_session_factory()()
-    try:
-        row = db.scalars(
-            select(MeetingBriefRow).where(MeetingBriefRow.lead_id == lead_id)
-        ).one()
-        assert row.channel == Channel.WEBSITE.value
-        payload = json.loads(row.payload_json)
-        assert payload["fit"] in ("possible", "good")
-        assert isinstance(payload["pain_level"], int)
-        assert isinstance(payload["missing_fields"], list)
-        assert isinstance(payload["owner_questions"], list)
-        # ADR-028: the website continuation gate now offers the booked meeting before
-        # WhatsApp, and that gate can fire before the OFFER_HYPOTHESIS rung of the
-        # discovery ladder is reached (the pre-ADR-028 WhatsApp offer had this same
-        # property — it also fired at the gate without a hypothesis having been
-        # delivered). This clinic funnel reaches the meeting through the gate, so no
-        # hypothesis was offered along the way.
-        assert payload["hypothesis_offered"] is False
-        assert payload["next_action"] == "offer_meeting"
-        assert set(payload.keys()) == _MEETING_BRIEF_PAYLOAD_KEYS
-        serialized = row.payload_json.lower()
-        for forbidden in ("@", "email", "phone", "transcript", "clinic", "http"):
-            assert forbidden not in serialized
-        events = list(
-            db.scalars(
-                select(CanonicalEventRow).where(
-                    CanonicalEventRow.lead_id == lead_id,
-                    CanonicalEventRow.event_type == EventType.MEETING_BRIEF.value,
-                )
-            )
+        assert clinic.status_code == 200
+        assert clinic.json()["next_action"] == "ask_contact"
+        meeting = client.post(
+            f"/v1/website/sessions/{session_id}/messages",
+            json={"text": "let's book a meeting", "phone": "0501234567"},
         )
-        assert len(events) == 1
-        event_payload = json.loads(events[0].payload_json)
-        assert set(event_payload.keys()) <= _MEETING_BRIEF_PAYLOAD_KEYS
-        assert events[0].provider_event_id == f"{lead_id}:brief:offer_meeting"
-    finally:
-        db.close()
-
-
-def test_second_offer_meeting_still_one_brief_row() -> None:
-    init_db()
-    with TestClient(app) as client:
-        session_id = client.post("/v1/website/sessions").json()["session_id"]
-        lead_id = _run_clinic_funnel_to_meeting(client, session_id)
+        assert meeting.json()["next_action"] == "handoff"
         again = client.post(
             f"/v1/website/sessions/{session_id}/messages",
             json={"text": "let's book a meeting"},
         )
-        assert again.json()["next_action"] == "offer_meeting"
+        assert again.json()["next_action"] == "handoff"
+        assert again.json()["lead_id"] == ""
     db = get_session_factory()()
     try:
-        rows = list(
-            db.scalars(select(MeetingBriefRow).where(MeetingBriefRow.lead_id == lead_id))
-        )
-        assert len(rows) == 1
+        assert db.scalars(select(MeetingBriefRow)).all() == []
         events = list(
             db.scalars(
                 select(CanonicalEventRow).where(
-                    CanonicalEventRow.lead_id == lead_id,
-                    CanonicalEventRow.event_type == EventType.MEETING_BRIEF.value,
+                    CanonicalEventRow.event_type == EventType.MEETING_BRIEF.value
                 )
             )
         )
-        assert len(events) == 1
+        assert events == []
     finally:
         db.close()
 
@@ -158,23 +100,19 @@ def test_student_disqualify_no_brief() -> None:
             json={"text": "I'm a student with a school project"},
         )
         assert response.status_code == 200
-        assert response.json()["next_action"] == "disqualify"
-        lead_id = response.json()["lead_id"]
+        assert response.json()["next_action"] == "ask_contact"
+        assert response.json()["lead_id"] == ""
     db = get_session_factory()()
     try:
-        row = db.scalars(
-            select(MeetingBriefRow).where(MeetingBriefRow.lead_id == lead_id)
-        ).one_or_none()
-        assert row is None
+        assert db.scalars(select(MeetingBriefRow)).all() == []
         events = list(
             db.scalars(
                 select(CanonicalEventRow).where(
-                    CanonicalEventRow.lead_id == lead_id,
                     CanonicalEventRow.event_type == EventType.MEETING_BRIEF.value,
                 )
             )
         )
-        assert len(events) == 0
+        assert events == []
     finally:
         db.close()
 

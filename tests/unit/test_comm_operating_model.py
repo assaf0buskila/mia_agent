@@ -400,17 +400,17 @@ def test_website_conversation_identity_qualification_events() -> None:
     with TestClient(app) as client:
         created = client.post("/v1/website/sessions")
         session_id = created.json()["session_id"]
-        lead_id = created.json()["lead_id"]
+        assert created.json()["lead_id"] == ""
         first = client.post(
             f"/v1/website/sessions/{session_id}/messages", json={"text": "hi"}
         )
         assert first.status_code == 200
-        assert first.json()["lead_id"] == lead_id
+        assert first.json()["lead_id"] == ""
         second = client.post(
             f"/v1/website/sessions/{session_id}/messages",
-            json={"text": "We run a clinic and miss calls all day."},
+            json={"text": "We run a clinic and miss calls all day.", "phone": "0501234567"},
         )
-        assert second.json()["next_action"] != "understand_workflow"
+        assert second.json()["next_action"] == "handoff"
         events = client.post(
             f"/v1/website/sessions/{session_id}/events",
             json={"kind": "cta_click", "cta": "whatsapp"},
@@ -428,11 +428,15 @@ async def test_website_whatsapp_valid_handoff_continuity_and_intro(monkeypatch) 
     with TestClient(app) as client:
         created = client.post("/v1/website/sessions")
         session_id = created.json()["session_id"]
-        website_lead_id = created.json()["lead_id"]
-        client.post(
+        website_lead_id = session_id
+        identify = client.post(
             f"/v1/website/sessions/{session_id}/messages",
-            json={"text": "We waste a lot of time answering inquiries."},
+            json={
+                "text": "We waste a lot of time answering inquiries.",
+                "phone": "0501234567",
+            },
         )
+        assert identify.status_code == 200
         token = client.post(f"/v1/website/sessions/{session_id}/handoff").json()["token"]
     db = get_session_factory()()
     try:
@@ -693,33 +697,30 @@ async def test_customer_cannot_self_promote_or_invoke_owner(monkeypatch) -> None
         db.close()
 
 
-def test_hot_lead_website_takeover_and_telegram_notification() -> None:
+def test_website_proposal_does_not_set_hot_lead_takeover() -> None:
     init_db()
     with TestClient(app) as client:
         created = client.post("/v1/website/sessions")
         session_id = created.json()["session_id"]
-        lead_id = created.json()["lead_id"]
+        assert created.json()["lead_id"] == ""
         reply = client.post(
             f"/v1/website/sessions/{session_id}/messages",
-            json={"text": "Please send me a written proposal"},
+            json={"text": "Please send me a written proposal", "phone": "0501234567"},
         )
-        assert reply.json()["next_action"] == NextAction.HANDOFF.value
+        assert reply.status_code == 200
+        assert reply.json()["next_action"] == "handoff"
+        assert reply.json()["lead_id"] == ""
     db = get_session_factory()()
     try:
         store = LeadStore(db)
-        assert store.get_takeover_state(lead_id) == TakeoverState.HUMAN_TAKEOVER_REQUIRED.value
-        assert store.is_human_takeover(lead_id) is True
+        assert store.get_website_lead_id(session_id) is None
+        assert store.is_human_takeover("") is False
         notify = db.scalars(
             select(OwnerNotificationRow).where(
                 OwnerNotificationRow.kind == KIND_HOT_LEAD,
-                OwnerNotificationRow.lead_id == lead_id,
             )
         ).one_or_none()
-        assert notify is not None
-        assert notify.lead_id == lead_id
-        fu = store.get_follow_up(lead_id)
-        if fu is not None:
-            assert fu.status == STATUS_CANCELLED
+        assert notify is None
     finally:
         db.close()
 

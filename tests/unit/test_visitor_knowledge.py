@@ -190,8 +190,9 @@ def test_website_client_graph_executes_knowledge_once(monkeypatch) -> None:
         )
 
     assert response.status_code == 200
-    assert capability_calls == 1
-    assert retrieval_paths == ["capability"]
+    assert response.json()["next_action"] in {"ask_need", "ask_contact", "no_price"}
+    assert capability_calls == 0
+    assert retrieval_paths == []
 
 
 def test_knowledge_capability_exception_does_not_break_the_turn(monkeypatch) -> None:

@@ -13,7 +13,6 @@ from app.main import app
 from fastapi.testclient import TestClient
 from sqlalchemy import delete
 
-from tests.unit.test_sheets import WEB_CLINIC_SESSION, _run_clinic_funnel_to_meeting
 
 
 def test_kpi_event_types_excludes_owner_brief_types() -> None:
@@ -115,14 +114,9 @@ def test_compute_after_website_session_and_message() -> None:
                 json={"text": "tell me about automation"},
             )
             assert response.status_code == 200
-            assert len(fake.kpi_rows) == 1
-            row = next(iter(fake.kpi_rows.values()))
-            assert row.leads >= 1
-            assert row.messages_in >= 1
-            assert row.week_start == week_start_on(
-                now=datetime.now(UTC),
-                timezone="Asia/Jerusalem",
-            )
+            assert response.json()["next_action"] == "ask_contact"
+            assert fake.kpi_rows == {}
+            assert fake.rows == {}
     finally:
         app.dependency_overrides.pop(get_sheets_port, None)
 
@@ -220,35 +214,25 @@ def test_mirror_kpi_rejects_invalid_week_start() -> None:
     assert port.kpi_rows == {}
 
 
-def test_website_clinic_funnel_kpi_meetings_offered_without_pii() -> None:
+def test_website_identify_then_sell_does_not_mirror_kpis() -> None:
     init_db()
-    db = get_session_factory()()
+    fake = FakeSheetsPort()
+    app.dependency_overrides[get_sheets_port] = lambda: fake
     try:
-        store = LeadStore(db)
-        session_id = WEB_CLINIC_SESSION
-        store.open_channel_lead(channel=Channel.WEBSITE, external_id=session_id)
-        db.commit()
-
-        fake = FakeSheetsPort()
-        app.dependency_overrides[get_sheets_port] = lambda: fake
-        try:
-            with TestClient(app) as client:
-                _run_clinic_funnel_to_meeting(client, session_id)
-                assert len(fake.kpi_rows) == 1
-                row = next(iter(fake.kpi_rows.values()))
-                assert row.meetings_offered >= 1
-                serialized = json.dumps(
-                    {
-                        "week_start": row.week_start,
-                        "leads": row.leads,
-                        "meetings_offered": row.meetings_offered,
-                        "handoffs": row.handoffs,
-                        "messages_in": row.messages_in,
-                        "follow_ups_pending": row.follow_ups_pending,
-                    }
-                )
-                assert "@" not in serialized
-        finally:
-            app.dependency_overrides.pop(get_sheets_port, None)
+        with TestClient(app) as client:
+            created = client.post("/v1/website/sessions")
+            session_id = created.json()["session_id"]
+            clinic = client.post(
+                f"/v1/website/sessions/{session_id}/messages",
+                json={"text": "We run a clinic and miss calls all day."},
+            )
+            assert clinic.status_code == 200
+            identified = client.post(
+                f"/v1/website/sessions/{session_id}/messages",
+                json={"text": "let's book a meeting", "phone": "0501234567"},
+            )
+            assert identified.json()["next_action"] == "handoff"
+        assert fake.kpi_rows == {}
+        assert fake.rows == {}
     finally:
-        db.close()
+        app.dependency_overrides.pop(get_sheets_port, None)

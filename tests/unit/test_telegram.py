@@ -9,6 +9,8 @@ from typing import Any
 import httpx
 import pytest
 from app.api import owner as owner_api
+from app.core.config import Settings
+from app.domain import owner_brain as owner_brain_module
 from app.api import telegram as telegram_api
 from app.api.deps import get_telegram_port, get_transcription_port
 from app.db.models import CanonicalEventRow
@@ -147,6 +149,12 @@ def _configure_owner(monkeypatch) -> None:
     monkeypatch.setenv("MIA_TELEGRAM_BOT_TOKEN", "test-bot-token")
 
 
+def _patch_owner_loop(monkeypatch, handler) -> None:
+    monkeypatch.setattr(Settings, "owner_agent_ready", lambda self: True)
+    monkeypatch.setattr(owner_brain_module, "answer_owner", handler)
+    monkeypatch.setattr(owner_api, "answer_owner", handler)
+
+
 @pytest.mark.asyncio
 async def test_voice_failures_map_to_fixed_content_free_stages() -> None:
     item = {"file_id": "voice-file-stage-test"}
@@ -216,7 +224,7 @@ def test_voice_note_downloads_transcribes_reaches_owner_graph_and_escapes_html(m
         graph_inputs.append(dict(kwargs))
         return OwnerBrainResult("<owner reply & verified>", True, ())
 
-    monkeypatch.setattr(owner_api, "answer_owner", owner_graph_result)
+    _patch_owner_loop(monkeypatch, owner_graph_result)
     app.dependency_overrides[get_telegram_port] = lambda: telegram
     app.dependency_overrides[get_transcription_port] = lambda: transcribe
     try:
@@ -407,9 +415,8 @@ def test_retried_voice_success_claims_before_download_stt_graph_and_reply(monkey
     telegram = RecordingTelegramVoicePort()
     transcribe = FakeTranscriptionPort("תבדקי את התזכורת")
     graph_calls: list[object] = []
-    monkeypatch.setattr(
-        owner_api,
-        "answer_owner",
+    _patch_owner_loop(
+        monkeypatch,
         lambda **kwargs: graph_calls.append(kwargs) or OwnerBrainResult("ok", True, ()),
     )
     app.dependency_overrides[get_telegram_port] = lambda: telegram
@@ -640,9 +647,8 @@ def test_audio_document_reaches_stt_and_owner_graph(monkeypatch) -> None:
     telegram = RecordingTelegramVoicePort()
     transcribe = CapturingTranscriptionPort()
     graph_inputs: list[dict[str, object]] = []
-    monkeypatch.setattr(
-        owner_api,
-        "answer_owner",
+    _patch_owner_loop(
+        monkeypatch,
         lambda **kwargs: graph_inputs.append(kwargs) or OwnerBrainResult("ok", True, ()),
     )
     app.dependency_overrides[get_telegram_port] = lambda: telegram

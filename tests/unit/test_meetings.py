@@ -15,44 +15,30 @@ from sqlalchemy import select
 WEB_SESSION_SHEETS = "web_meet_sheet_997009"
 
 
-def _run_clinic_funnel_to_meeting(client: TestClient, session_id: str) -> str:
-    messages = [
-        "We run a clinic and miss calls all day.",
-        "ok that's right",
-        "I decide this quarter",
-        "let's book a meeting",
-    ]
-    lead_id = ""
-    for text in messages:
-        response = client.post(
-            f"/v1/website/sessions/{session_id}/messages",
-            json={"text": text},
-        )
-        assert response.status_code == 200
-        body = response.json()
-        lead_id = body["lead_id"]
-    assert body["next_action"] == NextAction.OFFER_MEETING.value
-    return lead_id
-
-
 def _meeting_for_lead(db, lead_id: str) -> MeetingRow | None:
     return db.scalars(select(MeetingRow).where(MeetingRow.lead_id == lead_id)).one_or_none()
 
 
-def test_offer_meeting_persists_meeting_offered_empty_fields() -> None:
+def test_website_identify_then_sell_does_not_persist_meetings() -> None:
     init_db()
     with TestClient(app) as client:
         session_id = client.post("/v1/website/sessions").json()["session_id"]
-        lead_id = _run_clinic_funnel_to_meeting(client, session_id)
+        clinic = client.post(
+            f"/v1/website/sessions/{session_id}/messages",
+            json={"text": "We run a clinic and miss calls all day."},
+        )
+        assert clinic.status_code == 200
+        assert clinic.json()["next_action"] == "ask_contact"
+        meeting = client.post(
+            f"/v1/website/sessions/{session_id}/messages",
+            json={"text": "let's book a meeting", "phone": "0501234567"},
+        )
+        assert meeting.json()["next_action"] == "handoff"
+        assert meeting.json()["lead_id"] == ""
     db = get_session_factory()()
     try:
-        row = _meeting_for_lead(db, lead_id)
-        assert row is not None
-        assert row.status == STATUS_OFFERED
-        assert row.source == Channel.WEBSITE.value
-        assert row.scheduled_at == ""
-        assert row.calendar_event_id == ""
-        assert row.summary == ""
+        assert db.scalars(select(MeetingRow)).all() == []
+        assert LeadStore(db).get_website_lead_id(session_id) is None
     finally:
         db.close()
 
@@ -105,14 +91,14 @@ def test_handoff_does_not_persist_meeting() -> None:
         session_id = client.post("/v1/website/sessions").json()["session_id"]
         response = client.post(
             f"/v1/website/sessions/{session_id}/messages",
-            json={"text": "Please send me a proposal"},
+            json={"text": "Please send me a proposal", "phone": "0501234567"},
         )
         assert response.status_code == 200
-        assert response.json()["next_action"] == NextAction.HANDOFF.value
-        lead_id = response.json()["lead_id"]
+        assert response.json()["next_action"] == "handoff"
+        assert response.json()["lead_id"] == ""
     db = get_session_factory()()
     try:
-        assert _meeting_for_lead(db, lead_id) is None
+        assert db.scalars(select(MeetingRow)).all() == []
     finally:
         db.close()
 
@@ -159,35 +145,25 @@ def test_meetings_module_never_imports_message_port() -> None:
     assert "integrations.base" not in source
 
 
-def test_fake_sheets_port_after_offer_meeting_has_meeting_row_empty_fields() -> None:
+def test_website_path_does_not_mirror_01_leads_meetings() -> None:
     init_db()
-    db = get_session_factory()()
+    fake = FakeSheetsPort()
+    app.dependency_overrides[get_sheets_port] = lambda: fake
     try:
-        store = LeadStore(db)
-        session_id = WEB_SESSION_SHEETS
-        store.open_channel_lead(channel=Channel.WEBSITE, external_id=session_id)
-        db.commit()
-
-        fake = FakeSheetsPort()
-        app.dependency_overrides[get_sheets_port] = lambda: fake
-        try:
-            with TestClient(app) as client:
-                lead_id = _run_clinic_funnel_to_meeting(client, session_id)
-                assert lead_id in fake.meeting_rows
-                meeting = fake.meeting_rows[lead_id]
-                assert meeting.status == STATUS_OFFERED
-                assert meeting.source == Channel.WEBSITE.value
-                assert meeting.scheduled_at == ""
-                assert meeting.calendar_event_id == ""
-                assert meeting.summary == ""
-        finally:
-            app.dependency_overrides.pop(get_sheets_port, None)
+        with TestClient(app) as client:
+            session_id = client.post("/v1/website/sessions").json()["session_id"]
+            client.post(
+                f"/v1/website/sessions/{session_id}/messages",
+                json={"text": "let's book a meeting", "phone": "0501234567"},
+            )
+        assert fake.meeting_rows == {}
     finally:
-        db.close()
+        app.dependency_overrides.pop(get_sheets_port, None)
 
 
-def test_env_kill_switch_skips_meeting_persist(monkeypatch) -> None:
-    """Env kill switch 503s website chat, so the funnel never persists a meeting."""
+def test_env_kill_switch_does_not_503_website_and_does_not_persist_meeting(
+    monkeypatch,
+) -> None:
     monkeypatch.setenv("MIA_KILL_SWITCH", "true")
     init_db()
     with TestClient(app) as client:
@@ -196,13 +172,11 @@ def test_env_kill_switch_skips_meeting_persist(monkeypatch) -> None:
             f"/v1/website/sessions/{session_id}/messages",
             json={"text": "We run a clinic and miss calls all day."},
         )
-        assert response.status_code == 503
-        assert response.json()["detail"] == "killed"
+        assert response.status_code == 200
+        assert response.json()["next_action"] == "ask_contact"
     db = get_session_factory()()
     try:
-        store = LeadStore(db)
-        lead_id = store.get_website_lead_id(session_id)
-        assert lead_id
-        assert _meeting_for_lead(db, lead_id) is None
+        assert LeadStore(db).get_website_lead_id(session_id) is None
+        assert db.scalars(select(MeetingRow)).all() == []
     finally:
         db.close()

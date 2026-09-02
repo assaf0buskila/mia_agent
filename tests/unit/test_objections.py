@@ -131,18 +131,18 @@ def test_objection_and_pain_can_coexist_message_sets_both() -> None:
     assert select_next_action(updated) == NextAction.HANDLE_OBJECTION
 
 
-def test_website_post_price_objection_returns_handle_objection() -> None:
+def test_website_post_price_returns_no_price() -> None:
     with TestClient(app) as client:
         session_id = client.post("/v1/website/sessions").json()["session_id"]
         reply = client.post(
             f"/v1/website/sessions/{session_id}/messages",
-            json={"text": "that's too expensive"},
+            json={"text": "what's the price"},
         )
         assert reply.status_code == 200
         body = reply.json()
-        assert body["next_action"] == "handle_objection"
-        assert body["message"] == OBJECTION_REPLIES_EN[ObjectionKind.PRICE]
-        assert body["message"] != REFRAME_REPLIES_EN[ObjectionKind.PRICE]
+        assert body["next_action"] == "no_price"
+        assert "מחיר" in body["message"] or "price" in body["message"].lower()
+        assert body["lead_id"] == ""
 
 
 def test_cold_price_objection_reply_for_is_first_move() -> None:
@@ -169,7 +169,7 @@ def test_reframe_context_price_objection_uses_reframe_copy() -> None:
     assert reply == REFRAME_REPLIES[ObjectionKind.PRICE]
 
 
-def test_website_funnel_price_objection_after_reflect_uses_reframe() -> None:
+def test_website_price_after_need_still_returns_no_price() -> None:
     with TestClient(app) as client:
         session_id = client.post("/v1/website/sessions").json()["session_id"]
         msg1 = client.post(
@@ -177,32 +177,15 @@ def test_website_funnel_price_objection_after_reflect_uses_reframe() -> None:
             json={"text": "We run a clinic and miss calls all day."},
         )
         assert msg1.status_code == 200
-        assert msg1.json()["next_action"] == "deepen_pain"
-        msg2 = client.post(
-            f"/v1/website/sessions/{session_id}/messages",
-            json={"text": "we call everyone back by hand from a list"},
-        )
-        assert msg2.status_code == 200
-        assert msg2.json()["next_action"] == "reflect"
-        msg3 = client.post(
-            f"/v1/website/sessions/{session_id}/messages",
-            json={"text": "about two hours every day"},
-        )
-        assert msg3.status_code == 200
-        # ADR-028: the continuation gate now offers the booked meeting first, not
-        # WhatsApp. The point of this test is objection handling (reframe copy),
-        # which fires from `active_objection` and pre-empts the gate either way, so
-        # only the gate's own action needs updating here.
-        assert msg3.json()["next_action"] == "offer_meeting"
+        assert msg1.json()["next_action"] == "ask_contact"
         msg4 = client.post(
             f"/v1/website/sessions/{session_id}/messages",
-            json={"text": "sure, but that's too expensive"},
+            json={"text": "sure, but what's the price"},
         )
         assert msg4.status_code == 200
         body = msg4.json()
-        assert body["next_action"] == "handle_objection"
-        # Reframe copy, because there is real described friction to measure against.
-        assert body["message"] == REFRAME_REPLIES_EN[ObjectionKind.PRICE]
+        assert body["next_action"] == "no_price"
+        assert "מחיר" in body["message"] or "price" in body["message"].lower()
 
 
 def test_qualification_snapshot_includes_active_objection() -> None:

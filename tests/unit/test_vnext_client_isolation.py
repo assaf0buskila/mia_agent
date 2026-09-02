@@ -30,7 +30,8 @@ def test_two_website_tenants_are_isolated_and_client_is_denied_owner_mail() -> N
         )
         assert posted_a.status_code == 200
         assert posted_b.status_code == 200
-        assert posted_a.json()["lead_id"] != posted_b.json()["lead_id"]
+        assert posted_a.json()["lead_id"] == ""
+        assert posted_b.json()["lead_id"] == ""
         missing = client.post(
             "/v1/website/sessions/web_does_not_exist/messages",
             json={"text": "probe"},
@@ -39,9 +40,8 @@ def test_two_website_tenants_are_isolated_and_client_is_denied_owner_mail() -> N
     db = get_session_factory()()
     try:
         store = LeadStore(db)
-        lead_a = store.get_website_lead_id(session_a)
-        lead_b = store.get_website_lead_id(session_b)
-        assert lead_a and lead_b and lead_a != lead_b
+        assert store.get_website_lead_id(session_a) is None
+        assert store.get_website_lead_id(session_b) is None
         turns_b = store.list_conversation_turns(session_b)
         blob_b = " ".join(turn.text for turn in turns_b)
         assert "tenant-a-secret-never-share" not in blob_b

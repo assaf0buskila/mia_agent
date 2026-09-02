@@ -16,7 +16,7 @@ from app.integrations.transcribe import FakeTranscriptionPort
 from app.main import app
 from fastapi.testclient import TestClient
 
-from tests.conftest import without_injected_website_origin
+from tests.conftest import identify_website_visitor, without_injected_website_origin
 
 _ALLOWED = "https://www.assafweb.com"
 _APEX = "https://assafweb.com"
@@ -72,7 +72,7 @@ def test_allowed_origin_still_creates_session_and_message() -> None:
             headers={"Origin": _ALLOWED},
         )
         assert reply.status_code == 200
-        assert reply.json()["next_action"] == "understand_workflow"
+        assert reply.json()["next_action"] in {"ask_need", "ask_contact"}
 
 
 def test_apex_origin_is_allowed() -> None:
@@ -148,6 +148,7 @@ def test_handoff_allowed_origin_still_works() -> None:
         session_id = client.post(
             "/v1/website/sessions", headers={"Origin": _ALLOWED}
         ).json()["session_id"]
+        identify_website_visitor(client, session_id, headers={"Origin": _ALLOWED})
         reply = client.post(
             f"/v1/website/sessions/{session_id}/handoff",
             headers={"Origin": _ALLOWED},
@@ -186,6 +187,7 @@ def test_handoff_rate_limit_returns_429(monkeypatch: pytest.MonkeyPatch) -> None
         session_id = client.post(
             "/v1/website/sessions", headers={"Origin": _ALLOWED}
         ).json()["session_id"]
+        identify_website_visitor(client, session_id, headers={"Origin": _ALLOWED})
         first = client.post(
             f"/v1/website/sessions/{session_id}/handoff",
             headers={"Origin": _ALLOWED},
@@ -196,6 +198,7 @@ def test_handoff_rate_limit_returns_429(monkeypatch: pytest.MonkeyPatch) -> None
             headers={"Origin": _ALLOWED},
         )
         assert second.status_code == 429
+
 
 
 def test_voice_rate_limit_returns_429(monkeypatch: pytest.MonkeyPatch) -> None:

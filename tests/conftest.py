@@ -101,6 +101,32 @@ def _headers_have_origin(headers: object) -> bool:
     return False
 
 
+def identify_website_visitor(
+    client,
+    session_id: str,
+    *,
+    phone: str = "0501234567",
+    name: str = "דנה",
+    text: str = "צריכים אתר",
+    email: str = "",
+    headers: dict | None = None,
+):
+    """Identify on the live site path so handoff and CRM tests can proceed."""
+    payload = {"text": text, "phone": phone, "name": name}
+    if email:
+        payload["email"] = email
+    extras = {"headers": headers} if headers else {}
+    response = client.post(
+        f"/v1/website/sessions/{session_id}/messages",
+        json=payload,
+        **extras,
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["lead_id"] == ""
+    assert response.json()["next_action"] in {"handoff", "no_price"}
+    return response
+
+
 @pytest.fixture(autouse=True)
 def _website_origin_and_limiter(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.core.public_website import reset_public_website_limiter

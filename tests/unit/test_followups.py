@@ -62,154 +62,47 @@ def _due_pattern() -> re.Pattern[str]:
     return re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
-def _run_clinic_funnel_to_meeting(client: TestClient, session_id: str) -> str:
-    messages = [
-        "We run a clinic and miss calls all day.",
-        "ok that's right",
-        "I decide this quarter",
-        "let's book a meeting",
-    ]
-    lead_id = ""
-    for text in messages:
-        response = client.post(
-            f"/v1/website/sessions/{session_id}/messages",
-            json={"text": text},
-        )
-        assert response.status_code == 200
-        body = response.json()
-        lead_id = body["lead_id"]
-    assert body["next_action"] == "offer_meeting"
-    return lead_id
-
-
 def test_follow_up_due_on_tomorrow_jerusalem() -> None:
     now = datetime(2026, 8, 21, 20, 0, tzinfo=ZoneInfo("Asia/Jerusalem"))
     due_at = follow_up_due_on(now=now, timezone="Asia/Jerusalem")
     assert due_at == "2026-08-22"
 
 
-def test_website_clinic_funnel_creates_pending_follow_up() -> None:
+def test_website_identify_then_sell_does_not_create_follow_ups() -> None:
     init_db()
     with TestClient(app) as client:
         session_id = client.post("/v1/website/sessions").json()["session_id"]
-        lead_id = _run_clinic_funnel_to_meeting(client, session_id)
-    db = get_session_factory()()
-    try:
-        row = db.scalars(
-            select(FollowUpRow).where(FollowUpRow.lead_id == lead_id)
-        ).one()
-        assert row.status == STATUS_PENDING
-        assert row.reason == REASON_MEETING_OFFERED
-        assert row.channel == Channel.WEBSITE.value
-        assert _due_pattern().match(row.due_at)
-        follow_rows = list(
-            db.scalars(select(FollowUpRow).where(FollowUpRow.lead_id == lead_id)).all()
-        )
-        assert len(follow_rows) == 1
-        events = list(
-            db.scalars(
-                select(CanonicalEventRow).where(
-                    CanonicalEventRow.lead_id == lead_id,
-                    CanonicalEventRow.event_type == "follow_up",
-                )
-            )
-        )
-        assert len(events) == 1
-        payload = json.loads(events[0].payload_json)
-        assert payload == {"status": STATUS_PENDING, "reason": REASON_MEETING_OFFERED}
-        assert set(payload.keys()) == {"status", "reason"}
-        serialized = json.dumps(events[0].payload_json) + json.dumps(events[0].source_json)
-        for forbidden in ("@", "email", "phone", "transcript", "clinic"):
-            assert forbidden not in serialized.lower()
-    finally:
-        db.close()
-
-
-def test_second_offer_meeting_still_one_pending_row() -> None:
-    init_db()
-    with TestClient(app) as client:
-        session_id = client.post("/v1/website/sessions").json()["session_id"]
-        lead_id = _run_clinic_funnel_to_meeting(client, session_id)
-        again = client.post(
+        clinic = client.post(
             f"/v1/website/sessions/{session_id}/messages",
-            json={"text": "let's book a meeting"},
+            json={"text": "We run a clinic and miss calls all day."},
         )
-        assert again.json()["next_action"] == "offer_meeting"
-    db = get_session_factory()()
-    try:
-        rows = list(db.scalars(select(FollowUpRow).where(FollowUpRow.lead_id == lead_id)))
-        assert len(rows) == 1
-        assert rows[0].status == STATUS_PENDING
-        events = list(
-            db.scalars(
-                select(CanonicalEventRow).where(
-                    CanonicalEventRow.lead_id == lead_id,
-                    CanonicalEventRow.event_type == "follow_up",
-                )
-            )
+        assert clinic.status_code == 200
+        assert clinic.json()["next_action"] == "ask_contact"
+        meeting = client.post(
+            f"/v1/website/sessions/{session_id}/messages",
+            json={"text": "let's book a meeting", "phone": "0501234567"},
         )
-        assert len(events) == 1
-    finally:
-        db.close()
-
-
-def test_stop_cancels_pending_follow_up() -> None:
-    init_db()
-    with TestClient(app) as client:
-        session_id = client.post("/v1/website/sessions").json()["session_id"]
-        lead_id = _run_clinic_funnel_to_meeting(client, session_id)
+        assert meeting.json()["next_action"] == "handoff"
         stop = client.post(
             f"/v1/website/sessions/{session_id}/messages",
             json={"text": "not interested"},
         )
-        assert stop.json()["next_action"] == "stop"
-    db = get_session_factory()()
-    try:
-        row = db.scalars(
-            select(FollowUpRow).where(FollowUpRow.lead_id == lead_id)
-        ).one()
-        assert row.status == STATUS_CANCELLED
-        events = list(
-            db.scalars(
-                select(CanonicalEventRow).where(
-                    CanonicalEventRow.lead_id == lead_id,
-                    CanonicalEventRow.event_type == "follow_up",
-                )
-            )
-        )
-        assert len(events) == 2
-        statuses = {json.loads(event.payload_json)["status"] for event in events}
-        assert statuses == {STATUS_PENDING, STATUS_CANCELLED}
-    finally:
-        db.close()
-
-
-def test_student_disqualify_no_follow_up_row() -> None:
-    init_db()
-    with TestClient(app) as client:
-        session_id = client.post("/v1/website/sessions").json()["session_id"]
-        response = client.post(
+        assert stop.json()["next_action"] == "handoff"
+        student = client.post(
             f"/v1/website/sessions/{session_id}/messages",
             json={"text": "I'm a student with a school project"},
         )
-        assert response.status_code == 200
-        assert response.json()["next_action"] == "disqualify"
-        lead_id = response.json()["lead_id"]
+        assert student.json()["next_action"] == "handoff"
+        assert student.json()["lead_id"] == ""
     db = get_session_factory()()
     try:
-        row = db.scalars(
-            select(FollowUpRow).where(FollowUpRow.lead_id == lead_id)
-        ).one_or_none()
-        assert row is None
+        assert db.scalars(select(FollowUpRow)).all() == []
         events = list(
             db.scalars(
-                select(CanonicalEventRow).where(
-                    CanonicalEventRow.lead_id == lead_id,
-                    CanonicalEventRow.event_type == "follow_up",
-                )
+                select(CanonicalEventRow).where(CanonicalEventRow.event_type == "follow_up")
             )
         )
-        assert len(events) == 0
+        assert events == []
     finally:
         db.close()
 
