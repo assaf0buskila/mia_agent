@@ -128,6 +128,18 @@ def identify_website_visitor(
 
 
 @pytest.fixture(autouse=True)
+def _owner_turn_coalesce_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.surfaces import turn_coalesce
+    from app.workers import telegram_owner
+
+    monkeypatch.setattr(turn_coalesce, "COALESCE_WAIT_S", 0)
+    monkeypatch.setattr(telegram_owner, "COALESCE_WAIT_S", 0)
+    turn_coalesce.reset_pending_turns()
+    yield
+    turn_coalesce.reset_pending_turns()
+
+
+@pytest.fixture(autouse=True)
 def _website_origin_and_limiter(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.core.public_website import reset_public_website_limiter
     from starlette.testclient import TestClient

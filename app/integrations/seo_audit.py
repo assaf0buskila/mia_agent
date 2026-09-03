@@ -250,7 +250,9 @@ def format_audit_block(snapshot: SeoAuditSnapshot) -> str:
     if snapshot.has_json_ld is True:
         lines.append("JSON-LD: כן")
     elif snapshot.has_json_ld is False:
-        lines.append("JSON-LD: לא")
+        lines.append("JSON-LD: לא (בשליפה הזו)")
+    else:
+        lines.append("JSON-LD: unknown (לא נשלף)")
     if len(lines) == 1:
         return ""
     return "\n".join(lines)

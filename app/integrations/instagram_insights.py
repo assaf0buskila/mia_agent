@@ -2,7 +2,7 @@
 
 Read-only: recent media list + per-media insights. Composio when sender=composio
 or when Graph tokens are empty. Graph remains the default-direct path.
-No publish, comments write, captions, or media URLs.
+No publish or comments write. Owner output names each post; no anonymous totals.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from time import perf_counter
 from typing import Any, Protocol
+from urllib.parse import urlparse
 
 import httpx
 
@@ -37,7 +38,9 @@ from app.integrations.instagram import (
 from app.integrations.sheets import SheetsPort, maybe_mirror_content_insights
 
 _COMPOSIO_EXECUTE_BASE = "https://backend.composio.dev/api/v3.1/tools/execute"
-_MEDIA_LIST_FIELDS = "id,media_type"
+_MEDIA_LIST_FIELDS = "id,media_type,caption,timestamp,permalink"
+_PERMALINK_HOSTS = frozenset({"instagram.com", "www.instagram.com"})
+_UNLABELED_ACCOUNT = "unlabeled (playground vs personal unknown)"
 
 _INSIGHT_METRICS = ("views", "reach", "likes", "comments", "saved")
 _ALLOWED_GRAPH_HOSTS = frozenset({"graph.instagram.com", "graph.facebook.com"})
@@ -90,6 +93,99 @@ class _ComposioExecutionError(AdapterHttpError):
         return "error"
 
 
+@dataclass(frozen=True)
+class _MediaRef:
+    media_id: str
+    media_type: str
+    caption: str = ""
+    timestamp: str = ""
+    permalink: str = ""
+
+
+def _caption_hook(raw: object) -> str:
+    if not isinstance(raw, str):
+        return ""
+    first = raw.strip().splitlines()[0].strip() if raw.strip() else ""
+    return first[:80]
+
+
+def _sanitize_timestamp(raw: object) -> str:
+    if not isinstance(raw, str):
+        return ""
+    text = raw.strip()
+    if len(text) < 8 or len(text) > 40:
+        return ""
+    return text
+
+
+def _sanitize_permalink(raw: object) -> str:
+    if not isinstance(raw, str):
+        return ""
+    text = raw.strip()
+    try:
+        parsed = urlparse(text)
+    except ValueError:
+        return ""
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme != "https" or host not in _PERMALINK_HOSTS:
+        return ""
+    return text.split("?", 1)[0][:200]
+
+
+def _parse_media_entry(entry: object) -> _MediaRef | None:
+    if not isinstance(entry, dict):
+        return None
+    raw_id = entry.get("id")
+    if isinstance(raw_id, int) and not isinstance(raw_id, bool):
+        raw_id = str(raw_id)
+    raw_type = entry.get("media_type")
+    if not isinstance(raw_id, str) or not isinstance(raw_type, str):
+        return None
+    media_id = raw_id.strip()
+    media_type = raw_type.strip().upper()
+    if not is_allowlisted_media_id(media_id):
+        return None
+    if media_type not in ALLOWLISTED_MEDIA_TYPES:
+        return None
+    return _MediaRef(
+        media_id=media_id,
+        media_type=media_type,
+        caption=_caption_hook(entry.get("caption")),
+        timestamp=_sanitize_timestamp(entry.get("timestamp")),
+        permalink=_sanitize_permalink(entry.get("permalink")),
+    )
+
+
+def _media_refs_from_data(data: object) -> list[_MediaRef]:
+    if not isinstance(data, list):
+        return []
+    items: list[_MediaRef] = []
+    for entry in data:
+        parsed = _parse_media_entry(entry)
+        if parsed is not None:
+            items.append(parsed)
+    return items
+
+
+def _insight_from_media(
+    media: _MediaRef, metrics: dict[str, str | None] | None
+) -> ContentInsight:
+    payload = dict(metrics or {})
+    return ContentInsight(
+        media_id=media.media_id,
+        media_type=media.media_type,
+        caption=media.caption,
+        timestamp=media.timestamp,
+        permalink=media.permalink,
+        account_kind="",
+        views=payload.get("views"),
+        reach=payload.get("reach"),
+        likes=payload.get("likes"),
+        comments=payload.get("comments"),
+        saved=payload.get("saved"),
+    )
+
+
 class InstagramInsightsPort(Protocol):
     def list_recent_insights(self, *, limit: int = 5) -> list[ContentInsight]: ...
 
@@ -124,17 +220,9 @@ class GraphInstagramInsightsPort:
         try:
             media_items = self._fetch_media_list(limit=capped, budget=budget)
             results: list[ContentInsight] = []
-            for media_id, media_type in media_items:
-                metrics = self._fetch_insights(media_id, budget=budget)
-                if metrics is None:
-                    continue
-                results.append(
-                    ContentInsight(
-                        media_id=media_id,
-                        media_type=media_type,
-                        **metrics,
-                    )
-                )
+            for media in media_items:
+                metrics = self._fetch_insights(media.media_id, budget=budget)
+                results.append(_insight_from_media(media, metrics))
             return results
         except (
             httpx.HTTPError,
@@ -190,33 +278,13 @@ class GraphInstagramInsightsPort:
 
     def _fetch_media_list(
         self, *, limit: int, budget: _InsightCallBudget
-    ) -> list[tuple[str, str]]:
+    ) -> list[_MediaRef]:
         url = self._base_url(f"{self._account_id}/media")
-        params = {"fields": "id,media_type", "limit": str(limit)}
+        params = {"fields": _MEDIA_LIST_FIELDS, "limit": str(limit)}
         body = self._get_json(url, params, budget=budget, classify_http=True)
         if body is None:
             return []
-        data = body.get("data")
-        if not isinstance(data, list):
-            return []
-        items: list[tuple[str, str]] = []
-        for entry in data:
-            if not isinstance(entry, dict):
-                continue
-            raw_id = entry.get("id")
-            if isinstance(raw_id, int) and not isinstance(raw_id, bool):
-                raw_id = str(raw_id)
-            raw_type = entry.get("media_type")
-            if not isinstance(raw_id, str) or not isinstance(raw_type, str):
-                continue
-            media_id = raw_id.strip()
-            media_type = raw_type.strip().upper()
-            if not is_allowlisted_media_id(media_id):
-                continue
-            if media_type not in ALLOWLISTED_MEDIA_TYPES:
-                continue
-            items.append((media_id, media_type))
-        return items
+        return _media_refs_from_data(body.get("data"))
 
     def _fetch_insights(
         self, media_id: str, *, budget: _InsightCallBudget
@@ -248,7 +316,7 @@ class GraphInstagramInsightsPort:
 
 
 class ComposioInstagramInsightsPort:
-    """Composio INSTAGRAM media list + insights. Captions and URLs are never requested."""
+    """Composio INSTAGRAM media list + insights. Owner output names each post."""
 
     def __init__(
         self,
@@ -268,17 +336,9 @@ class ComposioInstagramInsightsPort:
         budget = _InsightCallBudget.for_limit(capped)
         media_items = self._fetch_media_list(limit=capped, budget=budget)
         results: list[ContentInsight] = []
-        for media_id, media_type in media_items:
-            metrics = self._fetch_insights(media_id, budget=budget)
-            if metrics is None:
-                continue
-            results.append(
-                ContentInsight(
-                    media_id=media_id,
-                    media_type=media_type,
-                    **metrics,
-                )
-            )
+        for media in media_items:
+            metrics = self._fetch_insights(media.media_id, budget=budget)
+            results.append(_insight_from_media(media, metrics))
         return results
 
     def _execute(
@@ -335,7 +395,7 @@ class ComposioInstagramInsightsPort:
 
     def _fetch_media_list(
         self, *, limit: int, budget: _InsightCallBudget
-    ) -> list[tuple[str, str]]:
+    ) -> list[_MediaRef]:
         body = self._execute(
             COMPOSIO_GET_USER_MEDIA_TOOL,
             {
@@ -347,27 +407,7 @@ class ComposioInstagramInsightsPort:
         )
         if body is None:
             return []
-        data = body.get("data")
-        if not isinstance(data, list):
-            return []
-        items: list[tuple[str, str]] = []
-        for entry in data:
-            if not isinstance(entry, dict):
-                continue
-            raw_id = entry.get("id")
-            if isinstance(raw_id, int) and not isinstance(raw_id, bool):
-                raw_id = str(raw_id)
-            raw_type = entry.get("media_type")
-            if not isinstance(raw_id, str) or not isinstance(raw_type, str):
-                continue
-            media_id = raw_id.strip()
-            media_type = raw_type.strip().upper()
-            if not is_allowlisted_media_id(media_id):
-                continue
-            if media_type not in ALLOWLISTED_MEDIA_TYPES:
-                continue
-            items.append((media_id, media_type))
-        return items
+        return _media_refs_from_data(body.get("data"))
 
     def _fetch_insights(
         self, media_id: str, *, budget: _InsightCallBudget
@@ -563,20 +603,33 @@ def format_content_insights_line(
 def format_content_insights_detail(
     items: list[ContentInsight], *, total_signals: int = 0
 ) -> str:
-    """Per-post metrics for the owner agent tool (no captions or media URLs)."""
+    """Per-post metrics named to a real post. No anonymous view/reach totals."""
     if not items:
         return ""
     lines = [
-        f"Instagram: {len(items)} recent posts (newest first, API cap {_MAX_IG_INSIGHTS_LIMIT})."
+        (
+            f"Instagram: {len(items)} recent posts "
+            f"(newest first, from the API, cap {_MAX_IG_INSIGHTS_LIMIT}). "
+            "Each line is one post. No combined view/reach totals."
+        )
     ]
     for index, item in enumerate(items, start=1):
+        if not item.media_id.strip():
+            lines.append(f"{index}. media identity missing — cannot attach metrics.")
+            continue
+        hook = item.caption.strip() or "caption missing"
+        when = item.timestamp.strip() or "time missing"
+        link = item.permalink.strip() or "permalink missing"
+        account = item.account_kind.strip() or _UNLABELED_ACCOUNT
         parts: list[str] = []
         for name in _INSIGHT_METRICS:
             value = getattr(item, name, None)
             if value:
                 parts.append(f"{name}={value}")
-        metric_text = ", ".join(parts) if parts else "no metrics returned"
-        lines.append(f"{index}. {item.media_type} id={item.media_id}: {metric_text}")
+        metric_text = ", ".join(parts) if parts else "metrics missing from Insights"
+        lines.append(
+            f"{index}. {item.media_type} {hook} | {when} | {link} | {account}: {metric_text}"
+        )
     if total_signals:
         lines.append(f"Lead signals attributed to these posts: {total_signals}.")
     return "\n".join(lines)

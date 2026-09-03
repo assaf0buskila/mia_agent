@@ -584,8 +584,16 @@
     return p.toString();
   }
 
-  function fetchJson(url, opts) {
-    return fetch(url, Object.assign({ credentials: 'omit' }, opts || {})).then(function (r) {
+  function fetchJson(url, opts, timeoutMs) {
+    var options = Object.assign({ credentials: 'omit' }, opts || {});
+    if (
+      timeoutMs &&
+      typeof AbortSignal !== 'undefined' &&
+      typeof AbortSignal.timeout === 'function'
+    ) {
+      options.signal = AbortSignal.timeout(timeoutMs);
+    }
+    return fetch(url, options).then(function (r) {
       if (!r.ok) {
         var err = new Error('fail');
         err.status = r.status;
@@ -746,12 +754,18 @@
     form.append('file', blob, name);
     return fetchJson(
       api + '/v1/website/sessions/' + encodeURIComponent(sessionId) + '/voice',
-      { method: 'POST', body: form }
+      { method: 'POST', body: form },
+      25000
     );
   }
 
   function sendVoice(blob) {
-    if (busy || !sessionId || !blob || !blob.size) return;
+    if (busy || !blob || !blob.size) return;
+    if (!sessionId) {
+      status.textContent = MIC_ERR;
+      appendMsg('mia', MIC_ERR);
+      return;
+    }
     busy = true;
     status.textContent = '';
     appendMsg('user', 'הקלטה');
@@ -763,6 +777,7 @@
       .catch(function () {
         hideLoading();
         status.textContent = MIC_ERR;
+        appendMsg('mia', MIC_ERR);
       })
       .finally(function () {
         hideLoading();
@@ -808,9 +823,13 @@
     if (!rec && !recording) return;
     recording = false;
     mediaRecorder = null;
+    setMicLive(false);
     if (!rec) {
       stopTracks();
-      setMicLive(false);
+      if (send) {
+        status.textContent = MIC_ERR;
+        appendMsg('mia', MIC_ERR);
+      }
       return;
     }
     rec.ondataavailable = function (e) {
@@ -821,31 +840,40 @@
       var chunks = audioChunks;
       audioChunks = [];
       stopTracks();
-      setMicLive(false);
       if (!send) return;
       if (!chunks.length) {
         status.textContent = MIC_ERR;
+        appendMsg('mia', MIC_ERR);
         return;
       }
       var blob = new Blob(chunks, { type: chunks[0].type || 'audio/webm' });
       if (!blob.size) {
         status.textContent = MIC_ERR;
+        appendMsg('mia', MIC_ERR);
         return;
       }
       sendVoice(blob);
     };
     try {
-      if (rec.state !== 'inactive') rec.stop();
-      else rec.onstop();
+      if (rec.state !== 'inactive') {
+        if (typeof rec.requestData === 'function') rec.requestData();
+        rec.stop();
+      } else rec.onstop();
     } catch (err) {
       stopTracks();
-      setMicLive(false);
-      if (send) status.textContent = MIC_ERR;
+      if (send) {
+        status.textContent = MIC_ERR;
+        appendMsg('mia', MIC_ERR);
+      }
     }
   }
 
   function toggleRecord() {
-    if (busy || !sessionId) return;
+    if (busy) return;
+    if (!sessionId) {
+      status.textContent = MIC_ERR;
+      return;
+    }
     if (recording) {
       finishRecording(true);
       return;

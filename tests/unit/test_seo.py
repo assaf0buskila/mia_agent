@@ -64,6 +64,9 @@ def test_enrich_seo_ack_fake_appends_facts_and_website_line() -> None:
     assert "נתוני חיפוש (GSC)" in enriched
     assert "תנועה (GA4)" in enriched
     assert "ביקורת דף בית" in enriched
+    assert "numbers from the API" in enriched
+    assert "GA4 property" in enriched
+    assert "GSC" in enriched
     assert "המלצה:" in enriched
     assert len(outcomes) == 3
     assert all(outcome.status == "ok" for outcome in outcomes)

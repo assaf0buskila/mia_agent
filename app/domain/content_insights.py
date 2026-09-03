@@ -21,6 +21,10 @@ class ContentInsight(BaseModel):
     likes: str | None = None
     comments: str | None = None
     saved: str | None = None
+    caption: str = ""
+    timestamp: str = ""
+    permalink: str = ""
+    account_kind: str = ""
 
 
 class ContentInsightRecord(BaseModel):

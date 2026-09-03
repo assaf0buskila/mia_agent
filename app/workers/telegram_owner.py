@@ -4,13 +4,18 @@ Telegram retries slow webhooks. Owner turns (voice STT + LangGraph + Composio) c
 for minutes and must not block the HTTP worker that also serves /health and the website
 widget. The webhook claims the update, commits, returns 200, then runs here on a fresh
 DB session.
+
+Rapid owner texts debounce into one turn. A hung tool call must still produce a reply
+so Telegram never stays on read with silence.
 """
 
 from __future__ import annotations
 
+import asyncio
+
 from sqlalchemy.exc import SQLAlchemyError
 
-from app.api.inbound_common import event_conversation_id
+from app.api.inbound_common import event_conversation_id, outbound_reply
 from app.core.config import get_settings
 from app.core.logging import log_comm
 from app.db.session import get_session_factory
@@ -26,6 +31,59 @@ from app.integrations.sheets import build_sheets_port
 from app.integrations.transcribe import TranscriptionPort
 from app.surfaces.crm import build_contacts_crm
 from app.surfaces.owner import run_owner_loop
+from app.surfaces.turn_coalesce import (
+    COALESCE_WAIT_S,
+    FAIL_REPLY,
+    HANG_REPLY,
+    OWNER_TURN_TIMEOUT_S,
+    claim_burst,
+    enqueue_turn,
+    merge_claimed_items,
+    take_if_still_pending,
+)
+
+
+def _inbound_from_work(work: dict[str, str]) -> dict[str, str]:
+    return {
+        "id": work["id"],
+        "from": work["from"],
+        "chat_id": work.get("chat_id") or work["from"],
+        "message_id": work.get("message_id") or "",
+        "text": work.get("text") or "",
+        "source": work.get("source", ""),
+        "file_name": work.get("file_name", ""),
+        "stt_provider": work.get("stt_provider", ""),
+        "stt_model": work.get("stt_model", ""),
+        "language": work.get("language", ""),
+        "duration_ms": work.get("duration_ms", "0"),
+        "confidence": work.get("confidence", ""),
+        "stt_latency_ms": work.get("stt_latency_ms", "0"),
+    }
+
+
+def _mark_claimed(store: LeadStore, claimed: list[dict[str, str]], status: str) -> None:
+    for row in claimed:
+        event_id = row.get("id") or ""
+        if not event_id:
+            continue
+        try:
+            store.mark_webhook(provider="telegram", provider_event_id=event_id, status=status)
+        except KeyError:
+            continue
+
+
+async def _send_owner_notice(
+    *,
+    item: dict[str, str],
+    port: MessagePort,
+    text: str,
+) -> bool:
+    message = outbound_reply(item, text=text, channel=Channel.TELEGRAM)
+    try:
+        await port.send(message)
+        return True
+    except RuntimeError:
+        return False
 
 
 async def process_telegram_owner_update(
@@ -41,6 +99,7 @@ async def process_telegram_owner_update(
         _transcribe_telegram_voice,
     )
 
+    del envelope_kind
     settings = get_settings()
     owner_ids = settings.telegram_owner_user_id_set()
     session = get_session_factory()()
@@ -93,32 +152,56 @@ async def process_telegram_owner_update(
                 )
                 session.commit()
                 return
-        inbound = {
-            "id": work["id"],
-            "from": work["from"],
-            "chat_id": work.get("chat_id") or work["from"],
-            "message_id": work.get("message_id") or "",
-            "text": work.get("text") or "",
-            "source": work.get("source", ""),
-            "file_name": work.get("file_name", ""),
-            "stt_provider": work.get("stt_provider", ""),
-            "stt_model": work.get("stt_model", ""),
-            "language": work.get("language", ""),
-            "duration_ms": work.get("duration_ms", "0"),
-            "confidence": work.get("confidence", ""),
-            "stt_latency_ms": work.get("stt_latency_ms", "0"),
-        }
+        inbound = _inbound_from_work(work)
+        key = event_conversation_id(inbound)
+        enqueue_turn(key, inbound)
+        await asyncio.sleep(COALESCE_WAIT_S)
+        claimed = claim_burst(key, inbound["id"])
+        if claimed is None:
+            await asyncio.sleep(OWNER_TURN_TIMEOUT_S)
+            claimed = take_if_still_pending(key, inbound["id"])
+            if claimed is None:
+                return
+        merged = merge_claimed_items(claimed)
         sheets = build_sheets_port(settings)
         crm = build_contacts_crm(settings, sheets)
-        await run_owner_loop(
-            item=inbound,
-            store=store,
-            port=port,
-            settings=settings,
-            crm=crm,
-            gmail_port=build_gmail_port(settings),
-            owner_ids=owner_ids,
-        )
+        try:
+            await asyncio.wait_for(
+                run_owner_loop(
+                    item=merged,
+                    store=store,
+                    port=port,
+                    settings=settings,
+                    crm=crm,
+                    gmail_port=build_gmail_port(settings),
+                    owner_ids=owner_ids,
+                ),
+                timeout=OWNER_TURN_TIMEOUT_S,
+            )
+        except TimeoutError:
+            sent = await _send_owner_notice(item=merged, port=port, text=HANG_REPLY)
+            _mark_claimed(store, claimed, "sent" if sent else "failed")
+            session.commit()
+            return
+        except Exception:
+            sent = await _send_owner_notice(item=merged, port=port, text=FAIL_REPLY)
+            _mark_claimed(store, claimed, "sent" if sent else "failed")
+            session.commit()
+            log_comm(
+                channel=Channel.TELEGRAM.value,
+                provider="telegram",
+                actor_type="owner",
+                direction="in",
+                external_message_id=merged.get("id", ""),
+                conversation_id=event_conversation_id(merged),
+                policy_result="owner_turn_failed",
+                latency_ms=0,
+                success=False,
+                automation_mode=settings.automation_mode.value,
+            )
+            return
+        extras = [row for row in claimed if row.get("id") and row["id"] != merged.get("id")]
+        _mark_claimed(store, extras, "sent")
         session.commit()
     except SQLAlchemyError:
         session.rollback()
@@ -137,6 +220,10 @@ async def process_telegram_owner_update(
             success=False,
             automation_mode=settings.automation_mode.value,
         )
-        raise
+        try:
+            notice_item = _inbound_from_work(item)
+            await _send_owner_notice(item=notice_item, port=port, text=FAIL_REPLY)
+        except Exception:
+            pass
     finally:
         session.close()
