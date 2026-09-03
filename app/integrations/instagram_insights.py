@@ -643,8 +643,7 @@ def format_content_insights_line(
         )
     return (
         f"Instagram Insights, account {label}: "
-        f"{named} named posts of {n} (newest first). "
-        f"Lead signals attributed: {total_signals}."
+        f"תוכן: {named} פוסטים, לידים מתוכן {total_signals}."
     )
 
 

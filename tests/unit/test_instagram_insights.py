@@ -49,6 +49,10 @@ SAMPLE_ITEMS = [
     ContentInsight(
         media_id=MEDIA_ID_1,
         media_type="IMAGE",
+        caption="Launch hook",
+        timestamp="2026-09-01T10:00:00+0000",
+        permalink="https://instagram.com/p/abc",
+        account="assafweb",
         views="1200",
         reach="900",
         likes="45",
@@ -58,6 +62,10 @@ SAMPLE_ITEMS = [
     ContentInsight(
         media_id=MEDIA_ID_2,
         media_type="REELS",
+        caption="Reel hook",
+        timestamp="2026-09-02T10:00:00+0000",
+        permalink="https://instagram.com/p/def",
+        account="assafweb",
         views="5000",
         reach="4200",
         likes="210",
@@ -242,6 +250,8 @@ def test_graph_port_retries_supported_metrics_individually_after_mixed_batch_rej
             return httpx.Response(
                 200, json={"data": [{"id": MEDIA_ID_1, "media_type": "IMAGE"}]}
             )
+        if not request.url.path.endswith("/insights"):
+            return httpx.Response(200, json={"username": "assafweb"})
         metric = str(request.url.params.get("metric") or "")
         requested_metrics.append(metric)
         if "," in metric:
@@ -289,6 +299,8 @@ def test_graph_port_terminal_insight_failure_stops_without_metric_fallback(
             return httpx.Response(
                 200, json={"data": [{"id": MEDIA_ID_1, "media_type": "IMAGE"}]}
             )
+        if not request.url.path.endswith("/insights"):
+            return httpx.Response(200, json={"username": "assafweb"})
         return httpx.Response(status_code, json={"error": {"message": "provider down"}})
 
     port = GraphInstagramInsightsPort(
@@ -301,7 +313,7 @@ def test_graph_port_terminal_insight_failure_stops_without_metric_fallback(
     with pytest.raises(AdapterHttpError) as exc_info:
         port.list_recent_insights(limit=1)
     assert exc_info.value.status_code == status_code
-    assert len(calls) == 2
+    assert len(calls) == 3
 
 
 @pytest.mark.parametrize(
@@ -324,6 +336,8 @@ def test_graph_port_stops_mixed_metric_fallback_on_terminal_400_provider_error(
             return httpx.Response(
                 200, json={"data": [{"id": MEDIA_ID_1, "media_type": "IMAGE"}]}
             )
+        if not request.url.path.endswith("/insights"):
+            return httpx.Response(200, json={"username": "assafweb"})
         metric = str(request.url.params.get("metric") or "")
         requested_metrics.append(metric)
         if "," in metric:
@@ -343,7 +357,7 @@ def test_graph_port_stops_mixed_metric_fallback_on_terminal_400_provider_error(
         port.list_recent_insights(limit=1)
     assert exc_info.value.status_code == expected_status
     assert requested_metrics == ["views,reach,likes,comments,saved", "views"]
-    assert calls == 3
+    assert calls == 4
 
 
 def test_graph_port_does_not_retry_generic_metric_error_individually() -> None:
@@ -354,6 +368,8 @@ def test_graph_port_does_not_retry_generic_metric_error_individually() -> None:
             return httpx.Response(
                 200, json={"data": [{"id": MEDIA_ID_1, "media_type": "IMAGE"}]}
             )
+        if not request.url.path.endswith("/insights"):
+            return httpx.Response(200, json={"username": "assafweb"})
         metric = str(request.url.params.get("metric") or "")
         requested_metrics.append(metric)
         return httpx.Response(400, json={"error": {"message": "unsupported metric"}})

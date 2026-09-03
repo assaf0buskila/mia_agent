@@ -40,7 +40,21 @@ _TOOLKIT_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
         ),
     ),
     ("Instagram", ("instagram", "אינסטגרם")),
-    ("CRM", ("contacts", "crm", "איש קשר", "sheets", "sheet", "שיט", "האקסל", "אקסל", "excel", "גוגל שיטס")),
+    (
+        "CRM",
+        (
+            "contacts",
+            "crm",
+            "איש קשר",
+            "sheets",
+            "sheet",
+            "שיט",
+            "האקסל",
+            "אקסל",
+            "excel",
+            "גוגל שיטס",
+        ),
+    ),
 )
 
 _lock = threading.Lock()

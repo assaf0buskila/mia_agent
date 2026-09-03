@@ -14,6 +14,7 @@ from app.integrations.telegram_format import MAX_MESSAGE_CHARS, split_message
 
 _TELEGRAM_API = "https://api.telegram.org"
 # getFile downloads are capped at 20MB by Telegram; stay under it.
+_MAX_AUDIO_BYTES = 16_000_000
 _MAX_PHOTO_BYTES = 5_000_000
 _SUPPORTED_IMAGE_MIME_TYPES = frozenset(
     {"image/jpeg", "image/jpg", "image/png", "image/webp", "image/gif"}

@@ -91,7 +91,7 @@ from app.domain.owner_status import format_owner_status_ack
 from app.domain.owner_weeklies import apply_owner_weekly
 from app.domain.seo import enrich_seo_ack
 from app.domain.tools import AdapterHttpError
-from app.domain.two_state import may_run, state_for
+from app.domain.two_state import is_sheets_health_ask, may_run, state_for
 from app.domain.whatsapp_drafts import draft_whatsapp_for_assaf
 from app.integrations.calendar import (
     CalendarAgendaPort,
@@ -135,7 +135,6 @@ from app.integrations.search_console import (
 )
 from app.integrations.seo_audit import SeoAuditPort, build_seo_audit_port
 from app.integrations.sheets import DisabledSheetsPort, SheetsPort, build_sheets_port
-from app.domain.two_state import is_sheets_health_ask
 from app.surfaces.crm import (
     ACTIVITY_TAB,
     CONTACTS_TAB,

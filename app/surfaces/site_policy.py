@@ -82,7 +82,10 @@ OFF_TOPIC_JOKE_OTHER_EN = "I left my crystal ball at home."
 ANSWER_HE = f"{ASSAFWEB_HOOK_HE} ספרו עוד על מה שצריך לפתור."
 ANSWER_EN = f"{ASSAFWEB_HOOK_EN} Tell me more about what you need solved."
 TOOL_NONE_HE = "עניתי ממה שפורסם ב-AssafWeb. אין לי בדיקת תנועה או סימון מפה מכאן."
-TOOL_NONE_EN = "I answered from published AssafWeb facts. I do not invent traffic numbers from here."
+TOOL_NONE_EN = (
+    "I answered from published AssafWeb facts. "
+    "I do not invent traffic numbers from here."
+)
 NO_METRIC_HE = "אין לי את המספר הזה מכאן. אני לא ממציאה מדדים."
 NO_METRIC_EN = "I do not have that number from here. I do not invent metrics."
 VOICE_PRODUCT_HE = (
@@ -93,8 +96,8 @@ VOICE_PRODUCT_EN = (
     "Yes. AssafWeb builds a voice agent for your site: visitors speak, "
     "Mia turns that into text and answers. Tell me what the site needs to cover."
 )
-WIDGET_STT_HE = "אם ההקלטה כאן לא נקלטה, כתבו."
-WIDGET_STT_EN = "If the recording here did not capture, type."
+WIDGET_STT_HE = "כן. קול כאן הופך לטקסט. אם ההקלטה לא נקלטה, כתבו."
+WIDGET_STT_EN = "Yes. Voice here becomes text. If the recording did not capture, type."
 
 _WEATHER = (
     "weather",
@@ -221,6 +224,9 @@ _VOICE_Q = (
     "understand voice",
     "שומעת אותי",
     "מבינה אותי כאן",
+    "מבינים קול",
+    "מבינה קול",
+    "אתם מבינים קול",
     "איך מקליטים כאן",
     "ההקלטה לא נקלטה",
     "לא נקלטה ההקלטה",
