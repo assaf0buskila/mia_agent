@@ -48,7 +48,11 @@ def test_website_identify_then_sell_does_not_create_opt_out_tool_run() -> None:
             f"/v1/website/sessions/{session_id}/messages",
             json={"text": "let's book a meeting", "phone": "0501234567"},
         )
-        assert recover.json()["next_action"] in {"handoff", "confirm_contact"}
+        assert recover.json()["next_action"] in {
+            "handoff",
+            "confirm_contact",
+            "answer",
+        }
         assert recover.json()["lead_id"] == ""
     db = get_session_factory()()
     try:

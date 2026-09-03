@@ -30,9 +30,14 @@ from app.domain.events import (
     transcription_outcome,
 )
 from app.domain.handoff import click_to_chat_url
+from app.domain.tools import AdapterHttpError
 from app.integrations.base import MessagePort
 from app.integrations.sheets import SheetsPort
-from app.integrations.transcribe import TranscriptionPort, TranscriptResult
+from app.integrations.transcribe import (
+    TranscriptionError,
+    TranscriptionPort,
+    TranscriptResult,
+)
 from app.surfaces.crm import build_contacts_crm
 from app.surfaces.site import (
     ping_assaf_async,
@@ -637,6 +642,8 @@ async def post_voice(
                 whatsapp_url=out.whatsapp_url,
                 heard="",
             )
+        except (TranscriptionError, AdapterHttpError) as exc:
+            raise HTTPException(status_code=503, detail="transcription unavailable") from exc
     finally:
         del audio
     text = (result.text or "").strip()

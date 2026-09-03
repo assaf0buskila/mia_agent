@@ -9,7 +9,7 @@ from app.api.website import _MAX_AUDIO_BYTES
 from app.db.models import CanonicalEventRow
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
-from app.integrations.transcribe import FakeTranscriptionPort
+from app.integrations.transcribe import FakeTranscriptionPort, TranscriptionError
 from app.main import app
 from fastapi.testclient import TestClient
 from sqlalchemy import select
@@ -89,6 +89,26 @@ def test_website_voice_transcribes_then_sales_reply() -> None:
             assert "hi" not in voice_tools[0].payload_json
         finally:
             db.close()
+    finally:
+        _clear_stt()
+
+
+def test_website_voice_transcription_error_is_503_not_a_hang() -> None:
+    class BoomTranscriptionPort:
+        async def transcribe(self, **kwargs):
+            del kwargs
+            raise TranscriptionError("unavailable")
+
+    app.dependency_overrides[get_transcription_port] = lambda: BoomTranscriptionPort()
+    try:
+        with TestClient(app) as client:
+            session_id = client.post("/v1/website/sessions").json()["session_id"]
+            reply = client.post(
+                f"/v1/website/sessions/{session_id}/voice",
+                files={"file": _AUDIO},
+            )
+            assert reply.status_code == 503
+            assert reply.json()["detail"] == "transcription unavailable"
     finally:
         _clear_stt()
 

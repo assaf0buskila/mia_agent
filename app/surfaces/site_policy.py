@@ -199,6 +199,22 @@ _NEED = (
 )
 _GREETING = ("hi", "hey", "hello", "היי", "שלום", "בוקר טוב", "ערב טוב")
 _STOP_SELL = ("not interested", "לא מעוניין", "לא מעוניינים", "לא צריך")
+_VOICE_Q = (
+    "voice",
+    "קול",
+    "הקלטה",
+    "דיבור",
+    "שומעת",
+    "שומע",
+    "מבינה קול",
+    "מבינים קול",
+    "understand voice",
+)
+VOICE_Q_HE = (
+    "כן. אפשר להקליט כאן, אני ממירה לטקסט וממשיכה משם. "
+    "אם ההקלטה לא נקלטה, נסו שוב או כתבו."
+)
+VOICE_Q_EN = VOICE_Q_HE
 
 
 @dataclass(frozen=True)
@@ -294,6 +310,8 @@ def classify_site_intent(text: str) -> str:
         return "stop_sell"
     if _is_greeting(text):
         return "greeting"
+    if _has(blob, _VOICE_Q):
+        return "voice_q"
     if _has(blob, _NEED):
         return "need"
     return "other"
@@ -528,6 +546,17 @@ def decide_site_turn(
             already_pinged=already_pinged,
             stop_selling=selling_stopped,
             complaint=False,
+        )
+
+    if intent == "voice_q":
+        return SiteDecision(
+            reply=line(VOICE_Q_HE, VOICE_Q_EN, language),
+            action="answer",
+            ask_contact=False,
+            write_sheet=False,
+            ping_assaf=False,
+            stop_selling=selling_stopped,
+            confirm_contact=False,
         )
 
     if intent in {"need", "other"}:

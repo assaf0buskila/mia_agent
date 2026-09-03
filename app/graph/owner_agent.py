@@ -53,7 +53,7 @@ from app.tools.registries.owner_tools import (
     tool_definitions,
 )
 
-PROMPT_VERSION = "owner_agent_v7"
+PROMPT_VERSION = "owner_agent_v8"
 
 # 8 steps, tools dropped on the last, gives 7 tool-calling turns: enough for
 # search -> read -> second source -> read -> answer with headroom, without leaving a
@@ -94,7 +94,14 @@ SYSTEM_PROMPT = (
     "and where they stand.\n"
     "- seo_snapshot: AssafWeb search and site traffic — Google Search Console, GA4, and a "
     "homepage SEO audit. Use for SEO, organic search, Search Console, GA4, website "
-    "traffic, rankings, CTR, impressions. Not Instagram and not paid Meta ads.\n"
+    "traffic, rankings, CTR, impressions. Not Instagram and not paid Meta ads. "
+    "When you report GA/GSC numbers, include property or GSC site, the date range, "
+    "and that the numbers came from the API. Missing metrics stay missing. "
+    "JSON-LD is unknown unless a homepage fetch returned it.\n"
+    "ASKED TOOLKIT FIRST: if Assaf asked for GA, GSC, Search Console, or site traffic, "
+    "answer that toolkit first. Do not open with Instagram or CRM. A follow-up like "
+    "תמשיך / continue / עוד נתונים continues the last asked toolkit in RECENT "
+    "CONVERSATION, not an older Instagram thread.\n"
     "- linkedin_snapshot: the pinned summary of Assaf's own LinkedIn profile. For another "
     "active LinkedIn read, use the Composio search/schema/read path. For a non-destructive "
     "LinkedIn side effect, use its exact schema and the approval proposal tool; never use "

@@ -226,6 +226,25 @@ def test_site_writes_crm_after_phone_or_email_and_offers_whatsapp() -> None:
     assert "2026-09-02" in crm.cells_written[0]
 
 
+def test_site_answers_voice_question_before_identity() -> None:
+    crm = FakeContactsCrm()
+    settings = Settings()
+    book = site_book()
+    book.open("web_voiceq1")
+    turn = run_site_turn(
+        session_id="web_voiceq1",
+        text="אתם מבינים קול?",
+        settings=settings,
+        crm=crm,
+        book=book,
+    )
+    assert turn.next_action == "answer"
+    assert "הקליט" in turn.reply or "קול" in turn.reply
+    assert turn.crm_wrote is False
+    assert turn.whatsapp_url is None
+    assert crm.written_tabs() == ()
+
+
 def test_site_does_not_invent_prices() -> None:
     crm = FakeContactsCrm()
     settings = Settings()
