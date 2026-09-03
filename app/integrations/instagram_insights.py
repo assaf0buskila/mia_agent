@@ -40,7 +40,6 @@ from app.integrations.sheets import SheetsPort, maybe_mirror_content_insights
 _COMPOSIO_EXECUTE_BASE = "https://backend.composio.dev/api/v3.1/tools/execute"
 _MEDIA_LIST_FIELDS = "id,media_type,caption,timestamp,permalink"
 _PERMALINK_HOSTS = frozenset({"instagram.com", "www.instagram.com"})
-_UNLABELED_ACCOUNT = "unlabeled (playground vs personal unknown)"
 
 _INSIGHT_METRICS = ("views", "reach", "likes", "comments", "saved")
 _ALLOWED_GRAPH_HOSTS = frozenset({"graph.instagram.com", "graph.facebook.com"})
@@ -52,7 +51,8 @@ _MAX_IG_INSIGHTS_LIMIT = 25
 
 def _insight_budget_for_limit(limit: int) -> int:
     capped = max(1, min(int(limit), _MAX_IG_INSIGHTS_LIMIT))
-    return 1 + capped * 6
+    # Username lookup + media list + up to six insight calls per post.
+    return 2 + capped * 6
 
 
 class InstagramInsightBudgetExceeded(AdapterHttpError):
@@ -220,13 +220,13 @@ class GraphInstagramInsightsPort:
         capped = max(1, min(limit, _MAX_IG_INSIGHTS_LIMIT))
         budget = _InsightCallBudget.for_limit(capped)
         try:
+            username = self._fetch_account_username(budget=budget)
+            account = _account_label(username or self._account_id)
             media_items = self._fetch_media_list(limit=capped, budget=budget)
             results: list[ContentInsight] = []
             for media in media_items:
                 metrics = self._fetch_insights(media.media_id, budget=budget)
-                results.append(
-                    _insight_from_media(media, metrics, account=self._account_id)
-                )
+                results.append(_insight_from_media(media, metrics, account=account))
             return results
         except (
             httpx.HTTPError,
@@ -236,6 +236,15 @@ class GraphInstagramInsightsPort:
             OSError,
         ):
             return []
+
+    def _fetch_account_username(self, *, budget: _InsightCallBudget) -> str:
+        url = self._base_url(self._account_id)
+        response = self._request_json(url, {"fields": "username"}, budget=budget)
+        body = response.body
+        if response.status_code >= 400 or not isinstance(body, dict):
+            return ""
+        name = body.get("username")
+        return name.strip() if isinstance(name, str) and name.strip() else ""
 
     def _base_url(self, path: str) -> str:
         return f"https://{self._graph_host}/{self._graph_version}/{path}"
@@ -339,10 +348,11 @@ class ComposioInstagramInsightsPort:
         capped = max(1, min(limit, _MAX_IG_INSIGHTS_LIMIT))
         budget = _InsightCallBudget.for_limit(capped)
         media_items = self._fetch_media_list(limit=capped, budget=budget)
+        account = _account_label(self._account_id)
         results: list[ContentInsight] = []
         for media in media_items:
             metrics = self._fetch_insights(media.media_id, budget=budget)
-            results.append(_insight_from_media(media, metrics, account=self._account_id))
+            results.append(_insight_from_media(media, metrics, account=account))
         return results
 
     def _execute(
@@ -595,52 +605,88 @@ def _metric_value(raw: object) -> str | None:
     return None
 
 
+def _account_label(raw: str) -> str:
+    text = raw.strip()
+    if not text or text in {"missing", "me"}:
+        return "account missing from API"
+    if text.isdigit():
+        return f"account id {text}, username missing from API"
+    return text
+
+
+def _post_identity(item: ContentInsight) -> tuple[str, str, str, bool]:
+    hook = item.caption.strip()
+    when = item.timestamp.strip()
+    link = item.permalink.strip()
+    identified = bool(hook or link)
+    return (
+        hook or "caption missing",
+        when or "date missing from API",
+        link or "permalink missing from API",
+        identified,
+    )
+
+
 def format_content_insights_line(
     items: list[ContentInsight], *, total_signals: int = 0
 ) -> str:
     n = len(items)
     if n == 0:
         return ""
-    account = next((item.account for item in items if item.account), "missing")
+    account = next((item.account for item in items if item.account), "")
+    label = _account_label(account)
+    named = sum(1 for item in items if item.caption.strip() or item.permalink.strip())
+    if named == 0:
+        return (
+            f"Instagram Insights: API omitted post identity for {n} items "
+            f"on {label}. No anonymous view counts."
+        )
     return (
-        f"Instagram Insights — account {account}: "
-        f"תוכן: {n} פוסטים, לידים מתוכן {total_signals}."
+        f"Instagram Insights, account {label}: "
+        f"{named} named posts of {n} (newest first). "
+        f"Lead signals attributed: {total_signals}."
     )
 
 
 def format_content_insights_detail(
     items: list[ContentInsight], *, total_signals: int = 0
 ) -> str:
-    """Per-post metrics. Tool name, account, and post name before any number."""
+    """Per-post metrics. Caption, date, permalink, and account before any number."""
     if not items:
         return ""
-    account = next((item.account for item in items if item.account), "missing")
+    account = next((item.account for item in items if item.account), "")
+    label = _account_label(account)
     lines = [
         (
-            f"Instagram Insights — account {account}: "
-            f"{len(items)} named posts (newest first, from the API, cap {_MAX_IG_INSIGHTS_LIMIT}). "
-            "Each line is one post. No combined view/reach totals."
+            f"Instagram Insights, account {label}: "
+            f"{len(items)} posts (newest first, from the API, cap {_MAX_IG_INSIGHTS_LIMIT}). "
+            "Each line is one post. Caption, date, permalink, and account before metrics. "
+            "No combined view/reach totals. If identity is missing, metrics stay off."
         )
     ]
     for index, item in enumerate(items, start=1):
         if not item.media_id.strip():
-            lines.append(f"{index}. media identity missing — cannot attach metrics.")
+            lines.append(f"{index}. media identity missing. Cannot attach metrics.")
             continue
-        hook = item.caption.strip() or "caption missing"
-        when = item.timestamp.strip() or "time missing"
-        link = item.permalink.strip() or "permalink missing"
-        kind = item.account_kind.strip() or _UNLABELED_ACCOUNT
+        hook, when, link, identified = _post_identity(item)
+        item_account = _account_label(item.account.strip() or account)
+        if not identified:
+            lines.append(
+                f"{index}. API omitted post identity (caption and permalink) "
+                f"on {item_account}. Cannot attach metrics."
+            )
+            continue
         parts: list[str] = []
         for name in _INSIGHT_METRICS:
             value = getattr(item, name, None)
             if value:
                 parts.append(f"{name}={value}")
         metric_text = ", ".join(parts) if parts else "metrics missing from Insights"
-        post_name = item.post_name.strip() or item.media_id
-        item_account = item.account.strip() or account
+        post_name = item.post_name.strip() or hook
+        extra = f" | {item.account_kind.strip()}" if item.account_kind.strip() else ""
         lines.append(
-            f"{index}. post {post_name} on account {item_account} "
-            f"({item.media_type}) {hook} | {when} | {link} | {kind}: {metric_text}"
+            f"{index}. post {post_name} on {item_account} "
+            f"({item.media_type}) {hook} | {when} | {link}{extra}: {metric_text}"
         )
     if total_signals:
         lines.append(f"Lead signals attributed to these posts: {total_signals}.")

@@ -355,7 +355,7 @@ def _published_facts_for_turn(
     if voice_failed or not text.strip():
         return (), ()
     intent = classify_site_intent(text)
-    if intent not in {"price", "need", "other", "metric"}:
+    if intent not in {"price", "need", "other", "metric", "voice_product"}:
         return (), ()
     try:
         from app.brain.context import retrieve_knowledge
@@ -370,7 +370,10 @@ def _published_facts_for_turn(
         )
     except Exception:
         return (), ()
-    return facts_from_knowledge_hits(hits), (KNOWLEDGE_TOOL,)
+    facts = facts_from_knowledge_hits(hits)
+    if not facts:
+        return (), ()
+    return facts, (KNOWLEDGE_TOOL,)
 
 
 async def _maybe_ping_owner(
@@ -642,8 +645,27 @@ async def post_voice(
                 whatsapp_url=out.whatsapp_url,
                 heard="",
             )
-        except (TranscriptionError, AdapterHttpError) as exc:
-            raise HTTPException(status_code=503, detail="transcription unavailable") from exc
+        except (TranscriptionError, AdapterHttpError):
+            out = process_website_message(
+                store,
+                session_id=session_id,
+                text="",
+                settings=settings,
+                sheets=sheets,
+                voice_failed=True,
+            )
+            await _maybe_ping_owner(
+                session_id=session_id,
+                settings=settings,
+                owner_port=owner_port,
+            )
+            return VoiceMessageOut(
+                lead_id=out.lead_id,
+                next_action=out.next_action,
+                message=out.message,
+                whatsapp_url=out.whatsapp_url,
+                heard="",
+            )
     finally:
         del audio
     text = (result.text or "").strip()

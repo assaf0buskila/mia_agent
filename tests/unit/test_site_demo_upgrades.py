@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from app.api.deps import get_transcription_port
 from app.core.config import Settings
 from app.integrations.transcribe import FakeTranscriptionPort
@@ -11,6 +13,7 @@ from app.surfaces.site import reset_site_book, run_site_turn, site_book, site_op
 from app.surfaces.site_policy import (
     KNOWLEDGE_TOOL,
     SITE_ACTIONS,
+    VISITOR_TOOL_LEAKS,
     PublishedFact,
     append_burst,
     classify_site_intent,
@@ -18,6 +21,7 @@ from app.surfaces.site_policy import (
     facts_from_knowledge_hits,
     pick_language,
     published_price_line,
+    scrub_visitor_reply,
     tool_status_reply,
 )
 from fastapi.testclient import TestClient
@@ -60,6 +64,16 @@ def _turn(
         now=now,
         voice_failed=voice_failed,
     )
+
+
+def _assert_no_visitor_tool_leak(text: str) -> None:
+    lowered = text.lower()
+    for leak in VISITOR_TOOL_LEAKS:
+        assert leak.lower() not in lowered
+    assert re.search(r"(^|[\s.])רץ(\s|$)", text) is None
+    assert ".Search Console" not in text
+    assert "—" not in text
+    assert "אפשר להקליט כאן" not in text
 
 
 def setup_function() -> None:
@@ -289,9 +303,8 @@ def test_stitch_site_message_bursts_into_one_thought() -> None:
 def test_tool_honesty_names_what_ran_and_never_invents_jsonld_or_gsc() -> None:
     none = _turn("web_tool1", "Did you run a JSON-LD or GSC check?")
     assert none.next_action == "tool_status"
-    assert "No tool ran" in none.reply or "לא רץ כאן כלי" in none.reply
-    assert "JSON-LD" in none.reply
-    assert "Search Console" in none.reply
+    assert none.reply
+    _assert_no_visitor_tool_leak(none.reply)
     assert "clicks" not in none.reply.lower()
     assert "impressions" not in none.reply.lower()
     ran = _turn(
@@ -299,8 +312,7 @@ def test_tool_honesty_names_what_ran_and_never_invents_jsonld_or_gsc() -> None:
         "what tool did you run",
         tools_ran=(KNOWLEDGE_TOOL,),
     )
-    assert KNOWLEDGE_TOOL in ran.reply
-    assert "JSON-LD" in ran.reply or "Search Console" in ran.reply
+    _assert_no_visitor_tool_leak(ran.reply)
     foreign = facts_from_knowledge_hits(
         [_Hit("secret price 12", "https://other.example/gsc", "gsc")]
     )
@@ -310,7 +322,8 @@ def test_tool_honesty_names_what_ran_and_never_invents_jsonld_or_gsc() -> None:
     )
     assert len(keep) == 1
     named = tool_status_reply((), "en")
-    assert "No tool ran" in named
+    _assert_no_visitor_tool_leak(named)
+    assert "invent" in named.lower() or "published" in named.lower()
     assert decide_site_turn(
         thought="check my search console clicks",
         language="en",
@@ -350,13 +363,13 @@ def test_greeting_with_number_confirms_once_and_never_silent() -> None:
     toolkit = _turn("web_hi_num", "did you run a search console check?")
     assert toolkit.next_action == "tool_status"
     assert toolkit.reply
-    assert "Search Console" in toolkit.reply
+    _assert_no_visitor_tool_leak(toolkit.reply)
 
 
 def test_toolkit_question_is_answered_before_weather_or_sell() -> None:
     mixed = _turn("web_tk1", "What's the weather and did you run a JSON-LD check?")
     assert mixed.next_action == "tool_status"
-    assert "JSON-LD" in mixed.reply
+    _assert_no_visitor_tool_leak(mixed.reply)
     assert mixed.reply
     rain = _turn("web_tk2", "how much rain tomorrow")
     assert rain.next_action == "off_topic"
@@ -367,9 +380,10 @@ def test_toolkit_question_is_answered_before_weather_or_sell() -> None:
 def test_session_names_the_tool_that_already_ran() -> None:
     first = _turn("web_ran1", "צריכים אתר", tools_ran=(KNOWLEDGE_TOOL,))
     assert first.reply
+    _assert_no_visitor_tool_leak(first.reply)
     asked = _turn("web_ran1", "what tool did you run")
     assert asked.next_action == "tool_status"
-    assert KNOWLEDGE_TOOL in asked.reply
+    _assert_no_visitor_tool_leak(asked.reply)
 
 
 def test_missing_metrics_are_allowed_never_invented() -> None:
@@ -421,3 +435,39 @@ def test_site_path_has_no_leads_studio_gmail_or_social() -> None:
     assert LiveSettings().gmail_send is False
     assert LiveSettings().auto_reply_instagram is False
     assert LiveSettings().meta_write is False
+
+
+def test_visitor_reply_scrubs_live_tool_leak_and_rtl_period() -> None:
+    leaked = (
+        "ב-AssafWeb אסף בונה אתרים. "
+        "רץ knowledge_search. לא רץ כלי Search Console או JSON-LD."
+        "\n.Search Console או JSON-LD"
+    )
+    cleaned = scrub_visitor_reply(leaked)
+    assert "AssafWeb" in cleaned
+    _assert_no_visitor_tool_leak(cleaned)
+    turn = _turn("web_leak1", "היי מיה אני מעוניין בשירותים שהאתר מציע")
+    _assert_no_visitor_tool_leak(turn.reply)
+    empty_facts = _turn(
+        "web_leak2",
+        "Did you run a JSON-LD or Search Console check?",
+        tools_ran=(),
+        facts=(),
+    )
+    _assert_no_visitor_tool_leak(empty_facts.reply)
+    assert "traffic" not in empty_facts.reply.lower() or "invent" in empty_facts.reply.lower()
+
+
+def test_voice_agent_product_is_sold_not_widget_stt() -> None:
+    he = _turn("web_va1", "אני צריך סוכן קולי לאתר שלי")
+    assert classify_site_intent("אני צריך סוכן קולי לאתר שלי") == "voice_product"
+    assert he.next_action == "answer"
+    assert "סוכן קולי" in he.reply
+    assert "AssafWeb" in he.reply or "ב-AssafWeb" in he.reply
+    _assert_no_visitor_tool_leak(he.reply)
+    en = _turn("web_va2", "I need a voice agent for my site")
+    assert "voice agent" in en.reply.lower()
+    assert "record here" not in en.reply.lower()
+    fail = _turn("web_va3", "", voice_failed=True)
+    assert fail.next_action == "voice_fail"
+    assert "כתבו" in fail.reply or "type" in fail.reply.lower()

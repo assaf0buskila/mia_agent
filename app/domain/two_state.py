@@ -12,6 +12,16 @@ from app.capabilities.types import Principal
 
 STILL_CHECKING = "still checking"
 TOOL_TIMEOUT_SECONDS = 12
+TOOL_RECOVERY_SECONDS = 16
+SLOW_HOUSE_TOOLS = frozenset(
+    {
+        "crm_search",
+        "crm_upsert",
+        "sheets_read",
+        "sheets_list_tabs",
+        "instagram_insights",
+    }
+)
 
 OWNER_HOUSE_TOOLS: frozenset[str] = frozenset(
     {
@@ -85,13 +95,29 @@ _IDENTITY_ACTIONS: frozenset[str] = frozenset(
     }
 )
 
+_SHEETS_NEEDLES: tuple[str, ...] = (
+    "google sheets",
+    "google sheet",
+    "גוגל שיטס",
+    "גוגל שיט",
+    "האקסל",
+    "אקסל",
+    "excel",
+    "contacts",
+    "crm",
+    "שיטס",
+    "שיט",
+    "sheets",
+    "sheet",
+)
+
 _TOOLKIT_NEEDLES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("instagram", ("instagram", "אינסטגרם", "ig ", " ריל", "reel", "פוסט")),
     ("gmail", ("gmail", "מייל", "inbox", "דואר")),
     ("calendar", ("יומן", "calendar", "פגישה", "agenda")),
     ("gsc", ("search console", "gsc", "קונסולת חיפוש", "impressions")),
     ("ga4", ("ga4", "analytics", "אנליטיקס", "traffic", "תנועה")),
-    ("sheets", ("שיט", "sheet", "contacts", "crm")),
+    ("sheets", _SHEETS_NEEDLES),
     ("linkedin", ("linkedin", "לינקדאין")),
     ("whatsapp", ("whatsapp", "וואטסאפ", "ווטסאפ")),
 )
@@ -136,6 +162,24 @@ def asked_toolkit(text: str) -> str:
         if any(needle in blob or needle in text for needle in needles):
             return toolkit
     return ""
+
+
+def is_sheets_alias(text: str) -> bool:
+    """sheets, Google sheets, גוגל שיטס, האקסל, Contacts, CRM are the locked CRM."""
+    return asked_toolkit(text) == "sheets"
+
+
+def is_sheets_health_ask(text: str) -> bool:
+    """First ask about whether the locked Sheet works, not a named contact lookup."""
+    stripped = text.strip().strip("?!.").strip()
+    if not stripped:
+        return True
+    if not is_sheets_alias(stripped):
+        return False
+    blob = f"{stripped} {stripped.casefold()}"
+    if any(mark in blob for mark in ("עובד", "working", "connected", "מחובר", "עדיין")):
+        return True
+    return len(stripped.split()) <= 3
 
 
 def say_tool_before_numbers(tool: str, body: str) -> str:

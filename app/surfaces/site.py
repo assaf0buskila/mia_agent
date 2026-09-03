@@ -246,7 +246,7 @@ def run_site_turn(
 
 
 def _looks_like_need(text: str) -> bool:
-    return classify_site_intent(text) in {"need", "ask_assaf", "other"}
+    return classify_site_intent(text) in {"need", "ask_assaf", "other", "voice_product"}
 
 
 def _contact_from_session(session: SiteSession) -> ContactRecord:

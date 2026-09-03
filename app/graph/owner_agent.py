@@ -43,7 +43,13 @@ from typing import Any, NamedTuple
 
 from app.brain.context import BrainContext, render_context_block
 from app.domain.memory import ConversationTurn, render_transcript
-from app.domain.two_state import STILL_CHECKING, TOOL_TIMEOUT_SECONDS, asked_toolkit
+from app.domain.two_state import (
+    SLOW_HOUSE_TOOLS,
+    STILL_CHECKING,
+    TOOL_RECOVERY_SECONDS,
+    TOOL_TIMEOUT_SECONDS,
+    asked_toolkit,
+)
 from app.integrations.llm_client import (
     LlmClient,
     LlmError,
@@ -110,7 +116,10 @@ SYSTEM_PROMPT = (
     "LinkedIn side effect, use its exact schema and the approval proposal tool; never use "
     "delete/remove/revoke or direct-message tools.\n"
     "- instagram_insights: organic Instagram post performance (views, reach, likes). "
-    "Default 20 recent posts, max 25. Not Search Console, not GA4, not paid ads.\n"
+    "Default 20 recent posts, max 25. Not Search Console, not GA4, not paid ads. "
+    "Name the post (caption or first line), the date, the permalink, and which "
+    "account. Never list anonymous view counts. If the API omitted identity, say so. "
+    "Never invent metrics.\n"
     "- owner_system_audit: when Assaf asks to check everything, all connections, or "
     "which systems work, call this first. It runs the defined checks behind one tool "
     "call and returns an item-by-item result. Report exactly which item was checked, "
@@ -125,7 +134,10 @@ SYSTEM_PROMPT = (
     "You already have the ID. Search, upsert Contacts, append Activity. Never ask him "
     "for a Google Sheet URL. The workbook is always the CRM. Do not ask him to configure "
     "it. Tabs are Contacts and Activity only. No 01 Leads. No lead ids. No Lead ID "
-    "columns. No row without phone or email.\n"
+    "columns. No row without phone or email. "
+    "sheets, Google sheets, גוגל שיטס, האקסל, Contacts, and CRM are the same locked "
+    "workbook. On the first ask, call crm_search immediately. Do not wait for the "
+    "English brand name.\n"
     "- sheets_read / sheets_update / sheets_append: same locked workbook. Default read is "
     "Contacts!A1:N20. spreadsheet_id may be null. Never ask for a link. Never read or "
     "write 01 Leads.\n"
@@ -179,12 +191,18 @@ SYSTEM_PROMPT = (
     "on assafweb.com via search_knowledge.\n"
     "Never invent metrics, counts, or pipeline numbers. If you have no tool result, "
     "say you do not know. Missing is allowed. Inventing is not.\n"
-    "Say the tool name before any number. Instagram Insights must name the post and "
-    "the account. GSC and GA4 must include the date range.\n"
+    "Say the tool name before any number. Instagram Insights must name the post "
+    "(caption or first line), the date, the permalink, and the account. If the API "
+    "omitted identity, say so and do not invent view counts. GSC and GA4 must include "
+    "the date range.\n"
     "Answer the toolkit he asked about first. If he asked Instagram, do not lead "
     "with Gmail. Never seen-and-silent: if a tool ran, say what it returned or that "
     "it was empty.\n"
-    "If a tool is still running, say 'still checking'. Do not invent while you wait.\n"
+    "If a tool is still running, say 'still checking'. Do not invent while you wait. "
+    "When the tool returns, send the real Contacts + Activity result. Do not wait "
+    "for him to retype Google sheets.\n"
+    "Voice notes and images are the request. Transcribed speech is the message. "
+    "If he attached an image, use what you see. Do not answer as if nothing arrived.\n"
     "Calendar write only for a meeting near Tel Aviv, 09:00-17:00 Asia/Jerusalem, "
     "empty slot. Weather chats never become meetings. Else ask Assaf.\n"
     "Gmail is read and draft only. gmail_send stays off. LinkedIn is read, never post. "
@@ -258,7 +276,10 @@ def _run_tool_with_timeout(name: str, arguments: dict[str, Any], ctx: ToolContex
             done.set()
 
     threading.Thread(target=_run, daemon=True).start()
-    if not done.wait(timeout=TOOL_TIMEOUT_SECONDS):
+    wait_s = TOOL_TIMEOUT_SECONDS
+    if name in SLOW_HOUSE_TOOLS:
+        wait_s = TOOL_TIMEOUT_SECONDS + TOOL_RECOVERY_SECONDS
+    if not done.wait(timeout=wait_s):
         return ToolResult(ok=True, text=STILL_CHECKING)
     return box[0]
 
@@ -377,13 +398,6 @@ def run_owner_agent(
     if not client.enabled():
         return AgentOutcome("", (), 0, 0, (), False, "llm not configured", 0, (), "no_model")
 
-    messages = build_messages(
-        owner_message=owner_message,
-        history=history,
-        context=context,
-        now_line=now_line,
-    )
-    definitions = tool_definitions(allow_memory_writes=ctx.settings.memory_write_enabled)
     steps: list[AgentStep] = []
     tools_used: list[str] = []
     tools_failed: list[str] = []
@@ -395,6 +409,32 @@ def run_owner_agent(
     blocked_tools: set[str] = set()
     approval_ids: list[str] = []
     tool_reports: list[str] = []
+    spoken = owner_message
+    if asked_toolkit(owner_message) == "sheets":
+        prefetch = _run_tool_with_timeout("crm_search", {"query": owner_message}, ctx)
+        snippet = (prefetch.text or prefetch.error or "").strip()
+        steps.append(
+            AgentStep(tool="crm_search", ok=prefetch.ok, detail=prefetch.error or "ok")
+        )
+        if prefetch.ok:
+            tools_used.append("crm_search")
+            if snippet:
+                tool_reports.append(f"crm_search: {snippet[:400]}")
+            seen_calls.add(("crm_search", _canonical_arguments({"query": owner_message})))
+            spoken = (
+                f"{owner_message}\n\nLOCKED CRM PREFETCH (Contacts + Activity). "
+                "Never ask for a URL. No lead ids.\n"
+                f"{snippet[:2000]}"
+            )
+        else:
+            tools_failed.append("crm_search")
+    messages = build_messages(
+        owner_message=spoken,
+        history=history,
+        context=context,
+        now_line=now_line,
+    )
+    definitions = tool_definitions(allow_memory_writes=ctx.settings.memory_write_enabled)
 
     def finish(
         *, text: str = "", completed: bool, completion: str, error: str, steps_used: int

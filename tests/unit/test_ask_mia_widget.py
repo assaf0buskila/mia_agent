@@ -348,6 +348,11 @@ def test_session_restore_skips_opening_and_retries_stale() -> None:
     assert "appendMsg('mia', MIC_ERR)" in voice
     assert "AbortSignal.timeout" in source
     assert "25000" in _function_body(source, "postVoice")
+    assert "unicode-bidi:plaintext" in source
+    assert "scrubMia" in source
+    assert "isAppleCapture" in source
+    assert "mediaRecorder.start()" in source
+    assert "knowledge_search" in source
     create = _function_body(source, "createWebsiteSession")
     assert "saveStoredSession(sessionId)" in create
     assert "TRANSCRIPT_KEY" not in create
