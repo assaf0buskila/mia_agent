@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from app.core.config import Settings
+from app.core.errors import MiaError
 from app.domain.handoff import click_to_chat_url
+from app.domain.memory import ConversationTurn
 from app.integrations.base import MessagePort, OutboundMessage
+from app.integrations.sales_reply import SalesReplyPort
 from app.surfaces.crm import ContactRecord, ContactsCrm, log_contact
 from app.surfaces.identity import CapturedFields, apply_form
 from app.surfaces.site_policy import (
@@ -21,6 +26,7 @@ from app.surfaces.site_policy import (
     never_silent,
     pick_language,
 )
+from app.surfaces.site_reply import phrase_site_reply
 
 SITE_OPENING = "שלום, אני מיה. ספרו לי בקצרה מה אתם מחפשים."
 ASK_CONTACT = "כדי שאסף יוכל להמשיך אתכם, צריך טלפון או אימייל."
@@ -60,22 +66,28 @@ class SiteTurn:
 
 
 class SiteBook:
+    """Process-local session store. Guarded: turns run off the event loop."""
+
     def __init__(self) -> None:
         self._sessions: dict[str, SiteSession] = {}
+        self._lock = threading.Lock()
 
     def open(self, session_id: str) -> SiteSession:
-        existing = self._sessions.get(session_id)
-        if existing is not None:
-            return existing
-        session = SiteSession(session_id=session_id)
-        self._sessions[session_id] = session
-        return session
+        with self._lock:
+            existing = self._sessions.get(session_id)
+            if existing is not None:
+                return existing
+            session = SiteSession(session_id=session_id)
+            self._sessions[session_id] = session
+            return session
 
     def get(self, session_id: str) -> SiteSession | None:
-        return self._sessions.get(session_id)
+        with self._lock:
+            return self._sessions.get(session_id)
 
     def exists(self, session_id: str) -> bool:
-        return session_id in self._sessions
+        with self._lock:
+            return session_id in self._sessions
 
 
 _BOOK = SiteBook()
@@ -86,7 +98,8 @@ def site_book() -> SiteBook:
 
 
 def reset_site_book() -> None:
-    _BOOK._sessions.clear()
+    with _BOOK._lock:
+        _BOOK._sessions.clear()
 
 
 def site_opening() -> str:
@@ -109,6 +122,9 @@ def run_site_turn(
     tools_ran: tuple[str, ...] = (),
     now: float | None = None,
     voice_failed: bool = False,
+    turns: tuple[ConversationTurn, ...] = (),
+    reply_port: SalesReplyPort | None = None,
+    defer: Callable[[Callable[[], None]], None] | None = None,
 ) -> SiteTurn:
     """Answer first. CRM or WhatsApp only with phone or email. No invented prices."""
     store = book or _BOOK
@@ -184,10 +200,21 @@ def run_site_turn(
     if decision.confirm_contact:
         session.confirmed = True
     session.awaiting_ping = bool(decision.ping_assaf and not session.pinged)
-    reply = never_silent(decision.reply, session.language)
     action = decision.action
     if action not in SITE_ACTIONS:
         action = "answer"
+    # `decide_site_turn` already chose the action. The port only phrases it, and falls
+    # back to the exact canned line on every failure path.
+    phrased = phrase_site_reply(
+        action=action,
+        canned=decision.reply,
+        latest_message=thought or raw,
+        language=session.language,
+        turns=turns,
+        facts=facts,
+        port=reply_port,
+    )
+    reply = never_silent(phrased, session.language)
     session.turns.append(("mia", reply))
     crm_wrote = False
     owner_pinged = False
@@ -197,14 +224,28 @@ def run_site_turn(
         and (decision.write_sheet or decision.ping_assaf)
     ):
         record = _contact_from_session(session)
-        written = log_contact(
-            crm,
-            record,
-            who="מיה",
-            channel="website",
-            action="שיחת אתר",
-            result="נרשם",
-        )
+        if defer is not None:
+            # Two Google Sheets round trips at 20s each. The visitor never waits on them.
+            defer(
+                lambda: log_contact(
+                    crm,
+                    record,
+                    who="מיה",
+                    channel="website",
+                    action="שיחת אתר",
+                    result="נרשם",
+                )
+            )
+            written = record
+        else:
+            written = log_contact(
+                crm,
+                record,
+                who="מיה",
+                channel="website",
+                action="שיחת אתר",
+                result="נרשם",
+            )
         crm_wrote = True
         wa_url = click_to_chat_url(settings.whatsapp_click_to_chat) or None
         if owner_port is not None and not session.pinged and decision.ping_assaf:
@@ -295,7 +336,7 @@ def _ping_assaf(settings: Settings, port: MessagePort, session: SiteSession) -> 
                 )
             )
             sent_any = True
-        except RuntimeError:
+        except (RuntimeError, MiaError):
             continue
     return sent_any
 
@@ -319,7 +360,7 @@ async def ping_assaf_async(
                 )
             )
             sent_any = True
-        except RuntimeError:
+        except (RuntimeError, MiaError):
             continue
     return sent_any
 

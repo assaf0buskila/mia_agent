@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 from typing import Any, NamedTuple
+from urllib.parse import urlparse
 
 import httpx
 
@@ -144,6 +145,11 @@ class LlmClient:
     @property
     def model(self) -> str:
         return self._model
+
+    @property
+    def provider(self) -> str:
+        """Endpoint host. Two rungs on the same host share one outage."""
+        return (urlparse(self._url).hostname or "").lower()
 
     def enabled(self) -> bool:
         return bool(self._api_key.strip() and self._model.strip())
@@ -283,6 +289,14 @@ class LlmModelChain:
     # the caller sees a transient failure rather than silently demoting.
     ADVANCE_ON: frozenset[int] = frozenset({403, 404, 410})
 
+    # "This provider is down or refusing right now." Advancing to another rung on the
+    # SAME host burns the fallback on the same outage, which is why these do not appear
+    # in ADVANCE_ON. Crossing to a DIFFERENT provider is the whole point of the Gemini
+    # rung, so those statuses do advance when the next client is another host.
+    ADVANCE_ON_CROSS_PROVIDER: frozenset[int] = frozenset(
+        {401, 408, 409, 425, 429, 500, 502, 503, 504}
+    )
+
     def __init__(self, clients: list[LlmClient]) -> None:
         self._clients = [client for client in clients if client.enabled()]
         self.last_model = ""
@@ -309,10 +323,20 @@ class LlmModelChain:
                 status = _status_from_error(exc)
                 is_last = index == len(self._clients) - 1
                 tools_sent = bool(kwargs.get("tools"))
+                # Look past sibling rungs: with OpenAI primary + OpenAI fallback +
+                # Gemini, the primary must still advance so the chain can walk through
+                # the sibling and reach the other provider.
+                crosses_provider = any(
+                    later.provider != client.provider
+                    for later in self._clients[index + 1 :]
+                )
                 if (
                     status is not None
                     and status not in self.ADVANCE_ON
                     and not (status == 400 and tools_sent)
+                    and not (
+                        status in self.ADVANCE_ON_CROSS_PROVIDER and crosses_provider
+                    )
                     and not is_last
                 ):
                     # Load or transport problem, not a model problem. Do not spend the
