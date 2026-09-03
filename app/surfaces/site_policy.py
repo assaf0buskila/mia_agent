@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
@@ -80,12 +81,23 @@ OFF_TOPIC_JOKE_OTHER_HE = "אין לי כדור בדולח."
 OFF_TOPIC_JOKE_OTHER_EN = "I left my crystal ball at home."
 ANSWER_HE = f"{ASSAFWEB_HOOK_HE} ספרו עוד על מה שצריך לפתור."
 ANSWER_EN = f"{ASSAFWEB_HOOK_EN} Tell me more about what you need solved."
-TOOL_NONE_HE = "לא רץ כאן כלי. אני לא ממציאה JSON-LD או נתוני Search Console."
-TOOL_NONE_EN = "No tool ran here. I do not invent JSON-LD or Search Console numbers."
-NO_GSC_HE = "לא רץ כלי JSON-LD או Search Console."
-NO_GSC_EN = "No JSON-LD or Search Console tool ran."
+TOOL_NONE_HE = "עניתי ממה שפורסם ב-AssafWeb. אין לי בדיקת תנועה או סימון מפה מכאן."
+TOOL_NONE_EN = (
+    "I answered from published AssafWeb facts. "
+    "I do not invent traffic numbers from here."
+)
 NO_METRIC_HE = "אין לי את המספר הזה מכאן. אני לא ממציאה מדדים."
 NO_METRIC_EN = "I do not have that number from here. I do not invent metrics."
+VOICE_PRODUCT_HE = (
+    "כן. ב-AssafWeb בונים סוכן קולי לאתר: מבקרים מדברים באתר שלכם, "
+    "מיה ממירה לטקסט ועונה. ספרו מה האתר צריך לכסות."
+)
+VOICE_PRODUCT_EN = (
+    "Yes. AssafWeb builds a voice agent for your site: visitors speak, "
+    "Mia turns that into text and answers. Tell me what the site needs to cover."
+)
+WIDGET_STT_HE = "כן. קול כאן הופך לטקסט. אם ההקלטה לא נקלטה, כתבו."
+WIDGET_STT_EN = "Yes. Voice here becomes text. If the recording did not capture, type."
 
 _WEATHER = (
     "weather",
@@ -199,22 +211,37 @@ _NEED = (
 )
 _GREETING = ("hi", "hey", "hello", "היי", "שלום", "בוקר טוב", "ערב טוב")
 _STOP_SELL = ("not interested", "לא מעוניין", "לא מעוניינים", "לא צריך")
+_VOICE_PRODUCT = (
+    "סוכן קולי",
+    "סוכנת קולית",
+    "voice agent",
+    "voice agents",
+    "ai voice",
+    "קולי לאתר",
+    "קולית לאתר",
+)
 _VOICE_Q = (
-    "voice",
-    "קול",
-    "הקלטה",
-    "דיבור",
-    "שומעת",
-    "שומע",
-    "מבינה קול",
-    "מבינים קול",
     "understand voice",
+    "שומעת אותי",
+    "מבינה אותי כאן",
+    "מבינים קול",
+    "מבינה קול",
+    "אתם מבינים קול",
+    "איך מקליטים כאן",
+    "ההקלטה לא נקלטה",
+    "לא נקלטה ההקלטה",
+    "mic fail",
 )
-VOICE_Q_HE = (
-    "כן. אפשר להקליט כאן, אני ממירה לטקסט וממשיכה משם. "
-    "אם ההקלטה לא נקלטה, נסו שוב או כתבו."
+VISITOR_TOOL_LEAKS = (
+    "knowledge_search",
+    "Search Console",
+    "search console",
+    "JSON-LD",
+    "JSON LD",
+    "json-ld",
+    "jsonld",
 )
-VOICE_Q_EN = VOICE_Q_HE
+_TOOL_STATUS_HE = re.compile(r"(^|[\s.])רץ(\s|$|[\.\,\!])")
 
 
 @dataclass(frozen=True)
@@ -296,6 +323,8 @@ def classify_site_intent(text: str) -> str:
         return "complaint"
     if _has(blob, _BOT):
         return "bot"
+    if _has(blob, _VOICE_PRODUCT):
+        return "voice_product"
     if _has(blob, _TOOL_STATUS):
         return "tool_status"
     if _has(blob, _OFF_TOPIC):
@@ -329,10 +358,32 @@ def _has(blob: str, needles: tuple[str, ...]) -> bool:
 
 def never_silent(reply: str, language: str) -> str:
     """Every seen visitor turn gets a visible line. Missing is allowed; silence is not."""
-    stripped = (reply or "").strip()
+    stripped = scrub_visitor_reply(reply or "")
     if stripped:
         return stripped
     return line(ANSWER_HE, ANSWER_EN, language)
+
+
+def scrub_visitor_reply(text: str) -> str:
+    """Visitor copy never names tools, even if a model emits the slugs."""
+    if not text:
+        return ""
+    cleaned = text.replace("\u2014", " ").replace("\u2013", " ")
+    for leak in VISITOR_TOOL_LEAKS:
+        cleaned = re.sub(re.escape(leak), " ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"לא\s+רץ\s+כלי[^.]*\.?", " ", cleaned)
+    cleaned = re.sub(r"(^|[\s.])רץ(\s+\S+)?\.?", r"\1", cleaned)
+    cleaned = re.sub(r"\bI ran\b[^.]*\.?", " ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"Did not run[^.]*\.?", " ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"(^|\s)\.(?=[A-Za-z])", r"\1", cleaned)
+    cleaned = _TOOL_STATUS_HE.sub(" ", cleaned)
+    cleaned = " ".join(cleaned.split()).strip()
+    return re.sub(r"^\.+\s*", "", cleaned).strip()
+
+
+def tool_status_reply(tools_ran: tuple[str, ...], language: str) -> str:
+    del tools_ran
+    return line(TOOL_NONE_HE, TOOL_NONE_EN, language)
 
 
 def _published_metric_line(facts: tuple[PublishedFact, ...]) -> str:
@@ -372,18 +423,6 @@ def _looks_like_price_fact(text: str) -> bool:
         mark in lowered
         for mark in ("price", "pricing", "fee", "cost", "מחיר", "תעריף", "עלות")
     )
-
-
-def tool_status_reply(tools_ran: tuple[str, ...], language: str) -> str:
-    named = [name for name in tools_ran if name.strip()]
-    none = line(TOOL_NONE_HE, TOOL_NONE_EN, language)
-    no_gsc = line(NO_GSC_HE, NO_GSC_EN, language)
-    if not named:
-        return none
-    joined = ", ".join(named)
-    if in_english(language):
-        return f"I ran {joined}. {no_gsc}"
-    return f"רץ {joined}. {no_gsc}"
 
 
 def off_topic_reply(language: str, thought: str = "") -> str:
@@ -480,12 +519,8 @@ def decide_site_turn(
                 "From assafweb.com:",
                 language,
             )
-            named = tool_status_reply(tools_ran, language) if tools_ran else ""
-            reply = f"{cite} {published}"
-            if named:
-                reply = f"{reply} {named}"
             return SiteDecision(
-                reply=reply,
+                reply=f"{cite} {published}",
                 action="answer",
                 ask_contact=False,
                 write_sheet=False,
@@ -493,9 +528,8 @@ def decide_site_turn(
                 stop_selling=selling_stopped,
                 confirm_contact=False,
             )
-        named = f" {tool_status_reply(tools_ran, language)}" if tools_ran else ""
         return SiteDecision(
-            reply=line(NO_PRICE_HE, NO_PRICE_EN, language) + named,
+            reply=line(NO_PRICE_HE, NO_PRICE_EN, language),
             action="no_price",
             ask_contact=False,
             write_sheet=False,
@@ -548,9 +582,20 @@ def decide_site_turn(
             complaint=False,
         )
 
+    if intent == "voice_product":
+        return SiteDecision(
+            reply=line(VOICE_PRODUCT_HE, VOICE_PRODUCT_EN, language),
+            action="answer",
+            ask_contact=False,
+            write_sheet=False,
+            ping_assaf=False,
+            stop_selling=selling_stopped,
+            confirm_contact=False,
+        )
+
     if intent == "voice_q":
         return SiteDecision(
-            reply=line(VOICE_Q_HE, VOICE_Q_EN, language),
+            reply=line(WIDGET_STT_HE, WIDGET_STT_EN, language),
             action="answer",
             ask_contact=False,
             write_sheet=False,
@@ -626,6 +671,7 @@ def _answer_from_facts(
     language: str,
     tools_ran: tuple[str, ...],
 ) -> str:
+    del tools_ran
     for fact in facts:
         if not fact.from_assafweb():
             continue
@@ -633,14 +679,8 @@ def _answer_from_facts(
         if not text:
             continue
         cite = line("מאתר assafweb.com:", "From assafweb.com:", language)
-        reply = f"{cite} {text[:280]}"
-        if tools_ran:
-            reply = f"{reply} {tool_status_reply(tools_ran, language)}"
-        return reply
-    base = line(ANSWER_HE, ANSWER_EN, language)
-    if tools_ran:
-        return f"{base} {tool_status_reply(tools_ran, language)}"
-    return base
+        return f"{cite} {text[:280]}"
+    return line(ANSWER_HE, ANSWER_EN, language)
 
 
 def _assaf_or_confirm(

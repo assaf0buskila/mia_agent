@@ -47,6 +47,7 @@ from app.integrations.instagram_insights import (
     format_content_insights_line,
 )
 from app.integrations.search_console import SearchAnalyticsRow, format_gsc_rows_block
+from app.integrations.sheets import FakeSheetsPort
 from app.surfaces.crm import FakeContactsCrm
 from app.surfaces.owner import talk_as_dude
 from app.surfaces.published_facts import asks_product_question, lookup_published_fact
@@ -80,6 +81,12 @@ def test_asked_toolkit_first_and_say_tool_before_numbers() -> None:
     assert asked_toolkit("תבדקי את האינסטגרם") == "instagram"
     assert asked_toolkit("מה ב-Gmail") == "gmail"
     assert asked_toolkit("היי") == ""
+    assert asked_toolkit("Sheets עדיין עובד?") == "sheets"
+    assert asked_toolkit("גוגל שיטס") == "sheets"
+    assert asked_toolkit("האקסל") == "sheets"
+    assert asked_toolkit("Contacts") == "sheets"
+    assert asked_toolkit("CRM") == "sheets"
+    assert asked_toolkit("Google sheets?") == "sheets"
     assert say_tool_before_numbers("Instagram Insights", "views=12").startswith(
         "Instagram Insights"
     )
@@ -90,18 +97,33 @@ def test_ig_format_names_post_and_account_before_numbers() -> None:
         ContentInsight(
             media_id="17841400112233445566",
             media_type="REELS",
-            account="17841400000000000",
-            post_name="abcDEF",
+            account="assafweb",
+            post_name="Launch hook",
+            caption="Launch hook",
+            timestamp="2026-09-01T10:00:00+0000",
+            permalink="https://instagram.com/p/abc",
             views="12",
             likes="3",
         )
     ]
     line = format_content_insights_line(items)
     detail = format_content_insights_detail(items)
-    assert line.startswith("Instagram Insights — account 17841400000000000")
-    assert "post abcDEF" in detail
-    assert "account 17841400000000000" in detail
+    assert "assafweb" in line
+    assert "post Launch hook" in detail
+    assert "https://instagram.com/p/abc" in detail
+    assert "2026-09-01T10:00:00+0000" in detail
     assert detail.index("Instagram Insights") < detail.index("12")
+    anonymous = format_content_insights_detail(
+        [
+            ContentInsight(
+                media_id="17841400112233445566",
+                media_type="REELS",
+                views="999",
+            )
+        ]
+    )
+    assert "API omitted post identity" in anonymous
+    assert "999" not in anonymous
 
 
 def test_gsc_and_ga4_format_include_dates_and_tool_name() -> None:
@@ -334,3 +356,41 @@ def test_published_facts_do_not_invent_prices() -> None:
     assert "₪" not in fact
     assert not any(ch.isdigit() for ch in fact)
     assert "מחיר" in fact or "לא מפורסם" in fact or "לא כאן" in fact
+    voice = lookup_published_fact("אני צריך סוכן קולי לאתר שלי")
+    assert "סוכן קולי" in voice
+    assert "₪" not in voice
+
+
+def test_sheets_aliases_prefetch_locked_contacts_and_activity() -> None:
+    from app.domain.two_state import is_sheets_health_ask
+    from app.surfaces.turn_coalesce import detect_asked_toolkit
+
+    assert is_sheets_health_ask("Sheets עדיין עובד?")
+    assert is_sheets_health_ask("גוגל שיטס")
+    assert is_sheets_health_ask("האקסל")
+    assert detect_asked_toolkit("Sheets עדיין עובד?") == "CRM"
+    init_db()
+    db = get_session_factory()()
+    sheets = FakeSheetsPort()
+    sheets.locked_contacts = [["דנה", "0501234567", "dana@example.com"]]
+    try:
+        ctx = ToolContext(
+            principal=Principal.owner(source="telegram", actor_id="1"),
+            store=LeadStore(db),
+            brain=BrainStore(db),
+            settings=Settings(_env_file=None),
+            embedding_port=FakeEmbeddingPort(),
+            sheets=sheets,
+            owner_text="Sheets עדיין עובד?",
+        )
+        result = execute_tool("crm_search", {"query": "Sheets עדיין עובד?"}, ctx)
+        assert result.ok is True
+        assert "Contacts" in result.text
+        assert "Activity" in result.text
+        assert "lead_" not in result.text.lower()
+        assert "docs.google.com" not in result.text
+        named = execute_tool("crm_search", {"query": "דנה"}, ctx)
+        assert "דנה" in named.text
+        assert "lead_" not in named.text.lower()
+    finally:
+        db.close()

@@ -1103,6 +1103,12 @@ def test_webhook_envelope_kind_text() -> None:
     assert webhook_envelope_kind({"id": "envl.text.1", "text": "hi"}) == "text"
 
 
+def test_webhook_envelope_kind_image() -> None:
+    item = {"id": "envl.img.1", "text": "", "photo_file_id": "ph1"}
+    assert webhook_envelope_kind(item) == "image"
+    assert sanitize_webhook_envelope_kind("image") == "image"
+
+
 def test_sanitize_webhook_envelope_kind_invalid() -> None:
     assert sanitize_webhook_envelope_kind("bogus") == ""
     assert sanitize_webhook_envelope_kind("text") == "text"

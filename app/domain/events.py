@@ -38,7 +38,7 @@ class Channel(StrEnum):
     INTERNAL = "internal"
 
 
-ALLOWLISTED_WEBHOOK_ENVELOPE_KINDS = frozenset({"text", "audio", "empty", "referral"})
+ALLOWLISTED_WEBHOOK_ENVELOPE_KINDS = frozenset({"text", "audio", "empty", "referral", "image"})
 
 
 def webhook_envelope_kind(item: dict[str, str]) -> str:
@@ -47,6 +47,8 @@ def webhook_envelope_kind(item: dict[str, str]) -> str:
         return "referral"
     if item.get("source") == "audio":
         return "audio"
+    if item.get("photo_file_id"):
+        return "image"
     if not item.get("text", "").strip():
         return "empty"
     return "text"

@@ -101,6 +101,8 @@ async def _transcribe_telegram_voice(
         return _voice_failure(item, stage="stt_failed", started=started)
     finally:
         del audio_bytes
+    if not (result.text or "").strip():
+        return _voice_failure(item, stage="stt_failed", started=started)
     item["text"] = result.text
     item["source"] = "audio"
     item["stt_provider"] = result.stt_provider
@@ -266,7 +268,13 @@ async def receive_webhook(
     store = LeadStore(db)
     item = dict(parsed)
     voice = bool(item.get("file_id"))
-    envelope_kind = "audio" if voice else webhook_envelope_kind(item)
+    photo = bool(item.get("photo_file_id"))
+    if voice:
+        envelope_kind = "audio"
+    elif photo:
+        envelope_kind = "image"
+    else:
+        envelope_kind = webhook_envelope_kind(item)
     if not store.claim_webhook(
         provider="telegram",
         provider_event_id=item["id"],
@@ -287,6 +295,7 @@ async def receive_webhook(
         item=item,
         envelope_kind=envelope_kind,
         voice_file_id=item.get("file_id") or None,
+        photo_file_id=item.get("photo_file_id") or None,
         port=port,
         transcribe_port=transcribe_port,
     )

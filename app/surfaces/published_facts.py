@@ -5,8 +5,8 @@ from __future__ import annotations
 # Facts only. No prices, dates, or funnel counts.
 _FACTS: tuple[tuple[tuple[str, ...], str], ...] = (
     (
-        ("אתר", "website", "landing", "דף נחיתה", "דפי נחיתה"),
-        "בונים אתרים ודפי נחיתה לעסקים. היקף ומחיר לא מפורסמים כאן.",
+        ("סוכן קולי", "סוכנת קולית", "voice agent", "קולי לאתר"),
+        "בונים סוכן קולי לאתרים: מבקר מדבר באתר, מיה ממירה לטקסט ועונה. בלי מחיר מכאן.",
     ),
     (
         ("אוטומצ", "automation", "zapier", "make.com", "חיבור כלים"),

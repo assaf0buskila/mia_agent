@@ -825,3 +825,104 @@ def test_malformed_voice_download_result_is_visible_once_and_never_reaches_stt_o
     finally:
         app.dependency_overrides.pop(get_telegram_port, None)
         app.dependency_overrides.pop(get_transcription_port, None)
+
+
+def test_empty_voice_transcript_is_stt_failure_not_empty_hello(monkeypatch) -> None:
+    _configure_owner(monkeypatch)
+    init_db()
+    telegram = RecordingTelegramVoicePort()
+    graph_calls: list[object] = []
+    monkeypatch.setattr(owner_api, "answer_owner", lambda **kwargs: graph_calls.append(kwargs))
+    app.dependency_overrides[get_telegram_port] = lambda: telegram
+    app.dependency_overrides[get_transcription_port] = lambda: FakeTranscriptionPort("   ")
+    try:
+        update_id = _fresh_update_id()
+        with TestClient(app) as client:
+            response = client.post(
+                "/v1/telegram/webhook",
+                json=_voice_update(update_id=update_id, file_id="voice-empty-1"),
+                headers={"X-Telegram-Bot-Api-Secret-Token": WEBHOOK_SECRET},
+            )
+        assert response.status_code == 200
+        assert telegram.sent[0].text.startswith("לא הצלחתי לתמלל")
+        assert graph_calls == []
+    finally:
+        app.dependency_overrides.pop(get_telegram_port, None)
+        app.dependency_overrides.pop(get_transcription_port, None)
+
+
+class RecordingTelegramPhotoPort(RecordingMessagePort):
+    def __init__(self) -> None:
+        super().__init__()
+        self.downloaded_photos: list[str] = []
+
+    async def download_photo(self, file_id: str) -> tuple[bytes, str]:
+        self.downloaded_photos.append(file_id)
+        return b"jpeg-bytes", "image/jpeg"
+
+
+def test_parse_telegram_photo_keeps_caption_and_file_id() -> None:
+    parsed = parse_telegram_update(
+        {
+            "update_id": 1001,
+            "message": {
+                "message_id": 1002,
+                "from": {"id": int(OWNER_ID)},
+                "chat": {"id": int(OWNER_ID)},
+                "caption": "תראי את זה",
+                "photo": [
+                    {"file_id": "small", "width": 90, "height": 90},
+                    {"file_id": "large-photo", "width": 800, "height": 800},
+                ],
+            },
+        }
+    )
+    assert parsed is not None
+    assert parsed["photo_file_id"] == "large-photo"
+    assert parsed["text"] == "תראי את זה"
+    assert parsed["file_id"] == ""
+
+
+def test_owner_photo_is_seen_and_reaches_owner_graph(monkeypatch) -> None:
+    from app.workers import telegram_owner as telegram_owner_module
+
+    _configure_owner(monkeypatch)
+    init_db()
+    telegram = RecordingTelegramPhotoPort()
+    graph_inputs: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        telegram_owner_module,
+        "_describe_owner_image",
+        lambda payload, mime: "צילום מסך של ווידג'ט צ'אט",
+    )
+    _patch_owner_loop(
+        monkeypatch,
+        lambda **kwargs: graph_inputs.append(dict(kwargs))
+        or OwnerBrainResult("ראיתי את התמונה", True, ()),
+    )
+    app.dependency_overrides[get_telegram_port] = lambda: telegram
+    app.dependency_overrides[get_transcription_port] = lambda: FakeTranscriptionPort("unused")
+    try:
+        update_id = _fresh_update_id()
+        with TestClient(app) as client:
+            response = client.post(
+                "/v1/telegram/webhook",
+                json={
+                    "update_id": update_id,
+                    "message": {
+                        "message_id": update_id + 100,
+                        "from": {"id": int(OWNER_ID)},
+                        "chat": {"id": int(OWNER_ID), "type": "private"},
+                        "photo": [{"file_id": "photo-live-1", "width": 320, "height": 320}],
+                    },
+                },
+                headers={"X-Telegram-Bot-Api-Secret-Token": WEBHOOK_SECRET},
+            )
+        assert response.status_code == 200
+        assert telegram.downloaded_photos == ["photo-live-1"]
+        assert graph_inputs
+        assert "צילום מסך" in graph_inputs[0]["owner_text"]
+        assert "פה. מה צריך" not in telegram.sent[0].text
+    finally:
+        app.dependency_overrides.pop(get_telegram_port, None)
+        app.dependency_overrides.pop(get_transcription_port, None)

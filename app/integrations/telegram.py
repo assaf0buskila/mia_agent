@@ -15,6 +15,10 @@ from app.integrations.telegram_format import MAX_MESSAGE_CHARS, split_message
 _TELEGRAM_API = "https://api.telegram.org"
 # getFile downloads are capped at 20MB by Telegram; stay under it.
 _MAX_AUDIO_BYTES = 16_000_000
+_MAX_PHOTO_BYTES = 5_000_000
+_SUPPORTED_IMAGE_MIME_TYPES = frozenset(
+    {"image/jpeg", "image/jpg", "image/png", "image/webp", "image/gif"}
+)
 _TIMEOUT = 20.0
 _SUPPORTED_AUDIO_MIME_TYPES = frozenset(
     {
@@ -101,6 +105,21 @@ def _mime_from_filename(value: object) -> str:
     if not isinstance(value, str) or not value.strip():
         return ""
     return _MIME_BY_EXTENSION.get(PurePosixPath(value).suffix.lower(), "")
+
+
+def _largest_photo_file_id(message: dict[str, Any]) -> str:
+    photos = message.get("photo")
+    if isinstance(photos, list) and photos:
+        largest = photos[-1]
+        if isinstance(largest, dict):
+            return str(largest.get("file_id") or "")
+    document = message.get("document") or {}
+    if isinstance(document, dict):
+        mime = str(document.get("mime_type") or "").split(";", 1)[0].strip().lower()
+        if mime in _SUPPORTED_IMAGE_MIME_TYPES or mime.startswith("image/"):
+            if not is_telegram_audio_document(document):
+                return str(document.get("file_id") or "")
+    return ""
 
 
 def is_telegram_audio_document(document: object) -> bool:
@@ -331,6 +350,60 @@ class TelegramPort:
         except AdapterHttpError as exc:
             _reraise_classified(TelegramMediaError, "Telegram media download failed", exc)
 
+    async def download_photo(self, file_id: str) -> tuple[bytes, str]:
+        headers = {"Content-Type": "application/json"}
+        try:
+            try:
+                if self._client is not None:
+                    meta = await self._client.post(
+                        self._url("getFile"), json={"file_id": file_id}, headers=headers
+                    )
+                else:
+                    async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+                        meta = await client.post(
+                            self._url("getFile"), json={"file_id": file_id}, headers=headers
+                        )
+            except httpx.HTTPError as exc:
+                raise AdapterHttpError(None) from exc
+            if meta.status_code >= 400:
+                raise AdapterHttpError(meta.status_code)
+            body = meta.json()
+            if not isinstance(body, dict) or not body.get("ok"):
+                raise TelegramMediaError("Telegram getFile failed")
+            result = body.get("result") or {}
+            file_path = str(result.get("file_path") or "")
+            if not file_path or ".." in file_path:
+                raise TelegramMediaError("Telegram media path missing")
+            file_url = f"{_TELEGRAM_API}/file/bot{self._bot_token}/{file_path}"
+            parsed = urlparse(file_url)
+            if parsed.scheme != "https" or (parsed.hostname or "") != "api.telegram.org":
+                raise TelegramMediaError("Telegram media host is not allowlisted")
+            if self._client is not None:
+                media = await self._client.get(file_url)
+            else:
+                async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+                    media = await client.get(file_url)
+            if media.status_code >= 400:
+                raise AdapterHttpError(media.status_code)
+            mime = str(media.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
+            suffix = PurePosixPath(file_path).suffix.lower()
+            if mime not in _SUPPORTED_IMAGE_MIME_TYPES:
+                mime = {
+                    ".jpg": "image/jpeg",
+                    ".jpeg": "image/jpeg",
+                    ".png": "image/png",
+                    ".webp": "image/webp",
+                    ".gif": "image/gif",
+                }.get(suffix, "")
+            if mime not in _SUPPORTED_IMAGE_MIME_TYPES:
+                raise TelegramMediaError("Telegram photo content type is unsupported")
+            payload = media.content
+            if not payload or len(payload) > _MAX_PHOTO_BYTES:
+                raise TelegramMediaError("Telegram photo is empty or too large")
+            return payload, mime
+        except AdapterHttpError as exc:
+            _reraise_classified(TelegramMediaError, "Telegram photo download failed", exc)
+
     async def _download_voice_file(
         self,
         file_url: str,
@@ -387,6 +460,7 @@ def parse_telegram_update(payload: dict[str, Any]) -> dict[str, str] | None:
     if isinstance(voice, dict):
         file_id = str(voice.get("file_id") or "")
         mime_type = str(voice.get("mime_type") or mime_type) or mime_type
+    photo_file_id = _largest_photo_file_id(message)
     message_id = str(message.get("message_id") or "")
     return {
         "id": str(update_id),
@@ -395,6 +469,7 @@ def parse_telegram_update(payload: dict[str, Any]) -> dict[str, str] | None:
         "message_id": message_id,
         "text": text,
         "file_id": file_id,
+        "photo_file_id": photo_file_id,
         "mime_type": mime_type,
         "file_name": str(voice.get("file_name") or "") if isinstance(voice, dict) else "",
     }

@@ -348,6 +348,11 @@ def test_session_restore_skips_opening_and_retries_stale() -> None:
     assert "appendMsg('mia', MIC_ERR)" in voice
     assert "AbortSignal.timeout" in source
     assert "25000" in _function_body(source, "postVoice")
+    assert "unicode-bidi:plaintext" in source
+    assert "scrubMia" in source
+    assert "isAppleCapture" in source
+    assert "mediaRecorder.start()" in source
+    assert "knowledge_search" in source
     create = _function_body(source, "createWebsiteSession")
     assert "saveStoredSession(sessionId)" in create
     assert "TRANSCRIPT_KEY" not in create
@@ -449,7 +454,7 @@ def test_widget_open_send_uses_textcontent_and_wa_me_href_only() -> None:
     assert "postText(text)" in flush
     assert "applyReply" in flush
     paint = _function_body(source, "paintMsg")
-    assert "el.textContent = text" in paint
+    assert "el.textContent =" in paint
     assert "innerHTML" not in paint
     handoff = _function_body(source, "handoff")
     assert "openConfiguredWhatsApp" in handoff
@@ -503,7 +508,7 @@ def test_whatsapp_offer_is_a_tappable_button_not_a_raw_url() -> None:
     restore = _function_body(source, "restoreTranscript")
     assert "stripWaMeUrls" in restore
     paint = _function_body(source, "paintMsg")
-    assert "el.textContent = text" in paint
+    assert "el.textContent =" in paint
     assert ".ask-mia-handoff-cta{" in source
     assert "background:#25d366" in source[source.index(".ask-mia-handoff-cta{") :][
         :400

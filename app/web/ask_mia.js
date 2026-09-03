@@ -167,7 +167,7 @@
     '.ask-mia-bubble-avatar{width:2rem;height:2rem;border-radius:999px;flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;font-weight:700;font-size:.72rem}' +
     '.ask-mia-row-mia .ask-mia-bubble-avatar{background:#d9eeff;color:#061b35}' +
     '.ask-mia-row-user .ask-mia-bubble-avatar{background:#2f5f93;color:#fff}' +
-    '.ask-mia-msg{padding:.65rem .8rem;border-radius:.85rem;white-space:pre-wrap;word-break:break-word}' +
+    '.ask-mia-msg{padding:.65rem .8rem;border-radius:.85rem;white-space:pre-wrap;word-break:break-word;unicode-bidi:plaintext}' +
     '.ask-mia-mia{background:#eef7ff;color:#061b35;max-width:min(90%,16rem);border:1px solid #2f5f9321;border-end-start-radius:.2rem;box-shadow:0 8px 20px rgba(6,27,53,.06)}' +
     '.ask-mia-user{background:#2f5f93;color:#fff;max-width:min(90%,16rem);border-end-end-radius:.2rem;box-shadow:0 8px 20px rgba(6,27,53,.12)}' +
     '.ask-mia-dots{display:inline-flex;align-items:center;gap:.2rem;height:1.1rem}' +
@@ -317,12 +317,29 @@
     return face;
   }
 
+  var TOOL_LEAKS = ['knowledge_search', 'Search Console', 'JSON-LD', 'JSON LD', 'json-ld', 'jsonld'];
+
+  function scrubMia(text) {
+    var out = String(text || '');
+    var i;
+    for (i = 0; i < TOOL_LEAKS.length; i++) {
+      out = out.split(TOOL_LEAKS[i]).join(' ');
+      out = out.split(TOOL_LEAKS[i].toLowerCase()).join(' ');
+    }
+    out = out.replace(/לא\s+רץ\s+כלי[^.]*\.?/g, ' ');
+    out = out.replace(/(^|[\s.])רץ(\s+\S+)?\.?/g, '$1');
+    out = out.replace(/(^|\s)\.(?=[A-Za-z])/g, '$1');
+    out = out.replace(/\s+/g, ' ').trim();
+    return out.replace(/^\.+\s*/, '').trim();
+  }
+
   function paintMsg(role, text) {
     var row = document.createElement('div');
     row.className = 'ask-mia-row ask-mia-row-' + role;
     var el = document.createElement('div');
     el.className = 'ask-mia-msg ask-mia-' + role;
-    el.textContent = text;
+    el.dir = 'auto';
+    el.textContent = role === 'mia' ? scrubMia(text) : text;
     row.appendChild(bubbleAvatar(role));
     row.appendChild(el);
     transcript.appendChild(row);
@@ -400,9 +417,11 @@
 
   function appendMsg(role, text) {
     if (typeof text !== 'string' || !text) return false;
-    if (role === 'mia' && text === lastMiaText()) return false;
-    paintMsg(role, text);
-    storedTranscript.push({ role: role, text: text });
+    var shown = role === 'mia' ? scrubMia(text) : text;
+    if (!shown) return false;
+    if (role === 'mia' && shown === lastMiaText()) return false;
+    paintMsg(role, shown);
+    storedTranscript.push({ role: role, text: shown });
     persistTranscript();
     return true;
   }
@@ -806,16 +825,26 @@
       });
   }
 
+  function isAppleCapture() {
+    var ua = navigator.userAgent || '';
+    if (/iP(hone|ad|od)/.test(ua)) return true;
+    if (/Macintosh/.test(ua) && 'ontouchend' in document) return true;
+    return /Safari/.test(ua) && !/Chrome|Chromium|Android/.test(ua);
+  }
+
   function pickMime() {
     if (typeof MediaRecorder === 'undefined') return '';
-    var types = ['audio/webm', 'audio/webm;codecs=opus', 'audio/mp4'];
+    var apple = isAppleCapture();
+    var types = apple
+      ? ['audio/mp4', 'audio/aac', 'audio/webm;codecs=opus', 'audio/webm']
+      : ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4'];
     var i;
     if (typeof MediaRecorder.isTypeSupported === 'function') {
       for (i = 0; i < types.length; i++) {
         if (MediaRecorder.isTypeSupported(types[i])) return types[i];
       }
     }
-    return 'audio/webm';
+    return apple ? 'audio/mp4' : 'audio/webm';
   }
 
   function setMicLive(on) {
@@ -945,7 +974,8 @@
         };
         setMicLive(true);
         try {
-          mediaRecorder.start(1000);
+          if (isAppleCapture()) mediaRecorder.start();
+          else mediaRecorder.start(1000);
         } catch (err) {
           finishRecording(false);
           status.textContent = MIC_NA;

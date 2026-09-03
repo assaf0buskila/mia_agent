@@ -140,7 +140,7 @@ def test_website_widget_js_safe_and_no_auto_open() -> None:
     assert "showLoading" in body
     assert ".ask-mia-user{background:#2f5f93;color:#fff" in body
     assert "lastMiaText" in body
-    assert "role === 'mia' && text === lastMiaText()" in body
+    assert "role === 'mia' && shown === lastMiaText()" in body
     assert "#ask-mia-send{background:#2f5f93;color:#fff}" in body
     assert "flex-direction:column-reverse" in body
     assert "askMia.sessionId" in body

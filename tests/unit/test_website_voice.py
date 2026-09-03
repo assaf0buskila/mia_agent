@@ -93,7 +93,7 @@ def test_website_voice_transcribes_then_sales_reply() -> None:
         _clear_stt()
 
 
-def test_website_voice_transcription_error_is_503_not_a_hang() -> None:
+def test_website_voice_transcription_error_is_200_voice_fail_not_a_hang() -> None:
     class BoomTranscriptionPort:
         async def transcribe(self, **kwargs):
             del kwargs
@@ -107,8 +107,12 @@ def test_website_voice_transcription_error_is_503_not_a_hang() -> None:
                 f"/v1/website/sessions/{session_id}/voice",
                 files={"file": _AUDIO},
             )
-            assert reply.status_code == 503
-            assert reply.json()["detail"] == "transcription unavailable"
+            assert reply.status_code == 200
+            body = reply.json()
+            assert body["next_action"] == "voice_fail"
+            assert body["heard"] == ""
+            assert body["message"]
+            assert "כתבו" in body["message"] or "type" in body["message"].lower()
     finally:
         _clear_stt()
 

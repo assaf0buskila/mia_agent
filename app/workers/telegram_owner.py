@@ -93,6 +93,7 @@ async def process_telegram_owner_update(
     voice_file_id: str | None,
     port: MessagePort,
     transcribe_port: TranscriptionPort,
+    photo_file_id: str | None = None,
 ) -> None:
     from app.api.telegram import (
         _send_transcription_failure_reply,
@@ -152,6 +153,12 @@ async def process_telegram_owner_update(
                 )
                 session.commit()
                 return
+        if photo_file_id and not voice_file_id:
+            work = await _see_telegram_photo(
+                item=work,
+                media=port,
+                photo_file_id=photo_file_id,
+            )
         inbound = _inbound_from_work(work)
         key = event_conversation_id(inbound)
         enqueue_turn(key, inbound)
@@ -227,3 +234,77 @@ async def process_telegram_owner_update(
             pass
     finally:
         session.close()
+
+
+_IMAGE_UNREAD = (
+    "קיבלתי תמונה אבל לא הצלחתי לקרוא את הפיקסלים. תגיד מה לבדוק בה."
+)
+
+
+async def _see_telegram_photo(
+    *,
+    item: dict[str, str],
+    media: object,
+    photo_file_id: str,
+) -> dict[str, str]:
+    from app.integrations.telegram import TelegramMediaError
+
+    download = getattr(media, "download_photo", None)
+    caption = (item.get("text") or "").strip()
+    if not callable(download):
+        item["text"] = _join_image_text(caption, _IMAGE_UNREAD)
+        return item
+    try:
+        payload, mime = await download(photo_file_id)
+    except (RuntimeError, TelegramMediaError, TypeError, ValueError):
+        item["text"] = _join_image_text(caption, _IMAGE_UNREAD)
+        return item
+    try:
+        seen = _describe_owner_image(payload, mime)
+    finally:
+        del payload
+    item["text"] = _join_image_text(caption, seen)
+    return item
+
+
+def _join_image_text(caption: str, seen: str) -> str:
+    parts = [part for part in (seen.strip(), caption) if part]
+    return "\n".join(parts) if parts else _IMAGE_UNREAD
+
+
+def _describe_owner_image(payload: bytes, mime: str) -> str:
+    from base64 import b64encode
+
+    from app.core.config import get_settings
+    from app.domain.owner_brain import build_agent_client
+
+    settings = get_settings()
+    client = build_agent_client(settings)
+    if not client.enabled() or not payload:
+        return _IMAGE_UNREAD
+    encoded = b64encode(payload).decode("ascii")
+    data_url = f"data:{mime};base64,{encoded}"
+    try:
+        response = client.complete(
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Assaf sent this image on Telegram. Describe what is visible "
+                        "so Mia can act on it. Hebrew if the image has Hebrew. "
+                        "Data only. No secrets."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "What is in this image?"},
+                        {"type": "image_url", "image_url": {"url": data_url}},
+                    ],
+                },
+            ]
+        )
+    except Exception:
+        return _IMAGE_UNREAD
+    text = (response.text or "").strip()
+    return text[:1500] if text else _IMAGE_UNREAD

@@ -91,7 +91,7 @@ from app.domain.owner_status import format_owner_status_ack
 from app.domain.owner_weeklies import apply_owner_weekly
 from app.domain.seo import enrich_seo_ack
 from app.domain.tools import AdapterHttpError
-from app.domain.two_state import may_run, state_for
+from app.domain.two_state import is_sheets_health_ask, may_run, state_for
 from app.domain.whatsapp_drafts import draft_whatsapp_for_assaf
 from app.integrations.calendar import (
     CalendarAgendaPort,
@@ -136,6 +136,8 @@ from app.integrations.search_console import (
 from app.integrations.seo_audit import SeoAuditPort, build_seo_audit_port
 from app.integrations.sheets import DisabledSheetsPort, SheetsPort, build_sheets_port
 from app.surfaces.crm import (
+    ACTIVITY_TAB,
+    CONTACTS_TAB,
     ContactRecord,
     CrmDenied,
     a1_targets_archive_tab,
@@ -913,22 +915,68 @@ def _crm_search(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     port = ctx.sheets or build_sheets_port(ctx.settings)
     reader = getattr(port, "read_locked_contacts", None)
     rows = reader() if callable(reader) else []
-    if not rows:
-        return ToolResult(ok=True, text="Contacts is empty so far.")
+    activity_rows = _read_locked_activity(port, ctx)
+    header = (
+        "Google Sheets CRM is connected. Live tabs: Contacts and Activity. "
+        "No lead ids. The sheet URL is already known."
+    )
+    if not rows and not activity_rows:
+        return ToolResult(ok=True, text=f"{header} Contacts is empty so far.")
     body = rows[1:] if len(rows) > 1 else rows
     needle = query.casefold()
+    health = _crm_health_query(query)
     matches: list[str] = []
-    for row in body:
-        blob = " | ".join(str(cell) for cell in row)
+    if not health:
+        for row in body:
+            blob = " | ".join(str(cell) for cell in row)
+            if "lead_" in blob.lower() or "01 Leads" in blob:
+                continue
+            if not needle or needle in blob.casefold():
+                matches.append(blob)
+            if len(matches) >= 8:
+                break
+    lines = [header, f"{CONTACTS_TAB} rows including header: {len(rows)}."]
+    if activity_rows:
+        lines.append(f"{ACTIVITY_TAB} rows including header: {len(activity_rows)}.")
+    else:
+        lines.append(f"{ACTIVITY_TAB} is the log tab.")
+    if health:
+        return ToolResult(ok=True, text="\n".join(lines))
+    if not matches:
+        lines.append("No Contacts row matched.")
+        return ToolResult(ok=True, text="\n".join(lines))
+    lines.append("Contacts:")
+    lines.extend(matches)
+    return ToolResult(ok=True, text="\n".join(lines))
+
+
+def _crm_health_query(query: str) -> bool:
+    return is_sheets_health_ask(query)
+
+
+def _read_locked_activity(port: object, ctx: ToolContext) -> list[list[str]]:
+    reader = getattr(port, "read_values", None)
+    if not callable(reader):
+        return []
+    try:
+        rows = reader(
+            spreadsheet_id=_crm_spreadsheet_id(ctx),
+            a1_range=f"{ACTIVITY_TAB}!A1:E20",
+        )
+    except Exception:
+        return []
+    if not isinstance(rows, list):
+        return []
+    cleaned: list[list[str]] = []
+    for row in rows:
+        if not isinstance(row, list):
+            continue
+        cells = [str(cell) for cell in row]
+        blob = " ".join(cells)
         if "lead_" in blob.lower() or "01 Leads" in blob:
             continue
-        if not needle or needle in blob.casefold():
-            matches.append(blob)
-        if len(matches) >= 8:
-            break
-    if not matches:
-        return ToolResult(ok=True, text="No Contacts row matched.")
-    return ToolResult(ok=True, text="Contacts:\n" + "\n".join(matches))
+        cleaned.append(cells)
+    return cleaned
 
 
 def _crm_upsert(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
