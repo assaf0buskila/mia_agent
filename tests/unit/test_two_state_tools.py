@@ -132,7 +132,7 @@ def test_site_answers_product_without_identity_and_pings_only_after() -> None:
         crm=crm,
         book=book,
     )
-    assert product.next_action == "product_answer"
+    assert product.next_action == "answer"
     assert product.crm_wrote is False
     assert product.whatsapp_url is None
     assert product.owner_pinged is False
@@ -146,7 +146,7 @@ def test_site_answers_product_without_identity_and_pings_only_after() -> None:
     )
     assert want.crm_wrote is False
     assert want.whatsapp_url is None
-    assert want.next_action == "ask_contact"
+    assert want.next_action == "answer"
     identified = run_site_turn(
         session_id="web_product1",
         text="0501234567",

@@ -175,7 +175,7 @@ def test_website_price_after_need_still_returns_no_price() -> None:
             json={"text": "We run a clinic and miss calls all day."},
         )
         assert msg1.status_code == 200
-        assert msg1.json()["next_action"] == "ask_contact"
+        assert msg1.json()["next_action"] == "answer"
         msg4 = client.post(
             f"/v1/website/sessions/{session_id}/messages",
             json={"text": "sure, but what's the price"},

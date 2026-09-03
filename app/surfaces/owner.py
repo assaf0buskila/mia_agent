@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -26,6 +27,7 @@ from app.integrations.base import MessagePort
 from app.integrations.gmail import GmailPort
 from app.surfaces.crm import ContactsCrm, log_contact
 from app.surfaces.identity import extract_fields
+from app.surfaces.turn_coalesce import prepare_owner_utterance
 
 OWNER_FALLBACK = "פה. מה צריך?"
 CONTACT_LOGGED = "רשמתי ב-Contacts."
@@ -155,12 +157,14 @@ async def run_owner_loop(
         if talk is not None:
             reply, crm_wrote = talk(text=owner_text, crm=crm)
         else:
-            reply, crm_wrote = _talk_with_optional_agent(
-                text=owner_text,
-                crm=crm,
-                settings=settings,
-                store=store,
-                item=item,
+            reply, crm_wrote = await asyncio.to_thread(
+                lambda: _talk_with_optional_agent(
+                    text=owner_text,
+                    crm=crm,
+                    settings=settings,
+                    store=store,
+                    item=item,
+                )
             )
 
     message = outbound_reply(item, text=reply, channel=channel)
@@ -203,6 +207,7 @@ def _talk_with_optional_agent(
     if not settings.owner_agent_ready():
         return fallback, wrote
     try:
+        history = tuple(store.list_conversation_turns(event_conversation_id(item)))
         brain = BrainStore(store.session)
         result = answer_owner(
             principal=Principal.owner(source="telegram", actor_id=item["from"]),
@@ -210,8 +215,8 @@ def _talk_with_optional_agent(
             brain=brain,
             settings=settings,
             task_type=OwnerTaskType.NOTE,
-            owner_text=text,
-            history=tuple(store.list_conversation_turns(event_conversation_id(item))),
+            owner_text=prepare_owner_utterance(text, history),
+            history=history,
             fallback_text=fallback,
             kill_switch=False,
             demo_active=demo_mode_active(settings),

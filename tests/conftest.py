@@ -123,8 +123,20 @@ def identify_website_visitor(
     )
     assert response.status_code == 200, response.text
     assert response.json()["lead_id"] == ""
-    assert response.json()["next_action"] in {"handoff", "no_price"}
+    assert response.json()["next_action"] in {"handoff", "no_price", "confirm_contact"}
     return response
+
+
+@pytest.fixture(autouse=True)
+def _owner_turn_coalesce_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.surfaces import turn_coalesce
+    from app.workers import telegram_owner
+
+    monkeypatch.setattr(turn_coalesce, "COALESCE_WAIT_S", 0)
+    monkeypatch.setattr(telegram_owner, "COALESCE_WAIT_S", 0)
+    turn_coalesce.reset_pending_turns()
+    yield
+    turn_coalesce.reset_pending_turns()
 
 
 @pytest.fixture(autouse=True)

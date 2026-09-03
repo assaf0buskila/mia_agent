@@ -66,14 +66,16 @@ def test_demo_scripted_identify_then_sell_when_active(monkeypatch) -> None:
         assert len(body["steps"]) == len(SCRIPTED_MESSAGES)
         for step, (text, _old_action) in zip(body["steps"], SCRIPTED_MESSAGES, strict=True):
             assert step["user"] == text
-            allowed = {
+            assert step["next_action"] in {
                 "ask_need",
                 "ask_contact",
                 "handoff",
                 "no_price",
-                "product_answer",
+                "answer",
+                "confirm_contact",
+                "off_topic",
+                "identity",
             }
-            assert step["next_action"] in allowed
             assert isinstance(step["message"], str)
             assert step["message"]
         dumped = json.dumps(body)

@@ -1355,7 +1355,7 @@ def test_website_e2e_booking() -> None:
                 )
                 assert response.status_code == 200
                 body = response.json()
-                assert body["next_action"] in {"ask_need", "ask_contact"}
+                assert body["next_action"] in {"ask_need", "ask_contact", "answer"}
                 assert "נקבעה פגישה" not in body["message"]
                 assert fake_book.create_calls == []
         finally:

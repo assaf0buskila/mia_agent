@@ -24,6 +24,7 @@ from app.integrations.ga4 import (
     _ga4_outcome,
     format_conversion_events_block,
     format_ga4_rows_block,
+    normalize_ga4_property_id,
 )
 from app.integrations.search_console import (
     SearchAnalyticsRow,
@@ -31,6 +32,7 @@ from app.integrations.search_console import (
     _gsc_outcome,
     find_weak_ctr_page,
     format_gsc_rows_block,
+    resolve_gsc_site_url,
 )
 from app.integrations.seo_audit import SeoAuditPort, _seo_audit_outcome, format_audit_block
 
@@ -149,6 +151,16 @@ def enrich_seo_ack(
     gsc_rows: list[SearchAnalyticsRow] = []
     audit_snapshot = None
     start_date, end_date = _default_read_dates(settings)
+    site = resolve_gsc_site_url(settings) or "unknown"
+    property_id = (
+        normalize_ga4_property_id(settings.ga4_property_id.strip())
+        or settings.ga4_property_id.strip()
+        or "unknown"
+    )
+    source_line = (
+        f"GA4 property {property_id}; GSC {site}; {start_date} to {end_date}; "
+        "numbers from the API."
+    )
 
     started = perf_counter()
     try:
@@ -332,7 +344,7 @@ def enrich_seo_ack(
 
     enriched = ack
     if blocks:
-        enriched = f"{ack}\n\n" + "\n\n".join(blocks)
+        enriched = f"{ack}\n\n" + "\n\n".join([source_line, *blocks])
 
     rec = _build_recommendation(
         gsc_rows=gsc_rows,

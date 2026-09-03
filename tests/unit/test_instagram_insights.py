@@ -85,7 +85,8 @@ def test_graph_port_parses_media_and_insights_no_urls() -> None:
                         {
                             "id": MEDIA_ID_1,
                             "media_type": "IMAGE",
-                            "caption": "secret caption",
+                            "caption": "Launch hook",
+                            "timestamp": "2026-09-01T10:00:00+0000",
                             "permalink": "https://instagram.com/p/abc",
                             "media_url": "https://cdn.example/photo.jpg",
                         },
@@ -128,10 +129,14 @@ def test_graph_port_parses_media_and_insights_no_urls() -> None:
     assert items[0].comments == "3"
     assert items[0].saved == "12"
     serialized = json.dumps([item.model_dump() for item in items]).lower()
-    assert "caption" not in serialized
-    assert "permalink" not in serialized
+    assert items[0].caption == "Launch hook"
+    assert items[0].timestamp == "2026-09-01T10:00:00+0000"
+    assert items[0].permalink == "https://instagram.com/p/abc"
+    assert "cdn.example" not in serialized
     assert "media_url" not in serialized
-    assert "http" not in serialized
+    assert any(
+        "/media" in call and "caption" in call and "permalink" in call for call in calls
+    )
     assert any("/media" in call for call in calls)
     assert any("/insights" in call for call in calls)
     assert all("access_token" not in call for call in calls)
@@ -222,9 +227,11 @@ def test_graph_port_insights_400_skips_media() -> None:
         client=client,
     )
     items = port.list_recent_insights(limit=5)
-    assert len(items) == 1
-    assert items[0].media_id == MEDIA_ID_2
-    assert items[0].views == "99"
+    assert len(items) == 2
+    assert items[0].media_id == MEDIA_ID_1
+    assert items[0].views is None
+    assert items[1].media_id == MEDIA_ID_2
+    assert items[1].views == "99"
 
 
 def test_graph_port_retries_supported_metrics_individually_after_mixed_batch_rejection() -> None:
@@ -358,7 +365,10 @@ def test_graph_port_does_not_retry_generic_metric_error_individually() -> None:
         graph_host="graph.instagram.com",
         client=httpx.Client(transport=httpx.MockTransport(handler)),
     )
-    assert port.list_recent_insights(limit=1) == []
+    items = port.list_recent_insights(limit=1)
+    assert len(items) == 1
+    assert items[0].media_id == MEDIA_ID_1
+    assert items[0].views is None
     assert requested_metrics == ["views,reach,likes,comments,saved"]
 
 
@@ -411,7 +421,7 @@ def test_enrich_appends_hebrew_line_and_persists() -> None:
             kill_switch=False,
         )
         db.commit()
-        assert "Instagram Insights" in enriched
+        assert "תוכן: 2 פוסטים, לידים מתוכן 0." in enriched
         rows = [
             row
             for row in store.list_content_insights()
@@ -630,6 +640,35 @@ def test_format_content_insights_line_empty_when_no_items() -> None:
     assert format_content_insights_line([]) == ""
 
 
+def test_format_content_insights_detail_names_posts_and_refuses_anonymous_totals() -> None:
+    from app.integrations.instagram_insights import format_content_insights_detail
+
+    named = ContentInsight(
+        media_id=MEDIA_ID_1,
+        media_type="REELS",
+        caption="Hook line",
+        timestamp="2026-09-01T10:00:00+0000",
+        permalink="https://instagram.com/p/abc",
+        account_kind="playground",
+        views="1000",
+        reach="800",
+    )
+    missing_id = ContentInsight(
+        media_id="",
+        media_type="IMAGE",
+        views="9999",
+    )
+    text = format_content_insights_detail([named, missing_id])
+    assert "Hook line" in text
+    assert "2026-09-01T10:00:00+0000" in text
+    assert "https://instagram.com/p/abc" in text
+    assert "playground" in text
+    assert "views=1000" in text
+    assert "media identity missing" in text
+    assert "9999" not in text
+    assert "combined view/reach" in text.lower() or "No combined view/reach totals" in text
+
+
 @pytest.mark.asyncio
 async def test_owner_analytics_inbound_tool_result_instagram_insights() -> None:
     init_db()
@@ -663,7 +702,7 @@ async def test_owner_analytics_inbound_tool_result_instagram_insights() -> None:
         assert task is not None
         assert task.task_type == "analytics"
         sent = port.sent[0].text
-        assert "Instagram Insights" in sent
+        assert "תוכן: 2 פוסטים" in sent
         tool_row = store.get_canonical_event(
             provider="whatsapp",
             provider_event_id="evt.owner.ig.content.1:tool:instagram_insights",
@@ -818,7 +857,8 @@ def test_composio_insights_parses_media_no_captions_or_urls() -> None:
                             {
                                 "id": MEDIA_ID_1,
                                 "media_type": "IMAGE",
-                                "caption": "secret caption",
+                                "caption": "Launch hook",
+                                "timestamp": "2026-09-01T10:00:00+0000",
                                 "permalink": "https://instagram.com/p/abc",
                                 "media_url": "https://cdn.example/photo.jpg",
                             },
@@ -861,15 +901,14 @@ def test_composio_insights_parses_media_no_captions_or_urls() -> None:
     assert items[0].views == "1200"
     assert items[0].reach == "900"
     serialized = json.dumps([item.model_dump() for item in items])
-    assert "secret caption" not in serialized
-    assert "instagram.com" not in serialized
+    assert items[0].caption == "Launch hook"
+    assert items[0].permalink == "https://instagram.com/p/abc"
     assert "cdn.example" not in serialized
     assert urls[0].endswith(f"/{COMPOSIO_GET_USER_MEDIA_TOOL}")
     assert urls[1].endswith(f"/{COMPOSIO_GET_MEDIA_INSIGHTS_TOOL}")
     assert captured[0]["version"] == COMPOSIO_INSTAGRAM_VERSION
     media_args = captured[0]["arguments"]
-    assert media_args["fields"] == "id,media_type,shortcode"
-    assert "caption" not in media_args["fields"]
+    assert media_args["fields"] == "id,media_type,caption,timestamp,permalink"
     assert media_args["ig_user_id"] == "17841400000000000"
     insight_args = captured[1]["arguments"]
     assert insight_args["ig_media_id"] == MEDIA_ID_1

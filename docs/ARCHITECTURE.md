@@ -37,7 +37,7 @@ Channels adapt transport. They do not reason.
 | Surface | Adapter job | Then |
 | --- | --- | --- |
 | Telegram | Webhook, numeric allowlist, HTML, voice download, callbacks | `run_owner_loop` |
-| Website | Session/message/voice/handoff HTTP + glass `widget.js` | `run_site_turn` |
+| Website | Session/message/voice/handoff HTTP + glass `widget.js` | `run_site_turn` + `site_policy` |
 | WhatsApp | Human inbox (ADR-024) | Assaf, after a site ping |
 
 Telegram access: `MIA_TELEGRAM_OWNER_USER_IDS` numeric only. Webhook secret check stays.
@@ -48,7 +48,7 @@ Locked spreadsheet `1HW8mnc9GFXraS6oG5VIxFcJvZq9gMDJBFRxY2mpVOhI`. Live tabs Con
 
 ## Website UX
 
-Glass Hebrew widget `app/web/ask_mia.js` at `https://mia.assafweb.com/v1/website/widget.js`. Product answers first. Identity before ping. WhatsApp only after phone or email. Origin-bind stays.
+Glass Hebrew widget `app/web/ask_mia.js` at `https://mia.assafweb.com/v1/website/widget.js`. Answer first. Identity before ping. WhatsApp only after phone or email. Origin-bind stays.
 
 ## Two-state tools
 

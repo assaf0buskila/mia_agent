@@ -48,6 +48,9 @@
   var SESSION_RE = /^web_[a-f0-9]{16}$/;
   var storedTranscript = [];
   var sessionEnded = false;
+  var burstParts = [];
+  var burstTimer = 0;
+  var BURST_MS = 800;
   // Only populated from the server's config response. Never infer a destination
   // from a Mia reply, a page link, or visitor text.
   var configuredWhatsAppUrl = '';
@@ -584,8 +587,16 @@
     return p.toString();
   }
 
-  function fetchJson(url, opts) {
-    return fetch(url, Object.assign({ credentials: 'omit' }, opts || {})).then(function (r) {
+  function fetchJson(url, opts, timeoutMs) {
+    var options = Object.assign({ credentials: 'omit' }, opts || {});
+    if (
+      timeoutMs &&
+      typeof AbortSignal !== 'undefined' &&
+      typeof AbortSignal.timeout === 'function'
+    ) {
+      options.signal = AbortSignal.timeout(timeoutMs);
+    }
+    return fetch(url, options).then(function (r) {
       if (!r.ok) {
         var err = new Error('fail');
         err.status = r.status;
@@ -682,6 +693,7 @@
         ? data.whatsapp_url
         : '';
     var painted = visible ? appendMsg('mia', visible) : false;
+    if (!visible) status.textContent = ERR;
     if (offering) {
       waBtn.hidden = true;
       waBtn.classList.remove('offer');
@@ -716,14 +728,19 @@
     );
   }
 
-  function sendMessage() {
-    var text = input.value.trim();
-    if (!text || busy || !sessionId) return;
+  function flushBurst() {
+    burstTimer = 0;
+    if (!burstParts.length || !sessionId) return;
+    if (busy) {
+      burstTimer = setTimeout(flushBurst, BURST_MS);
+      return;
+    }
+    var text = burstParts.join(' ').trim();
+    burstParts = [];
+    if (!text) return;
     if (text.length > 4000) text = text.slice(0, 4000);
     busy = true;
     status.textContent = '';
-    appendMsg('user', text);
-    input.value = '';
     showLoading();
     retryOnce(function () {
       return postText(text);
@@ -739,6 +756,18 @@
       });
   }
 
+  function sendMessage() {
+    var text = input.value.trim();
+    if (!text || !sessionId) return;
+    if (text.length > 4000) text = text.slice(0, 4000);
+    status.textContent = '';
+    appendMsg('user', text);
+    input.value = '';
+    burstParts.push(text);
+    if (burstTimer) clearTimeout(burstTimer);
+    burstTimer = setTimeout(flushBurst, BURST_MS);
+  }
+
   function postVoice(blob) {
     var form = new FormData();
     var mime = blob.type || 'audio/webm';
@@ -746,12 +775,18 @@
     form.append('file', blob, name);
     return fetchJson(
       api + '/v1/website/sessions/' + encodeURIComponent(sessionId) + '/voice',
-      { method: 'POST', body: form }
+      { method: 'POST', body: form },
+      25000
     );
   }
 
   function sendVoice(blob) {
-    if (busy || !sessionId || !blob || !blob.size) return;
+    if (busy || !blob || !blob.size) return;
+    if (!sessionId) {
+      status.textContent = MIC_ERR;
+      appendMsg('mia', MIC_ERR);
+      return;
+    }
     busy = true;
     status.textContent = '';
     appendMsg('user', 'הקלטה');
@@ -763,6 +798,7 @@
       .catch(function () {
         hideLoading();
         status.textContent = MIC_ERR;
+        appendMsg('mia', MIC_ERR);
       })
       .finally(function () {
         hideLoading();
@@ -808,9 +844,13 @@
     if (!rec && !recording) return;
     recording = false;
     mediaRecorder = null;
+    setMicLive(false);
     if (!rec) {
       stopTracks();
-      setMicLive(false);
+      if (send) {
+        status.textContent = MIC_ERR;
+        appendMsg('mia', MIC_ERR);
+      }
       return;
     }
     rec.ondataavailable = function (e) {
@@ -821,31 +861,40 @@
       var chunks = audioChunks;
       audioChunks = [];
       stopTracks();
-      setMicLive(false);
       if (!send) return;
       if (!chunks.length) {
         status.textContent = MIC_ERR;
+        appendMsg('mia', MIC_ERR);
         return;
       }
       var blob = new Blob(chunks, { type: chunks[0].type || 'audio/webm' });
       if (!blob.size) {
         status.textContent = MIC_ERR;
+        appendMsg('mia', MIC_ERR);
         return;
       }
       sendVoice(blob);
     };
     try {
-      if (rec.state !== 'inactive') rec.stop();
-      else rec.onstop();
+      if (rec.state !== 'inactive') {
+        if (typeof rec.requestData === 'function') rec.requestData();
+        rec.stop();
+      } else rec.onstop();
     } catch (err) {
       stopTracks();
-      setMicLive(false);
-      if (send) status.textContent = MIC_ERR;
+      if (send) {
+        status.textContent = MIC_ERR;
+        appendMsg('mia', MIC_ERR);
+      }
     }
   }
 
   function toggleRecord() {
-    if (busy || !sessionId) return;
+    if (busy) return;
+    if (!sessionId) {
+      status.textContent = MIC_ERR;
+      return;
+    }
     if (recording) {
       finishRecording(true);
       return;

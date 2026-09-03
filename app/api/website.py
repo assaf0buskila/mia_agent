@@ -30,15 +30,26 @@ from app.domain.events import (
     transcription_outcome,
 )
 from app.domain.handoff import click_to_chat_url
+from app.domain.tools import AdapterHttpError
 from app.integrations.base import MessagePort
 from app.integrations.sheets import SheetsPort
-from app.integrations.transcribe import TranscriptionPort, TranscriptResult
+from app.integrations.transcribe import (
+    TranscriptionError,
+    TranscriptionPort,
+    TranscriptResult,
+)
 from app.surfaces.crm import build_contacts_crm
 from app.surfaces.site import (
     ping_assaf_async,
     run_site_turn,
     site_book,
     site_opening,
+)
+from app.surfaces.site_policy import (
+    KNOWLEDGE_TOOL,
+    PublishedFact,
+    classify_site_intent,
+    facts_from_knowledge_hits,
 )
 
 router = APIRouter(prefix="/v1/website", tags=["website"])
@@ -231,6 +242,7 @@ def process_website_message(
     email: str = "",
     date: str = "",
     owner_port: MessagePort | None = None,
+    voice_failed: bool = False,
 ) -> MessageOut:
     del owner_port
     if not store.website_session_exists(session_id):
@@ -238,6 +250,7 @@ def process_website_message(
     if site_book().get(session_id) is None:
         site_book().open(session_id)
     turn_started = perf_counter()
+    facts, tools_ran = _published_facts_for_turn(store, text, voice_failed=voice_failed)
     crm = build_contacts_crm(settings, sheets)
     turn = run_site_turn(
         session_id=session_id,
@@ -248,6 +261,9 @@ def process_website_message(
         phone=phone,
         email=email,
         date=date,
+        facts=facts,
+        tools_ran=tools_ran,
+        voice_failed=voice_failed,
     )
     run_id = f"run_{uuid4().hex[:12]}"
     provider_event_id = f"{session_id}:{uuid4().hex[:12]}"
@@ -293,7 +309,11 @@ def process_website_message(
                 ),
                 correlation_id=run_id,
             )
-    message = turn.reply
+    message = (turn.reply or "").strip()
+    if not message:
+        from app.surfaces.site_policy import never_silent
+
+        message = never_silent("", "he")
     if message:
         website_message_out = build_message_out_event(
             provider="website",
@@ -325,20 +345,52 @@ def process_website_message(
     )
 
 
+def _published_facts_for_turn(
+    store: LeadStore,
+    text: str,
+    *,
+    voice_failed: bool,
+) -> tuple[tuple[PublishedFact, ...], tuple[str, ...]]:
+    """Look up assafweb.com facts only when the turn needs them. Never GSC or JSON-LD."""
+    if voice_failed or not text.strip():
+        return (), ()
+    intent = classify_site_intent(text)
+    if intent not in {"price", "need", "other", "metric"}:
+        return (), ()
+    try:
+        from app.brain.context import retrieve_knowledge
+        from app.brain.embeddings import build_embedding_port
+        from app.brain.store import BrainStore
+
+        hits = retrieve_knowledge(
+            BrainStore(store.session),
+            query=text,
+            embedding_port=build_embedding_port(get_settings()),
+            limit=3,
+        )
+    except Exception:
+        return (), ()
+    return facts_from_knowledge_hits(hits), (KNOWLEDGE_TOOL,)
+
+
 async def _maybe_ping_owner(
     *,
     session_id: str,
     settings: Settings,
     owner_port: MessagePort | None,
+    force: bool = False,
 ) -> bool:
     if owner_port is None:
         return False
     session = site_book().get(session_id)
     if session is None or session.pinged or not session.fields.has_phone_or_email():
         return False
+    if not force and not session.awaiting_ping and not session.confirmed:
+        return False
     sent = await ping_assaf_async(settings, owner_port, session)
     if sent:
         session.pinged = True
+        session.awaiting_ping = False
     return sent
 
 
@@ -430,6 +482,7 @@ async def create_handoff(
         session_id=session_id,
         settings=settings,
         owner_port=owner_port,
+        force=True,
     )
     notification_status = "delivered" if pinged else "failed"
     log_comm(
@@ -568,13 +621,53 @@ async def post_voice(
                 mime_type=mime,
                 filename=_voice_filename(mime),
             )
-        except RuntimeError as exc:
+        except RuntimeError:
+            out = process_website_message(
+                store,
+                session_id=session_id,
+                text="",
+                settings=settings,
+                sheets=sheets,
+                voice_failed=True,
+            )
+            await _maybe_ping_owner(
+                session_id=session_id,
+                settings=settings,
+                owner_port=owner_port,
+            )
+            return VoiceMessageOut(
+                lead_id=out.lead_id,
+                next_action=out.next_action,
+                message=out.message,
+                whatsapp_url=out.whatsapp_url,
+                heard="",
+            )
+        except (TranscriptionError, AdapterHttpError) as exc:
             raise HTTPException(status_code=503, detail="transcription unavailable") from exc
     finally:
         del audio
     text = (result.text or "").strip()
     if not text:
-        raise HTTPException(status_code=422, detail="empty transcript")
+        out = process_website_message(
+            store,
+            session_id=session_id,
+            text="",
+            settings=settings,
+            sheets=sheets,
+            voice_failed=True,
+        )
+        await _maybe_ping_owner(
+            session_id=session_id,
+            settings=settings,
+            owner_port=owner_port,
+        )
+        return VoiceMessageOut(
+            lead_id=out.lead_id,
+            next_action=out.next_action,
+            message=out.message,
+            whatsapp_url=out.whatsapp_url,
+            heard="",
+        )
     if len(text) > 4000:
         text = text[:4000]
     out = process_website_message(

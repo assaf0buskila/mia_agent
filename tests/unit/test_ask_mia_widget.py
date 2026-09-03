@@ -85,7 +85,9 @@ def test_no_auto_open_timer_scroll_or_exit_intent() -> None:
     ):
         assert needle not in lowered
     assert "setTimeout(mount, 0)" in source
-    assert source.count("setTimeout(") == 1
+    assert source.count("setTimeout(") >= 2
+    assert "BURST_MS" in source
+    assert "flushBurst" in source
     mount_fn = _function_body(source, "mount")
     assert "openPanel" not in mount_fn
     assert "initSession" not in mount_fn
@@ -192,14 +194,16 @@ def test_messages_use_chat_bubble_layout() -> None:
     source = _source()
     paint = _function_body(source, "paintMsg")
     send = _function_body(source, "sendMessage")
+    flush = _function_body(source, "flushBurst")
     assert "ask-mia-row ask-mia-row-" in paint
     assert "bubbleAvatar(role)" in paint
     assert "ask-mia-bubble-avatar" in source
     assert "flex-direction:row-reverse" in source
     assert ".ask-mia-user{background:#2f5f93;color:#fff" in source
     assert ".ask-mia-mia{background:#eef7ff;color:#061b35" in source
-    assert "showLoading()" in send
-    assert "hideLoading()" in send
+    assert "burstParts.push(text)" in send
+    assert "showLoading()" in flush
+    assert "hideLoading()" in flush
     assert "unsplash" not in source.lower()
     assert "innerHTML" not in source
     assert 'face.textContent = "א"' in source or "face.textContent = 'א'" in source
@@ -309,8 +313,20 @@ def test_widget_uses_mediarecorder_and_no_tts() -> None:
     assert "speechsynthesis" not in lowered
     assert "speechsynthesisutterance" not in lowered
     assert "webkitSpeechRecognition" not in source
-    assert source.count("setTimeout(") == 1
+    assert "setTimeout(flushBurst, BURST_MS)" in source
     assert "setTimeout(mount, 0)" in source
+
+
+def test_widget_stitches_message_bursts() -> None:
+    source = _source()
+    send = _function_body(source, "sendMessage")
+    flush = _function_body(source, "flushBurst")
+    assert "BURST_MS = 800" in source
+    assert "burstParts.push(text)" in send
+    assert "busy" not in send or "if (!text || !sessionId) return" in send
+    assert "burstParts.join(' ')" in flush
+    assert "postText(text)" in flush
+    assert "setTimeout(flushBurst, BURST_MS)" in send
 
 
 def test_session_restore_skips_opening_and_retries_stale() -> None:
@@ -322,11 +338,16 @@ def test_session_restore_skips_opening_and_retries_stale() -> None:
     assert "cfg.opening" in init
     assert "createWebsiteSession()" in init
     send = _function_body(source, "sendMessage")
-    assert "retryOnce" in send
+    flush = _function_body(source, "flushBurst")
+    assert "burstParts.push(text)" in send
+    assert "retryOnce" in flush
     retry = _function_body(source, "retryOnce")
     assert "err.status !== 404" in retry
     voice = _function_body(source, "sendVoice")
     assert "retryOnce" in voice
+    assert "appendMsg('mia', MIC_ERR)" in voice
+    assert "AbortSignal.timeout" in source
+    assert "25000" in _function_body(source, "postVoice")
     create = _function_body(source, "createWebsiteSession")
     assert "saveStoredSession(sessionId)" in create
     assert "TRANSCRIPT_KEY" not in create
@@ -423,9 +444,10 @@ def test_widget_open_send_uses_textcontent_and_wa_me_href_only() -> None:
     assert "panel.hidden = false" in open_fn
     assert "initSession()" in open_fn
     send = _function_body(source, "sendMessage")
+    flush = _function_body(source, "flushBurst")
     assert "appendMsg('user', text)" in send
-    assert "postText(text)" in send
-    assert "applyReply" in send
+    assert "postText(text)" in flush
+    assert "applyReply" in flush
     paint = _function_body(source, "paintMsg")
     assert "el.textContent = text" in paint
     assert "innerHTML" not in paint
@@ -462,6 +484,7 @@ def test_whatsapp_offer_is_a_tappable_button_not_a_raw_url() -> None:
     assert "placeWhatsAppCta" in apply
     assert "requestWhatsAppCta" not in source
     assert "status.textContent = WA_NA" in apply
+    assert "if (!visible) status.textContent = ERR" in apply
     assert "waBtn.hidden = false" not in apply
     strip = _function_body(source, "stripWaMeUrls")
     assert "wa.me" in strip.replace("\\", "")

@@ -405,7 +405,7 @@ def test_website_conversation_identity_qualification_events() -> None:
             f"/v1/website/sessions/{session_id}/messages",
             json={"text": "We run a clinic and miss calls all day.", "phone": "0501234567"},
         )
-        assert second.json()["next_action"] == "handoff"
+        assert second.json()["next_action"] in {"handoff", "confirm_contact"}
         events = client.post(
             f"/v1/website/sessions/{session_id}/events",
             json={"kind": "cta_click", "cta": "whatsapp"},
@@ -720,7 +720,7 @@ def test_website_proposal_does_not_set_hot_lead_takeover() -> None:
             json={"text": "Please send me a written proposal", "phone": "0501234567"},
         )
         assert reply.status_code == 200
-        assert reply.json()["next_action"] == "handoff"
+        assert reply.json()["next_action"] in {"handoff", "confirm_contact"}
         assert reply.json()["lead_id"] == ""
     db = get_session_factory()()
     try:

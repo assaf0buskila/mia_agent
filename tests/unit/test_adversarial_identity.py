@@ -20,6 +20,7 @@ from app.integrations.calendar import DisabledCalendarPort
 from app.integrations.research import FakeResearchPort, ResearchSnippet
 from app.integrations.sheets import DisabledSheetsPort
 from app.main import app
+from app.surfaces.site_policy import SITE_ACTIONS as _DUDE_SITE
 from fastapi.testclient import TestClient
 from sqlalchemy import delete, select
 
@@ -45,7 +46,6 @@ _INJECTION_SNIPPET = (
 )
 
 _SALES_NBA = frozenset(action.value for action in NextAction)
-_DUDE_SITE = frozenset({"ask_need", "ask_contact", "handoff", "no_price", "product_answer"})
 _FORBIDDEN_PROMPT_DUMP = (
     "agents.md",
     "system prompt",
