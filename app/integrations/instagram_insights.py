@@ -168,12 +168,14 @@ def _media_refs_from_data(data: object) -> list[_MediaRef]:
 
 
 def _insight_from_media(
-    media: _MediaRef, metrics: dict[str, str | None] | None
+    media: _MediaRef, metrics: dict[str, str | None] | None, *, account: str = ""
 ) -> ContentInsight:
     payload = dict(metrics or {})
     return ContentInsight(
         media_id=media.media_id,
         media_type=media.media_type,
+        account=account,
+        post_name=media.caption or media.media_id,
         caption=media.caption,
         timestamp=media.timestamp,
         permalink=media.permalink,
@@ -222,7 +224,9 @@ class GraphInstagramInsightsPort:
             results: list[ContentInsight] = []
             for media in media_items:
                 metrics = self._fetch_insights(media.media_id, budget=budget)
-                results.append(_insight_from_media(media, metrics))
+                results.append(
+                    _insight_from_media(media, metrics, account=self._account_id)
+                )
             return results
         except (
             httpx.HTTPError,
@@ -338,7 +342,7 @@ class ComposioInstagramInsightsPort:
         results: list[ContentInsight] = []
         for media in media_items:
             metrics = self._fetch_insights(media.media_id, budget=budget)
-            results.append(_insight_from_media(media, metrics))
+            results.append(_insight_from_media(media, metrics, account=self._account_id))
         return results
 
     def _execute(
@@ -597,19 +601,24 @@ def format_content_insights_line(
     n = len(items)
     if n == 0:
         return ""
-    return f"תוכן: {n} פוסטים, לידים מתוכן {total_signals}."
+    account = next((item.account for item in items if item.account), "missing")
+    return (
+        f"Instagram Insights — account {account}: "
+        f"תוכן: {n} פוסטים, לידים מתוכן {total_signals}."
+    )
 
 
 def format_content_insights_detail(
     items: list[ContentInsight], *, total_signals: int = 0
 ) -> str:
-    """Per-post metrics named to a real post. No anonymous view/reach totals."""
+    """Per-post metrics. Tool name, account, and post name before any number."""
     if not items:
         return ""
+    account = next((item.account for item in items if item.account), "missing")
     lines = [
         (
-            f"Instagram: {len(items)} recent posts "
-            f"(newest first, from the API, cap {_MAX_IG_INSIGHTS_LIMIT}). "
+            f"Instagram Insights — account {account}: "
+            f"{len(items)} named posts (newest first, from the API, cap {_MAX_IG_INSIGHTS_LIMIT}). "
             "Each line is one post. No combined view/reach totals."
         )
     ]
@@ -620,15 +629,18 @@ def format_content_insights_detail(
         hook = item.caption.strip() or "caption missing"
         when = item.timestamp.strip() or "time missing"
         link = item.permalink.strip() or "permalink missing"
-        account = item.account_kind.strip() or _UNLABELED_ACCOUNT
+        kind = item.account_kind.strip() or _UNLABELED_ACCOUNT
         parts: list[str] = []
         for name in _INSIGHT_METRICS:
             value = getattr(item, name, None)
             if value:
                 parts.append(f"{name}={value}")
         metric_text = ", ".join(parts) if parts else "metrics missing from Insights"
+        post_name = item.post_name.strip() or item.media_id
+        item_account = item.account.strip() or account
         lines.append(
-            f"{index}. {item.media_type} {hook} | {when} | {link} | {account}: {metric_text}"
+            f"{index}. post {post_name} on account {item_account} "
+            f"({item.media_type}) {hook} | {when} | {link} | {kind}: {metric_text}"
         )
     if total_signals:
         lines.append(f"Lead signals attributed to these posts: {total_signals}.")

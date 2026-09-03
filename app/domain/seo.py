@@ -190,7 +190,7 @@ def enrich_seo_ack(
             for item in (payload.get("rows") or [])
             if isinstance(item, dict)
         ]
-        block = format_gsc_rows_block(gsc_rows)
+        block = format_gsc_rows_block(gsc_rows, start_date=start_date, end_date=end_date)
         if block:
             blocks.append(block)
         outcomes.append(
@@ -256,7 +256,7 @@ def enrich_seo_ack(
             for item in (payload.get("conversions") or [])
             if str(item).strip()
         ]
-        ga4_block = format_ga4_rows_block(pivot_rows)
+        ga4_block = format_ga4_rows_block(pivot_rows, start_date=start_date, end_date=end_date)
         conv_block = format_conversion_events_block(conversions)
         if ga4_block:
             blocks.append(ga4_block)

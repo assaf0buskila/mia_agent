@@ -58,7 +58,7 @@ def test_enrich_content_insights_ack_fake_freshness_cached() -> None:
         assert outcome.freshness == "cached"
         assert outcome.status == "ok"
         assert outcome.result_count == 2
-        assert "תוכן: 2 פוסטים" in enriched
+        assert "Instagram Insights" in enriched
         dumped = json.dumps(outcome.model_dump()).lower()
         assert "caption" not in dumped
         assert "http" not in dumped

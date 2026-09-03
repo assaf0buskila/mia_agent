@@ -169,6 +169,8 @@ OWNER_REQUESTED_GMAIL_SEND_SLUGS: frozenset[str] = frozenset(
 # Send-like slugs that exist on allowlisted apps but must not auto-fire.
 NEVER_AUTO_SEND_SLUGS: frozenset[str] = OWNER_REQUESTED_GMAIL_SEND_SLUGS | {
     "GOOGLE_ANALYTICS_SEND_EVENTS",
+    "WHATSAPP_SEND_MESSAGE",
+    "WHATSAPP_SEND_TEMPLATE_MESSAGE",
 }
 
 # Adapter-pinned Sheets writes already in this repo. Classifier treats them as

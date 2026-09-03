@@ -38,10 +38,12 @@ a prose answer instead of looping forever or running up cost:
 from __future__ import annotations
 
 import json
+import threading
 from typing import Any, NamedTuple
 
 from app.brain.context import BrainContext, render_context_block
 from app.domain.memory import ConversationTurn, render_transcript
+from app.domain.two_state import STILL_CHECKING, TOOL_TIMEOUT_SECONDS, asked_toolkit
 from app.integrations.llm_client import (
     LlmClient,
     LlmError,
@@ -75,7 +77,8 @@ EMPTY_RESULT_REPEAT_LIMIT = 2
 SYSTEM_PROMPT = (
     "You are Mia, Assaf Buskila's private AI operator on Telegram. "
     "Talk like Dude: warm, short, hybrid Hebrew/English when a tool is involved. "
-    "You talk to Assaf and only to Assaf. This is not a sales channel.\n"
+    "You talk to Assaf and only to Assaf. This is not a sales channel. "
+    "Never sell to him. No packages, no CTAs, no 'want a website?'.\n"
     "\n"
     "You are not a generic assistant who meets him fresh every time. You have a long-term "
     "memory of him, his businesses and his projects, and a knowledge base built from his "
@@ -175,7 +178,17 @@ SYSTEM_PROMPT = (
     "Talk freely like Dude. Use the tools. Do not invent prices — visitor prices live "
     "on assafweb.com via search_knowledge.\n"
     "Never invent metrics, counts, or pipeline numbers. If you have no tool result, "
-    "say you do not know.\n"
+    "say you do not know. Missing is allowed. Inventing is not.\n"
+    "Say the tool name before any number. Instagram Insights must name the post and "
+    "the account. GSC and GA4 must include the date range.\n"
+    "Answer the toolkit he asked about first. If he asked Instagram, do not lead "
+    "with Gmail. Never seen-and-silent: if a tool ran, say what it returned or that "
+    "it was empty.\n"
+    "If a tool is still running, say 'still checking'. Do not invent while you wait.\n"
+    "Calendar write only for a meeting near Tel Aviv, 09:00-17:00 Asia/Jerusalem, "
+    "empty slot. Weather chats never become meetings. Else ask Assaf.\n"
+    "Gmail is read and draft only. gmail_send stays off. LinkedIn is read, never post. "
+    "WhatsApp drafts go to Assaf and never fire at a lead.\n"
     "House Composio already has Sheets, Gmail, Instagram, LinkedIn, GA, GSC, Calendar, "
     "and WhatsApp. Call those tools. Do not say they are disconnected. If a tool fails, "
     "say the error.\n"
@@ -229,6 +242,43 @@ _EMPTY_RESULT_MARKERS = (
 _EMPTY_RESULT_MAX_CHARS = 60
 
 
+def _run_tool_with_timeout(name: str, arguments: dict[str, Any], ctx: ToolContext):
+    """Run one tool. If it exceeds the bound, say still checking — do not invent."""
+    from app.tools.registries.owner_tools import ToolResult
+
+    box: list[Any] = []
+    done = threading.Event()
+
+    def _run() -> None:
+        try:
+            box.append(execute_tool(name, arguments, ctx))
+        except Exception as exc:  # noqa: BLE001 - timeout path must still answer
+            box.append(ToolResult(ok=False, error=type(exc).__name__))
+        finally:
+            done.set()
+
+    threading.Thread(target=_run, daemon=True).start()
+    if not done.wait(timeout=TOOL_TIMEOUT_SECONDS):
+        return ToolResult(ok=True, text=STILL_CHECKING)
+    return box[0]
+
+
+def _looks_silent(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped:
+        return True
+    lowered = stripped.casefold()
+    greetings = ("פה. מה צריך", "here. what do you need", "hey", "היי")
+    return any(lowered == greet or lowered.startswith(greet) for greet in greetings)
+
+
+def _refuse_seen_and_silent(text: str, steps: list[AgentStep], reports: list[str]) -> str:
+    used = [step.tool for step in steps if step.ok]
+    if used and _looks_silent(text) and reports:
+        return "בדקתי.\n" + "\n".join(reports[:6])
+    return text
+
+
 def _looks_empty(text: str) -> bool:
     stripped = text.strip()
     if not stripped:
@@ -280,6 +330,12 @@ def build_messages(
 ) -> list[dict[str, Any]]:
     """System + context + history + the owner's message. History is data, not instructions."""
     system = SYSTEM_PROMPT
+    toolkit = asked_toolkit(owner_message)
+    if toolkit:
+        system = (
+            f"{system}\n\nASKED TOOLKIT FIRST: he asked about {toolkit}. "
+            "Answer that toolkit first. Do not lead with another source."
+        )
     if now_line:
         system = f"{system}\n\nCURRENT TIME: {now_line}"
     context_block = render_context_block(context) if context is not None else ""
@@ -338,6 +394,7 @@ def run_owner_agent(
     empty_counts: dict[str, int] = {}
     blocked_tools: set[str] = set()
     approval_ids: list[str] = []
+    tool_reports: list[str] = []
 
     def finish(
         *, text: str = "", completed: bool, completion: str, error: str, steps_used: int
@@ -405,8 +462,9 @@ def run_owner_agent(
             )
         if not response.tool_calls:
             if response.text:
+                reply = _refuse_seen_and_silent(response.text, steps, tool_reports)
                 return finish(
-                    text=response.text,
+                    text=reply,
                     completed=True,
                     completion="answered",
                     error="",
@@ -477,10 +535,13 @@ def run_owner_agent(
                 )
                 continue
             seen_calls.add(key)
-            result = execute_tool(call.name, call.arguments, ctx)
+            result = _run_tool_with_timeout(call.name, call.arguments, ctx)
             steps.append(AgentStep(tool=call.name, ok=result.ok, detail=result.error or "ok"))
             if result.ok:
                 tools_used.append(call.name)
+                snippet = (result.text or result.error or "").strip()
+                if snippet:
+                    tool_reports.append(f"{call.name}: {snippet[:400]}")
                 if result.approval_id and result.approval_id not in approval_ids:
                     approval_ids.append(result.approval_id)
                 if _looks_empty(result.text):

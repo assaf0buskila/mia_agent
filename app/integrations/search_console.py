@@ -478,7 +478,12 @@ def build_search_console_port(settings: Settings) -> SearchConsolePort:
     return DisabledSearchConsolePort()
 
 
-def format_gsc_rows_block(rows: list[SearchAnalyticsRow]) -> str:
+def format_gsc_rows_block(
+    rows: list[SearchAnalyticsRow],
+    *,
+    start_date: str = "",
+    end_date: str = "",
+) -> str:
     lines: list[str] = []
     for row in rows:
         label = _sanitize_page_label(row.page or row.query)
@@ -497,7 +502,10 @@ def format_gsc_rows_block(rows: list[SearchAnalyticsRow]) -> str:
             break
     if not lines:
         return ""
-    return "נתוני חיפוש (GSC):\n" + "\n".join(f"- {line}" for line in lines)
+    header = "Google Search Console"
+    if start_date and end_date:
+        header = f"Google Search Console ({start_date} to {end_date})"
+    return f"{header}:\n" + "\n".join(f"- {line}" for line in lines)
 
 
 def _parse_ctr(value: str | None) -> float | None:

@@ -107,7 +107,7 @@ def test_gmail_claim_is_committed_before_provider_send_and_replay_never_resends(
 def test_calendar_create_reconciles_durable_claim_without_reissuing_provider_write() -> None:
     session, store = _store()
     try:
-        text = "צור אירוע: פגישת בטיחות | 2026-09-03T10:00 | 60 | Asia/Jerusalem"
+        text = "צור אירוע: פגישת בטיחות בתל אביב | 2026-09-03T10:00 | 60 | Asia/Jerusalem"
         apply_owner_calendar_change_request(
             store, text=text, channel=Channel.TELEGRAM, kill_switch=False, demo_active=False,
             default_timezone="Asia/Jerusalem",
@@ -131,7 +131,7 @@ def test_calendar_create_reconciles_durable_claim_without_reissuing_provider_wri
             start=start,
             end=start + timedelta(hours=1),
             timezone="Asia/Jerusalem",
-            summary="פגישת בטיחות",
+            summary="פגישת בטיחות בתל אביב",
             create_meeting_room=False,
             allow_nonstandard_duration=True,
         )
