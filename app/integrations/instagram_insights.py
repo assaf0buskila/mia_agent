@@ -604,7 +604,7 @@ def format_content_insights_line(
     account = next((item.account for item in items if item.account), "missing")
     return (
         f"Instagram Insights — account {account}: "
-        f"{n} named posts, לידים מתוכן {total_signals}."
+        f"תוכן: {n} פוסטים, לידים מתוכן {total_signals}."
     )
 
 
