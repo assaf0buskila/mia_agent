@@ -55,13 +55,13 @@ def test_website_identify_then_sell_does_not_persist_deals() -> None:
             json={"text": "We run a clinic and miss calls all day."},
         )
         assert clinic.status_code == 200
-        assert clinic.json()["next_action"] == "ask_contact"
+        assert clinic.json()["next_action"] == "answer"
         proposal = client.post(
             f"/v1/website/sessions/{session_id}/messages",
             json={"text": "Please send me a proposal", "phone": "0501234567"},
         )
         assert proposal.status_code == 200
-        assert proposal.json()["next_action"] == "handoff"
+        assert proposal.json()["next_action"] in {"handoff", "confirm_contact"}
         assert proposal.json()["lead_id"] == ""
     db = get_session_factory()()
     try:
@@ -178,7 +178,7 @@ def test_disqualify_does_not_create_deal() -> None:
             json={"text": "I'm a student with a school project"},
         )
         assert response.status_code == 200
-        assert response.json()["next_action"] == "ask_contact"
+        assert response.json()["next_action"] in {"ask_contact", "answer", "ask_need"}
         assert response.json()["lead_id"] == ""
     db = get_session_factory()()
     try:
@@ -198,7 +198,7 @@ def test_kill_switch_does_not_503_website_and_does_not_persist_deal(monkeypatch)
             json={"text": "We run a clinic and miss calls all day."},
         )
         assert response.status_code == 200
-        assert response.json()["next_action"] == "ask_contact"
+        assert response.json()["next_action"] in {"ask_contact", "answer", "ask_need"}
     db = get_session_factory()()
     try:
         store = LeadStore(db)

@@ -283,7 +283,7 @@ def test_website_post_message_enriches_seeded_offer_meeting(monkeypatch) -> None
                 )
                 assert response.status_code == 200
                 body = response.json()
-                assert body["next_action"] in {"ask_need", "ask_contact"}
+                assert body["next_action"] in {"ask_need", "ask_contact", "answer"}
                 assert body["lead_id"] == ""
                 assert OFFER_COPY not in body["message"]
         finally:

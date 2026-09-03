@@ -48,6 +48,9 @@
   var SESSION_RE = /^web_[a-f0-9]{16}$/;
   var storedTranscript = [];
   var sessionEnded = false;
+  var burstParts = [];
+  var burstTimer = 0;
+  var BURST_MS = 800;
   // Only populated from the server's config response. Never infer a destination
   // from a Mia reply, a page link, or visitor text.
   var configuredWhatsAppUrl = '';
@@ -690,6 +693,7 @@
         ? data.whatsapp_url
         : '';
     var painted = visible ? appendMsg('mia', visible) : false;
+    if (!visible) status.textContent = ERR;
     if (offering) {
       waBtn.hidden = true;
       waBtn.classList.remove('offer');
@@ -724,14 +728,19 @@
     );
   }
 
-  function sendMessage() {
-    var text = input.value.trim();
-    if (!text || busy || !sessionId) return;
+  function flushBurst() {
+    burstTimer = 0;
+    if (!burstParts.length || !sessionId) return;
+    if (busy) {
+      burstTimer = setTimeout(flushBurst, BURST_MS);
+      return;
+    }
+    var text = burstParts.join(' ').trim();
+    burstParts = [];
+    if (!text) return;
     if (text.length > 4000) text = text.slice(0, 4000);
     busy = true;
     status.textContent = '';
-    appendMsg('user', text);
-    input.value = '';
     showLoading();
     retryOnce(function () {
       return postText(text);
@@ -745,6 +754,18 @@
         hideLoading();
         busy = false;
       });
+  }
+
+  function sendMessage() {
+    var text = input.value.trim();
+    if (!text || !sessionId) return;
+    if (text.length > 4000) text = text.slice(0, 4000);
+    status.textContent = '';
+    appendMsg('user', text);
+    input.value = '';
+    burstParts.push(text);
+    if (burstTimer) clearTimeout(burstTimer);
+    burstTimer = setTimeout(flushBurst, BURST_MS);
   }
 
   function postVoice(blob) {

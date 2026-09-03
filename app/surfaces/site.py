@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 
 from app.core.config import Settings
@@ -9,48 +10,26 @@ from app.domain.handoff import click_to_chat_url
 from app.integrations.base import MessagePort, OutboundMessage
 from app.surfaces.crm import ContactRecord, ContactsCrm, log_contact
 from app.surfaces.identity import CapturedFields, apply_form
-
-SITE_OPENING = (
-    "שלום, אני מיה. ספרו לי בקצרה מה אתם מחפשים, "
-    "ואיך אפשר לחזור אליכם בטלפון או באימייל."
+from app.surfaces.site_policy import (
+    ASK_NEED_HE,
+    ASSAFWEB_HOOK_HE,
+    SITE_ACTIONS,
+    PublishedFact,
+    append_burst,
+    classify_site_intent,
+    decide_site_turn,
+    never_silent,
+    pick_language,
 )
+
+SITE_OPENING = "שלום, אני מיה. ספרו לי בקצרה מה אתם מחפשים."
 ASK_CONTACT = "כדי שאסף יוכל להמשיך אתכם, צריך טלפון או אימייל."
-ASK_NEED = "מה הכי חשוב לכם שנפתור קודם?"
+ASK_NEED = ASK_NEED_HE
 AFTER_CAPTURE = (
     "תודה. העברתי לאסף את מה שסיפרתם, והוא ימשיך איתכם בוואטסאפ. "
     "אני לא ממציאה מחיר או התחייבות מכאן."
 )
-NO_PRICE = "אין לי מחיר לתת כאן. אסף ידבר איתכם על זה."
-VOICE_ANSWER = (
-    "כן. אפשר להקליט כאן, אני ממירה לטקסט וממשיכה משם. "
-    "אם ההקלטה לא נקלטה, נסו שוב או כתבו."
-)
-PRODUCT_ANSWER = (
-    "אסף בונה עובדים דיגיטליים לעסקים: אוטומציות, סוכני AI באתר ובוואטסאפ, "
-    "ואתרים בעברית. אין לי מחיר לתת כאן."
-)
-_VOICE_MARKERS = (
-    "voice",
-    "קול",
-    "הקלטה",
-    "דיבור",
-    "שומעת",
-    "שומע",
-    "מבינה קול",
-    "מבינים קול",
-    "understand voice",
-)
-_PRODUCT_MARKERS = (
-    "מה אתם",
-    "מה מיה",
-    "what do you",
-    "do you",
-    "can you",
-    "שירותים",
-    "אוטומציה",
-    "עובד דיגיטלי",
-    "ai agent",
-)
+NO_PRICE = "אין מחיר מפורסם באתר assafweb.com לתת כאן. אסף יגיד."
 
 
 @dataclass
@@ -58,8 +37,15 @@ class SiteSession:
     session_id: str
     fields: CapturedFields = field(default_factory=CapturedFields)
     turns: list[tuple[str, str]] = field(default_factory=list)
+    burst_parts: list[tuple[float, str]] = field(default_factory=list)
     pinged: bool = False
     finalized: bool = False
+    confirmed: bool = False
+    selling_stopped: bool = False
+    complaint_open: bool = False
+    awaiting_ping: bool = False
+    language: str = ""
+    tools_ran: tuple[str, ...] = ()
 
 
 @dataclass
@@ -70,6 +56,7 @@ class SiteTurn:
     crm_wrote: bool
     owner_pinged: bool
     fields: CapturedFields
+    tools_ran: tuple[str, ...] = ()
 
 
 class SiteBook:
@@ -118,25 +105,38 @@ def run_site_turn(
     email: str = "",
     date: str = "",
     book: SiteBook | None = None,
+    facts: tuple[PublishedFact, ...] = (),
+    tools_ran: tuple[str, ...] = (),
+    now: float | None = None,
+    voice_failed: bool = False,
 ) -> SiteTurn:
-    """Identify, capture, then ping Assaf. No CRM or WhatsApp without phone or email."""
+    """Answer first. CRM or WhatsApp only with phone or email. No invented prices."""
     store = book or _BOOK
     session = store.get(session_id)
     if session is None:
         raise KeyError(session_id)
+    clock = time.monotonic() if now is None else now
+    raw = text
     session.fields = apply_form(
         session.fields,
         name=name,
         phone=phone,
         email=email,
         date=date,
-        text=text,
+        text="" if voice_failed else raw,
     )
+    thought = raw.strip()
+    if not voice_failed:
+        session.burst_parts, thought = append_burst(
+            session.burst_parts, raw, now=clock
+        )
+    session.language = pick_language(thought or raw, session.language or session.fields.language)
     if (
-        not session.fields.want
-        and text.strip()
-        and not _is_contact_only(text)
-        and not _is_product_question(text)
+        not voice_failed
+        and not session.fields.want
+        and thought
+        and not _is_contact_only(thought)
+        and _looks_like_need(thought)
     ):
         session.fields = CapturedFields(
             name=session.fields.name,
@@ -144,17 +144,58 @@ def run_site_turn(
             email=session.fields.email,
             date=session.fields.date,
             business=session.fields.business,
-            want=text.strip()[:200],
-            language=session.fields.language,
+            want=thought[:200],
+            language=session.language,
             summary=session.fields.summary,
         )
-    session.turns.append(("visitor", text.strip()))
-    reply, action = _site_reply(session.fields, text)
+    elif session.language and not session.fields.language:
+        session.fields = CapturedFields(
+            name=session.fields.name,
+            phone=session.fields.phone,
+            email=session.fields.email,
+            date=session.fields.date,
+            business=session.fields.business,
+            want=session.fields.want,
+            language=session.language,
+            summary=session.fields.summary,
+        )
+    if not voice_failed:
+        session.turns.append(("visitor", raw.strip()))
+    intent = classify_site_intent(thought or raw)
+    if tools_ran:
+        session.tools_ran = tuple(dict.fromkeys((*session.tools_ran, *tools_ran)))
+    named_tools = session.tools_ran if intent == "tool_status" else tools_ran
+    decision = decide_site_turn(
+        thought=thought or raw,
+        language=session.language,
+        has_contact=session.fields.has_phone_or_email(),
+        already_confirmed=session.confirmed,
+        selling_stopped=session.selling_stopped,
+        already_pinged=session.pinged,
+        facts=facts,
+        tools_ran=named_tools,
+        voice_failed=voice_failed,
+        complaint_open=session.complaint_open,
+    )
+    if decision.stop_selling:
+        session.selling_stopped = True
+    if intent == "complaint":
+        session.complaint_open = True
+    if decision.confirm_contact:
+        session.confirmed = True
+    session.awaiting_ping = bool(decision.ping_assaf and not session.pinged)
+    reply = never_silent(decision.reply, session.language)
+    action = decision.action
+    if action not in SITE_ACTIONS:
+        action = "answer"
     session.turns.append(("mia", reply))
     crm_wrote = False
     owner_pinged = False
     wa_url = None
-    if session.fields.has_phone_or_email():
+    if (
+        session.fields.has_phone_or_email()
+        and (decision.write_sheet or decision.ping_assaf)
+    ):
         record = _contact_from_session(session)
         written = log_contact(
             crm,
@@ -166,10 +207,11 @@ def run_site_turn(
         )
         crm_wrote = True
         wa_url = click_to_chat_url(settings.whatsapp_click_to_chat) or None
-        if owner_port is not None and not session.pinged:
+        if owner_port is not None and not session.pinged and decision.ping_assaf:
             owner_pinged = _ping_assaf(settings, owner_port, session)
             if owner_pinged:
                 session.pinged = True
+                session.confirmed = True
                 log_contact(
                     crm,
                     ContactRecord(
@@ -199,7 +241,12 @@ def run_site_turn(
         crm_wrote=crm_wrote,
         owner_pinged=owner_pinged,
         fields=session.fields,
+        tools_ran=tools_ran,
     )
+
+
+def _looks_like_need(text: str) -> bool:
+    return classify_site_intent(text) in {"need", "ask_assaf", "other"}
 
 
 def _contact_from_session(session: SiteSession) -> ContactRecord:
@@ -210,7 +257,7 @@ def _contact_from_session(session: SiteSession) -> ContactRecord:
         email=fields.email,
         date=fields.date,
         source="website",
-        language=fields.language,
+        language=fields.language or session.language,
         want=fields.want,
         status="פתוח",
         summary=_conversation_summary(session),
@@ -221,46 +268,6 @@ def _contact_from_session(session: SiteSession) -> ContactRecord:
 def _conversation_summary(session: SiteSession) -> str:
     lines = [f"{role}: {text}" for role, text in session.turns[-8:] if text]
     return " | ".join(lines)[:400]
-
-
-def _site_reply(fields: CapturedFields, text: str) -> tuple[str, str]:
-    if _asks_price(text):
-        return NO_PRICE, "no_price"
-    product = _product_answer(text)
-    if product:
-        if fields.has_phone_or_email():
-            return f"{product} {AFTER_CAPTURE}", "handoff"
-        return product, "answer"
-    if not fields.has_phone_or_email():
-        if fields.want:
-            return ASK_CONTACT, "ask_contact"
-        return ASK_NEED, "ask_need"
-    return AFTER_CAPTURE, "handoff"
-
-
-def _is_voice_question(text: str) -> bool:
-    lowered = text.lower()
-    return any(marker in lowered for marker in _VOICE_MARKERS)
-
-
-def _is_product_question(text: str) -> bool:
-    if _is_voice_question(text):
-        return True
-    lowered = text.lower()
-    return any(marker in lowered for marker in _PRODUCT_MARKERS)
-
-
-def _product_answer(text: str) -> str:
-    if _is_voice_question(text):
-        return VOICE_ANSWER
-    if _is_product_question(text):
-        return PRODUCT_ANSWER
-    return ""
-
-
-def _asks_price(text: str) -> bool:
-    lowered = text.lower()
-    return any(word in text or word in lowered for word in ("מחיר", "כמה עולה", "price", "cost"))
 
 
 def _is_contact_only(text: str) -> bool:
@@ -329,3 +336,7 @@ def format_owner_ping(session: SiteSession) -> str:
         f"סיכום: {_conversation_summary(session) or '—'}",
     ]
     return "\n".join(lines)
+
+
+# Re-export for leftover tests that import the hook line.
+ASSAFWEB_HOOK = ASSAFWEB_HOOK_HE

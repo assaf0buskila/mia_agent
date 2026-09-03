@@ -153,11 +153,10 @@ def test_kill_switch_skips_client_knowledge_retrieval_entirely(monkeypatch) -> N
 
 
 def test_website_client_graph_executes_knowledge_once(monkeypatch) -> None:
-    """One website message has one retrieval owner in the live composition.
+    """Live SITE lookup is published facts only. ClientGraph must not run.
 
-    Before this guard, ClientGraph executed the capability and the website injected a
-    second direct retrieval into the reused inner sales graph. The spies distinguish
-    those paths while exercising the actual HTTP route and ClientGraph invocation.
+    The website may call retrieve_knowledge for assafweb.com facts. It must not
+    invoke the leftover ClientGraph capability path.
     """
     capability_calls = 0
     retrieval_paths: list[str] = []
@@ -190,9 +189,15 @@ def test_website_client_graph_executes_knowledge_once(monkeypatch) -> None:
         )
 
     assert response.status_code == 200
-    assert response.json()["next_action"] in {"ask_need", "ask_contact", "no_price"}
+    assert response.json()["next_action"] in {
+        "ask_need",
+        "ask_contact",
+        "no_price",
+        "answer",
+    }
     assert capability_calls == 0
-    assert retrieval_paths == []
+    assert "capability" not in retrieval_paths
+    assert all(path == "legacy_website" for path in retrieval_paths)
 
 
 def test_knowledge_capability_exception_does_not_break_the_turn(monkeypatch) -> None:
