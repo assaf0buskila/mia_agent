@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -12,6 +13,7 @@ from app.brain.store import BrainStore
 from app.capabilities.types import Principal
 from app.core.config import Settings
 from app.core.demo import demo_mode_active
+from app.core.errors import MiaError
 from app.db.store import LeadStore
 from app.domain.approvals import DECISION_APPROVED
 from app.domain.events import (
@@ -23,11 +25,14 @@ from app.domain.events import (
 )
 from app.domain.gmail_drafts import apply_gmail_send_decision, execute_approved_gmail_send
 from app.domain.owner_tasks import OwnerTaskType
+from app.domain.tools import AdapterHttpError
 from app.integrations.base import MessagePort
 from app.integrations.gmail import GmailPort
 from app.surfaces.crm import ContactsCrm, log_contact
 from app.surfaces.identity import extract_fields
 from app.surfaces.turn_coalesce import prepare_owner_utterance
+
+_log = logging.getLogger("mia.owner")
 
 OWNER_FALLBACK = "פה. מה צריך?"
 CONTACT_LOGGED = "רשמתי ב-Contacts."
@@ -171,7 +176,11 @@ async def run_owner_loop(
     try:
         await port.send(message)
         sent = True
-    except RuntimeError:
+    except (RuntimeError, MiaError, AdapterHttpError):
+        # TelegramPort.send raises TelegramSendError (a MiaError) and AdapterHttpError.
+        # `except RuntimeError` only caught the not-configured DisabledMessagePort, so a
+        # Telegram 429 — likely on a split 4096-char reply — threw away an answer the
+        # owner had already waited and paid for, and left the webhook row `received`.
         sent = False
     store.mark_webhook(
         provider=provider,
@@ -203,7 +212,15 @@ def _talk_with_optional_agent(
 ) -> tuple[str, bool]:
     from app.domain.owner_brain import answer_owner
 
-    fallback, wrote = talk_as_dude(text=text, crm=crm)
+    try:
+        fallback, wrote = talk_as_dude(text=text, crm=crm)
+    except (MiaError, AdapterHttpError) as exc:
+        # `talk_as_dude` writes the CRM row, and the live Sheets adapter raises
+        # AdapterHttpError. This sat outside the guard below, so a Sheets 500 aborted
+        # the whole turn and the owner got the generic failure line instead of an
+        # answer the agent could still have given.
+        _log.warning("owner crm write failed error=%s", type(exc).__name__)
+        fallback, wrote = OWNER_FALLBACK, False
     if not settings.owner_agent_ready():
         return fallback, wrote
     try:
@@ -227,7 +244,10 @@ def _talk_with_optional_agent(
         if _asks_for_sheet_url(reply):
             return fallback, wrote
         return reply, wrote
-    except Exception:
+    except Exception as exc:
+        # Never silent: a brain outage here used to answer every real question with the
+        # greeting "פה. מה צריך?" and leave nothing in the logs to explain why.
+        _log.warning("owner agent turn failed error=%s", type(exc).__name__)
         return fallback, wrote
 
 

@@ -17,6 +17,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from app.api.inbound_common import event_conversation_id, outbound_reply
 from app.core.config import get_settings
+from app.core.errors import MiaError
 from app.core.logging import log_comm
 from app.db.session import get_session_factory
 from app.db.store import LeadStore
@@ -25,6 +26,7 @@ from app.domain.events import (
     persist_tool_outcome,
     transcription_outcome,
 )
+from app.domain.tools import AdapterHttpError
 from app.integrations.base import MessagePort
 from app.integrations.gmail import build_gmail_port
 from app.integrations.sheets import build_sheets_port
@@ -82,7 +84,7 @@ async def _send_owner_notice(
     try:
         await port.send(message)
         return True
-    except RuntimeError:
+    except (RuntimeError, MiaError, AdapterHttpError):
         return False
 
 
