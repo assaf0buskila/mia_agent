@@ -1937,7 +1937,7 @@ _register(
             "store small talk or anything he only asked a question about. Takes the fact "
             "as one self-contained sentence, a kind (semantic for stable facts, working "
             "for active tasks), a category, and an importance from 1 (mundane) to 10 "
-            "(defining) -- most facts are 4-7. The only write tool in this registry; "
+            "(defining) -- most facts are 4-7. Writes to Assaf's own memory only; "
             "owner-scoped and never leaves the system."
         ),
         parameters={
@@ -2354,9 +2354,10 @@ _register(
         name="seo_snapshot",
         description=(
             "Combined SEO snapshot: Search Console query/click/impression data, GA4 "
-            "traffic, and a homepage technical audit. Use when Assaf asks how the site "
-            "is doing in search or wants an SEO check. Takes no input. Read only; never "
-            "edits the site."
+            "traffic, and a homepage technical audit. Use when Assaf wants a health "
+            "check or an audit of the site. For plain traffic numbers with no audit use "
+            "website_kpis instead, never both in one turn: each fans out to several 20s "
+            "providers. Takes no input. Read only; never edits the site."
         ),
         parameters=_NO_ARGS,
         handler=_seo_snapshot,
@@ -2368,8 +2369,10 @@ _register(
         description=(
             "AssafWeb's API-backed KPI summary for the last 28 completed days: GA4 users, "
             "sessions, conversions and top pages, plus Search Console pages and queries with "
-            "clicks, impressions, CTR and average position. Use for traffic/search performance "
-            "questions. Takes no input; read only, no browser automation or site changes."
+            "clicks, impressions, CTR and average position. Use for plain numbers over that "
+            "window. For a health check that also audits the homepage use seo_snapshot "
+            "instead, never both in one turn. Takes no input; read only, no browser "
+            "automation or site changes."
         ),
         parameters=_NO_ARGS,
         handler=_website_kpis,
