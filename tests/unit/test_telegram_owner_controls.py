@@ -98,13 +98,19 @@ def test_taking_over_from_telegram_stops_mia_replying() -> None:
         db.close()
 
 
-def test_no_approval_keyboard_when_nothing_is_pending() -> None:
+def test_the_keyboard_tracks_whether_anything_is_actually_pending() -> None:
+    """Order-independent: other tests share this DB and may leave approvals behind."""
     init_db()
     db = get_session_factory()()
     try:
+        store = LeadStore(db)
         port = CapturingPort()
-        _run("מה קורה היום?", LeadStore(db), port)
+        _run("מה קורה היום?", store, port)
         assert port.sent
-        assert port.sent[0].reply_markup in (None, {}), "no buttons with nothing pending"
+        has_pending = bool(store.list_all_pending_approvals())
+        has_buttons = bool(port.sent[0].reply_markup)
+        assert has_buttons == has_pending, (
+            "buttons must appear exactly when something is waiting on him"
+        )
     finally:
         db.close()
