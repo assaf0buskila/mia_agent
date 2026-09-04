@@ -17,7 +17,6 @@ from urllib.parse import urlparse
 import httpx
 
 from app.core.config import Settings
-from app.core.demo import demo_mode_active
 from app.core.errors import PolicyDenied
 from app.core.risk import RiskAction, RiskLevel, assert_allowed
 from app.domain.ai_runs import elapsed_ms
@@ -35,7 +34,7 @@ from app.integrations.instagram import (
     COMPOSIO_GET_USER_MEDIA_TOOL,
     COMPOSIO_INSTAGRAM_VERSION,
 )
-from app.integrations.sheets import SheetsPort, maybe_mirror_content_insights
+from app.integrations.sheets import SheetsPort
 
 _COMPOSIO_EXECUTE_BASE = "https://backend.composio.dev/api/v3.1/tools/execute"
 _MEDIA_LIST_FIELDS = "id,media_type,caption,timestamp,permalink"
@@ -755,16 +754,6 @@ def enrich_content_insights_ack(
                 now=now,
             )
         apply_content_insight_policy(store, items=items, kill_switch=kill_switch)
-        if sheets is not None and settings is not None and not demo_mode_active(settings):
-            mirror_outcome = maybe_mirror_content_insights(
-                store=store,
-                sheets=sheets,
-                settings=settings,
-                kill_switch=kill_switch,
-                inbound_id=inbound_id,
-            )
-            if extra_outcomes is not None and mirror_outcome is not None:
-                extra_outcomes.append(mirror_outcome)
         wanted = {item.media_id for item in items}
         total_signals = sum(
             record.lead_signals

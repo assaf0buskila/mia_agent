@@ -1,13 +1,11 @@
 import importlib
 
-from app.api.deps import get_sheets_port
 from app.db.models import MeetingRow
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
 from app.domain.events import Channel
 from app.domain.meetings import STATUS_OFFERED, apply_meeting_policy
 from app.domain.sales import NextAction
-from app.integrations.sheets import FakeSheetsPort
 from app.main import app
 from fastapi.testclient import TestClient
 from sqlalchemy import select
@@ -143,22 +141,6 @@ def test_meetings_module_never_imports_message_port() -> None:
     source = importlib.import_module("inspect").getsource(meetings)
     assert "MessagePort" not in source
     assert "integrations.base" not in source
-
-
-def test_website_path_does_not_mirror_01_leads_meetings() -> None:
-    init_db()
-    fake = FakeSheetsPort()
-    app.dependency_overrides[get_sheets_port] = lambda: fake
-    try:
-        with TestClient(app) as client:
-            session_id = client.post("/v1/website/sessions").json()["session_id"]
-            client.post(
-                f"/v1/website/sessions/{session_id}/messages",
-                json={"text": "let's book a meeting", "phone": "0501234567"},
-            )
-        assert fake.meeting_rows == {}
-    finally:
-        app.dependency_overrides.pop(get_sheets_port, None)
 
 
 def test_env_kill_switch_does_not_503_website_and_does_not_persist_meeting(

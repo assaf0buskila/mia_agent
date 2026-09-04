@@ -133,7 +133,6 @@ async def test_owner_linkedin_fake_headline_in_sent_text() -> None:
         assert task is not None
         assert task.task_type == "linkedin"
         assert task.status == "logged"
-        assert sheets.rows == {}
         sent = port.sent[0].text
         assert "Growth & Sales Operator at AssafWeb" in sent
         assert "לא ביצעתי" in sent

@@ -1411,7 +1411,6 @@ async def test_inbound_cancellation_is_local_only_and_sends_one_honest_reply() -
         assert row.status == STATUS_CANCELLATION_REQUESTED
         assert booking.get_calls == []
         assert booking.patch_calls == []
-        assert sheets.meeting_rows[lead_id].status == STATUS_CANCELLATION_REQUESTED
     finally:
         db.close()
 
@@ -1479,12 +1478,11 @@ def test_website_e2e_reschedule_then_cancellation_request(monkeypatch) -> None:
             app.dependency_overrides.pop(get_sheets_port, None)
         db.expire_all()
         assert booking.patch_calls == []
-        assert lead_id not in sheets.meeting_rows
     finally:
         db.close()
 
 
-def test_cancellation_request_mirrors_status_and_lead_review_allows_it() -> None:
+def test_cancellation_request_sets_status_and_lead_review_allows_it() -> None:
     init_db()
     db = get_session_factory()()
     try:
@@ -1496,7 +1494,6 @@ def test_cancellation_request_mirrors_status_and_lead_review_allows_it() -> None
         )
         store.save_sales(SalesState(lead_id=lead_id, fit=FitLevel.GOOD))
         booking = FakeCalendarBookingPort()
-        sheets = FakeSheetsPort()
         reply, outcomes, changed = resolve_meeting_reply(
             store,
             lead_id=lead_id,
@@ -1516,7 +1513,6 @@ def test_cancellation_request_mirrors_status_and_lead_review_allows_it() -> None
         meeting = store.get_meeting(lead_id)
         assert meeting is not None
         from app.domain.lead_reviews import build_lead_review_snapshot
-        from app.integrations.sheets import MeetingMirrorRow, mirror_meeting
 
         snapshot = build_lead_review_snapshot(store, lead_id=lead_id)
         assert reply == CANCELLATION_REQUESTED_REPLY
@@ -1524,22 +1520,9 @@ def test_cancellation_request_mirrors_status_and_lead_review_allows_it() -> None
         assert changed is True
         assert snapshot is not None
         assert snapshot.meeting_status == STATUS_CANCELLATION_REQUESTED
-        assert mirror_meeting(
-            sheets=sheets,
-            row=MeetingMirrorRow(
-                lead_id=lead_id,
-                status=meeting.status,
-                source=meeting.source,
-                scheduled_at=meeting.scheduled_at,
-                calendar_event_id=meeting.calendar_event_id,
-                summary=meeting.summary,
-            ),
-            kill_switch=False,
-        )
-        mirrored = sheets.meeting_rows[lead_id]
-        assert mirrored.status == STATUS_CANCELLATION_REQUESTED
-        assert mirrored.scheduled_at
-        assert mirrored.calendar_event_id
+        assert meeting.status == STATUS_CANCELLATION_REQUESTED
+        assert meeting.scheduled_at
+        assert meeting.calendar_event_id
         assert booking.get_calls == []
         assert booking.patch_calls == []
     finally:

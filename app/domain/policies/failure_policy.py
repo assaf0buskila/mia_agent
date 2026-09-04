@@ -80,7 +80,6 @@ for _node in ("linkedin_profile",):
     _REGISTRY[_node] = _pin(_node, fallback="omit")
 
 _REGISTRY["sheets_mirror"] = _pin("sheets_mirror", fallback="skip")
-_REGISTRY["sheets_mirror_content"] = _pin("sheets_mirror_content", fallback="skip")
 _REGISTRY["voice_transcribe"] = _pin(
     "voice_transcribe", timeout_ms=30_000, maximum_retries=1, fallback="empty"
 )

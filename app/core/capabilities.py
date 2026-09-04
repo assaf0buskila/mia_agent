@@ -23,7 +23,6 @@ class CapabilityId(StrEnum):
     INSTAGRAM = "instagram"
     GMAIL = "gmail"
     CALENDAR = "calendar"
-    SHEETS_MIRROR = "sheets_mirror"
     META_ADS = "meta_ads"
     CONTENT_PERFORMANCE = "content_performance"
     CONTENT_IDEAS = "content_ideas"
@@ -214,12 +213,6 @@ CAPABILITIES: tuple[Capability, ...] = (
         prd="§18",
         status=WiringStatus.ALIVE,
         port="app.integrations.calendar",
-    ),
-    Capability(
-        id=CapabilityId.SHEETS_MIRROR,
-        prd="§19",
-        status=WiringStatus.ALIVE,
-        port="app.integrations.sheets",
     ),
     Capability(
         id=CapabilityId.META_ADS,

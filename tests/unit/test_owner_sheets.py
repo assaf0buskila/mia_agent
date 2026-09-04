@@ -16,7 +16,6 @@ from app.integrations.sheets import (
     CRM_WORKSPACE_SCHEMA_RANGE,
     CRM_WORKSPACE_SCHEMA_VERSION,
     CRM_WORKSPACE_TABS,
-    LEADS_SHEET_NAME,
     ComposioSheetsPort,
     FakeSheetsPort,
     normalize_owner_spreadsheet_id,
@@ -123,6 +122,11 @@ def test_owner_sheets_lists_tabs_only_inside_the_allowlisted_sheet() -> None:
     }
 
 
+# The legacy mirror tab. The mirror stack is gone; this name is kept only to assert
+# that workspace setup never recreates or writes it.
+LEGACY_LEADS_TAB = "01 Leads"
+
+
 def test_configured_mia_sheet_initializes_fixed_crm_workspace_idempotently() -> None:
     requests: list[tuple[str, dict]] = []
 
@@ -135,7 +139,7 @@ def test_configured_mia_sheet_initializes_fixed_crm_workspace_idempotently() -> 
                 200,
                 json={
                     "successful": True,
-                    "data": {"sheetNames": [LEADS_SHEET_NAME, "10 Mia Activity"]},
+                    "data": {"sheetNames": [LEGACY_LEADS_TAB, "10 Mia Activity"]},
                 },
             )
         if tool == COMPOSIO_VALUES_GET_TOOL:
@@ -172,12 +176,12 @@ def test_configured_mia_sheet_initializes_fixed_crm_workspace_idempotently() -> 
         "Activity",
     }
     assert not any(
-        body["arguments"]["properties"]["title"] == LEADS_SHEET_NAME for body in add_requests
+        body["arguments"]["properties"]["title"] == LEGACY_LEADS_TAB for body in add_requests
     )
     update_requests = [body for tool, body in requests if tool == COMPOSIO_VALUES_UPDATE_TOOL]
     assert len(update_requests) == 3
     assert not any(
-        body["arguments"]["range"].startswith(f"{LEADS_SHEET_NAME}!")
+        body["arguments"]["range"].startswith(f"{LEGACY_LEADS_TAB}!")
         for body in update_requests
     )
     assert all(body["arguments"]["spreadsheetId"] == _SHEET for body in update_requests)

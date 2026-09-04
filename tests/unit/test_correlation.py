@@ -4,7 +4,7 @@ import json
 
 import pytest
 from app.api.inbound import process_inbound_texts
-from app.db.models import AiRunRow, CanonicalEventRow, ToolRunRow
+from app.db.models import AiRunRow, CanonicalEventRow
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
 from app.domain.events import (
@@ -143,13 +143,6 @@ async def test_prospect_whatsapp_inbound_shares_correlation_id() -> None:
         )
         assert in_row is not None and out_row is not None
         assert in_row.correlation_id == out_row.correlation_id == ai_row.run_id
-        tool_rows = list(
-            db.scalars(
-                select(ToolRunRow).where(ToolRunRow.lead_id == lead_id)
-            ).all()
-        )
-        assert tool_rows
-        assert all(row.correlation_id == ai_row.run_id for row in tool_rows)
     finally:
         db.close()
 

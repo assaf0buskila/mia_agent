@@ -1,7 +1,6 @@
 import json
 
 import pytest
-from app.api.deps import get_sheets_port
 from app.api.inbound import process_inbound_texts
 from app.core.config import MiaEnv, Settings
 from app.core.demo import SCRIPTED_MESSAGES, demo_mode_active
@@ -144,61 +143,6 @@ def test_demo_session_does_not_stamp_attribution(monkeypatch) -> None:
         db.close()
 
 
-def test_demo_session_skips_source_mirror(monkeypatch) -> None:
-    monkeypatch.setenv("MIA_DEMO_MODE", "true")
-    init_db()
-    fake = FakeSheetsPort()
-    app.dependency_overrides[get_sheets_port] = lambda: fake
-    try:
-        with TestClient(app) as client:
-            response = client.post(
-                "/v1/website/sessions",
-                params={"utm_source": "meta", "utm_campaign": "yuma"},
-            )
-            assert response.status_code == 200
-        assert fake.source_rows == {}
-        assert fake.kpi_rows == {}
-    finally:
-        app.dependency_overrides.pop(get_sheets_port, None)
-
-
-def test_demo_message_skips_sheets_mirror(monkeypatch) -> None:
-    monkeypatch.setenv("MIA_DEMO_MODE", "true")
-    init_db()
-    fake = FakeSheetsPort()
-    app.dependency_overrides[get_sheets_port] = lambda: fake
-    try:
-        with TestClient(app) as client:
-            session_id = client.post("/v1/website/sessions").json()["session_id"]
-            client.post(
-                f"/v1/website/sessions/{session_id}/messages",
-                json={"text": "hi"},
-            )
-        assert fake.rows == {}
-        assert fake.source_rows == {}
-        assert fake.activity_rows == {}
-        assert fake.kpi_rows == {}
-    finally:
-        app.dependency_overrides.pop(get_sheets_port, None)
-    db = get_session_factory()()
-    try:
-        tool_rows = list(
-            db.scalars(
-                select(CanonicalEventRow).where(
-                    CanonicalEventRow.conversation_id == session_id,
-                    CanonicalEventRow.event_type == "tool_result",
-                )
-            )
-        )
-        sheets_tools = [
-            row for row in tool_rows
-            if json.loads(row.payload_json).get("tool") == "sheets_mirror"
-        ]
-        assert len(sheets_tools) == 0
-    finally:
-        db.close()
-
-
 @pytest.mark.asyncio
 async def test_inbound_skips_sheets_mirror_when_demo_active(monkeypatch) -> None:
     monkeypatch.setenv("MIA_DEMO_MODE", "true")
@@ -225,8 +169,6 @@ async def test_inbound_skips_sheets_mirror_when_demo_active(monkeypatch) -> None
         )
         db.commit()
         assert result["processed"] == 1
-        assert sheets.rows == {}
-        assert sheets.activity_rows == {}
         tool_rows = list(
             db.scalars(
                 select(CanonicalEventRow).where(

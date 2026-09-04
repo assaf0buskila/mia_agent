@@ -356,7 +356,6 @@ async def test_owner_audio_persists_task_no_sheets_no_sales_graph() -> None:
         assert task.status == "logged"
         expected_due = parse_due_at(owner_text, now=datetime.now(UTC))
         assert task.due_at == expected_due
-        assert sheets.rows == {}
         assert len(port.sent) == 1
         assert "משימת מכירות" in port.sent[0].text
         assert "Daniel" not in port.sent[0].text

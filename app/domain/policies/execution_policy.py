@@ -109,9 +109,6 @@ _REGISTRY: dict[str, ActionPolicy] = {
     CapabilityId.CALENDAR.value: _det(
         CapabilityId.CALENDAR, risk=RiskLevel.R2_CUSTOMER_MESSAGE
     ),
-    CapabilityId.SHEETS_MIRROR.value: _det(
-        CapabilityId.SHEETS_MIRROR, risk=RiskLevel.R1_LOW_WRITE
-    ),
     CapabilityId.CONTENT_PERFORMANCE.value: _det(
         CapabilityId.CONTENT_PERFORMANCE, risk=RiskLevel.R0_READ
     ),

@@ -9,7 +9,6 @@ ALLOWLISTED_TOOLS = frozenset({
     "calendar_patch_event",
     "calendar_reschedule_verify",
     "sheets_mirror",
-    "sheets_mirror_content",
     "instagram_insights",
     "research_search",
     "meeting_research",

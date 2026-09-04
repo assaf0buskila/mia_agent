@@ -22,22 +22,7 @@ from app.integrations.instagram_insights import (
     enrich_content_insights_ack,
     format_content_insights_line,
 )
-from app.integrations.sheets import (
-    ContentMirrorRow,
-    FakeSheetsPort,
-    mirror_content,
-)
-
-
-class CountingContentSheetsPort(FakeSheetsPort):
-    def __init__(self) -> None:
-        super().__init__()
-        self.content_calls = 0
-
-    def upsert_content(self, row: ContentMirrorRow) -> None:
-        self.content_calls += 1
-        super().upsert_content(row)
-
+from app.integrations.sheets import FakeSheetsPort
 
 OWNER_IG_CONTENT_PHONE = "972509990081"
 OWNER_SHCNT_PHONE = "972509991301"
@@ -452,71 +437,6 @@ def test_enrich_appends_hebrew_line_and_persists() -> None:
         db.close()
 
 
-def test_enrich_content_insights_ack_mirror_extra_outcome(monkeypatch) -> None:
-    monkeypatch.setattr("app.integrations.sheets.elapsed_ms", lambda _started: 12)
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        sheets = FakeSheetsPort()
-        settings = Settings()
-        extras: list = []
-        enrich_content_insights_ack(
-            "ack",
-            FakeInstagramInsightsPort(SAMPLE_ITEMS),
-            store,
-            kill_switch=False,
-            sheets=sheets,
-            settings=settings,
-            extra_outcomes=extras,
-            inbound_id="shcnt.1",
-        )
-        content_extras = [o for o in extras if o.tool == "sheets_mirror_content"]
-        assert len(content_extras) == 1
-        outcome = content_extras[0]
-        assert outcome.status == "ok"
-        assert outcome.result_count > 0
-        assert outcome.latency_ms == 12
-    finally:
-        db.close()
-
-
-def test_enrich_content_insights_ack_mirror_claim_fail_skips_extra(monkeypatch) -> None:
-    monkeypatch.setattr("app.integrations.sheets.elapsed_ms", lambda _started: 12)
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        sheets = CountingContentSheetsPort()
-        settings = Settings()
-        inbound_id = "shcnt.2"
-        enrich_content_insights_ack(
-            "ack",
-            FakeInstagramInsightsPort(SAMPLE_ITEMS),
-            store,
-            kill_switch=False,
-            sheets=sheets,
-            settings=settings,
-            inbound_id=inbound_id,
-        )
-        assert sheets.content_calls == 2
-        extras: list = []
-        enrich_content_insights_ack(
-            "ack",
-            FakeInstagramInsightsPort(SAMPLE_ITEMS),
-            store,
-            kill_switch=False,
-            sheets=sheets,
-            settings=settings,
-            extra_outcomes=extras,
-            inbound_id=inbound_id,
-        )
-        assert [o.tool for o in extras if o.tool == "sheets_mirror_content"] == []
-        assert sheets.content_calls == 2
-    finally:
-        db.close()
-
-
 def test_attribution_matching_ig_content_id_increments_lead_signals() -> None:
     init_db()
     db = get_session_factory()()
@@ -577,58 +497,6 @@ def test_never_imports_message_port() -> None:
     source = inspect.getsource(module)
     assert "MessagePort" not in source
     assert "instagram.py" not in source
-
-
-def test_fake_sheets_port_after_enrich_has_content_rows() -> None:
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        sheets = FakeSheetsPort()
-        ack = ack_for_owner_task(classify_owner_task("instagram content performance"))
-        enrich_content_insights_ack(
-            ack,
-            FakeInstagramInsightsPort(SAMPLE_ITEMS),
-            store,
-            kill_switch=False,
-            sheets=sheets,
-            settings=Settings(),
-        )
-        db.commit()
-        assert MEDIA_ID_1 in sheets.content_rows
-        assert sheets.content_rows[MEDIA_ID_1].views == "1200"
-        assert sheets.content_rows[MEDIA_ID_1].lead_signals == 0
-    finally:
-        db.close()
-
-
-def test_mirror_content_sanitizer_rejects_bad_rows() -> None:
-    port = FakeSheetsPort()
-    assert (
-        mirror_content(
-            sheets=port,
-            row=ContentMirrorRow(
-                media_id="not_digits",
-                media_type="IMAGE",
-                views="10",
-            ),
-            kill_switch=False,
-        )
-        is False
-    )
-    assert (
-        mirror_content(
-            sheets=port,
-            row=ContentMirrorRow(
-                media_id=MEDIA_ID_1,
-                media_type="IMAGE",
-                views="https://cdn.example/1.jpg",
-            ),
-            kill_switch=False,
-        )
-        is False
-    )
-    assert port.content_rows == {}
 
 
 def test_classify_analyze_instagram_content_is_analytics() -> None:
@@ -727,105 +595,8 @@ async def test_owner_analytics_inbound_tool_result_instagram_insights() -> None:
         payload = json.loads(tool_row.payload_json)
         assert payload["status"] == "ok"
         assert payload["result_count"] == 2
-        assert MEDIA_ID_1 in sheets.content_rows
-        content_row = store.get_tool_run("evt.owner.ig.content.1:tool:sheets_mirror_content")
-        assert content_row is not None
-        assert content_row.status == "ok"
-        assert store.get_tool_run("evt.owner.ig.content.1:tool:sheets_mirror") is None
     finally:
         db.close()
-
-
-@pytest.mark.asyncio
-async def test_owner_analytics_inbound_persists_content_mirror_tool_run() -> None:
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        sheets = FakeSheetsPort()
-        port = RecordingMessagePort()
-        inbound_id = "shcnt.in.1"
-        await process_inbound_texts(
-            provider="whatsapp",
-            channel=Channel.WHATSAPP,
-            items=[
-                {
-                    "id": inbound_id,
-                    "from": OWNER_SHCNT_PHONE,
-                    "text": "analyze instagram content",
-                    "source": "audio",
-                }
-            ],
-            store=store,
-            port=port,
-            kill_switch=False,
-            owner_ids={OWNER_SHCNT_PHONE},
-            sheets=sheets,
-            instagram_insights=FakeInstagramInsightsPort(SAMPLE_ITEMS),
-        )
-        db.commit()
-        row = store.get_tool_run(f"{inbound_id}:tool:sheets_mirror_content")
-        assert row is not None
-        assert row.status == "ok"
-        assert row.result_count > 0
-        assert store.get_tool_run(f"{inbound_id}:tool:sheets_mirror") is None
-        payload = json.loads(
-            store.get_canonical_event(
-                provider="whatsapp",
-                provider_event_id=f"{inbound_id}:tool:sheets_mirror_content",
-            ).payload_json
-        )
-        assert payload["tool"] == "sheets_mirror_content"
-        assert "latency_ms" not in payload
-    finally:
-        db.close()
-
-
-def test_composio_sheets_port_content_request_shape() -> None:
-    captured: dict[str, object] = {}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        captured["url"] = str(request.url)
-        captured["json"] = json.loads(request.content)
-        if str(request.url).endswith("GOOGLESHEETS_GET_SHEET_NAMES"):
-            from app.integrations.sheets import CRM_WORKSPACE_TABS
-
-            return httpx.Response(
-                200,
-                json={
-                    "data": {"sheetNames": [name for name, _headers in CRM_WORKSPACE_TABS]},
-                    "error": None,
-                    "successful": True,
-                },
-            )
-        return httpx.Response(
-            200,
-            json={"data": {}, "error": None, "successful": True},
-        )
-
-    transport = httpx.MockTransport(handler)
-    client = httpx.Client(transport=transport)
-    from app.integrations.sheets import ComposioSheetsPort
-
-    port = ComposioSheetsPort(
-        api_key="cmp-test",
-        user_id="user-abc",
-        spreadsheet_id="spreadsheet-xyz",
-        client=client,
-    )
-    row = ContentMirrorRow(
-        media_id=MEDIA_ID_1,
-        media_type="IMAGE",
-        views="1200",
-        reach="900",
-        likes="45",
-        comments="3",
-        saved="12",
-        lead_signals=2,
-    )
-    port.upsert_content(row)
-
-    assert captured == {}
 
 
 def test_build_insights_composio_when_sender_composio() -> None:

@@ -203,10 +203,6 @@ async def test_story_instagram_lead_meeting_calendar_sheet_notify_trace(
         )
         assert in_row is not None
         assert in_row.correlation_id == ai_row.run_id
-
-        assert len(sheets.rows) >= 1 or len(sheets.meeting_rows) >= 1 or len(
-            sheets.activity_rows
-        ) >= 1
     finally:
         db.close()
 
