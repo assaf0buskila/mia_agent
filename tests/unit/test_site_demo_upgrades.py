@@ -171,7 +171,14 @@ def test_http_confirm_pings_assaf_once(monkeypatch) -> None:
             )
             assert first.json()["next_action"] == "confirm_contact"
             assert port.sent
-            assert "שיחה מהאתר" in port.sent[0].text
+            # A structured brief, not a clipped transcript: Assaf gets the captured
+            # fields, what is missing, and what to do next.
+            ping = port.sent[0].text
+            assert "ליד חדש מהאתר" in ping
+            assert "שם: דנה" in ping
+            assert "טלפון: 0501234567" in ping
+            assert "המלצה:" in ping
+            assert "חסר:" in ping
             assert "0501234567" not in str(first.json())
             second = client.post(
                 f"/v1/website/sessions/{session_id}/messages",

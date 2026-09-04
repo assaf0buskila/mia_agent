@@ -26,5 +26,20 @@ def mail_read(port: GmailPort, args: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def mail_search(port: GmailPort, args: dict[str, Any]) -> dict[str, Any]:
+    """Owner mail.search — recent inbox, or a Gmail query when one is given.
+
+    `mail.search` has been a registered capability with no handler, so the two owner
+    tools that need it (`gmail_inbox`, `gmail_search`) called the port directly and
+    were gated only by registry membership. This is the missing half.
+    """
+    query = str(args.get("query") or "").strip()
+    rows = port.search(query) if query else port.list_recent()
+    return {"query": query, "rows": list(rows)}
+
+
 def mail_handlers(port: GmailPort) -> dict[str, Any]:
-    return {"mail.read": lambda args: mail_read(port, args)}
+    return {
+        "mail.read": lambda args: mail_read(port, args),
+        "mail.search": lambda args: mail_search(port, args),
+    }

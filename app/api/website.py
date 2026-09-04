@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from time import perf_counter
 from uuid import uuid4
@@ -28,6 +29,7 @@ from app.core.config import Settings, get_settings
 from app.core.demo import demo_mode_active
 from app.core.logging import log_comm
 from app.core.public_website import public_website_guard
+from app.db.session import get_session_factory
 from app.db.store import LeadStore
 from app.domain.ai_runs import elapsed_ms
 from app.domain.behavior import CLIENT_BEHAVIOR_KINDS, sanitize_client_behavior
@@ -41,6 +43,11 @@ from app.domain.events import (
     transcription_outcome,
 )
 from app.domain.handoff import click_to_chat_url
+from app.domain.owner_notification_delivery import (
+    KIND_WEBSITE_HANDOFF_DELIVERY,
+    WEBSITE_HANDOFF_DELIVERY_KINDS,
+    website_ping_scope,
+)
 from app.domain.tools import AdapterHttpError
 from app.integrations.base import MessagePort
 from app.integrations.sheets import SheetsPort
@@ -63,6 +70,7 @@ from app.surfaces.site_policy import (
     PublishedFact,
     classify_site_intent,
     facts_from_knowledge_hits,
+    is_filler,
 )
 from app.surfaces.site_reply import build_site_reply_port
 
@@ -405,6 +413,10 @@ def _published_facts_for_turn(
     """Look up assafweb.com facts only when the turn needs them. Never GSC or JSON-LD."""
     if voice_failed or not text.strip():
         return (), ()
+    if is_filler(text):
+        # "תודה" / "ok" classify as `other`, which is in the trigger set below, so
+        # every acknowledgement used to buy an embedding call and two table scans.
+        return (), ()
     intent = classify_site_intent(text)
     if intent not in {"price", "need", "other", "metric", "voice_product"}:
         return (), ()
@@ -441,7 +453,43 @@ async def _maybe_ping_owner(
         return False
     if not force and not session.awaiting_ping and not session.confirmed:
         return False
-    sent = await ping_assaf_async(settings, owner_port, session)
+    # `session.pinged` above is a process-local hint, not a guarantee: it dies with the
+    # task and two workers hold different copies of it. The durable claim below is what
+    # actually makes one website handoff produce one delivery per owner. This runs as a
+    # background task, after the request's session is gone, so it opens its own.
+    db = get_session_factory()()
+    try:
+        store = LeadStore(db)
+        lead_id, notification_key = website_ping_scope(session_id)
+
+        def claim(recipient_id: str) -> bool:
+            won = store.try_claim_owner_notification_recipient_compatible(
+                kind=KIND_WEBSITE_HANDOFF_DELIVERY,
+                compatible_kinds=WEBSITE_HANDOFF_DELIVERY_KINDS,
+                lead_id=lead_id,
+                notification_key=notification_key,
+                recipient_id=recipient_id,
+                claimed_at=datetime.now(UTC).isoformat(),
+            )
+            # Commit before sending. An uncommitted claim is invisible to the other
+            # worker, which would then send the same ping.
+            db.commit()
+            return won
+
+        def release(recipient_id: str) -> None:
+            store.release_owner_notification_recipient_claim(
+                kind=KIND_WEBSITE_HANDOFF_DELIVERY,
+                lead_id=lead_id,
+                notification_key=notification_key,
+                recipient_id=recipient_id,
+            )
+            db.commit()
+
+        sent = await ping_assaf_async(
+            settings, owner_port, session, claim=claim, release=release
+        )
+    finally:
+        db.close()
     if sent:
         session.pinged = True
         session.awaiting_ping = False

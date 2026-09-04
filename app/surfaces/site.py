@@ -30,6 +30,12 @@ from app.surfaces.site_policy import (
 )
 from app.surfaces.site_reply import phrase_site_reply
 
+# Durable at-most-once for the owner ping, injected by the API layer so this surface
+# keeps no database dependency. claim(recipient_id) -> may I send to this owner;
+# release(recipient_id) -> that send genuinely failed, let a later turn retry.
+OwnerPingClaim = Callable[[str], bool]
+OwnerPingRelease = Callable[[str], None]
+
 SITE_OPENING = "שלום, אני מיה. ספרו לי בקצרה מה אתם מחפשים."
 ASK_CONTACT = "כדי שאסף יוכל להמשיך אתכם, צריך טלפון או אימייל."
 ASK_NEED = ASK_NEED_HE
@@ -130,6 +136,9 @@ def dump_site_session(session: SiteSession) -> str:
                 "summary": fields.summary,
             },
             "pinged": session.pinged,
+            # Without this a restart between two /end calls repeats finalization and
+            # every handoff effect that hangs off it.
+            "finalized": session.finalized,
             "confirmed": session.confirmed,
             "selling_stopped": session.selling_stopped,
             "complaint_open": session.complaint_open,
@@ -165,6 +174,7 @@ def load_site_session(session: SiteSession, raw: str) -> bool:
             summary=str(stored.get("summary", "")),
         )
     session.pinged = bool(data.get("pinged"))
+    session.finalized = bool(data.get("finalized"))
     session.confirmed = bool(data.get("confirmed"))
     session.selling_stopped = bool(data.get("selling_stopped"))
     session.complaint_open = bool(data.get("complaint_open"))
@@ -202,6 +212,8 @@ def run_site_turn(
     turns: tuple[ConversationTurn, ...] = (),
     reply_port: SalesReplyPort | None = None,
     defer: Callable[[Callable[[], None]], None] | None = None,
+    claim_owner_ping: OwnerPingClaim | None = None,
+    release_owner_ping: OwnerPingRelease | None = None,
 ) -> SiteTurn:
     """Answer first. CRM or WhatsApp only with phone or email. No invented prices."""
     store = book or _BOOK
@@ -337,7 +349,13 @@ def run_site_turn(
         crm_wrote = True
         wa_url = click_to_chat_url(settings.whatsapp_click_to_chat) or None
         if owner_port is not None and not session.pinged and decision.ping_assaf:
-            owner_pinged = _ping_assaf(settings, owner_port, session)
+            owner_pinged = _ping_assaf(
+                settings,
+                owner_port,
+                session,
+                claim=claim_owner_ping,
+                release=release_owner_ping,
+            )
             if owner_pinged:
                 session.pinged = True
                 session.confirmed = True
@@ -407,13 +425,24 @@ def _is_contact_only(text: str) -> bool:
     return len(digits) >= 9 and len(stripped) <= 24
 
 
-def _ping_assaf(settings: Settings, port: MessagePort, session: SiteSession) -> bool:
+def _ping_assaf(
+    settings: Settings,
+    port: MessagePort,
+    session: SiteSession,
+    *,
+    claim: OwnerPingClaim | None = None,
+    release: OwnerPingRelease | None = None,
+) -> bool:
     owners = settings.telegram_owner_user_id_set()
     if not owners:
         return False
     body = format_owner_ping(session)
     sent_any = False
+    already_delivered = False
     for owner_id in owners:
+        if claim is not None and not claim(owner_id):
+            already_delivered = True
+            continue
         try:
             port.send(  # type: ignore[unused-coroutine]
                 OutboundMessage(
@@ -425,19 +454,32 @@ def _ping_assaf(settings: Settings, port: MessagePort, session: SiteSession) -> 
             )
             sent_any = True
         except (RuntimeError, MiaError):
+            if release is not None:
+                release(owner_id)
             continue
-    return sent_any
+    return sent_any or already_delivered
 
 
 async def ping_assaf_async(
-    settings: Settings, port: MessagePort, session: SiteSession
+    settings: Settings,
+    port: MessagePort,
+    session: SiteSession,
+    *,
+    claim: OwnerPingClaim | None = None,
+    release: OwnerPingRelease | None = None,
 ) -> bool:
     owners = settings.telegram_owner_user_id_set()
     if not owners:
         return False
     body = format_owner_ping(session)
     sent_any = False
+    already_delivered = False
     for owner_id in owners:
+        if claim is not None and not claim(owner_id):
+            # Someone already delivered this handoff to this owner. Not a failure,
+            # and not a reason to send it twice.
+            already_delivered = True
+            continue
         try:
             await port.send(
                 OutboundMessage(
@@ -449,21 +491,77 @@ async def ping_assaf_async(
             )
             sent_any = True
         except (RuntimeError, MiaError):
+            # A genuine transport failure gives the claim back, so a later turn can
+            # still reach Assaf instead of the lead going quiet forever.
+            if release is not None:
+                release(owner_id)
             continue
-    return sent_any
+    return sent_any or already_delivered
+
+
+_UNKNOWN = "—"
+
+
+def _missing_for_owner(session: SiteSession) -> list[str]:
+    """What Mia did not get. Naming the hole beats implying the record is complete."""
+    fields = session.fields
+    missing: list[str] = []
+    if not fields.name.strip():
+        missing.append("שם")
+    if not fields.business.strip():
+        missing.append("עסק")
+    if not fields.has_phone_or_email():
+        missing.append("טלפון או אימייל")
+    if not (fields.want.strip() or fields.summary.strip()):
+        missing.append("מה צריך")
+    return missing
+
+
+def _recommended_next_action(session: SiteSession) -> str:
+    """Deterministic from state. Never a guess about how good the lead is."""
+    fields = session.fields
+    if session.complaint_open:
+        return "תלונה פתוחה. תדבר איתם, בלי מכירה."
+    if session.selling_stopped:
+        return "אמרו שלא מעוניינים. אל תדחוף."
+    if fields.phone.strip():
+        return "תכתוב להם בוואטסאפ למספר שלמעלה."
+    if fields.email.strip():
+        return "תשלח מייל לכתובת שלמעלה."
+    return "אין דרך ליצור קשר. אין למי לפנות."
+
+
+def _last_visitor_line(session: SiteSession) -> str:
+    for role, text in reversed(session.turns):
+        if role == "visitor" and text.strip():
+            return text.strip()[:200]
+    return ""
 
 
 def format_owner_ping(session: SiteSession) -> str:
+    """A factual brief, not a clipped transcript.
+
+    Every line is either a field Mia actually captured or a deterministic consequence
+    of the session state. Nothing here estimates budget, intent or lead quality — if
+    Mia did not learn something, the brief says so instead of filling the gap.
+    """
     fields = session.fields
+    need = (fields.want.strip() or fields.summary.strip())
+    missing = _missing_for_owner(session)
     lines = [
-        "שיחה מהאתר",
-        f"שם: {fields.name or '—'}",
-        f"טלפון: {fields.phone or '—'}",
-        f"אימייל: {fields.email or '—'}",
-        f"תאריך: {fields.date or '—'}",
-        f"מה רוצים: {fields.want or '—'}",
-        f"סיכום: {_conversation_summary(session) or '—'}",
+        "ליד חדש מהאתר",
+        f"שם: {fields.name.strip() or _UNKNOWN}",
+        f"עסק: {fields.business.strip() or _UNKNOWN}",
+        f"טלפון: {fields.phone.strip() or _UNKNOWN}",
+        f"אימייל: {fields.email.strip() or _UNKNOWN}",
+        f"תאריך: {fields.date.strip() or _UNKNOWN}",
+        f"מה צריך: {need or _UNKNOWN}",
+        f"חסר: {', '.join(missing) if missing else 'כלום'}",
+        f"המלצה: {_recommended_next_action(session)}",
     ]
+    last = _last_visitor_line(session)
+    if last:
+        lines.append(f"במילים שלהם: {last}")
     return "\n".join(lines)
 
 

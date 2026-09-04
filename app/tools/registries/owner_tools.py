@@ -147,6 +147,14 @@ from app.surfaces.crm import (
 )
 
 MAX_TOOL_RESULT_CHARS = 3000
+
+# How a tool call actually ended. `ok` answers "is there an answer to use"; these
+# answer "what happened", so a timeout or a half-read is never filed as a clean
+# success. Telemetry reads the outcome; owner-facing copy stays natural.
+OUTCOME_SUCCESS = "success"
+OUTCOME_FAILURE = "failure"
+OUTCOME_TIMEOUT = "timeout"
+OUTCOME_PARTIAL = "partial"
 _NO_ARGS: dict[str, Any] = {
     "type": "object",
     "properties": {},
@@ -265,10 +273,28 @@ class ToolResult:
     # Exact durable approval created by this tool call. This is orchestration
     # metadata, not provider/model text, and must remain bound to this turn.
     approval_id: str = ""
+    # Blank means "derive it from ok". Set explicitly for timeout and partial.
+    outcome: str = ""
+
+    def outcome_label(self) -> str:
+        """success | failure | timeout | partial. Never blank."""
+        if self.outcome:
+            return self.outcome
+        return OUTCOME_SUCCESS if self.ok else OUTCOME_FAILURE
 
     def payload(self) -> dict[str, Any]:
+        label = self.outcome_label()
         if not self.ok:
-            return {"ok": False, "error": self.error or "tool failed"}
+            body: dict[str, Any] = {"ok": False, "error": self.error or "tool failed"}
+            if label != OUTCOME_FAILURE:
+                body["outcome"] = label
+            # A timeout still has honest copy for the owner. Carry it so the model can
+            # say what Mia was doing rather than invent a result it never got.
+            if self.text:
+                body["result"] = self.text[: self.max_chars]
+            return body
+        if label != OUTCOME_SUCCESS:
+            return {"ok": True, "outcome": label, "result": self.text[: self.max_chars]}
         return {"ok": True, "result": self.text[: self.max_chars]}
 
 
@@ -554,9 +580,18 @@ def _gmail_inbox(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     if port is None:
         return _house_unavailable(ctx, "Gmail")
     try:
-        rows = port.list_recent()
+        payload = execute_capability(
+            "mail.search",
+            principal=ctx.principal,
+            args={},
+            handlers=mail_handlers(port),
+            kill_switch=ctx.kill_switch,
+        )
+    except PermissionDenied:
+        return ToolResult(ok=False, error="mail read denied")
     except AdapterHttpError as exc:
         return ToolResult(ok=False, error=f"Gmail read failed ({exc.tool_status()})")
+    rows = payload.get("rows") or []
     text = format_inbox_rows(rows, timezone=ctx.timezone(), now=ctx.now)
     return _empty(text, "אין מיילים בתיבה.")
 
@@ -569,7 +604,17 @@ def _gmail_search(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     if port is None:
         return _house_unavailable(ctx, "Gmail")
     normalized = normalize_gmail_query(query, now=ctx.now)
-    rows = port.search(normalized.query)
+    try:
+        payload = execute_capability(
+            "mail.search",
+            principal=ctx.principal,
+            args={"query": normalized.query},
+            handlers=mail_handlers(port),
+            kill_switch=ctx.kill_switch,
+        )
+    except PermissionDenied:
+        return ToolResult(ok=False, error="mail read denied")
+    rows = payload.get("rows") or []
     text = format_inbox_rows(rows, timezone=ctx.timezone(), now=ctx.now)
     if not rows and normalized.changed:
         # Normalization rewrote the owner's phrasing before it hit Gmail and still came
@@ -915,12 +960,26 @@ def _crm_search(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     port = ctx.sheets or build_sheets_port(ctx.settings)
     reader = getattr(port, "read_locked_contacts", None)
     rows = reader() if callable(reader) else []
-    activity_rows = _read_locked_activity(port, ctx)
+    read_activity = _read_locked_activity(port, ctx)
+    activity_failed = read_activity is None
+    activity_rows = read_activity or []
+    # Reading half of what was asked for is not a success. Every exit below carries
+    # this so a broken Activity tab can never look like a quiet one.
+    partial = OUTCOME_PARTIAL if activity_failed else ""
     header = (
         "Google Sheets CRM is connected. Live tabs: Contacts and Activity. "
         "No lead ids. The sheet URL is already known."
     )
     if not rows and not activity_rows:
+        if activity_failed:
+            return ToolResult(
+                ok=True,
+                outcome=OUTCOME_PARTIAL,
+                text=(
+                    f"{header} Contacts is empty so far. {ACTIVITY_TAB} could not be "
+                    "read on this attempt, so this answer is incomplete."
+                ),
+            )
         return ToolResult(ok=True, text=f"{header} Contacts is empty so far.")
     body = rows[1:] if len(rows) > 1 else rows
     needle = query.casefold()
@@ -938,23 +997,34 @@ def _crm_search(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     lines = [header, f"{CONTACTS_TAB} rows including header: {len(rows)}."]
     if activity_rows:
         lines.append(f"{ACTIVITY_TAB} rows including header: {len(activity_rows)}.")
+    elif activity_failed:
+        lines.append(
+            f"{ACTIVITY_TAB} could not be read on this attempt. The Contacts lines "
+            "below are complete; the Activity log is missing from this answer."
+        )
     else:
         lines.append(f"{ACTIVITY_TAB} is the log tab.")
     if health:
-        return ToolResult(ok=True, text="\n".join(lines))
+        return ToolResult(ok=True, outcome=partial, text="\n".join(lines))
     if not matches:
         lines.append("No Contacts row matched.")
-        return ToolResult(ok=True, text="\n".join(lines))
+        return ToolResult(ok=True, outcome=partial, text="\n".join(lines))
     lines.append("Contacts:")
     lines.extend(matches)
-    return ToolResult(ok=True, text="\n".join(lines))
+    return ToolResult(ok=True, outcome=partial, text="\n".join(lines))
 
 
 def _crm_health_query(query: str) -> bool:
     return is_sheets_health_ask(query)
 
 
-def _read_locked_activity(port: object, ctx: ToolContext) -> list[list[str]]:
+def _read_locked_activity(port: object, ctx: ToolContext) -> list[list[str]] | None:
+    """Activity rows, or None when the tab could not be read.
+
+    None and [] are different answers. [] means the tab is empty; None means the
+    read failed, and the caller has to say so rather than let a broken integration
+    read as a quiet log.
+    """
     reader = getattr(port, "read_values", None)
     if not callable(reader):
         return []
@@ -964,9 +1034,9 @@ def _read_locked_activity(port: object, ctx: ToolContext) -> list[list[str]]:
             a1_range=f"{ACTIVITY_TAB}!A1:E20",
         )
     except Exception:
-        return []
+        return None
     if not isinstance(rows, list):
-        return []
+        return None
     cleaned: list[list[str]] = []
     for row in rows:
         if not isinstance(row, list):

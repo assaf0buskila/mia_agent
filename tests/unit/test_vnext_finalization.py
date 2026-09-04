@@ -923,8 +923,11 @@ def test_website_session_end_route_pings_the_owner_exactly_once(monkeypatch) -> 
         assert again.json()["finalized"] is False
         assert len(port.sent) == 1
         sent = port.sent[0].text
-        assert "שיחה מהאתר" in sent
+        assert "ליד חדש מהאתר" in sent
         assert "יוסי" in sent
+        # Structured brief, not a transcript dump.
+        assert "המלצה:" in sent
+        assert "חסר:" in sent
     finally:
         app.dependency_overrides.pop(get_telegram_port, None)
 
