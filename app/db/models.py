@@ -359,6 +359,27 @@ class OwnerNotificationClaimRow(Base):
     claimed_at: Mapped[str] = mapped_column(String(32), default="")
 
 
+class WebsiteSessionStateRow(Base):
+    """What Mia has learned in one website conversation, so it survives a deploy.
+
+    `SiteSession` lives in a process-local dict. When the task is replaced mid
+    conversation the visitor's captured phone number, the fact that Assaf was already
+    told about them, and the fact that they said "not interested" all vanish — so Mia
+    re-asks for the number, tells Assaf about the same person twice, and resumes
+    selling to someone who declined.
+
+    Written inside the request's own transaction by `process_website_message`. That is
+    the whole point: an earlier attempt used a second connection and rolled the live
+    request back underneath itself.
+    """
+
+    __tablename__ = "website_session_state"
+
+    session_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    state_json: Mapped[str] = mapped_column(Text, default="{}")
+    updated_at: Mapped[str] = mapped_column(String(32), default="")
+
+
 class OwnerNotificationRecipientClaimRow(Base):
     """Per-recipient notification delivery ledger.
 

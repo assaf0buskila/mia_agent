@@ -51,6 +51,8 @@ from app.integrations.transcribe import (
 )
 from app.surfaces.crm import build_contacts_crm
 from app.surfaces.site import (
+    dump_site_session,
+    load_site_session,
     ping_assaf_async,
     run_site_turn,
     site_book,
@@ -277,8 +279,15 @@ def process_website_message(
     del owner_port
     if not store.website_session_exists(session_id):
         raise HTTPException(status_code=404, detail="session not found")
-    if site_book().get(session_id) is None:
-        site_book().open(session_id)
+    session = site_book().get(session_id)
+    if session is None:
+        session = site_book().open(session_id)
+    if not session.turns:
+        # Cold in this process: either a genuinely new visitor, or a deploy replaced
+        # the task mid conversation. Rehydrate before deciding anything, so Mia does
+        # not re-ask for a number she already has or ping Assaf about the same person
+        # a second time.
+        load_site_session(session, store.load_website_session_state(session_id))
     turn_started = perf_counter()
     facts, tools_ran = _published_facts_for_turn(
         store, text, voice_failed=voice_failed, settings=settings
@@ -347,6 +356,9 @@ def process_website_message(
                 ),
                 correlation_id=run_id,
             )
+    # Persist inside the request's own transaction. get_db commits it; a second
+    # connection here would roll this request back underneath itself.
+    store.save_website_session_state(session_id, dump_site_session(session))
     message = (turn.reply or "").strip()
     if not message:
         from app.surfaces.site_policy import never_silent
