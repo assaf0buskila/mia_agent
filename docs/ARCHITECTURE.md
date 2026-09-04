@@ -28,7 +28,7 @@ Two simple loops, shared core, thin channels. Product: `docs/PRODUCT.md`. Decisi
 | Owner loop | Assaf on Telegram | Invent metrics; invent lead IDs; ask for a Sheet URL; sell to Assaf |
 | Site loop | Website visitors | Write CRM, ping, or offer WhatsApp without phone or email; invent prices; run owner tools |
 
-Runtime paths are `app/surfaces/owner.py` and `app/surfaces/site.py`. The owner tool loop is `app/graph/owner_agent.py`. Leftover LangGraph files stay in-repo for old unit tests only.
+Runtime paths are `app/surfaces/owner.py` and `app/surfaces/site.py`. The owner tool loop is `app/graph/owner_agent.py`. The LangGraph files are live, not leftovers: `app/graph/orchestrator.py` and `app/agents/client/graph.py` are the reasoning path for WhatsApp inbound and for due-scan finalization.
 
 ## Channels
 
@@ -52,7 +52,7 @@ Glass Hebrew widget `app/web/ask_mia.js` at `https://mia.assafweb.com/v1/website
 
 ## Two-state tools
 
-Owner Telegram gets the house Composio set. Visitor site gets `search_knowledge` and published facts only. Calendar writes go through `app/domain/calendar_write_gate.py`: meeting near Tel Aviv, 09:00–17:00 Asia/Jerusalem, empty slot — else ask Assaf.
+Owner Telegram gets the house Composio set. Visitor site gets published facts only, looked up directly in `app/api/website.py`; the `app/tools/registries/visitor_tools.py` registry is written but wired to nothing. Calendar writes go through `app/domain/calendar_write_gate.py`: meeting near Tel Aviv, 09:00–17:00 Asia/Jerusalem, empty slot — else ask Assaf.
 
 ## Runtime
 
