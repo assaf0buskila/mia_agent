@@ -1,0 +1,87 @@
+{
+  "_comment": [
+    "Alarms over the metrics in cloudwatch-metric-filters.example.json.",
+    "Create those filters first, otherwise these alarms sit in INSUFFICIENT_DATA forever.",
+    "",
+    "All of them need a real SNS topic. The existing mia-alb-elb-5xx alarm points at a",
+    "placeholder ARN, which is why nothing currently pages anyone. Create the topic and",
+    "subscribe a phone or email before creating these:",
+    "  aws sns create-topic --name mia-ops",
+    "  aws sns subscribe --topic-arn ARN --protocol email --notification-endpoint YOU@example.com",
+    "",
+    "Thresholds assume one operator and a low-traffic site. Raise them if they become noisy;",
+    "an alarm that cries wolf is worse than no alarm, because it teaches you to ignore it."
+  ],
+  "Alarms": [
+    {
+      "AlarmName": "mia-owner-agent-silent",
+      "AlarmDescription": "Mia stopped answering Assaf on Telegram. Usually a missing or rejected model key, or an exhausted provider chain.",
+      "Namespace": "Mia",
+      "MetricName": "OwnerAgentSilent",
+      "Statistic": "Sum",
+      "Period": 900,
+      "EvaluationPeriods": 1,
+      "DatapointsToAlarm": 1,
+      "Threshold": 2,
+      "ComparisonOperator": "GreaterThanThreshold",
+      "TreatMissingData": "notBreaching",
+      "AlarmActions": ["arn:aws:sns:REGION:ACCOUNT_ID:mia-ops"]
+    },
+    {
+      "AlarmName": "mia-provider-error",
+      "AlarmDescription": "The LLM fallback chain was exhausted. OpenAI and Gemini both failed, so Mia is on canned replies.",
+      "Namespace": "Mia",
+      "MetricName": "ProviderError",
+      "Statistic": "Sum",
+      "Period": 900,
+      "EvaluationPeriods": 1,
+      "DatapointsToAlarm": 1,
+      "Threshold": 0,
+      "ComparisonOperator": "GreaterThanThreshold",
+      "TreatMissingData": "notBreaching",
+      "AlarmActions": ["arn:aws:sns:REGION:ACCOUNT_ID:mia-ops"]
+    },
+    {
+      "AlarmName": "mia-turn-failed",
+      "AlarmDescription": "Turns are not reaching people. A composed reply the port never delivered looks healthy everywhere else.",
+      "Namespace": "Mia",
+      "MetricName": "TurnFailed",
+      "Statistic": "Sum",
+      "Period": 900,
+      "EvaluationPeriods": 1,
+      "DatapointsToAlarm": 1,
+      "Threshold": 2,
+      "ComparisonOperator": "GreaterThanThreshold",
+      "TreatMissingData": "notBreaching",
+      "AlarmActions": ["arn:aws:sns:REGION:ACCOUNT_ID:mia-ops"]
+    },
+    {
+      "AlarmName": "mia-website-voice-failed",
+      "AlarmDescription": "Visitors are recording voice notes and being told Mia could not hear them.",
+      "Namespace": "Mia",
+      "MetricName": "WebsiteVoiceFailed",
+      "Statistic": "Sum",
+      "Period": 3600,
+      "EvaluationPeriods": 1,
+      "DatapointsToAlarm": 1,
+      "Threshold": 2,
+      "ComparisonOperator": "GreaterThanThreshold",
+      "TreatMissingData": "notBreaching",
+      "AlarmActions": ["arn:aws:sns:REGION:ACCOUNT_ID:mia-ops"]
+    },
+    {
+      "AlarmName": "mia-scheduled-task-stopped",
+      "AlarmDescription": "mia-due-scan or mia-reconcile stopped running. Both schedules use MaximumRetryAttempts 0 with no dead-letter queue, so a failing job is otherwise completely silent, including the job whose whole purpose is noticing drift.",
+      "Namespace": "AWS/Events",
+      "MetricName": "FailedInvocations",
+      "Statistic": "Sum",
+      "Period": 3600,
+      "EvaluationPeriods": 1,
+      "DatapointsToAlarm": 1,
+      "Threshold": 0,
+      "ComparisonOperator": "GreaterThanThreshold",
+      "TreatMissingData": "notBreaching",
+      "AlarmActions": ["arn:aws:sns:REGION:ACCOUNT_ID:mia-ops"]
+    }
+  ]
+}
