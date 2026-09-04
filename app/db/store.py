@@ -44,6 +44,7 @@ from app.db.models import (
     ToolRunRow,
     VoiceTranscriptRow,
     WebhookEventRow,
+    WebsiteSessionStateRow,
 )
 from app.domain.ai_runs import (
     MODEL_CANNED,
@@ -527,6 +528,31 @@ class LeadStore:
             )
             or 0
         )
+
+    def load_website_session_state(self, session_id: str) -> str:
+        """Serialized SiteSession state, or empty when this session is new."""
+        if not session_id:
+            return ""
+        row = self.session.get(WebsiteSessionStateRow, session_id)
+        return row.state_json if row is not None else ""
+
+    def save_website_session_state(self, session_id: str, state_json: str) -> None:
+        """Flush only. The caller's request transaction owns the commit — using a
+        second connection here rolls the live request back underneath itself."""
+        if not session_id:
+            return
+        stamp = datetime.now(UTC).isoformat()
+        row = self.session.get(WebsiteSessionStateRow, session_id)
+        if row is None:
+            self.session.add(
+                WebsiteSessionStateRow(
+                    session_id=session_id, state_json=state_json, updated_at=stamp
+                )
+            )
+        else:
+            row.state_json = state_json
+            row.updated_at = stamp
+        self.session.flush()
 
     def count_open_reconciliation(self) -> int:
         return int(

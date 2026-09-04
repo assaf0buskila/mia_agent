@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import threading
 import time
 from collections.abc import Callable
@@ -106,6 +107,80 @@ def reset_site_book() -> None:
 
 def site_opening() -> str:
     return SITE_OPENING
+
+
+# Enough recent turns to write an honest owner summary. The model's own history comes
+# from the canonical events, not from here.
+_STATE_TURN_LIMIT = 12
+
+
+def dump_site_session(session: SiteSession) -> str:
+    """Everything that would otherwise die with the process."""
+    fields = session.fields
+    return json.dumps(
+        {
+            "fields": {
+                "name": fields.name,
+                "phone": fields.phone,
+                "email": fields.email,
+                "date": fields.date,
+                "business": fields.business,
+                "want": fields.want,
+                "language": fields.language,
+                "summary": fields.summary,
+            },
+            "pinged": session.pinged,
+            "confirmed": session.confirmed,
+            "selling_stopped": session.selling_stopped,
+            "complaint_open": session.complaint_open,
+            "need_seen": session.need_seen,
+            "language": session.language,
+            "tools_ran": list(session.tools_ran),
+            "turns": [[role, text] for role, text in session.turns[-_STATE_TURN_LIMIT:]],
+        },
+        ensure_ascii=False,
+    )
+
+
+def load_site_session(session: SiteSession, raw: str) -> bool:
+    """Rehydrate after a restart. Malformed or partial state never breaks the turn."""
+    if not raw:
+        return False
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return False
+    if not isinstance(data, dict):
+        return False
+    stored = data.get("fields")
+    if isinstance(stored, dict):
+        session.fields = CapturedFields(
+            name=str(stored.get("name", "")),
+            phone=str(stored.get("phone", "")),
+            email=str(stored.get("email", "")),
+            date=str(stored.get("date", "")),
+            business=str(stored.get("business", "")),
+            want=str(stored.get("want", "")),
+            language=str(stored.get("language", "")),
+            summary=str(stored.get("summary", "")),
+        )
+    session.pinged = bool(data.get("pinged"))
+    session.confirmed = bool(data.get("confirmed"))
+    session.selling_stopped = bool(data.get("selling_stopped"))
+    session.complaint_open = bool(data.get("complaint_open"))
+    session.need_seen = bool(data.get("need_seen"))
+    session.language = str(data.get("language", "") or "")
+    tools = data.get("tools_ran")
+    if isinstance(tools, list):
+        session.tools_ran = tuple(str(item) for item in tools)
+    turns = data.get("turns")
+    if isinstance(turns, list):
+        session.turns = [
+            (str(pair[0]), str(pair[1]))
+            for pair in turns
+            if isinstance(pair, list | tuple) and len(pair) == 2
+        ]
+    return True
 
 
 def run_site_turn(
