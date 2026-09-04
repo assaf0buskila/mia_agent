@@ -84,6 +84,41 @@ currently reaches anyone.
 `ops.failed_sends` counts only an owner turn that broke *and* could not deliver
 its own apology; it does not count a failed customer reply.
 
+## Database safety
+
+Everything Mia knows is in Postgres: every conversation, every lead's sales state,
+every approval, every memory and knowledge embedding, and the website session state.
+Only the knowledge corpus can be rebuilt, with `mia-ingest-knowledge`. Contacts
+survive only as far as they were mirrored to the Sheet.
+
+`deploy/rds.example.json` is the template, not the live instance. Applying it to the
+running database is a separate act:
+
+```
+aws rds modify-db-instance --db-instance-identifier mia   --deletion-protection --backup-retention-period 14 --apply-immediately
+```
+
+Deletion protection was off. That is one API call, or one console misclick, from
+losing the business. Turn it on before anything else on this page.
+
+Take a snapshot before anything irreversible — a migration, a schema change, or
+`mia-wipe-data`:
+
+```
+aws rds create-db-snapshot --db-instance-identifier mia   --db-snapshot-identifier mia-before-CHANGE-$(date +%Y%m%d%H%M)
+```
+
+Restore is a new instance, never in place, so it also means repointing
+`MIA_DATABASE_URL` and forcing a new deployment:
+
+```
+aws rds restore-db-instance-to-point-in-time   --source-db-instance-identifier mia   --target-db-instance-identifier mia-restored   --restore-time 2026-09-04T12:00:00Z
+```
+
+`MultiAZ` stays false deliberately: it roughly doubles the cost and one operator can
+tolerate the failover window. That is a cost decision, not an oversight — it does mean
+an AZ failure is an outage, not a blip.
+
 ## What not to do
 
 Do not copy `.env` onto Fargate. Do not dump secrets. Do not auto-deploy. Do not invent metrics or prices. Assaf sends customer WhatsApp.
