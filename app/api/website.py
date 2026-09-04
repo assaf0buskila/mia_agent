@@ -1,8 +1,18 @@
+import asyncio
+from collections.abc import Callable
 from pathlib import Path
 from time import perf_counter
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    File,
+    HTTPException,
+    Query,
+    UploadFile,
+)
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -51,6 +61,7 @@ from app.surfaces.site_policy import (
     classify_site_intent,
     facts_from_knowledge_hits,
 )
+from app.surfaces.site_reply import build_site_reply_port
 
 router = APIRouter(prefix="/v1/website", tags=["website"])
 _WIDGET_PATH = Path(__file__).resolve().parent.parent / "web" / "ask_mia.js"
@@ -243,6 +254,7 @@ def process_website_message(
     date: str = "",
     owner_port: MessagePort | None = None,
     voice_failed: bool = False,
+    defer: Callable[[Callable[[], None]], None] | None = None,
 ) -> MessageOut:
     del owner_port
     if not store.website_session_exists(session_id):
@@ -250,8 +262,13 @@ def process_website_message(
     if site_book().get(session_id) is None:
         site_book().open(session_id)
     turn_started = perf_counter()
-    facts, tools_ran = _published_facts_for_turn(store, text, voice_failed=voice_failed)
+    facts, tools_ran = _published_facts_for_turn(
+        store, text, voice_failed=voice_failed, settings=settings
+    )
     crm = build_contacts_crm(settings, sheets)
+    # History comes from the canonical events this session already persists, so the
+    # phrasing port sees the real conversation without the site minting a lead.
+    history = tuple(store.list_conversation_turns(session_id))
     turn = run_site_turn(
         session_id=session_id,
         text=text,
@@ -264,6 +281,9 @@ def process_website_message(
         facts=facts,
         tools_ran=tools_ran,
         voice_failed=voice_failed,
+        turns=history,
+        reply_port=build_site_reply_port(settings),
+        defer=defer,
     )
     run_id = f"run_{uuid4().hex[:12]}"
     provider_event_id = f"{session_id}:{uuid4().hex[:12]}"
@@ -350,6 +370,7 @@ def _published_facts_for_turn(
     text: str,
     *,
     voice_failed: bool,
+    settings: Settings | None = None,
 ) -> tuple[tuple[PublishedFact, ...], tuple[str, ...]]:
     """Look up assafweb.com facts only when the turn needs them. Never GSC or JSON-LD."""
     if voice_failed or not text.strip():
@@ -365,7 +386,7 @@ def _published_facts_for_turn(
         hits = retrieve_knowledge(
             BrainStore(store.session),
             query=text,
-            embedding_port=build_embedding_port(get_settings()),
+            embedding_port=build_embedding_port(settings or get_settings()),
             limit=3,
         )
     except Exception:
@@ -568,6 +589,7 @@ async def end_session(
 async def post_message(
     session_id: str,
     body: MessageIn,
+    background: BackgroundTasks,
     db: Session = Depends(get_db),
     sheets: SheetsPort = Depends(get_sheets_port),
     owner_port: MessagePort = Depends(get_telegram_port),
@@ -576,7 +598,8 @@ async def post_message(
     store = LeadStore(db)
     if not store.website_session_exists(session_id):
         raise HTTPException(status_code=404, detail="session not found")
-    out = process_website_message(
+    out = await asyncio.to_thread(
+        process_website_message,
         store,
         session_id=session_id,
         text=body.text,
@@ -586,8 +609,10 @@ async def post_message(
         phone=body.phone,
         email=body.email,
         date=body.date,
+        defer=background.add_task,
     )
-    await _maybe_ping_owner(
+    background.add_task(
+        _maybe_ping_owner,
         session_id=session_id,
         settings=settings,
         owner_port=owner_port,
@@ -602,6 +627,7 @@ async def post_message(
 )
 async def post_voice(
     session_id: str,
+    background: BackgroundTasks,
     db: Session = Depends(get_db),
     sheets: SheetsPort = Depends(get_sheets_port),
     transcribe_port: TranscriptionPort = Depends(get_transcription_port),
@@ -633,7 +659,8 @@ async def post_voice(
                 sheets=sheets,
                 voice_failed=True,
             )
-            await _maybe_ping_owner(
+            background.add_task(
+                _maybe_ping_owner,
                 session_id=session_id,
                 settings=settings,
                 owner_port=owner_port,
@@ -654,7 +681,8 @@ async def post_voice(
                 sheets=sheets,
                 voice_failed=True,
             )
-            await _maybe_ping_owner(
+            background.add_task(
+                _maybe_ping_owner,
                 session_id=session_id,
                 settings=settings,
                 owner_port=owner_port,
@@ -678,7 +706,8 @@ async def post_voice(
             sheets=sheets,
             voice_failed=True,
         )
-        await _maybe_ping_owner(
+        background.add_task(
+            _maybe_ping_owner,
             session_id=session_id,
             settings=settings,
             owner_port=owner_port,
@@ -692,7 +721,8 @@ async def post_voice(
         )
     if len(text) > 4000:
         text = text[:4000]
-    out = process_website_message(
+    out = await asyncio.to_thread(
+        process_website_message,
         store,
         session_id=session_id,
         text=text,
@@ -700,8 +730,10 @@ async def post_voice(
         sheets=sheets,
         audio_meta=result,
         stt_latency_ms=elapsed_ms(started),
+        defer=background.add_task,
     )
-    await _maybe_ping_owner(
+    background.add_task(
+        _maybe_ping_owner,
         session_id=session_id,
         settings=settings,
         owner_port=owner_port,
