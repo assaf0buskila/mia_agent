@@ -7,7 +7,11 @@ import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from app.api.inbound_common import event_conversation_id, outbound_reply
+from app.api.inbound_common import (
+    event_conversation_id,
+    outbound_reply,
+    owner_telegram_reply_markup,
+)
 from app.api.owner import OwnerTurnResult, _is_authorized_owner
 from app.brain.store import BrainStore
 from app.capabilities.types import Principal
@@ -24,7 +28,8 @@ from app.domain.events import (
     stamp_correlation,
 )
 from app.domain.gmail_drafts import apply_gmail_send_decision, execute_approved_gmail_send
-from app.domain.owner_tasks import OwnerTaskType
+from app.domain.owner_tasks import OwnerTaskType, classify_owner_task
+from app.domain.takeover import apply_owner_human_resume, apply_owner_human_takeover
 from app.domain.tools import AdapterHttpError
 from app.integrations.base import MessagePort
 from app.integrations.gmail import GmailPort
@@ -141,7 +146,26 @@ async def run_owner_loop(
     store.save_canonical_event(provider=provider, event=incoming)
 
     reply = ""
-    if gmail_port is not None:
+    # Human takeover and release existed only on the WhatsApp owner path, which is
+    # off. So a conversation Mia escalated could be parked forever with no way to hand
+    # it back to her from Telegram.
+    if not demo_mode_active(settings):
+        task = classify_owner_task(owner_text)
+        if not task.needs_clarification:
+            if task.task_type is OwnerTaskType.HUMAN_TAKEOVER:
+                ack = apply_owner_human_takeover(
+                    store, text=owner_text, kill_switch=False
+                )
+                if ack is not None:
+                    reply = ack
+            elif task.task_type is OwnerTaskType.HUMAN_TAKEOVER_RESUME:
+                ack = apply_owner_human_resume(
+                    store, text=owner_text, kill_switch=False
+                )
+                if ack is not None:
+                    reply = ack
+
+    if not reply and gmail_port is not None:
         gmail_intent, gmail_draft_id = apply_gmail_send_decision(
             store,
             text=owner_text,
@@ -172,7 +196,13 @@ async def run_owner_loop(
                 )
             )
 
-    message = outbound_reply(item, text=reply, channel=channel)
+    # Approvals proposed on Telegram had no button and no text command, so
+    # `pending_approvals` could only ever grow. Attach the keyboard whenever
+    # something is actually waiting on him.
+    markup = owner_telegram_reply_markup(
+        store, channel=channel, task_type=OwnerTaskType.PENDING_APPROVALS
+    )
+    message = outbound_reply(item, text=reply, channel=channel, reply_markup=markup)
     try:
         await port.send(message)
         sent = True
