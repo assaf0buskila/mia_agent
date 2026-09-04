@@ -33,10 +33,30 @@ SITE_ACTION_TO_NEXT: dict[str, NextAction] = {
     "answer": NextAction.UNDERSTAND_WORKFLOW,
     "ask_need": NextAction.UNDERSTAND_WORKFLOW,
     "ask_contact": NextAction.OFFER_WHATSAPP,
-    "confirm_contact": NextAction.HANDOFF,
     "handoff": NextAction.HANDOFF,
     "complaint": NextAction.HANDLE_OBJECTION,
 }
+
+# The selling ladder for an ongoing conversation. `answer` used to mean
+# UNDERSTAND_WORKFLOW on every single turn, so Mia asked a discovery question forever
+# and never offered anything. A real visitor answered six of them and left.
+#
+# Turn 1  learn what the business is
+# Turn 2  name what we would take off their hands, and ask if they want to hear how
+# Turn 3+ one sharp question about the step that actually costs them time
+ANSWER_LADDER: tuple[NextAction, ...] = (
+    NextAction.UNDERSTAND_WORKFLOW,
+    NextAction.OFFER_HYPOTHESIS,
+    NextAction.DEEPEN_PAIN,
+)
+
+
+def answer_intent(*, visitor_turns: int, frustrated: bool) -> NextAction:
+    """Pick the rung. Frustration jumps straight to the offer, never another question."""
+    if frustrated:
+        return NextAction.OFFER_HYPOTHESIS
+    index = max(0, visitor_turns - 1)
+    return ANSWER_LADDER[min(index, len(ANSWER_LADDER) - 1)]
 
 # Copy whose exact wording is the guardrail. Never paraphrased, never sent to a model.
 VERBATIM_SITE_ACTIONS = frozenset(
@@ -47,6 +67,9 @@ VERBATIM_SITE_ACTIONS = frozenset(
         "identity",
         "voice_fail",
         "off_topic",
+        # A promise about what happens next. Phrasing it against the HANDOFF intent,
+        # which forbids claiming a transfer, put the model in an impossible position.
+        "confirm_contact",
     }
 )
 
@@ -79,13 +102,18 @@ def phrase_site_reply(
     facts: tuple[PublishedFact, ...] = (),
     port: SalesReplyPort | None = None,
     kill_switch: bool = False,
+    visitor_turns: int = 0,
+    frustrated: bool = False,
 ) -> str:
     """Return the visitor-facing line. Falls back to `canned` on every failure path."""
     if action in VERBATIM_SITE_ACTIONS:
         return canned
     if port is None or kill_switch:
         return canned
-    next_action = SITE_ACTION_TO_NEXT.get(action)
+    if action in {"answer", "ask_need"}:
+        next_action = answer_intent(visitor_turns=visitor_turns, frustrated=frustrated)
+    else:
+        next_action = SITE_ACTION_TO_NEXT.get(action)
     if next_action is None:
         return canned
     try:

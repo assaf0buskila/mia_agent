@@ -23,6 +23,7 @@ from app.surfaces.site_policy import (
     append_burst,
     classify_site_intent,
     decide_site_turn,
+    is_frustrated,
     never_silent,
     pick_language,
 )
@@ -52,6 +53,7 @@ class SiteSession:
     awaiting_ping: bool = False
     language: str = ""
     tools_ran: tuple[str, ...] = ()
+    need_seen: bool = False
 
 
 @dataclass
@@ -181,6 +183,12 @@ def run_site_turn(
     if tools_ran:
         session.tools_ran = tuple(dict.fromkeys((*session.tools_ran, *tools_ran)))
     named_tools = session.tools_ran if intent == "tool_status" else tools_ran
+    # How far into the conversation we are, and whether they have told us it is going
+    # badly. Both move the ladder off "ask another question".
+    visitor_turns = sum(1 for role, _text in session.turns if role == "visitor")
+    frustrated = not voice_failed and is_frustrated(thought or raw)
+    if intent == "need":
+        session.need_seen = True
     decision = decide_site_turn(
         thought=thought or raw,
         language=session.language,
@@ -192,6 +200,9 @@ def run_site_turn(
         tools_ran=named_tools,
         voice_failed=voice_failed,
         complaint_open=session.complaint_open,
+        visitor_turns=visitor_turns,
+        frustrated=frustrated,
+        need_seen=session.need_seen,
     )
     if decision.stop_selling:
         session.selling_stopped = True
@@ -213,6 +224,8 @@ def run_site_turn(
         turns=turns,
         facts=facts,
         port=reply_port,
+        visitor_turns=visitor_turns,
+        frustrated=frustrated,
     )
     reply = never_silent(phrased, session.language)
     session.turns.append(("mia", reply))

@@ -92,7 +92,10 @@ def test_website_identify_then_sell_never_sets_conversation_killed() -> None:
             f"/v1/website/sessions/{session_id}/messages",
             json={"text": "I'm a student with a school project"},
         )
-        assert student.json()["next_action"] == "answer"
+        # This turn follows "we run a clinic" and "let's book a meeting", so the sell
+        # ladder may now offer to connect them. What this test guards is that nothing
+        # kills the conversation and no lead is minted, not which rung we are on.
+        assert student.json()["next_action"] in {"answer", "ask_contact"}
     db = get_session_factory()()
     try:
         store = LeadStore(db)

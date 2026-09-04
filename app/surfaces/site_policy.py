@@ -26,6 +26,10 @@ SITE_ACTIONS = frozenset(
 )
 
 BURST_WINDOW_S = 4.0
+# A visitor who has answered this many questions has earned an offer, not another
+# question. Six unanswered discovery turns is what made a real prospect type
+# "נכשלת" and leave.
+ASK_CONTACT_AFTER_TURNS = 4
 KNOWLEDGE_TOOL = "knowledge_search"
 ASSAFWEB_HOSTS = frozenset({"www.assafweb.com", "assafweb.com"})
 
@@ -144,7 +148,23 @@ _COMPLAINT = (
     "רוצה להתלונן",
     "שירות גרוע",
 )
-_PRICE = ("מחיר", "כמה עולה", "כמה זה עולה", "מה המחיר", "price", "cost", "how much")
+# Question forms only. Bare "מחיר"/"price" also matches a visitor describing their
+# OWN pricing work ("תמחור מחירים לוקח לי את היום"), which is a pain to sell into,
+# not a request for our price.
+_PRICE = (
+    "כמה עולה",
+    "כמה זה עולה",
+    "כמה אתם גובים",
+    "מה המחיר",
+    "המחיר שלכם",
+    "מחירון",
+    "how much",
+    "what do you charge",
+    "the price",
+    "your price",
+    "pricing page",
+    "what does it cost",
+)
 _METRIC = (
     "how many",
     "conversion",
@@ -211,6 +231,25 @@ _NEED = (
 )
 _GREETING = ("hi", "hey", "hello", "היי", "שלום", "בוקר טוב", "ערב טוב")
 _STOP_SELL = ("not interested", "לא מעוניין", "לא מעוניינים", "לא צריך")
+# The visitor is telling us the conversation is going badly. Asking one more
+# discovery question is the worst possible next move.
+_FRUSTRATED = (
+    "נכשלת",
+    "לא הבנת",
+    "את לא מבינה",
+    "לא עוזר",
+    "לא עוזרת",
+    "נמאס",
+    "מספיק שאלות",
+    "די עם השאלות",
+    "לא רלוונטי",
+    "you failed",
+    "not helpful",
+    "you don't understand",
+    "you dont understand",
+    "stop asking",
+    "too many questions",
+)
 _VOICE_PRODUCT = (
     "סוכן קולי",
     "סוכנת קולית",
@@ -346,6 +385,12 @@ def classify_site_intent(text: str) -> str:
     return "other"
 
 
+def is_frustrated(text: str) -> bool:
+    """The visitor said the conversation is failing. Stop interrogating them."""
+    lowered = text.lower()
+    return _has(f"{text} {lowered}", _FRUSTRATED)
+
+
 def _is_greeting(text: str) -> bool:
     stripped = text.strip().lower().strip("!.?")
     return stripped in _GREETING or stripped in {"yo", "sup"}
@@ -449,6 +494,9 @@ def decide_site_turn(
     tools_ran: tuple[str, ...] = (),
     voice_failed: bool = False,
     complaint_open: bool = False,
+    visitor_turns: int = 0,
+    frustrated: bool = False,
+    need_seen: bool = False,
 ) -> SiteDecision:
     """Pick one canned reply. Phone/email only when the next step is Assaf or Sheet."""
     if voice_failed:
@@ -606,6 +654,24 @@ def decide_site_turn(
 
     if intent in {"need", "other"}:
         answer = _answer_from_facts(facts, language, tools_ran)
+        if (
+            not has_contact
+            and need_seen
+            and (frustrated or visitor_turns >= ASK_CONTACT_AFTER_TURNS)
+        ):
+            # Stop interrogating. Either they told us it is going badly, or they have
+            # answered enough that the next honest move is to offer Assaf.
+            # `need_seen` gates it on an actual business need: a student asking about
+            # a school project is not a lead and must never be asked for a phone.
+            return SiteDecision(
+                reply=line(ASK_CONTACT_HE, ASK_CONTACT_EN, language),
+                action="ask_contact",
+                ask_contact=True,
+                write_sheet=False,
+                ping_assaf=False,
+                stop_selling=selling_stopped,
+                confirm_contact=False,
+            )
         if has_contact and not already_confirmed:
             # They already left a number. Answer first, then confirm once and ping.
             return SiteDecision(
