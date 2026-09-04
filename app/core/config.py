@@ -106,6 +106,10 @@ class Settings(BaseSettings):
     whatsapp_click_to_chat: str = Field(default="")
     whatsapp_sender: str = Field(default="direct")
     whatsapp_require_business_scope: bool = True
+    # Baileys sidecar. Reverse-engineered WhatsApp Web, so it is opt-in and off by
+    # default: MIA_WHATSAPP_SENDER=baileys plus a URL and a shared token.
+    whatsapp_baileys_url: str = Field(default="")
+    whatsapp_baileys_token: str = Field(default="")
     whatsapp_handoff_send: bool = False
 
     telegram_bot_token: str = Field(default="")

@@ -6,6 +6,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.exc import SQLAlchemyError
 
 from app import __version__
+from app.api.baileys import router as baileys_router
 from app.api.composio import router as composio_router
 from app.api.demo import router as demo_router
 from app.api.telegram import router as telegram_router
@@ -237,6 +238,8 @@ app.include_router(demo_router)
 app.include_router(whatsapp_router)
 app.include_router(telegram_router)
 app.include_router(composio_router)
+# Off until MIA_WHATSAPP_BAILEYS_TOKEN is set; fails closed without it.
+app.include_router(baileys_router)
 
 
 @app.exception_handler(MiaError)
