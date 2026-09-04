@@ -9,12 +9,14 @@
   "StorageEncrypted": true,
   "PubliclyAccessible": false,
   "MultiAZ": false,
-  "BackupRetentionPeriod": 7,
+  "BackupRetentionPeriod": 14,
   "CopyTagsToSnapshot": true,
-  "DeletionProtection": false,
+  "DeletionProtection": true,
   "AutoMinorVersionUpgrade": true,
   "MasterUsername": "mia_admin",
   "ManageMasterUserPassword": true,
-  "VpcSecurityGroupIds": ["sg-MIA_RDS"],
+  "VpcSecurityGroupIds": [
+    "sg-MIA_RDS"
+  ],
   "DBSubnetGroupName": "mia-private"
 }
