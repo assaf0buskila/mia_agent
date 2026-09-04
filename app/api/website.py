@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from collections.abc import Callable
 from pathlib import Path
 from time import perf_counter
@@ -64,6 +65,8 @@ from app.surfaces.site_policy import (
 from app.surfaces.site_reply import build_site_reply_port
 
 router = APIRouter(prefix="/v1/website", tags=["website"])
+_log = logging.getLogger("mia.comm")
+
 _WIDGET_PATH = Path(__file__).resolve().parent.parent / "web" / "ask_mia.js"
 _MAX_AUDIO_BYTES = 16_000_000
 _VOICE_MIME_ALLOW = frozenset(
@@ -176,6 +179,21 @@ def _voice_filename(mime: str) -> str:
     if mime in {"audio/aac", "audio/m4a"}:
         return "note.m4a"
     return "note.webm"
+
+
+def _log_voice_failure(
+    *, session_id: str, reason: str, mime: str, size_bytes: int, detail: str = ""
+) -> None:
+    """Say why a voice note failed. All three branches used to be silent, so a visitor
+    seeing "לא הצלחתי לשמוע" left no trace anywhere and could not be diagnosed."""
+    _log.warning(
+        "website voice failed session=%s reason=%s mime=%s bytes=%s detail=%s",
+        session_id,
+        reason,
+        mime,
+        size_bytes,
+        detail or "-",
+    )
 
 
 async def _read_audio_capped(upload: UploadFile) -> bytes:
@@ -642,6 +660,7 @@ async def post_voice(
     audio = await _read_audio_capped(file)
     if not audio:
         raise HTTPException(status_code=400, detail="empty audio")
+    audio_bytes = len(audio)
     started = perf_counter()
     try:
         try:
@@ -651,6 +670,12 @@ async def post_voice(
                 filename=_voice_filename(mime),
             )
         except RuntimeError:
+            _log_voice_failure(
+                session_id=session_id,
+                reason="stt_not_configured",
+                mime=mime,
+                size_bytes=audio_bytes,
+            )
             out = process_website_message(
                 store,
                 session_id=session_id,
@@ -672,7 +697,14 @@ async def post_voice(
                 whatsapp_url=out.whatsapp_url,
                 heard="",
             )
-        except (TranscriptionError, AdapterHttpError):
+        except (TranscriptionError, AdapterHttpError) as exc:
+            _log_voice_failure(
+                session_id=session_id,
+                reason="provider_error",
+                mime=mime,
+                size_bytes=audio_bytes,
+                detail=type(exc).__name__,
+            )
             out = process_website_message(
                 store,
                 session_id=session_id,
@@ -698,6 +730,14 @@ async def post_voice(
         del audio
     text = (result.text or "").strip()
     if not text:
+        # The provider answered, with nothing in it: silence, a tap too short to carry
+        # speech, or a container it could not decode.
+        _log_voice_failure(
+            session_id=session_id,
+            reason="empty_transcript",
+            mime=mime,
+            size_bytes=audio_bytes,
+        )
         out = process_website_message(
             store,
             session_id=session_id,
