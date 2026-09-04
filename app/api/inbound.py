@@ -520,6 +520,7 @@ async def process_inbound_texts(
                 outcome=opt_out_outcome,
                 correlation_id=run_id,
             )
+        send_failed = False
         if reply_text:
             automation_scope = (
                 _whatsapp_automation_scope(store, item)
@@ -558,6 +559,7 @@ async def process_inbound_texts(
                     auto_reply_instagram=settings.auto_reply_instagram,
                     whatsapp_require_business_scope=settings.whatsapp_require_business_scope,
                 )
+            send_failed = bool(reply_text) and not sent
             store.mark_webhook(
                 provider=provider,
                 provider_event_id=item["id"],
@@ -607,10 +609,17 @@ async def process_inbound_texts(
             automation_scope=control.automation_scope if control is not None else "",
             takeover_state=store.get_takeover_state(lead_id),
             policy_result=result.get("next_action", ""),
-            success=True,
+            success=not send_failed,
             automation_mode=settings.automation_mode.value,
         )
         processed += 1
+        # Make this item durable before touching the next one. Providers batch
+        # messages, and `get_db` rolls the whole request back on any exception: a
+        # failed send for item B used to erase item A's committed "sent" claim, so the
+        # provider retry redelivered A's reply to a customer who already had it.
+        # Per-item commit keeps at-least-once for the item that failed (its claim is
+        # rolled back and reclaimed on retry) without re-sending the ones that worked.
+        store.session.commit()
     return {
         "processed": processed,
         "duplicates": duplicates,

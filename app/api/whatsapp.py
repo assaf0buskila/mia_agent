@@ -14,12 +14,13 @@ from app.api.deps import (
 )
 from app.api.inbound import process_inbound_texts
 from app.core.config import get_settings
-from app.core.errors import WebhookRejected
+from app.core.errors import MiaError, WebhookRejected
 from app.core.webhooks import verify_meta_signature
 from app.db.store import LeadStore
 from app.domain.ai_runs import elapsed_ms
 from app.domain.conversation_scope import existing_whatsapp_scope, whatsapp_stt_allowed
 from app.domain.events import Channel
+from app.domain.tools import AdapterHttpError
 from app.integrations.base import MessagePort
 from app.integrations.transcribe import TranscriptionPort
 from app.integrations.whatsapp import DisabledWhatsAppMediaPort, WhatsAppMediaPort
@@ -131,7 +132,11 @@ async def transcribe_inbound_audio(
                 stt_latency_ms = elapsed_ms(started)
             finally:
                 del audio_bytes
-        except RuntimeError:
+        except (RuntimeError, MiaError, AdapterHttpError):
+            # `transcribe` raises TranscriptionError (a MiaError) and media download
+            # raises AdapterHttpError; neither is a RuntimeError. Unhandled, they left
+            # the webhook as a 502, which Composio then retries — turning one failed
+            # voice note into repeated delivery of every message in the batch.
             continue
         transcribed.append(
             {
