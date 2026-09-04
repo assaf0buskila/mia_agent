@@ -18,6 +18,7 @@ Two hard invariants the site keeps that the inbound path does not need:
 from __future__ import annotations
 
 from app.core.config import Settings
+from app.domain.emotion import infer_emotional_cues
 from app.domain.memory import ConversationTurn, repeats_previous_mia_turn
 from app.domain.sales import NextAction
 from app.integrations.sales_reply import (
@@ -128,6 +129,15 @@ def phrase_site_reply(
                 turns=tuple(turns),
                 language=language,
                 knowledge=knowledge_lines(facts),
+                # The prompt has a whole delivery contract keyed on PROSPECT TONE, and
+                # it was inert on the widget because this was never passed. A visitor
+                # who sounds frustrated on the website now gets the same
+                # acknowledgement they would get on WhatsApp. Deterministic labels from
+                # a closed vocabulary; an empty tuple renders no block at all, so a
+                # neutral message never earns manufactured empathy.
+                emotional_cues=infer_emotional_cues(
+                    latest_message, recent_turns=tuple(turns)
+                ),
             ),
         )
     except Exception:
