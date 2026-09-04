@@ -1,0 +1,48 @@
+{
+  "_comment": [
+    "Turn the log lines Mia already writes into CloudWatch metrics, so they can raise an alarm.",
+    "Nothing here changes application code. The lines exist and are well formed; until a metric",
+    "filter reads them, a Mia that is failing every turn looks identical to a Mia nobody used.",
+    "",
+    "Apply each entry with:",
+    "  aws logs put-metric-filter --log-group-name /ecs/mia \\",
+    "    --filter-name NAME --filter-pattern PATTERN \\",
+    "    --metric-transformations metricName=METRIC,metricNamespace=Mia,metricValue=1,defaultValue=0",
+    "",
+    "defaultValue=0 matters: without it the metric is missing rather than zero when Mia is idle,",
+    "and an alarm cannot tell 'healthy' from 'no data'."
+  ],
+  "LogGroupName": "/ecs/mia",
+  "Filters": [
+    {
+      "FilterName": "mia-turn-failed",
+      "FilterPattern": "\"success=False\"",
+      "MetricName": "TurnFailed",
+      "Why": "A turn that did not reach the person. Includes a composed customer reply the port never delivered, which is otherwise indistinguishable from a healthy turn."
+    },
+    {
+      "FilterName": "mia-owner-agent-silent",
+      "FilterPattern": "\"owner_agent used=False\"",
+      "MetricName": "OwnerAgentSilent",
+      "Why": "Assaf asked something and the agent did not answer. reason= carries why: no_model_configured, provider_error, budget_exhausted."
+    },
+    {
+      "FilterName": "mia-provider-error",
+      "FilterPattern": "\"completion=provider_error\"",
+      "MetricName": "ProviderError",
+      "Why": "An LLM provider failed the whole chain. A sustained non-zero rate here means the fallback chain is exhausted, not merely exercised."
+    },
+    {
+      "FilterName": "mia-voice-failed",
+      "FilterPattern": "\"website voice failed\"",
+      "MetricName": "WebsiteVoiceFailed",
+      "Why": "A visitor recorded a voice note and got 'I could not hear that'. reason= separates stt_not_configured, provider_error and empty_transcript."
+    },
+    {
+      "FilterName": "mia-outbound-send-failed",
+      "FilterPattern": "\"outbound send failed\"",
+      "MetricName": "OutboundSendFailed",
+      "Why": "A provider refused a message Mia had already composed and paid for."
+    }
+  ]
+}

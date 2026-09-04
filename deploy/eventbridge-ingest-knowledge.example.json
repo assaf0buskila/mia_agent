@@ -1,0 +1,33 @@
+{
+  "Name": "mia-ingest-knowledge",
+  "Description": "Re-read assafweb.com into Mia's brain. Without this the corpus silently drifts from the live site: change a price on the site and Mia keeps quoting the old one, with nothing anywhere saying so.",
+  "State": "ENABLED",
+  "ScheduleExpression": "cron(20 4 ? * MON *)",
+  "ScheduleExpressionTimezone": "Asia/Jerusalem",
+  "FlexibleTimeWindow": {
+    "Mode": "OFF"
+  },
+  "Target": {
+    "Arn": "arn:aws:ecs:REGION:ACCOUNT_ID:cluster/mia",
+    "RoleArn": "arn:aws:iam::ACCOUNT_ID:role/miaSchedulerRole",
+    "RetryPolicy": {
+      "MaximumEventAgeInSeconds": 3600,
+      "MaximumRetryAttempts": 0
+    },
+    "EcsParameters": {
+      "TaskDefinitionArn": "arn:aws:ecs:REGION:ACCOUNT_ID:task-definition/mia",
+      "LaunchType": "FARGATE",
+      "PlatformVersion": "1.4.0",
+      "EnableExecuteCommand": false,
+      "TaskCount": 1,
+      "NetworkConfiguration": {
+        "awsvpcConfiguration": {
+          "AssignPublicIp": "DISABLED",
+          "Subnets": ["subnet-PRIVATE_A", "subnet-PRIVATE_B"],
+          "SecurityGroups": ["sg-MIA_TASKS"]
+        }
+      }
+    },
+    "Input": "{\"containerOverrides\":[{\"name\":\"mia\",\"command\":[\"mia-ingest-knowledge\"]}]}"
+  }
+}
