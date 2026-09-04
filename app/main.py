@@ -8,7 +8,6 @@ from sqlalchemy.exc import SQLAlchemyError
 from app import __version__
 from app.api.composio import router as composio_router
 from app.api.demo import router as demo_router
-from app.api.instagram import router as instagram_router
 from app.api.telegram import router as telegram_router
 from app.api.website import router as website_router
 from app.api.whatsapp import router as whatsapp_router
@@ -237,7 +236,6 @@ app.include_router(website_router)
 app.include_router(demo_router)
 app.include_router(whatsapp_router)
 app.include_router(telegram_router)
-app.include_router(instagram_router)
 app.include_router(composio_router)
 
 

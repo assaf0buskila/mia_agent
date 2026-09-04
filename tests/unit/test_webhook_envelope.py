@@ -3,7 +3,6 @@ import hmac
 import json
 
 from app.api.deps import (
-    get_instagram_port,
     get_transcription_port,
     get_whatsapp_media_port,
     get_whatsapp_port,
@@ -86,35 +85,6 @@ def _signed_whatsapp_audio(
     }
     raw = json.dumps(payload, separators=(",", ":")).encode()
     digest = hmac.new(b"app-secret", raw, hashlib.sha256).hexdigest()
-    headers = {
-        "Content-Type": "application/json",
-        "X-Hub-Signature-256": f"sha256={digest}",
-    }
-    return raw, headers
-
-
-def _signed_instagram_payload(
-    *,
-    sender_id: str,
-    message_id: str = "mid.envl.1",
-    text: str = "bonus text should not matter",
-    referral: dict | None = None,
-    omit_message: bool = False,
-) -> tuple[bytes, dict[str, str]]:
-    msg_event: dict = {
-        "sender": {"id": sender_id},
-        "recipient": {"id": "ig-account-123"},
-    }
-    if not omit_message:
-        msg_event["message"] = {"mid": message_id, "text": text, "is_echo": False}
-    if referral is not None:
-        msg_event["referral"] = referral
-    payload = {
-        "object": "instagram",
-        "entry": [{"id": "ig-account-123", "messaging": [msg_event]}],
-    }
-    raw = json.dumps(payload, separators=(",", ":")).encode()
-    digest = hmac.new(b"ig-app-secret", raw, hashlib.sha256).hexdigest()
     headers = {
         "Content-Type": "application/json",
         "X-Hub-Signature-256": f"sha256={digest}",
@@ -205,34 +175,3 @@ def test_whatsapp_audio_webhook_envelope_kind(monkeypatch) -> None:
         app.dependency_overrides.pop(get_transcription_port, None)
 
 
-def test_instagram_igref_webhook_envelope_referral(monkeypatch) -> None:
-    monkeypatch.setenv("MIA_INSTAGRAM_VERIFY_TOKEN", "verify-me")
-    monkeypatch.setenv("MIA_INSTAGRAM_APP_SECRET", "ig-app-secret")
-    igsid = "igsid-envl-ref-001"
-    provider_event_id = f"igref:{igsid}:1234567890"
-    recorder = RecordingMessagePort()
-    app.dependency_overrides[get_instagram_port] = lambda: recorder
-    raw, headers = _signed_instagram_payload(
-        sender_id=igsid,
-        omit_message=True,
-        referral={
-            "source": "ADS",
-            "ad_id": "1234567890",
-            "ads_context_data": {"post_id": "17841456789012345"},
-        },
-    )
-    init_db()
-    try:
-        with TestClient(app) as client:
-            response = client.post("/v1/instagram/webhook", content=raw, headers=headers)
-            assert response.status_code == 200
-            assert response.json()["processed"] == 1
-        db = get_session_factory()()
-        try:
-            row = _webhook_row(db, provider="instagram", provider_event_id=provider_event_id)
-            assert row.channel == "instagram"
-            assert row.envelope_kind == "referral"
-        finally:
-            db.close()
-    finally:
-        app.dependency_overrides.pop(get_instagram_port, None)
