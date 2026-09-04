@@ -216,6 +216,7 @@ def rank_memories(
                 recency=recency,
                 importance=importance,
                 source_ref=str(item.get("source_ref", "")),
+                category=str(item.get("category", "")),
             )
         )
     scored.sort(key=lambda hit: (-hit.score, hit.item_id))
@@ -253,6 +254,7 @@ def rank_knowledge(
                 score=score,
                 similarity=similarity.get(doc_id, 0.0),
                 source_ref=str(item.get("source_ref", "")),
+                category=str(item.get("category", "")),
             )
         )
     hits.sort(key=lambda hit: (-hit.score, hit.item_id))

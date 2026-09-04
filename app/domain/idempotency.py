@@ -14,6 +14,7 @@ ALLOWLISTED_OPERATION_SCOPES = frozenset(
         "owner_task",
         "sheets_mirror",
         "owner_sheets_write",
+        "owner_crm_write",
         "follow_up",
         "calendar_cancellation",
         "linkedin_approval",

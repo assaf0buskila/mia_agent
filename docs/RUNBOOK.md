@@ -20,24 +20,64 @@ Restore: `MIA_KILL_SWITCH=false`, restart, confirm `/health` `"status": "ok"`.
 ## Deploy
 
 CI never deploys. The `deploy` job in `.github/workflows/ci.yml` ends in `exit 1`
-on purpose, and the `image` job builds without pushing. Every deploy is manual.
+on purpose, and the `image` job builds without pushing. Every deploy is manual, and
+the order below is not optional: the schema must lead the code.
 
-1. Wait for green CI on a SHA, then check out **that** SHA locally. The image is
-   built from the working tree, not from what CI tested, so a dirty tree ships.
-2. Build, tag and push to ECR with the next integer tag:
-   `docker build -f deploy/Dockerfile -t mia:N .`
-3. `python scripts/deploy_ecs_revision.py --tag N` — re-runs the origin-bind gate
-   and registers a new task revision with only the image tag swapped. It does
-   **not** move the service.
-4. `aws ecs update-service --cluster mia --service mia --force-new-deployment`
+```
+test  ->  build  ->  migrate  ->  deploy  ->  smoke  ->  verify
+```
 
-Step 4 is the one that actually deploys. Record which tag came from which SHA;
-nothing in the repo does that for you.
+1. **Test.** Wait for green CI on a SHA, then `git checkout` that SHA. The image is
+   built from the working tree, so a dirty tree would ship. `deploy_ecs_revision.py`
+   now refuses a dirty tree or a SHA that does not match HEAD, but check out the
+   tested commit anyway.
 
-The ECS deployment circuit breaker is on, so a container that fails
-`/health/live` rolls back by itself. It catches "will not boot". It catches
-nothing about "boots fine and answers badly" — for that, run
-`scripts/probe_live_website.py` and read the output yourself.
+2. **Build** with the commit stamped in, and push to ECR:
+   ```
+   SHA=$(git rev-parse HEAD)
+   docker build -f deploy/Dockerfile --build-arg MIA_BUILD_SHA=$SHA -t mia:N .
+   docker tag mia:N <ECR>/mia:N && docker push <ECR>/mia:N
+   ```
+   Without `--build-arg`, `/health` reports an empty `deployment.commit_sha` and the
+   smoke test fails check A, which is the point.
+
+3. **Migrate, before the service moves.** New columns and tables must exist before the
+   new code serves a request. `mia-migrate` is additive and records each file in
+   `schema_migrations`, so re-running it is safe and already-applied files are skipped.
+   ```
+   python scripts/run_ecs_migration.py --task-definition mia
+   ```
+   If this fails, stop. Do not move the service. A partly applied migration set cannot
+   be rolled back (see below), so fix forward from the current schema.
+
+4. **Register and deploy:**
+   ```
+   python scripts/deploy_ecs_revision.py --tag N --sha $SHA
+   aws ecs update-service --cluster mia --service mia --force-new-deployment
+   ```
+
+5. **Smoke.** This has a real exit status and is the release gate:
+   ```
+   python scripts/smoke_production.py --sha $SHA
+   ```
+   Non-zero means roll back. It checks that production reports the commit you just
+   deployed, that a real conversation reaches an offer instead of asking questions
+   forever, that a price question never invents a number, that R5 reports the current
+   policy, and that a normal turn answers. It creates no CRM row and sends you no
+   Telegram notification.
+
+6. **Verify** `GET /health`: `status ok`, `deployment.commit_sha` matches, and
+   `brain.corpus.knowledge_chunks` is non-zero.
+
+The ECS deployment circuit breaker is on, so a container that fails `/health/live`
+rolls back by itself. It catches "will not boot". The smoke test is what catches
+"boots fine and answers badly".
+
+### Migrations pending in this release
+
+`20260904_website_session_state.sql` creates `website_session_state`. The website turn
+reads and writes that table on every message, so deploying the code without running the
+migration first will error on the first visitor.
 
 ## Rollback
 
@@ -74,15 +114,47 @@ example; that command truncates every table and its only guard is typing
 
 ## Alarms
 
-Nothing pages you by default. `deploy/cloudwatch-metric-filters.example.json`
-turns the log lines Mia already writes into metrics, and
-`deploy/cloudwatch-mia-alarms.example.json` alarms on them. Both need a real SNS
-topic — the existing ALB 5xx alarm points at a placeholder, which is why nothing
-currently reaches anyone.
+Nothing pages you until the steps below are run. The alarm definitions exist and are
+inert: the only alarm with an SNS action is the ALB 5xx one, and it points at a
+placeholder ARN. **This has not been applied for you** — it needs your AWS
+credentials, and creating a topic that pages a real phone is not something to do
+automatically.
+
+One time, to create the destination:
+
+```
+aws sns create-topic --name mia-ops
+aws sns subscribe --topic-arn arn:aws:sns:REGION:ACCOUNT_ID:mia-ops   --protocol email --notification-endpoint YOU@example.com
+```
+
+Confirm the subscription from the email, then turn the log lines into metrics. Each
+entry in `deploy/cloudwatch-metric-filters.example.json` becomes one call:
+
+```
+aws logs put-metric-filter --log-group-name /ecs/mia   --filter-name mia-owner-agent-silent   --filter-pattern '"owner_agent used=False"'   --metric-transformations     metricName=OwnerAgentSilent,metricNamespace=Mia,metricValue=1,defaultValue=0
+```
+
+`defaultValue=0` matters: without it the metric is absent rather than zero when Mia is
+idle, and an alarm cannot tell healthy from no-data.
+
+Then create the alarms, replacing the placeholder ARN in
+`deploy/cloudwatch-mia-alarms.example.json` with the real topic:
+
+```
+aws cloudwatch put-metric-alarm --cli-input-json file://alarm.json
+```
+
+Verify one end to end before trusting it:
+
+```
+aws cloudwatch set-alarm-state --alarm-name mia-owner-agent-silent   --state-value ALARM --state-reason "smoke test"
+```
+
+If that does not reach your phone, nothing else on this page will either.
 
 `/health` answers "is the config filled in", not "is Mia working". In particular
-`ops.failed_sends` counts only an owner turn that broke *and* could not deliver
-its own apology; it does not count a failed customer reply.
+`ops.failed_sends` counts only an owner turn that broke *and* could not deliver its
+own apology; it does not count a failed customer reply.
 
 ## Database safety
 

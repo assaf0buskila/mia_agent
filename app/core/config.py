@@ -108,6 +108,9 @@ class Settings(BaseSettings):
     whatsapp_require_business_scope: bool = True
     # Baileys sidecar. Reverse-engineered WhatsApp Web, so it is opt-in and off by
     # default: MIA_WHATSAPP_SENDER=baileys plus a URL and a shared token.
+    # Stamped into the image at build time from the tested commit. Never derived
+    # from the working tree at runtime: the point is to prove which code is serving.
+    build_sha: str = Field(default="")
     whatsapp_baileys_url: str = Field(default="")
     whatsapp_baileys_token: str = Field(default="")
     whatsapp_handoff_send: bool = False

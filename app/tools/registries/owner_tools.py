@@ -1000,6 +1000,20 @@ def _crm_upsert(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
         return ToolResult(ok=False, error="lead ids are not used")
     port = ctx.sheets or build_sheets_port(ctx.settings)
     crm = build_contacts_crm(ctx.settings, port)
+    # Durable duplicate protection, same shape as the sheets_append/update writes:
+    # keyed on the owner event plus the exact row, so a retried owner message cannot
+    # write the contact twice.
+    canonical = json.dumps(
+        {"event": ctx.source_ref, "operation": "crm_upsert", "cells": record.cells()},
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    key = sha256(canonical.encode("utf-8")).hexdigest()
+    if not ctx.store.claim_operation(scope="owner_crm_write", key=key):
+        return ToolResult(
+            ok=True, text="This exact Contacts row was already written for this message."
+        )
     try:
         log_contact(
             crm,
@@ -1010,7 +1024,26 @@ def _crm_upsert(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
             result="נרשם",
         )
     except CrmDenied as exc:
+        ctx.store.fail_operation(scope="owner_crm_write", key=key)
         return ToolResult(ok=False, error=str(exc) or "lead ids are not used")
+    except AdapterHttpError as exc:
+        # Composio reported the write failed, or the response did not match the
+        # adapter contract. Either way it is NOT a success: saying "Wrote Contacts"
+        # here is how a rejected CRM write reached Assaf as done.
+        # The row may still have landed before a transport failure, so keep the claim
+        # completed rather than freeing it for a silent duplicate retry.
+        ctx.store.complete_operation(
+            scope="owner_crm_write", key=key, result_json='{"ok":false}'
+        )
+        return ToolResult(
+            ok=False, error=f"Contacts write failed ({exc.tool_status()}); nothing was saved."
+        )
+    except (RuntimeError, ValueError, OSError):
+        ctx.store.fail_operation(scope="owner_crm_write", key=key)
+        return ToolResult(ok=False, error="Contacts write failed; nothing was saved.")
+    ctx.store.complete_operation(
+        scope="owner_crm_write", key=key, result_json='{"ok":true}'
+    )
     return ToolResult(
         ok=True,
         text=f"Wrote Contacts on {_crm_spreadsheet_id(ctx)}.",

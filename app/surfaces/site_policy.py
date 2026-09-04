@@ -283,11 +283,20 @@ VISITOR_TOOL_LEAKS = (
 _TOOL_STATUS_HE = re.compile(r"(^|[\s.])רץ(\s|$|[\.\,\!])")
 
 
+# Mirrors `app.brain.schemas.KnowledgeCategory.PRICING`. Kept as a literal so this
+# deterministic policy module does not depend on the brain package.
+PRICING_CATEGORY = "pricing"
+
+
 @dataclass(frozen=True)
 class PublishedFact:
     text: str
     url: str
     title: str = ""
+    # Assigned at ingest from the document heading. Authoritative for "is this a
+    # published price"; the keyword check below is only a fallback for rows that
+    # predate the category being carried through retrieval.
+    category: str = ""
 
     def from_assafweb(self) -> bool:
         host = (urlparse(self.url).hostname or "").lower()
@@ -301,7 +310,8 @@ def facts_from_knowledge_hits(hits: list[object]) -> tuple[PublishedFact, ...]:
         url = str(getattr(hit, "source_ref", "") or "")
         text = str(getattr(hit, "text", "") or "")
         title = str(getattr(hit, "label", "") or "")
-        fact = PublishedFact(text=text, url=url, title=title)
+        category = str(getattr(hit, "category", "") or "")
+        fact = PublishedFact(text=text, url=url, title=title, category=category)
         if fact.from_assafweb() and text.strip():
             facts.append(fact)
     return tuple(facts)
@@ -448,6 +458,19 @@ def _published_metric_line(facts: tuple[PublishedFact, ...]) -> str:
     return ""
 
 
+def is_pricing_fact(fact: PublishedFact) -> bool:
+    """Is this retrieved chunk a published price?
+
+    The category the ingest already computed is authoritative. The keyword check
+    stays only as a fallback for chunks retrieved without one — re-deriving this by
+    substring is why Mia answered "there is no published price" while holding
+    pricing.md: a priced chunk whose first 280 chars never say "מחיר" failed the test.
+    """
+    if fact.category.strip().lower() == PRICING_CATEGORY:
+        return True
+    return _looks_like_price_fact(fact.text)
+
+
 def published_price_line(facts: tuple[PublishedFact, ...]) -> str:
     """Quote a published assafweb.com sentence. Never invent a number."""
     for fact in facts:
@@ -456,7 +479,7 @@ def published_price_line(facts: tuple[PublishedFact, ...]) -> str:
         text = " ".join(fact.text.split())
         if not text:
             continue
-        if not _looks_like_price_fact(text):
+        if not is_pricing_fact(fact):
             continue
         return text[:280]
     return ""
