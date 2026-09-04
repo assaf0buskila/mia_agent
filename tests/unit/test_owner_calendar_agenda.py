@@ -3,8 +3,9 @@
 
 Separate from `app.domain.owner_calendar.apply_owner_calendar` (free-slot availability,
 "when am I free"). This covers the additive "what's on my calendar" read: window math
-in `resolve_agenda_window`, rendering in `format_calendar_agenda`, and the `calendar_agenda`
-tool registration in `app.tools.registries.owner_tools`.
+in `resolve_agenda_window`, rendering in `format_calendar_agenda`, the `calendar_agenda`
+handler in `app.tools.owner.calendar`, and its registration in
+`app.tools.registries.owner_tools`.
 """
 
 from __future__ import annotations
