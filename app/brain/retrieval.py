@@ -13,7 +13,7 @@ Two stages, both portable across SQLite and PostgreSQL because both run in Pytho
    and poignancy are meaningless for a scraped web page, so knowledge chunks stop at
    stage 1.
 
-Sources for every constant are in docs/BRAIN_ARCHITECTURE.md.
+Sources for every constant are in docs/ARCHITECTURE.md (Brain).
 """
 
 from __future__ import annotations

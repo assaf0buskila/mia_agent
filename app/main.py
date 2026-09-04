@@ -214,7 +214,7 @@ def openapi_surface(*, env: MiaEnv) -> dict[str, str | None]:
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     # Prod schema is mia-migrate. create_all here would delay /health/live and
-    # still would not apply SQL migrations (docs/PRODUCTION_BUILD.md §3.6).
+    # still would not apply SQL migrations (docs/OPERATIONS.md).
     if get_settings().env is not MiaEnv.PROD:
         init_db()
     yield

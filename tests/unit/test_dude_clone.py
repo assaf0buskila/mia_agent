@@ -591,12 +591,14 @@ def test_public_surfaces_do_not_ship_assaf_private_or_my_studio() -> None:
     living = [
         (root / name).read_text(encoding="utf-8").lower()
         for name in (
+            # The canonical doc set. WIRING/BRAIN_ARCHITECTURE/RUNBOOK were folded
+            # into ARCHITECTURE and OPERATIONS; this list is now exactly the docs a
+            # reader is expected to load, so nothing public escapes the check.
             "README.md",
             "docs/PRODUCT.md",
             "docs/ARCHITECTURE.md",
-            "docs/WIRING.md",
-            "docs/BRAIN_ARCHITECTURE.md",
-            "docs/RUNBOOK.md",
+            "docs/OPERATIONS.md",
+            "docs/DECISIONS.md",
         )
     ]
     widget = (root / "app/web/ask_mia.js").read_text(encoding="utf-8").lower()
