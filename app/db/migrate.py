@@ -158,3 +158,17 @@ def apply_migrations(engine: Engine) -> MigrationSummary:
             break
 
     return summary
+
+
+def applied_schema_version(engine: Engine) -> str:
+    """Filename of the newest applied migration, for /health. Empty when unknown."""
+    try:
+        with engine.connect() as conn:
+            _ensure_schema_migrations_table(conn)
+            rows = conn.execute(
+                text("SELECT filename FROM schema_migrations")
+            ).fetchall()
+    except Exception:
+        return ""
+    names = sorted(str(row[0]) for row in rows if row and row[0])
+    return names[-1] if names else ""

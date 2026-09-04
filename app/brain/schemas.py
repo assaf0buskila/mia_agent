@@ -217,6 +217,9 @@ class RetrievedItem(BaseModel):
     recency: float = 0.0
     importance: float = 0.0
     source_ref: str = ""
+    # The category assigned at ingest (`KnowledgeCategory`). Carried so the answer
+    # path can trust it instead of re-deriving "is this a price" by substring.
+    category: str = ""
 
     def provenance(self) -> str:
         """Short, promptable citation. Never contains secrets or raw provider payloads."""

@@ -174,6 +174,7 @@ def retrieve_knowledge(
             "origin": "knowledge",
             "label": chunk.title or chunk.category.value,
             "source_ref": chunk.url or chunk.source_id,
+            "category": chunk.category.value,
         }
         for chunk in chunks
     ]

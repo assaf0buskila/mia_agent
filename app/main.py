@@ -20,6 +20,7 @@ from app.core.errors import MiaError
 from app.core.logging import configure_logging
 from app.db.session import database_ready, get_session_factory, init_db
 from app.db.store import LeadStore
+from app.domain.ai_runs import PROMPT_VERSION as SALES_PROMPT_VERSION
 
 settings = get_settings()
 configure_logging(settings.log_level)
@@ -250,6 +251,30 @@ async def mia_error_handler(_request: Request, exc: MiaError) -> JSONResponse:
     )
 
 
+def _deployment_block(live) -> dict:
+    """Which exact code is serving, so a stale image is visible from production.
+
+    Deliberately identifiers only: a commit sha, an environment name and version
+    strings. No secrets, no connection strings, no infrastructure paths.
+    """
+    schema_version = ""
+    if database_ready():
+        try:
+            from app.db.migrate import applied_schema_version
+            from app.db.session import get_engine
+
+            schema_version = applied_schema_version(get_engine())
+        except Exception:
+            schema_version = ""
+    return {
+        "commit_sha": live.build_sha.strip(),
+        "env": live.env.value,
+        "app_version": __version__,
+        "prompt_version": SALES_PROMPT_VERSION,
+        "schema_version": schema_version,
+    }
+
+
 @app.get("/health")
 def health() -> dict:
     live = get_settings()
@@ -259,6 +284,7 @@ def health() -> dict:
         "app": live.app_name,
         "env": live.env.value,
         "version": __version__,
+        "deployment": _deployment_block(live),
         "kill_switch": live.kill_switch,
         "demo": demo_mode_active(live),
         "website_url": live.website_url,

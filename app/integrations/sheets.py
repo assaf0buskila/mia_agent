@@ -581,18 +581,17 @@ class ComposioSheetsPort:
             raise AdapterHttpError(None) from exc
         if response.status_code >= 400:
             raise AdapterHttpError(response.status_code)
+        # Composio answers HTTP 200 with `successful: false` when the write was
+        # accepted but did not happen. Returning quietly here reported a rejected CRM
+        # write to Assaf as "Wrote Contacts". Raise like `_execute_tool` already does.
         try:
             body = response.json()
-            if not isinstance(body, dict) or body.get("successful") is not True:
-                return
-        except (
-            ValueError,
-            KeyError,
-            TypeError,
-            AttributeError,
-            IndexError,
-        ):
-            return
+        except ValueError as exc:
+            raise AdapterSchemaError() from exc
+        if not isinstance(body, dict) or not isinstance(body.get("successful"), bool):
+            raise AdapterSchemaError()
+        if body["successful"] is False:
+            raise AdapterResponseError()
 
     def write_locked_contact(self, cells: list[str], *, key_column: str) -> None:
         payload_values = [list(cells)]
