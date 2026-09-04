@@ -61,7 +61,7 @@ Kill switch, risk policy, and idempotency stay in code.
 
 Restate significant work in one sentence. Ask only the question that changes the design. No silent architecture drift. No extra features.
 
-Two graphs: OwnerGraph (Telegram) and ClientGraph (website). Shared core. Capabilities → policy → adapters → Composio/direct. Channels stay thin.
+Two graphs: OwnerGraph (Telegram, inside `answer_owner`) and ClientGraph (WhatsApp inbound). The **website does not use ClientGraph** — it runs the deterministic `app/surfaces/site_policy.py` and phrases each turn through the shared sales reply port in `app/surfaces/site_reply.py`. Shared core. Capabilities → policy → adapters → Composio/direct. Channels stay thin.
 
 Better-Way: if a safer/simpler/cheaper path appears, propose it. Assaf chooses KEEP / ADOPT / TEST BOTH / DEFER. Material change → ADR in `docs/DECISIONS.md`, then PRODUCT/ARCHITECTURE if the contract changed.
 
