@@ -42,15 +42,19 @@ from sqlalchemy import func, select
 
 PROSPECT_PHONE = "972509994901"
 VISITOR_TEXT = "hi"
-# Bumped with PROMPT_VERSION sales_reply_v10: business claims left the prompt. It used
+# Bumped with PROMPT_VERSION sales_reply_v11: business claims left the prompt. It used
 # to assert "Every launch includes a month of guidance" — a commercial promise made to
 # every prospect from a prompt rather than from anything published — and "There is no
 # public price list", which became false the moment pricing.md was ingested into the
 # knowledge base. Both are facts about the business, so they belong in the corpus where
 # they can be corrected. What stays is identity plus policy: specifics come only from
 # PUBLISHED ASSAFWEB FACTS, and Mia never quotes a price herself.
+# v11 closes three gaps the prompt never covered: an abusive visitor, a request for
+# legal/medical/tax/financial advice, and someone claiming to be Assaf. Rule 7 also
+# lost its template debris — it forbade inventing "stock" and a "menu" for a web
+# consultancy, and carried the unparseable fragment "medical yes, or legal yes".
 _FROZEN_SYSTEM_PROMPT_SHA256 = (
-    "b13e24db4832c0a74ec2631c57efbf4335d491e6eee81c9462070ba0d02b757c"
+    "34024b4cfe9ca61cf23f7e98fee966b92ae65bf28b193da48d34838da706d15b"
 )
 
 
@@ -341,7 +345,7 @@ def test_persist_ai_run_writes_prompt_version() -> None:
         row = store.get_ai_run("run_prompt_ver_1")
         assert row is not None
         assert row.prompt_version == PROMPT_VERSION
-        assert row.prompt_version == "sales_reply_v10"
+        assert row.prompt_version == "sales_reply_v11"
     finally:
         db.close()
 
@@ -430,7 +434,7 @@ def test_sanitize_prompt_version(value: str, expected: str) -> None:
 
 
 def test_prompt_version_constant_from_sales_reply() -> None:
-    assert PROMPT_VERSION == SALES_REPLY_PROMPT_VERSION == "sales_reply_v10"
+    assert PROMPT_VERSION == SALES_REPLY_PROMPT_VERSION == "sales_reply_v11"
 
 
 def test_sales_reply_system_prompt_frozen_hash() -> None:
