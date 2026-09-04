@@ -694,6 +694,7 @@ class LeadStore:
         automation_mode: str = "",
         prompt_version: str = "",
         decision_confidence: str = "",
+        occurred_at: str = "",
     ) -> None:
         existing = self.get_ai_run(run_id)
         if existing is not None:
@@ -715,6 +716,7 @@ class LeadStore:
                 automation_mode=sanitize_automation_mode(automation_mode),
                 prompt_version=sanitize_prompt_version(prompt_version),
                 decision_confidence=sanitize_decision_confidence(decision_confidence),
+                occurred_at=(occurred_at or datetime.now(UTC).isoformat())[:32],
             )
         )
         self.session.flush()
@@ -3407,17 +3409,16 @@ class LeadStore:
         return row.lead_id
 
     def aggregate_ai_runs(self, *, occurred_from: str, occurred_to: str) -> AiRunAggregate:
-        """All-time aggregate over persisted `AiRunRow`s.
+        """Aggregate persisted `AiRunRow`s inside one day window.
 
-        `occurred_from` / `occurred_to` are accepted for interface parity with the
-        other owner-brief aggregate reads (`count_canonical_events`,
-        `count_behavior_events`) but are NOT applied as a filter: `AiRunRow` has no
-        timestamp column, so there is nothing to filter on. See
-        `app/domain/engine_health.py` for the full explanation. Percentiles are
-        computed in Python over the fetched rows so behavior is identical on
-        SQLite and Postgres (no database-specific percentile function).
+        The window is real now. It used to be accepted and ignored, because the table
+        had no timestamp, so every "today" number on the owner brief was an all-time
+        total. Rows written before `occurred_at` existed carry an empty string and so
+        fall outside every window -- correct, since nobody knows when they ran.
+
+        Percentiles are computed in Python over the fetched rows so behavior is
+        identical on SQLite and Postgres (no database-specific percentile function).
         """
-        _ = occurred_from, occurred_to
         rows = self.session.execute(
             select(
                 AiRunRow.model,
@@ -3425,6 +3426,9 @@ class LeadStore:
                 AiRunRow.tokens_in,
                 AiRunRow.tokens_out,
                 AiRunRow.cost_usd,
+            ).where(
+                AiRunRow.occurred_at >= occurred_from,
+                AiRunRow.occurred_at < occurred_to,
             )
         ).all()
         total_runs = len(rows)

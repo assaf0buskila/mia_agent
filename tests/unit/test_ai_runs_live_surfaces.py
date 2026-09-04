@@ -31,15 +31,121 @@ def test_the_mirrored_website_vocabulary_has_not_drifted() -> None:
     assert WEBSITE_ACTIONS == SITE_ACTIONS
 
 
-def test_every_live_surface_vocabulary_is_recordable() -> None:
+def test_all_three_action_vocabularies_are_accepted() -> None:
+    """Three surfaces, three vocabularies. All must be storable, none may be dropped."""
+    # 1. Website (app/surfaces/site_policy.SITE_ACTIONS) -- overlaps NextAction on
+    #    "handoff" alone, so this is the one that was silently failing.
     for action in SITE_ACTIONS:
-        assert _valid_next_action(action) is True, action
-    for action in NextAction:
-        assert _valid_next_action(action.value) is True, action
+        assert _valid_next_action(action) is True, f"website action rejected: {action}"
+
+    # 2. Owner Telegram -- has no sales action of its own.
     assert _valid_next_action(OWNER_REPLY_ACTION) is True
-    # Still a gate, not a free-for-all.
+
+    # 3. ClientGraph / prospect sales path.
+    for action in NextAction:
+        assert _valid_next_action(action.value) is True, f"NextAction rejected: {action}"
+
+    # And it is still a gate, not a free-for-all.
     assert _valid_next_action("") is False
     assert _valid_next_action("delete_everything") is False
+    assert _valid_next_action("owner_reply_but_evil") is False
+
+
+def test_engine_health_counts_one_day_not_all_time() -> None:
+    """The day window used to be accepted and ignored, so "today" meant "ever".
+
+    Dated in 2019 on purpose. The suite shares one database and other tests write
+    ai_runs stamped with the real clock, so asserting exact counts around "now" makes
+    this pass alone and fail in the suite. A window nothing else can land in tests the
+    filter itself rather than the order tests happen to run in.
+    """
+    init_db()
+    db = get_session_factory()()
+    try:
+        store = LeadStore(db)
+
+        def _run(run_id: str, occurred_at: str) -> None:
+            store.save_ai_run(
+                run_id=run_id,
+                lead_id=None,
+                channel="website",
+                graph_version="v1",
+                model="gpt-test",
+                tokens_in=1,
+                tokens_out=1,
+                cost_usd=0,
+                next_action="answer",
+                kill_switch=False,
+                policy_version="v1",
+                latency_ms=100,
+                occurred_at=occurred_at,
+            )
+
+        _run("run_day_a", "2019-03-05T09:00:00+00:00")
+        _run("run_day_b", "2019-03-05T21:00:00+00:00")
+        _run("run_day_yesterday", "2019-03-04T09:00:00+00:00")
+        # A row as it exists in production today, written before the column did.
+        # Inserted directly: save_ai_run stamps `now` for a new write, so a blank can
+        # only come from pre-migration data. Nobody knows when it ran, so it belongs
+        # to no day rather than silently to this one.
+        db.add(
+            AiRunRow(
+                run_id="run_day_legacy",
+                lead_id=None,
+                channel="website",
+                graph_version="v1",
+                model="gpt-test",
+                tokens_in=1,
+                tokens_out=1,
+                cost_usd=0,
+                next_action="answer",
+                kill_switch=False,
+                policy_version="v1",
+                latency_ms=100,
+                occurred_at="",
+            )
+        )
+        db.commit()
+
+        first_day = store.aggregate_ai_runs(
+            occurred_from="2019-03-05T00:00:00+00:00",
+            occurred_to="2019-03-06T00:00:00+00:00",
+        )
+        assert first_day.total_runs == 2
+
+        day_before = store.aggregate_ai_runs(
+            occurred_from="2019-03-04T00:00:00+00:00",
+            occurred_to="2019-03-05T00:00:00+00:00",
+        )
+        assert day_before.total_runs == 1
+    finally:
+        db.close()
+
+
+def test_a_run_is_stamped_even_when_the_caller_says_nothing() -> None:
+    init_db()
+    db = get_session_factory()()
+    try:
+        store = LeadStore(db)
+        store.save_ai_run(
+            run_id="run_stamp_default",
+            lead_id=None,
+            channel="website",
+            graph_version="v1",
+            model="gpt-test",
+            tokens_in=0,
+            tokens_out=0,
+            cost_usd=0,
+            next_action="answer",
+            kill_switch=False,
+            policy_version="v1",
+        )
+        db.commit()
+        saved = store.get_ai_run("run_stamp_default")
+        assert saved is not None
+        assert saved.occurred_at  # not blank: a new row always knows when it ran
+    finally:
+        db.close()
 
 
 def _rows(db) -> list[AiRunRow]:
