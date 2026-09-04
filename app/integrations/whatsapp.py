@@ -9,7 +9,7 @@ from app.domain.tools import AdapterHttpError
 from app.integrations.base import DisabledMessagePort, MessagePort, OutboundMessage
 
 _GRAPH_BASE = "https://graph.facebook.com"
-VALID_WHATSAPP_SENDERS = frozenset({"direct", "composio"})
+VALID_WHATSAPP_SENDERS = frozenset({"direct", "composio", "baileys"})
 COMPOSIO_WHATSAPP_VERSION = "20260815_00"
 COMPOSIO_SEND_TEXT_TOOL = "WHATSAPP_SEND_MESSAGE"
 COMPOSIO_SEND_TEMPLATE_TOOL = "WHATSAPP_SEND_TEMPLATE_MESSAGE"
@@ -179,8 +179,66 @@ class ComposioWhatsAppPort:
             )
 
 
+class BaileysWhatsAppPort:
+    """Send through the Baileys sidecar in `services/whatsapp-baileys`.
+
+    Baileys speaks the reverse-engineered WhatsApp Web protocol from Node, so the
+    connection lives in a separate process and this port is a thin HTTP client to it.
+    Failures are raised as `WhatsAppSendError` like every other WhatsApp adapter, so
+    the caller cannot tell which transport it got.
+    """
+
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        token: str,
+        client: httpx.AsyncClient | None = None,
+    ) -> None:
+        self._base_url = base_url.rstrip("/")
+        self._token = token
+        self._client = client
+
+    async def send(self, message: OutboundMessage) -> None:
+        payload = {
+            "to": message.conversation_id,
+            "text": message.text,
+            "idempotency_key": message.idempotency_key,
+        }
+        headers = {
+            "Authorization": f"Bearer {self._token}",
+            "Content-Type": "application/json",
+        }
+        url = f"{self._base_url}/send"
+        try:
+            try:
+                if self._client is not None:
+                    response = await self._client.post(url, json=payload, headers=headers)
+                else:
+                    async with httpx.AsyncClient(timeout=20.0) as client:
+                        response = await client.post(url, json=payload, headers=headers)
+            except httpx.HTTPError as exc:
+                raise AdapterHttpError(None) from exc
+            if response.status_code >= 400:
+                raise AdapterHttpError(response.status_code)
+            try:
+                body = response.json()
+            except ValueError as exc:
+                raise AdapterHttpError(response.status_code) from exc
+            if not isinstance(body, dict) or body.get("sent") is not True:
+                raise AdapterHttpError(400)
+        except AdapterHttpError as exc:
+            _reraise_classified(WhatsAppSendError, "WhatsApp Baileys send failed", exc)
+
+
 def build_whatsapp_port(settings: Settings) -> MessagePort:
     sender = normalized_whatsapp_sender(settings)
+    if sender == "baileys":
+        base_url = settings.whatsapp_baileys_url.strip()
+        token = settings.whatsapp_baileys_token.strip()
+        if base_url and token:
+            return BaileysWhatsAppPort(base_url=base_url, token=token)
+        return DisabledMessagePort()
     if sender == "composio":
         if (
             settings.composio_ready()

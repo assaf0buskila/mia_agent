@@ -1,0 +1,5 @@
+node_modules/
+dist/
+# WhatsApp session credentials. Never commit these: anyone holding them can send
+# messages as the linked number.
+auth/
