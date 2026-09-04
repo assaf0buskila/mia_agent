@@ -287,7 +287,11 @@ def health() -> dict:
         "capabilities": capability_map(),
         "risk": {
             "R4_meta_writes": "approval",
-            "R5_destructive": "deny",
+            # Approval, not deny. `propose_composio_write` mints an approval row for a
+            # destructive slug and `execute_approved_composio_write` runs it once Assaf
+            # taps approve; `test_gmail_send_is_never_auto_executed_and_delete_requires_approval`
+            # pins that. "deny" here meant "never automatic" and read as "never".
+            "R5_destructive": "approval",
             "kill_switch": live.kill_switch,
         },
     }
