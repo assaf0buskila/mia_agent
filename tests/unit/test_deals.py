@@ -2,7 +2,6 @@ import importlib
 import json
 
 import pytest
-from app.api.deps import get_sheets_port
 from app.api.inbound import process_inbound_texts
 from app.db.models import CanonicalEventRow, DealRow
 from app.db.session import get_session_factory, init_db
@@ -235,23 +234,6 @@ def test_deals_module_never_imports_message_port() -> None:
     source = importlib.import_module("inspect").getsource(deals)
     assert "MessagePort" not in source
     assert "integrations.base" not in source
-
-
-def test_website_path_does_not_mirror_01_leads_deals() -> None:
-    init_db()
-    fake = FakeSheetsPort()
-    app.dependency_overrides[get_sheets_port] = lambda: fake
-    try:
-        with TestClient(app) as client:
-            session_id = client.post("/v1/website/sessions").json()["session_id"]
-            client.post(
-                f"/v1/website/sessions/{session_id}/messages",
-                json={"text": "We run a clinic", "phone": "0501234567"},
-            )
-        assert fake.deal_rows == {}
-        assert fake.rows == {}
-    finally:
-        app.dependency_overrides.pop(get_sheets_port, None)
 
 
 def test_deal_updated_event_payload_has_no_value_keys() -> None:

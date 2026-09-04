@@ -41,15 +41,6 @@ from app.domain.meetings import STATUS_BOOKED, STATUS_CANCELLATION_REQUESTED, ap
 from app.domain.sales import FitLevel, NextAction, SalesState
 from app.integrations.calendar import FakeCalendarPort, TimeSlot
 from app.integrations.calendar_booking import CalendarBookingEvent, FakeCalendarBookingPort
-from app.integrations.sheets import (
-    ContentMirrorRow,
-    FakeSheetsPort,
-    LeadMirrorRow,
-    claim_sheets_mirror,
-    complete_sheets_mirror,
-    mirror_content,
-    mirror_lead,
-)
 from sqlalchemy import func, select
 
 IL = ZoneInfo("Asia/Jerusalem")
@@ -136,37 +127,6 @@ def _provider_event(event_id: str, slot: TimeSlot) -> CalendarBookingEvent:
         start=slot.start,
         end=slot.end,
     )
-
-
-def _sample_mirror_row(*, lead_id: str) -> LeadMirrorRow:
-    return LeadMirrorRow(
-        lead_id=lead_id,
-        channel="gmail",
-        stage="open",
-        fit="unknown",
-        pain_level=0,
-        next_action="understand_workflow",
-    )
-
-
-class _CountingSheetsPort(FakeSheetsPort):
-    def __init__(self) -> None:
-        super().__init__()
-        self.lead_upserts = 0
-
-    def upsert_lead(self, row: LeadMirrorRow) -> None:
-        self.lead_upserts += 1
-        super().upsert_lead(row)
-
-
-class _CountingContentSheetsPort(FakeSheetsPort):
-    def __init__(self) -> None:
-        super().__init__()
-        self.content_upserts = 0
-
-    def upsert_content(self, row: ContentMirrorRow) -> None:
-        self.content_upserts += 1
-        super().upsert_content(row)
 
 
 def _good_willing_sales(lead_id: str) -> SalesState:
@@ -538,28 +498,6 @@ def test_cancellation_same_inbound_one_canonical() -> None:
         db.close()
 
 
-def test_sheets_same_inbound_upserts_once() -> None:
-    init_db()
-    db = get_session_factory()()
-    inbound_id = "xcut.sheets.1"
-    try:
-        store = LeadStore(db)
-        _, lead_id = store.open_channel_lead(
-            channel=Channel.WEBSITE, external_id="xcut.sheets.web.1"
-        )
-        port = _CountingSheetsPort()
-        row = _sample_mirror_row(lead_id=lead_id)
-        for _ in range(2):
-            if claim_sheets_mirror(store=store, inbound_id=inbound_id, tab="sales"):
-                mirror_lead(sheets=port, row=row, kill_switch=False)
-                complete_sheets_mirror(store=store, inbound_id=inbound_id, tab="sales")
-        db.commit()
-        assert port.lead_upserts == 1
-        assert claim_sheets_mirror(store=store, inbound_id=inbound_id, tab="sales") is False
-    finally:
-        db.close()
-
-
 def test_follow_up_same_inbound_writes_one_row() -> None:
     init_db()
     db = get_session_factory()()
@@ -600,33 +538,5 @@ def test_follow_up_same_inbound_writes_one_row() -> None:
         assert len(follow_events) == 1
         payload = json.loads(follow_events[0].payload_json)
         assert payload["status"] == "pending"
-    finally:
-        db.close()
-
-
-def test_content_sheets_same_inbound_upserts_once() -> None:
-    init_db()
-    db = get_session_factory()()
-    inbound_id = "xcut.sheets.content.1"
-    try:
-        store = LeadStore(db)
-        port = _CountingContentSheetsPort()
-        row = ContentMirrorRow(
-            media_id="17841400112233445566",
-            media_type="IMAGE",
-            views="1200",
-            reach="900",
-            likes="45",
-            comments="3",
-            saved="12",
-            lead_signals=0,
-        )
-        for _ in range(2):
-            if claim_sheets_mirror(store=store, inbound_id=inbound_id, tab="content"):
-                mirror_content(sheets=port, row=row, kill_switch=False)
-                complete_sheets_mirror(store=store, inbound_id=inbound_id, tab="content")
-        db.commit()
-        assert port.content_upserts == 1
-        assert claim_sheets_mirror(store=store, inbound_id=inbound_id, tab="content") is False
     finally:
         db.close()

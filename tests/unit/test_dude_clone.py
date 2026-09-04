@@ -292,7 +292,6 @@ def test_website_http_session_has_empty_lead_id_and_no_leads_write() -> None:
         app.dependency_overrides.pop(get_sheets_port, None)
     assert not any(op[0] == "lead" for op in sheets.owner_operations)
     assert "01 Leads" not in str(sheets.owner_operations)
-    assert sheets.rows == {}
 
 
 def test_website_handoff_requires_phone_or_email() -> None:
@@ -374,22 +373,6 @@ async def test_owner_loop_ignores_kill_switch() -> None:
         db.close()
     assert result.sent is True
     assert port.sent
-
-
-def test_live_sheets_upsert_lead_is_noop() -> None:
-    from app.integrations.sheets import ComposioSheetsPort, LeadMirrorRow
-
-    port = ComposioSheetsPort(api_key="", user_id="", spreadsheet_id="x")
-    port.upsert_lead(
-        LeadMirrorRow(
-            lead_id="lead_should_not_write",
-            channel="website",
-            stage="open",
-            fit="good",
-            pain_level=1,
-            next_action="ask",
-        )
-    )
 
 
 def test_empty_env_still_resolves_locked_spreadsheet() -> None:
@@ -554,10 +537,7 @@ def test_live_workbook_writers_target_contacts_and_activity_only() -> None:
         CONTACTS_ACTIVITY_TAB,
         CONTACTS_TAB,
         CRM_WORKSPACE_TABS,
-        ActivityMirrorRow,
         ComposioSheetsPort,
-        LeadMirrorRow,
-        SourceMirrorRow,
     )
 
     assert [name for name, _headers in CRM_WORKSPACE_TABS] == ["Contacts", "Activity"]
@@ -580,39 +560,6 @@ def test_live_workbook_writers_target_contacts_and_activity_only() -> None:
         key_column="טלפון",
     )
     port.append_locked_activity(["2026-09-02", "מיה", "telegram", "רשמה", "נרשם"])
-    port.upsert_lead(
-        LeadMirrorRow(
-            lead_id="lead_x",
-            channel="website",
-            stage="open",
-            fit="good",
-            pain_level=1,
-            next_action="ask",
-        )
-    )
-    port.upsert_source(
-        SourceMirrorRow(
-            lead_id="lead_x",
-            utm_source="meta",
-            utm_medium="cpc",
-            utm_campaign="",
-            utm_content="",
-            landing_page="",
-            referrer="",
-        )
-    )
-    port.upsert_activity(
-        ActivityMirrorRow(
-            run_id="run_x",
-            occurred_on="2026-09-02",
-            channel="website",
-            next_action="ask",
-            model="canned",
-            kill_switch=False,
-            cost_usd=0,
-            lead_id="lead_x",
-        )
-    )
     blob = " ".join(calls)
     assert CONTACTS_TAB in blob
     assert CONTACTS_ACTIVITY_TAB in blob

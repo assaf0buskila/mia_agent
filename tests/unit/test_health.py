@@ -203,7 +203,6 @@ def test_health_is_alive() -> None:
     assert "manychat" not in body["capabilities"]
     assert body["capabilities"]["gmail"] == "alive"
     assert body["capabilities"]["calendar"] == "alive"
-    assert body["capabilities"]["sheets_mirror"] == "alive"
     assert body["capabilities"]["meta_ads"] == "specified"
     assert body["capabilities"]["content_performance"] == "alive"
     assert body["capabilities"]["campaign_analysis"] == "specified"
@@ -256,7 +255,6 @@ def test_owner_integrations_discovery_off_lists_ids_honestly() -> None:
     assert integrations["composio"] is True
     assert integrations["search_console"] is False
     assert integrations["ga4"] is False
-    assert integrations["sheets_mirror"] is True
     assert integrations["sheets_crm"] is True
     assert integrations["sheets_read"] is True
     assert integrations["sheets_update"] is True
@@ -284,7 +282,7 @@ def test_owner_integrations_discovery_on_drops_listable_ids() -> None:
     integrations = owner_integrations(settings)
     assert integrations["search_console"] is True
     assert integrations["ga4"] is True
-    assert integrations["sheets_mirror"] is True
+    assert integrations["sheets_crm"] is True
     assert integrations["sheets_read"] is True
     assert integrations["sheets_update"] is True
     assert integrations["sheets_append"] is True
@@ -304,7 +302,7 @@ def test_owner_integrations_sheets_allowlist_enables_adr042_operations() -> None
         sheets_allowed_spreadsheet_ids="allowed-one, allowed-two",
     )
     integrations = owner_integrations(settings)
-    assert integrations["sheets_mirror"] is True
+    assert integrations["sheets_crm"] is True
     assert integrations["sheets_read"] is True
     assert integrations["sheets_update"] is True
     assert integrations["sheets_append"] is True

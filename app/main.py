@@ -164,7 +164,6 @@ def owner_integrations(settings) -> dict[str, object]:
         "gmail_send": settings.gmail_send,
         "calendar_read": composio,
         "calendar_write": settings.calendar_write,
-        "sheets_mirror": composio and bool(sheets_id),
         "sheets_crm": composio and bool(sheets_id),
         # ADR-042 readiness is deliberately config-only: health never makes an
         # authenticated provider call and never returns credentials.

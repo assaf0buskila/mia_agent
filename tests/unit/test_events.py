@@ -25,7 +25,6 @@ from app.domain.events import (
     sanitize_webhook_channel,
     sanitize_webhook_envelope_kind,
     sheets_mirror_outcome,
-    sheets_tab_mirror_outcome,
     transcription_outcome,
     webhook_envelope_kind,
 )
@@ -90,67 +89,6 @@ def test_sheets_mirror_outcome_stamps_latency() -> None:
     assert denied.latency_ms == 12
     default = sheets_mirror_outcome(1)
     assert default.latency_ms == 0
-
-
-def test_sheets_tab_mirror_outcome_stamps_latency() -> None:
-    ok = sheets_tab_mirror_outcome("sheets_mirror_content", 2, latency_ms=12)
-    assert ok.tool == "sheets_mirror_content"
-    assert ok.status == "ok"
-    assert ok.result_count == 2
-    assert ok.latency_ms == 12
-    denied = sheets_tab_mirror_outcome("sheets_mirror_content", 0, latency_ms=12)
-    assert denied.tool == "sheets_mirror_content"
-    assert denied.status == "denied"
-    assert denied.result_count == 0
-    assert denied.latency_ms == 12
-    default = sheets_tab_mirror_outcome("sheets_mirror_content", 1)
-    assert default.latency_ms == 0
-    with pytest.raises(ValueError, match="unknown sheets tab tool"):
-        sheets_tab_mirror_outcome("sheets_mirror", 1)
-    with pytest.raises(ValueError, match="unknown sheets tab tool"):
-        sheets_tab_mirror_outcome("sheets_mirror_campaign", 1)
-
-
-@pytest.mark.asyncio
-async def test_inbound_sheets_mirror_tool_run_latency(monkeypatch) -> None:
-    monkeypatch.setattr("app.api.inbound.elapsed_ms", lambda _started: 12)
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        result = await process_inbound_texts(
-            provider="gmail",
-            channel=Channel.GMAIL,
-            items=[
-                {
-                    "id": "shtlat.in.1",
-                    "from": "shtlat.lead.1@example.invalid",
-                    "text": "hello",
-                }
-            ],
-            store=store,
-            port=RecordingMessagePort(),
-            kill_switch=False,
-            sheets=FakeSheetsPort(),
-        )
-        db.commit()
-        assert result["processed"] == 1
-        row = store.get_tool_run("shtlat.in.1:tool:sheets_mirror")
-        assert row is not None
-        assert row.status == "ok"
-        assert row.latency_ms == 12
-        payload = json.loads(
-            db.scalar(
-                select(CanonicalEventRow.payload_json).where(
-                    CanonicalEventRow.provider_event_id
-                    == "shtlat.in.1:tool:sheets_mirror"
-                )
-            )
-        )
-        assert payload["tool"] == "sheets_mirror"
-        assert "latency_ms" not in payload
-    finally:
-        db.close()
 
 
 def test_voice_transcribe_tool_outcome_payload_only() -> None:
@@ -238,7 +176,6 @@ def test_build_meeting_brief_event_pairs_and_payload() -> None:
     assert event.payload["next_action"] == "offer_meeting"
     assert event.payload["missing_fields"] == ["timeline", "metric"]
     assert event.payload["owner_questions"] == ["timeline"]
-
 
 
 def test_build_follow_up_event_pairs_and_payload() -> None:

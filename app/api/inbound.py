@@ -82,7 +82,6 @@ from app.integrations.seo_audit import SeoAuditPort, build_seo_audit_port
 from app.integrations.sheets import (
     SheetsPort,
     build_sheets_port,
-    mirror_sales_turn,
 )
 
 
@@ -521,20 +520,6 @@ async def process_inbound_texts(
                 outcome=opt_out_outcome,
                 correlation_id=run_id,
             )
-        mirror_sales_turn(
-            store=store,
-            sheets=sheets_port,
-            settings=settings,
-            provider=provider,
-            channel=channel,
-            inbound_id=item["id"],
-            conversation_id=_event_conversation_id(item),
-            lead_id=lead_id,
-            run_id=run_id,
-            next_action=result.get("next_action", ""),
-            kill_switch=kill_switch,
-            measure_elapsed=elapsed_ms,
-        )
         if reply_text:
             automation_scope = (
                 _whatsapp_automation_scope(store, item)

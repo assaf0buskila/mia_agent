@@ -243,7 +243,6 @@ async def test_owner_research_fake_titles_in_sent_text() -> None:
         assert task is not None
         assert task.task_type == "research"
         assert task.status == "logged"
-        assert sheets.rows == {}
         sent = port.sent[0].text
         assert "Acme Corp Overview" in sent
         assert "Acme Competitor Analysis" in sent

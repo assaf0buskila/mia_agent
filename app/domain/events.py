@@ -745,8 +745,6 @@ def build_meeting_debrief_event(
     )
 
 
-
-
 def build_tool_result_event(
     *,
     provider: str,
@@ -841,22 +839,7 @@ def sheets_mirror_outcome(written_count: int, *, latency_ms: int = 0) -> ToolOut
 
 
 _SHEETS_TAB_MIRROR_TOOLS = frozenset({
-    "sheets_mirror_content",
 })
-
-
-def sheets_tab_mirror_outcome(
-    tool: str, written_count: int, *, latency_ms: int = 0
-) -> ToolOutcome:
-    if tool not in _SHEETS_TAB_MIRROR_TOOLS:
-        raise ValueError(f"unknown sheets tab tool: {tool}")
-    if written_count > 0:
-        return ToolOutcome(
-            tool=tool, status="ok", result_count=written_count, latency_ms=latency_ms
-        )
-    return ToolOutcome(
-        tool=tool, status="denied", result_count=0, latency_ms=latency_ms
-    )
 
 
 def transcription_outcome(*, transcribed: bool, latency_ms: int = 0) -> ToolOutcome:

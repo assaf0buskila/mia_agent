@@ -217,7 +217,6 @@ async def test_owner_preference_persists_proposed_not_active() -> None:
         assert instruction.status == "proposed"
         assert "concise" in instruction.body
         assert store.list_active_instructions() == []
-        assert sheets.rows == {}
         assert len(port.sent) == 1
         sent = port.sent[0].text
         assert "נשמר כהצעת העדפה" in sent

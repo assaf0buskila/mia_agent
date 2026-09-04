@@ -7,7 +7,7 @@ from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
 from app.domain.events import Channel, build_meeting_booked_event
 from app.domain.kpis import KPI_EVENT_TYPES, compute_weekly_kpi, week_start_on
-from app.integrations.sheets import FakeSheetsPort, KpiMirrorRow, mirror_kpi
+from app.integrations.sheets import FakeSheetsPort
 from app.main import app
 from fastapi.testclient import TestClient
 from sqlalchemy import delete
@@ -113,8 +113,6 @@ def test_compute_after_website_session_and_message() -> None:
             )
             assert response.status_code == 200
             assert response.json()["next_action"] in {"ask_contact", "answer", "ask_need"}
-            assert fake.kpi_rows == {}
-            assert fake.rows == {}
     finally:
         app.dependency_overrides.pop(get_sheets_port, None)
 
@@ -147,72 +145,7 @@ def test_compute_excludes_events_outside_current_week() -> None:
         db.close()
 
 
-def test_mirror_kpi_kill_switch_skips_port() -> None:
-    class ExplodingSheetsPort:
-        def upsert_lead(self, row: object) -> None:
-            del row
-
-        def upsert_source(self, row: object) -> None:
-            del row
-
-        def upsert_follow_up(self, row: object) -> None:
-            del row
-
-        def upsert_deal(self, row: object) -> None:
-            del row
-
-        def upsert_meeting(self, row: object) -> None:
-            del row
-
-        def upsert_activity(self, row: object) -> None:
-            del row
-
-        def upsert_kpi(self, row: object) -> None:
-            raise RuntimeError("kpi mirror must not run when kill switch is on")
-
-        def upsert_content(self, row: object) -> None:
-            del row
-
-        def upsert_budget(self, row: object) -> None:
-            del row
-
-        def upsert_performance(self, row: object) -> None:
-            del row
-
-    written = mirror_kpi(
-        sheets=ExplodingSheetsPort(),  # type: ignore[arg-type]
-        row=KpiMirrorRow(
-            week_start="2026-08-17",
-            leads=1,
-            meetings_offered=0,
-            handoffs=0,
-            messages_in=1,
-            follow_ups_pending=0,
-        ),
-        kill_switch=True,
-    )
-    assert written is False
-
-
-def test_mirror_kpi_rejects_invalid_week_start() -> None:
-    port = FakeSheetsPort()
-    written = mirror_kpi(
-        sheets=port,
-        row=KpiMirrorRow(
-            week_start="not-a-date",
-            leads=1,
-            meetings_offered=0,
-            handoffs=0,
-            messages_in=1,
-            follow_ups_pending=0,
-        ),
-        kill_switch=False,
-    )
-    assert written is False
-    assert port.kpi_rows == {}
-
-
-def test_website_identify_then_sell_does_not_mirror_kpis() -> None:
+def test_website_identify_then_sell_reaches_handoff() -> None:
     init_db()
     fake = FakeSheetsPort()
     app.dependency_overrides[get_sheets_port] = lambda: fake
@@ -230,7 +163,5 @@ def test_website_identify_then_sell_does_not_mirror_kpis() -> None:
                 json={"text": "let's book a meeting", "phone": "0501234567"},
             )
             assert identified.json()["next_action"] in {"handoff", "confirm_contact"}
-        assert fake.kpi_rows == {}
-        assert fake.rows == {}
     finally:
         app.dependency_overrides.pop(get_sheets_port, None)

@@ -44,7 +44,7 @@ Telegram access: `MIA_TELEGRAM_OWNER_USER_IDS` numeric only. Webhook secret chec
 
 ## CRM
 
-Locked spreadsheet `1HW8mnc9GFXraS6oG5VIxFcJvZq9gMDJBFRxY2mpVOhI`. Live tabs Contacts and Activity only. Archive tabs are gone. Writers live in `app/surfaces/crm.py`. Owner tools `crm_search` / `crm_upsert` always use that ID. Empty `MIA_SHEETS_SPREADSHEET_ID` still resolves to the locked ID. Leftover Composio mirrors are no-ops. Telegram binds house Composio from `MIA_COMPOSIO_USER_ID` — if `/health` says connected, tools must run.
+Locked spreadsheet `1HW8mnc9GFXraS6oG5VIxFcJvZq9gMDJBFRxY2mpVOhI`. Live tabs Contacts and Activity only. Archive tabs are gone. Writers live in `app/surfaces/crm.py`. Owner tools `crm_search` / `crm_upsert` always use that ID. Empty `MIA_SHEETS_SPREADSHEET_ID` still resolves to the locked ID. The Composio archive mirrors are deleted (ADR-052). Telegram binds house Composio from `MIA_COMPOSIO_USER_ID` — if `/health` says connected, tools must run.
 
 ## Website UX
 
