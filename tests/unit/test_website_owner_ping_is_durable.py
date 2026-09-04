@@ -154,6 +154,59 @@ def test_a_failed_delivery_gives_the_claim_back_so_a_retry_still_reaches_assaf()
         db.close()
 
 
+def test_the_crash_window_between_a_good_send_and_the_saved_flag() -> None:
+    """The worst case: the ping lands, then the process dies before it is recorded.
+
+    Sequence: claim -> Telegram accepts -> the task is killed before `session.pinged`
+    is set or the session row is written. A new process rehydrates a session that
+    still says pinged=False, so the in-memory guard lets it through. Only the durable
+    claim stands between Assaf and a second identical ping about the same visitor.
+
+    This uses a genuinely separate DB session for the second attempt, so it proves the
+    claim survives a process boundary rather than an object boundary.
+    """
+    init_db()
+    reset_site_book()
+
+    # --- process 1: claims, sends, then dies -------------------------------
+    first_db = get_session_factory()()
+    try:
+        claim, release = _ledger(LeadStore(first_db), first_db, "web_crash")
+        port = RecordingPort()
+        sent = asyncio.run(
+            ping_assaf_async(
+                _settings(), port, _ready_session("web_crash"), claim=claim, release=release
+            )
+        )
+        assert sent is True
+        assert sorted(port.sent) == ["12345", "67890"]
+    finally:
+        # No `session.pinged = True` is ever persisted: that is the crash.
+        first_db.close()
+
+    # --- process 2: cold start, same conversation --------------------------
+    second_db = get_session_factory()()
+    try:
+        claim, release = _ledger(LeadStore(second_db), second_db, "web_crash")
+        revived = _ready_session("web_crash")
+        assert revived.pinged is False  # the flag genuinely did not survive
+        port_after_restart = RecordingPort()
+        again = asyncio.run(
+            ping_assaf_async(
+                _settings(),
+                port_after_restart,
+                revived,
+                claim=claim,
+                release=release,
+            )
+        )
+        # Treated as already handled, and crucially: nothing new left the building.
+        assert again is True
+        assert port_after_restart.sent == []
+    finally:
+        second_db.close()
+
+
 def test_finalized_survives_a_restart() -> None:
     """A repeated /end after a deploy must not re-run finalization."""
     session = _ready_session("web_dur_3")

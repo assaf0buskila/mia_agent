@@ -6,6 +6,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from time import perf_counter
 
 from app.api.inbound_common import (
     event_conversation_id,
@@ -18,7 +19,9 @@ from app.capabilities.types import Principal
 from app.core.config import Settings
 from app.core.demo import demo_mode_active
 from app.core.errors import MiaError
+from app.core.logging import log_owner_agent
 from app.db.store import LeadStore
+from app.domain.ai_runs import OWNER_REPLY_ACTION, elapsed_ms, persist_ai_run
 from app.domain.approvals import DECISION_APPROVED
 from app.domain.events import (
     Channel,
@@ -193,6 +196,7 @@ async def run_owner_loop(
                     settings=settings,
                     store=store,
                     item=item,
+                    correlation_id=correlation_id,
                 )
             )
 
@@ -228,6 +232,27 @@ async def run_owner_loop(
         )
         stamp_correlation(outgoing, correlation_id)
         store.save_canonical_event(provider=provider, event=outgoing)
+    # Learn from what Assaf actually said. `learn_from_exchange` existed and ran only
+    # on the muted WhatsApp owner path, so Mia formed no durable memory from her one
+    # live owner channel. Deliberately after the send: extraction costs a model call
+    # and must never sit between Assaf's message and his answer. It stays inside the
+    # existing durable learning path -- no new store, no raw provider data, and the
+    # function's own guards still decide what is worth keeping.
+    if not demo_mode_active(settings):
+        try:
+            from app.domain.owner_brain import learn_from_exchange
+
+            learn_from_exchange(
+                brain=BrainStore(store.session),
+                settings=settings,
+                owner_text=owner_text,
+                history=tuple(store.list_conversation_turns(event_conversation_id(item))),
+                source_ref=item.get("id", ""),
+                kill_switch=False,
+                demo_active=False,
+            )
+        except Exception as exc:  # noqa: BLE001 - learning must never cost a reply
+            _log.warning("owner learning failed error=%s", type(exc).__name__)
     del crm_wrote
     return OwnerTurnResult(processed=True, sent=sent, last_reply=reply)
 
@@ -239,6 +264,7 @@ def _talk_with_optional_agent(
     settings: Settings,
     store: LeadStore,
     item: dict[str, str],
+    correlation_id: str = "",
 ) -> tuple[str, bool]:
     from app.domain.owner_brain import answer_owner
 
@@ -253,6 +279,7 @@ def _talk_with_optional_agent(
         fallback, wrote = OWNER_FALLBACK, False
     if not settings.owner_agent_ready():
         return fallback, wrote
+    started = perf_counter()
     try:
         history = tuple(store.list_conversation_turns(event_conversation_id(item)))
         brain = BrainStore(store.session)
@@ -269,6 +296,39 @@ def _talk_with_optional_agent(
             demo_active=demo_mode_active(settings),
             source_ref=item.get("id", ""),
             now=datetime.now(UTC),
+        )
+        # Everything below used to be thrown away: only `.text` was read, so the live
+        # Telegram turn recorded no model, no latency, no tokens, no steps, no failed
+        # tool and no completion reason anywhere. `persist_ai_run` had a single call
+        # site on the muted WhatsApp path, which is why the table the daily brief
+        # reports on was fed by nothing Assaf could actually reach.
+        log_owner_agent(
+            used_agent=result.used_agent,
+            model=result.model,
+            task_type=OwnerTaskType.NOTE.value,
+            tools_used=result.tools_used,
+            reason=result.fallback_reason,
+            steps=result.steps,
+            tools_failed=result.tools_failed,
+            completion=result.completion,
+        )
+        persist_ai_run(
+            store,
+            run_id=correlation_id,
+            lead_id=None,
+            channel=Channel.TELEGRAM.value,
+            next_action=OWNER_REPLY_ACTION,
+            kill_switch=False,
+            sales_model=settings.owner_agent_model,
+            openai_api_key=settings.openai_api_key,
+            sales_fallback_model=settings.owner_agent_fallback_model,
+            gemini_api_key=settings.gemini_api_key,
+            sales_gemini_model=settings.owner_agent_gemini_model,
+            latency_ms=elapsed_ms(started),
+            tokens_in=result.tokens_in,
+            tokens_out=result.tokens_out,
+            automation_mode=settings.automation_mode.value,
+            model_label=result.model,
         )
         reply = result.text or fallback
         if _asks_for_sheet_url(reply):

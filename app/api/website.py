@@ -31,7 +31,7 @@ from app.core.logging import log_comm
 from app.core.public_website import public_website_guard
 from app.db.session import get_session_factory
 from app.db.store import LeadStore
-from app.domain.ai_runs import elapsed_ms
+from app.domain.ai_runs import elapsed_ms, persist_ai_run
 from app.domain.behavior import CLIENT_BEHAVIOR_KINDS, sanitize_client_behavior
 from app.domain.events import (
     Channel,
@@ -383,6 +383,31 @@ def process_website_message(
         )
         stamp_correlation(website_message_out, run_id)
         store.save_canonical_event(provider="website", event=website_message_out)
+    # The live website turn writes its own ai_run. Until now `persist_ai_run` had a
+    # single call site on the muted WhatsApp prospect path, so the table the daily
+    # brief reports on was fed by nothing a real visitor could reach.
+    persist_ai_run(
+        store,
+        run_id=run_id,
+        lead_id=None,
+        channel=Channel.WEBSITE.value,
+        # The website's real action, not a lossy translation into NextAction. The
+        # `channel` column already says which vocabulary a row is written in, and
+        # recording OFFER_WHATSAPP for what was actually `confirm_contact` would make
+        # the funnel numbers wrong in a way nobody would ever catch.
+        next_action=turn.next_action,
+        # The switch is deliberately not named on this path: it does not gate site
+        # chat, so this turn ran regardless of it and the row says so by default.
+        sales_model=settings.sales_model,
+        openai_api_key=settings.openai_api_key,
+        sales_fallback_model=settings.sales_fallback_model,
+        gemini_api_key=settings.gemini_api_key,
+        sales_gemini_model=settings.sales_gemini_model,
+        latency_ms=elapsed_ms(turn_started),
+        tokens_in=turn.tokens_in,
+        tokens_out=turn.tokens_out,
+        automation_mode=settings.automation_mode.value,
+    )
     log_comm(
         channel=Channel.WEBSITE.value,
         provider="website",
@@ -425,11 +450,13 @@ def _published_facts_for_turn(
         from app.brain.embeddings import build_embedding_port
         from app.brain.store import BrainStore
 
+        live = settings or get_settings()
         hits = retrieve_knowledge(
             BrainStore(store.session),
             query=text,
-            embedding_port=build_embedding_port(settings or get_settings()),
+            embedding_port=build_embedding_port(live),
             limit=3,
+            min_similarity=live.knowledge_min_similarity,
         )
     except Exception:
         return (), ()

@@ -93,6 +93,17 @@ class Settings(BaseSettings):
     memory_weight_relevance: float = Field(default=1.0)
     memory_weight_recency: float = Field(default=0.5)
     memory_weight_importance: float = Field(default=0.3)
+    # Evidence floor for published-knowledge retrieval, on the raw cosine. Below this
+    # the corpus does not actually answer the question and Mia says so instead of
+    # quoting the least-bad chunk. Calibrated against real positive/negative queries
+    # (scripts/calibrate_knowledge_floor.py) -- do not hand-tune without rerunning it.
+    knowledge_min_similarity: float = Field(default=0.0)
+    # Completion bounds. Nothing passed one before, so a runaway generation was billed
+    # in full and the first cost signal was the invoice. The website answers in a
+    # sentence or two; the owner loop needs room for a real answer after tool results.
+    # 0 means "send no bound", which is the old behaviour.
+    max_completion_tokens_site: int = Field(default=500)
+    max_completion_tokens_owner: int = Field(default=1500)
     knowledge_sources: str = Field(
         default="llms-full.txt,llms.txt,pricing.md",
     )

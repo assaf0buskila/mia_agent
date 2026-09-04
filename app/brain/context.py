@@ -159,6 +159,7 @@ def retrieve_knowledge(
     query: str,
     embedding_port: EmbeddingPort,
     limit: int = DEFAULT_KNOWLEDGE_LIMIT,
+    min_similarity: float = 0.0,
 ) -> list[RetrievedItem]:
     chunks = store.list_knowledge_chunks()
     if not chunks:
@@ -179,7 +180,11 @@ def retrieve_knowledge(
         for chunk in chunks
     ]
     ranked = rank_knowledge(
-        query=query, candidates=candidates, similarity=similarity, limit=limit * 2
+        query=query,
+        candidates=candidates,
+        similarity=similarity,
+        limit=limit * 2,
+        min_similarity=min_similarity,
     )
     return deduplicate(ranked)[:limit]
 

@@ -105,8 +105,15 @@ def phrase_site_reply(
     kill_switch: bool = False,
     visitor_turns: int = 0,
     frustrated: bool = False,
+    usage: dict[str, int] | None = None,
 ) -> str:
-    """Return the visitor-facing line. Falls back to `canned` on every failure path."""
+    """Return the visitor-facing line. Falls back to `canned` on every failure path.
+
+    `usage`, when given, is filled with the tokens this turn actually cost. It is an
+    out-parameter rather than a changed return type because thirteen call sites treat
+    the result as a plain string. Spend is recorded even when the composed text is
+    then discarded -- the provider billed for it either way.
+    """
     if action in VERBATIM_SITE_ACTIONS:
         return canned
     if port is None or kill_switch:
@@ -142,6 +149,9 @@ def phrase_site_reply(
         )
     except Exception:
         return canned
+    if usage is not None:
+        usage["tokens_in"] = int(getattr(composed, "tokens_in", 0) or 0)
+        usage["tokens_out"] = int(getattr(composed, "tokens_out", 0) or 0)
     text = scrub_visitor_reply(composed.text or "")
     if not text:
         return canned

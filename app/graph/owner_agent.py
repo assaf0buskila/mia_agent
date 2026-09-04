@@ -498,6 +498,9 @@ def run_owner_agent(
                 tools=None if force_prose else available,
                 tool_choice=None if force_prose else "auto",
                 parallel_tool_calls=None if force_prose else True,
+                max_completion_tokens=(
+                    ctx.settings.max_completion_tokens_owner or None
+                ),
             )
         except LlmError as exc:
             return finish(

@@ -26,7 +26,7 @@ canned line for the selected action.
 
 from __future__ import annotations
 
-from typing import NamedTuple, Protocol
+from typing import Any, NamedTuple, Protocol
 
 import httpx
 from pydantic import BaseModel, ConfigDict
@@ -401,8 +401,10 @@ class OpenAISalesReplyPort:
         gemini_api_key: str = "",
         gemini_model: str = "",
         client: httpx.Client | None = None,
+        max_completion_tokens: int = 0,
     ) -> None:
         self._client = client
+        self._max_completion_tokens = max(0, int(max_completion_tokens))
         attempts: list[tuple[str, str, str]] = []
         openai_key = api_key.strip()
         if openai_key:
@@ -473,7 +475,17 @@ class OpenAISalesReplyPort:
         messages: list[dict[str, str]],
         headers: dict[str, str],
     ) -> _CompleteOutcome | None:
-        payload = {"model": model, "messages": messages}
+        payload: dict[str, Any] = {"model": model, "messages": messages}
+        if self._max_completion_tokens > 0:
+            # Same endpoint shape, different parameter name: OpenAI took
+            # `max_tokens` out of Chat Completions in favour of
+            # `max_completion_tokens`, while Gemini's OpenAI-compat layer still
+            # speaks `max_tokens`. Sending the wrong one is a 400, and a 400 here
+            # silently drops the visitor to a canned reply.
+            if url == _GEMINI_CHAT_COMPLETIONS_URL:
+                payload["max_tokens"] = self._max_completion_tokens
+            else:
+                payload["max_completion_tokens"] = self._max_completion_tokens
         try:
             if self._client is not None:
                 response = self._client.post(
@@ -525,4 +537,5 @@ def build_sales_reply_port(settings: Settings) -> SalesReplyPort:
         fallback_model=openai_chain[1] if len(openai_chain) > 1 else "",
         gemini_api_key=settings.gemini_api_key,
         gemini_model=gemini_model,
+        max_completion_tokens=settings.max_completion_tokens_site,
     )

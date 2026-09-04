@@ -72,6 +72,10 @@ class SiteTurn:
     owner_pinged: bool
     fields: CapturedFields
     tools_ran: tuple[str, ...] = ()
+    # What this turn actually cost. Surfaced so the live website turn can write an
+    # ai_run row; the table used to be fed only by the muted WhatsApp path.
+    tokens_in: int = 0
+    tokens_out: int = 0
 
 
 class SiteBook:
@@ -303,6 +307,7 @@ def run_site_turn(
         action = "answer"
     # `decide_site_turn` already chose the action. The port only phrases it, and falls
     # back to the exact canned line on every failure path.
+    usage: dict[str, int] = {}
     phrased = phrase_site_reply(
         action=action,
         canned=decision.reply,
@@ -313,6 +318,7 @@ def run_site_turn(
         port=reply_port,
         visitor_turns=visitor_turns,
         frustrated=frustrated,
+        usage=usage,
     )
     reply = never_silent(phrased, session.language)
     session.turns.append(("mia", reply))
@@ -389,6 +395,8 @@ def run_site_turn(
         owner_pinged=owner_pinged,
         fields=session.fields,
         tools_ran=tools_ran,
+        tokens_in=usage.get("tokens_in", 0),
+        tokens_out=usage.get("tokens_out", 0),
     )
 
 
