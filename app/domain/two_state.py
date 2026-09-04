@@ -11,7 +11,14 @@ from enum import StrEnum
 from app.capabilities.types import Principal
 
 STILL_CHECKING = "still checking"
-TOOL_TIMEOUT_SECONDS = 12
+# Every house adapter allows itself 20s (SEO 25s, Apify 70s). A 12s budget meant any
+# tool needing 12-20s ALWAYS reported "still checking" while its real answer was
+# computed and then discarded — the owner could never get it. Sit just above the 20s
+# adapter ceiling so a normal slow call still returns a real result, and keep the slow
+# budget under the 45s `asyncio.wait_for` around the whole turn in
+# `app.workers.telegram_owner`, otherwise the outer guard fires first and the extra
+# patience buys nothing.
+TOOL_TIMEOUT_SECONDS = 22
 TOOL_RECOVERY_SECONDS = 16
 SLOW_HOUSE_TOOLS = frozenset(
     {
@@ -20,6 +27,12 @@ SLOW_HOUSE_TOOLS = frozenset(
         "sheets_read",
         "sheets_list_tabs",
         "instagram_insights",
+        # Multi-provider reads: each fans out to two or more 20s adapters, so they
+        # never fitted in the base budget.
+        "seo_snapshot",
+        "website_kpis",
+        "research_search",
+        "owner_system_audit",
     }
 )
 
