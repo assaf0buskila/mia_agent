@@ -29,9 +29,18 @@
   var MAX_RECORD_MS = 60000;
   var MIC_IDLE = 'הקלטה';
   var MIC_LIVE = 'מקליטה… לחצו שוב לשליחה';
+  // One string for every failure is why nobody could tell a denied microphone from a
+  // rate limit from a recording that captured silence. Each of these is a different
+  // problem with a different thing the visitor should do about it.
   var MIC_ERR = 'לא שמעתי טוב. נסו שוב או כתבו.';
   var MIC_PERM = 'לא קיבלתי גישה למיקרופון. אפשר גם לכתוב.';
   var MIC_NA = 'ההקלטה לא זמינה כאן. אפשר לכתוב.';
+  var MIC_EMPTY = 'ההקלטה יצאה ריקה. נסו לדבר קרוב יותר למיקרופון, או כתבו.';
+  var MIC_NET = 'ההקלטה לא הגיעה. בדקו חיבור ונסו שוב, או כתבו.';
+  // A 429 used to render as "I did not hear you", so the visitor retried, spent more
+  // of the quota, and got the same sentence. Telling them to wait is the only advice
+  // that can actually work.
+  var MIC_BUSY = 'יותר מדי הקלטות בזמן קצר. חכו רגע ונסו שוב, או כתבו.';
   var ERR = 'משהו השתבש. נסו שוב.';
   var WA_NA = 'וואטסאפ לא זמין כרגע.';
   var eventQueue = [];
@@ -799,6 +808,19 @@
     );
   }
 
+  function voiceFailed(why, msg) {
+    // Tell the visitor which problem this is, and leave a trace. A browser-side voice
+    // failure used to be invisible: it never reached the voice endpoint, so nothing
+    // was logged and every cause produced the same sentence.
+    status.textContent = msg;
+    appendMsg('mia', msg);
+    try {
+      postEvent('voice_failed', { section: why });
+    } catch (err) {
+      /* telemetry must never cost the visitor anything */
+    }
+  }
+
   function sendVoice(blob) {
     if (busy || !blob || !blob.size) return;
     if (!sessionId) {
@@ -814,10 +836,24 @@
       return postVoice(blob);
     })
       .then(applyReply)
-      .catch(function () {
+      .catch(function (err) {
         hideLoading();
-        status.textContent = MIC_ERR;
-        appendMsg('mia', MIC_ERR);
+        // Say which failure this was. 429 in particular must not read as "try again":
+        // retrying is exactly what keeps it failing.
+        var code = err && err.status;
+        var msg = MIC_NET;
+        var why = 'upload_' + (code || 'network');
+        if (code === 429) {
+          msg = MIC_BUSY;
+          why = 'rate_limited';
+        } else if (code === 415) {
+          msg = MIC_NA;
+          why = 'unsupported_type';
+        } else if (code === 400) {
+          msg = MIC_EMPTY;
+          why = 'empty_audio';
+        }
+        voiceFailed(why, msg);
       })
       .finally(function () {
         hideLoading();
@@ -892,14 +928,14 @@
       stopTracks();
       if (!send) return;
       if (!chunks.length) {
-        status.textContent = MIC_ERR;
-        appendMsg('mia', MIC_ERR);
+        // The recorder produced nothing at all: the mic is muted, the wrong input is
+        // selected, or the tap was too short to capture a frame.
+        voiceFailed('no_chunks', MIC_EMPTY);
         return;
       }
       var blob = new Blob(chunks, { type: chunks[0].type || 'audio/webm' });
       if (!blob.size) {
-        status.textContent = MIC_ERR;
-        appendMsg('mia', MIC_ERR);
+        voiceFailed('empty_blob', MIC_EMPTY);
         return;
       }
       sendVoice(blob);

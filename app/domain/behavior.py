@@ -12,6 +12,11 @@ CLIENT_BEHAVIOR_KINDS = frozenset({
     "cta_click",
     "form_started",
     "form_abandoned",
+    # A voice note that fails in the browser never reaches the voice endpoint, so it
+    # left no trace anywhere and "it says it did not hear me" could not be told from a
+    # denied microphone, a silent recording, a dropped upload or a rate limit. The
+    # `section` slug carries which one.
+    "voice_failed",
 })
 
 SERVER_BEHAVIOR_KINDS = frozenset({
