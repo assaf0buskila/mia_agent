@@ -93,9 +93,21 @@ class Settings(BaseSettings):
     memory_weight_recency: float = Field(default=0.5)
     memory_weight_importance: float = Field(default=0.3)
     # Evidence floor for published-knowledge retrieval, on the raw cosine. Below this
-    # the corpus does not actually answer the question and Mia says so instead of
-    # quoting the least-bad chunk. Calibrated against real positive/negative queries
-    # (scripts/calibrate_knowledge_floor.py) -- do not hand-tune without rerunning it.
+    # the corpus does not answer the question and Mia says so instead of quoting the
+    # least-bad chunk.
+    #
+    # 0.0 means the gate is inert, and that is a measured result, not a default nobody
+    # got to. Calibrated 2026-09-05 with scripts/calibrate_knowledge_floor.py against
+    # the live 33-chunk corpus on text-embedding-3-small: the weakest real product
+    # question ("אתם בונים אוטומציות בוואטסאפ?") scored 0.3430 while the strongest
+    # unrelated one ("כמה עולה טיסה לתאילנד?") scored 0.4213. The pricing chunks are
+    # saturated with "כמה עולה", so the embedding matches any cost question, and every
+    # threshold in that range both mutes a customer and admits a stranger.
+    #
+    # Do not hand-tune this. Rerun the script; it exits 1 while the groups overlap. A
+    # real floor needs a stronger embedding model or a relevance signal that is not
+    # cosine alone. Until then the defence is prompt rule 16 plus the assafweb.com
+    # host filter, which stop an unrelated chunk being stated as fact.
     knowledge_min_similarity: float = Field(default=0.0)
     # Completion bounds. Nothing passed one before, so a runaway generation was billed
     # in full and the first cost signal was the invoice. The website answers in a
