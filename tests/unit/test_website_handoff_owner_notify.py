@@ -17,8 +17,8 @@ from app.db.models import OwnerNotificationRow
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
 from app.domain.events import Channel
-from app.domain.hot_handoff import KIND_HOT_LEAD, apply_hot_handoff
-from app.domain.website_handoff_brief import (
+from app.domain.handoff.hot import KIND_HOT_LEAD, apply_hot_handoff
+from app.domain.handoff.website_brief import (
     KIND_WEBSITE_WHATSAPP,
     NOTIFICATION_DELIVERED,
     apply_website_whatsapp_handoff_brief,

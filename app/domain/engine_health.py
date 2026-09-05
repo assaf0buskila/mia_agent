@@ -8,14 +8,12 @@ an `AiRunRow` (`app/domain/ai_runs.py::persist_ai_run`), and `MODEL_CANNED` mark
 turn that never reached a real model. This module aggregates that log so a canned
 spike is visible on the owner brief instead of silent in a health check.
 
-LIMITATION (read before trusting the numbers): `AiRunRow` carries no timestamp
-column (no `created_at` / `occurred_at`). `LeadStore.aggregate_ai_runs` therefore
-cannot filter to a calendar day today; `occurred_from` / `occurred_to` are accepted
-for interface parity with the rest of the owner-brief reads (`count_canonical_events`,
-`count_behavior_events`, ...) but are NOT applied as a real filter. Every call
-aggregates the full `ai_runs` table, since the beginning of the deployment, not
-"today". A real day window needs a migration adding a timestamp column to
-`ai_runs`, which is out of scope for this slice — see ADR-029's Consequences.
+The window is real. `AiRunRow.occurred_at` (migration
+`20260905_ai_runs_occurred_at.sql`) is stamped on every write, so
+`LeadStore.aggregate_ai_runs` filters to the owner's local calendar day like the
+rest of the owner-brief reads. Rows written before that column existed carry an
+empty string and fall outside every window, which is the honest answer: nobody
+knows when they ran.
 """
 
 from __future__ import annotations
@@ -32,10 +30,7 @@ if TYPE_CHECKING:
 
 
 class AiRunAggregate(BaseModel):
-    """Frozen all-time aggregate over persisted `AiRunRow`s.
-
-    See the module docstring: this is NOT scoped to a calendar day.
-    """
+    """Frozen aggregate over persisted `AiRunRow`s inside one local calendar day."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -51,13 +46,7 @@ class AiRunAggregate(BaseModel):
 def compute_engine_health(
     store: LeadStore, *, timezone: str, now: datetime | None = None
 ) -> AiRunAggregate | None:
-    """Compute the engine-truth aggregate. None only on an invalid `timezone`.
-
-    `timezone` / `now` exist to match the calling convention of the other owner-brief
-    reads (`compute_daily_brief`, `compute_website_funnel`), but per the module
-    docstring the underlying store read cannot honor a day window yet: the result is
-    an all-time total regardless of `now`.
-    """
+    """Compute the engine-truth aggregate for the owner's local day. None on a bad `timezone`."""
     instant = now if now is not None else datetime.now(UTC)
     bounds = local_day_bounds_utc_iso(now=instant, timezone=timezone)
     if bounds is None:
@@ -74,7 +63,7 @@ def format_engine_health(aggregate: AiRunAggregate) -> str:
     fallback only — that is the whole point of this line existing.
     """
     return (
-        f"מנוע (מאז ההתחלה): {aggregate.total_runs} תגובות רצו · "
+        f"מנוע היום: {aggregate.total_runs} תגובות רצו · "
         f"חציון {aggregate.median_latency_ms} מילישניות · "
         f"{aggregate.canned_runs} ללא מודל אמיתי"
     )

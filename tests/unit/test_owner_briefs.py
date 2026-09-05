@@ -21,12 +21,12 @@ from app.domain.events import (
 )
 from app.domain.followups import follow_up_due_on
 from app.domain.kpis import KPI_EVENT_TYPES
-from app.domain.owner_briefs import (
+from app.domain.owner.briefs import (
     apply_owner_brief_policy,
     compute_daily_brief,
     format_daily_brief,
 )
-from app.domain.owner_tasks import OwnerTaskType, classify_owner_task
+from app.domain.owner.tasks import OwnerTaskType, classify_owner_task
 from app.integrations.base import RecordingMessagePort
 from sqlalchemy import delete
 
@@ -395,7 +395,7 @@ async def test_owner_inbound_daily_brief_booked_counts_in_ack() -> None:
 
 
 def test_owner_briefs_module_no_message_or_meta_ports() -> None:
-    import app.domain.owner_briefs as module
+    import app.domain.owner.briefs as module
 
     source = inspect.getsource(module)
     assert "MessagePort" not in source

@@ -9,16 +9,16 @@ from app.api.inbound import process_inbound_texts
 from app.db.models import CanonicalEventRow, MeetingBriefRow, OwnerTaskRow
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
-from app.domain.briefs import (
+from app.domain.events import Channel, EventType
+from app.domain.meetings.booking import BookingResultKind, attempt_meeting_booking
+from app.domain.meetings.briefs import (
     apply_meeting_brief_policy,
     apply_owner_meeting_brief,
     persist_booked_meeting_brief,
 )
-from app.domain.calendar_booking import BookingResultKind, attempt_meeting_booking
-from app.domain.events import Channel, EventType
-from app.domain.meeting_changes import MeetingChangeKind, resolve_booked_meeting_change
-from app.domain.meetings import apply_meeting_policy
-from app.domain.owner_tasks import OwnerTaskType, ack_for_owner_task, classify_owner_task
+from app.domain.meetings.changes import MeetingChangeKind, resolve_booked_meeting_change
+from app.domain.meetings.state import apply_meeting_policy
+from app.domain.owner.tasks import OwnerTaskType, ack_for_owner_task, classify_owner_task
 from app.domain.sales import FitLevel, NextAction, PainLevel, SalesState
 from app.integrations.base import RecordingMessagePort
 from app.integrations.calendar import DisabledCalendarPort, FakeCalendarPort, TimeSlot
@@ -647,7 +647,7 @@ def test_apply_owner_meeting_brief_unknown_lead() -> None:
 
 
 def test_briefs_module_no_forbidden_imports() -> None:
-    module = importlib.import_module("app.domain.briefs")
+    module = importlib.import_module("app.domain.meetings.briefs")
     source = inspect.getsource(module)
     assert "MessagePort" not in source
     assert "MetaAdsPort" not in source

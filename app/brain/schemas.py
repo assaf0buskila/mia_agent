@@ -2,7 +2,7 @@
 
 Vocabulary follows the documented agent-memory taxonomy (LangMem / Letta / Generative
 Agents); the supersede-don't-delete rule follows Mem0g. Sources are cited in
-docs/BRAIN_ARCHITECTURE.md.
+docs/ARCHITECTURE.md (Brain).
 """
 
 from __future__ import annotations

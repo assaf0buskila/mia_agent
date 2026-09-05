@@ -10,13 +10,13 @@ from app.core.errors import PolicyDenied
 from app.db.models import OwnerNotificationRow, OwnerTaskRow
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
-from app.domain.calendar_booking import BookingResultKind, attempt_meeting_booking
 from app.domain.events import Channel
-from app.domain.meeting_changes import (
+from app.domain.meetings.booking import BookingResultKind, attempt_meeting_booking
+from app.domain.meetings.changes import (
     MeetingChangeKind,
     resolve_booked_meeting_change,
 )
-from app.domain.owner_notify import (
+from app.domain.owner.notifications import (
     KIND_MEETING_BOOKED,
     KIND_MEETING_CANCELLATION_REQUESTED,
     KIND_MEETING_RESCHEDULED,
@@ -24,7 +24,7 @@ from app.domain.owner_notify import (
     apply_owner_notify,
     persist_meeting_booked_owner_notify,
 )
-from app.domain.owner_tasks import OwnerTaskType, classify_owner_task
+from app.domain.owner.tasks import OwnerTaskType, classify_owner_task
 from app.integrations.base import RecordingMessagePort
 from app.integrations.calendar import FakeCalendarPort, TimeSlot
 from app.integrations.calendar_booking import CalendarBookingEvent, FakeCalendarBookingPort
@@ -51,7 +51,7 @@ def _slot(days_ahead: int, hour: int, minute: int = 0) -> TimeSlot:
 
 
 def _seed_offered(store: LeadStore, lead_id: str, slots: list[TimeSlot]) -> None:
-    from app.domain.meetings import apply_meeting_policy
+    from app.domain.meetings.state import apply_meeting_policy
     from app.domain.sales import NextAction
 
     apply_meeting_policy(
@@ -113,7 +113,7 @@ def _seed_booked(
     external_id: str,
     slot: TimeSlot | None = None,
 ) -> str:
-    from app.domain.meetings import apply_meeting_policy
+    from app.domain.meetings.state import apply_meeting_policy
 
     _, lead_id = store.open_channel_lead(
         channel=Channel.GMAIL, external_id=external_id
@@ -510,7 +510,7 @@ async def test_owner_inbound_notify_kill_switch() -> None:
 
 
 def test_owner_notify_module_no_forbidden_imports() -> None:
-    module = importlib.import_module("app.domain.owner_notify")
+    module = importlib.import_module("app.domain.owner.notifications")
     source = inspect.getsource(module)
     assert "httpx" not in source
     assert "openai" not in source.lower()

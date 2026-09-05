@@ -5,7 +5,7 @@ from app.api.inbound import process_inbound_texts
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
 from app.domain.events import Channel
-from app.domain.owner_tasks import ack_for_owner_task, classify_owner_task
+from app.domain.owner.tasks import ack_for_owner_task, classify_owner_task
 from app.domain.tools import AdapterHttpError
 from app.integrations.base import RecordingMessagePort
 from app.integrations.research import (

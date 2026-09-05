@@ -15,7 +15,7 @@ from app.core.config import Settings, get_settings
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
 from app.domain.events import Channel
-from app.domain.owner_tasks import (
+from app.domain.owner.tasks import (
     OwnerTaskType,
     classify_owner_task,
     promote_unclassified_text_to_status,
@@ -67,9 +67,9 @@ async def test_failed_note_agent_tells_assaf_the_failure_class(monkeypatch) -> N
     """Repro for the live fallback. The classifier's 'could not classify' line must not
     be what Assaf sees, and the generic NOTE failure must name the class (provider
     error) without a model id or a secret."""
-    monkeypatch.setattr("app.domain.owner_brain.build_agent_client", _failing_chain)
+    monkeypatch.setattr("app.domain.owner.brain.build_agent_client", _failing_chain)
     monkeypatch.setattr(
-        "app.domain.owner_brain.build_embedding_port", lambda _s: FakeEmbeddingPort()
+        "app.domain.owner.brain.build_embedding_port", lambda _s: FakeEmbeddingPort()
     )
     settings = get_settings()
     settings.openai_api_key = "k"

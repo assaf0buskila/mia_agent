@@ -16,12 +16,12 @@ from app.domain.commitments import (
     plan_owner_commitment,
 )
 from app.domain.events import Channel, build_message_in_event
-from app.domain.gmail_summaries import (
+from app.domain.gmail.summaries import (
     apply_gmail_summary_policy,
     apply_owner_gmail_summary,
     extract_gmail_summary_target,
 )
-from app.domain.owner_tasks import (
+from app.domain.owner.tasks import (
     OwnerTaskType,
     ack_for_owner_task,
     classify_owner_task,
@@ -365,7 +365,7 @@ def test_classify_gmail_summary_plus_campaign_first_pass() -> None:
 
 
 def test_gmail_summaries_module_no_send_ports() -> None:
-    module = importlib.import_module("app.domain.gmail_summaries")
+    module = importlib.import_module("app.domain.gmail.summaries")
     source = inspect.getsource(module)
     assert "MessagePort" not in source
     assert "ComposioGmailPort" not in source
@@ -382,8 +382,8 @@ def test_gmail_summaries_module_no_send_ports() -> None:
 def test_sales_reply_orchestrator_do_not_import_gmail_summaries() -> None:
     sales_reply = inspect.getsource(importlib.import_module("app.integrations.sales_reply"))
     orchestrator = inspect.getsource(importlib.import_module("app.graph.orchestrator"))
-    assert "gmail_summaries" not in sales_reply
-    assert "gmail_summaries" not in orchestrator
+    assert "gmail.summaries" not in sales_reply
+    assert "gmail.summaries" not in orchestrator
 
 
 def test_extract_gmail_summary_target_thread_and_lead() -> None:
@@ -414,7 +414,7 @@ def test_apply_gmail_summary_policy_kill_switch() -> None:
     db = get_session_factory()()
     try:
         store = LeadStore(db)
-        from app.domain.gmail_summaries import GmailSummarySnapshot
+        from app.domain.gmail.summaries import GmailSummarySnapshot
 
         snapshot = GmailSummarySnapshot(
             thread_id=THREAD_ID,

@@ -13,7 +13,7 @@ from app.core.config import Settings
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
 from app.domain.events import Channel
-from app.domain.owner_tasks import OwnerTaskType, classify_owner_task
+from app.domain.owner.tasks import OwnerTaskType, classify_owner_task
 from app.integrations.base import OutboundMessage
 from app.surfaces.crm import DisabledContactsCrm
 from app.surfaces.owner import run_owner_loop

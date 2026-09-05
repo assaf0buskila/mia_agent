@@ -348,7 +348,7 @@ def test_owner_system_audit_reports_each_surface_without_a_blanket_provider_clai
 
 def test_owner_system_audit_keeps_unseen_booked_meetings_unconsumed() -> None:
     """The aggregate audit reports its inbox snapshot without acknowledging it."""
-    from app.domain.owner_notify import KIND_MEETING_BOOKED
+    from app.domain.owner.notifications import KIND_MEETING_BOOKED
 
     session = _session()
     try:
@@ -439,7 +439,7 @@ def test_owner_sheets_twenty_second_whole_turn_grammar_is_effect_free_on_denial(
     """Review-22 prefixes cannot be discarded before a valid Sheets suffix."""
     from app.db.models import IdempotencyRow
     from app.integrations.sheets import FakeSheetsPort
-    from app.tools.registries import owner_tools
+    from app.tools.owner import sheets as owner_sheets
 
     session = _session()
     try:
@@ -460,7 +460,7 @@ def test_owner_sheets_twenty_second_whole_turn_grammar_is_effect_free_on_denial(
             return ctx.sheets
 
         monkeypatch.setattr(ctx.store, "claim_operation", counted_claim)
-        monkeypatch.setattr(owner_tools, "_owner_sheets_port", counted_port)
+        monkeypatch.setattr(owner_sheets, "_owner_sheets_port", counted_port)
         args = {"spreadsheet_id": "sheet-main", "range": "KPI!A1", "values": [["x"]]}
         valid_append = 'Append "x" to sheet-main at KPI!A1 in the Sheet'
         valid_hebrew = 'הוסף "x" לגיליון sheet-main בטווח KPI!A1'
@@ -563,7 +563,7 @@ def test_owner_sheets_fifteenth_review_controls_fail_closed_and_overlap_is_safe(
     """Residual controls, incomplete JSON cells, and overlapping IDs never mutate Sheets."""
     from app.db.models import IdempotencyRow
     from app.integrations.sheets import FakeSheetsPort
-    from app.tools.registries import owner_tools
+    from app.tools.owner import sheets as owner_sheets
 
     session = _session()
     try:
@@ -581,7 +581,7 @@ def test_owner_sheets_fifteenth_review_controls_fail_closed_and_overlap_is_safe(
             calls["port"] += 1
             return ctx.sheets
         monkeypatch.setattr(ctx.store, "claim_operation", counted_claim)
-        monkeypatch.setattr(owner_tools, "_owner_sheets_port", counted_port)
+        monkeypatch.setattr(owner_sheets, "_owner_sheets_port", counted_port)
         args = {"spreadsheet_id": "sheet-allowed", "range": "KPI!A1", "values": [["x"]]}
 
         for mark in ("\u200d", "\u200c", "\u200e", "\u034f", "\u0301"):
@@ -612,7 +612,7 @@ def test_owner_sheets_write_binds_id_range_and_every_literal_before_claim(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from app.integrations.sheets import FakeSheetsPort
-    from app.tools.registries import owner_tools
+    from app.tools.owner import sheets as owner_sheets
 
     session = _session()
     try:
@@ -632,7 +632,7 @@ def test_owner_sheets_write_binds_id_range_and_every_literal_before_claim(
             lambda **_kwargs: pytest.fail("unbound Sheets write must not claim"),
         )
         monkeypatch.setattr(
-            owner_tools,
+            owner_sheets,
             "_owner_sheets_port",
             lambda _ctx: pytest.fail("unbound Sheets write must not construct a port"),
         )
@@ -702,7 +702,7 @@ def test_owner_sheets_semantic_binding_rejects_negation_conflicts_and_payload_mi
     """No ambiguous proposal may build a port, claim an event, or call a provider."""
     from app.db.models import IdempotencyRow
     from app.integrations.sheets import FakeSheetsPort
-    from app.tools.registries import owner_tools
+    from app.tools.owner import sheets as owner_sheets
 
     session = _session()
     try:
@@ -723,7 +723,7 @@ def test_owner_sheets_semantic_binding_rejects_negation_conflicts_and_payload_mi
             return ctx.sheets
 
         monkeypatch.setattr(ctx.store, "claim_operation", counted_claim)
-        monkeypatch.setattr(owner_tools, "_owner_sheets_port", counted_port)
+        monkeypatch.setattr(owner_sheets, "_owner_sheets_port", counted_port)
         update_args = {
             "spreadsheet_id": "sheet-allowed",
             "range": "KPI!A1:B1",
@@ -914,7 +914,7 @@ def test_owner_sheets_bounded_negation_modifiers_deny_before_all_side_effects(
     """Ordinary negated wording is not an authorization for any Sheets mutation verb."""
     from app.db.models import IdempotencyRow
     from app.integrations.sheets import FakeSheetsPort
-    from app.tools.registries import owner_tools
+    from app.tools.owner import sheets as owner_sheets
 
     session = _session()
     try:
@@ -935,7 +935,7 @@ def test_owner_sheets_bounded_negation_modifiers_deny_before_all_side_effects(
             return ctx.sheets
 
         monkeypatch.setattr(ctx.store, "claim_operation", counted_claim)
-        monkeypatch.setattr(owner_tools, "_owner_sheets_port", counted_port)
+        monkeypatch.setattr(owner_sheets, "_owner_sheets_port", counted_port)
         args = {"spreadsheet_id": "sheet-allowed", "range": "KPI!A1", "values": [["x"]]}
         negators = (
             "do not even",
@@ -1065,7 +1065,7 @@ def test_owner_sheets_write_binds_exactly_one_unquoted_target_before_side_effect
     """The model cannot choose one target from more than one owner-specified target."""
     from app.db.models import IdempotencyRow
     from app.integrations.sheets import FakeSheetsPort
-    from app.tools.registries import owner_tools
+    from app.tools.owner import sheets as owner_sheets
 
     session = _session()
     try:
@@ -1086,7 +1086,7 @@ def test_owner_sheets_write_binds_exactly_one_unquoted_target_before_side_effect
             return ctx.sheets
 
         monkeypatch.setattr(ctx.store, "claim_operation", counted_claim)
-        monkeypatch.setattr(owner_tools, "_owner_sheets_port", counted_port)
+        monkeypatch.setattr(owner_sheets, "_owner_sheets_port", counted_port)
         args = {"spreadsheet_id": "sheet-allowed", "range": "KPI!A1", "values": [["x"]]}
         for owner_text in (
             'Please append "x" to sheet-allowed at KPI!A1 or sheet-other at KPI!B1 in the Sheet',
@@ -1161,7 +1161,7 @@ def test_owner_sheets_spaced_tab_binding_rejects_suffix_selection_before_side_ef
     """A model cannot select a suffix tab from an owner-stated spaced tab target."""
     from app.db.models import IdempotencyRow
     from app.integrations.sheets import FakeSheetsPort
-    from app.tools.registries import owner_tools
+    from app.tools.owner import sheets as owner_sheets
 
     session = _session()
     try:
@@ -1182,7 +1182,7 @@ def test_owner_sheets_spaced_tab_binding_rejects_suffix_selection_before_side_ef
             return ctx.sheets
 
         monkeypatch.setattr(ctx.store, "claim_operation", counted_claim)
-        monkeypatch.setattr(owner_tools, "_owner_sheets_port", counted_port)
+        monkeypatch.setattr(owner_sheets, "_owner_sheets_port", counted_port)
         suffix_args = {"spreadsheet_id": "sheet-allowed", "range": "Bar!A1", "values": [["x"]]}
         for owner_text in (
             'Please append "x" to sheet-allowed at Foo Bar!A1 or Other Bar!A1 in the Sheet',
@@ -1214,7 +1214,7 @@ def test_owner_sheets_target_extraction_ignores_quoted_literals_and_range_suffix
     """Only a second complete unquoted target makes an owner write ambiguous."""
     from app.db.models import IdempotencyRow
     from app.integrations.sheets import FakeSheetsPort
-    from app.tools.registries import owner_tools
+    from app.tools.owner import sheets as owner_sheets
 
     session = _session()
     try:
@@ -1235,7 +1235,7 @@ def test_owner_sheets_target_extraction_ignores_quoted_literals_and_range_suffix
             return ctx.sheets
 
         monkeypatch.setattr(ctx.store, "claim_operation", counted_claim)
-        monkeypatch.setattr(owner_tools, "_owner_sheets_port", counted_port)
+        monkeypatch.setattr(owner_sheets, "_owner_sheets_port", counted_port)
         target = {"spreadsheet_id": "sheet-allowed"}
 
         for source_ref, owner_text, args in (
@@ -1283,7 +1283,7 @@ def test_owner_sheets_rejects_lowercase_secondary_a1_targets_before_side_effects
     """Every remaining unquoted A1-looking target is ambiguous, regardless of ASCII case."""
     from app.db.models import IdempotencyRow
     from app.integrations.sheets import FakeSheetsPort
-    from app.tools.registries import owner_tools
+    from app.tools.owner import sheets as owner_sheets
 
     session = _session()
     try:
@@ -1304,7 +1304,7 @@ def test_owner_sheets_rejects_lowercase_secondary_a1_targets_before_side_effects
             return ctx.sheets
 
         monkeypatch.setattr(ctx.store, "claim_operation", counted_claim)
-        monkeypatch.setattr(owner_tools, "_owner_sheets_port", counted_port)
+        monkeypatch.setattr(owner_sheets, "_owner_sheets_port", counted_port)
         args = {
             "spreadsheet_id": "sheet-allowed",
             "range": "Foo Bar!A1",
@@ -1341,7 +1341,7 @@ def test_owner_sheets_opaque_allowlisted_ids_do_not_mask_secondary_targets(
     """Exact allowlisted IDs are opaque; separate A1 targets still fail before effects."""
     from app.db.models import IdempotencyRow
     from app.integrations.sheets import FakeSheetsPort
-    from app.tools.registries import owner_tools
+    from app.tools.owner import sheets as owner_sheets
 
     session = _session()
     try:
@@ -1363,7 +1363,7 @@ def test_owner_sheets_opaque_allowlisted_ids_do_not_mask_secondary_targets(
             return ctx.sheets
 
         monkeypatch.setattr(ctx.store, "claim_operation", counted_claim)
-        monkeypatch.setattr(owner_tools, "_owner_sheets_port", counted_port)
+        monkeypatch.setattr(owner_sheets, "_owner_sheets_port", counted_port)
         for index, spreadsheet_id in enumerate(opaque_ids):
             ctx.source_ref = f"telegram:opaque-id-positive-{index}"
             ctx.owner_text = f'Please append "x" to {spreadsheet_id} at KPI!A1 in the Sheet'
@@ -1395,7 +1395,7 @@ def test_owner_sheets_a1_like_opaque_id_may_bind_once_but_not_hide_targets(
     """One raw opaque ID is allowed; each extra A1-looking reference is still unsafe."""
     from app.db.models import IdempotencyRow
     from app.integrations.sheets import FakeSheetsPort
-    from app.tools.registries import owner_tools
+    from app.tools.owner import sheets as owner_sheets
 
     session = _session()
     try:
@@ -1414,7 +1414,7 @@ def test_owner_sheets_a1_like_opaque_id_may_bind_once_but_not_hide_targets(
             return ctx.sheets
 
         monkeypatch.setattr(ctx.store, "claim_operation", counted_claim)
-        monkeypatch.setattr(owner_tools, "_owner_sheets_port", counted_port)
+        monkeypatch.setattr(owner_sheets, "_owner_sheets_port", counted_port)
         args = {"spreadsheet_id": "B2", "range": "KPI!A1", "values": [["x"]]}
 
         ctx.source_ref = "telegram:bare-opaque-id-once"
@@ -1466,7 +1466,7 @@ def test_owner_sheets_write_literal_binding_preserves_raw_json_codepoints(
     """Owner cell literals are exact JSON strings, never Unicode-normalized authorization."""
     from app.db.models import IdempotencyRow
     from app.integrations.sheets import FakeSheetsPort
-    from app.tools.registries import owner_tools
+    from app.tools.owner import sheets as owner_sheets
 
     session = _session()
     try:
@@ -1487,7 +1487,7 @@ def test_owner_sheets_write_literal_binding_preserves_raw_json_codepoints(
             return ctx.sheets
 
         monkeypatch.setattr(ctx.store, "claim_operation", counted_claim)
-        monkeypatch.setattr(owner_tools, "_owner_sheets_port", counted_port)
+        monkeypatch.setattr(owner_sheets, "_owner_sheets_port", counted_port)
         target = {"spreadsheet_id": "sheet-allowed", "range": "KPI!A1"}
 
         for source_ref, owner_value, argument_value in (
@@ -1532,7 +1532,7 @@ def test_owner_sheets_prevalidates_policy_and_arguments_before_port_or_claim(
     """Invalid writes must not reserve an idempotency operation or build an adapter."""
     from app.db.models import IdempotencyRow
     from app.integrations.sheets import FakeSheetsPort
-    from app.tools.registries import owner_tools
+    from app.tools.owner import sheets as owner_sheets
 
     session = _session()
     try:
@@ -1553,7 +1553,7 @@ def test_owner_sheets_prevalidates_policy_and_arguments_before_port_or_claim(
             return ctx.sheets
 
         monkeypatch.setattr(ctx.store, "claim_operation", counted_claim)
-        monkeypatch.setattr(owner_tools, "_owner_sheets_port", counted_port)
+        monkeypatch.setattr(owner_sheets, "_owner_sheets_port", counted_port)
         owner = Principal.owner(source="test")
         valid_args = {
             "spreadsheet_id": "sheet-allowed",
@@ -1708,7 +1708,7 @@ def test_owner_sheets_explicit_scalar_cell_grammar_is_counted_and_narrow(
 ) -> None:
     from app.db.models import IdempotencyRow
     from app.integrations.sheets import FakeSheetsPort
-    from app.tools.registries import owner_tools
+    from app.tools.owner import sheets as owner_sheets
 
     session = _session()
     try:
@@ -1729,7 +1729,7 @@ def test_owner_sheets_explicit_scalar_cell_grammar_is_counted_and_narrow(
             return ctx.sheets
 
         monkeypatch.setattr(ctx.store, "claim_operation", counted_claim)
-        monkeypatch.setattr(owner_tools, "_owner_sheets_port", counted_port)
+        monkeypatch.setattr(owner_sheets, "_owner_sheets_port", counted_port)
         args = {"spreadsheet_id": "sheet-2026", "range": "KPI2!A123", "values": [["x"]]}
         for owner_text in (
             'Append 123 and "x" to sheet-2026 at KPI2!A123 in the Sheet',
@@ -1765,7 +1765,7 @@ def test_owner_sheets_complete_cell_binding_rejects_residual_json_cells(
     """Every explicit extra JSON cell must fail before a claim, port, or provider write."""
     from app.db.models import IdempotencyRow
     from app.integrations.sheets import FakeSheetsPort
-    from app.tools.registries import owner_tools
+    from app.tools.owner import sheets as owner_sheets
 
     session = _session()
     try:
@@ -1786,7 +1786,7 @@ def test_owner_sheets_complete_cell_binding_rejects_residual_json_cells(
             return ctx.sheets
 
         monkeypatch.setattr(ctx.store, "claim_operation", counted_claim)
-        monkeypatch.setattr(owner_tools, "_owner_sheets_port", counted_port)
+        monkeypatch.setattr(owner_sheets, "_owner_sheets_port", counted_port)
         args = {"spreadsheet_id": "sheet-main", "range": "KPI!A1", "values": [["x"]]}
 
         def assert_rejected(tool_name: str, owner_text: str) -> None:
@@ -1871,7 +1871,7 @@ def test_owner_sheets_punctuation_and_layout_binding_are_effect_free_on_denial(
     """Cell grammar, order, and grid shape bind before every Sheets side effect."""
     from app.db.models import IdempotencyRow
     from app.integrations.sheets import FakeSheetsPort
-    from app.tools.registries import owner_tools
+    from app.tools.owner import sheets as owner_sheets
 
     session = _session()
     try:
@@ -1892,7 +1892,7 @@ def test_owner_sheets_punctuation_and_layout_binding_are_effect_free_on_denial(
             return ctx.sheets
 
         monkeypatch.setattr(ctx.store, "claim_operation", counted_claim)
-        monkeypatch.setattr(owner_tools, "_owner_sheets_port", counted_port)
+        monkeypatch.setattr(owner_sheets, "_owner_sheets_port", counted_port)
 
         def assert_rejected(tool_name: str, owner_text: str, args: dict) -> None:
             before = (
@@ -2224,7 +2224,7 @@ def test_owner_sheets_twentieth_repair_binds_one_operation_clause_before_effects
     """Earlier mutation clauses and public sentinel collisions cannot be discarded."""
     from app.db.models import IdempotencyRow
     from app.integrations.sheets import FakeSheetsPort
-    from app.tools.registries import owner_tools
+    from app.tools.owner import sheets as owner_sheets
 
     session = _session()
     try:
@@ -2245,7 +2245,7 @@ def test_owner_sheets_twentieth_repair_binds_one_operation_clause_before_effects
             return ctx.sheets
 
         monkeypatch.setattr(ctx.store, "claim_operation", counted_claim)
-        monkeypatch.setattr(owner_tools, "_owner_sheets_port", counted_port)
+        monkeypatch.setattr(owner_sheets, "_owner_sheets_port", counted_port)
         append_args = {"spreadsheet_id": "sheet-main", "range": "KPI!A1", "values": [["x"]]}
         update_args = dict(append_args)
 
@@ -2342,7 +2342,7 @@ def test_owner_sheets_twenty_first_unicode_security_view_is_effect_free_on_denia
     """The 126-case review matrix cannot hide an instruction or public sentinel."""
     from app.db.models import IdempotencyRow
     from app.integrations.sheets import FakeSheetsPort
-    from app.tools.registries import owner_tools
+    from app.tools.owner import sheets as owner_sheets
 
     session = _session()
     try:
@@ -2363,7 +2363,7 @@ def test_owner_sheets_twenty_first_unicode_security_view_is_effect_free_on_denia
             return ctx.sheets
 
         monkeypatch.setattr(ctx.store, "claim_operation", counted_claim)
-        monkeypatch.setattr(owner_tools, "_owner_sheets_port", counted_port)
+        monkeypatch.setattr(owner_sheets, "_owner_sheets_port", counted_port)
         standard_args = {"spreadsheet_id": "sheet-main", "range": "KPI!A1", "values": [["x"]]}
         denied_cases = 0
         valid_cases = 0

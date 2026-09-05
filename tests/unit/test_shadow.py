@@ -40,23 +40,6 @@ def test_should_skip_prospect_send_matrix() -> None:
     assert should_skip_prospect_send(AutomationMode.SHADOW, "owner") is False
     assert should_skip_prospect_send(AutomationMode.AUTO_APPROVED, "prospect") is False
     assert should_skip_prospect_send(AutomationMode.HYBRID, "prospect") is False
-    assert (
-        should_skip_prospect_send(
-            AutomationMode.AUTO_APPROVED,
-            "prospect",
-            channel=Channel.INSTAGRAM.value,
-        )
-        is True
-    )
-    assert (
-        should_skip_prospect_send(
-            AutomationMode.AUTO_APPROVED,
-            "prospect",
-            channel=Channel.INSTAGRAM.value,
-            auto_reply_instagram=True,
-        )
-        is False
-    )
 
 
 @pytest.mark.asyncio

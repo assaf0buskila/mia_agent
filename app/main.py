@@ -214,7 +214,7 @@ def openapi_surface(*, env: MiaEnv) -> dict[str, str | None]:
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     # Prod schema is mia-migrate. create_all here would delay /health/live and
-    # still would not apply SQL migrations (docs/PRODUCTION_BUILD.md §3.6).
+    # still would not apply SQL migrations (docs/OPERATIONS.md).
     if get_settings().env is not MiaEnv.PROD:
         init_db()
     yield
@@ -306,7 +306,6 @@ def health() -> dict:
         "email_send_policy": live.email_send_policy_label(),
         "automation_mode": live.automation_mode.value,
         "whatsapp_handoff_send": live.whatsapp_handoff_send,
-        "auto_reply_instagram": live.auto_reply_instagram,
         "ops": _health_ops(),
         "brain": {**brain_health(live), "corpus": brain_counts()},
         "owner_integrations": owner_integrations(live),

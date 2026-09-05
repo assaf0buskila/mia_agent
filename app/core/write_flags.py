@@ -14,7 +14,6 @@ _WRITE_FLAG_NAMES = frozenset(
         "calendar_write",
         "gmail_send",
         "meta_write",
-        "auto_reply_instagram",
     }
 )
 

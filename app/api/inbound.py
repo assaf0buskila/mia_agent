@@ -1,4 +1,3 @@
-from datetime import UTC, datetime
 from time import perf_counter
 from uuid import uuid4
 
@@ -27,9 +26,6 @@ from app.domain.ai_runs import elapsed_ms, persist_ai_run
 from app.domain.approvals import (
     apply_approval_policy,
 )
-from app.domain.attribution import INSTAGRAM_ATTRIBUTION_KEYS
-from app.domain.briefs import apply_meeting_brief_policy
-from app.domain.calendar_booking import resolve_meeting_reply
 from app.domain.conversation_kill import apply_conversation_kill_policy
 from app.domain.conversation_scope import (
     AutomationScope,
@@ -40,7 +36,6 @@ from app.domain.conversation_scope import (
 from app.domain.deals import apply_deal_policy
 from app.domain.events import (
     Channel,
-    build_attribution_event,
     build_message_in_event,
     build_message_out_event,
     persist_tool_outcome,
@@ -49,14 +44,12 @@ from app.domain.events import (
     webhook_envelope_kind,
 )
 from app.domain.followups import apply_follow_up_policy
-from app.domain.handoff import inbound_text_without_token
-from app.domain.hot_handoff import apply_hot_handoff
+from app.domain.handoff.hot import apply_hot_handoff
+from app.domain.handoff.tokens import inbound_text_without_token
 from app.domain.identity import REASON_HANDOFF_TOKEN, persist_verified_identity_link
-from app.domain.meetings import apply_meeting_policy
-from app.domain.ownership_freshness import (
-    VALID_INSTAGRAM_SENDERS,
-    conversation_ownership_outcome,
-)
+from app.domain.meetings.booking import resolve_meeting_reply
+from app.domain.meetings.briefs import apply_meeting_brief_policy
+from app.domain.meetings.state import apply_meeting_policy
 from app.domain.sales import NextAction
 from app.domain.shadow import persist_shadow_decision, should_skip_prospect_send
 from app.integrations.base import MessagePort
@@ -83,37 +76,6 @@ from app.integrations.sheets import (
     SheetsPort,
     build_sheets_port,
 )
-
-
-def _instagram_attribution_from_item(item: dict[str, str]) -> dict[str, str]:
-    return {
-        key: item[key]
-        for key in INSTAGRAM_ATTRIBUTION_KEYS
-        if key in item and item[key]
-    }
-
-
-def _persist_instagram_attribution(
-    *,
-    store: LeadStore,
-    provider: str,
-    channel: Channel,
-    lead_id: str,
-    item: dict[str, str],
-) -> None:
-    attribution = _instagram_attribution_from_item(item)
-    if not attribution:
-        return
-    store.save_canonical_event(
-        provider=provider,
-        event=build_attribution_event(
-            provider=provider,
-            channel=channel,
-            lead_id=lead_id,
-            conversation_id=_event_conversation_id(item),
-            payload=attribution,
-        ),
-    )
 
 
 def _whatsapp_automation_scope(store: LeadStore, item: dict[str, str]) -> str:
@@ -306,29 +268,6 @@ async def process_inbound_texts(
                 channel=channel, external_id=item["from"]
             )
         run_id = f"run_{uuid4().hex[:12]}"
-        if channel == Channel.INSTAGRAM:
-            _persist_instagram_attribution(
-                store=store,
-                provider=provider,
-                channel=channel,
-                lead_id=lead_id,
-                item=item,
-            )
-            sender = settings.instagram_sender
-            ownership_present = sender in VALID_INSTAGRAM_SENDERS
-            persist_tool_outcome(
-                store,
-                provider=provider,
-                channel=channel,
-                inbound_provider_event_id=f"{lead_id}:ownership",
-                conversation_id=_event_conversation_id(item),
-                lead_id=lead_id,
-                outcome=conversation_ownership_outcome(
-                    present=ownership_present,
-                    now=datetime.now(UTC),
-                ),
-                correlation_id=run_id,
-            )
         if not message_text.strip():
             store.mark_webhook(
                 provider=provider,
@@ -533,7 +472,6 @@ async def process_inbound_texts(
                 channel=channel_value,
                 automation_scope=automation_scope,
                 whatsapp_handoff_send=settings.whatsapp_handoff_send,
-                auto_reply_instagram=settings.auto_reply_instagram,
                 whatsapp_require_business_scope=settings.whatsapp_require_business_scope,
             ):
                 persist_shadow_decision(
@@ -556,8 +494,7 @@ async def process_inbound_texts(
                     store=store,
                     automation_scope=automation_scope,
                     whatsapp_handoff_send=settings.whatsapp_handoff_send,
-                    auto_reply_instagram=settings.auto_reply_instagram,
-                    whatsapp_require_business_scope=settings.whatsapp_require_business_scope,
+                        whatsapp_require_business_scope=settings.whatsapp_require_business_scope,
                 )
             send_failed = bool(reply_text) and not sent
             store.mark_webhook(

@@ -29,8 +29,8 @@ from app.capabilities.types import Principal
 from app.core.config import get_settings
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
-from app.domain.owner_brain import answer_owner, run_owner_turn
-from app.domain.owner_tasks import OwnerTaskType
+from app.domain.owner.brain import answer_owner, run_owner_turn
+from app.domain.owner.tasks import OwnerTaskType
 from app.integrations.llm_client import LlmClient
 
 MEMORY_TEXT = "Assaf runs the zorblat pipeline every Friday morning"
@@ -226,7 +226,7 @@ def test_the_graph_hits_are_what_reach_the_prompt(monkeypatch) -> None:
     This is the test that cannot pass while `answer_owner` assembles its own context —
     the planted line lives only in graph state, so a second retrieval can never find it.
     """
-    from app.domain import owner_brain
+    from app.domain.owner import brain as owner_brain
 
     planted = "PLANTED-BY-THE-RETRIEVE-NODE"
     real_retrieve = owner_brain.retrieve_owner_context

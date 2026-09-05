@@ -13,7 +13,7 @@ from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
 from app.domain.conversation_scope import TakeoverState
 from app.domain.events import Channel
-from app.domain.hot_handoff import KIND_HOT_LEAD, apply_hot_handoff, notify_owners
+from app.domain.handoff.hot import KIND_HOT_LEAD, apply_hot_handoff, notify_owners
 from app.domain.sales import FitLevel, PainLevel, SalesState
 from app.services import notifications as notifications_mod
 

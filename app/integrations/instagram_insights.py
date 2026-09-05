@@ -29,12 +29,11 @@ from app.domain.content_insights import (
 from app.domain.ownership_freshness import VALID_INSTAGRAM_SENDERS
 from app.domain.policies.freshness import overlay_stale, stamp_freshness
 from app.domain.tools import AdapterHttpError, ToolOutcome
-from app.integrations.instagram import (
-    COMPOSIO_GET_MEDIA_INSIGHTS_TOOL,
-    COMPOSIO_GET_USER_MEDIA_TOOL,
-    COMPOSIO_INSTAGRAM_VERSION,
-)
 from app.integrations.sheets import SheetsPort
+
+COMPOSIO_INSTAGRAM_VERSION = "20260819_00"
+COMPOSIO_GET_USER_MEDIA_TOOL = "INSTAGRAM_GET_IG_USER_MEDIA"
+COMPOSIO_GET_MEDIA_INSIGHTS_TOOL = "INSTAGRAM_GET_IG_MEDIA_INSIGHTS"
 
 _COMPOSIO_EXECUTE_BASE = "https://backend.composio.dev/api/v3.1/tools/execute"
 _MEDIA_LIST_FIELDS = "id,media_type,caption,timestamp,permalink"

@@ -119,11 +119,6 @@ _REGISTRY: dict[str, FreshnessPin] = {
         freshness_class=FreshnessClass.LIVE_ONLY,
         source="calendar_port",
     ),
-    "conversation_ownership": _pin(
-        "conversation_ownership",
-        freshness_class=FreshnessClass.LIVE_ONLY,
-        source="config",
-    ),
     "owner_permissions": _pin(
         "owner_permissions",
         freshness_class=FreshnessClass.LIVE_ONLY,

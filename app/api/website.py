@@ -1,6 +1,7 @@
 import asyncio
 import logging
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from time import perf_counter
 from uuid import uuid4
@@ -28,8 +29,9 @@ from app.core.config import Settings, get_settings
 from app.core.demo import demo_mode_active
 from app.core.logging import log_comm
 from app.core.public_website import public_website_guard
+from app.db.session import get_session_factory
 from app.db.store import LeadStore
-from app.domain.ai_runs import elapsed_ms
+from app.domain.ai_runs import elapsed_ms, persist_ai_run
 from app.domain.behavior import CLIENT_BEHAVIOR_KINDS, sanitize_client_behavior
 from app.domain.events import (
     Channel,
@@ -40,7 +42,12 @@ from app.domain.events import (
     stamp_correlation,
     transcription_outcome,
 )
-from app.domain.handoff import click_to_chat_url
+from app.domain.handoff.delivery import (
+    KIND_WEBSITE_HANDOFF_DELIVERY,
+    WEBSITE_HANDOFF_DELIVERY_KINDS,
+    website_ping_scope,
+)
+from app.domain.handoff.tokens import click_to_chat_url
 from app.domain.tools import AdapterHttpError
 from app.integrations.base import MessagePort
 from app.integrations.sheets import SheetsPort
@@ -63,6 +70,7 @@ from app.surfaces.site_policy import (
     PublishedFact,
     classify_site_intent,
     facts_from_knowledge_hits,
+    is_filler,
 )
 from app.surfaces.site_reply import build_site_reply_port
 
@@ -375,6 +383,31 @@ def process_website_message(
         )
         stamp_correlation(website_message_out, run_id)
         store.save_canonical_event(provider="website", event=website_message_out)
+    # The live website turn writes its own ai_run. Until now `persist_ai_run` had a
+    # single call site on the muted WhatsApp prospect path, so the table the daily
+    # brief reports on was fed by nothing a real visitor could reach.
+    persist_ai_run(
+        store,
+        run_id=run_id,
+        lead_id=None,
+        channel=Channel.WEBSITE.value,
+        # The website's real action, not a lossy translation into NextAction. The
+        # `channel` column already says which vocabulary a row is written in, and
+        # recording OFFER_WHATSAPP for what was actually `confirm_contact` would make
+        # the funnel numbers wrong in a way nobody would ever catch.
+        next_action=turn.next_action,
+        # The switch is deliberately not named on this path: it does not gate site
+        # chat, so this turn ran regardless of it and the row says so by default.
+        sales_model=settings.sales_model,
+        openai_api_key=settings.openai_api_key,
+        sales_fallback_model=settings.sales_fallback_model,
+        gemini_api_key=settings.gemini_api_key,
+        sales_gemini_model=settings.sales_gemini_model,
+        latency_ms=elapsed_ms(turn_started),
+        tokens_in=turn.tokens_in,
+        tokens_out=turn.tokens_out,
+        automation_mode=settings.automation_mode.value,
+    )
     log_comm(
         channel=Channel.WEBSITE.value,
         provider="website",
@@ -405,6 +438,10 @@ def _published_facts_for_turn(
     """Look up assafweb.com facts only when the turn needs them. Never GSC or JSON-LD."""
     if voice_failed or not text.strip():
         return (), ()
+    if is_filler(text):
+        # "תודה" / "ok" classify as `other`, which is in the trigger set below, so
+        # every acknowledgement used to buy an embedding call and two table scans.
+        return (), ()
     intent = classify_site_intent(text)
     if intent not in {"price", "need", "other", "metric", "voice_product"}:
         return (), ()
@@ -413,11 +450,13 @@ def _published_facts_for_turn(
         from app.brain.embeddings import build_embedding_port
         from app.brain.store import BrainStore
 
+        live = settings or get_settings()
         hits = retrieve_knowledge(
             BrainStore(store.session),
             query=text,
-            embedding_port=build_embedding_port(settings or get_settings()),
+            embedding_port=build_embedding_port(live),
             limit=3,
+            min_similarity=live.knowledge_min_similarity,
         )
     except Exception:
         return (), ()
@@ -441,7 +480,43 @@ async def _maybe_ping_owner(
         return False
     if not force and not session.awaiting_ping and not session.confirmed:
         return False
-    sent = await ping_assaf_async(settings, owner_port, session)
+    # `session.pinged` above is a process-local hint, not a guarantee: it dies with the
+    # task and two workers hold different copies of it. The durable claim below is what
+    # actually makes one website handoff produce one delivery per owner. This runs as a
+    # background task, after the request's session is gone, so it opens its own.
+    db = get_session_factory()()
+    try:
+        store = LeadStore(db)
+        lead_id, notification_key = website_ping_scope(session_id)
+
+        def claim(recipient_id: str) -> bool:
+            won = store.try_claim_owner_notification_recipient_compatible(
+                kind=KIND_WEBSITE_HANDOFF_DELIVERY,
+                compatible_kinds=WEBSITE_HANDOFF_DELIVERY_KINDS,
+                lead_id=lead_id,
+                notification_key=notification_key,
+                recipient_id=recipient_id,
+                claimed_at=datetime.now(UTC).isoformat(),
+            )
+            # Commit before sending. An uncommitted claim is invisible to the other
+            # worker, which would then send the same ping.
+            db.commit()
+            return won
+
+        def release(recipient_id: str) -> None:
+            store.release_owner_notification_recipient_claim(
+                kind=KIND_WEBSITE_HANDOFF_DELIVERY,
+                lead_id=lead_id,
+                notification_key=notification_key,
+                recipient_id=recipient_id,
+            )
+            db.commit()
+
+        sent = await ping_assaf_async(
+            settings, owner_port, session, claim=claim, release=release
+        )
+    finally:
+        db.close()
     if sent:
         session.pinged = True
         session.awaiting_ping = False

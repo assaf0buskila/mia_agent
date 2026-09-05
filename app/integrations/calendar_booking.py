@@ -20,7 +20,7 @@ import httpx
 from pydantic import BaseModel, field_validator, model_validator
 
 from app.core.config import Settings
-from app.domain.meeting_slots import sanitize_event_id, sanitize_meet_link, to_utc_aware
+from app.domain.meetings.slots import sanitize_event_id, sanitize_meet_link, to_utc_aware
 from app.domain.tools import AdapterHttpError
 from app.integrations.calendar import COMPOSIO_GOOGLECALENDAR_VERSION
 

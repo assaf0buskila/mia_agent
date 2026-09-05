@@ -7,8 +7,8 @@ from app.api.inbound import process_inbound_texts
 from app.db.models import CanonicalEventRow, OwnerTaskRow
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
-from app.domain.briefs import apply_meeting_brief_policy
 from app.domain.events import Channel, EventType
+from app.domain.meetings.briefs import apply_meeting_brief_policy
 from app.domain.sales import FitLevel, NextAction, SalesState
 from app.integrations.base import RecordingMessagePort
 from app.integrations.calendar import DisabledCalendarPort

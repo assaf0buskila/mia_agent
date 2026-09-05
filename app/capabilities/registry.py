@@ -41,7 +41,7 @@ CAPABILITIES: tuple[CapabilitySpec, ...] = (
     spec(MAIL_SEARCH, Sensitivity.READ, _OWNER),
     spec(MAIL_READ, Sensitivity.READ, _OWNER),
     # A draft is deliberately NOT approval-gated: it leaves the building only via an
-    # explicit Approve plus MIA_GMAIL_SEND (app/domain/gmail_drafts.py). Gating the
+    # explicit Approve plus MIA_GMAIL_SEND (app/domain/gmail/drafts.py). Gating the
     # draft itself would gate the safe half and change nothing about the risky half.
     # WRITE already implies confirmation_required=False, so no override is needed --
     # the old explicit `confirmation_required=False` read like a deliberate bypass.

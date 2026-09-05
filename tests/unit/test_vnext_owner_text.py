@@ -25,8 +25,8 @@ from app.brain.store import BrainStore
 from app.capabilities.types import GraphName, Principal
 from app.core.config import Settings
 from app.db.session import get_session_factory, init_db
-from app.domain import owner_brain
-from app.domain.owner_brain import (
+from app.domain.owner import brain as owner_brain
+from app.domain.owner.brain import (
     GRAPH_FAILURE_REASON,
     GRAPH_NO_RESULT_REASON,
     OwnerBrainResult,

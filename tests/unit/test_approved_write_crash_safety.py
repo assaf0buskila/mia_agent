@@ -16,14 +16,14 @@ from app.domain.approvals import (
     payload_hash,
 )
 from app.domain.events import Channel
-from app.domain.gmail_drafts import execute_approved_gmail_send
-from app.domain.owner_calendar_writes import (
+from app.domain.gmail.drafts import execute_approved_gmail_send
+from app.domain.owner.calendar_writes import (
     ACTION_CALENDAR_CREATE,
     apply_owner_calendar_change_request,
     decide_calendar_change,
     execute_approved_calendar_change,
 )
-from app.domain.owner_linkedin_writes import (
+from app.domain.owner.linkedin_writes import (
     _digest,
     _parameters,
     execute_approved_linkedin_write,

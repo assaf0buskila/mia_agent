@@ -9,15 +9,15 @@ static hello without ever reaching the model.
 A unit test cannot prove the model *chooses* the right tool for a given phrase (that
 is verified against real CloudWatch traces). What is deterministic and pinned here is
 routing: whether `classify_owner_task` intercepts the phrase into a
-deterministic-only intent (`app.domain.owner_brain.DETERMINISTIC_TASK_TYPES`, gated by
+deterministic-only intent (`app.domain.owner.brain.DETERMINISTIC_TASK_TYPES`, gated by
 `agent_allowed_for`) instead of letting the agent answer it.
 """
 
 from __future__ import annotations
 
 import pytest
-from app.domain.owner_brain import agent_allowed_for
-from app.domain.owner_tasks import (
+from app.domain.owner.brain import agent_allowed_for
+from app.domain.owner.tasks import (
     OwnerTaskType,
     ack_for_owner_task,
     classify_owner_task,

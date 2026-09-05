@@ -12,16 +12,16 @@ from app.core.config import Settings
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
 from app.domain.approvals import ACTION_CALENDAR_CREATE
-from app.domain.calendar_write_gate import (
+from app.domain.content_insights import ContentInsight
+from app.domain.events import Channel
+from app.domain.meetings.write_gate import (
     ASK_ASSAF,
     assess_calendar_write,
     looks_like_meeting,
     looks_like_weather,
     near_tel_aviv,
 )
-from app.domain.content_insights import ContentInsight
-from app.domain.events import Channel
-from app.domain.owner_calendar_writes import apply_owner_calendar_change_request
+from app.domain.owner.calendar_writes import apply_owner_calendar_change_request
 from app.domain.two_state import (
     FORBIDDEN_OWNER_TOOLS,
     OWNER_HOUSE_TOOLS,

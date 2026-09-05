@@ -117,7 +117,7 @@ def prepare_whatsapp_inbound(
     require_business_scope: bool,
 ) -> tuple[bool, str | None, bool, str]:
     """Return (allowed, handoff_lead_id, fresh_handoff, message_text)."""
-    from app.domain.handoff import extract_handoff_token, inbound_text_without_token
+    from app.domain.handoff.tokens import extract_handoff_token, inbound_text_without_token
 
     existing_scope = existing_whatsapp_scope(store, external_id)
     if existing_scope in {

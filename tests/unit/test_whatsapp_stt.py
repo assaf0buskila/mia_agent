@@ -14,7 +14,7 @@ from app.db.models import CanonicalEventRow
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
 from app.domain.commitments import parse_due_at
-from app.domain.owner_tasks import ack_for_owner_task, classify_owner_task
+from app.domain.owner.tasks import ack_for_owner_task, classify_owner_task
 from app.domain.tools import AdapterHttpError
 from app.integrations.base import RecordingMessagePort
 from app.integrations.transcribe import (

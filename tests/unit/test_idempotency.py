@@ -8,9 +8,9 @@ from app.core.risk import RiskLevel
 from app.db.models import CanonicalEventRow, IdempotencyRow, WebhookEventRow
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
-from app.domain.calendar_booking import _persist_meeting_booked_event
 from app.domain.events import Channel, EventType
 from app.domain.idempotency import ALLOWLISTED_OPERATION_SCOPES, IdempotencyStore
+from app.domain.meetings.booking import _persist_meeting_booked_event
 from app.domain.policies.execution_policy import ExecutionMode, policy_for
 from sqlalchemy import select
 

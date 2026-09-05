@@ -13,7 +13,7 @@ Two stages, both portable across SQLite and PostgreSQL because both run in Pytho
    and poignancy are meaningless for a scraped web page, so knowledge chunks stop at
    stage 1.
 
-Sources for every constant are in docs/BRAIN_ARCHITECTURE.md.
+Sources for every constant are in docs/ARCHITECTURE.md (Brain).
 """
 
 from __future__ import annotations
@@ -229,8 +229,17 @@ def rank_knowledge(
     candidates: list[dict[str, object]],
     similarity: dict[str, float],
     limit: int,
+    min_similarity: float = 0.0,
 ) -> list[RetrievedItem]:
-    """Stage 1 only. Recency and poignancy do not apply to ingested documents."""
+    """Stage 1 only. Recency and poignancy do not apply to ingested documents.
+
+    `min_similarity` is an evidence floor applied to the RAW cosine, not to `score`.
+    It has to be: `min_max_normalize` rescales the candidate set so the best hit is
+    always 1.0, however weak it actually is, so the fused score can rank hits but can
+    never answer "is any of this about the question". With a small corpus something is
+    otherwise always returned and then rendered to the model as fact. A floor of 0.0
+    keeps every hit, which is the historical behaviour.
+    """
     if not candidates or limit <= 0:
         return []
     documents = [(str(item["id"]), str(item.get("text", ""))) for item in candidates]
@@ -245,6 +254,9 @@ def rank_knowledge(
         item = by_id.get(doc_id)
         if item is None:
             continue
+        raw = similarity.get(doc_id, 0.0)
+        if raw < min_similarity:
+            continue
         hits.append(
             RetrievedItem(
                 item_id=doc_id,
@@ -252,7 +264,7 @@ def rank_knowledge(
                 origin=str(item.get("origin", "knowledge")),
                 label=str(item.get("label", "")),
                 score=score,
-                similarity=similarity.get(doc_id, 0.0),
+                similarity=raw,
                 source_ref=str(item.get("source_ref", "")),
                 category=str(item.get("category", "")),
             )

@@ -18,11 +18,6 @@ from app.db.models import (
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
 from app.domain.approvals import apply_approval_policy
-from app.domain.calendar_booking import (
-    BookingResultKind,
-    _persist_meeting_booked_event,
-    attempt_meeting_booking,
-)
 from app.domain.events import (
     Channel,
     EventType,
@@ -31,13 +26,22 @@ from app.domain.events import (
 )
 from app.domain.followups import apply_follow_up_policy
 from app.domain.idempotency import ALLOWLISTED_OPERATION_SCOPES
-from app.domain.meeting_changes import (
+from app.domain.meetings.booking import (
+    BookingResultKind,
+    _persist_meeting_booked_event,
+    attempt_meeting_booking,
+)
+from app.domain.meetings.changes import (
     CANCELLATION_REQUESTED_REPLY,
     MeetingChangeKind,
     resolve_booked_meeting_change,
 )
-from app.domain.meeting_slots import compute_booking_key
-from app.domain.meetings import STATUS_BOOKED, STATUS_CANCELLATION_REQUESTED, apply_meeting_policy
+from app.domain.meetings.slots import compute_booking_key
+from app.domain.meetings.state import (
+    STATUS_BOOKED,
+    STATUS_CANCELLATION_REQUESTED,
+    apply_meeting_policy,
+)
 from app.domain.sales import FitLevel, NextAction, SalesState
 from app.integrations.calendar import FakeCalendarPort, TimeSlot
 from app.integrations.calendar_booking import CalendarBookingEvent, FakeCalendarBookingPort

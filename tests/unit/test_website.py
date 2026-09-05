@@ -6,7 +6,7 @@ from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
 from app.domain.attribution import sanitize_attribution
 from app.domain.events import Channel
-from app.domain.handoff import click_to_chat_url
+from app.domain.handoff.tokens import click_to_chat_url
 from app.domain.sales import NextAction, select_next_action
 from app.graph.orchestrator import build_graph
 from app.graph.state import empty_state
@@ -500,8 +500,10 @@ def test_website_message_pings_assaf_after_contact(monkeypatch) -> None:
     finally:
         app.dependency_overrides.pop(get_telegram_port, None)
     assert port.sent
-    assert "שיחה מהאתר" in port.sent[0].text
+    assert "ליד חדש מהאתר" in port.sent[0].text
     assert "0501234567" in port.sent[0].text
+    # The brief tells Assaf what to do, not just what was said.
+    assert "המלצה:" in port.sent[0].text
 
 
 def test_website_post_page_viewed_accepted_and_idempotent() -> None:

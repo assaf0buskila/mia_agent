@@ -7,7 +7,7 @@ from app.db.models import CanonicalEventRow, SeoRecommendationRow
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
 from app.domain.events import Channel
-from app.domain.owner_tasks import OwnerTaskType, ack_for_owner_task, classify_owner_task
+from app.domain.owner.tasks import OwnerTaskType, ack_for_owner_task, classify_owner_task
 from app.domain.seo import enrich_seo_ack
 from app.integrations.base import RecordingMessagePort
 from app.integrations.ga4 import DisabledGa4Port, FakeGa4Port, Ga4PivotRow

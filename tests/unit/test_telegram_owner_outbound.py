@@ -26,9 +26,9 @@ from app.domain.approvals import (
     payload_hash,
 )
 from app.domain.events import Channel
-from app.domain.owner_brain import OwnerBrainResult
-from app.domain.owner_callbacks import approval_token
-from app.domain.owner_tasks import OwnerTaskType
+from app.domain.owner.brain import OwnerBrainResult
+from app.domain.owner.callbacks import approval_token
+from app.domain.owner.tasks import OwnerTaskType
 from app.integrations.base import RecordingMessagePort
 from app.integrations.gmail import FakeGmailPort
 from app.integrations.telegram_format import approval_keyboard
@@ -554,7 +554,7 @@ def test_gmail_invalid_callback_never_sends(monkeypatch, bad_field: str) -> None
     ],
 )
 def test_approval_keyboard_callback_rejects_misbinding(field: str, value: str) -> None:
-    from app.domain.owner_callbacks import resolve_owner_callback
+    from app.domain.owner.callbacks import resolve_owner_callback
 
     init_db()
     db = get_session_factory()()

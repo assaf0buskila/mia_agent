@@ -9,7 +9,7 @@ from pydantic import BaseModel, field_validator
 from app.core.errors import PolicyDenied
 from app.core.risk import RiskAction, RiskLevel, assert_allowed
 from app.domain.followups import follow_up_due_on
-from app.domain.owner_tasks import OwnerTaskDecision, OwnerTaskType
+from app.domain.owner.tasks import OwnerTaskDecision, OwnerTaskType
 
 TRIGGER_NONE = "none"
 TRIGGER_DUE_DATE = "due_date"

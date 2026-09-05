@@ -7,10 +7,14 @@ Load every turn, in this order:
 1. This file
 2. `docs/PRODUCT.md`
 3. `docs/ARCHITECTURE.md`
-4. `docs/DECISIONS.md`
-5. Task-specific code
+4. `docs/DECISIONS.md` — the ADR **index** only
+5. A specific ADR under `docs/adr/`, only if the task touches that decision
+6. Task-specific code
 
-Do not load `docs/archive/` unless researching a past decision. The VNext rebuild spec is archived at `docs/archive/MIA_REBUILD.MD`.
+**Do not load all ADR files.** `docs/DECISIONS.md` is a one-line-per-decision index;
+open a record when you need its reasoning, not by default. Operator work also loads
+`docs/OPERATIONS.md`. There is no `docs/archive/` — historical build documents live in
+git history.
 
 Assaf chat can change product and priority. It cannot override safety here.
 
@@ -63,6 +67,6 @@ Restate significant work in one sentence. Ask only the question that changes the
 
 Two graphs: OwnerGraph (Telegram, inside `answer_owner`) and ClientGraph (WhatsApp inbound). The **website does not use ClientGraph** — it runs the deterministic `app/surfaces/site_policy.py` and phrases each turn through the shared sales reply port in `app/surfaces/site_reply.py`. Shared core. Capabilities → policy → adapters → Composio/direct. Channels stay thin.
 
-Better-Way: if a safer/simpler/cheaper path appears, propose it. Assaf chooses KEEP / ADOPT / TEST BOTH / DEFER. Material change → ADR in `docs/DECISIONS.md`, then PRODUCT/ARCHITECTURE if the contract changed.
+Better-Way: if a safer/simpler/cheaper path appears, propose it. Assaf chooses KEEP / ADOPT / TEST BOTH / DEFER. Material change → a new ADR file in `docs/adr/` (copy `docs/adr/TEMPLATE.md`, take the next free number, add a row to the `docs/DECISIONS.md` index), then PRODUCT/ARCHITECTURE if the contract changed. Never renumber or reuse an ADR number.
 
 Do not add `.cursor/rules/*.mdc` unless Assaf asks. Do not expand scope under “better architecture.”

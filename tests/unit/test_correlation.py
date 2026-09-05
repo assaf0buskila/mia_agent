@@ -224,42 +224,6 @@ def test_website_message_in_and_out_share_correlation_without_ai_run() -> None:
         db.close()
 
 
-@pytest.mark.asyncio
-async def test_instagram_prospect_conversation_ownership_shares_run_id(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("MIA_INSTAGRAM_SENDER", "direct")
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        port = RecordingMessagePort()
-        sender_id = "ig.corr.prospect.9001"
-        event_id = "ig.corr.prospect.msg.1"
-        await process_inbound_texts(
-            provider="instagram",
-            channel=Channel.INSTAGRAM,
-            items=[{"id": event_id, "from": sender_id, "text": VISITOR_TEXT}],
-            store=store,
-            port=port,
-            kill_switch=False,
-        )
-        db.commit()
-        in_row = store.get_canonical_event(
-            provider="instagram", provider_event_id=event_id
-        )
-        assert in_row is not None
-        assert in_row.correlation_id.startswith("run_")
-        _, lead_id = store.open_channel_lead(
-            channel=Channel.INSTAGRAM, external_id=sender_id
-        )
-        ownership = store.get_tool_run(f"{lead_id}:ownership:tool:conversation_ownership")
-        assert ownership is not None
-        assert ownership.correlation_id == in_row.correlation_id
-    finally:
-        db.close()
-
-
 def test_events_module_has_no_message_port_import() -> None:
     events_module = importlib.import_module("app.domain.events")
     source = inspect.getsource(events_module)

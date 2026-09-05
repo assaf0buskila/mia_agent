@@ -14,7 +14,7 @@ import httpx
 import pytest
 from app.capabilities.types import Principal
 from app.core.config import Settings, get_settings
-from app.domain.owner_brain import build_agent_client
+from app.domain.owner.brain import build_agent_client
 from app.integrations.llm_client import LlmClient, LlmError, LlmModelChain
 
 
@@ -158,8 +158,8 @@ def test_fallback_reason_is_recorded_so_the_failure_is_visible() -> None:
     from app.brain.store import BrainStore
     from app.db.session import get_session_factory, init_db
     from app.db.store import LeadStore
-    from app.domain.owner_brain import answer_owner
-    from app.domain.owner_tasks import OwnerTaskType
+    from app.domain.owner.brain import answer_owner
+    from app.domain.owner.tasks import OwnerTaskType
 
     init_db()
     session = get_session_factory()()
@@ -202,8 +202,8 @@ def test_a_deterministic_intent_reports_that_reason_not_a_failure() -> None:
     from app.brain.store import BrainStore
     from app.db.session import get_session_factory, init_db
     from app.db.store import LeadStore
-    from app.domain.owner_brain import answer_owner
-    from app.domain.owner_tasks import OwnerTaskType
+    from app.domain.owner.brain import answer_owner
+    from app.domain.owner.tasks import OwnerTaskType
 
     init_db()
     session = get_session_factory()()
@@ -259,7 +259,7 @@ def test_gemini_is_the_last_resort_in_the_agent_chain() -> None:
 
 
 def test_extraction_also_falls_over_to_gemini() -> None:
-    from app.domain.owner_brain import build_extraction_client
+    from app.domain.owner.brain import build_extraction_client
 
     chain = build_extraction_client(_settings_with_both())
     assert chain.models == ("openai-extract", "gemini-3.7-flash")
@@ -276,7 +276,7 @@ def test_gemini_is_skipped_without_a_key_or_a_model() -> None:
 
 def test_gemini_client_targets_the_openai_compat_endpoint() -> None:
     """The compat endpoint takes the identical nested `tools` shape, so the loop is unchanged."""
-    from app.domain.owner_brain import _gemini_clients
+    from app.domain.owner.brain import _gemini_clients
     from app.integrations.llm_client import GEMINI_CHAT_URL
 
     settings = _settings_with_both()

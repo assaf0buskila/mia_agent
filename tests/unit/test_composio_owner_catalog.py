@@ -14,8 +14,8 @@ from app.capabilities.registry import (
 from app.capabilities.types import Principal
 from app.core.errors import PermissionDenied
 from app.domain.events import Channel
-from app.domain.owner_callbacks import resolve_owner_callback_result
-from app.domain.owner_linkedin_writes import (
+from app.domain.owner.callbacks import resolve_owner_callback_result
+from app.domain.owner.linkedin_writes import (
     MAX_LINKEDIN_APPROVAL_PARAMETERS_BYTES,
     propose_linkedin_write,
 )

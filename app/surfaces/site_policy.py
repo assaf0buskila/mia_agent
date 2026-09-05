@@ -365,6 +365,41 @@ def append_burst(
     return nxt, stitch_burst(nxt)
 
 
+# A bare acknowledgement. Deliberately exact-match only: "תודה" is filler, but
+# "תודה, כמה עולה אתר?" is a price question and must still reach retrieval. Kept
+# narrow on purpose -- words that can carry meaning inside the sales ladder ("כן",
+# "בסדר", "מעולה") are NOT here, because skipping those would change what Mia asks
+# next, and this is a cost gate, not a conversation gate.
+_FILLER = frozenset(
+    {
+        "thanks",
+        "thank you",
+        "thanks a lot",
+        "many thanks",
+        "ty",
+        "ok",
+        "okay",
+        "k",
+        "got it",
+        "תודה",
+        "תודה רבה",
+        "אוקיי",
+        "אוקי",
+        "סבבה",
+    }
+)
+_FILLER_TRIM = " \t\n.!?,;:-–—…\"'"
+
+
+def is_filler(text: str) -> bool:
+    """True when the whole message is a bare acknowledgement worth no retrieval.
+
+    Embeddings plus two table scans for "thanks" is money spent to answer nothing.
+    """
+    stripped = text.strip().strip(_FILLER_TRIM).strip().casefold()
+    return bool(stripped) and stripped in _FILLER
+
+
 def classify_site_intent(text: str) -> str:
     lowered = text.lower()
     blob = f"{text} {lowered}"

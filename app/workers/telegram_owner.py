@@ -278,7 +278,7 @@ def _describe_owner_image(payload: bytes, mime: str) -> str:
     from base64 import b64encode
 
     from app.core.config import get_settings
-    from app.domain.owner_brain import build_agent_client
+    from app.domain.owner.brain import build_agent_client
 
     settings = get_settings()
     client = build_agent_client(settings)

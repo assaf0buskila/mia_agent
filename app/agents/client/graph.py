@@ -17,9 +17,9 @@ from app.capabilities.types import GraphName, Principal
 from app.core.config import Settings
 from app.core.errors import MiaError, PermissionDenied
 from app.db.store import LeadStore
-from app.domain.hot_handoff import apply_hot_handoff
-from app.domain.owner_notification_delivery import WEBSITE_HANDOFF_DELIVERY_KINDS
-from app.domain.website_handoff_brief import format_website_human_handoff_brief
+from app.domain.handoff.delivery import WEBSITE_HANDOFF_DELIVERY_KINDS
+from app.domain.handoff.hot import apply_hot_handoff
+from app.domain.handoff.website_brief import format_website_human_handoff_brief
 from app.graph.orchestrator import build_graph
 from app.graph.replies import (
     HANDOFF_OWNER_NOTIFIED,

@@ -15,16 +15,16 @@ from app.db.store import LeadStore
 from app.domain.approvals import ACTION_PROPOSAL_HANDOFF, ACTION_WEBSITE_EDIT
 from app.domain.events import Channel
 from app.domain.memory import ROLE_MIA, ConversationTurn
-from app.domain.owner_followups import (
+from app.domain.owner.followups import (
     needs_data_anchor,
     resolve_owner_reference,
     routed_owner_text,
 )
-from app.domain.owner_reads import (
+from app.domain.owner.reads import (
     format_pending_approvals_ack,
     format_website_conversations_ack,
 )
-from app.domain.owner_tasks import (
+from app.domain.owner.tasks import (
     OwnerTaskType,
     ack_for_owner_task,
     classify_owner_task,

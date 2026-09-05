@@ -56,6 +56,7 @@ from app.integrations.llm_client import (
     tool_result_message,
 )
 from app.tools.registries.owner_tools import (
+    OUTCOME_TIMEOUT,
     ToolContext,
     execute_tool,
     tool_definitions,
@@ -282,7 +283,14 @@ def _run_tool_with_timeout(name: str, arguments: dict[str, Any], ctx: ToolContex
     if name in SLOW_HOUSE_TOOLS:
         wait_s = TOOL_TIMEOUT_SECONDS + TOOL_RECOVERY_SECONDS
     if not done.wait(timeout=wait_s):
-        return ToolResult(ok=True, text=STILL_CHECKING)
+        # Not a success. The owner still hears "still checking", but a run that timed
+        # out is recorded as a timeout, never counted among the tools that worked.
+        return ToolResult(
+            ok=False,
+            text=STILL_CHECKING,
+            error=OUTCOME_TIMEOUT,
+            outcome=OUTCOME_TIMEOUT,
+        )
     return box[0]
 
 
@@ -321,6 +329,9 @@ class AgentStep(NamedTuple):
     tool: str
     ok: bool
     detail: str
+    # success | failure | timeout | partial. Defaulted so existing callers that only
+    # know ok/detail keep working, but the real tool loop always fills it in.
+    outcome: str = ""
 
 
 class AgentOutcome(NamedTuple):
@@ -339,6 +350,9 @@ class AgentOutcome(NamedTuple):
     completion: str = ""
     # Durable approvals created by successful tool calls in this exact turn.
     approval_ids: tuple[str, ...] = ()
+    # Subset of tools_failed that ran out of time rather than returning an error. A
+    # timeout is not a failure of the provider and needs its own line in telemetry.
+    tools_timed_out: tuple[str, ...] = ()
 
     def used_any_tool(self) -> bool:
         return bool(self.tools_used)
@@ -403,6 +417,7 @@ def run_owner_agent(
     steps: list[AgentStep] = []
     tools_used: list[str] = []
     tools_failed: list[str] = []
+    tools_timed_out: list[str] = []
     tokens_in = 0
     tokens_out = 0
     total_tool_calls = 0
@@ -416,7 +431,12 @@ def run_owner_agent(
         prefetch = _run_tool_with_timeout("crm_search", {"query": owner_message}, ctx)
         snippet = (prefetch.text or prefetch.error or "").strip()
         steps.append(
-            AgentStep(tool="crm_search", ok=prefetch.ok, detail=prefetch.error or "ok")
+            AgentStep(
+                tool="crm_search",
+                ok=prefetch.ok,
+                detail=prefetch.error or "ok",
+                outcome=prefetch.outcome_label(),
+            )
         )
         if prefetch.ok:
             tools_used.append("crm_search")
@@ -430,6 +450,8 @@ def run_owner_agent(
             )
         else:
             tools_failed.append("crm_search")
+            if prefetch.outcome_label() == OUTCOME_TIMEOUT:
+                tools_timed_out.append("crm_search")
     messages = build_messages(
         owner_message=spoken,
         history=history,
@@ -453,6 +475,7 @@ def run_owner_agent(
             tuple(tools_failed),
             completion,
             tuple(approval_ids),
+            tuple(tools_timed_out),
         )
 
     max_steps = max(1, max_steps)
@@ -475,6 +498,9 @@ def run_owner_agent(
                 tools=None if force_prose else available,
                 tool_choice=None if force_prose else "auto",
                 parallel_tool_calls=None if force_prose else True,
+                max_completion_tokens=(
+                    ctx.settings.max_completion_tokens_owner or None
+                ),
             )
         except LlmError as exc:
             return finish(
@@ -578,7 +604,15 @@ def run_owner_agent(
                 continue
             seen_calls.add(key)
             result = _run_tool_with_timeout(call.name, call.arguments, ctx)
-            steps.append(AgentStep(tool=call.name, ok=result.ok, detail=result.error or "ok"))
+            outcome = result.outcome_label()
+            steps.append(
+                AgentStep(
+                    tool=call.name,
+                    ok=result.ok,
+                    detail=result.error or "ok",
+                    outcome=outcome,
+                )
+            )
             if result.ok:
                 tools_used.append(call.name)
                 snippet = (result.text or result.error or "").strip()
@@ -592,6 +626,13 @@ def run_owner_agent(
                         blocked_tools.add(call.name)
             else:
                 tools_failed.append(call.name)
+                if outcome == OUTCOME_TIMEOUT:
+                    tools_timed_out.append(call.name)
+                # A timeout carries honest copy even though it failed. Keep it in the
+                # reports so a silent model can still say what Mia was doing.
+                snippet = (result.text or "").strip()
+                if snippet:
+                    tool_reports.append(f"{call.name}: {snippet[:400]}")
             messages.append(tool_result_message(call.call_id, result.payload()))
     # Unreachable in practice: the final iteration always sets `last_step`, which drops
     # tools and forces the `not response.tool_calls` branch above to return. Kept as a

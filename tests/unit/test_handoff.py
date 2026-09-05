@@ -8,7 +8,7 @@ from app.db.models import ChannelIdentityRow, HandoffTokenRow, IdentityLinkRow
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
 from app.domain.events import Channel
-from app.domain.handoff import (
+from app.domain.handoff.tokens import (
     HANDOFF_COMPOSE_HINT_HE,
     click_to_chat_digits,
     click_to_chat_url,

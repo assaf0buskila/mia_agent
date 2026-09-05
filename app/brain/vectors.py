@@ -8,7 +8,7 @@ pgvector is deliberately not used. Its SQLAlchemy type is PostgreSQL-dialect-onl
 would mean the test suite exercises a different retrieval path than production. pgvector
 also documents that exact search "provides perfect recall" and that an index trades recall
 for speed — at this corpus size (single owner, a few thousand rows) there is no speed
-problem to trade recall for. See docs/BRAIN_ARCHITECTURE.md and ADR-026.
+problem to trade recall for. See docs/ARCHITECTURE.md (Brain) and ADR-026.
 
 Vectors are L2-normalized on write, so cosine similarity is a plain dot product.
 Measured: 3000 x 1536 exact search is ~170 ms in pure stdlib, against an LLM call that

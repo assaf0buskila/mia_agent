@@ -9,9 +9,9 @@ from app.capabilities.types import Principal
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
 from app.domain.events import Channel
-from app.domain.meeting_availability import is_workday_local
-from app.domain.owner_calendar import apply_owner_calendar
-from app.domain.owner_tasks import ack_for_owner_task, classify_owner_task
+from app.domain.meetings.availability import is_workday_local
+from app.domain.owner.calendar import apply_owner_calendar
+from app.domain.owner.tasks import ack_for_owner_task, classify_owner_task
 from app.domain.sales import FitLevel, NextAction, PainLevel, SalesState
 from app.graph.replies import WEBSITE_REPLIES
 from app.integrations.base import RecordingMessagePort

@@ -523,6 +523,9 @@ class AiRunRow(Base):
     automation_mode: Mapped[str] = mapped_column(String(32), default="")
     prompt_version: Mapped[str] = mapped_column(String(32), default="")
     decision_confidence: Mapped[str] = mapped_column(String(16), default="")
+    # UTC ISO-8601. Empty on rows written before the column existed, which puts them
+    # outside every day window -- correct, because nobody knows when they ran.
+    occurred_at: Mapped[str] = mapped_column(String(32), default="", index=True)
 
 
 class ShadowDecisionRow(Base):

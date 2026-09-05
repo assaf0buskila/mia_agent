@@ -13,7 +13,6 @@ from app.domain.policies.freshness import (
 
 _LIVE_ONLY_FACTS = (
     "calendar_availability",
-    "conversation_ownership",
     "owner_permissions",
     "opt_out_status",
 )

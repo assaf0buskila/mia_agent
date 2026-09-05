@@ -10,14 +10,14 @@ from app.core.config import Settings, get_settings
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
 from app.domain.events import Channel
-from app.domain.gmail_drafts import (
+from app.domain.gmail.drafts import (
     apply_gmail_send_decision,
     apply_owner_gmail_draft,
     execute_approved_gmail_send,
     parse_gmail_draft_request,
     parse_gmail_send_intent,
 )
-from app.domain.owner_tasks import OwnerTaskType, classify_owner_task
+from app.domain.owner.tasks import OwnerTaskType, classify_owner_task
 from app.integrations.gmail import (
     COMPOSIO_CREATE_DRAFT_TOOL,
     COMPOSIO_FETCH_EMAILS_TOOL,

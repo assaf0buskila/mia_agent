@@ -11,7 +11,7 @@ from app.domain.approvals import (
     RESOURCE_CALENDAR,
 )
 from app.domain.events import Channel
-from app.domain.owner_calendar_writes import (
+from app.domain.owner.calendar_writes import (
     apply_owner_calendar_change_request,
     decide_calendar_change,
     execute_approved_calendar_change,

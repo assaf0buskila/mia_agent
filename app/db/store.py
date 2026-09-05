@@ -97,7 +97,7 @@ from app.domain.events import (
     stamp_payload_version,
 )
 from app.domain.followups import ALLOWLISTED_SEND_REASONS, STATUS_CANCELLED, STATUS_PENDING
-from app.domain.handoff import generate_handoff_token, hash_handoff_token
+from app.domain.handoff.tokens import generate_handoff_token, hash_handoff_token
 from app.domain.idempotency import (
     ALLOWLISTED_OPERATION_SCOPES,
     OPERATION_TTL_SECONDS,
@@ -112,7 +112,7 @@ from app.domain.lead_reviews import (
     ALLOWLISTED_MEETING_STATUS,
     ALLOWLISTED_NEXT_ACTION,
 )
-from app.domain.meeting_slots import (
+from app.domain.meetings.slots import (
     normalize_scheduled_at_utc,
     offered_slots_from_json,
     offered_slots_to_json,
@@ -120,7 +120,7 @@ from app.domain.meeting_slots import (
     sanitize_meet_link,
     validate_offered_slots,
 )
-from app.domain.meetings import (
+from app.domain.meetings.state import (
     ALLOWLISTED_MEETING_TYPES,
     ALLOWLISTED_STATUSES,
     MEETING_TYPE_INTRO_CALL,
@@ -694,6 +694,7 @@ class LeadStore:
         automation_mode: str = "",
         prompt_version: str = "",
         decision_confidence: str = "",
+        occurred_at: str = "",
     ) -> None:
         existing = self.get_ai_run(run_id)
         if existing is not None:
@@ -715,6 +716,7 @@ class LeadStore:
                 automation_mode=sanitize_automation_mode(automation_mode),
                 prompt_version=sanitize_prompt_version(prompt_version),
                 decision_confidence=sanitize_decision_confidence(decision_confidence),
+                occurred_at=(occurred_at or datetime.now(UTC).isoformat())[:32],
             )
         )
         self.session.flush()
@@ -1730,7 +1732,7 @@ class LeadStore:
             return
         if decision != DECISION_PENDING or not resource_id or len(resource_id) > 80:
             return
-        from app.domain.owner_linkedin_writes import linkedin_parameters_within_bound
+        from app.domain.owner.linkedin_writes import linkedin_parameters_within_bound
 
         if not linkedin_parameters_within_bound(proposed_parameters):
             return
@@ -1773,7 +1775,7 @@ class LeadStore:
             return
         if decision != DECISION_PENDING or not resource_id or len(resource_id) > 80:
             return
-        from app.domain.owner_composio_writes import composio_parameters_within_bound
+        from app.domain.owner.composio_writes import composio_parameters_within_bound
 
         if not composio_parameters_within_bound(proposed_parameters):
             return
@@ -3407,17 +3409,16 @@ class LeadStore:
         return row.lead_id
 
     def aggregate_ai_runs(self, *, occurred_from: str, occurred_to: str) -> AiRunAggregate:
-        """All-time aggregate over persisted `AiRunRow`s.
+        """Aggregate persisted `AiRunRow`s inside one day window.
 
-        `occurred_from` / `occurred_to` are accepted for interface parity with the
-        other owner-brief aggregate reads (`count_canonical_events`,
-        `count_behavior_events`) but are NOT applied as a filter: `AiRunRow` has no
-        timestamp column, so there is nothing to filter on. See
-        `app/domain/engine_health.py` for the full explanation. Percentiles are
-        computed in Python over the fetched rows so behavior is identical on
-        SQLite and Postgres (no database-specific percentile function).
+        The window is real now. It used to be accepted and ignored, because the table
+        had no timestamp, so every "today" number on the owner brief was an all-time
+        total. Rows written before `occurred_at` existed carry an empty string and so
+        fall outside every window -- correct, since nobody knows when they ran.
+
+        Percentiles are computed in Python over the fetched rows so behavior is
+        identical on SQLite and Postgres (no database-specific percentile function).
         """
-        _ = occurred_from, occurred_to
         rows = self.session.execute(
             select(
                 AiRunRow.model,
@@ -3425,6 +3426,9 @@ class LeadStore:
                 AiRunRow.tokens_in,
                 AiRunRow.tokens_out,
                 AiRunRow.cost_usd,
+            ).where(
+                AiRunRow.occurred_at >= occurred_from,
+                AiRunRow.occurred_at < occurred_to,
             )
         ).all()
         total_runs = len(rows)

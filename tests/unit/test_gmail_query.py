@@ -11,7 +11,7 @@ append at most one relative-time operator.
 from __future__ import annotations
 
 import pytest
-from app.domain.gmail_query import normalize_gmail_query
+from app.domain.gmail.query import normalize_gmail_query
 
 # --------------------------------------------------------------------- invariants
 
