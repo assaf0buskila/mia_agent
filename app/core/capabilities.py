@@ -188,7 +188,7 @@ CAPABILITIES: tuple[Capability, ...] = (
         id=CapabilityId.INSTAGRAM,
         prd="§16",
         status=WiringStatus.ALIVE,
-        port="app.integrations.instagram",
+        port="app.integrations.instagram_insights",
     ),
     Capability(
         id=CapabilityId.GMAIL,

@@ -18,13 +18,10 @@ def should_skip_prospect_send(
     channel: str = "",
     automation_scope: str = "",
     whatsapp_handoff_send: bool = False,
-    auto_reply_instagram: bool = False,
     whatsapp_require_business_scope: bool = False,
 ) -> bool:
     if actor_role != "prospect":
         return False
-    if channel == Channel.INSTAGRAM.value and not auto_reply_instagram:
-        return True
     # Production (business-scope on): WhatsApp stays silent until Assaf flips
     # MIA_WHATSAPP_HANDOFF_SEND after official Cloud API inbound works.
     # Tests that disable the scope gate still use WhatsApp as a sales transport.

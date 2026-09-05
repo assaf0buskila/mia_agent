@@ -82,7 +82,6 @@ SEALED_ENV: dict[str, str] = {
     "MIA_GMAIL_SEND": "false",
     "MIA_CALENDAR_WRITE": "false",
     "MIA_META_WRITE": "false",
-    "MIA_AUTO_REPLY_INSTAGRAM": "false",
     "MIA_KILL_SWITCH": "false",
     "MIA_DEMO_MODE": "false",
 }
@@ -115,7 +114,6 @@ _SEALED_FIELDS: dict[str, Any] = {
     "gmail_send": False,
     "calendar_write": False,
     "meta_write": False,
-    "auto_reply_instagram": False,
     "kill_switch": False,
     "demo_mode": False,
 }

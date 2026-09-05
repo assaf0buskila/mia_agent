@@ -19,7 +19,6 @@ ALLOWLISTED_TOOLS = frozenset({
     "ga4_pivot_report",
     "seo_audit",
     "opt_out_status",
-    "conversation_ownership",
     "owner_permissions",
     "lead_recent_messages",
     "website_session_events",

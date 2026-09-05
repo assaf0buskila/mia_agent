@@ -15,7 +15,6 @@ _ALLOWED_WRITE_PINS = frozenset(
         "GOOGLESHEETS_UPSERT_ROWS",
         "GOOGLESHEETS_VALUES_UPDATE",
         "GOOGLESHEETS_SPREADSHEETS_VALUES_APPEND",
-        "INSTAGRAM_SEND_TEXT_MESSAGE",
         # ADR-016: one outbound WhatsApp owner, production is composio.
         "WHATSAPP_SEND_MESSAGE",
         # Named owner Telegram draft → approve → send. Not catalog auto-fire.

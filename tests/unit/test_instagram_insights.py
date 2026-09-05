@@ -669,12 +669,12 @@ def test_composio_insights_parses_media_no_captions_or_urls() -> None:
             },
         )
 
-    from app.integrations.instagram import (
+    from app.integrations.instagram_insights import (
         COMPOSIO_GET_MEDIA_INSIGHTS_TOOL,
         COMPOSIO_GET_USER_MEDIA_TOOL,
         COMPOSIO_INSTAGRAM_VERSION,
+        ComposioInstagramInsightsPort,
     )
-    from app.integrations.instagram_insights import ComposioInstagramInsightsPort
 
     port = ComposioInstagramInsightsPort(
         api_key="cmp-test",

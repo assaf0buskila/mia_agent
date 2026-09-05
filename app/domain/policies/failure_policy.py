@@ -91,7 +91,6 @@ _REGISTRY["gmail_fetch"] = _pin("gmail_fetch", fallback="empty")
 _REGISTRY["opt_out_status"] = _pin("opt_out_status", fallback="omit")
 
 for _node in (
-    "conversation_ownership",
     "owner_permissions",
     "lead_recent_messages",
     "website_session_events",

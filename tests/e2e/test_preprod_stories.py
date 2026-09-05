@@ -43,7 +43,7 @@ IL = ZoneInfo("Asia/Jerusalem")
 FIXED_NOW = datetime(2026, 8, 20, 6, 0, tzinfo=UTC)
 
 # Story IDs (unique — do not reuse unit-test phones)
-IG_SENDER_S1 = "igsid.e2e.s1"
+PROSPECT_S1 = "972509997101"
 PROSPECT_S2 = "972509997201"
 OWNER_S2 = "972509997202"
 OWNER_S3 = "972509997301"
@@ -133,23 +133,22 @@ def _all_ai_run_values(row: AiRunRow) -> str:
 
 
 @pytest.mark.asyncio
-async def test_story_instagram_lead_meeting_calendar_sheet_notify_trace(
+async def test_story_whatsapp_lead_meeting_calendar_sheet_notify_trace(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from tests.conftest import freeze_mia_clock
 
     freeze_mia_clock(monkeypatch, FIXED_NOW)
-    monkeypatch.setenv("MIA_AUTO_REPLY_INSTAGRAM", "true")
     init_db()
     db = get_session_factory()()
     try:
         store = LeadStore(db)
         _, lead_id = store.open_channel_lead(
-            channel=Channel.INSTAGRAM, external_id=IG_SENDER_S1
+            channel=Channel.WHATSAPP, external_id=PROSPECT_S1
         )
         store.save_sales(_ready_state(lead_id))
         slot = _slot()
-        _seed_offered(store, lead_id=lead_id, channel=Channel.INSTAGRAM, slots=[slot])
+        _seed_offered(store, lead_id=lead_id, channel=Channel.WHATSAPP, slots=[slot])
         db.commit()
 
         calendar = FakeCalendarPort([slot])
@@ -158,9 +157,9 @@ async def test_story_instagram_lead_meeting_calendar_sheet_notify_trace(
         port = RecordingMessagePort()
 
         result = await process_inbound_texts(
-            provider="instagram",
-            channel=Channel.INSTAGRAM,
-            items=[{"id": "mid.e2e.s1.book", "from": IG_SENDER_S1, "text": "1"}],
+            provider="whatsapp",
+            channel=Channel.WHATSAPP,
+            items=[{"id": "wamid.e2e.s1.book", "from": PROSPECT_S1, "text": "1"}],
             store=store,
             port=port,
             kill_switch=False,
@@ -180,7 +179,7 @@ async def test_story_instagram_lead_meeting_calendar_sheet_notify_trace(
         assert meeting.status == STATUS_BOOKED
 
         booked_event = store.get_canonical_event(
-            provider="instagram", provider_event_id=f"{lead_id}:booked"
+            provider="whatsapp", provider_event_id=f"{lead_id}:booked"
         )
         assert booked_event is not None
         assert booked_event.event_type == EventType.MEETING_BOOKED.value
@@ -199,7 +198,7 @@ async def test_story_instagram_lead_meeting_calendar_sheet_notify_trace(
         ai_row = db.scalars(select(AiRunRow).where(AiRunRow.lead_id == lead_id)).one()
         assert ai_row.run_id.startswith("run_")
         in_row = store.get_canonical_event(
-            provider="instagram", provider_event_id="mid.e2e.s1.book"
+            provider="whatsapp", provider_event_id="wamid.e2e.s1.book"
         )
         assert in_row is not None
         assert in_row.correlation_id == ai_row.run_id
@@ -485,7 +484,6 @@ def test_story_high_risk_write_stays_gated() -> None:
     for name in PRELOADED_TOOL_NAMES:
         upper = name.upper()
         if name in {
-            "INSTAGRAM_SEND_TEXT_MESSAGE",
             "WHATSAPP_SEND_MESSAGE",
             "GMAIL_SEND_DRAFT",
         }:
@@ -494,8 +492,8 @@ def test_story_high_risk_write_stays_gated() -> None:
         assert "PAUSE" not in upper
         assert "DELETE" not in upper
     assert preloaded_tool("GOOGLECALENDAR_DELETE") is None
-    assert preloaded_tool("INSTAGRAM_SEND_TEXT_MESSAGE") is not None
-    assert preloaded_tool("INSTAGRAM_SEND_TEXT_MESSAGE").write is True
+    # Instagram is analytics-only: no DM send pin exists any more.
+    assert preloaded_tool("INSTAGRAM_SEND_TEXT_MESSAGE") is None
     assert preloaded_tool("INSTAGRAM_POST_IG_USER_MEDIA_PUBLISH") is None
     assert preloaded_tool("GOOGLESHEETS_DELETE_DIMENSION") is None
     assert preloaded_tool("LINKEDIN_DELETE_POST") is None

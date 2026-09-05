@@ -23,14 +23,12 @@ _FLAG_ENV_KEYS = (
     "MIA_CALENDAR_WRITE",
     "MIA_GMAIL_SEND",
     "MIA_META_WRITE",
-    "MIA_AUTO_REPLY_INSTAGRAM",
 )
 
 _FLAG_ATTRS = (
     "calendar_write",
     "gmail_send",
     "meta_write",
-    "auto_reply_instagram",
 )
 
 

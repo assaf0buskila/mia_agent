@@ -15,7 +15,6 @@ async def send_inbound_reply(
     store=None,
     automation_scope: str = "",
     whatsapp_handoff_send: bool = False,
-    auto_reply_instagram: bool = False,
     whatsapp_require_business_scope: bool = False,
 ) -> bool:
     """Send a customer reply after R2 policy check. Returns True if the port sent."""
@@ -25,7 +24,6 @@ async def send_inbound_reply(
         channel=message.channel,
         automation_scope=automation_scope,
         whatsapp_handoff_send=whatsapp_handoff_send,
-        auto_reply_instagram=auto_reply_instagram,
         whatsapp_require_business_scope=whatsapp_require_business_scope,
     ):
         return False

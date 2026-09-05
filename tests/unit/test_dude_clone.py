@@ -578,7 +578,6 @@ def test_owner_prompt_forbids_invented_counts() -> None:
     assert "No unsolicited Gmail" in SYSTEM_PROMPT
     flags = Settings(_env_file=None)
     assert flags.gmail_send is False
-    assert flags.auto_reply_instagram is False
     assert flags.meta_write is False
     from app.integrations.composio_catalog import NEVER_AUTO_PUBLISH_SLUGS
 

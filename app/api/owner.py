@@ -865,7 +865,7 @@ async def process_owner_texts(
     preclaimed_event_id: str | None = None,
     preclaimed_envelope_kind: str | None = None,
 ) -> dict[str, int | bool | str | None]:
-    """Owner-only inbound. Prospect WhatsApp/Instagram stay on process_inbound_texts."""
+    """Owner-only inbound. Prospect WhatsApp stays on process_inbound_texts."""
     processed = 0
     duplicates = 0
     sent_count = 0

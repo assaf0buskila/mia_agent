@@ -32,11 +32,10 @@ from app.integrations.gmail import (
     COMPOSIO_SEND_DRAFT_TOOL,
     GMAIL_NEW_MESSAGE_TRIGGER,
 )
-from app.integrations.instagram import (
+from app.integrations.instagram_insights import (
     COMPOSIO_GET_MEDIA_INSIGHTS_TOOL,
     COMPOSIO_GET_USER_MEDIA_TOOL,
     COMPOSIO_INSTAGRAM_VERSION,
-    COMPOSIO_SEND_TEXT_TOOL,
 )
 from app.integrations.linkedin import (
     COMPOSIO_GET_MY_INFO_TOOL,
@@ -56,12 +55,10 @@ from app.integrations.sheets import (
     COMPOSIO_VALUES_GET_TOOL,
     COMPOSIO_VALUES_UPDATE_TOOL,
 )
-
-# Aliased: app.integrations.instagram exports the same COMPOSIO_SEND_TEXT_TOOL name.
-from app.integrations.whatsapp import (  # isort: skip
-    COMPOSIO_SEND_TEXT_TOOL as COMPOSIO_WHATSAPP_SEND_TEXT_TOOL,
+from app.integrations.whatsapp import (
+    COMPOSIO_SEND_TEXT_TOOL,
+    COMPOSIO_WHATSAPP_VERSION,
 )
-from app.integrations.whatsapp import COMPOSIO_WHATSAPP_VERSION  # isort: skip
 
 
 class PreloadedTool(BaseModel):
@@ -198,19 +195,11 @@ PRELOADED_TOOLS: tuple[PreloadedTool, ...] = (
         write=True,
         enabled=True,
     ),
-    PreloadedTool(
-        name=COMPOSIO_SEND_TEXT_TOOL,
-        toolkit="INSTAGRAM",
-        version=COMPOSIO_INSTAGRAM_VERSION,
-        risk="R2",
-        write=True,
-        enabled=True,
-    ),
     # ADR-016 mandates this pin: outbound WhatsApp has one owner selected by
     # MIA_WHATSAPP_SENDER, and production runs `composio`. WHATSAPP_SEND_TEMPLATE_MESSAGE
     # stays unpinned on purpose — ADR-016 leaves it unwired (no mass outreach).
     PreloadedTool(
-        name=COMPOSIO_WHATSAPP_SEND_TEXT_TOOL,
+        name=COMPOSIO_SEND_TEXT_TOOL,
         toolkit="WHATSAPP",
         version=COMPOSIO_WHATSAPP_VERSION,
         risk="R2",

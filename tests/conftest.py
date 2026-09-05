@@ -29,7 +29,6 @@ os.environ["MIA_WHATSAPP_APP_SECRET"] = ""
 os.environ["MIA_WHATSAPP_VERIFY_TOKEN"] = ""
 os.environ["MIA_GMAIL_SEND"] = "false"
 os.environ["MIA_META_WRITE"] = "false"
-os.environ["MIA_AUTO_REPLY_INSTAGRAM"] = "false"
 os.environ["MIA_FIRECRAWL_API_KEY"] = ""
 os.environ["MIA_APIFY_TOKEN"] = ""
 os.environ["MIA_COMPOSIO_API_KEY"] = ""
@@ -58,7 +57,8 @@ def freeze_mia_clock(monkeypatch, frozen) -> None:
             return frozen.astimezone(tz)
 
     for path in (
-        "app.api.inbound.datetime",
+        # app.api.inbound no longer reads the clock: its only datetime.now lived in
+        # the removed Instagram inbound block. Nothing there left to freeze.
         "app.domain.meetings.booking.datetime",
         "app.domain.meetings.changes.datetime",
         "app.domain.owner.calendar.datetime",

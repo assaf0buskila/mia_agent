@@ -58,7 +58,6 @@ def test_no_send_delete_pause_in_pin_names() -> None:
         # ADR-047: GMAIL_SEND_DRAFT is the named owner Telegram send pin, also
         # adapter-invoked, never catalog auto-fire, never an LLM tool.
         if name in {
-            "INSTAGRAM_SEND_TEXT_MESSAGE",
             "WHATSAPP_SEND_MESSAGE",
             "GMAIL_SEND_DRAFT",
         }:
@@ -68,14 +67,16 @@ def test_no_send_delete_pause_in_pin_names() -> None:
         assert "PAUSE" not in upper
 
 
-def test_instagram_send_pin_is_write_not_publish() -> None:
-    send = preloaded_tool("INSTAGRAM_SEND_TEXT_MESSAGE")
-    assert send is not None
-    assert send.write is True
-    assert send.risk == "R2"
+def test_instagram_is_analytics_only_no_send_or_publish_pin() -> None:
+    # Instagram's product contract is analytics only: the DM send surface is gone,
+    # so no INSTAGRAM write pin may exist at all.
+    assert preloaded_tool("INSTAGRAM_SEND_TEXT_MESSAGE") is None
     assert preloaded_tool("INSTAGRAM_CREATE_POST") is None
     assert preloaded_tool("INSTAGRAM_CREATE_MEDIA_CONTAINER") is None
     assert preloaded_tool("INSTAGRAM_POST_IG_USER_MEDIA_PUBLISH") is None
+    for tool in PRELOADED_TOOLS:
+        if tool.toolkit == "INSTAGRAM":
+            assert tool.write is False, tool.name
 
 
 def test_gmail_named_send_and_read_pins_stay_on_owner_adapter() -> None:

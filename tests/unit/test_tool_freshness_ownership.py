@@ -16,10 +16,7 @@ from app.domain.followups import (
     scan_due_follow_ups,
     website_session_events_outcome,
 )
-from app.domain.ownership_freshness import (
-    conversation_ownership_outcome,
-    owner_permissions_outcome,
-)
+from app.domain.ownership_freshness import owner_permissions_outcome
 from app.domain.sales import FitLevel, SalesState
 from app.integrations.base import RecordingMessagePort
 from sqlalchemy import select
@@ -27,18 +24,8 @@ from sqlalchemy import select
 OWNER_PERM_PHONE = "972509997001"
 OWNER_PERM_PHONE_2 = "972509997002"
 PROSPECT_WA_PHONE = "972509997003"
-IG_PROSPECT_1 = "ig_fresh_own_9001"
-IG_PROSPECT_2 = "ig_fresh_own_9002"
 SCAN_FRESH_PHONE = "972509997901"
 SCAN_FRESH_TOMORROW = "972509997902"
-
-
-def test_conversation_ownership_outcome_live_when_present() -> None:
-    now = datetime(2026, 8, 21, 12, 0, 0, tzinfo=UTC)
-    outcome = conversation_ownership_outcome(present=True, now=now)
-    assert outcome.freshness == "live"
-    assert outcome.status == "ok"
-    assert outcome.tool == "conversation_ownership"
 
 
 def test_owner_permissions_outcome_live_when_present() -> None:
@@ -65,17 +52,6 @@ def test_website_session_events_outcome_cached_when_present() -> None:
     assert outcome.tool == "website_session_events"
 
 
-def _ownership_rows(db, lead_id: str) -> list[ToolRunRow]:
-    return list(
-        db.scalars(
-            select(ToolRunRow).where(
-                ToolRunRow.lead_id == lead_id,
-                ToolRunRow.tool == "conversation_ownership",
-            )
-        )
-    )
-
-
 def _owner_perm_rows(db, owner_from: str) -> list[ToolRunRow]:
     return list(
         db.scalars(
@@ -85,68 +61,6 @@ def _owner_perm_rows(db, owner_from: str) -> list[ToolRunRow]:
             )
         )
     )
-
-
-@pytest.mark.asyncio
-async def test_ig_prospect_stamps_conversation_ownership_once(monkeypatch) -> None:
-    monkeypatch.setenv("MIA_INSTAGRAM_SENDER", "direct")
-    monkeypatch.setenv("MIA_AUTO_REPLY_INSTAGRAM", "true")
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        port = RecordingMessagePort()
-        items = [
-            {"id": "ig.own.fresh.1", "from": IG_PROSPECT_1, "text": "hello"},
-            {"id": "ig.own.fresh.2", "from": IG_PROSPECT_1, "text": "follow up"},
-        ]
-        for item in items:
-            await process_inbound_texts(
-                provider="instagram",
-                channel=Channel.INSTAGRAM,
-                items=[item],
-                store=store,
-                port=port,
-                kill_switch=False,
-            )
-        db.commit()
-        _, lead_id = store.open_channel_lead(
-            channel=Channel.INSTAGRAM, external_id=IG_PROSPECT_1
-        )
-        rows = _ownership_rows(db, lead_id)
-        assert len(rows) == 1
-        assert rows[0].freshness == "live"
-        assert rows[0].status == "ok"
-        assert len(port.sent) == 2
-    finally:
-        db.close()
-
-
-@pytest.mark.asyncio
-async def test_ig_prospect_invalid_sender_ownership_unverified(monkeypatch) -> None:
-    monkeypatch.setenv("MIA_INSTAGRAM_SENDER", "bogus")
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        port = RecordingMessagePort()
-        await process_inbound_texts(
-            provider="instagram",
-            channel=Channel.INSTAGRAM,
-            items=[{"id": "ig.own.invalid.1", "from": IG_PROSPECT_2, "text": "hi"}],
-            store=store,
-            port=port,
-            kill_switch=False,
-        )
-        db.commit()
-        _, lead_id = store.open_channel_lead(
-            channel=Channel.INSTAGRAM, external_id=IG_PROSPECT_2
-        )
-        rows = _ownership_rows(db, lead_id)
-        assert len(rows) == 1
-        assert rows[0].freshness == "unverified"
-    finally:
-        db.close()
 
 
 @pytest.mark.asyncio

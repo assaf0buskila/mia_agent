@@ -5,11 +5,6 @@ from app.db.session import get_session_factory
 from app.integrations.base import MessagePort
 from app.integrations.calendar import CalendarPort, build_calendar_port
 from app.integrations.calendar_booking import CalendarBookingPort, build_calendar_booking_port
-from app.integrations.instagram import build_instagram_port
-from app.integrations.instagram_insights import (
-    InstagramInsightsPort,
-    build_instagram_insights_port,
-)
 from app.integrations.linkedin import LinkedInPort, build_linkedin_port
 from app.integrations.research import ResearchPort, build_research_port
 from app.integrations.sheets import SheetsPort, build_sheets_port
@@ -39,10 +34,6 @@ def get_whatsapp_port() -> MessagePort:
     return build_whatsapp_port(get_settings())
 
 
-def get_instagram_port() -> MessagePort:
-    return build_instagram_port(get_settings())
-
-
 def get_telegram_port() -> MessagePort:
     return build_telegram_port(get_settings())
 
@@ -65,10 +56,6 @@ def get_calendar_booking_port() -> CalendarBookingPort:
 
 def get_sheets_port() -> SheetsPort:
     return build_sheets_port(get_settings())
-
-
-def get_instagram_insights_port() -> InstagramInsightsPort:
-    return build_instagram_insights_port(get_settings())
 
 
 def get_research_port() -> ResearchPort:

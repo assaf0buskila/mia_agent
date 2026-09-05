@@ -306,7 +306,6 @@ def health() -> dict:
         "email_send_policy": live.email_send_policy_label(),
         "automation_mode": live.automation_mode.value,
         "whatsapp_handoff_send": live.whatsapp_handoff_send,
-        "auto_reply_instagram": live.auto_reply_instagram,
         "ops": _health_ops(),
         "brain": {**brain_health(live), "corpus": brain_counts()},
         "owner_integrations": owner_integrations(live),

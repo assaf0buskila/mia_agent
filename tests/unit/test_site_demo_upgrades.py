@@ -440,7 +440,6 @@ def test_site_path_has_no_leads_studio_gmail_or_social() -> None:
     assert "social publish" not in lowered
     assert "linkedin.com/feed" not in lowered
     assert LiveSettings().gmail_send is False
-    assert LiveSettings().auto_reply_instagram is False
     assert LiveSettings().meta_write is False
 
 

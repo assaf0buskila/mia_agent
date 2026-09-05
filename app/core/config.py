@@ -40,7 +40,6 @@ class Settings(BaseSettings):
     calendar_write: bool = False
     gmail_send: bool = False
     meta_write: bool = False
-    auto_reply_instagram: bool = False
     app_name: str = "mia"
 
     website_url: str = Field(default="https://www.assafweb.com")
@@ -130,8 +129,6 @@ class Settings(BaseSettings):
     telegram_webhook_secret: str = Field(default="")
     telegram_owner_user_ids: str = Field(default="")
 
-    instagram_verify_token: str = Field(default="")
-    instagram_app_secret: str = Field(default="")
     instagram_access_token: str = Field(default="")
     instagram_account_id: str = Field(default="")
     instagram_graph_version: str = Field(default="v26.0")
