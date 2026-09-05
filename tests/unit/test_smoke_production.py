@@ -96,17 +96,64 @@ def test_ladder_fails_on_a_verbatim_repeat(monkeypatch) -> None:
         smoke.check_sales_ladder("http://x")
 
 
-def test_pricing_fails_when_the_reply_denies_a_price_it_retrieved(monkeypatch) -> None:
-    """Observed on stale production: action=answer while the text says no list exists."""
+def test_relaying_the_published_position_is_not_a_failure(monkeypatch) -> None:
+    """This gate used to fail Mia for being right.
+
+    assafweb.com publishes no price: `pricing.md` ingests as scope and service copy,
+    and no chunk carries an amount. The published position IS "it depends on scope",
+    so a faithful reply says so. The old check read `action == "answer"` as proof that
+    a NUMBER had been retrieved and called the honest answer a contradiction — it
+    failed about two live runs in three with nothing wrong.
+    """
     monkeypatch.setattr(
         smoke,
         "_conversation",
         lambda base, turns: [
-            {"next_action": "answer", "message": "אין מחירון ציבורי קבוע אצלנו."}
+            {
+                "next_action": "answer",
+                "message": "מחיר לבניית אתר תלוי במה שבונים, ואין מחירון ציבורי קבוע.",
+            }
         ],
     )
-    with pytest.raises(smoke.SmokeFailure, match="still denies"):
+    assert "without inventing" in smoke.check_pricing("http://x", require_quote=False)
+
+
+def test_pricing_fails_on_an_invented_amount(monkeypatch) -> None:
+    """The invariant this check is actually for: never state a number nobody published."""
+    monkeypatch.setattr(
+        smoke,
+        "_conversation",
+        lambda base, turns: [
+            {"next_action": "answer", "message": 'בניית אתר עולה 4,500 ש"ח.'}
+        ],
+    )
+    with pytest.raises(smoke.SmokeFailure, match="invented number"):
         smoke.check_pricing("http://x", require_quote=False)
+
+
+def test_a_number_without_a_currency_is_not_a_price(monkeypatch) -> None:
+    """A timeline or a count must not be mistaken for money."""
+    monkeypatch.setattr(
+        smoke,
+        "_conversation",
+        lambda base, turns: [
+            {"next_action": "answer", "message": "בונים תוך 2-3 שבועות, תלוי ב-100 עמודים."}
+        ],
+    )
+    assert "without inventing" in smoke.check_pricing("http://x", require_quote=False)
+
+
+def test_require_price_quote_demands_an_actual_amount(monkeypatch) -> None:
+    """Strict mode is for a corpus known to publish a price."""
+    monkeypatch.setattr(
+        smoke,
+        "_conversation",
+        lambda base, turns: [
+            {"next_action": "answer", "message": "המחיר תלוי בהיקף."}
+        ],
+    )
+    with pytest.raises(smoke.SmokeFailure, match="states no amount"):
+        smoke.check_pricing("http://x", require_quote=True)
 
 
 def test_pricing_allows_an_honest_refusal(monkeypatch) -> None:
