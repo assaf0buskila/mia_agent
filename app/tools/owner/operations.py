@@ -12,7 +12,7 @@ from typing import Any
 
 from app.domain.briefs import apply_owner_meeting_brief
 from app.domain.content_ideas import apply_owner_content_ideas
-from app.domain.hot_handoff import format_hot_leads_ack
+from app.domain.handoff.hot import format_hot_leads_ack
 from app.domain.lead_reviews import apply_owner_lead_review, format_lead_matches
 from app.domain.owner_briefs import apply_owner_brief
 from app.domain.owner_connection_audit import OwnerAuditResult, format_owner_connection_audit

@@ -5,10 +5,8 @@ from __future__ import annotations
 import inspect
 
 from app.core.config import Settings
-from app.domain import website_handoff_brief as brief_mod
-from app.domain.memory import ConversationTurn
-from app.domain.sales import FitLevel, PainLevel, SalesState
-from app.domain.website_handoff_brief import (
+from app.domain.handoff import website_brief as brief_mod
+from app.domain.handoff.website_brief import (
     KIND_WEBSITE_WHATSAPP,
     NOTIFICATION_DELIVERED,
     NOTIFICATION_DUPLICATE_OR_AMBIGUOUS,
@@ -16,6 +14,8 @@ from app.domain.website_handoff_brief import (
     apply_website_whatsapp_handoff_brief,
     format_website_whatsapp_brief,
 )
+from app.domain.memory import ConversationTurn
+from app.domain.sales import FitLevel, PainLevel, SalesState
 from app.integrations.owner_reply import OWNER_CAPABILITIES, SYSTEM_PROMPT
 from app.services.notifications import OwnerTelegramDelivery
 
@@ -311,7 +311,7 @@ def test_apply_click_brief_sends_summary_and_only_that_path_pings(monkeypatch) -
 
 
 def test_human_handoff_brief_includes_the_conversation_and_is_not_a_whatsapp_claim() -> None:
-    from app.domain.website_handoff_brief import format_website_human_handoff_brief
+    from app.domain.handoff.website_brief import format_website_human_handoff_brief
 
     brief = format_website_human_handoff_brief(
         lead_id="lead_abc123def456",
@@ -554,7 +554,7 @@ def test_ambiguous_click_brief_is_not_resent(monkeypatch) -> None:
 
 
 def test_handoff_compose_text_is_human_and_hides_the_token() -> None:
-    from app.domain.handoff import compose_handoff_text, generate_handoff_token
+    from app.domain.handoff.tokens import compose_handoff_text, generate_handoff_token
 
     token = generate_handoff_token()
     text = compose_handoff_text(token)

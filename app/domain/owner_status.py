@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from app.capabilities.types import Principal
-from app.domain.hot_handoff import format_hot_leads_ack
+from app.domain.handoff.hot import format_hot_leads_ack
 from app.domain.owner_briefs import compute_daily_brief
 
 if TYPE_CHECKING:

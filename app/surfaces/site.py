@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 
 from app.core.config import Settings
 from app.core.errors import MiaError
-from app.domain.handoff import click_to_chat_url
+from app.domain.handoff.tokens import click_to_chat_url
 from app.domain.memory import ConversationTurn
 from app.integrations.base import MessagePort, OutboundMessage
 from app.integrations.sales_reply import SalesReplyPort

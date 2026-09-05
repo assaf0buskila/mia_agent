@@ -12,7 +12,7 @@ from app.core.config import Settings
 from app.core.errors import PolicyDenied
 from app.core.risk import RiskAction, RiskLevel, assert_allowed
 from app.domain.conversation_scope import TakeoverState
-from app.domain.owner_notification_delivery import (
+from app.domain.handoff.delivery import (
     KIND_HOT_LEAD_LEGACY,
     KIND_WEBSITE_HANDOFF_DELIVERY,
     WEBSITE_HANDOFF_DELIVERY_KINDS,

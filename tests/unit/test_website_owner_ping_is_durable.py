@@ -16,7 +16,7 @@ import asyncio
 from app.core.config import Settings
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
-from app.domain.owner_notification_delivery import (
+from app.domain.handoff.delivery import (
     KIND_WEBSITE_HANDOFF_DELIVERY,
     website_ping_scope,
 )

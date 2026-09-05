@@ -49,8 +49,8 @@ from app.domain.events import (
     webhook_envelope_kind,
 )
 from app.domain.followups import apply_follow_up_policy
-from app.domain.handoff import inbound_text_without_token
-from app.domain.hot_handoff import apply_hot_handoff
+from app.domain.handoff.hot import apply_hot_handoff
+from app.domain.handoff.tokens import inbound_text_without_token
 from app.domain.identity import REASON_HANDOFF_TOKEN, persist_verified_identity_link
 from app.domain.meetings import apply_meeting_policy
 from app.domain.ownership_freshness import (

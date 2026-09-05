@@ -42,14 +42,14 @@ from app.domain.events import (
     webhook_envelope_kind,
 )
 from app.domain.feedback import persist_owner_correction
-from app.domain.gmail_drafts import (
+from app.domain.gmail.drafts import (
     apply_gmail_send_decision,
     apply_owner_gmail_draft,
     execute_approved_gmail_send,
 )
-from app.domain.gmail_summaries import apply_owner_gmail_summary
-from app.domain.handoff import inbound_text_without_token
-from app.domain.hot_handoff import format_hot_leads_ack
+from app.domain.gmail.summaries import apply_owner_gmail_summary
+from app.domain.handoff.hot import format_hot_leads_ack
+from app.domain.handoff.tokens import inbound_text_without_token
 from app.domain.lead_reviews import apply_owner_lead_review
 from app.domain.learning import (
     InstructionKind,

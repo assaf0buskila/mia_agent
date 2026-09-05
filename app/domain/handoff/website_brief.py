@@ -14,13 +14,13 @@ from typing import NamedTuple
 from app.core.config import Settings
 from app.core.errors import PolicyDenied
 from app.core.risk import RiskAction, RiskLevel, assert_allowed
-from app.domain.lead_label import lead_display
-from app.domain.memory import ROLE_MIA, ConversationTurn, counterpart_turns
-from app.domain.owner_notification_delivery import (
+from app.domain.handoff.delivery import (
     KIND_WEBSITE_HANDOFF_DELIVERY,
     KIND_WEBSITE_WHATSAPP_LEGACY,
     WEBSITE_HANDOFF_DELIVERY_KINDS,
 )
+from app.domain.lead_label import lead_display
+from app.domain.memory import ROLE_MIA, ConversationTurn, counterpart_turns
 from app.domain.sales import NextAction, PainLevel, SalesState, select_next_action
 from app.integrations.telegram_format import blockquote, bold, esc
 

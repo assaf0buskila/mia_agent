@@ -223,7 +223,7 @@ _CUSTOMER_MASCULINE_ONLY = (
 
 
 def test_canned_customer_hebrew_addresses_both_genders() -> None:
-    from app.domain import website_handoff_brief as brief
+    from app.domain.handoff import website_brief as brief
 
     blob = "\n".join(_all_canned_customer_replies())
     paste_lines = [

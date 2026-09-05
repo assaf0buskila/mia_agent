@@ -200,7 +200,7 @@ CAPABILITIES: tuple[Capability, ...] = (
         id=CapabilityId.GMAIL_SUMMARY,
         prd="§18.1",
         status=WiringStatus.ALIVE,
-        port="app.domain.gmail_summaries",
+        port="app.domain.gmail.summaries",
     ),
     Capability(
         id=CapabilityId.GMAIL_INBOX,

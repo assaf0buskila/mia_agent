@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from app.capabilities.types import Principal
 from app.domain.engine_health import compute_engine_health, format_engine_health
 from app.domain.funnel import compute_website_funnel, format_website_funnel
-from app.domain.hot_handoff import format_hot_leads_ack
+from app.domain.handoff.hot import format_hot_leads_ack
 from app.domain.owner_briefs import compute_daily_brief
 from app.domain.owner_notify import (
     OWNER_NOTIFY_KINDS,

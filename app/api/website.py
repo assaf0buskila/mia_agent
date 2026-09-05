@@ -42,12 +42,12 @@ from app.domain.events import (
     stamp_correlation,
     transcription_outcome,
 )
-from app.domain.handoff import click_to_chat_url
-from app.domain.owner_notification_delivery import (
+from app.domain.handoff.delivery import (
     KIND_WEBSITE_HANDOFF_DELIVERY,
     WEBSITE_HANDOFF_DELIVERY_KINDS,
     website_ping_scope,
 )
+from app.domain.handoff.tokens import click_to_chat_url
 from app.domain.tools import AdapterHttpError
 from app.integrations.base import MessagePort
 from app.integrations.sheets import SheetsPort

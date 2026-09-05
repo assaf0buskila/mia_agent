@@ -19,7 +19,7 @@ from app.core.webhooks import verify_telegram_secret
 from app.db.store import LeadStore
 from app.domain.ai_runs import elapsed_ms
 from app.domain.events import Channel, webhook_envelope_kind
-from app.domain.gmail_drafts import execute_approved_gmail_send
+from app.domain.gmail.drafts import execute_approved_gmail_send
 from app.domain.owner_calendar_writes import execute_approved_calendar_change
 from app.domain.owner_callbacks import resolve_owner_callback_result
 from app.domain.owner_composio_writes import execute_approved_composio_write

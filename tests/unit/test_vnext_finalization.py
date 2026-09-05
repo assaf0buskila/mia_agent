@@ -26,16 +26,16 @@ from app.db.models import (
 )
 from app.db.session import get_session_factory, init_db, make_engine
 from app.db.store import LeadStore
-from app.domain import hot_handoff as hot_handoff_module
 from app.domain.conversation_scope import TakeoverState
 from app.domain.events import Channel, build_message_in_event, build_message_out_event
-from app.domain.hot_handoff import KIND_HOT_LEAD, apply_hot_handoff
-from app.domain.owner_notification_delivery import (
+from app.domain.handoff import hot as hot_handoff_module
+from app.domain.handoff.delivery import (
     KIND_WEBSITE_HANDOFF_DELIVERY,
     WEBSITE_HANDOFF_DELIVERY_KINDS,
 )
+from app.domain.handoff.hot import KIND_HOT_LEAD, apply_hot_handoff
+from app.domain.handoff.website_brief import KIND_WEBSITE_WHATSAPP
 from app.domain.sales import FitLevel, PainLevel
-from app.domain.website_handoff_brief import KIND_WEBSITE_WHATSAPP
 from app.main import app
 from app.services import finalization as finalization_module
 from app.services import notifications as notifications_mod

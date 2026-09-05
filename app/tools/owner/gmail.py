@@ -8,9 +8,9 @@ from app.capabilities.mail import mail_handlers
 from app.capabilities.policy import execute_capability
 from app.core.errors import PermissionDenied
 from app.domain.events import Channel
-from app.domain.gmail_drafts import apply_owner_gmail_draft
-from app.domain.gmail_query import normalize_gmail_query
-from app.domain.gmail_summaries import apply_owner_gmail_summary
+from app.domain.gmail.drafts import apply_owner_gmail_draft
+from app.domain.gmail.query import normalize_gmail_query
+from app.domain.gmail.summaries import apply_owner_gmail_summary
 from app.domain.tools import AdapterHttpError
 from app.integrations.gmail import (
     DisabledGmailPort,

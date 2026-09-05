@@ -8,8 +8,8 @@ from typing import Any, Protocol
 from pydantic import BaseModel, ConfigDict
 
 from app.core.config import Settings
+from app.domain.handoff.delivery import WEBSITE_HANDOFF_DELIVERY_KINDS
 from app.domain.memory import ConversationTurn
-from app.domain.owner_notification_delivery import WEBSITE_HANDOFF_DELIVERY_KINDS
 from app.domain.sales import SalesState
 from app.services.conversation_facts import (
     describe_business,

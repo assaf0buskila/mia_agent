@@ -10,7 +10,7 @@ from app.core.config import Settings, get_settings
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
 from app.domain.events import Channel
-from app.domain.gmail_drafts import (
+from app.domain.gmail.drafts import (
     apply_gmail_send_decision,
     apply_owner_gmail_draft,
     execute_approved_gmail_send,

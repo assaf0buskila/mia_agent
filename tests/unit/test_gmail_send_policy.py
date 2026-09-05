@@ -12,7 +12,7 @@ from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
 from app.domain.approvals import DECISION_APPROVED
 from app.domain.events import Channel
-from app.domain.gmail_drafts import (
+from app.domain.gmail.drafts import (
     apply_gmail_send_decision,
     apply_owner_gmail_draft,
     execute_approved_gmail_send,
@@ -28,7 +28,7 @@ from app.tools.registries.owner_tools import tool_names
 _APP = Path(__file__).resolve().parents[2] / "app"
 _NO_GMAIL_SEND_MODULES = (
     _APP / "api" / "website.py",
-    _APP / "domain" / "website_handoff_brief.py",
+    _APP / "domain" / "handoff" / "website_brief.py",
     _APP / "workers" / "due_scan.py",
     _APP / "agents" / "client" / "graph.py",
 )

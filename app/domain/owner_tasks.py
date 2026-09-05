@@ -6,8 +6,8 @@ from enum import StrEnum
 from pydantic import BaseModel, Field
 
 from app.domain.approvals import LEAD_ID_RE
-from app.domain.gmail_drafts import parse_gmail_send_intent
-from app.domain.gmail_summaries import THREAD_ID_RE
+from app.domain.gmail.drafts import parse_gmail_send_intent
+from app.domain.gmail.summaries import THREAD_ID_RE
 from app.domain.learning import InstructionKind, classify_instruction_kind
 from app.domain.owner_calendar_writes import (
     parse_calendar_change_decision,

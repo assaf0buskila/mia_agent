@@ -6,7 +6,7 @@ from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
 from app.domain.attribution import sanitize_attribution
 from app.domain.events import Channel
-from app.domain.handoff import click_to_chat_url
+from app.domain.handoff.tokens import click_to_chat_url
 from app.domain.sales import NextAction, select_next_action
 from app.graph.orchestrator import build_graph
 from app.graph.state import empty_state

@@ -97,7 +97,7 @@ from app.domain.events import (
     stamp_payload_version,
 )
 from app.domain.followups import ALLOWLISTED_SEND_REASONS, STATUS_CANCELLED, STATUS_PENDING
-from app.domain.handoff import generate_handoff_token, hash_handoff_token
+from app.domain.handoff.tokens import generate_handoff_token, hash_handoff_token
 from app.domain.idempotency import (
     ALLOWLISTED_OPERATION_SCOPES,
     OPERATION_TTL_SECONDS,
