@@ -177,6 +177,40 @@ def _normalize_voice_mime(content_type: str | None) -> str:
     return raw
 
 
+# Container signatures. The provider identifies audio by filename and content type, so
+# a truthful label is the difference between a transcript and silence.
+_AUDIO_MAGIC: tuple[tuple[bytes, int, str], ...] = (
+    (b"OggS", 0, "audio/ogg"),
+    (b"\x1a\x45\xdf\xa3", 0, "audio/webm"),  # EBML: WebM and Matroska
+    (b"ftyp", 4, "audio/mp4"),
+    (b"RIFF", 0, "audio/wav"),
+    (b"ID3", 0, "audio/mpeg"),
+)
+
+
+def sniff_audio_container(audio: bytes) -> str:
+    """The container the bytes actually are, or "" when nothing matches.
+
+    The browser's label cannot be trusted. `MediaRecorder` leaves `blob.type` empty on
+    several browsers, and the widget then assumes webm -- so a Firefox recording, which
+    is ogg/opus, arrives labelled `audio/webm` and named `note.webm`. The provider
+    honours that label, fails to demux, and returns empty text, which surfaces to the
+    visitor as "I did not hear that" with nothing wrong with the audio or the mic.
+
+    Verified against production: the same opus bytes transcribe as `audio/ogg` and come
+    back empty as `audio/webm`.
+    """
+    if not audio:
+        return ""
+    for signature, offset, mime in _AUDIO_MAGIC:
+        if audio[offset : offset + len(signature)] == signature:
+            return mime
+    # MPEG audio frame sync, for mp3 without an ID3 header.
+    if len(audio) >= 2 and audio[0] == 0xFF and (audio[1] & 0xE0) == 0xE0:
+        return "audio/mpeg"
+    return ""
+
+
 def _voice_filename(mime: str) -> str:
     if mime == "audio/mp4":
         return "note.mp4"
@@ -743,11 +777,23 @@ async def post_voice(
     store = LeadStore(db)
     if not store.website_session_exists(session_id):
         raise HTTPException(status_code=404, detail="session not found")
-    mime = _normalize_voice_mime(file.content_type)
+    claimed = _normalize_voice_mime(file.content_type)
     audio = await _read_audio_capped(file)
     if not audio:
         raise HTTPException(status_code=400, detail="empty audio")
     audio_bytes = len(audio)
+    # Believe the bytes over the browser. A mislabelled container transcribes to
+    # nothing, and the visitor is told Mia could not hear them.
+    sniffed = sniff_audio_container(audio)
+    mime = sniffed or claimed
+    if sniffed and sniffed != claimed:
+        _log.info(
+            "website voice container relabelled session=%s claimed=%s actual=%s bytes=%s",
+            session_id,
+            claimed,
+            sniffed,
+            audio_bytes,
+        )
     started = perf_counter()
     try:
         try:
