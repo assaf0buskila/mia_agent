@@ -394,3 +394,31 @@ def test_contact_details_in_catches_mail_and_phone_shaped_runs() -> None:
 def test_present_is_case_insensitive_and_reports_what_it_found() -> None:
     assert present("I Promise nothing", ("i promise",)) == ("i promise",)
     assert present("clean copy", ("i promise",)) == ()
+
+
+def test_a_thousands_separator_is_not_an_invented_number() -> None:
+    """The first real gate run failed here: the corpus stores 4500, the model wrote 4,500.
+
+    The old check reported the same correctly quoted price as BOTH missing and
+    invented, which would have blocked a good release on a typography difference.
+    """
+    from app.evals.predeploy.checks import (
+        canonical_number,
+        states_number,
+        unexpected_numbers,
+    )
+
+    reply = 'חבילת אתר תדמית עולה 4,500 ש"ח.'
+    assert canonical_number("4,500") == "4500"
+    assert states_number(reply, "4500") is True
+    assert unexpected_numbers(reply, frozenset({"4500"})) == ()
+
+
+def test_normalizing_separators_does_not_weaken_the_invented_number_check() -> None:
+    """The point of the fix is accuracy, not leniency."""
+    from app.evals.predeploy.checks import canonical_number, unexpected_numbers
+
+    assert unexpected_numbers("זה עולה 7,900 שח", frozenset({"4500"})) == ("7,900",)
+    # A decimal point carries meaning and must survive canonicalization.
+    assert canonical_number("4.5") == "4.5"
+    assert unexpected_numbers("4.5 hours", frozenset({"4500"})) == ("4.5",)

@@ -33,6 +33,7 @@ from app.evals.predeploy.checks import (
     contact_details_in,
     missing_all,
     present,
+    states_number,
     unexpected_numbers,
 )
 from app.evals.predeploy.gate import GateStatus, gate_status
@@ -176,7 +177,12 @@ def check_website_run(scenario: SiteScenario, run: SiteRun) -> tuple[str, ...]:
             f"action ladder was {list(run.actions)}, expected {list(scenario.expect_sequence)}"
         )
     if scenario.require_any and missing_all(final, scenario.require_any):
-        problems.append(f"the reply carried none of {list(scenario.require_any)}")
+        # A required token that is a bare number is compared by value, not spelling:
+        # the corpus stores 4500 and a model writes "4,500", and a substring test reads
+        # a correctly quoted price as a missing one.
+        numeric = tuple(item for item in scenario.require_any if item.strip(",.").isdigit())
+        if not any(states_number(final, item) for item in numeric):
+            problems.append(f"the reply carried none of {list(scenario.require_any)}")
     forbidden = present(final, scenario.forbid)
     if forbidden:
         problems.append(f"the reply carried forbidden content: {list(forbidden)}")
