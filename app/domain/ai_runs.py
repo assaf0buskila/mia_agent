@@ -221,6 +221,9 @@ def persist_ai_run(
         ),
         tokens_in=_clamp_tokens(tokens_in),
         tokens_out=_clamp_tokens(tokens_out),
+        # NOT a measurement. Nothing prices a run yet, so this is always 0 and an
+        # aggregate of it is a sum of unknowns, not a bill. Do not report it as
+        # spend until something actually computes it per model and token count.
         cost_usd=0,
         next_action=next_action,
         kill_switch=kill_switch,

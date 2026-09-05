@@ -127,3 +127,64 @@ def test_ecs_migration_script_rejects_command_override(monkeypatch) -> None:
     with pytest.raises(SystemExit) as exc_info:
         module["main"]()
     assert exc_info.value.code == 2
+
+
+def test_new_revision_is_based_on_what_production_is_serving() -> None:
+    """Not on the newest registered revision.
+
+    A release that registers mia:30 and then fails its migration leaves the service on
+    mia:29 while mia:30 stays ACTIVE forever. `describe-task-definition --task-definition
+    mia` resolves the family to the newest revision, so the next deploy would silently
+    inherit environment, secrets, cpu and memory from a revision a human deliberately
+    never cut over to.
+    """
+    import importlib.util
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2]
+    spec = importlib.util.spec_from_file_location(
+        "deploy_ecs_revision", root / "scripts" / "deploy_ecs_revision.py"
+    )
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    calls: list[tuple[str, ...]] = []
+
+    def fake_aws(*args: str) -> dict:
+        calls.append(args)
+        if args[1] == "describe-services":
+            return {
+                "services": [
+                    {"taskDefinition": "arn:aws:ecs:eu-north-1:1:task-definition/mia:29"}
+                ]
+            }
+        raise AssertionError(f"unexpected call: {args}")
+
+    module._aws = fake_aws  # type: ignore[assignment]
+    base = module._running_task_definition()
+
+    assert base.endswith("/mia:29")
+    # It must ASK the service, not resolve the family name.
+    assert calls and calls[0][1] == "describe-services"
+    assert "--task-definition" not in calls[0]
+
+
+def test_refuses_to_guess_a_base_when_the_service_is_missing() -> None:
+    """Guessing here would hand a real deploy an arbitrary revision."""
+    import importlib.util
+    from pathlib import Path
+
+    import pytest
+
+    root = Path(__file__).resolve().parents[2]
+    spec = importlib.util.spec_from_file_location(
+        "deploy_ecs_revision_missing", root / "scripts" / "deploy_ecs_revision.py"
+    )
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    module._aws = lambda *args: {"services": []}  # type: ignore[assignment]
+    with pytest.raises(SystemExit):
+        module._running_task_definition()

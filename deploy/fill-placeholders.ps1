@@ -1,6 +1,6 @@
 # Copies deploy/*.example.json into deploy/local/ with ACCOUNT_ID / REGION / VPC / subnet / SG tokens replaced.
 # Does not call AWS. Does not read laptop env files. Does not copy mia-prod.secret.example.json.
-# After this, follow docs/PRODUCTION_BUILD.md section 3 using file://./deploy/local/<name>.json
+# After this, follow docs/OPERATIONS.md (stack rebuild) using file://./deploy/local/<name>.json
 # (./ is required — file://deploy/... is a host named deploy).
 
 param(
@@ -83,4 +83,4 @@ foreach ($file in $files) {
 
 Write-Host "Wrote $count files to deploy/local. Do not commit. Do not copy secrets into this folder."
 Write-Host "Fill the Secrets Manager box separately (deploy/mia-prod.secret.example.json locally, then delete)."
-Write-Host "Next: docs/PRODUCTION_BUILD.md section 3 with file://./deploy/local/<file>.json from repo root."
+Write-Host "Next: docs/OPERATIONS.md (stack rebuild) with file://./deploy/local/<file>.json from repo root."

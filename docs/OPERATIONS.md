@@ -65,7 +65,7 @@ ECS Fargate + RDS + Secrets Manager + ALB in **eu-north-1** (ADR-014, ADR-019).
 | Public URL | `https://mia.assafweb.com` via ALB + ACM |
 | Keys | Secrets Manager secret `mia/prod` (the box). ECS injects `MIA_*`. Never git, never chat |
 | Env | `MIA_ENV=prod` and `MIA_DEMO_MODE=false` — never prod+demo together |
-| Prospect send | `MIA_AUTOMATION_MODE=auto_approved` (ADR-022). Unknown WhatsApp still silent. Instagram send stays off |
+| Prospect send | `MIA_AUTOMATION_MODE=auto_approved` (ADR-022). Unknown WhatsApp still silent. Instagram has no send path at all |
 | Calendar writes | `MIA_CALENDAR_WRITE=true`. Exact create/move proposals execute only after a one-tap Telegram approval |
 | Gmail / Meta send | Gmail draft send is approval-only and additionally requires `MIA_GMAIL_SEND=true`; Meta writes stay off. R4/R5 are not env knobs |
 | Kill switch | `MIA_KILL_SWITCH=false` for live |
@@ -257,8 +257,16 @@ purpose, and the `image` job builds without pushing. Every deploy is manual, and
 order is not optional: the schema must lead the code.
 
 ```
-test  ->  build  ->  migrate  ->  deploy  ->  smoke  ->  verify
+test  ->  build  ->  register  ->  migrate  ->  cut over  ->  smoke  ->  verify
 ```
+
+**Register before migrate.** The migration files are baked into the image
+(`COPY migrations ./migrations`) and `mia-migrate` reads them from inside the running
+container, so the migration set that runs is whichever one the *task definition you
+pass* happens to contain. Migrating against the old revision runs the old migrations,
+exits 0 because there is nothing new to apply, and the new code then serves against a
+schema missing the columns it expects. Registering is safe to do first because
+`deploy_ecs_revision.py` never moves the service.
 
 1. **Test.** Wait for green CI on a SHA, then `git checkout` that SHA. The image is
    built from the working tree, so a dirty tree would ship. `deploy_ecs_revision.py`
@@ -274,27 +282,44 @@ test  ->  build  ->  migrate  ->  deploy  ->  smoke  ->  verify
    Without `--build-arg`, `/health` reports an empty `deployment.commit_sha` and the
    smoke test fails check A, which is the point.
 
-3. **Migrate, before the service moves.** New columns and tables must exist before the
-   new code serves a request. `mia-migrate` is additive and records each file in
-   `schema_migrations`, so re-running it is safe and already-applied files are skipped.
+3. **Register the new revision.** Record the number it prints; every later step names
+   it, and the revision the service is on *now* is your rollback target.
    ```
-   python scripts/run_ecs_migration.py --task-definition mia
+   aws ecs describe-services --cluster mia --services mia --query "services[0].taskDefinition" --output text
+   python scripts/deploy_ecs_revision.py --tag N --sha $SHA
    ```
+   This bases the new revision on the one production is actually serving, not on the
+   newest registered one — a release that registered a revision and then failed its
+   migration leaves that revision registered forever, and inheriting its config would
+   be silent. Registering does not move the service.
+
+4. **Migrate, using the revision you just registered.** New columns must exist before
+   the new code serves a request, and the migration must come from the *new* image.
+   ```
+   python scripts/run_ecs_migration.py --task-definition mia:NEW_REVISION
+   aws ecs describe-tasks --cluster mia --tasks TASK_ARN --query "tasks[0].containers[0].exitCode"
+   ```
+   Passing the family name `mia` here is the bug this ordering exists to prevent: it
+   resolves to whatever is newest, which before step 3 is the old image, and the old
+   image cannot apply a migration it does not contain. `mia-migrate` is additive and
+   records each file in `schema_migrations`, so re-running is safe and applied files
+   are skipped — which is exactly why an exit code of 0 proves nothing on its own.
+   Check the exit code, and confirm `/health.deployment.schema_version` afterwards.
+
    If this fails, stop. Do not move the service. A partly applied migration set cannot
    be rolled back, so fix forward from the current schema.
 
-4. **Register, then move the service to that exact revision:**
+5. **Cut over to that exact revision:**
    ```
-   python scripts/deploy_ecs_revision.py --tag N --sha $SHA
    aws ecs update-service --cluster mia --service mia --task-definition mia:NEW_REVISION
    aws ecs wait services-stable --cluster mia --services mia
    ```
    Name the revision. `--force-new-deployment` on its own restarts the tasks against
    the revision the service is *already* pinned to, so registering a new one and then
    forcing a deployment can redeploy the old image while every command reports
-   success. `deploy_ecs_revision.py` prints the revision it registered; pass that.
+   success.
 
-5. **Smoke.** This has a real exit status and is the release gate:
+6. **Smoke.** This has a real exit status and is the release gate:
    ```
    python scripts/smoke_production.py --sha $SHA
    ```
@@ -304,7 +329,10 @@ test  ->  build  ->  migrate  ->  deploy  ->  smoke  ->  verify
    policy, and that a normal turn answers. It creates no CRM row and sends no Telegram
    notification.
 
-6. **Verify** `GET /health` as above.
+7. **Verify** `GET /health` as above: `deployment.commit_sha` must equal the SHA
+   you built, and `deployment.schema_version` must match the newest file in
+   `migrations/`. A matching commit with a stale schema means step 4 ran against the
+   wrong revision.
 
 The ECS deployment circuit breaker is on, so a container that fails `/health/live`
 rolls back by itself. It catches "will not boot". The smoke test is what catches
@@ -411,7 +439,7 @@ Use `{MIA_PUBLIC_BASE_URL}`, not a tunnel.
 | --- | --- |
 | Telegram | `POST {base}/v1/telegram/webhook` (`X-Telegram-Bot-Api-Secret-Token`) |
 | WhatsApp | `POST {base}/v1/whatsapp/webhook` (GET verify on the same path) |
-| Instagram | `POST {base}/v1/instagram/webhook` (analytics; not a v1 sales inbox) |
+| Instagram | no inbound webhook. Analytics only (Insights); the DM/send path was deleted in 1.0 |
 | Composio Gmail ingest | `POST {base}/v1/composio/webhook` |
 
 **Telegram** is the one that must be right. `setWebhook` to
@@ -421,7 +449,7 @@ Use `{MIA_PUBLIC_BASE_URL}`, not a tunnel.
 this is done with `mia-telegram-webhook` through `run_ecs_command.py`.
 
 Also confirm: `MIA_WHATSAPP_VERIFY_TOKEN` + `MIA_WHATSAPP_APP_SECRET` for inbound HMAC
-(ADR-016); one Instagram sender only, never Graph + Composio together; Composio
+(ADR-016); Composio
 `MIA_COMPOSIO_API_KEY` + `MIA_COMPOSIO_USER_ID` + `MIA_COMPOSIO_WEBHOOK_SECRET`, then
 restart and check `/health` `composio` and `composio_webhook`; the Composio project's
 OAuth user verification URL is **empty** (Mia has no verify route, and a value there
