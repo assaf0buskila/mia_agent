@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import time
 import urllib.error
@@ -108,37 +109,70 @@ def check_sales_ladder(base: str) -> str:
     return " -> ".join(actions)
 
 
+# A number next to a currency marker. A bare "2024" or "3 שלבים" is not a price, and
+# treating it as one is how a gate starts failing honest replies.
+_CURRENCY = ("₪", "שקל", "שקלים", 'ש"ח', "ils", "nis", "$", "usd", "eur", "€")
+
+
+def _price_amount_in(message: str) -> str:
+    """The price amount the reply states, or "" when it states none."""
+    lowered = (message or "").lower()
+    if not any(mark in lowered for mark in _CURRENCY):
+        return ""
+    for match in re.finditer(r"\d[\d,\.]{2,}", message or ""):
+        digits = match.group(0).replace(",", "").replace(".", "")
+        # Three digits or more, so a scope list ("2-3 שבועות") is never read as money.
+        if len(digits) >= 3:
+            return match.group(0)
+    return ""
+
+
 def check_pricing(base: str, *, require_quote: bool) -> str:
     reply = _conversation(base, (PRICE_QUESTION,))[0]
     action = str(reply.get("next_action") or "?")
     message = str(reply.get("message") or "")
     if action not in {"answer", "no_price"}:
         raise SmokeFailure(f"a price question produced action={action}")
+    amount = _price_amount_in(message)
     quoted = action == "answer"
     if quoted:
-        # Retrieval found a price, so the reply must not also deny that one exists.
-        # The pre-v11 prompt asserted "there is no public price list" as a fact and
-        # contradicted its own evidence in the same breath.
-        for denial in ("אין מחירון", "אין מחיר מפורסם", "no public price"):
-            if denial in message:
-                raise SmokeFailure(
-                    "a published price was retrieved but the reply still denies one "
-                    f"exists: {message[:120]!r}"
-                )
-    if not quoted:
-        # Refusing is allowed; inventing a number is not.
-        if NO_PRICE_MARKER not in message:
+        # `action == "answer"` means a quotable pricing SENTENCE was found, not that a
+        # published NUMBER was. Conflating those made this gate fail Mia for being
+        # right: assafweb.com's published position is that price depends on scope, so a
+        # faithful reply says exactly that, and the check read its own honesty as a
+        # contradiction. Measured against live production it failed about two runs in
+        # three with nothing wrong.
+        #
+        # The invariant, per this file's own summary, is that a price question never
+        # invents a number. That is what is asserted now.
+        if amount and not require_quote:
             raise SmokeFailure(
-                "Mia declined to quote a price but did not use the published refusal: "
+                f"Mia stated a price amount ({amount!r}) but this run was not told the "
+                "corpus publishes one. Pass --require-price-quote when it does; "
+                f"otherwise this is an invented number: {message[:120]!r}"
+            )
+        if require_quote and not amount:
+            raise SmokeFailure(
+                "a published price was expected but the reply states no amount: "
                 f"{message[:120]!r}"
             )
-        if require_quote:
-            raise SmokeFailure(
-                "no published price was quoted. The corpus has no PRICING chunk for "
-                "this question, or the ingest has not run."
-            )
-        return "refused honestly (no published price retrieved)"
-    return f"quoted a published price: {message[:80]!r}"
+        return (
+            f"quoted the published amount {amount!r}"
+            if amount
+            else "relayed the published pricing position without inventing a number"
+        )
+    # Refusing is allowed; inventing a number is not.
+    if NO_PRICE_MARKER not in message:
+        raise SmokeFailure(
+            "Mia declined to quote a price but did not use the published refusal: "
+            f"{message[:120]!r}"
+        )
+    if require_quote:
+        raise SmokeFailure(
+            "no published price was quoted. The corpus has no PRICING chunk for "
+            "this question, or the ingest has not run."
+        )
+    return "refused honestly (no published price retrieved)"
 
 
 def check_approval_policy(base: str) -> str:
