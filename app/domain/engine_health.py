@@ -40,7 +40,10 @@ class AiRunAggregate(BaseModel):
     p95_latency_ms: int = Field(ge=0)
     tokens_in: int = Field(ge=0)
     tokens_out: int = Field(ge=0)
-    cost_usd: int = Field(ge=0)
+    # Always 0: no code prices a run. Kept so the shape does not change under
+    # callers, but it is a sum of unknowns. Never render it as money -- a zero
+    # cost reads as "free" when it means "never measured".
+    cost_usd: int = Field(ge=0, description="not computed; always 0")
 
 
 def compute_engine_health(

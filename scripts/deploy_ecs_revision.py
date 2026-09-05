@@ -18,6 +18,7 @@ import sys
 from pathlib import Path
 
 FAMILY = "mia"
+CLUSTER = "mia"
 MUTABLE_KEYS = (
     "family",
     "taskRoleArn",
@@ -106,6 +107,26 @@ def _image_with_tag(image: str, tag: str) -> str:
     return f"{registry}/{name}:{tag}"
 
 
+def _running_task_definition() -> str:
+    """The exact revision the service is serving right now.
+
+    Not the family name. `describe-task-definition --task-definition mia` returns the
+    latest ACTIVE revision, which is not necessarily the one production runs: a release
+    that registered mia:30 and then failed its migration leaves the service on mia:29
+    while mia:30 stays registered forever. Basing the next revision on the family would
+    silently inherit that abandoned config -- environment, secrets, cpu, memory -- from
+    a revision a human deliberately never cut over to.
+    """
+    service = _aws("ecs", "describe-services", "--cluster", CLUSTER, "--services", FAMILY)
+    services = service.get("services") or []
+    if not services:
+        sys.exit(f"no ECS service {FAMILY} in cluster {CLUSTER}; refusing to guess a base")
+    arn = str(services[0].get("taskDefinition") or "")
+    if not arn:
+        sys.exit("service reports no task definition; refusing to guess a base")
+    return arn
+
+
 def main() -> None:
     # Gate F: do not register a revision unless this SHA still has origin-bind.
     gate = Path(__file__).resolve().parent / "assert_origin_bind.py"
@@ -122,9 +143,10 @@ def main() -> None:
     sha = _resolved_sha(args.sha)
     print(f"build sha {sha[:12]}")
 
-    current = _aws("ecs", "describe-task-definition", "--task-definition", FAMILY)
+    base = _running_task_definition()
+    current = _aws("ecs", "describe-task-definition", "--task-definition", base)
     task_def = current["taskDefinition"]
-    print(f"current revision {task_def['revision']}")
+    print(f"basing on the revision production is serving: {task_def['revision']}")
 
     payload = {key: task_def[key] for key in MUTABLE_KEYS if key in task_def}
     for container in payload["containerDefinitions"]:
