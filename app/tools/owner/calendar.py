@@ -5,14 +5,14 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from app.domain.calendar_write_gate import ASK_ASSAF
 from app.domain.events import Channel
-from app.domain.owner_calendar import (
+from app.domain.meetings.write_gate import ASK_ASSAF
+from app.domain.owner.calendar import (
     apply_owner_calendar,
     format_calendar_agenda,
     resolve_agenda_window,
 )
-from app.domain.owner_calendar_writes import apply_owner_calendar_change_request
+from app.domain.owner.calendar_writes import apply_owner_calendar_change_request
 from app.integrations.calendar import build_calendar_agenda_port, build_calendar_port
 from app.tools.owner.types import ToolContext, ToolResult, _empty, _house_unavailable
 

@@ -4,7 +4,7 @@ Read-only by construction: no writes, no PII, no lead ids. Mia is a sales operat
 with every turn logged, but until this module nothing ever aggregated those events
 into a funnel, so nobody could tell whether the website actually converts (see
 ADR-029). This is a scorecard, not a drill-down: naming a specific conversation
-stays the job of `app/domain/owner_reads.py`.
+stays the job of `app/domain/owner/reads.py`.
 
 Every stage is an EVENT count on the canonical event / behavior log for the
 requested local calendar day, taken as-is from counters that already exist
@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel, Field
 
 from app.domain.followups import local_day_bounds_utc_iso
-from app.domain.owner_reads import discovery_depth
+from app.domain.owner.reads import discovery_depth
 
 if TYPE_CHECKING:
     from app.db.store import LeadStore
@@ -115,7 +115,7 @@ def compute_website_funnel(
     """Compute today's (local `timezone`) website funnel. None on a bad timezone.
 
     Read-only: no writes, no PII, no lead ids. Mirrors
-    `app/domain/owner_briefs.py::compute_daily_brief`'s local-day-bounds pattern.
+    `app/domain/owner/briefs.py::compute_daily_brief`'s local-day-bounds pattern.
     """
     instant = now if now is not None else datetime.now(UTC)
     bounds = local_day_bounds_utc_iso(now=instant, timezone=timezone)

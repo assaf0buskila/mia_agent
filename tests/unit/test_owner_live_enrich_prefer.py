@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from app.api.owner import _prefer_live_enrich
-from app.domain.owner_tasks import OwnerTaskType
+from app.domain.owner.tasks import OwnerTaskType
 
 
 def test_prefer_live_enrich_when_agent_skipped_seo_tool() -> None:

@@ -1,7 +1,7 @@
 """Adversarial scrape injection must not alter owner SEO ack beyond sanitized fields."""
 
 from app.capabilities.types import Principal
-from app.domain.owner_tasks import ack_for_owner_task, classify_owner_task
+from app.domain.owner.tasks import ack_for_owner_task, classify_owner_task
 from app.domain.seo import enrich_seo_ack
 from app.integrations.ga4 import DisabledGa4Port
 from app.integrations.search_console import DisabledSearchConsolePort

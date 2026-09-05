@@ -13,21 +13,21 @@ from app.core.errors import PolicyDenied
 from app.core.risk import PolicyDecision, RiskAction, RiskLevel, decide
 from app.core.write_flags import named_write_may_auto, write_flag_enabled
 from app.domain.ai_runs import elapsed_ms
-from app.domain.booking_voice import (
+from app.domain.events import Channel, build_meeting_booked_event
+from app.domain.followups import cancel_follow_up_for_booked
+from app.domain.meetings.availability import slot_is_bookable
+from app.domain.meetings.briefs import persist_booked_meeting_brief
+from app.domain.meetings.changes import (
+    MeetingChangeKind,
+    resolve_booked_meeting_change,
+)
+from app.domain.meetings.copy import (
     BOOKING_CONFIRMED,
     BOOKING_DENIED,
     BOOKING_RETRY,
     CONFLICT_SLOT_TAKEN,
 )
-from app.domain.briefs import persist_booked_meeting_brief
-from app.domain.events import Channel, build_meeting_booked_event
-from app.domain.followups import cancel_follow_up_for_booked
-from app.domain.meeting_availability import slot_is_bookable
-from app.domain.meeting_changes import (
-    MeetingChangeKind,
-    resolve_booked_meeting_change,
-)
-from app.domain.meeting_slots import (
+from app.domain.meetings.slots import (
     OfferedSlot,
     compute_booking_key,
     is_explicit_slot_selection,
@@ -39,12 +39,12 @@ from app.domain.meeting_slots import (
     slot_interval_exactly_available,
     to_utc_aware,
 )
-from app.domain.meetings import (
+from app.domain.meetings.state import (
     MEETING_TYPE_INTRO_CALL,
     STATUS_BOOKED,
     STATUS_CANCELLATION_REQUESTED,
 )
-from app.domain.owner_notify import persist_meeting_booked_owner_notify
+from app.domain.owner.notifications import persist_meeting_booked_owner_notify
 from app.domain.tools import AdapterHttpError, ToolOutcome
 from app.domain.value import ValueKind, persist_business_value
 from app.integrations.calendar import CalendarPort, format_slot_time

@@ -29,7 +29,7 @@ from app.core.config import Settings
 from app.core.errors import PolicyDenied
 from app.core.risk import RiskAction, RiskLevel, assert_allowed
 from app.domain.ai_runs import elapsed_ms
-from app.domain.meeting_availability import carve_policy_slots
+from app.domain.meetings.availability import carve_policy_slots
 from app.domain.policies.freshness import overlay_stale, stamp_freshness
 from app.domain.sales import NextAction
 from app.domain.tools import AdapterHttpError, ToolOutcome

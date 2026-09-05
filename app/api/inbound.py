@@ -28,8 +28,6 @@ from app.domain.approvals import (
     apply_approval_policy,
 )
 from app.domain.attribution import INSTAGRAM_ATTRIBUTION_KEYS
-from app.domain.briefs import apply_meeting_brief_policy
-from app.domain.calendar_booking import resolve_meeting_reply
 from app.domain.conversation_kill import apply_conversation_kill_policy
 from app.domain.conversation_scope import (
     AutomationScope,
@@ -52,7 +50,9 @@ from app.domain.followups import apply_follow_up_policy
 from app.domain.handoff.hot import apply_hot_handoff
 from app.domain.handoff.tokens import inbound_text_without_token
 from app.domain.identity import REASON_HANDOFF_TOKEN, persist_verified_identity_link
-from app.domain.meetings import apply_meeting_policy
+from app.domain.meetings.booking import resolve_meeting_reply
+from app.domain.meetings.briefs import apply_meeting_brief_policy
+from app.domain.meetings.state import apply_meeting_policy
 from app.domain.ownership_freshness import (
     VALID_INSTAGRAM_SENDERS,
     conversation_ownership_outcome,

@@ -14,7 +14,6 @@ from app.core.config import Settings
 from app.db.models import CanonicalEventRow, IdempotencyRow
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
-from app.domain.calendar_booking import resolve_meeting_reply
 from app.domain.events import Channel, EventType
 from app.domain.followups import (
     REASON_MEETING_BOOKED,
@@ -23,7 +22,8 @@ from app.domain.followups import (
     STATUS_PENDING,
     evaluate_follow_up_send,
 )
-from app.domain.meeting_changes import (
+from app.domain.meetings.booking import resolve_meeting_reply
+from app.domain.meetings.changes import (
     CANCELLATION_DENIED_REPLY,
     CANCELLATION_REQUESTED_REPLY,
     RESCHEDULE_CONFIRMED,
@@ -39,8 +39,8 @@ from app.domain.meeting_changes import (
     is_explicit_reschedule_request,
     resolve_booked_meeting_change,
 )
-from app.domain.meeting_slots import compute_booking_key
-from app.domain.meetings import (
+from app.domain.meetings.slots import compute_booking_key
+from app.domain.meetings.state import (
     STATUS_BOOKED,
     STATUS_CANCELLATION_REQUESTED,
     apply_meeting_policy,

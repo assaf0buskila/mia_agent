@@ -1,7 +1,7 @@
 
 """Read-only calendar agenda: window resolution, rendering, and the calendar_agenda tool.
 
-Separate from `app.domain.owner_calendar.apply_owner_calendar` (free-slot availability,
+Separate from `app.domain.owner.calendar.apply_owner_calendar` (free-slot availability,
 "when am I free"). This covers the additive "what's on my calendar" read: window math
 in `resolve_agenda_window`, rendering in `format_calendar_agenda`, the `calendar_agenda`
 handler in `app.tools.owner.calendar`, and its registration in
@@ -19,7 +19,7 @@ from app.capabilities.types import Principal
 from app.core.config import get_settings
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
-from app.domain.owner_calendar import (
+from app.domain.owner.calendar import (
     AGENDA_RANGES,
     format_calendar_agenda,
     resolve_agenda_window,

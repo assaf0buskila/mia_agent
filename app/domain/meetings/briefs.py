@@ -14,7 +14,7 @@ from app.domain.ai_runs import elapsed_ms
 from app.domain.approvals import extract_approval_lead_id
 from app.domain.company import sanitize_company_domain
 from app.domain.events import Channel, build_meeting_brief_event
-from app.domain.meeting_slots import normalize_scheduled_at_utc, to_utc_aware
+from app.domain.meetings.slots import normalize_scheduled_at_utc, to_utc_aware
 from app.domain.sales import MEDDPICC_MISSING_ORDER, FitLevel, NextAction, SalesState
 from app.domain.tools import AdapterHttpError, ToolOutcome
 from app.integrations.calendar import format_slot_time

@@ -112,7 +112,7 @@ from app.domain.lead_reviews import (
     ALLOWLISTED_MEETING_STATUS,
     ALLOWLISTED_NEXT_ACTION,
 )
-from app.domain.meeting_slots import (
+from app.domain.meetings.slots import (
     normalize_scheduled_at_utc,
     offered_slots_from_json,
     offered_slots_to_json,
@@ -120,7 +120,7 @@ from app.domain.meeting_slots import (
     sanitize_meet_link,
     validate_offered_slots,
 )
-from app.domain.meetings import (
+from app.domain.meetings.state import (
     ALLOWLISTED_MEETING_TYPES,
     ALLOWLISTED_STATUSES,
     MEETING_TYPE_INTRO_CALL,
@@ -1732,7 +1732,7 @@ class LeadStore:
             return
         if decision != DECISION_PENDING or not resource_id or len(resource_id) > 80:
             return
-        from app.domain.owner_linkedin_writes import linkedin_parameters_within_bound
+        from app.domain.owner.linkedin_writes import linkedin_parameters_within_bound
 
         if not linkedin_parameters_within_bound(proposed_parameters):
             return
@@ -1775,7 +1775,7 @@ class LeadStore:
             return
         if decision != DECISION_PENDING or not resource_id or len(resource_id) > 80:
             return
-        from app.domain.owner_composio_writes import composio_parameters_within_bound
+        from app.domain.owner.composio_writes import composio_parameters_within_bound
 
         if not composio_parameters_within_bound(proposed_parameters):
             return

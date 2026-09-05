@@ -7,9 +7,9 @@ from app.core.config import get_settings
 from app.db.models import CanonicalEventRow
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
-from app.domain.calendar_booking import _persist_meeting_booked_event
 from app.domain.events import Channel, EventType, build_business_value_event
 from app.domain.followups import STATUS_RECOVERED, apply_follow_up_policy
+from app.domain.meetings.booking import _persist_meeting_booked_event
 from app.domain.sales import FitLevel, NextAction, PainLevel, SalesState
 from app.domain.value import ValueKind, count_business_value, persist_business_value
 from app.graph.orchestrator import build_graph

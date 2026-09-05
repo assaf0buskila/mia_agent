@@ -348,7 +348,7 @@ def test_owner_system_audit_reports_each_surface_without_a_blanket_provider_clai
 
 def test_owner_system_audit_keeps_unseen_booked_meetings_unconsumed() -> None:
     """The aggregate audit reports its inbox snapshot without acknowledging it."""
-    from app.domain.owner_notify import KIND_MEETING_BOOKED
+    from app.domain.owner.notifications import KIND_MEETING_BOOKED
 
     session = _session()
     try:

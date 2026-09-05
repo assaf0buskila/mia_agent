@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 from app.brain.schemas import MemoryCategory, MemoryKind, MemorySource
-from app.domain.owner_brain import OwnerBrainResult
+from app.domain.owner.brain import OwnerBrainResult
 from app.domain.two_state import TOOL_TIMEOUT_SECONDS
 from app.evals.predeploy.checks import (
     CLAIMED_ACTION_EN,

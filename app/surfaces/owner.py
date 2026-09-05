@@ -31,7 +31,7 @@ from app.domain.events import (
     stamp_correlation,
 )
 from app.domain.gmail.drafts import apply_gmail_send_decision, execute_approved_gmail_send
-from app.domain.owner_tasks import OwnerTaskType, classify_owner_task
+from app.domain.owner.tasks import OwnerTaskType, classify_owner_task
 from app.domain.takeover import apply_owner_human_resume, apply_owner_human_takeover
 from app.domain.tools import AdapterHttpError
 from app.integrations.base import MessagePort
@@ -240,7 +240,7 @@ async def run_owner_loop(
     # function's own guards still decide what is worth keeping.
     if not demo_mode_active(settings):
         try:
-            from app.domain.owner_brain import learn_from_exchange
+            from app.domain.owner.brain import learn_from_exchange
 
             learn_from_exchange(
                 brain=BrainStore(store.session),
@@ -266,7 +266,7 @@ def _talk_with_optional_agent(
     item: dict[str, str],
     correlation_id: str = "",
 ) -> tuple[str, bool]:
-    from app.domain.owner_brain import answer_owner
+    from app.domain.owner.brain import answer_owner
 
     try:
         fallback, wrote = talk_as_dude(text=text, crm=crm)

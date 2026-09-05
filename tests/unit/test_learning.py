@@ -13,7 +13,7 @@ from app.domain.learning import (
     classify_instruction_kind,
     propose_owner_instruction,
 )
-from app.domain.owner_tasks import OwnerTaskType, ack_for_owner_task, classify_owner_task
+from app.domain.owner.tasks import OwnerTaskType, ack_for_owner_task, classify_owner_task
 from app.graph.orchestrator import build_graph
 from app.integrations.base import RecordingMessagePort
 from app.integrations.linkedin import DisabledLinkedInPort

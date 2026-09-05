@@ -18,7 +18,7 @@ from app.domain.commitments import (
     scan_due_owner_tasks,
 )
 from app.domain.followups import follow_up_due_on
-from app.domain.owner_tasks import classify_owner_task
+from app.domain.owner.tasks import classify_owner_task
 
 _JERUSALEM = ZoneInfo("Asia/Jerusalem")
 _FIXED_NOW = datetime(2026, 8, 21, 10, 0, tzinfo=_JERUSALEM)
@@ -124,7 +124,7 @@ def test_plan_understanding_check_all_none() -> None:
 
 
 def test_plan_calendar_tomorrow_no_due_trigger() -> None:
-    from app.domain.owner_tasks import OwnerTaskType
+    from app.domain.owner.tasks import OwnerTaskType
 
     text = "check my calendar tomorrow"
     decision = classify_owner_task(text)

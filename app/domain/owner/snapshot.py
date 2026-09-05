@@ -8,16 +8,16 @@ from app.capabilities.types import Principal
 from app.domain.engine_health import compute_engine_health, format_engine_health
 from app.domain.funnel import compute_website_funnel, format_website_funnel
 from app.domain.handoff.hot import format_hot_leads_ack
-from app.domain.owner_briefs import compute_daily_brief
-from app.domain.owner_notify import (
+from app.domain.owner.briefs import compute_daily_brief
+from app.domain.owner.notifications import (
     OWNER_NOTIFY_KINDS,
     format_owner_notify_inbox,
 )
-from app.domain.owner_reads import (
+from app.domain.owner.reads import (
     format_pending_approvals_ack,
     format_website_conversations_ack,
 )
-from app.domain.owner_weeklies import compute_weekly_brief
+from app.domain.owner.weeklies import compute_weekly_brief
 
 if TYPE_CHECKING:
     from app.db.store import LeadStore

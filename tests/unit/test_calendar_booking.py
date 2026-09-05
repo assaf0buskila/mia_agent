@@ -14,15 +14,15 @@ from app.core.config import Settings
 from app.db.models import OwnerNotificationRow
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
-from app.domain.booking_voice import BOOKING_RETRY
-from app.domain.calendar_booking import (
+from app.domain.events import Channel, EventType, build_meeting_booked_event
+from app.domain.meetings.availability import is_workday_local
+from app.domain.meetings.booking import (
     BookingResultKind,
     attempt_meeting_booking,
     resolve_meeting_reply,
 )
-from app.domain.events import Channel, EventType, build_meeting_booked_event
-from app.domain.meeting_availability import is_workday_local
-from app.domain.meeting_slots import (
+from app.domain.meetings.copy import BOOKING_RETRY
+from app.domain.meetings.slots import (
     compute_booking_key,
     is_explicit_slot_selection,
     offered_slots_from_json,
@@ -32,7 +32,7 @@ from app.domain.meeting_slots import (
     slot_interval_exactly_available,
     validate_offered_slots,
 )
-from app.domain.meetings import (
+from app.domain.meetings.state import (
     MEETING_TYPE_INTRO_CALL,
     STATUS_BOOKED,
     STATUS_OFFERED,
@@ -215,7 +215,7 @@ def _seed_offered(
     ],
 )
 def test_parse_slot_selection(message: str, expected: int | None) -> None:
-    from app.domain.meeting_slots import OfferedSlot
+    from app.domain.meetings.slots import OfferedSlot
 
     slots = [
         OfferedSlot(start=_slot(4, 10).start, end=_slot(4, 10).end),
@@ -1052,7 +1052,7 @@ def test_verify_tool_outcome_mismatch() -> None:
 
 
 def test_slot_interval_exactly_available_requires_full_cover() -> None:
-    from app.domain.meeting_slots import OfferedSlot
+    from app.domain.meetings.slots import OfferedSlot
 
     selected = OfferedSlot(start=_slot(4, 10).start, end=_slot(4, 10).end)
     partial = [

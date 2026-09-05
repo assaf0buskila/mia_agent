@@ -21,8 +21,8 @@ from app.domain.approvals import (
     RESOURCE_LINKEDIN_TOOL,
 )
 from app.domain.events import Channel
-from app.domain.owner_composio_writes import composio_approval_resource_id, propose_composio_write
-from app.domain.owner_linkedin_writes import linkedin_approval_resource_id, propose_linkedin_write
+from app.domain.owner.composio_writes import composio_approval_resource_id, propose_composio_write
+from app.domain.owner.linkedin_writes import linkedin_approval_resource_id, propose_linkedin_write
 from app.integrations.composio_catalog import (
     NEVER_AUTO_PUBLISH_SLUGS,
     NEVER_AUTO_SEND_SLUGS,

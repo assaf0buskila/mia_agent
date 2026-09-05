@@ -32,7 +32,7 @@ from app.domain.events import Channel
 from app.domain.extract import extract_sales_signals
 from app.domain.followups import STATUS_CANCELLED, STATUS_PENDING
 from app.domain.handoff.hot import KIND_HOT_LEAD
-from app.domain.owner_tasks import OwnerTaskType, classify_owner_task
+from app.domain.owner.tasks import OwnerTaskType, classify_owner_task
 from app.domain.sales import NextAction, SalesState
 from app.domain.takeover import apply_owner_human_resume, apply_owner_human_takeover
 from app.integrations.base import OutboundMessage, RecordingMessagePort

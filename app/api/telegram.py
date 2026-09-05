@@ -20,10 +20,10 @@ from app.db.store import LeadStore
 from app.domain.ai_runs import elapsed_ms
 from app.domain.events import Channel, webhook_envelope_kind
 from app.domain.gmail.drafts import execute_approved_gmail_send
-from app.domain.owner_calendar_writes import execute_approved_calendar_change
-from app.domain.owner_callbacks import resolve_owner_callback_result
-from app.domain.owner_composio_writes import execute_approved_composio_write
-from app.domain.owner_linkedin_writes import execute_approved_linkedin_write
+from app.domain.owner.calendar_writes import execute_approved_calendar_change
+from app.domain.owner.callbacks import resolve_owner_callback_result
+from app.domain.owner.composio_writes import execute_approved_composio_write
+from app.domain.owner.linkedin_writes import execute_approved_linkedin_write
 from app.domain.tools import AdapterHttpError
 from app.integrations.base import MessagePort
 from app.integrations.calendar import build_calendar_port

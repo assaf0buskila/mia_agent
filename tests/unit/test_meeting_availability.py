@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
-from app.domain.meeting_availability import (
+from app.domain.meetings.availability import (
     BUSINESS_CLOSE,
     carve_policy_slots,
     is_workday_local,

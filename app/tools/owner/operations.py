@@ -10,17 +10,17 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from app.domain.briefs import apply_owner_meeting_brief
 from app.domain.content_ideas import apply_owner_content_ideas
 from app.domain.handoff.hot import format_hot_leads_ack
 from app.domain.lead_reviews import apply_owner_lead_review, format_lead_matches
-from app.domain.owner_briefs import apply_owner_brief
-from app.domain.owner_connection_audit import OwnerAuditResult, format_owner_connection_audit
-from app.domain.owner_notify import apply_owner_notify
-from app.domain.owner_reads import format_pending_approvals_ack, format_website_conversations_ack
-from app.domain.owner_snapshot import format_operator_snapshot_ack
-from app.domain.owner_status import format_owner_status_ack
-from app.domain.owner_weeklies import apply_owner_weekly
+from app.domain.meetings.briefs import apply_owner_meeting_brief
+from app.domain.owner.briefs import apply_owner_brief
+from app.domain.owner.connection_audit import OwnerAuditResult, format_owner_connection_audit
+from app.domain.owner.notifications import apply_owner_notify
+from app.domain.owner.reads import format_pending_approvals_ack, format_website_conversations_ack
+from app.domain.owner.snapshot import format_operator_snapshot_ack
+from app.domain.owner.status import format_owner_status_ack
+from app.domain.owner.weeklies import apply_owner_weekly
 from app.domain.whatsapp_drafts import draft_whatsapp_for_assaf
 from app.tools.owner.types import ToolContext, ToolResult, _empty
 

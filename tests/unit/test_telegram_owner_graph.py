@@ -18,8 +18,8 @@ from app.api.owner import process_owner_texts
 from app.channels.telegram import message_to_owner_state
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
-from app.domain import owner_brain
 from app.domain.events import Channel
+from app.domain.owner import brain as owner_brain
 from app.integrations.base import RecordingMessagePort
 
 OWNER_ID = "550077"

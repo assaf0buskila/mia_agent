@@ -11,8 +11,8 @@ from app.core.risk import PolicyDecision, RiskLevel, decide
 from app.core.write_flags import named_write_may_auto, write_flag_enabled
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
-from app.domain.calendar_booking import BookingResultKind, attempt_meeting_booking
 from app.domain.events import Channel
+from app.domain.meetings.booking import BookingResultKind, attempt_meeting_booking
 from app.domain.tools import ToolOutcome
 from app.integrations.calendar import FakeCalendarPort
 from app.integrations.calendar_booking import FakeCalendarBookingPort

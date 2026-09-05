@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 from app.core.errors import PolicyDenied
 from app.core.risk import RiskAction, RiskLevel, assert_allowed
-from app.domain.meeting_slots import normalize_scheduled_at_utc, to_utc_aware
+from app.domain.meetings.slots import normalize_scheduled_at_utc, to_utc_aware
 from app.integrations.calendar import format_slot_time
 
 if TYPE_CHECKING:

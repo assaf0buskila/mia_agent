@@ -3,12 +3,6 @@ import inspect
 
 import pytest
 from app.core.capabilities import CapabilityId, require_alive
-from app.domain.booking_voice import (
-    BOOKING_CONFIRMED,
-    BOOKING_DENIED,
-    BOOKING_RETRY,
-    CONFLICT_SLOT_TAKEN,
-)
 from app.domain.conversation_scope import MIA_INTRO_HE
 from app.domain.followup_voice import MEETING_OFFERED_FOLLOW_UP
 from app.domain.humanity import (
@@ -16,7 +10,7 @@ from app.domain.humanity import (
     customer_reply_or_canned,
     lint_customer_reply,
 )
-from app.domain.meeting_changes import (
+from app.domain.meetings.changes import (
     CANCELLATION_DENIED_REPLY,
     CANCELLATION_REQUESTED_REPLY,
     RESCHEDULE_CONFIRMED,
@@ -24,6 +18,12 @@ from app.domain.meeting_changes import (
     RESCHEDULE_DENIED,
     RESCHEDULE_OFFER_INTRO,
     RESCHEDULE_RETRY,
+)
+from app.domain.meetings.copy import (
+    BOOKING_CONFIRMED,
+    BOOKING_DENIED,
+    BOOKING_RETRY,
+    CONFLICT_SLOT_TAKEN,
 )
 from app.domain.sales import NextAction, SalesState
 from app.graph.replies import (

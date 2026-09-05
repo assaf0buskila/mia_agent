@@ -21,7 +21,7 @@ from app.domain.gmail.summaries import (
     apply_owner_gmail_summary,
     extract_gmail_summary_target,
 )
-from app.domain.owner_tasks import (
+from app.domain.owner.tasks import (
     OwnerTaskType,
     ack_for_owner_task,
     classify_owner_task,

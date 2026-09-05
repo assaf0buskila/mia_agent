@@ -22,7 +22,7 @@ from app.domain.content_ideas import (
 )
 from app.domain.events import Channel
 from app.domain.followups import follow_up_due_on
-from app.domain.owner_tasks import OwnerTaskType, classify_owner_task
+from app.domain.owner.tasks import OwnerTaskType, classify_owner_task
 from app.integrations.base import RecordingMessagePort
 from sqlalchemy import delete
 

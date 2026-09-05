@@ -26,7 +26,7 @@ from app.domain.followups import (
     evaluate_follow_up_send,
     follow_up_due_on,
 )
-from app.domain.meetings import STATUS_BOOKED, apply_meeting_policy
+from app.domain.meetings.state import STATUS_BOOKED, apply_meeting_policy
 from app.domain.sales import FitLevel, NextAction, PainLevel, SalesState, select_next_action
 from app.integrations.base import DisabledMessagePort, RecordingMessagePort
 from app.integrations.calendar import FakeCalendarPort, TimeSlot

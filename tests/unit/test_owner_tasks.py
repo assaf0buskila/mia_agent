@@ -17,7 +17,7 @@ from app.domain.commitments import (
     plan_owner_commitment,
 )
 from app.domain.events import Channel
-from app.domain.owner_tasks import (
+from app.domain.owner.tasks import (
     OwnerTaskType,
     ack_for_owner_task,
     classify_owner_task,

@@ -9,8 +9,8 @@ from app.domain.approvals import (
     ACTION_GMAIL_SEND,
 )
 from app.domain.events import Channel
-from app.domain.owner_callbacks import approval_token
-from app.domain.owner_tasks import OwnerTaskType
+from app.domain.owner.callbacks import approval_token
+from app.domain.owner.tasks import OwnerTaskType
 from app.integrations.base import OutboundMessage
 from app.integrations.telegram_format import approval_keyboard, esc
 

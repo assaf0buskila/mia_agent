@@ -25,8 +25,8 @@ from uuid import uuid4
 from app.capabilities.types import Principal
 from app.core.config import Settings, get_settings
 from app.domain.memory import ConversationTurn
-from app.domain.owner_brain import answer_owner
-from app.domain.owner_tasks import OwnerTaskType
+from app.domain.owner.brain import answer_owner
+from app.domain.owner.tasks import OwnerTaskType
 from app.evals.predeploy.checks import (
     CLAIMED_ACTION_EN,
     CLAIMED_ACTION_HE,

@@ -9,7 +9,7 @@ from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
 from app.domain.content_insights import apply_content_insight_policy
 from app.domain.events import Channel, build_attribution_event
-from app.domain.owner_tasks import OwnerTaskType, ack_for_owner_task, classify_owner_task
+from app.domain.owner.tasks import OwnerTaskType, ack_for_owner_task, classify_owner_task
 from app.domain.tools import AdapterHttpError
 from app.integrations.base import RecordingMessagePort
 from app.integrations.instagram_insights import (

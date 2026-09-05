@@ -21,13 +21,13 @@ from app.core.config import get_settings
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
 from app.domain.memory import ConversationTurn
-from app.domain.owner_brain import (
+from app.domain.owner.brain import (
     DETERMINISTIC_TASK_TYPES,
     agent_allowed_for,
     answer_owner,
     learn_from_exchange,
 )
-from app.domain.owner_tasks import OwnerTaskType
+from app.domain.owner.tasks import OwnerTaskType
 from app.integrations.llm_client import LlmClient
 
 FALLBACK = "נרשם כמשימה. לא ביצעתי אותה."
@@ -431,8 +431,8 @@ async def test_grounded_agent_answer_reaches_the_owner_verbatim(monkeypatch) -> 
     at that call site) rather than only exercising `answer_owner` in isolation.
     """
     from app.api.inbound import process_inbound_texts
-    from app.domain import owner_brain as owner_brain_module
     from app.domain.events import Channel
+    from app.domain.owner import brain as owner_brain_module
 
     from tests.unit.test_comm_operating_model import RecordingTelegramPort
 

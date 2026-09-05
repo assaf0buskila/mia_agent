@@ -4,7 +4,7 @@ from app.db.models import MeetingRow
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
 from app.domain.events import Channel
-from app.domain.meetings import STATUS_OFFERED, apply_meeting_policy
+from app.domain.meetings.state import STATUS_OFFERED, apply_meeting_policy
 from app.domain.sales import NextAction
 from app.main import app
 from fastapi.testclient import TestClient
@@ -137,7 +137,7 @@ def test_reoffer_is_idempotent_one_row_per_lead() -> None:
 
 
 def test_meetings_module_never_imports_message_port() -> None:
-    meetings = importlib.import_module("app.domain.meetings")
+    meetings = importlib.import_module("app.domain.meetings.state")
     source = importlib.import_module("inspect").getsource(meetings)
     assert "MessagePort" not in source
     assert "integrations.base" not in source

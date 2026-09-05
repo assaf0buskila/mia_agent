@@ -19,7 +19,7 @@ from app.domain.followups import (
     evaluate_follow_up_send,
     follow_up_due_on,
 )
-from app.domain.owner_tasks import OwnerTaskType, ack_for_owner_task, classify_owner_task
+from app.domain.owner.tasks import OwnerTaskType, ack_for_owner_task, classify_owner_task
 from app.domain.policies.execution_policy import policy_for
 from app.domain.sales import FitLevel, NextAction, SalesState
 from app.domain.takeover import apply_owner_human_resume, apply_owner_human_takeover

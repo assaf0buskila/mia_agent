@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, date, datetime
 
 import pytest
-from app.domain.owner_callbacks import approval_token, resolve_owner_callback
+from app.domain.owner.callbacks import approval_token, resolve_owner_callback
 from app.integrations.telegram import ALLOWED_UPDATES, parse_telegram_callback
 from app.integrations.telegram_format import (
     MAX_CALLBACK_BYTES,

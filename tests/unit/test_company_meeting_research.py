@@ -5,10 +5,10 @@ from app.api.inbound import process_inbound_texts
 from app.db.models import CanonicalEventRow, ToolRunRow
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
-from app.domain.briefs import apply_meeting_brief_policy
 from app.domain.company import extract_explicit_company_domain, sanitize_company_domain
 from app.domain.events import Channel, EventType, build_qualification_updated_event
 from app.domain.extract import extract_sales_signals
+from app.domain.meetings.briefs import apply_meeting_brief_policy
 from app.domain.sales import (
     FitLevel,
     NextAction,

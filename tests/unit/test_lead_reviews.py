@@ -20,7 +20,7 @@ from app.domain.lead_reviews import (
     build_lead_review_snapshot,
     format_lead_review,
 )
-from app.domain.owner_tasks import (
+from app.domain.owner.tasks import (
     OwnerTaskType,
     ack_for_owner_task,
     classify_owner_task,

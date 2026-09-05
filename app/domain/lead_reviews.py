@@ -12,7 +12,7 @@ from app.core.risk import RiskAction, RiskLevel, assert_allowed
 from app.domain.approvals import extract_approval_lead_id
 from app.domain.deals import STAGE_MEETING_OFFERED, STAGE_PROPOSAL
 from app.domain.lead_label import lead_display
-from app.domain.meetings import (
+from app.domain.meetings.state import (
     STATUS_BOOKED,
     STATUS_CANCELLATION_REQUESTED,
     STATUS_OFFERED,

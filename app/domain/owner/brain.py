@@ -41,7 +41,7 @@ from app.core.errors import MiaError
 from app.core.models import model_chain
 from app.db.store import LeadStore
 from app.domain.memory import ConversationTurn
-from app.domain.owner_tasks import OwnerTaskType
+from app.domain.owner.tasks import OwnerTaskType
 from app.graph.owner_agent import AgentOutcome, run_owner_agent
 from app.integrations.calendar import (
     CalendarAgendaPort,

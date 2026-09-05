@@ -10,7 +10,7 @@ from urllib.parse import urlparse
 
 from pydantic import BaseModel, field_validator
 
-from app.domain.meeting_availability import MAX_POLICY_SLOTS, slot_is_bookable
+from app.domain.meetings.availability import MAX_POLICY_SLOTS, slot_is_bookable
 from app.integrations.calendar import DEFAULT_MEETING_MINUTES, TimeSlot
 
 MAX_OFFERED_SLOTS = 3

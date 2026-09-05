@@ -17,7 +17,7 @@ from app.domain.gmail.drafts import (
     parse_gmail_draft_request,
     parse_gmail_send_intent,
 )
-from app.domain.owner_tasks import OwnerTaskType, classify_owner_task
+from app.domain.owner.tasks import OwnerTaskType, classify_owner_task
 from app.integrations.gmail import (
     COMPOSIO_CREATE_DRAFT_TOOL,
     COMPOSIO_FETCH_EMAILS_TOOL,

@@ -31,9 +31,9 @@ from app.domain.approvals import (
     extract_approval_id,
     is_approval_expired,
 )
-from app.domain.calendar_write_gate import ASK_ASSAF, assess_calendar_write
 from app.domain.events import Channel, build_approval_required_event
-from app.domain.meeting_slots import sanitize_event_id
+from app.domain.meetings.slots import sanitize_event_id
+from app.domain.meetings.write_gate import ASK_ASSAF, assess_calendar_write
 from app.integrations.calendar import CalendarPort
 from app.integrations.calendar_booking import (
     BookingLookupStatus,

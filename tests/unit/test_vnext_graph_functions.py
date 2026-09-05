@@ -11,7 +11,7 @@ from app.core.config import Settings
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
 from app.domain.events import Channel, build_message_in_event
-from app.domain.owner_brain import OwnerBrainResult, run_owner_turn
+from app.domain.owner.brain import OwnerBrainResult, run_owner_turn
 from app.integrations.sales_reply import FakeSalesReplyPort
 from app.services.finalization import kind_for
 
@@ -186,7 +186,7 @@ def test_owner_retrieve_uses_owner_policy(monkeypatch) -> None:
         del args, handlers, kill_switch, preapproved
         return {"hits": []}
 
-    monkeypatch.setattr("app.domain.owner_brain.execute_capability", fake_execute)
+    monkeypatch.setattr("app.domain.owner.brain.execute_capability", fake_execute)
     init_db()
     db = get_session_factory()()
     try:

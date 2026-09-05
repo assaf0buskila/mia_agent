@@ -92,7 +92,7 @@ def _callback_binding_is_valid(row) -> bool:
     if row.action in (ACTION_CALENDAR_CREATE, ACTION_CALENDAR_RESCHEDULE):
         # Calendar changes carry a parameter-bound hash, validated by their
         # executor immediately before the provider call.
-        from app.domain.owner_calendar_writes import _row_change
+        from app.domain.owner.calendar_writes import _row_change
 
         return (
             row.resource_type == RESOURCE_CALENDAR
@@ -113,7 +113,7 @@ def _callback_binding_is_valid(row) -> bool:
             is None
         )
     if row.action == ACTION_LINKEDIN_COMPOSIO_WRITE:
-        from app.domain.owner_linkedin_writes import linkedin_row_valid
+        from app.domain.owner.linkedin_writes import linkedin_row_valid
 
         return (
             row.resource_type == RESOURCE_LINKEDIN_TOOL
@@ -121,7 +121,7 @@ def _callback_binding_is_valid(row) -> bool:
             and linkedin_row_valid(row) is not None
         )
     if row.action == ACTION_COMPOSIO_WRITE:
-        from app.domain.owner_composio_writes import composio_row_valid
+        from app.domain.owner.composio_writes import composio_row_valid
 
         return (
             row.resource_type == RESOURCE_COMPOSIO_TOOL

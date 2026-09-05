@@ -14,9 +14,9 @@ from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
 from app.domain.commitments import ACTION_LOG, TRIGGER_NONE
 from app.domain.events import Channel
-from app.domain.meeting_availability import is_workday_local
-from app.domain.owner_calendar import apply_owner_calendar
-from app.domain.owner_tasks import (
+from app.domain.meetings.availability import is_workday_local
+from app.domain.owner.calendar import apply_owner_calendar
+from app.domain.owner.tasks import (
     OwnerTaskType,
     ack_for_owner_task,
     classify_owner_task,
@@ -331,7 +331,7 @@ async def test_owner_inbound_calendar_kill_switch() -> None:
 
 
 def test_owner_calendar_module_no_forbidden_imports() -> None:
-    module = importlib.import_module("app.domain.owner_calendar")
+    module = importlib.import_module("app.domain.owner.calendar")
     source = inspect.getsource(module)
     assert "MessagePort" not in source
     assert "CREATE_EVENT" not in source

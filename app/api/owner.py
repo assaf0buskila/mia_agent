@@ -26,7 +26,6 @@ from app.domain.approvals import (
     ack_for_approval_result,
     apply_owner_approval_decision,
 )
-from app.domain.briefs import apply_owner_meeting_brief
 from app.domain.commitments import parse_due_at, plan_owner_commitment
 from app.domain.content_ideas import apply_owner_content_ideas
 from app.domain.conversation_scope import apply_owner_scope_mark
@@ -56,30 +55,31 @@ from app.domain.learning import (
     classify_instruction_kind,
     propose_owner_instruction,
 )
-from app.domain.owner_brain import answer_owner, learn_from_exchange, run_owner_turn
-from app.domain.owner_briefs import apply_owner_brief
-from app.domain.owner_calendar import apply_owner_calendar
-from app.domain.owner_calendar_writes import (
+from app.domain.meetings.briefs import apply_owner_meeting_brief
+from app.domain.owner.brain import answer_owner, learn_from_exchange, run_owner_turn
+from app.domain.owner.briefs import apply_owner_brief
+from app.domain.owner.calendar import apply_owner_calendar
+from app.domain.owner.calendar_writes import (
     apply_owner_calendar_change_request,
     calendar_request_help,
     decide_calendar_change,
     execute_approved_calendar_change,
 )
-from app.domain.owner_followups import needs_data_anchor, routed_owner_text
-from app.domain.owner_notify import apply_owner_notify
-from app.domain.owner_reads import (
+from app.domain.owner.followups import needs_data_anchor, routed_owner_text
+from app.domain.owner.notifications import apply_owner_notify
+from app.domain.owner.reads import (
     format_pending_approvals_ack,
     format_website_conversations_ack,
     top_website_lead_id,
 )
-from app.domain.owner_snapshot import format_operator_snapshot_ack
-from app.domain.owner_tasks import (
+from app.domain.owner.snapshot import format_operator_snapshot_ack
+from app.domain.owner.tasks import (
     OwnerTaskType,
     ack_for_owner_task,
     classify_owner_task,
     promote_unclassified_text_to_status,
 )
-from app.domain.owner_weeklies import apply_owner_weekly
+from app.domain.owner.weeklies import apply_owner_weekly
 from app.domain.ownership_freshness import owner_permissions_outcome
 from app.domain.seo import enrich_seo_ack
 from app.domain.takeover import apply_owner_human_resume, apply_owner_human_takeover

@@ -3,8 +3,8 @@
 from app.capabilities.types import Principal
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
-from app.domain.owner_snapshot import format_operator_snapshot_ack
-from app.domain.owner_status import format_owner_status_ack
+from app.domain.owner.snapshot import format_operator_snapshot_ack
+from app.domain.owner.status import format_owner_status_ack
 
 
 def test_operator_snapshot_has_facts_and_no_menu() -> None:

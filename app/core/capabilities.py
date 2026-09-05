@@ -290,13 +290,13 @@ CAPABILITIES: tuple[Capability, ...] = (
         id=CapabilityId.OWNER_BRIEF,
         prd="§2.2 / §17",
         status=WiringStatus.ALIVE,
-        port="app.domain.owner_briefs",
+        port="app.domain.owner.briefs",
     ),
     Capability(
         id=CapabilityId.OWNER_WEEKLY,
         prd="§2.2 / §17",
         status=WiringStatus.ALIVE,
-        port="app.domain.owner_weeklies",
+        port="app.domain.owner.weeklies",
     ),
     Capability(
         id=CapabilityId.GRAPH_LAB,
@@ -338,7 +338,7 @@ CAPABILITIES: tuple[Capability, ...] = (
         id=CapabilityId.MEETING_BRIEF,
         prd="§12.2",
         status=WiringStatus.ALIVE,
-        port="app.domain.briefs",
+        port="app.domain.meetings.briefs",
     ),
     Capability(
         id=CapabilityId.MEETING_DEBRIEF,
@@ -356,19 +356,19 @@ CAPABILITIES: tuple[Capability, ...] = (
         id=CapabilityId.OWNER_CALENDAR,
         prd="§17 / §18.2",
         status=WiringStatus.ALIVE,
-        port="app.domain.owner_calendar",
+        port="app.domain.owner.calendar",
     ),
     Capability(
         id=CapabilityId.OWNER_NOTIFY,
         prd="§12.2 / §26.2",
         status=WiringStatus.ALIVE,
-        port="app.domain.owner_notify",
+        port="app.domain.owner.notifications",
     ),
     Capability(
         id=CapabilityId.MEETINGS,
         prd="§12.2 / §19",
         status=WiringStatus.ALIVE,
-        port="app.domain.meetings",
+        port="app.domain.meetings.state",
     ),
     Capability(
         id=CapabilityId.APPROVALS,

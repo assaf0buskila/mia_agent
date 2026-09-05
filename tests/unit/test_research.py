@@ -9,7 +9,7 @@ from app.core.config import Settings
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
 from app.domain.events import Channel
-from app.domain.owner_tasks import OwnerTaskType, ack_for_owner_task, classify_owner_task
+from app.domain.owner.tasks import OwnerTaskType, ack_for_owner_task, classify_owner_task
 from app.domain.tools import AdapterHttpError
 from app.integrations.base import RecordingMessagePort
 from app.integrations.research import (

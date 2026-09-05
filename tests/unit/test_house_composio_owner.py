@@ -8,7 +8,7 @@ from app.capabilities.types import Principal
 from app.core.config import Settings
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
-from app.domain.owner_brain import bind_owner_house_ports
+from app.domain.owner.brain import bind_owner_house_ports
 from app.integrations.calendar import ComposioCalendarPort, FakeCalendarAgendaPort
 from app.integrations.composio_catalog import ComposioCatalog
 from app.integrations.ga4 import ComposioGa4Port, FakeGa4Port

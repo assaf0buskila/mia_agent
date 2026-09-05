@@ -19,8 +19,8 @@ from app.domain.events import (
     build_meeting_cancellation_requested_event,
 )
 from app.domain.kpis import week_start_on
-from app.domain.owner_tasks import OwnerTaskType, classify_owner_task
-from app.domain.owner_weeklies import (
+from app.domain.owner.tasks import OwnerTaskType, classify_owner_task
+from app.domain.owner.weeklies import (
     apply_owner_weekly,
     apply_owner_weekly_policy,
     compute_weekly_brief,
@@ -301,7 +301,7 @@ def test_require_alive_owner_weekly() -> None:
 
 
 def test_owner_weeklies_module_no_message_or_openai() -> None:
-    import app.domain.owner_weeklies as module
+    import app.domain.owner.weeklies as module
 
     source = inspect.getsource(module)
     assert "MessagePort" not in source

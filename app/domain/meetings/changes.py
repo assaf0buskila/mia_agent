@@ -14,14 +14,14 @@ from app.core.errors import PolicyDenied
 from app.core.risk import PolicyDecision, RiskAction, RiskLevel, assert_allowed, decide
 from app.core.write_flags import named_write_may_auto, write_flag_enabled
 from app.domain.ai_runs import elapsed_ms
-from app.domain.briefs import persist_booked_meeting_brief
 from app.domain.events import (
     Channel,
     build_meeting_cancellation_requested_event,
     build_meeting_rescheduled_event,
 )
-from app.domain.meeting_availability import slot_is_bookable
-from app.domain.meeting_slots import (
+from app.domain.meetings.availability import slot_is_bookable
+from app.domain.meetings.briefs import persist_booked_meeting_brief
+from app.domain.meetings.slots import (
     compute_booking_key,
     is_explicit_slot_selection,
     normalize_scheduled_at_utc,
@@ -33,11 +33,11 @@ from app.domain.meeting_slots import (
     slot_interval_exactly_available,
     to_utc_aware,
 )
-from app.domain.meetings import (
+from app.domain.meetings.state import (
     STATUS_BOOKED,
     STATUS_CANCELLATION_REQUESTED,
 )
-from app.domain.owner_notify import (
+from app.domain.owner.notifications import (
     KIND_MEETING_CANCELLATION_REQUESTED,
     KIND_MEETING_RESCHEDULED,
     persist_owner_notify,

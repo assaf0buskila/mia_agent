@@ -11,7 +11,7 @@ from app.capabilities.policy import execute_capability
 from app.capabilities.types import Principal
 from app.core.errors import PermissionDenied, PolicyDenied
 from app.domain.ai_runs import elapsed_ms
-from app.domain.meeting_availability import carve_policy_slots
+from app.domain.meetings.availability import carve_policy_slots
 from app.domain.tools import AdapterHttpError, ToolOutcome
 from app.integrations.calendar import (
     DEFAULT_MEETING_MINUTES,

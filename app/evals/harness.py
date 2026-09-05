@@ -7,9 +7,9 @@ from pydantic import BaseModel, field_validator
 from app.domain.extract import extract_sales_signals
 from app.domain.followup_voice import compose_follow_up_draft
 from app.domain.humanity import lint_customer_reply
-from app.domain.meeting_availability import carve_policy_slots
-from app.domain.owner_briefs import DailyBriefSnapshot, format_daily_brief
-from app.domain.owner_tasks import OwnerTaskType, classify_owner_task
+from app.domain.meetings.availability import carve_policy_slots
+from app.domain.owner.briefs import DailyBriefSnapshot, format_daily_brief
+from app.domain.owner.tasks import OwnerTaskType, classify_owner_task
 from app.domain.sales import (
     NextAction,
     ObjectionKind,
