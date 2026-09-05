@@ -94,27 +94,104 @@ VPC / RDS  →  secret box mia/prod  →  image to ECR  →  IAM + cluster + tas
            →  ACM ISSUED + ALB + target group  →  migrate  →  create-service  →  alarms
 ```
 
-The same order as commands. Every `--cli-input-json` is `file://./deploy/local/<name>.json`
-after `fill-placeholders.ps1`, run from the repo root — `file://deploy/local/...` makes the
-CLI treat `deploy` as a host. Never point one at a `*.example.json`: those still carry
-`sg-MIA_*` tokens.
+Every `--cli-input-json` is `file://./deploy/local/<name>.json` after the
+placeholder-stamping script has written ids into `deploy/local/`. Use `./` —
+`file://deploy/local/...` makes the CLI treat `deploy` as a host. **Never point one at a
+`*.example.json`**: templates still contain `sg-MIA_*` tokens, and authorizing against
+one opens a rule you did not mean.
+
+**Identity first.** Do not create a VPC or a NAT gateway before this exits 0.
+
+```
+Set-Location "<repo root>"
+$env:AWS_DEFAULT_REGION = "eu-north-1"
+aws login
+powershell -File deploy/assert-aws-identity.ps1
+```
+
+**Network.** VPC console in eu-north-1 —
+https://eu-north-1.console.aws.amazon.com/vpc/home?region=eu-north-1 → **Create VPC** →
+**VPC and more**. 2 AZs, 2 public subnets (ALB), 2 private (ECS + RDS), NAT in 1 AZ
+(private tasks must reach OpenAI/Composio). Keep DNS hostnames and resolution on.
+
+```bash
+aws ec2 create-security-group --group-name mia-alb --description "Mia ALB" --vpc-id vpc-YOUR_VPC --query GroupId --output text
+aws ec2 create-security-group --group-name mia-tasks --description "Mia ECS tasks" --vpc-id vpc-YOUR_VPC --query GroupId --output text
+aws ec2 create-security-group --group-name mia-rds --description "Mia RDS" --vpc-id vpc-YOUR_VPC --query GroupId --output text
+```
+
+Stamp the ids, then prove nothing is still a placeholder. `deploy/fill-placeholders.ps1`
+calls no AWS API and never reads `.env`; `assert-local-stamped.ps1 -Stage network` exits 1
+while any token remains, and that gate is what stands between you and authorizing a
+rule against `sg-MIA_SG_ALB`.
+
+```
+powershell -File deploy/fill-placeholders.ps1 -AccountId 123456789012 -Region eu-north-1 -VpcId vpc-... -SgAlb sg-... -SgTasks sg-... -SgRds sg-...
+powershell -File deploy/assert-local-stamped.ps1 -Stage network
+```
+
+```bash
+aws ec2 authorize-security-group-ingress --cli-input-json file://./deploy/local/sg-alb-ingress.json
+aws ec2 authorize-security-group-ingress --cli-input-json file://./deploy/local/sg-tasks-ingress.json
+aws ec2 authorize-security-group-ingress --cli-input-json file://./deploy/local/sg-rds-ingress.json
+aws rds create-db-subnet-group --cli-input-json file://./deploy/local/rds-subnet-group.json
+aws rds create-db-instance --cli-input-json file://./deploy/local/rds.json
+aws rds wait db-instance-available --db-instance-identifier mia
+aws rds describe-db-instances --db-instance-identifier mia --query "DBInstances[0].MasterUserSecret.SecretArn" --output text
+```
+
+RDS generates the master password into Secrets Manager. Read it on the operator machine
+only, and never paste a `SecretString` anywhere.
+
+**IAM, cluster, task definition, certificate:**
 
 ```bash
 aws iam create-role --role-name miaTaskExecutionRole --assume-role-policy-document file://./deploy/local/iam-ecs-task-trust.json
 aws ecs create-cluster --cluster-name mia
 aws ecs register-task-definition --cli-input-json file://./deploy/local/ecs-task-definition.json
 aws acm request-certificate --cli-input-json file://./deploy/local/acm-certificate.json
+aws acm wait certificate-validated --certificate-arn CERT_ARN
+```
+
+The listener rejects a pending certificate, so the wait is not optional.
+
+**Load balancer and target group:**
+
+```bash
 aws elbv2 create-load-balancer --cli-input-json file://./deploy/local/alb.json
 aws elbv2 wait load-balancer-available --load-balancer-arns LOAD_BALANCER_ARN
 aws elbv2 create-target-group --cli-input-json file://./deploy/local/alb-target-group.json
+```
+
+Re-stamp: the ALB and target-group ARNs carry hashes that did not exist until now.
+
+```
+powershell -File deploy/fill-placeholders.ps1 -AccountId 123456789012 -Region eu-north-1 -AlbArn arn:... -TargetGroupArn arn:... -CertArn arn:...
+powershell -File deploy/assert-local-stamped.ps1 -Stage alb
+```
+
+```bash
 aws elbv2 create-listener --cli-input-json file://./deploy/local/alb-listener-https.json
 aws ecs run-task --cluster mia --launch-type FARGATE --task-definition mia --overrides file://./deploy/local/ecs-migrate-overrides.json
+aws ecs wait tasks-stopped --cluster mia --tasks TASK_ARN
+aws ecs describe-tasks --cluster mia --tasks TASK_ARN --query "tasks[0].containers[0].exitCode"
 aws ecs create-service --cli-input-json file://./deploy/local/ecs-service.json
+```
+
+**DNS last.** Point `mia.assafweb.com` at the ALB. `AliasTarget.HostedZoneId` is the
+**ALB's** canonical zone from `describe-load-balancers`, not the Route 53 hosted zone —
+they are different ids and swapping them produces a record that resolves to nothing.
+
+```bash
+aws route53 list-hosted-zones-by-name --dns-name assafweb.com --query "HostedZones[0].Id" --output text
+aws route53 change-resource-record-sets --cli-input-json file://./deploy/local/route53-mia.json
 ```
 
 `wait tasks-stopped` is not success: the migrate task's printed **exit code must be 0**.
 Anything else means the schema is not there — read CloudWatch `/ecs/mia` and do **not**
-`create-service`.
+`create-service`. Migrating first is required because the production API skips
+`create_all` on boot, so `/health/live` binds without waiting on a schema and the
+service will happily serve against a database that has none.
 
 The JSON templates live in `deploy/*.example.json`. `deploy/fill-placeholders.ps1`
 stamps account, region, VPC, subnet, SG, ALB/target-group hashes, cert id and Route 53
@@ -154,6 +231,27 @@ own apology; it does not count a failed customer reply.
 
 ## Deploy
 
+### Before any of this works
+
+The operator laptop needs **AWS CLI v2** and a live session. Prefer the current-user
+MSI: it needs no Administrator or UAC, where `winget install Amazon.AWSCLI` is
+all-users and stalls waiting on a UAC prompt nobody sees. Open a **new** PowerShell
+afterwards so `aws` is on PATH.
+
+```
+msiexec.exe /i https://awscli.amazonaws.com/AWSCLIV2-User.msi /qn
+# new PowerShell:
+aws --version
+$env:AWS_DEFAULT_REGION = "eu-north-1"
+aws login
+aws sts get-caller-identity --query Account --output text
+```
+
+Expect `aws-cli/2.` and a 12-digit account id. `NoCredentials` or "session has
+expired" means sign in again — `aws login` for a console user, `aws configure sso`
+then `aws sso login` for IAM Identity Center. Sign in yourself; never paste access
+keys into a chat or a file.
+
 CI never deploys. The `deploy` job in `.github/workflows/ci.yml` ends in `exit 1` on
 purpose, and the `image` job builds without pushing. Every deploy is manual, and the
 order is not optional: the schema must lead the code.
@@ -185,11 +283,16 @@ test  ->  build  ->  migrate  ->  deploy  ->  smoke  ->  verify
    If this fails, stop. Do not move the service. A partly applied migration set cannot
    be rolled back, so fix forward from the current schema.
 
-4. **Register and deploy:**
+4. **Register, then move the service to that exact revision:**
    ```
    python scripts/deploy_ecs_revision.py --tag N --sha $SHA
-   aws ecs update-service --cluster mia --service mia --force-new-deployment
+   aws ecs update-service --cluster mia --service mia --task-definition mia:NEW_REVISION
+   aws ecs wait services-stable --cluster mia --services mia
    ```
+   Name the revision. `--force-new-deployment` on its own restarts the tasks against
+   the revision the service is *already* pinned to, so registering a new one and then
+   forcing a deployment can redeploy the old image while every command reports
+   success. `deploy_ecs_revision.py` prints the revision it registered; pass that.
 
 5. **Smoke.** This has a real exit status and is the release gate:
    ```
@@ -227,9 +330,14 @@ migration first will error on the first visitor.
 Register a revision pointing at the previous good tag and move the service to it:
 
 ```
-python scripts/deploy_ecs_revision.py --tag PREVIOUS_GOOD
-aws ecs update-service --cluster mia --service mia --force-new-deployment
+aws ecs update-service --cluster mia --service mia --task-definition mia:PREVIOUS_GOOD_REVISION
+aws ecs wait services-stable --cluster mia --services mia
 ```
+
+The previous revision is still registered, so rolling back is a service update and
+needs no rebuild. Record the revision number *before* cutting over, because that is
+the thing you will want under pressure. Again: name the revision rather than forcing
+a new deployment, or you will restart the bad one.
 
 For a bad model or a bad prompt, blanking the relevant `MIA_*` model id and forcing a
 new deployment is faster than rebuilding an image.
@@ -403,11 +511,13 @@ aws logs put-metric-filter --log-group-name /ecs/mia \
 `defaultValue=0` matters: without it the metric is absent rather than zero when Mia is
 idle, and an alarm cannot tell healthy from no-data.
 
-Then create the alarms, replacing the placeholder ARN in
-`deploy/cloudwatch-mia-alarms.example.json` with the real topic:
+Then create the alarms. Stamp the real topic ARN over the placeholder in
+`deploy/cloudwatch-mia-alarms.example.json` and run from the stamped copy, never the
+template — the same rule as every other command here, and for the same reason: an
+alarm created against an unstamped ARN is an alarm that pages nobody.
 
 ```
-aws cloudwatch put-metric-alarm --cli-input-json file://alarm.json
+aws cloudwatch put-metric-alarm --cli-input-json file://./deploy/local/cloudwatch-mia-alarms.json
 ```
 
 The ALB alarms are `deploy/cloudwatch-alb-unhealthy.example.json` (statistic

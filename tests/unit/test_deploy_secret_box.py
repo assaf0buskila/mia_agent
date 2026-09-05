@@ -44,7 +44,7 @@ def test_env_example_documents_settings_and_adapter_map() -> None:
     assert "ADR-015" in text
     assert not (ROOT / "deploy/Caddyfile").exists()
     assert not (ROOT / "deploy/mia.service").exists()
-    production = (ROOT / "docs/PRODUCTION_BUILD.md").read_text(encoding="utf-8")
+    production = (ROOT / "docs/OPERATIONS.md").read_text(encoding="utf-8")
     assert "deploy/Caddyfile" not in production
     assert "mia.service" not in production
 
@@ -198,7 +198,7 @@ def test_alb_examples_are_https_ip_targets() -> None:
 
 
 def test_production_build_creates_alb_then_migrate_then_service() -> None:
-    text = (ROOT / "docs/PRODUCTION_BUILD.md").read_text(encoding="utf-8")
+    text = (ROOT / "docs/OPERATIONS.md").read_text(encoding="utf-8")
     request_cert = text.index("aws acm request-certificate")
     create_exec_role = text.index(
         "aws iam create-role --role-name miaTaskExecutionRole"
@@ -342,7 +342,7 @@ def test_fill_placeholders_script_skips_secrets_and_aws() -> None:
     assert ".env" not in script
     assert "Get-Content" not in script
     assert "Invoke-Expression" not in script
-    build = (ROOT / "docs/PRODUCTION_BUILD.md").read_text(encoding="utf-8")
+    build = (ROOT / "docs/OPERATIONS.md").read_text(encoding="utf-8")
     assert "deploy/fill-placeholders.ps1" in build
     assert "file://./deploy/local/" in script
     assert_script = (ROOT / "deploy/assert-local-stamped.ps1").read_text(encoding="utf-8")
@@ -517,7 +517,7 @@ def test_assert_local_stamped_stages_on_windows() -> None:
 
 def test_assert_aws_identity_script_is_sts_only() -> None:
     script = (ROOT / "deploy/assert-aws-identity.ps1").read_text(encoding="utf-8")
-    build = (ROOT / "docs/PRODUCTION_BUILD.md").read_text(encoding="utf-8")
+    build = (ROOT / "docs/OPERATIONS.md").read_text(encoding="utf-8")
     lower = script.lower()
     assert ".env" not in script
     assert "Get-Content" not in script
