@@ -481,25 +481,65 @@ def test_flag_merge_does_not_replace_malformed_session_state() -> None:
             session_id, dump_site_session(SiteSession(session_id=session_id))
         )
         row = db.scalar(
-            select(WebsiteSessionStateRow).where(
-                WebsiteSessionStateRow.session_id == session_id
-            )
+            select(WebsiteSessionStateRow).where(WebsiteSessionStateRow.session_id == session_id)
         )
         assert row is not None
         row.state_json = "{malformed"
         db.commit()
-        assert (
-            store.merge_website_session_notification_flags(session_id, pinged=True) == ""
-        )
+        assert store.merge_website_session_notification_flags(session_id, pinged=True) == ""
         db.commit()
     with get_session_factory()() as verify_db:
         row = verify_db.scalar(
-            select(WebsiteSessionStateRow).where(
-                WebsiteSessionStateRow.session_id == session_id
-            )
+            select(WebsiteSessionStateRow).where(WebsiteSessionStateRow.session_id == session_id)
         )
         assert row is not None
         assert row.state_json == "{malformed"
+
+
+def test_stale_full_save_preserves_background_monotonic_flags_and_new_turn() -> None:
+    init_db()
+    session_id = "web_stale_full_save_flags"
+    initial = _ready_session(session_id)
+    with get_session_factory()() as seed_db:
+        seed_store = LeadStore(seed_db)
+        seed_store.open_website_session(session_id)
+        seed_store.save_website_session_state(session_id, dump_site_session(initial))
+        seed_db.commit()
+
+    foreground_db = get_session_factory()()
+    try:
+        foreground_store = LeadStore(foreground_db)
+        stale_raw = foreground_store.load_website_session_state(session_id)
+        stale = SiteSession(session_id=session_id)
+        assert load_site_session(stale, stale_raw)
+
+        with get_session_factory()() as background_db:
+            background_store = LeadStore(background_db)
+            background_store.merge_website_session_notification_flags(
+                session_id,
+                pinged=True,
+                finalized=True,
+                crm_written=True,
+            )
+            background_db.commit()
+
+        stale.business_summary = "foreground newer conversation"
+        stale.turns.append(("visitor", "new foreground turn"))
+        foreground_store.save_website_session_state(session_id, dump_site_session(stale))
+        foreground_db.commit()
+    finally:
+        foreground_db.close()
+
+    with get_session_factory()() as verify_db:
+        persisted = SiteSession(session_id=session_id)
+        assert load_site_session(
+            persisted, LeadStore(verify_db).load_website_session_state(session_id)
+        )
+    assert persisted.pinged is True
+    assert persisted.finalized is True
+    assert persisted.crm_written is True
+    assert persisted.business_summary == "foreground newer conversation"
+    assert persisted.turns[-1] == ("visitor", "new foreground turn")
 
 
 def test_handoff_uses_newer_durable_contact_and_brief(monkeypatch) -> None:

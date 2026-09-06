@@ -538,11 +538,21 @@ class LeadStore:
 
     def save_website_session_state(self, session_id: str, state_json: str) -> None:
         """Flush only. The caller's request transaction owns the commit — using a
-        second connection here rolls the live request back underneath itself."""
+        second connection here rolls the live request back underneath itself.
+
+        Delivery/finalization flags are monotonic. Refresh the row under the write
+        lock and retain any true flag committed while this caller was doing slower
+        turn work, so a stale full snapshot cannot undo completed side effects.
+        """
         if not session_id:
             return
         stamp = datetime.now(UTC).isoformat()
-        row = self.session.get(WebsiteSessionStateRow, session_id)
+        row = self.session.scalar(
+            select(WebsiteSessionStateRow)
+            .where(WebsiteSessionStateRow.session_id == session_id)
+            .execution_options(populate_existing=True)
+            .with_for_update()
+        )
         if row is None:
             self.session.add(
                 WebsiteSessionStateRow(
@@ -550,7 +560,18 @@ class LeadStore:
                 )
             )
         else:
-            row.state_json = state_json
+            merged_json = state_json
+            try:
+                current = json.loads(row.state_json)
+                incoming = json.loads(state_json)
+            except (TypeError, ValueError):
+                current = incoming = None
+            if isinstance(current, dict) and isinstance(incoming, dict):
+                for flag in ("pinged", "finalized", "crm_written"):
+                    if current.get(flag) is True:
+                        incoming[flag] = True
+                merged_json = json.dumps(incoming, ensure_ascii=False)
+            row.state_json = merged_json
             row.updated_at = stamp
         self.session.flush()
 
