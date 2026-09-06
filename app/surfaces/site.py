@@ -2,18 +2,23 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+import httpx
+
 from app.core.config import Settings
 from app.core.errors import MiaError
 from app.domain.handoff.tokens import click_to_chat_url
 from app.domain.memory import ConversationTurn
+from app.domain.tools import AdapterHttpError
 from app.integrations.base import MessagePort, OutboundMessage
 from app.integrations.sales_reply import SalesReplyPort
+from app.services.notifications import OwnerTelegramDelivery
 from app.surfaces.crm import ContactRecord, ContactsCrm, log_contact
 from app.surfaces.identity import CapturedFields, apply_form
 from app.surfaces.site_policy import (
@@ -38,6 +43,7 @@ from app.surfaces.site_reply import phrase_site_reply
 # release(recipient_id) -> that send genuinely failed, let a later turn retry.
 OwnerPingClaim = Callable[[str], bool]
 OwnerPingRelease = Callable[[str], None]
+OwnerPingConfirmed = Callable[[str], bool]
 
 SITE_OPENING = "שלום, אני מיה. ספרו לי בקצרה מה אתם מחפשים."
 ASK_CONTACT = "כדי שאסף יוכל להמשיך אתכם, צריך טלפון או אימייל."
@@ -116,6 +122,11 @@ class SiteBook:
     def get(self, session_id: str) -> SiteSession | None:
         with self._lock:
             return self._sessions.get(session_id)
+
+    def replace(self, session: SiteSession) -> None:
+        """Publish a completed snapshot without mutating an object another turn holds."""
+        with self._lock:
+            self._sessions[session.session_id] = session
 
     def exists(self, session_id: str) -> bool:
         with self._lock:
@@ -658,13 +669,11 @@ def _ping_assaf(
         return False
     body = format_owner_ping(session)
     sent_any = False
-    already_delivered = False
     for owner_id in owners:
         if claim is not None and not claim(owner_id):
-            already_delivered = True
             continue
         try:
-            port.send(  # type: ignore[unused-coroutine]
+            result = port.send(  # type: ignore[unused-coroutine]
                 OutboundMessage(
                     conversation_id=owner_id,
                     text=body,
@@ -672,12 +681,30 @@ def _ping_assaf(
                     idempotency_key=f"site-ping:{session.session_id}",
                 )
             )
+            if inspect.iscoroutine(result):
+                # The sync sales function cannot execute an async transport. Close the
+                # untouched coroutine and give the claim back; the API owns delivery.
+                result.close()
+                if release is not None:
+                    release(owner_id)
+                continue
             sent_any = True
         except (RuntimeError, MiaError):
             if release is not None:
                 release(owner_id)
             continue
-    return sent_any or already_delivered
+    return sent_any
+
+
+def _telegram_rejection_status(exc: BaseException) -> int | None:
+    cause = exc.__cause__
+    if isinstance(cause, AdapterHttpError):
+        return cause.status_code
+    return None
+
+
+def _is_retryable_telegram_rejection(status: int | None) -> bool:
+    return status in {408, 409, 425, 429} or bool(status is not None and status >= 500)
 
 
 async def ping_assaf_async(
@@ -687,36 +714,88 @@ async def ping_assaf_async(
     *,
     claim: OwnerPingClaim | None = None,
     release: OwnerPingRelease | None = None,
+    confirmed: OwnerPingConfirmed | None = None,
+    max_rejection_retries: int = 1,
 ) -> bool:
+    """Compatibility result: true only for observed or durably confirmed acceptance."""
+    delivery = await ping_assaf_delivery_async(
+        settings,
+        port,
+        session,
+        claim=claim,
+        release=release,
+        confirmed=confirmed,
+        max_rejection_retries=max_rejection_retries,
+    )
+    return bool(delivery.delivered)
+
+
+async def ping_assaf_delivery_async(
+    settings: Settings,
+    port: MessagePort,
+    session: SiteSession,
+    *,
+    claim: OwnerPingClaim | None = None,
+    release: OwnerPingRelease | None = None,
+    confirmed: OwnerPingConfirmed | None = None,
+    max_rejection_retries: int = 1,
+) -> OwnerTelegramDelivery:
     owners = settings.telegram_owner_user_id_set()
     if not owners:
-        return False
+        return OwnerTelegramDelivery(no_attempt=True)
     body = format_owner_ping(session)
-    sent_any = False
-    already_delivered = False
+    delivered: list[str] = []
+    rejected: list[str] = []
+    ambiguous: list[str] = []
     for owner_id in owners:
         if claim is not None and not claim(owner_id):
-            # Someone already delivered this handoff to this owner. Not a failure,
-            # and not a reason to send it twice.
-            already_delivered = True
+            # A retained claim can mean accepted, ambiguous, or still in flight. Only
+            # the accepted receipt is evidence that Assaf actually got the message.
+            if confirmed is not None and confirmed(owner_id):
+                delivered.append(owner_id)
+            else:
+                ambiguous.append(owner_id)
             continue
-        try:
-            await port.send(
-                OutboundMessage(
-                    conversation_id=owner_id,
-                    text=body,
-                    channel="telegram",
-                    idempotency_key=f"site-ping:{session.session_id}",
+        attempts = 0
+        while True:
+            try:
+                await port.send(
+                    OutboundMessage(
+                        conversation_id=owner_id,
+                        text=body,
+                        channel="telegram",
+                        idempotency_key=f"site-ping:{session.session_id}",
+                    )
                 )
-            )
-            sent_any = True
-        except (RuntimeError, MiaError):
-            # A genuine transport failure gives the claim back, so a later turn can
-            # still reach Assaf instead of the lead going quiet forever.
-            if release is not None:
-                release(owner_id)
-            continue
-    return sent_any or already_delivered
+                delivered.append(owner_id)
+                break
+            except (RuntimeError, MiaError, httpx.HTTPError) as exc:
+                rejection_status = _telegram_rejection_status(exc)
+                explicit_rejection = isinstance(exc, RuntimeError) or rejection_status is not None
+                if not explicit_rejection:
+                    # A timeout or malformed success response can happen after
+                    # Telegram accepted the request. Retain the claim and never resend.
+                    ambiguous.append(owner_id)
+                    break
+                if release is not None:
+                    release(owner_id)
+                if not _is_retryable_telegram_rejection(rejection_status) or attempts >= max(
+                    0, max_rejection_retries
+                ):
+                    rejected.append(owner_id)
+                    break
+                attempts += 1
+                if claim is not None and not claim(owner_id):
+                    if confirmed is not None and confirmed(owner_id):
+                        delivered.append(owner_id)
+                    else:
+                        ambiguous.append(owner_id)
+                    break
+    return OwnerTelegramDelivery(
+        delivered=tuple(delivered),
+        rejected=tuple(rejected),
+        ambiguous=tuple(ambiguous),
+    )
 
 
 _UNKNOWN = "—"
@@ -728,11 +807,11 @@ def _missing_for_owner(session: SiteSession) -> list[str]:
     missing: list[str] = []
     if not fields.name.strip():
         missing.append("שם")
-    if not fields.business.strip():
+    if not (session.business_summary.strip() or fields.business.strip()):
         missing.append("עסק")
     if not fields.has_phone_or_email():
         missing.append("טלפון או אימייל")
-    if not (fields.want.strip() or fields.summary.strip()):
+    if not (session.friction_summary.strip() or fields.want.strip() or fields.summary.strip()):
         missing.append("מה צריך")
     return missing
 
@@ -753,9 +832,42 @@ def _recommended_next_action(session: SiteSession) -> str:
 
 def _last_visitor_line(session: SiteSession) -> str:
     for role, text in reversed(session.turns):
-        if role == "visitor" and text.strip():
+        if role == "visitor" and text.strip() and not _is_contact_only(text):
             return text.strip()[:200]
     return ""
+
+
+def _open_questions_for_owner(session: SiteSession) -> str:
+    open_topics: list[str] = []
+    if not session.business_known:
+        open_topics.append("מה העסק עושה")
+    if not session.friction_known:
+        open_topics.append("מה מפריע היום")
+    return ", ".join(open_topics) or "לא ידוע על פרט חסר בשאלות ההיכרות"
+
+
+def _discussion_for_owner(session: SiteSession) -> str:
+    discussed = [
+        f"{'לקוח' if role == 'visitor' else 'מיה'}: {text.strip()}"
+        for role, text in session.turns
+        if role in {"visitor", "mia"}
+        and text.strip()
+        and not (role == "visitor" and _is_contact_only(text))
+    ]
+    return " | ".join(discussed[-4:])[:500] or _UNKNOWN
+
+
+def _visitor_questions_for_owner(session: SiteSession) -> str:
+    question_starts = ("מה ", "איך ", "כמה ", "מתי ", "האם ", "אפשר ", "can ", "how ")
+    questions = [
+        text.strip()
+        for role, text in session.turns
+        if role == "visitor"
+        and text.strip()
+        and not _is_contact_only(text)
+        and ("?" in text or text.strip().casefold().startswith(question_starts))
+    ]
+    return " | ".join(questions[-2:])[:300] or _UNKNOWN
 
 
 def format_owner_ping(session: SiteSession) -> str:
@@ -766,16 +878,20 @@ def format_owner_ping(session: SiteSession) -> str:
     Mia did not learn something, the brief says so instead of filling the gap.
     """
     fields = session.fields
-    need = fields.want.strip() or fields.summary.strip()
+    business = session.business_summary.strip() or fields.business.strip()
+    friction = session.friction_summary.strip() or fields.want.strip()
     missing = _missing_for_owner(session)
     lines = [
         "ליד חדש מהאתר",
         f"שם: {fields.name.strip() or _UNKNOWN}",
-        f"עסק: {fields.business.strip() or _UNKNOWN}",
         f"טלפון: {fields.phone.strip() or _UNKNOWN}",
         f"אימייל: {fields.email.strip() or _UNKNOWN}",
         f"תאריך: {fields.date.strip() or _UNKNOWN}",
-        f"מה צריך: {need or _UNKNOWN}",
+        f"עסק: {business or _UNKNOWN}",
+        f"מה מפריע: {friction or _UNKNOWN}",
+        f"על מה דיברו: {_discussion_for_owner(session)}",
+        f"שאלות שהלקוח העלה: {_visitor_questions_for_owner(session)}",
+        f"להשלמה עם אסף: {_open_questions_for_owner(session)}",
         f"חסר: {', '.join(missing) if missing else 'כלום'}",
         f"המלצה: {_recommended_next_action(session)}",
     ]

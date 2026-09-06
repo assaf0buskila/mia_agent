@@ -59,6 +59,12 @@ Upsert Contacts by phone or email. Append Activity. No row without phone or emai
 
 Voice is an input modality on both surfaces. Same loop as text after speech-to-text. No speech synthesis.
 
+Telegram retains successful transcription provenance. Mia treats uncertain spoken
+names, numbers, and dates as details to clarify, not facts to invent. Owner reasoning
+is bounded by a turn deadline and Telegram shows typing progress while work runs.
+Website lead briefs include known context and contact details; a delivery reservation
+is not a Telegram receipt (ADR-055).
+
 ## Hard never
 
 Voice output. Auto-publish social. Self-edit production graph or prompts. Autonomous Meta budget/launch/pause. ManyChat/Make as the brain. Cold Instagram DMs. Fake urgency or unsupported claims. Website visitors executing owner tools. Dual WhatsApp or Instagram send. Telegram owner access by username. Invented metrics or prices. My Studio. Assaf's phone, Gmail, CV, ID, calendar, or unread mail on the public widget. Unsolicited Gmail. Secrets in git.

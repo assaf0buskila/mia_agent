@@ -1,6 +1,7 @@
 import json
 from urllib.parse import urlparse
 
+import httpx
 from app.db.models import CanonicalEventRow
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
@@ -8,11 +9,13 @@ from app.domain.attribution import sanitize_attribution
 from app.domain.events import Channel
 from app.domain.handoff.tokens import click_to_chat_url
 from app.domain.sales import NextAction, select_next_action
+from app.domain.tools import AdapterHttpError
 from app.graph.orchestrator import build_graph
 from app.graph.state import empty_state
 from app.main import app
 from fastapi.testclient import TestClient
 from sqlalchemy import select
+from sqlalchemy.orm import sessionmaker
 
 from tests.unit.test_handoff import CLICK_CHAT
 
@@ -497,6 +500,7 @@ def test_website_message_pings_assaf_after_contact(monkeypatch) -> None:
             assert captured.json()["next_action"] == "confirm_contact"
             handoff = client.post(f"/v1/website/sessions/{session_id}/handoff")
             assert handoff.status_code == 200
+            assert handoff.json()["notification_status"] == "delivered"
     finally:
         app.dependency_overrides.pop(get_telegram_port, None)
     assert port.sent
@@ -504,6 +508,147 @@ def test_website_message_pings_assaf_after_contact(monkeypatch) -> None:
     assert "0501234567" in port.sent[0].text
     # The brief tells Assaf what to do, not just what was said.
     assert "המלצה:" in port.sent[0].text
+
+
+class _OutcomePort:
+    def __init__(self, outcomes: dict[str, list[str]]) -> None:
+        self.outcomes = outcomes
+        self.sent: list[str] = []
+
+    async def send(self, message) -> None:
+        recipient = message.conversation_id
+        self.sent.append(recipient)
+        outcomes = self.outcomes[recipient]
+        outcome = outcomes.pop(0) if len(outcomes) > 1 else outcomes[0]
+        if outcome == "accepted":
+            return
+        if outcome == "ambiguous":
+            raise httpx.ReadTimeout("response lost")
+        try:
+            raise AdapterHttpError(500)
+        except AdapterHttpError as exc:
+            from app.integrations.telegram import TelegramSendError
+
+            raise TelegramSendError("Telegram sendMessage failed: HTTP 500") from exc
+
+
+def _capture_website_contact(client: TestClient) -> str:
+    session_id = client.post("/v1/website/sessions").json()["session_id"]
+    response = client.post(
+        f"/v1/website/sessions/{session_id}/messages",
+        json={
+            "text": "אני מנהלת סטודיו לציפורניים והתורים בוואטסאפ מתפספסים",
+            "phone": "0501234567",
+            "name": "דנה",
+        },
+    )
+    assert response.status_code == 200
+    return session_id
+
+
+def test_partial_owner_rejection_retries_only_missing_recipient(monkeypatch) -> None:
+    from app.api.deps import get_telegram_port
+
+    port = _OutcomePort(
+        {"111": ["accepted"], "222": ["rejected", "rejected", "accepted"]}
+    )
+    app.dependency_overrides[get_telegram_port] = lambda: port
+    monkeypatch.setenv("MIA_TELEGRAM_OWNER_USER_IDS", "111,222")
+    try:
+        with TestClient(app) as client:
+            session_id = _capture_website_contact(client)
+            # The background delivery retries the explicit rejection once. The
+            # accepted owner stays receipt-protected while /handoff retries only 222.
+            assert port.sent.count("111") == 1
+            assert port.sent.count("222") == 2
+            handoff = client.post(f"/v1/website/sessions/{session_id}/handoff")
+            assert handoff.json()["notification_status"] == "delivered"
+            assert port.sent.count("111") == 1
+            assert port.sent.count("222") == 3
+    finally:
+        app.dependency_overrides.pop(get_telegram_port, None)
+
+
+def test_ambiguous_owner_timeout_is_never_resent_or_called_delivered(monkeypatch) -> None:
+    from app.api.deps import get_telegram_port
+
+    port = _OutcomePort({"111": ["ambiguous"]})
+    app.dependency_overrides[get_telegram_port] = lambda: port
+    monkeypatch.setenv("MIA_TELEGRAM_OWNER_USER_IDS", "111")
+    try:
+        with TestClient(app) as client:
+            session_id = _capture_website_contact(client)
+            assert port.sent == ["111"]
+            first = client.post(f"/v1/website/sessions/{session_id}/handoff")
+            second = client.post(f"/v1/website/sessions/{session_id}/handoff")
+            assert first.json()["notification_status"] == "failed"
+            assert second.json()["notification_status"] == "failed"
+            assert port.sent == ["111"]
+    finally:
+        app.dependency_overrides.pop(get_telegram_port, None)
+
+
+def test_background_crm_failure_cannot_block_owner_notification(monkeypatch) -> None:
+    from app.api.deps import get_sheets_port, get_telegram_port
+    from app.integrations.sheets import FakeSheetsPort
+
+    events: list[str] = []
+
+    class FailingSheets(FakeSheetsPort):
+        def write_locked_contact(self, cells, *, key_column):
+            events.append("crm")
+            raise RuntimeError("sheets unavailable")
+
+    class RecordingPort:
+        async def send(self, message) -> None:
+            events.append("telegram")
+
+    app.dependency_overrides[get_sheets_port] = FailingSheets
+    app.dependency_overrides[get_telegram_port] = RecordingPort
+    monkeypatch.setenv("MIA_TELEGRAM_OWNER_USER_IDS", "111")
+    try:
+        with TestClient(app) as client:
+            _capture_website_contact(client)
+    finally:
+        app.dependency_overrides.pop(get_sheets_port, None)
+        app.dependency_overrides.pop(get_telegram_port, None)
+
+    assert events == ["telegram", "crm"]
+
+
+def test_background_delivery_sees_committed_contact_state_on_independent_connection(
+    monkeypatch, tmp_path
+) -> None:
+    from app.api.deps import get_telegram_port
+    from app.db import session as db_session
+
+    engine = db_session.make_engine(f"sqlite:///{tmp_path / 'website-effects.db'}")
+    factory = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+    monkeypatch.setattr(db_session, "_engine", engine)
+    monkeypatch.setattr(db_session, "_SessionLocal", factory)
+    init_db()
+    observed: list[dict[str, object]] = []
+
+    class InspectingPort:
+        async def send(self, message) -> None:
+            with get_session_factory()() as independent_db:
+                raw = LeadStore(independent_db).load_website_session_state(
+                    message.idempotency_key.removeprefix("site-ping:")
+                )
+            observed.append(json.loads(raw))
+
+    app.dependency_overrides[get_telegram_port] = InspectingPort
+    monkeypatch.setenv("MIA_TELEGRAM_OWNER_USER_IDS", "111")
+    try:
+        with TestClient(app) as client:
+            _capture_website_contact(client)
+    finally:
+        app.dependency_overrides.pop(get_telegram_port, None)
+        engine.dispose()
+
+    assert observed
+    assert observed[0]["confirmed"] is True
+    assert observed[0]["fields"]["phone"] == "0501234567"
 
 
 def test_website_post_page_viewed_accepted_and_idempotent() -> None:

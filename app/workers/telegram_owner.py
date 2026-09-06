@@ -12,10 +12,17 @@ so Telegram never stays on read with silence.
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
+from time import monotonic
 
 from sqlalchemy.exc import SQLAlchemyError
 
-from app.api.inbound_common import event_conversation_id, outbound_reply
+from app.api.inbound_common import (
+    event_conversation_id,
+    outbound_reply,
+    stt_latency_ms,
+    transcript_duration_ms,
+)
 from app.core.config import get_settings
 from app.core.errors import MiaError
 from app.core.logging import log_comm
@@ -88,6 +95,21 @@ async def _send_owner_notice(
         return False
 
 
+async def _renew_typing(
+    *, port: MessagePort, chat_id: str, interval_s: float, stop: asyncio.Event
+) -> None:
+    send_action = getattr(port, "send_chat_action", None)
+    if not callable(send_action):
+        return
+    while not stop.is_set():
+        with suppress(RuntimeError, MiaError, AdapterHttpError):
+            await send_action(chat_id, action="typing")
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=interval_s)
+        except TimeoutError:
+            continue
+
+
 async def process_telegram_owner_update(
     *,
     item: dict[str, str],
@@ -104,6 +126,7 @@ async def process_telegram_owner_update(
 
     del envelope_kind
     settings = get_settings()
+    deadline_at = monotonic() + settings.owner_turn_timeout_seconds
     owner_ids = settings.telegram_owner_user_id_set()
     session = get_session_factory()()
     try:
@@ -155,6 +178,29 @@ async def process_telegram_owner_update(
                 )
                 session.commit()
                 return
+            store.save_transcript(
+                provider="telegram",
+                provider_event_id=work["id"],
+                channel=Channel.TELEGRAM.value,
+                external_id=work["from"],
+                actor_role="owner",
+                transcript=work.get("text") or "",
+                stt_provider=work.get("stt_provider", ""),
+                stt_model=work.get("stt_model", ""),
+                language=work.get("language", ""),
+                duration_ms=transcript_duration_ms(work),
+                confidence=work.get("confidence", ""),
+            )
+            persist_tool_outcome(
+                store,
+                provider="telegram",
+                channel=Channel.TELEGRAM,
+                inbound_provider_event_id=work["id"],
+                conversation_id=event_conversation_id(work),
+                lead_id=None,
+                outcome=transcription_outcome(transcribed=True, latency_ms=stt_latency_ms(work)),
+            )
+            session.commit()
         if photo_file_id and not voice_file_id:
             work = await _see_telegram_photo(
                 item=work,
@@ -174,8 +220,17 @@ async def process_telegram_owner_update(
         merged = merge_claimed_items(claimed)
         sheets = build_sheets_port(settings)
         crm = build_contacts_crm(settings, sheets)
+        typing_stop = asyncio.Event()
+        typing_task = asyncio.create_task(
+            _renew_typing(
+                port=port,
+                chat_id=merged.get("chat_id") or merged["from"],
+                interval_s=settings.telegram_typing_interval_seconds,
+                stop=typing_stop,
+            )
+        )
         try:
-            await asyncio.wait_for(
+            loop_task = asyncio.create_task(
                 run_owner_loop(
                     item=merged,
                     store=store,
@@ -184,9 +239,27 @@ async def process_telegram_owner_update(
                     crm=crm,
                     gmail_port=build_gmail_port(settings),
                     owner_ids=owner_ids,
-                ),
-                timeout=OWNER_TURN_TIMEOUT_S,
+                    deadline_at=deadline_at,
+                )
             )
+            remaining = max(0.0, deadline_at - monotonic())
+            done, _pending = await asyncio.wait({loop_task}, timeout=remaining)
+            if not done:
+                # The deadline is externally visible, but the DB lifecycle remains
+                # strict: drain the underlying work before this function can close its
+                # session. Production code also receives deadline_at and cooperates.
+                with suppress(Exception):
+                    await asyncio.shield(loop_task)
+                sent = await _send_owner_notice(item=merged, port=port, text=HANG_REPLY)
+                _mark_claimed(store, claimed, "sent" if sent else "failed")
+                session.commit()
+                return
+            await loop_task
+        except asyncio.CancelledError:
+            # Service shutdown/caller cancellation must obey the same ownership rule
+            # as a deadline: the DB session remains open until the started turn exits.
+            await asyncio.shield(loop_task)
+            raise
         except TimeoutError:
             sent = await _send_owner_notice(item=merged, port=port, text=HANG_REPLY)
             _mark_claimed(store, claimed, "sent" if sent else "failed")
@@ -209,6 +282,9 @@ async def process_telegram_owner_update(
                 automation_mode=settings.automation_mode.value,
             )
             return
+        finally:
+            typing_stop.set()
+            await typing_task
         extras = [row for row in claimed if row.get("id") and row["id"] != merged.get("id")]
         _mark_claimed(store, extras, "sent")
         session.commit()
@@ -238,9 +314,7 @@ async def process_telegram_owner_update(
         session.close()
 
 
-_IMAGE_UNREAD = (
-    "קיבלתי תמונה אבל לא הצלחתי לקרוא את הפיקסלים. תגיד מה לבדוק בה."
-)
+_IMAGE_UNREAD = "קיבלתי תמונה אבל לא הצלחתי לקרוא את הפיקסלים. תגיד מה לבדוק בה."
 
 
 async def _see_telegram_photo(

@@ -14,16 +14,30 @@ _OPENAI_TRANSCRIPTIONS_URL = "https://api.openai.com/v1/audio/transcriptions"
 # The prompt should match the audio language, so the Hebrew-primary owner channel gets a
 # Hebrew prompt. Product names go in `keywords` for models that support it.
 _ASSAFWEB_STT_PROMPT = (
-    "שיחות עסקיות של AssafWeb על עובדים דיגיטליים, אוטומציות וסוכני AI. "
-    "מונחים עסקיים בעברית ובאנגלית."
+    "שיחות עסקיות עם Mia, העוזרת של AssafWeb. עברית ואנגלית יכולות "
+    "להופיע באותו משפט. יש לתמלל במדויק שמות אנשים וחברות, כתובות אימייל, "
+    "מספרי טלפון, סכומים, שעות ותאריכים; לא להשלים פרט שלא נשמע בבירור. "
+    "נושאים נפוצים: עובדים דיגיטליים, אוטומציות, סוכני AI, CRM, אימייל, "
+    "יומן, פגישות, Google Sheets, GA4, Search Console, Instagram ו-LinkedIn."
 )
 _ASSAFWEB_STT_KEYWORDS: tuple[str, ...] = (
     "AssafWeb",
+    "אסף",
     "Mia",
+    "מיה",
     "עובד דיגיטלי",
     "אוטומציה",
     "ליד",
     "וואטסאפ",
+    "CRM",
+    "Contacts",
+    "Google Sheets",
+    "Gmail",
+    "Google Calendar",
+    "GA4",
+    "Google Search Console",
+    "Instagram",
+    "LinkedIn",
 )
 _DEFAULT_LANGUAGES: tuple[str, ...] = ("he", "en")
 
@@ -71,6 +85,7 @@ def transcription_request_fields(
             fields["language"] = languages[0]
         return fields
     raise TranscriptionError("OpenAI transcription model is unsupported")
+
 
 _STT_PROVIDER_ALLOWLIST = frozenset({"openai", "fake"})
 _STT_MODEL_RE = re.compile(r"^[a-zA-Z0-9._-]{1,64}$")
@@ -337,9 +352,7 @@ class FakeTranscriptionPort:
 
 
 def build_transcription_port(settings: Settings) -> TranscriptionPort:
-    chain = model_chain(
-        settings.openai_transcribe_model, settings.openai_transcribe_fallback_model
-    )
+    chain = model_chain(settings.openai_transcribe_model, settings.openai_transcribe_fallback_model)
     if settings.openai_api_key and chain:
         return OpenAITranscribePort(
             api_key=settings.openai_api_key,

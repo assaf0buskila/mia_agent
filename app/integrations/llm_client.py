@@ -1,4 +1,4 @@
-"""Thin OpenAI-compatible Chat Completions client for tool calling and structured output.
+"""Thin OpenAI client with compatible Chat Completions and Responses modes.
 
 Deliberately not a refactor of `sales_reply.py` / `owner_reply.py`: those are live,
 heavily-tested paraphrase paths and this slice does not touch them. This client serves the
@@ -17,13 +17,15 @@ Wire-shape notes, all from the current Chat Completions reference:
   unsupported parameters, so a 200 there is not proof the schema was honoured. Callers
   validate the parsed object and fall back.
 - GPT-5.6 on Chat Completions rejects function tools unless `reasoning_effort` is
-  `"none"` (otherwise OpenAI returns HTTP 400). This client sets that when tools are
-  sent. Prefer `/v1/responses` only if we later need reasoning + tools together.
+  `"none"` (otherwise OpenAI returns HTTP 400). Generic Chat callers retain that
+  compatibility behavior. Owner OpenAI clients use Responses so reasoning and tools
+  work together; Gemini and structured extraction remain on their compatible routes.
 """
 
 from __future__ import annotations
 
 import json
+from time import monotonic
 from typing import Any, NamedTuple
 from urllib.parse import urlparse
 
@@ -32,6 +34,7 @@ import httpx
 from app.core.errors import MiaError
 
 OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions"
+OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
 GEMINI_CHAT_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
 
 DEFAULT_TIMEOUT = 45.0
@@ -91,6 +94,42 @@ def _message_text(content: object) -> str:
     return "\n".join(parts)
 
 
+def _chat_message(message: dict[str, Any]) -> dict[str, Any]:
+    """Drop Responses-only replay data before a Chat Completions fallback."""
+    return {key: value for key, value in message.items() if key != "_responses_output"}
+
+
+def _responses_tool(tool: dict[str, Any]) -> dict[str, Any]:
+    """Flatten one existing Chat Completions function tool for Responses."""
+    function = tool.get("function")
+    if not isinstance(function, dict):
+        return dict(tool)
+    return {
+        "type": "function",
+        "name": function.get("name"),
+        "description": function.get("description", ""),
+        "parameters": function.get("parameters", {}),
+        "strict": function.get("strict", True),
+    }
+
+
+def _responses_content(content: object) -> object:
+    """Translate the small Chat multimodal subset used by Telegram images."""
+    if not isinstance(content, list):
+        return content
+    converted: list[dict[str, Any]] = []
+    for part in content:
+        if not isinstance(part, dict):
+            continue
+        if part.get("type") == "text":
+            converted.append({"type": "input_text", "text": str(part.get("text") or "")})
+        elif part.get("type") == "image_url":
+            image = part.get("image_url")
+            url = image.get("url") if isinstance(image, dict) else image
+            converted.append({"type": "input_image", "image_url": str(url or "")})
+    return converted
+
+
 def function_tool(
     *,
     name: str,
@@ -115,9 +154,7 @@ def function_tool(
     }
 
 
-def json_schema_format(
-    *, name: str, schema: dict[str, Any], strict: bool = True
-) -> dict[str, Any]:
+def json_schema_format(*, name: str, schema: dict[str, Any], strict: bool = True) -> dict[str, Any]:
     return {
         "type": "json_schema",
         "json_schema": {"name": name, "schema": schema, "strict": strict},
@@ -134,12 +171,14 @@ class LlmClient:
         model: str,
         url: str = OPENAI_CHAT_URL,
         timeout: float = DEFAULT_TIMEOUT,
+        reasoning_effort: str = "",
         client: httpx.Client | None = None,
     ) -> None:
         self._api_key = api_key
         self._model = model
         self._url = url
         self._timeout = timeout
+        self._reasoning_effort = reasoning_effort.strip().lower()
         self._client = client
 
     @property
@@ -163,10 +202,25 @@ class LlmClient:
         response_format: dict[str, Any] | None = None,
         parallel_tool_calls: bool | None = None,
         max_completion_tokens: int | None = None,
+        timeout: float | None = None,
     ) -> LlmResponse:
         if not self.enabled():
             raise LlmError("llm client is not configured")
-        payload: dict[str, Any] = {"model": self._model, "messages": messages}
+        if self._url == OPENAI_RESPONSES_URL:
+            payload = self._responses_payload(
+                messages=messages,
+                tools=tools,
+                tool_choice=tool_choice,
+                parallel_tool_calls=parallel_tool_calls,
+                max_completion_tokens=max_completion_tokens,
+            )
+            body = self._post(payload, timeout=timeout)
+            return self._parse_responses(body)
+
+        payload: dict[str, Any] = {
+            "model": self._model,
+            "messages": [_chat_message(message) for message in messages],
+        }
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = tool_choice or "auto"
@@ -181,7 +235,7 @@ class LlmClient:
         if max_completion_tokens is not None:
             payload["max_completion_tokens"] = max_completion_tokens
         try:
-            body = self._post(payload)
+            body = self._post(payload, timeout=timeout)
         except LlmError as exc:
             # Some models 400 on `parallel_tool_calls`. Drop it and retry once so a
             # capabilities-style question is not killed by a tool-calling flag.
@@ -192,18 +246,20 @@ class LlmClient:
                 and "parallel_tool_calls" in payload
             ):
                 payload.pop("parallel_tool_calls", None)
-                body = self._post(payload)
+                body = self._post(payload, timeout=timeout)
             else:
                 raise
         return self._parse(body)
 
-    def _post(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def _post(self, payload: dict[str, Any], *, timeout: float | None = None) -> dict[str, Any]:
         headers = {"Authorization": f"Bearer {self._api_key}"}
         try:
             if self._client is not None:
-                response = self._client.post(self._url, json=payload, headers=headers)
+                response = self._client.post(
+                    self._url, json=payload, headers=headers, timeout=timeout or self._timeout
+                )
             else:
-                with httpx.Client(timeout=self._timeout) as client:
+                with httpx.Client(timeout=timeout or self._timeout) as client:
                     response = client.post(self._url, json=payload, headers=headers)
         except httpx.HTTPError as exc:
             raise LlmError("llm request failed") from exc
@@ -216,6 +272,161 @@ class LlmClient:
         if not isinstance(body, dict):
             raise LlmError("llm response was not an object")
         return body
+
+    def _responses_payload(
+        self,
+        *,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None,
+        tool_choice: str | dict[str, Any] | None,
+        parallel_tool_calls: bool | None,
+        max_completion_tokens: int | None,
+    ) -> dict[str, Any]:
+        input_items: list[dict[str, Any]] = []
+        instructions: list[str] = []
+        for message in messages:
+            raw_output = message.get("_responses_output")
+            if isinstance(raw_output, list):
+                input_items.extend(item for item in raw_output if isinstance(item, dict))
+                continue
+            role = message.get("role")
+            if role == "system":
+                content = message.get("content")
+                if isinstance(content, str) and content:
+                    instructions.append(content)
+                continue
+            if role == "tool":
+                input_items.append(
+                    {
+                        "type": "function_call_output",
+                        "call_id": str(message.get("tool_call_id") or ""),
+                        "output": str(message.get("content") or ""),
+                    }
+                )
+                continue
+            if role == "assistant" and isinstance(message.get("tool_calls"), list):
+                content = message.get("content")
+                if isinstance(content, str) and content:
+                    input_items.append({"role": "assistant", "content": content})
+                for raw_call in message["tool_calls"]:
+                    function = raw_call.get("function") if isinstance(raw_call, dict) else None
+                    if not isinstance(function, dict):
+                        continue
+                    input_items.append(
+                        {
+                            "type": "function_call",
+                            "call_id": str(raw_call.get("id") or ""),
+                            "name": str(function.get("name") or ""),
+                            "arguments": str(function.get("arguments") or "{}"),
+                        }
+                    )
+                continue
+            input_items.append(
+                {
+                    "role": role or "user",
+                    "content": _responses_content(message.get("content") or ""),
+                }
+            )
+        payload: dict[str, Any] = {
+            "model": self._model,
+            "input": input_items,
+            "store": False,
+            # Reasoning models require their returned reasoning items on the next
+            # stateless tool turn. Encrypted content lets that work under store=false.
+            "include": ["reasoning.encrypted_content"],
+        }
+        if instructions:
+            payload["instructions"] = "\n\n".join(instructions)
+        if self._reasoning_effort:
+            payload["reasoning"] = {"effort": self._reasoning_effort}
+        if tools:
+            payload["tools"] = [_responses_tool(tool) for tool in tools]
+            payload["tool_choice"] = tool_choice or "auto"
+            if parallel_tool_calls is not None:
+                payload["parallel_tool_calls"] = parallel_tool_calls
+        if max_completion_tokens is not None:
+            payload["max_output_tokens"] = max_completion_tokens
+        return payload
+
+    def _parse_responses(self, body: dict[str, Any]) -> LlmResponse:
+        output = body.get("output")
+        if not isinstance(output, list):
+            raise LlmError("llm response had no output")
+        status = str(body.get("status") or "")
+        incomplete = body.get("incomplete_details")
+        reason = incomplete.get("reason") if isinstance(incomplete, dict) else ""
+        usage = body.get("usage") if isinstance(body.get("usage"), dict) else {}
+        if status == "incomplete" and reason == "max_output_tokens":
+            # Output can contain a syntactically complete-looking function call even
+            # though generation stopped early. Expose neither prose nor calls: the
+            # agent sees a truncation and cannot execute partial intent.
+            return LlmResponse(
+                text="",
+                tool_calls=(),
+                finish_reason="length",
+                refusal="",
+                tokens_in=_clamp_tokens(usage.get("input_tokens")),
+                tokens_out=_clamp_tokens(usage.get("output_tokens")),
+                raw_message={"_responses_output": []},
+            )
+        if status != "completed":
+            raise LlmError(f"llm response was not completed: {status or 'unknown'}")
+        calls: list[ToolCall] = []
+        text_parts: list[str] = []
+        refusal = ""
+        for item in output:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "function_call":
+                raw_arguments = item.get("arguments")
+                raw_arguments = raw_arguments if isinstance(raw_arguments, str) else ""
+                call_id = item.get("call_id")
+                name = item.get("name")
+                if isinstance(call_id, str) and isinstance(name, str) and name:
+                    calls.append(
+                        ToolCall(
+                            call_id=call_id,
+                            name=name,
+                            arguments=parse_tool_arguments(raw_arguments),
+                            raw_arguments=raw_arguments[:MAX_TOOL_ARGUMENT_CHARS],
+                        )
+                    )
+            if item.get("type") != "message":
+                continue
+            content = item.get("content")
+            if not isinstance(content, list):
+                continue
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                if part.get("type") == "output_text" and isinstance(part.get("text"), str):
+                    text_parts.append(part["text"].strip())
+                elif part.get("type") == "refusal" and isinstance(part.get("refusal"), str):
+                    refusal = part["refusal"].strip()
+        return LlmResponse(
+            text="\n".join(part for part in text_parts if part),
+            tool_calls=tuple(calls),
+            finish_reason=status,
+            refusal=refusal,
+            tokens_in=_clamp_tokens(usage.get("input_tokens")),
+            tokens_out=_clamp_tokens(usage.get("output_tokens")),
+            raw_message={
+                "role": "assistant",
+                "content": "\n".join(part for part in text_parts if part) or None,
+                "tool_calls": [
+                    {
+                        "id": call.call_id,
+                        "type": "function",
+                        "function": {
+                            "name": call.name,
+                            "arguments": call.raw_arguments,
+                        },
+                    }
+                    for call in calls
+                ],
+                "_responses_output": output,
+            },
+        )
 
     def _parse(self, body: dict[str, Any]) -> LlmResponse:
         choices = body.get("choices")
@@ -299,6 +510,7 @@ class LlmModelChain:
 
     def __init__(self, clients: list[LlmClient]) -> None:
         self._clients = [client for client in clients if client.enabled()]
+        self._active_index = 0
         self.last_model = ""
         self.errors: list[str] = []
 
@@ -309,15 +521,36 @@ class LlmModelChain:
     def models(self) -> tuple[str, ...]:
         return tuple(client.model for client in self._clients)
 
+    @property
+    def model(self) -> str:
+        """The active rung, useful for a release probe without exposing credentials."""
+        if not self._clients:
+            return ""
+        return self._clients[self._active_index].model
+
     def complete(self, **kwargs: Any) -> LlmResponse:
         if not self._clients:
             raise LlmError("no model configured")
         self.errors = []
         last: LlmError | None = None
-        for index, client in enumerate(self._clients):
+        requested_timeout = kwargs.get("timeout")
+        deadline = (
+            monotonic() + float(requested_timeout)
+            if isinstance(requested_timeout, (int, float)) and requested_timeout > 0
+            else None
+        )
+        candidates = self._clients[self._active_index :]
+        for relative_index, client in enumerate(candidates):
+            index = self._active_index + relative_index
             self.last_model = client.model
             try:
-                response = client.complete(**kwargs)
+                attempt_kwargs = dict(kwargs)
+                if deadline is not None:
+                    remaining = deadline - monotonic()
+                    if remaining <= 0:
+                        raise LlmError("llm request failed: deadline exceeded")
+                    attempt_kwargs["timeout"] = remaining
+                response = client.complete(**attempt_kwargs)
             except LlmError as exc:
                 self.errors.append(f"{client.model}:{exc}")
                 status = _status_from_error(exc)
@@ -327,16 +560,13 @@ class LlmModelChain:
                 # Gemini, the primary must still advance so the chain can walk through
                 # the sibling and reach the other provider.
                 crosses_provider = any(
-                    later.provider != client.provider
-                    for later in self._clients[index + 1 :]
+                    later.provider != client.provider for later in self._clients[index + 1 :]
                 )
                 if (
                     status is not None
                     and status not in self.ADVANCE_ON
                     and not (status == 400 and tools_sent)
-                    and not (
-                        status in self.ADVANCE_ON_CROSS_PROVIDER and crosses_provider
-                    )
+                    and not (status in self.ADVANCE_ON_CROSS_PROVIDER and crosses_provider)
                     and not is_last
                 ):
                     # Load or transport problem, not a model problem. Do not spend the
@@ -352,6 +582,10 @@ class LlmModelChain:
                 self.errors.append(f"{client.model}:empty_reply")
                 last = LlmError("llm request failed: empty reply HTTP 200")
                 continue
+            # Tool continuation state, especially encrypted Responses reasoning,
+            # belongs to the endpoint/model that produced it. Stay on that rung for
+            # the rest of this agent turn; only advance if it later fails.
+            self._active_index = index
             return response
         raise last or LlmError("all models failed")
 

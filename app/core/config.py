@@ -1,5 +1,6 @@
 import os
 from enum import StrEnum
+from typing import Literal
 from urllib.parse import urlparse
 
 from pydantic import Field
@@ -82,6 +83,9 @@ class Settings(BaseSettings):
     # and already serving website sales.
     owner_agent_gemini_model: str = Field(default="")
     owner_agent_max_steps: int = Field(default=8)
+    owner_agent_reasoning_effort: Literal["low", "medium", "high", "xhigh", "max"] = "medium"
+    owner_turn_timeout_seconds: float = Field(default=45.0, gt=0.0, le=300.0)
+    telegram_typing_interval_seconds: float = Field(default=4.0, gt=0.5, le=10.0)
     extraction_model: str = Field(default="")
     embedding_provider: str = Field(default="openai")
     embedding_model: str = Field(default="")
@@ -170,9 +174,7 @@ class Settings(BaseSettings):
         from app.surfaces.crm import LOCKED_SPREADSHEET_ID
 
         configured = {
-            item.strip()
-            for item in self.sheets_allowed_spreadsheet_ids.split(",")
-            if item.strip()
+            item.strip() for item in self.sheets_allowed_spreadsheet_ids.split(",") if item.strip()
         }
         configured.add(self.resolved_sheets_spreadsheet_id())
         configured.add(LOCKED_SPREADSHEET_ID)
@@ -213,9 +215,7 @@ class Settings(BaseSettings):
             self.sales_fallback_model,
         )
         openai_ok = bool(self.openai_api_key.strip() and chain)
-        gemini_ok = bool(
-            self.gemini_api_key.strip() and self.owner_agent_gemini_model.strip()
-        )
+        gemini_ok = bool(self.gemini_api_key.strip() and self.owner_agent_gemini_model.strip())
         return openai_ok or gemini_ok
 
     def embeddings_ready(self) -> bool:

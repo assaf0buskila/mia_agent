@@ -110,6 +110,10 @@ def merge_claimed_items(claimed: list[dict[str, str]]) -> dict[str, str]:
         return {}
     merged = dict(claimed[-1])
     merged["text"] = stitch_texts([row.get("text") or "" for row in claimed])
+    if any(row.get("source") == "audio" for row in claimed):
+        # One STT fragment makes entity spelling in the combined turn potentially
+        # ambiguous even when the final burst item was typed.
+        merged["source"] = "audio"
     return merged
 
 

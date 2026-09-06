@@ -92,6 +92,11 @@ Telegram access: `MIA_TELEGRAM_OWNER_USER_IDS` numeric only. Webhook secret chec
 
 ## CRM
 
+Website owner notifications use the existing per-recipient delivery ledger. Only
+confirmed Telegram acceptance establishes delivery; pending or ambiguous claims
+retain duplicate protection. Notification delivery is independent of Sheets work.
+The brief derives bounded context from captured state and the conversation (ADR-055).
+
 Locked spreadsheet `1HW8mnc9GFXraS6oG5VIxFcJvZq9gMDJBFRxY2mpVOhI`. Live tabs Contacts
 and Activity only. Archive tabs are gone. Writers live in `app/surfaces/crm.py`. Owner
 tools `crm_search` / `crm_upsert` always use that ID. Empty `MIA_SHEETS_SPREADSHEET_ID`
@@ -122,6 +127,11 @@ registry is written but wired to nothing. Calendar writes go through
 empty slot — else ask Assaf (ADR-050).
 
 ## Brain
+
+The OpenAI owner loop uses Responses with bounded reasoning. Its deadline covers
+model and tool iterations; resource cleanup waits for active work to stop. Telegram
+typing progress runs while work is active. Successful STT provenance is persisted
+before coalescing, and the owner agent receives an audio-origin hint (ADR-055).
 
 Everything Mia knows beyond the current turn lives under `app/brain/`. **Every
 retrieval constant lives there too**, in the module that uses it, not in this document.

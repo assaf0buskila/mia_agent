@@ -59,6 +59,7 @@ from app.integrations.linkedin import LinkedInPort, build_linkedin_port
 from app.integrations.llm_client import (
     GEMINI_CHAT_URL,
     OPENAI_CHAT_URL,
+    OPENAI_RESPONSES_URL,
     LlmClient,
     LlmModelChain,
 )
@@ -179,7 +180,12 @@ def build_agent_client(settings: Settings) -> LlmModelChain:
         settings.sales_fallback_model,
     )
     clients = [
-        LlmClient(api_key=settings.openai_api_key, model=name, url=OPENAI_CHAT_URL)
+        LlmClient(
+            api_key=settings.openai_api_key,
+            model=name,
+            url=OPENAI_RESPONSES_URL,
+            reasoning_effort=settings.owner_agent_reasoning_effort,
+        )
         for name in chain
     ]
     clients.extend(_gemini_clients(settings, settings.owner_agent_gemini_model))
@@ -276,6 +282,8 @@ def answer_owner(
     # its hits ARE the context -- assembling a second one here is what used to pay for
     # retrieval twice on every owner message.
     graph_state: Mapping[str, Any] | None = None,
+    deadline_at: float | None = None,
+    input_source: str = "text",
 ) -> OwnerBrainResult:
     """Answer one owner message, preferring the agent and degrading to `fallback_text`."""
     if kill_switch or not settings.brain_ready():
@@ -317,15 +325,11 @@ def answer_owner(
         ),
         gmail=gmail if gmail is not None else house["gmail"],
         linkedin=linkedin if linkedin is not None else house["linkedin"],
-        search_console=(
-            search_console if search_console is not None else house["search_console"]
-        ),
+        search_console=(search_console if search_console is not None else house["search_console"]),
         ga4=ga4 if ga4 is not None else house["ga4"],
         seo_audit=seo_audit if seo_audit is not None else house["seo_audit"],
         instagram_insights=(
-            instagram_insights
-            if instagram_insights is not None
-            else house["instagram_insights"]
+            instagram_insights if instagram_insights is not None else house["instagram_insights"]
         ),
         research=research if research is not None else house["research"],
         sheets=sheets if sheets is not None else house["sheets"],
@@ -343,6 +347,8 @@ def answer_owner(
         context=context,
         max_steps=max(1, settings.owner_agent_max_steps),
         now_line=hebrew_datetime(moment, timezone=settings.calendar_timezone),
+        deadline_at=deadline_at,
+        input_source=input_source,
     )
     model = getattr(agent_client, "last_model", "")
     if not outcome.completed or not outcome.text.strip():

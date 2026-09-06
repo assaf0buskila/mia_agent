@@ -6,7 +6,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from time import perf_counter
+from time import monotonic, perf_counter
 
 from app.api.inbound_common import (
     event_conversation_id,
@@ -130,6 +130,7 @@ async def run_owner_loop(
     provider: str = "telegram",
     channel: Channel = Channel.TELEGRAM,
     talk=None,
+    deadline_at: float | None = None,
 ) -> OwnerTurnResult:
     """Allowlisted owner turn: talk, optional Gmail send after he asked, optional CRM write."""
     if not _is_authorized_owner(actor_id=item["from"], owner_ids=owner_ids):
@@ -147,7 +148,6 @@ async def run_owner_loop(
     )
     stamp_correlation(incoming, correlation_id)
     store.save_canonical_event(provider=provider, event=incoming)
-
     reply = ""
     # Human takeover and release existed only on the WhatsApp owner path, which is
     # off. So a conversation Mia escalated could be parked forever with no way to hand
@@ -156,15 +156,11 @@ async def run_owner_loop(
         task = classify_owner_task(owner_text)
         if not task.needs_clarification:
             if task.task_type is OwnerTaskType.HUMAN_TAKEOVER:
-                ack = apply_owner_human_takeover(
-                    store, text=owner_text, kill_switch=False
-                )
+                ack = apply_owner_human_takeover(store, text=owner_text, kill_switch=False)
                 if ack is not None:
                     reply = ack
             elif task.task_type is OwnerTaskType.HUMAN_TAKEOVER_RESUME:
-                ack = apply_owner_human_resume(
-                    store, text=owner_text, kill_switch=False
-                )
+                ack = apply_owner_human_resume(store, text=owner_text, kill_switch=False)
                 if ack is not None:
                     reply = ack
 
@@ -197,8 +193,14 @@ async def run_owner_loop(
                     store=store,
                     item=item,
                     correlation_id=correlation_id,
+                    deadline_at=deadline_at,
                 )
             )
+
+    # The worker sends the one timeout notice after it has drained this coroutine.
+    # Do not send a late model answer and race that notice.
+    if deadline_at is not None and monotonic() >= deadline_at:
+        return OwnerTurnResult(processed=True, sent=False, last_reply=None)
 
     # Approvals proposed on Telegram had no button and no text command, so
     # `pending_approvals` could only ever grow. Attach the keyboard whenever
@@ -238,7 +240,7 @@ async def run_owner_loop(
     # and must never sit between Assaf's message and his answer. It stays inside the
     # existing durable learning path -- no new store, no raw provider data, and the
     # function's own guards still decide what is worth keeping.
-    if not demo_mode_active(settings):
+    if not demo_mode_active(settings) and (deadline_at is None or monotonic() < deadline_at):
         try:
             from app.domain.owner.brain import learn_from_exchange
 
@@ -265,6 +267,7 @@ def _talk_with_optional_agent(
     store: LeadStore,
     item: dict[str, str],
     correlation_id: str = "",
+    deadline_at: float | None = None,
 ) -> tuple[str, bool]:
     from app.domain.owner.brain import answer_owner
 
@@ -296,6 +299,8 @@ def _talk_with_optional_agent(
             demo_active=demo_mode_active(settings),
             source_ref=item.get("id", ""),
             now=datetime.now(UTC),
+            deadline_at=deadline_at,
+            input_source=item.get("source") or "text",
         )
         # Everything below used to be thrown away: only `.text` was read, so the live
         # Telegram turn recorded no model, no latency, no tokens, no steps, no failed

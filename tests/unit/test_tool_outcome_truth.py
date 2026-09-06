@@ -14,8 +14,7 @@ from app.capabilities.types import Principal
 from app.core.config import Settings
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
-from app.domain.two_state import STILL_CHECKING
-from app.graph.owner_agent import _run_tool_with_timeout
+from app.graph.owner_agent import TOOL_DEADLINE_REPLY, _run_tool_with_timeout
 from app.tools.registries.owner_tools import (
     OUTCOME_FAILURE,
     OUTCOME_PARTIAL,
@@ -67,16 +66,19 @@ def test_a_timeout_is_not_a_success() -> None:
     try:
         import app.graph.owner_agent as owner_agent
 
+        finished = []
+
         def _hang(_name, _args, _ctx):
             import time
 
-            time.sleep(20)
+            time.sleep(0.1)
+            finished.append(True)
             raise AssertionError("should have timed out")
 
         original = owner_agent.execute_tool
         original_timeout = owner_agent.TOOL_TIMEOUT_SECONDS
         owner_agent.execute_tool = _hang  # type: ignore[method-assign]
-        owner_agent.TOOL_TIMEOUT_SECONDS = 0.2
+        owner_agent.TOOL_TIMEOUT_SECONDS = 0.01
         try:
             result = _run_tool_with_timeout("gmail_inbox", {}, _ctx(db))
         finally:
@@ -84,7 +86,8 @@ def test_a_timeout_is_not_a_success() -> None:
             owner_agent.TOOL_TIMEOUT_SECONDS = original_timeout
 
         # The owner still hears something honest and natural.
-        assert result.text == STILL_CHECKING
+        assert finished == [True], "active work must drain before the DB closes"
+        assert result.text == TOOL_DEADLINE_REPLY
         # But nothing counts it as a tool that worked.
         assert result.ok is False
         assert result.outcome_label() == OUTCOME_TIMEOUT
@@ -92,7 +95,7 @@ def test_a_timeout_is_not_a_success() -> None:
         assert payload["ok"] is False
         assert payload["outcome"] == OUTCOME_TIMEOUT
         # The copy survives into the model payload so the turn is not left blank.
-        assert payload["result"] == STILL_CHECKING
+        assert payload["result"] == TOOL_DEADLINE_REPLY
     finally:
         db.close()
 
