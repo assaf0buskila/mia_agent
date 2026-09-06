@@ -26,6 +26,12 @@ Each request reads committed website state; process-local cache entries are not
 authoritative across workers. After network effects, merge only delivery or CRM
 completion flags against freshly locked state so newer conversation details survive.
 
+Determine atomic claim ownership from `INSERT ... ON CONFLICT DO NOTHING RETURNING`,
+not a driver's affected-row count. A live PostgreSQL probe inserted a row while
+reporting `rowcount=-1`; treating that as a lost claim left it pending without a send.
+The release probe must prove first-claim success, duplicate refusal, and rollback
+against PostgreSQL itself, in addition to SQLite unit tests.
+
 Send a bounded factual lead brief containing contact details, known business and
 friction, relevant conversation context, questions requiring follow-up, and a next
 step. Unknown information stays unknown; visitor text remains untrusted data.

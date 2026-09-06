@@ -12,6 +12,7 @@ its claim back, or a lead goes permanently unannounced.
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 from app.api.website import (
     _delivery_accepted,
@@ -21,7 +22,7 @@ from app.api.website import (
     process_website_message,
 )
 from app.core.config import Settings
-from app.db.models import WebsiteSessionStateRow
+from app.db.models import OwnerNotificationRecipientClaimRow, WebsiteSessionStateRow
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
 from app.domain.handoff.delivery import (
@@ -58,6 +59,49 @@ class BriefRecordingPort:
 
     async def send(self, message) -> None:
         self.sent.append(message)
+
+
+def test_claim_insert_uses_returned_key_when_driver_rowcount_is_unknown() -> None:
+    class ReturnedResult:
+        rowcount = -1
+
+        def __init__(self, row) -> None:
+            self._row = row
+
+        def first(self):
+            return self._row
+
+    class ClaimSession:
+        def __init__(self, row) -> None:
+            self.row = row
+            self.statement = None
+
+        def get_bind(self):
+            return SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
+
+        def execute(self, statement):
+            self.statement = statement
+            return ReturnedResult(self.row)
+
+    values = {
+        "kind": "website_handoff_delivery",
+        "lead_id": "website_session:test",
+        "notification_key": "test",
+        "recipient_id": "12345",
+        "claimed_at": "2026-09-06T12:00:00+00:00",
+    }
+    inserted_session = ClaimSession((values["kind"], values["lead_id"], "test", "12345"))
+    inserted = LeadStore(inserted_session)._insert_ignoring_conflicts(
+        OwnerNotificationRecipientClaimRow.__table__, values
+    )
+    assert inserted is True
+    assert "RETURNING" in str(inserted_session.statement)
+
+    conflict_session = ClaimSession(None)
+    conflict = LeadStore(conflict_session)._insert_ignoring_conflicts(
+        OwnerNotificationRecipientClaimRow.__table__, values
+    )
+    assert conflict is False
 
 
 class ExplodingPort:
