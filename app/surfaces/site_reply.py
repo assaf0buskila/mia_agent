@@ -17,6 +17,8 @@ Two hard invariants the site keeps that the inbound path does not need:
 
 from __future__ import annotations
 
+import re
+
 from app.core.config import Settings
 from app.domain.emotion import infer_emotional_cues
 from app.domain.memory import ConversationTurn, repeats_previous_mia_turn
@@ -58,6 +60,7 @@ def answer_intent(*, visitor_turns: int, frustrated: bool) -> NextAction:
         return NextAction.OFFER_HYPOTHESIS
     index = max(0, visitor_turns - 1)
     return ANSWER_LADDER[min(index, len(ANSWER_LADDER) - 1)]
+
 
 # Copy whose exact wording is the guardrail. Never paraphrased, never sent to a model.
 VERBATIM_SITE_ACTIONS = frozenset(
@@ -106,6 +109,13 @@ def phrase_site_reply(
     visitor_turns: int = 0,
     frustrated: bool = False,
     usage: dict[str, int] | None = None,
+    known_facts: tuple[str, ...] = (),
+    open_questions: tuple[str, ...] = (),
+    asked_actions: tuple[str, ...] = (),
+    page_path: str = "",
+    page_section: str = "",
+    value_only: bool = False,
+    answer_only: bool = False,
 ) -> str:
     """Return the visitor-facing line. Falls back to `canned` on every failure path.
 
@@ -118,7 +128,11 @@ def phrase_site_reply(
         return canned
     if port is None or kill_switch:
         return canned
-    if action in {"answer", "ask_need"}:
+    if value_only:
+        next_action = NextAction.OFFER_HYPOTHESIS
+    elif answer_only:
+        next_action = SITE_ACTION_TO_NEXT.get(action, NextAction.UNDERSTAND_WORKFLOW)
+    elif action in {"answer", "ask_need"}:
         next_action = answer_intent(visitor_turns=visitor_turns, frustrated=frustrated)
     else:
         next_action = SITE_ACTION_TO_NEXT.get(action)
@@ -131,10 +145,17 @@ def phrase_site_reply(
             latest_message=latest_message,
             channel="website",
             kill_switch=kill_switch,
+            page_path=page_path,
+            page_section=page_section,
             knowledge_hits=(),
             context=ReplyContext(
                 turns=tuple(turns),
                 language=language,
+                known_facts=known_facts,
+                open_questions=open_questions,
+                asked_actions=asked_actions,
+                website_value_only=value_only,
+                website_answer_only=answer_only,
                 knowledge=knowledge_lines(facts),
                 # The prompt has a whole delivery contract keyed on PROSPECT TONE, and
                 # it was inert on the widget because this was never passed. A visitor
@@ -142,9 +163,7 @@ def phrase_site_reply(
                 # acknowledgement they would get on WhatsApp. Deterministic labels from
                 # a closed vocabulary; an empty tuple renders no block at all, so a
                 # neutral message never earns manufactured empathy.
-                emotional_cues=infer_emotional_cues(
-                    latest_message, recent_turns=tuple(turns)
-                ),
+                emotional_cues=infer_emotional_cues(latest_message, recent_turns=tuple(turns)),
             ),
         )
     except Exception:
@@ -155,8 +174,26 @@ def phrase_site_reply(
     text = scrub_visitor_reply(composed.text or "")
     if not text:
         return canned
+    if value_only or answer_only:
+        # The live website never delegates discovery or contact capture to the model.
+        # Reject question-shaped statements too; punctuation alone is insufficient.
+        request = re.search(
+            r"(?:^|[.!]\s*)(?:מה\s|איזה\s|ספרו\s|תארו\s|אמרו\s|"
+            r"what\s|which\s|tell me\b|describe\b|can you\b)",
+            text,
+            re.IGNORECASE,
+        )
+        if "?" in text or "？" in text or request:
+            return canned
+    if value_only and (
+        re.search(r"טלפון|אימייל|מייל|phone|email|\d|₪|\$|מבטיח|guarantee", text, re.I)
+        or not re.search(r"אפשר|ניתן|עשוי|יכול|could|may|might|can|explore", text, re.I)
+    ):
+        return canned
     # Outer guard, mirroring `app.graph.orchestrator`: a paraphrase that lands on a line
     # Mia already said is worse than the canned line.
     if repeats_previous_mia_turn(text, list(turns)):
         return canned
+    if usage is not None and (composed.text or "").strip() != canned.strip() and text != canned:
+        usage["model_reply_used"] = 1
     return text

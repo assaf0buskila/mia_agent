@@ -8,9 +8,11 @@ same action and the same intent, so turn 1 and turn 20 were identical.
 
 from __future__ import annotations
 
+from app.core.config import Settings
 from app.domain.sales import NextAction
+from app.surfaces.crm import FakeContactsCrm
+from app.surfaces.site import SiteBook, run_site_turn
 from app.surfaces.site_policy import (
-    ASK_CONTACT_AFTER_TURNS,
     classify_site_intent,
     decide_site_turn,
     is_frustrated,
@@ -42,8 +44,17 @@ def _decide(text: str, *, turns: int, need_seen: bool = True, frustrated: bool =
 
 def test_the_bug_she_no_longer_asks_forever() -> None:
     """Replay of the conversation that failed. She must reach the offer."""
+    book = SiteBook()
+    book.open("real-conversation")
     actions = [
-        _decide(text, turns=i).action
+        run_site_turn(
+            session_id="real-conversation",
+            text=text,
+            book=book,
+            settings=Settings(_env_file=None),
+            crm=FakeContactsCrm(),
+            now=i * 10,
+        ).next_action
         for i, text in enumerate(REAL_CONVERSATION, start=1)
     ]
     assert "ask_contact" in actions, f"never offered to connect them: {actions}"
@@ -70,9 +81,7 @@ def test_frustration_stops_the_questions_immediately() -> None:
 
 def test_a_visitor_with_no_business_need_is_never_asked_for_a_phone() -> None:
     """A student on a school project is not a lead."""
-    decision = _decide(
-        "I'm a student with a school project", turns=6, need_seen=False
-    )
+    decision = _decide("I'm a student with a school project", turns=6, need_seen=False)
     assert decision.action == "answer"
     assert decision.ask_contact is False
 
@@ -86,11 +95,11 @@ def test_describing_your_own_pricing_work_is_not_a_price_question() -> None:
         assert classify_site_intent(ask) == "price", ask
 
 
-def test_contact_is_not_asked_before_the_ladder_is_earned() -> None:
+def test_turn_count_alone_does_not_earn_contact() -> None:
     early = _decide("אני מתאמת תורים בוואטסאפ", turns=1)
-    assert early.action == "answer"
-    late = _decide("אני מתאמת תורים בוואטסאפ", turns=ASK_CONTACT_AFTER_TURNS)
-    assert late.action == "ask_contact"
+    assert early.question_topic == "friction"
+    late = _decide("אני מתאמת תורים בוואטסאפ", turns=99)
+    assert late.question_topic == "friction"
 
 
 def test_the_ladder_never_runs_off_its_end() -> None:

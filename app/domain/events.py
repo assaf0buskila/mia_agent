@@ -200,13 +200,13 @@ def build_attribution_event(
     *,
     provider: str,
     channel: Channel,
-    lead_id: str,
+    lead_id: str | None,
     conversation_id: str,
     payload: dict[str, Any],
     occurred_at: datetime | None = None,
 ) -> CanonicalEvent:
     """Build ATTRIBUTION from sanitized website or Instagram attribution payload."""
-    provider_event_id = f"{lead_id}:attribution"
+    provider_event_id = f"{lead_id or conversation_id}:attribution"
     clean_payload = {
         key: payload[key] for key in ATTRIBUTION_KEYS if key in payload
     }

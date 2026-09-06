@@ -68,6 +68,7 @@ def extract_fields(
     email: str = "",
     date: str = "",
     language: str = "",
+    website: bool = False,
 ) -> CapturedFields:
     blob = text or ""
     found_email = normalize_email(email) or _first(_EMAIL_RE.findall(blob))
@@ -75,7 +76,15 @@ def extract_fields(
     found_date = (date or "").strip() or _first(_DATE_RE.findall(blob))
     found_name = (name or "").strip()
     if not found_name:
-        match = _NAME_RE.search(blob)
+        pattern = (
+            _NAME_RE
+            if not website
+            else re.compile(
+                r"(?:קוראים לי|שמי|my name is)\s+([A-Za-zא-ת][A-Za-zא-ת\s'\-]{1,40})",
+                re.IGNORECASE,
+            )
+        )
+        match = pattern.search(blob)
         if match:
             found_name = match.group(1).strip()
     lang = language.strip() or ("he" if _looks_hebrew(blob) else "en" if blob.strip() else "")
@@ -97,8 +106,11 @@ def apply_form(
     email: str = "",
     date: str = "",
     text: str = "",
+    website: bool = False,
 ) -> CapturedFields:
-    from_text = extract_fields(text, name=name, phone=phone, email=email, date=date)
+    from_text = extract_fields(
+        text, name=name, phone=phone, email=email, date=date, website=website
+    )
     return merge_fields(current, from_text)
 
 

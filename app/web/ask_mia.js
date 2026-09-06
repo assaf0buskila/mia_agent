@@ -23,9 +23,8 @@
   var busy = false;
   var recording = false;
   var mediaRecorder = null;
-  var audioChunks = [];
-  var recordStarted = 0;
   var recordStream = null;
+  var recordStopping = false;
   var MAX_RECORD_MS = 60000;
   var MIC_IDLE = 'הקלטה';
   var MIC_LIVE = 'מקליטה… לחצו שוב לשליחה';
@@ -53,10 +52,20 @@
   var FORBIDDEN = ['token', 'secret', 'password'];
   var SLUG_RE = /^[a-zA-Z0-9_\-\u0590-\u05FF]+$/;
   var SESSION_KEY = 'askMia.sessionId';
+  var SESSION_META_KEY = 'askMia.sessionMeta';
   var TRANSCRIPT_KEY = 'askMia.transcript';
   var SESSION_RE = /^web_[a-f0-9]{16}$/;
+  var SESSION_LIFETIME_MS = 30 * 24 * 60 * 60 * 1000;
+  var configuredSessionLifetimeMs = SESSION_LIFETIME_MS;
+  var hostLifetime = Number(script && script.getAttribute('data-mia-session-lifetime-ms'));
+  if (Number.isFinite(hostLifetime) && hostLifetime >= 60 * 60 * 1000) {
+    configuredSessionLifetimeMs = hostLifetime;
+  }
   var storedTranscript = [];
   var sessionEnded = false;
+  var conversationFinished = false;
+  var handoffPending = false;
+  var sendAfterHandoff = false;
   var burstParts = [];
   var burstTimer = 0;
   var BURST_MS = 800;
@@ -206,6 +215,14 @@
     'box-sizing:border-box;border-radius:.65rem;cursor:pointer;' +
     'background:#25d366;color:#fff;font-weight:700;text-decoration:none}' +
     '.ask-mia-handoff-cta:focus-visible{outline:2px solid #2563eb;outline-offset:2px}' +
+    '.ask-mia-contact{display:flex;flex-direction:column;gap:.45rem;padding:.7rem;' +
+    'background:#eef7ff;border:1px solid #2f5f9321;border-radius:.8rem;max-width:100%}' +
+    '.ask-mia-contact label{font-size:.78rem;color:#2f5f93;font-weight:700}' +
+    '.ask-mia-contact input{box-sizing:border-box;width:100%;min-height:44px;padding:.55rem;' +
+    'border:1px solid #7ba7d3;border-radius:.55rem;background:#fff;color:#061b35}' +
+    '.ask-mia-contact button{min-height:44px;border:0;border-radius:.55rem;padding:.55rem;' +
+    'background:#2f5f93;color:#fff;font-weight:700;cursor:pointer}' +
+    '.ask-mia-contact small{color:#2f5f93}' +
     '#ask-mia-wa.offer{box-shadow:0 0 0 2px #2563eb}' +
     '#ask-mia-status{min-height:1rem;padding:0 .75rem .5rem;color:#b00;font-size:.85rem}' +
     '@media (prefers-reduced-motion:reduce){#ask-mia-launcher,#ask-mia-send,#ask-mia-mic,#ask-mia-wa,#ask-mia-input,#ask-mia-panel:not([hidden]){transition:none;animation:none}#ask-mia-launcher:hover{transform:none}.ask-mia-dots span,.ask-mia-live{animation:none}}';
@@ -303,6 +320,79 @@
 
   var status = document.createElement('div');
   status.id = 'ask-mia-status';
+  var contactBlock = null;
+
+  function showContactCapture() {
+    if (contactBlock) {
+      contactBlock.hidden = false;
+      return;
+    }
+    contactBlock = document.createElement('form');
+    contactBlock.className = 'ask-mia-contact';
+    contactBlock.setAttribute('aria-label', 'פרטי קשר');
+    var name = document.createElement('input');
+    name.name = 'name';
+    name.maxLength = 80;
+    name.setAttribute('aria-label', 'שם (לא חובה)');
+    name.placeholder = 'שם (לא חובה)';
+    name.setAttribute('autocomplete', 'name');
+    var phone = document.createElement('input');
+    phone.name = 'phone';
+    phone.type = 'tel';
+    phone.maxLength = 40;
+    phone.setAttribute('aria-label', 'טלפון');
+    phone.placeholder = 'טלפון';
+    phone.setAttribute('autocomplete', 'tel');
+    var email = document.createElement('input');
+    email.name = 'email';
+    email.type = 'email';
+    email.maxLength = 120;
+    email.setAttribute('aria-label', 'אימייל');
+    email.placeholder = 'או אימייל';
+    email.setAttribute('autocomplete', 'email');
+    var note = document.createElement('small');
+    note.textContent = 'טלפון או אימייל. השם לא חובה.';
+    var submit = document.createElement('button');
+    submit.type = 'submit';
+    submit.textContent = 'המשיכו עם אסף';
+    contactBlock.appendChild(name);
+    contactBlock.appendChild(phone);
+    contactBlock.appendChild(email);
+    contactBlock.appendChild(note);
+    contactBlock.appendChild(submit);
+    contactBlock.addEventListener('submit', function (event) {
+      event.preventDefault();
+      if (busy || submit.disabled) return;
+      var phoneValue = phone.value.trim();
+      var emailValue = email.value.trim();
+      if (!phoneValue && !emailValue) {
+        status.textContent = 'השאירו טלפון או אימייל כדי שאסף יחזור אליכם.';
+        return;
+      }
+      submit.disabled = true;
+      busy = true;
+      status.textContent = '';
+      retryOnce(function () {
+        return postContact(name.value.trim(), phoneValue, emailValue);
+      })
+        .then(function (data) {
+          applyReply(data);
+          var captured = data.next_action === 'confirm_contact' || data.next_action === 'handoff';
+          contactBlock.hidden = captured;
+          if (!captured) status.textContent = 'בדקו את הטלפון או האימייל ונסו שוב.';
+          else if (isWaMeUrl(data.whatsapp_url)) status.textContent = 'פרטי הקשר התקבלו.';
+        })
+        .catch(function () {
+          status.textContent = ERR;
+        })
+        .finally(function () {
+          submit.disabled = false;
+          busy = false;
+        });
+    });
+    transcript.appendChild(contactBlock);
+    transcript.scrollTop = transcript.scrollHeight;
+  }
 
   function lastMiaText() {
     var nodes = transcript.querySelectorAll('.ask-mia-mia');
@@ -393,7 +483,15 @@
   function loadStoredSession() {
     try {
       var value = localStorage.getItem(SESSION_KEY);
-      if (typeof value === 'string' && SESSION_RE.test(value)) return value;
+      if (typeof value !== 'string' || !SESSION_RE.test(value)) return null;
+      var rawMeta = localStorage.getItem(SESSION_META_KEY);
+      var meta = rawMeta ? JSON.parse(rawMeta) : null;
+      if (!meta || !Number.isFinite(meta.updatedAt) ||
+          Date.now() - meta.updatedAt > configuredSessionLifetimeMs) {
+        clearStoredSession();
+        return null;
+      }
+      return value;
     } catch (err) {}
     return null;
   }
@@ -401,7 +499,17 @@
   function saveStoredSession(id) {
     try {
       localStorage.setItem(SESSION_KEY, id);
+      localStorage.setItem(SESSION_META_KEY, JSON.stringify({ updatedAt: Date.now() }));
     } catch (err) {}
+  }
+
+  function clearStoredSession() {
+    try {
+      localStorage.removeItem(SESSION_KEY);
+      localStorage.removeItem(SESSION_META_KEY);
+      localStorage.removeItem(TRANSCRIPT_KEY);
+    } catch (err) {}
+    storedTranscript = [];
   }
 
   function restoreTranscript() {
@@ -438,7 +546,15 @@
   function isWaMeUrl(url) {
     try {
       var parsed = new URL(url);
-      return parsed.protocol === 'https:' && parsed.hostname === 'wa.me';
+      var valid = (
+        parsed.protocol === 'https:' &&
+        parsed.hostname === 'wa.me' &&
+        (!parsed.port || parsed.port === '443') &&
+        !parsed.username &&
+        !parsed.password &&
+        /^\/[0-9]+\/?$/.test(String(parsed.pathname || ''))
+      );
+      return valid;
     } catch (err) {
       return false;
     }
@@ -462,7 +578,9 @@
   }
 
   function notifyHandoffIssued() {
-    if (!sessionId) return;
+    if (!sessionId || handoffPending) return;
+    var handoffSessionId = sessionId;
+    handoffPending = true;
     fetch(
       api + '/v1/website/sessions/' + encodeURIComponent(sessionId) + '/handoff',
       { method: 'POST', credentials: 'omit', keepalive: true }
@@ -472,14 +590,25 @@
         return response.json();
       })
       .then(function (data) {
+        if (sessionId !== handoffSessionId) return;
         if (data.notification_status === 'delivered') {
           status.textContent = 'אסף קיבל את תקציר השיחה.';
+          clearStoredSession();
+          sessionId = null;
+          conversationFinished = true;
         } else if (data.notification_status === 'failed') {
           status.textContent = 'לא הצלחתי להעביר את השיחה לאסף כרגע.';
         }
       })
       .catch(function () {
         status.textContent = 'לא הצלחתי להעביר את השיחה לאסף כרגע.';
+      })
+      .finally(function () {
+        handoffPending = false;
+        if (sendAfterHandoff) {
+          sendAfterHandoff = false;
+          sendMessage();
+        }
       });
   }
 
@@ -611,6 +740,11 @@
       if (v) p.set(k, v);
     });
     p.set('landing_page', location.pathname);
+    var pageSection =
+      script.getAttribute('data-mia-page-section') ||
+      (document.body && document.body.getAttribute('data-mia-page-section')) ||
+      '';
+    if (SLUG_RE.test(pageSection)) p.set('page_section', pageSection);
     if (document.referrer) p.set('referrer', document.referrer);
     return p.toString();
   }
@@ -634,9 +768,26 @@
     });
   }
 
+  function resetFinishedConversation() {
+    clearStoredSession();
+    while (transcript.firstChild) transcript.removeChild(transcript.firstChild);
+    contactBlock = null;
+    configuredWhatsAppUrl = '';
+    waBtn.hidden = true;
+    sessionEnded = false;
+    conversationFinished = false;
+    opened = false;
+    burstParts = [];
+    eventQueue = [];
+    seenSections = {};
+    if (burstTimer) clearTimeout(burstTimer);
+    burstTimer = 0;
+  }
+
   function openPanel() {
     panel.hidden = false;
     launcher.setAttribute('aria-expanded', 'true');
+    if (conversationFinished) resetFinishedConversation();
     if (!opened) {
       opened = true;
       initSession();
@@ -661,6 +812,7 @@
       function (data) {
         if (typeof data.session_id === 'string' && SESSION_RE.test(data.session_id)) {
           sessionId = data.session_id;
+          sessionEnded = false;
           saveStoredSession(sessionId);
         }
         if (sessionId) {
@@ -673,10 +825,14 @@
   }
 
   function initSession() {
+    opened = true;
     busy = true;
     status.textContent = '';
-    fetchJson(api + '/v1/website/config')
+    return fetchJson(api + '/v1/website/config')
       .then(function (cfg) {
+        if (cfg && Number.isFinite(cfg.session_lifetime_ms) && cfg.session_lifetime_ms > 0) {
+          configuredSessionLifetimeMs = cfg.session_lifetime_ms;
+        }
         var existing = loadStoredSession();
         var resumed = restoreTranscript();
         if (!existing && !resumed && typeof cfg.opening === 'string') {
@@ -684,6 +840,7 @@
         }
         if (existing) {
           sessionId = existing;
+          saveStoredSession(sessionId);
           postEvent('page_viewed', { path: location.pathname });
           flushEventQueue();
           return existing;
@@ -715,18 +872,21 @@
     var raw = typeof data.message === 'string' ? data.message : '';
     var visible = stripWaMeUrls(raw);
     var offering =
-      data.next_action === 'offer_whatsapp' || data.next_action === 'handoff';
+      data.next_action === 'confirm_contact' ||
+      data.next_action === 'handoff';
     var replyUrl =
       typeof data.whatsapp_url === 'string' && isWaMeUrl(data.whatsapp_url)
         ? data.whatsapp_url
         : '';
     var painted = visible ? appendMsg('mia', visible) : false;
     if (!visible) status.textContent = ERR;
+    if (data.next_action === 'ask_contact') showContactCapture();
     if (offering) {
       waBtn.hidden = true;
       waBtn.classList.remove('offer');
       if (replyUrl) {
         placeWhatsAppCta(replyUrl, painted);
+        if (contactBlock) contactBlock.hidden = true;
       } else {
         status.textContent = WA_NA;
       }
@@ -756,10 +916,26 @@
     );
   }
 
+  function postContact(name, phone, email) {
+    return fetchJson(
+      api + '/v1/website/sessions/' + encodeURIComponent(sessionId) + '/messages',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text: 'רוצה להמשיך עם אסף',
+          name: name || '',
+          phone: phone || '',
+          email: email || '',
+        }),
+      }
+    );
+  }
+
   function flushBurst() {
     burstTimer = 0;
     if (!burstParts.length || !sessionId) return;
-    if (busy) {
+    if (busy || recordStopping) {
       burstTimer = setTimeout(flushBurst, BURST_MS);
       return;
     }
@@ -786,7 +962,18 @@
 
   function sendMessage() {
     var text = input.value.trim();
-    if (!text || !sessionId) return;
+    if (!text) return;
+    if (handoffPending) {
+      sendAfterHandoff = true;
+      return;
+    }
+    if (!sessionId) {
+      if (conversationFinished && !busy) {
+        resetFinishedConversation();
+        initSession().then(sendMessage);
+      }
+      return;
+    }
     if (text.length > 4000) text = text.slice(0, 4000);
     status.textContent = '';
     appendMsg('user', text);
@@ -918,34 +1105,16 @@
       }
       return;
     }
-    rec.ondataavailable = function (e) {
-      if (e.data && e.data.size) audioChunks.push(e.data);
-    };
+    rec._miaSend = send;
+    recordStopping = true;
     rec.onerror = null;
-    rec.onstop = function () {
-      var chunks = audioChunks;
-      audioChunks = [];
-      stopTracks();
-      if (!send) return;
-      if (!chunks.length) {
-        // The recorder produced nothing at all: the mic is muted, the wrong input is
-        // selected, or the tap was too short to capture a frame.
-        voiceFailed('no_chunks', MIC_EMPTY);
-        return;
-      }
-      var blob = new Blob(chunks, { type: chunks[0].type || 'audio/webm' });
-      if (!blob.size) {
-        voiceFailed('empty_blob', MIC_EMPTY);
-        return;
-      }
-      sendVoice(blob);
-    };
     try {
       if (rec.state !== 'inactive') {
         if (typeof rec.requestData === 'function') rec.requestData();
         rec.stop();
       } else rec.onstop();
     } catch (err) {
+      recordStopping = false;
       stopTracks();
       if (send) {
         status.textContent = MIC_ERR;
@@ -955,8 +1124,13 @@
   }
 
   function toggleRecord() {
-    if (busy) return;
+    if (busy || recordStopping || handoffPending) return;
     if (!sessionId) {
+      if (conversationFinished) {
+        resetFinishedConversation();
+        initSession().then(toggleRecord);
+        return;
+      }
       status.textContent = MIC_ERR;
       return;
     }
@@ -984,7 +1158,6 @@
           return;
         }
         recordStream = stream;
-        audioChunks = [];
         try {
           mediaRecorder = mime
             ? new MediaRecorder(stream, { mimeType: mime })
@@ -997,12 +1170,35 @@
           status.textContent = MIC_NA;
           return;
         }
-        recordStarted = Date.now();
+        mediaRecorder._miaStarted = Date.now();
+        mediaRecorder._miaStream = stream;
+        mediaRecorder._miaChunks = [];
         mediaRecorder.ondataavailable = function (e) {
-          if (e.data && e.data.size) audioChunks.push(e.data);
-          if (recording && Date.now() - recordStarted >= MAX_RECORD_MS) {
+          if (e.data && e.data.size) {
+            this._miaChunks.push(e.data);
+          }
+          if (mediaRecorder === this && recording && Date.now() - this._miaStarted >= MAX_RECORD_MS) {
             finishRecording(true);
           }
+        };
+        mediaRecorder._miaSend = false;
+        mediaRecorder.onstop = function () {
+          var chunks = this._miaChunks || [];
+          this._miaChunks = [];
+          this._miaStream.getTracks().forEach(function (track) { track.stop(); });
+          if (recordStream === this._miaStream) recordStream = null;
+          recordStopping = false;
+          if (!this._miaSend) return;
+          if (!chunks.length) {
+            voiceFailed('no_chunks', MIC_EMPTY);
+            return;
+          }
+          var blob = new Blob(chunks, { type: chunks[0].type || 'audio/webm' });
+          if (!blob.size) {
+            voiceFailed('empty_blob', MIC_EMPTY);
+            return;
+          }
+          sendVoice(blob);
         };
         mediaRecorder.onerror = function () {
           finishRecording(false);
@@ -1010,8 +1206,13 @@
         };
         setMicLive(true);
         try {
-          if (isAppleCapture()) mediaRecorder.start();
-          else mediaRecorder.start(1000);
+          try {
+            mediaRecorder.start(1000);
+          } catch (sliceErr) {
+            // Older Safari builds reject a timeslice; retain the proven periodic
+            // path as the default and use a guarded no-timeslice fallback.
+            mediaRecorder.start();
+          }
         } catch (err) {
           finishRecording(false);
           status.textContent = MIC_NA;

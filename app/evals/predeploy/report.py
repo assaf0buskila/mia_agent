@@ -52,6 +52,7 @@ class AttemptResult:
     tokens_in: int = 0
     tokens_out: int = 0
     notes: tuple[str, ...] = ()
+    turns: tuple[dict, ...] = ()
 
     def as_dict(self) -> dict:
         return {
@@ -63,6 +64,7 @@ class AttemptResult:
             "tokens_in": self.tokens_in,
             "tokens_out": self.tokens_out,
             "notes": list(self.notes),
+            "turns": list(self.turns),
         }
 
 

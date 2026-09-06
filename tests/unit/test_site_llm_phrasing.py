@@ -20,8 +20,7 @@ from app.surfaces.site_reply import (
 
 SERVICES_Q = "היי מיה, אני רוצה לדעת איזה שירותים אתם מציעים?"
 GEL_NAILS_Q = (
-    "יש לי עסק של לק ג'ל ואני צריך שיהיה מענה אוטומטי "
-    "ושמירת מספרי טלפון כדי שאוכל לחזור ללקוחות"
+    "יש לי עסק של לק ג'ל ואני צריך שיהיה מענה אוטומטי ושמירת מספרי טלפון כדי שאוכל לחזור ללקוחות"
 )
 
 
@@ -59,11 +58,11 @@ def _canned(text: str) -> tuple[str, str]:
     return decision.action, decision.reply
 
 
-def test_the_bug_two_questions_share_one_canned_line() -> None:
-    """The deterministic layer alone still collapses both questions onto one string."""
+def test_product_question_and_discovery_have_distinct_canned_moves() -> None:
+    """Published-fact questions no longer collapse into the discovery ladder."""
     _, services = _canned(SERVICES_Q)
     _, gel = _canned(GEL_NAILS_Q)
-    assert services == gel
+    assert services != gel
 
 
 def test_phrasing_makes_the_two_replies_differ() -> None:
@@ -88,6 +87,52 @@ def test_phrasing_makes_the_two_replies_differ() -> None:
     assert services != gel
     assert services not in {services_canned, gel_canned}
     assert "לק ג'ל" in gel
+
+
+def test_model_reply_used_only_marks_accepted_non_canned_text() -> None:
+    port = EchoPort()
+    usage: dict[str, int] = {}
+    action, canned = _canned(GEL_NAILS_Q)
+    reply = phrase_site_reply(
+        action=action,
+        canned=canned,
+        latest_message=GEL_NAILS_Q,
+        language="he",
+        port=port,
+        usage=usage,
+    )
+    assert reply != canned
+    assert usage["model_reply_used"] == 1
+
+    fallback_usage: dict[str, int] = {}
+    fallback = phrase_site_reply(
+        action=action,
+        canned=canned,
+        latest_message=GEL_NAILS_Q,
+        language="he",
+        port=EmptyPort(),
+        usage=fallback_usage,
+    )
+    assert fallback == canned
+    assert "model_reply_used" not in fallback_usage
+
+    class CannedPort:
+        def compose(self, **kwargs: object) -> ComposeResult:
+            return ComposeResult(text=str(kwargs["canned"]))
+
+    canned_usage: dict[str, int] = {}
+    assert (
+        phrase_site_reply(
+            action=action,
+            canned=canned,
+            latest_message=GEL_NAILS_Q,
+            language="he",
+            port=CannedPort(),
+            usage=canned_usage,
+        )
+        == canned
+    )
+    assert "model_reply_used" not in canned_usage
 
 
 def test_guardrail_actions_are_never_paraphrased() -> None:

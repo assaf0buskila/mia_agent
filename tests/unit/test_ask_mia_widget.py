@@ -109,14 +109,14 @@ def test_host_data_mia_open_opens_panel() -> None:
     assert "onCtaClick" in tracking
 
 
-def test_session_created_only_on_first_open() -> None:
+def test_active_session_reopens_without_reset_and_finished_session_can_restart() -> None:
     source = _source()
     assert "opened = false" in source
-    assert source.count("opened = true") == 1
     open_fn = _function_body(source, "openPanel")
-    assert "opened = true" in open_fn
+    assert "if (!opened)" in open_fn
+    assert "if (conversationFinished) resetFinishedConversation()" in open_fn
     assert "initSession()" in open_fn
-    assert source.count("initSession()") == 2
+    assert "createWebsiteSession" in _function_body(source, "initSession")
     assert "setupFunnelTracking()" in _function_body(source, "mount")
 
 
@@ -323,7 +323,7 @@ def test_widget_stitches_message_bursts() -> None:
     flush = _function_body(source, "flushBurst")
     assert "BURST_MS = 800" in source
     assert "burstParts.push(text)" in send
-    assert "busy" not in send or "if (!text || !sessionId) return" in send
+    assert "if (busy) return;" not in send
     assert "burstParts.join(' ')" in flush
     assert "postText(text)" in flush
     assert "setTimeout(flushBurst, BURST_MS)" in send
@@ -428,10 +428,10 @@ def test_whatsapp_click_claims_delivery_only_after_telegram_acceptance() -> None
     )
 
 
-def test_widget_offers_whatsapp_on_handoff_as_well_as_offer_whatsapp() -> None:
+def test_widget_offers_whatsapp_on_handoff_as_well_as_confirm_contact() -> None:
     """HANDOFF used to claim a transfer with no CTA. The visitor had no way to reach Assaf."""
     apply = _function_body(_source(), "applyReply")
-    assert "offer_whatsapp" in apply
+    assert "confirm_contact" in apply
     assert "handoff" in apply
     assert "placeWhatsAppCta" in apply or "requestWhatsAppCta" in apply
     assert "waBtn.hidden = false" not in apply
@@ -483,7 +483,7 @@ def test_whatsapp_offer_is_a_tappable_button_not_a_raw_url() -> None:
     apply = _function_body(source, "applyReply")
     assert "stripWaMeUrls" in apply
     assert apply.index("stripWaMeUrls") < apply.index("appendMsg")
-    assert "offer_whatsapp" in apply
+    assert "confirm_contact" in apply
     assert "handoff" in apply
     assert "isWaMeUrl(data.whatsapp_url)" in apply
     assert "placeWhatsAppCta" in apply

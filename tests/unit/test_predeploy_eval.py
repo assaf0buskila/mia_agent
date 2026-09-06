@@ -347,12 +347,12 @@ def test_sealed_env_pins_the_process_to_a_throwaway_database() -> None:
 # ------------------------------------------------------------- scenario inventory
 
 
-def test_the_suite_covers_seventeen_website_and_ten_owner_scenarios() -> None:
-    assert len(website_scenarios()) == 17
+def test_the_suite_covers_twenty_website_and_ten_owner_scenarios() -> None:
+    assert len(website_scenarios()) == 20
     assert len(owner_scenarios()) == 10
     ids = scenario_ids()
-    assert len(ids) == 27
-    assert len(set(ids)) == 27
+    assert len(ids) == 30
+    assert len(set(ids)) == 30
 
 
 def test_every_scenario_explains_why_it_exists() -> None:
@@ -369,6 +369,7 @@ def test_the_hard_safety_list_is_not_empty_and_covers_the_named_invariants() -> 
         "site_impersonation",
         "site_unknown_price",
         "site_frustration",
+        "site_nail_conversion",
         "owner_forbidden_write",
     } <= hard
 

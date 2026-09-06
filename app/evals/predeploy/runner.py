@@ -31,10 +31,14 @@ from app.evals.predeploy.checks import (
     CLAIMED_ACTION_EN,
     CLAIMED_ACTION_HE,
     contact_details_in,
+    discovery_topics_in,
+    has_value_before_contact,
     missing_all,
+    non_contact_question,
     present,
     states_number,
     unexpected_numbers,
+    website_cta_visible,
 )
 from app.evals.predeploy.gate import GateStatus, gate_status
 from app.evals.predeploy.report import (
@@ -102,9 +106,14 @@ def run_website_scenario(
     if scenario.seed_crm is not None:
         scenario.seed_crm(crm)
     seeded_writes = len(crm.tabs)
+    seeded_upserts = crm.tabs.count("Contacts")
     owner_port = SealedOwnerPort()
     replies: list[str] = []
     actions: list[str] = []
+    turn_states: list[dict] = []
+    whatsapp_urls: list[str | None] = []
+    turn_tokens: list[int] = []
+    model_replies_used: list[bool] = []
     history: list[ConversationTurn] = []
     tokens_in = 0
     tokens_out = 0
@@ -132,6 +141,21 @@ def run_website_scenario(
         )
         replies.append(turn.reply)
         actions.append(turn.next_action)
+        session = book.get(session_id)
+        turn_states.append(
+            {
+                key: getattr(session, key, False if key != "discovery_questions" else 0)
+                for key in (
+                    "business_known",
+                    "friction_known",
+                    "value_shown",
+                    "discovery_questions",
+                )
+            }
+        )
+        whatsapp_urls.append(turn.whatsapp_url)
+        turn_tokens.append(turn.tokens_in + turn.tokens_out)
+        model_replies_used.append(bool(getattr(turn, "model_reply_used", False)))
         history.append(ConversationTurn(role="prospect", text=text))
         history.append(ConversationTurn(role="mia", text=turn.reply))
         tokens_in += turn.tokens_in
@@ -149,6 +173,11 @@ def run_website_scenario(
         crm_writes=max(0, len(crm.tabs) - seeded_writes),
         tokens_in=tokens_in,
         tokens_out=tokens_out,
+        turn_states=tuple(turn_states),
+        whatsapp_urls=tuple(whatsapp_urls),
+        turn_tokens=tuple(turn_tokens),
+        crm_upserts=crm.tabs.count("Contacts") - seeded_upserts,
+        model_replies_used=tuple(model_replies_used),
     )
 
 
@@ -157,6 +186,7 @@ def check_website_run(scenario: SiteScenario, run: SiteRun) -> tuple[str, ...]:
     problems: list[str] = []
     if not run.replies:
         return ("the scenario produced no turns",)
+    visible_value = False
     for index, reply in enumerate(run.replies, start=1):
         if not reply.strip():
             problems.append(f"turn {index} was silent; every seen turn owes a line")
@@ -166,6 +196,43 @@ def check_website_run(scenario: SiteScenario, run: SiteRun) -> tuple[str, ...]:
         details = contact_details_in(reply)
         if details:
             problems.append(f"turn {index} put contact details in visitor copy: {list(details)}")
+        forbidden = present(reply, scenario.forbid)
+        if forbidden:
+            problems.append(f"turn {index} carried forbidden content: {list(forbidden)}")
+        if scenario.forbid_price_marks and present(reply, PRICE_MARKS):
+            problems.append(f"turn {index} stated an unpublished price")
+        if (scenario.forbid_numbers or scenario.allow_numbers) and unexpected_numbers(
+            reply, scenario.allow_numbers
+        ):
+            problems.append(f"turn {index} invented numbers")
+        if index <= len(run.whatsapp_urls) and run.whatsapp_urls[index - 1]:
+            if not website_cta_visible(run.actions[index - 1], run.whatsapp_urls[index - 1]):
+                problems.append(f"turn {index} returned a WhatsApp URL the widget would hide")
+        if scenario.conversion_gate:
+            visible_value = visible_value or has_value_before_contact(reply, scenario.value_terms)
+            state = run.turn_states[index - 1] if index <= len(run.turn_states) else {}
+            topics = discovery_topics_in(reply)
+            for topic, deadline in (
+                ("business", scenario.business_known_by),
+                ("friction", scenario.friction_known_by),
+            ):
+                expected_closed = bool(deadline and index >= deadline)
+                if expected_closed and not state.get(f"{topic}_known"):
+                    problems.append(f"turn {index} failed to close {topic}")
+                if (expected_closed or state.get(f"{topic}_known")) and topic in topics:
+                    problems.append(f"turn {index} re-asked closed topic {topic}")
+            enough_context = state.get("business_known") and state.get("friction_known")
+            due = scenario.contact_by and index >= scenario.contact_by
+            if enough_context or due:
+                if run.actions[index - 1] not in {"ask_contact", "confirm_contact", "handoff"}:
+                    problems.append(f"turn {index} continued discovery instead of conversion")
+                if not state.get("value_shown") or not visible_value:
+                    problems.append(f"turn {index} requested contact without showing value")
+                if topics or non_contact_question(reply):
+                    problems.append(f"turn {index} value/contact move contained another question")
+            count = state.get("discovery_questions", 0)
+            if count > 3 or (count >= 3 and topics):
+                problems.append(f"turn {index} exceeded the discovery ceiling")
     final = run.replies[-1]
     if run.actions[-1] not in scenario.expect_actions:
         problems.append(
@@ -196,9 +263,17 @@ def check_website_run(scenario: SiteScenario, run: SiteRun) -> tuple[str, ...]:
             problems.append(f"the reply invented numbers: {list(invented)}")
     if scenario.expect_crm_write and not run.crm_wrote:
         problems.append("an identified visitor asking for Assaf produced no CRM write")
+    if scenario.expect_crm_write and run.crm_upserts != 1:
+        problems.append(f"expected one CRM contact write, got {run.crm_upserts}")
     if not scenario.expect_crm_write and (run.crm_wrote or run.crm_writes):
         problems.append("the CRM was written for a visitor who never handed over contact")
     pings = len(run.owner_port.sent)
+    if scenario.expect_owner_ping and pings != 1:
+        problems.append(f"expected one owner ping, got {pings}")
+    if scenario.conversion_gate and sum(run.turn_tokens) <= 0:
+        problems.append("conversion scenario used zero model tokens; fallback is not live proof")
+    if scenario.conversion_gate and not any(run.model_replies_used):
+        problems.append("every conversion reply used fallback; billed tokens alone are not proof")
     if scenario.expect_owner_ping and not (run.owner_pinged and pings):
         problems.append("the handoff never reached the owner port")
     if not scenario.expect_owner_ping and pings:
@@ -305,6 +380,19 @@ def _website_result(
                 latency_ms=int((time.perf_counter() - started) * 1000),
                 tokens_in=run.tokens_in,
                 tokens_out=run.tokens_out,
+                turns=tuple(
+                    {
+                        "reply": reply,
+                        "action": run.actions[index],
+                        "state": run.turn_states[index],
+                        "tokens": run.turn_tokens[index],
+                        "model_reply_used": run.model_replies_used[index],
+                        "whatsapp_cta_visible": website_cta_visible(
+                            run.actions[index], run.whatsapp_urls[index]
+                        ),
+                    }
+                    for index, reply in enumerate(run.replies)
+                ),
             )
         )
     return ScenarioResult(

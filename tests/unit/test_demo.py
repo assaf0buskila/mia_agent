@@ -117,7 +117,7 @@ def test_website_config_demo_true_when_flag_on(monkeypatch) -> None:
     assert body["demo"] is True
 
 
-def test_demo_session_does_not_stamp_attribution(monkeypatch) -> None:
+def test_demo_website_session_preserves_supplied_anonymous_attribution(monkeypatch) -> None:
     monkeypatch.setenv("MIA_DEMO_MODE", "true")
     init_db()
     with TestClient(app) as client:
@@ -138,7 +138,9 @@ def test_demo_session_does_not_stamp_attribution(monkeypatch) -> None:
                 )
             )
         )
-        assert attr_rows == []
+        assert len(attr_rows) == 1
+        assert attr_rows[0].lead_id is None
+        assert json.loads(attr_rows[0].payload_json)["utm_source"] == "meta"
     finally:
         db.close()
 
