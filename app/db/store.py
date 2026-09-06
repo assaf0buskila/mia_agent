@@ -2705,15 +2705,19 @@ class LeadStore:
         A `SELECT` followed by an `INSERT` is not a claim: two workers both see nothing,
         both insert, and the loser gets an IntegrityError out of the request. The database
         decides here instead, in one statement, and a lost race returns False rather than
-        raising. SQLite and PostgreSQL both support the clause and both report
-        `rowcount == 0` when the conflict target already existed, so the two dialects stay
-        behaviour-identical.
+        raising. SQLite and PostgreSQL both return the inserted primary key and return no
+        row on conflict. This avoids treating an unknown driver rowcount as a lost claim.
         """
         dialect = self.session.get_bind().dialect.name
         builder = postgres_insert if dialect == "postgresql" else sqlite_insert
-        statement = builder(table).values(**values).on_conflict_do_nothing()
+        statement = (
+            builder(table)
+            .values(**values)
+            .on_conflict_do_nothing()
+            .returning(*table.primary_key.columns)
+        )
         result = self.session.execute(statement)
-        return int(result.rowcount or 0) > 0
+        return result.first() is not None
 
     def upsert_owner_notification(
         self,
