@@ -25,7 +25,6 @@ from app.domain.owner.calendar_writes import apply_owner_calendar_change_request
 from app.domain.two_state import (
     FORBIDDEN_OWNER_TOOLS,
     OWNER_HOUSE_TOOLS,
-    STILL_CHECKING,
     MiaState,
     asked_toolkit,
     identity_required_for,
@@ -36,6 +35,7 @@ from app.domain.two_state import (
 from app.domain.whatsapp_drafts import draft_whatsapp_for_assaf
 from app.graph.owner_agent import (
     SYSTEM_PROMPT,
+    TOOL_DEADLINE_REPLY,
     AgentStep,
     _refuse_seen_and_silent,
     _run_tool_with_timeout,
@@ -70,7 +70,7 @@ def test_two_states_split_tools_and_never_sell_owner() -> None:
     assert identity_required_for("ping") is True
     assert identity_required_for("product_answer") is False
     assert "Never sell to him" in SYSTEM_PROMPT
-    assert "still checking" in SYSTEM_PROMPT
+    assert "say that the check stopped" in SYSTEM_PROMPT
     assert "Say the tool name before any number" in SYSTEM_PROMPT
     reply, wrote = talk_as_dude(text="רוצה חבילת אתר?", crm=FakeContactsCrm())
     assert wrote is False
@@ -308,7 +308,7 @@ def test_calendar_write_request_asks_assaf_for_weather() -> None:
         db.close()
 
 
-def test_timeout_says_still_checking_and_seen_is_not_silent() -> None:
+def test_timeout_reports_stopped_work_and_seen_is_not_silent() -> None:
     init_db()
     db = get_session_factory()()
     try:
@@ -323,7 +323,7 @@ def test_timeout_says_still_checking_and_seen_is_not_silent() -> None:
         def _hang(_name, _args, _ctx):
             import time
 
-            time.sleep(20)
+            time.sleep(0.1)
             raise AssertionError("should have timed out")
 
         import app.graph.owner_agent as owner_agent
@@ -331,13 +331,13 @@ def test_timeout_says_still_checking_and_seen_is_not_silent() -> None:
         original = owner_agent.execute_tool
         original_timeout = owner_agent.TOOL_TIMEOUT_SECONDS
         owner_agent.execute_tool = _hang  # type: ignore[method-assign]
-        owner_agent.TOOL_TIMEOUT_SECONDS = 0.2
+        owner_agent.TOOL_TIMEOUT_SECONDS = 0.01
         try:
             result = _run_tool_with_timeout("gmail_inbox", {}, ctx)
         finally:
             owner_agent.execute_tool = original  # type: ignore[method-assign]
             owner_agent.TOOL_TIMEOUT_SECONDS = original_timeout
-        assert result.text == STILL_CHECKING
+        assert result.text == TOOL_DEADLINE_REPLY
         spoken = _refuse_seen_and_silent(
             "פה. מה צריך?",
             [AgentStep(tool="gmail_inbox", ok=True, detail="ok")],

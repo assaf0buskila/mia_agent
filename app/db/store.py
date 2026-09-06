@@ -554,6 +554,42 @@ class LeadStore:
             row.updated_at = stamp
         self.session.flush()
 
+    def merge_website_session_notification_flags(
+        self,
+        session_id: str,
+        *,
+        pinged: bool | None = None,
+        finalized: bool | None = None,
+        crm_written: bool | None = None,
+    ) -> str:
+        """Lock and update only delivery flags, preserving newer conversation state."""
+        if not session_id:
+            return ""
+        row = self.session.scalar(
+            select(WebsiteSessionStateRow)
+            .where(WebsiteSessionStateRow.session_id == session_id)
+            .execution_options(populate_existing=True)
+            .with_for_update()
+        )
+        if row is None:
+            return ""
+        try:
+            state = json.loads(row.state_json)
+        except (TypeError, ValueError):
+            return ""
+        if not isinstance(state, dict):
+            return ""
+        if pinged is not None:
+            state["pinged"] = bool(pinged)
+        if finalized is not None:
+            state["finalized"] = bool(finalized)
+        if crm_written is not None:
+            state["crm_written"] = bool(crm_written)
+        row.state_json = json.dumps(state, ensure_ascii=False)
+        row.updated_at = datetime.now(UTC).isoformat()
+        self.session.flush()
+        return row.state_json
+
     def count_open_reconciliation(self) -> int:
         return int(
             self.session.scalar(
@@ -1724,8 +1760,16 @@ class LeadStore:
         self.session.flush()
 
     def upsert_linkedin_approval(
-        self, *, channel: str, action: str, risk: str, payload_hash: str,
-        decision: str, resource_id: str, expires_at: str, proposed_parameters: str,
+        self,
+        *,
+        channel: str,
+        action: str,
+        risk: str,
+        payload_hash: str,
+        decision: str,
+        resource_id: str,
+        expires_at: str,
+        proposed_parameters: str,
     ) -> None:
         """Persist one exact LinkedIn provider write; its arguments are rehashed at execute."""
         if action != "linkedin_composio_write" or risk not in ("R3", "R4"):
@@ -1742,13 +1786,22 @@ class LeadStore:
             return
         row = self.get_approval_by_resource("linkedin_tool", resource_id, action)
         if row is None:
-            self.session.add(ApprovalRow(
-                lead_id=None, channel=channel, action=action, risk=risk,
-                payload_hash=payload_hash, decision=decision, approver="",
-                resource_type="linkedin_tool", resource_id=resource_id,
-                expires_at=expires_at, approval_id=new_approval_id(),
-                proposed_parameters=proposed_parameters,
-            ))
+            self.session.add(
+                ApprovalRow(
+                    lead_id=None,
+                    channel=channel,
+                    action=action,
+                    risk=risk,
+                    payload_hash=payload_hash,
+                    decision=decision,
+                    approver="",
+                    resource_type="linkedin_tool",
+                    resource_id=resource_id,
+                    expires_at=expires_at,
+                    approval_id=new_approval_id(),
+                    proposed_parameters=proposed_parameters,
+                )
+            )
         elif row.decision == DECISION_PENDING:
             row.channel, row.risk, row.payload_hash = channel, risk, payload_hash
             row.expires_at, row.proposed_parameters = expires_at, proposed_parameters
@@ -1767,8 +1820,16 @@ class LeadStore:
         return True
 
     def upsert_composio_approval(
-        self, *, channel: str, action: str, risk: str, payload_hash: str,
-        decision: str, resource_id: str, expires_at: str, proposed_parameters: str,
+        self,
+        *,
+        channel: str,
+        action: str,
+        risk: str,
+        payload_hash: str,
+        decision: str,
+        resource_id: str,
+        expires_at: str,
+        proposed_parameters: str,
     ) -> None:
         """Persist one exact Composio provider write; arguments are rehashed at execute."""
         if action != "composio_write" or risk not in ("R3", "R4", "R5"):
@@ -1785,13 +1846,22 @@ class LeadStore:
             return
         row = self.get_approval_by_resource("composio_tool", resource_id, action)
         if row is None:
-            self.session.add(ApprovalRow(
-                lead_id=None, channel=channel, action=action, risk=risk,
-                payload_hash=payload_hash, decision=decision, approver="",
-                resource_type="composio_tool", resource_id=resource_id,
-                expires_at=expires_at, approval_id=new_approval_id(),
-                proposed_parameters=proposed_parameters,
-            ))
+            self.session.add(
+                ApprovalRow(
+                    lead_id=None,
+                    channel=channel,
+                    action=action,
+                    risk=risk,
+                    payload_hash=payload_hash,
+                    decision=decision,
+                    approver="",
+                    resource_type="composio_tool",
+                    resource_id=resource_id,
+                    expires_at=expires_at,
+                    approval_id=new_approval_id(),
+                    proposed_parameters=proposed_parameters,
+                )
+            )
         elif row.decision == DECISION_PENDING:
             row.channel, row.risk, row.payload_hash = channel, risk, payload_hash
             row.expires_at, row.proposed_parameters = expires_at, proposed_parameters

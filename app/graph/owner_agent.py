@@ -39,13 +39,13 @@ from __future__ import annotations
 
 import json
 import threading
+from time import monotonic
 from typing import Any, NamedTuple
 
 from app.brain.context import BrainContext, render_context_block
 from app.domain.memory import ConversationTurn, render_transcript
 from app.domain.two_state import (
     SLOW_HOUSE_TOOLS,
-    STILL_CHECKING,
     TOOL_RECOVERY_SECONDS,
     TOOL_TIMEOUT_SECONDS,
     asked_toolkit,
@@ -80,6 +80,7 @@ MAX_TOTAL_TOOL_CALLS = 16
 # A tool that comes back empty more than this many times in one run stops being offered:
 # past that point another identical-shaped call is a retry spiral, not investigation.
 EMPTY_RESULT_REPEAT_LIMIT = 2
+TOOL_DEADLINE_REPLY = "הבדיקה נעצרה כי עבר הזמן."
 
 SYSTEM_PROMPT = (
     "You are Mia, Assaf Buskila's private AI operator on Telegram. "
@@ -201,9 +202,8 @@ SYSTEM_PROMPT = (
     "Answer the toolkit he asked about first. If he asked Instagram, do not lead "
     "with Gmail. Never seen-and-silent: if a tool ran, say what it returned or that "
     "it was empty.\n"
-    "If a tool is still running, say 'still checking'. Do not invent while you wait. "
-    "When the tool returns, send the real Contacts + Activity result. Do not wait "
-    "for him to retype Google sheets.\n"
+    "If a tool reaches the turn deadline, say that the check stopped. Do not invent. "
+    "A later request may retry the real Contacts + Activity lookup.\n"
     "Voice notes and images are the request. Transcribed speech is the message. "
     "If he attached an image, use what you see. Do not answer as if nothing arrived.\n"
     "Calendar write only for a meeting near Tel Aviv, 09:00-17:00 Asia/Jerusalem, "
@@ -263,10 +263,23 @@ _EMPTY_RESULT_MARKERS = (
 _EMPTY_RESULT_MAX_CHARS = 60
 
 
-def _run_tool_with_timeout(name: str, arguments: dict[str, Any], ctx: ToolContext):
-    """Run one tool. If it exceeds the bound, say still checking — do not invent."""
+def _run_tool_with_timeout(
+    name: str,
+    arguments: dict[str, Any],
+    ctx: ToolContext,
+    *,
+    deadline_at: float | None = None,
+):
+    """Run one tool within the turn deadline and drain it before reporting timeout."""
     from app.tools.registries.owner_tools import ToolResult
 
+    if deadline_at is not None and monotonic() >= deadline_at:
+        return ToolResult(
+            ok=False,
+            text=TOOL_DEADLINE_REPLY,
+            error=OUTCOME_TIMEOUT,
+            outcome=OUTCOME_TIMEOUT,
+        )
     box: list[Any] = []
     done = threading.Event()
 
@@ -282,12 +295,19 @@ def _run_tool_with_timeout(name: str, arguments: dict[str, Any], ctx: ToolContex
     wait_s = TOOL_TIMEOUT_SECONDS
     if name in SLOW_HOUSE_TOOLS:
         wait_s = TOOL_TIMEOUT_SECONDS + TOOL_RECOVERY_SECONDS
+    if deadline_at is not None:
+        wait_s = max(0.0, min(wait_s, deadline_at - monotonic()))
     if not done.wait(timeout=wait_s):
-        # Not a success. The owner still hears "still checking", but a run that timed
-        # out is recorded as a timeout, never counted among the tools that worked.
+        # Never abandon a DB-backed tool thread. The worker owns ctx.store.session;
+        # returning while this thread still runs lets the worker close that session
+        # underneath it. Drain the bounded adapter call, then report the timeout and
+        # discard its late result.
+        done.wait()
+        # The late result is discarded and the owner is told truthfully that the
+        # check stopped; it is never counted among the tools that worked.
         return ToolResult(
             ok=False,
-            text=STILL_CHECKING,
+            text=TOOL_DEADLINE_REPLY,
             error=OUTCOME_TIMEOUT,
             outcome=OUTCOME_TIMEOUT,
         )
@@ -364,6 +384,7 @@ def build_messages(
     history: tuple[ConversationTurn, ...],
     context: BrainContext | None,
     now_line: str = "",
+    input_source: str = "text",
 ) -> list[dict[str, Any]]:
     """System + context + history + the owner's message. History is data, not instructions."""
     system = SYSTEM_PROMPT
@@ -375,6 +396,13 @@ def build_messages(
         )
     if now_line:
         system = f"{system}\n\nCURRENT TIME: {now_line}"
+    if input_source == "audio":
+        system = (
+            f"{system}\n\nAUDIO INPUT: the latest owner message is an STT transcript. "
+            "Treat names, numbers and dates as potentially ambiguous. Use context or a "
+            "live read only when it resolves them exactly; otherwise ask one short "
+            "clarifying question. Never guess what the audio said."
+        )
     context_block = render_context_block(context) if context is not None else ""
     if context_block:
         system = f"{system}\n\n{context_block}"
@@ -403,6 +431,8 @@ def run_owner_agent(
     context: BrainContext | None = None,
     max_steps: int = DEFAULT_MAX_STEPS,
     now_line: str = "",
+    deadline_at: float | None = None,
+    input_source: str = "text",
 ) -> AgentOutcome:
     """Run the tool loop and return the final owner-facing message.
 
@@ -413,6 +443,10 @@ def run_owner_agent(
         return AgentOutcome("", (), 0, 0, (), False, "empty message", 0, (), "empty_reply")
     if not client.enabled():
         return AgentOutcome("", (), 0, 0, (), False, "llm not configured", 0, (), "no_model")
+    if deadline_at is not None and monotonic() >= deadline_at:
+        return AgentOutcome(
+            "", (), 0, 0, (), False, "deadline exceeded", 0, (), "deadline_exceeded"
+        )
 
     steps: list[AgentStep] = []
     tools_used: list[str] = []
@@ -428,7 +462,9 @@ def run_owner_agent(
     tool_reports: list[str] = []
     spoken = owner_message
     if asked_toolkit(owner_message) == "sheets":
-        prefetch = _run_tool_with_timeout("crm_search", {"query": owner_message}, ctx)
+        prefetch = _run_tool_with_timeout(
+            "crm_search", {"query": owner_message}, ctx, deadline_at=deadline_at
+        )
         snippet = (prefetch.text or prefetch.error or "").strip()
         steps.append(
             AgentStep(
@@ -457,6 +493,7 @@ def run_owner_agent(
         history=history,
         context=context,
         now_line=now_line,
+        input_source=input_source,
     )
     definitions = tool_definitions(allow_memory_writes=ctx.settings.memory_write_enabled)
 
@@ -480,6 +517,13 @@ def run_owner_agent(
 
     max_steps = max(1, max_steps)
     for step_index in range(max_steps):
+        if deadline_at is not None and monotonic() >= deadline_at:
+            return finish(
+                completed=False,
+                completion="deadline_exceeded",
+                error="deadline exceeded",
+                steps_used=step_index,
+            )
         last_step = step_index == max_steps - 1
         ceiling_hit = total_tool_calls >= MAX_TOTAL_TOOL_CALLS
         available = [
@@ -497,10 +541,9 @@ def run_owner_agent(
                 messages=messages,
                 tools=None if force_prose else available,
                 tool_choice=None if force_prose else "auto",
-                parallel_tool_calls=None if force_prose else True,
-                max_completion_tokens=(
-                    ctx.settings.max_completion_tokens_owner or None
-                ),
+                parallel_tool_calls=None if force_prose else False,
+                max_completion_tokens=(ctx.settings.max_completion_tokens_owner or None),
+                timeout=(max(0.1, deadline_at - monotonic()) if deadline_at is not None else None),
             )
         except LlmError as exc:
             return finish(
@@ -553,6 +596,13 @@ def run_owner_agent(
         # the tool results, and each result keyed by its own tool_call_id.
         messages.append(response.raw_message)
         for call_index, call in enumerate(response.tool_calls):
+            if deadline_at is not None and monotonic() >= deadline_at:
+                return finish(
+                    completed=False,
+                    completion="deadline_exceeded",
+                    error="deadline exceeded",
+                    steps_used=step_index + 1,
+                )
             if call_index >= MAX_TOOL_CALLS_PER_STEP:
                 messages.append(
                     tool_result_message(
@@ -603,7 +653,7 @@ def run_owner_agent(
                 )
                 continue
             seen_calls.add(key)
-            result = _run_tool_with_timeout(call.name, call.arguments, ctx)
+            result = _run_tool_with_timeout(call.name, call.arguments, ctx, deadline_at=deadline_at)
             outcome = result.outcome_label()
             steps.append(
                 AgentStep(

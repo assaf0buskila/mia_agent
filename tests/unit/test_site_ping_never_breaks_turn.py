@@ -14,6 +14,7 @@ from app.core.config import Settings
 from app.integrations.telegram import TelegramSendError
 from app.surfaces.site import (
     SiteSession,
+    _ping_assaf,
     ping_assaf_async,
     reset_site_book,
     site_book,
@@ -49,3 +50,23 @@ def test_site_book_open_is_idempotent_under_the_lock() -> None:
     again = book.open("web_lock_1")
     assert first is again
     assert book.exists("web_lock_1")
+
+
+def test_denied_sync_claim_neither_sends_nor_reports_delivery() -> None:
+    class SyncPort:
+        def __init__(self) -> None:
+            self.attempts = 0
+
+        def send(self, message: object) -> None:
+            self.attempts += 1
+
+    port = SyncPort()
+    delivered = _ping_assaf(
+        _settings(),
+        port,  # type: ignore[arg-type]
+        SiteSession(session_id="web_claim_denied"),
+        claim=lambda _recipient: False,
+    )
+
+    assert delivered is False
+    assert port.attempts == 0

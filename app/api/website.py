@@ -1,5 +1,4 @@
 import asyncio
-import json
 import logging
 import re
 from collections.abc import Callable
@@ -54,18 +53,21 @@ from app.domain.handoff.delivery import (
 )
 from app.domain.handoff.tokens import click_to_chat_url
 from app.domain.tools import AdapterHttpError
-from app.integrations.base import MessagePort
+from app.integrations.base import DisabledMessagePort, MessagePort
 from app.integrations.sheets import SheetsPort
 from app.integrations.transcribe import (
     TranscriptionError,
     TranscriptionPort,
     TranscriptResult,
 )
+from app.services.notifications import OwnerTelegramDelivery
 from app.surfaces.crm import build_contacts_crm
 from app.surfaces.site import (
+    SiteBook,
+    SiteSession,
     dump_site_session,
     load_site_session,
-    ping_assaf_async,
+    ping_assaf_delivery_async,
     run_site_turn,
     site_book,
     site_opening,
@@ -136,6 +138,14 @@ class MessageOut(BaseModel):
 
 class VoiceMessageOut(MessageOut):
     heard: str
+
+
+def _durable_site_snapshot(store: LeadStore, session_id: str) -> SiteSession | None:
+    """Return committed website state without mutating a process-local active turn."""
+    snapshot = SiteSession(session_id=session_id)
+    if not load_site_session(snapshot, store.load_website_session_state(session_id)):
+        return None
+    return snapshot
 
 
 class WebsiteConfigOut(BaseModel):
@@ -376,15 +386,22 @@ def process_website_message(
     del owner_port
     if not store.website_session_exists(session_id):
         raise HTTPException(status_code=404, detail="session not found")
-    session = site_book().get(session_id)
-    if session is None:
-        session = site_book().open(session_id)
-    if not session.turns:
-        # Cold in this process: either a genuinely new visitor, or a deploy replaced
-        # the task mid conversation. Rehydrate before deciding anything, so Mia does
-        # not re-ask for a number she already has or ping Assaf about the same person
-        # a second time.
-        load_site_session(session, store.load_website_session_state(session_id))
+    # A different worker may have committed a newer turn than this process-local
+    # cache knows about. Work on a detached book so refreshing from the authoritative
+    # row cannot overwrite another request that is currently using the cached object.
+    request_book = SiteBook()
+    session = request_book.open(session_id)
+    load_site_session(session, store.load_website_session_state(session_id))
+    cached_session = site_book().get(session_id)
+    if cached_session is not None:
+        # Burst timing is intentionally process-local and is not business state.
+        # Carry only that ephemeral coalescing window into the detached snapshot.
+        session.burst_parts = list(cached_session.burst_parts)
+        # These completion flags are monotonic. A true process-local value may come
+        # from work that just finished; it cannot make committed business data stale.
+        session.pinged = session.pinged or cached_session.pinged
+        session.finalized = session.finalized or cached_session.finalized
+        session.crm_written = session.crm_written or cached_session.crm_written
     turn_started = perf_counter()
     facts, tools_ran = _published_facts_for_turn(
         store, text, voice_failed=voice_failed, settings=settings
@@ -405,14 +422,8 @@ def process_website_message(
             # open another connection during the request's active transaction.
             with get_session_factory()() as effect_db:
                 effect_store = LeadStore(effect_db)
-                raw_state = effect_store.load_website_session_state(session_id)
-                if raw_state:
-                    saved = json.loads(raw_state)
-                    saved["crm_written"] = True
-                    effect_store.save_website_session_state(
-                        session_id, json.dumps(saved, ensure_ascii=False)
-                    )
-                    effect_db.commit()
+                effect_store.merge_website_session_notification_flags(session_id, crm_written=True)
+                effect_db.commit()
 
         if defer is not None:
             defer(write_and_persist)
@@ -432,7 +443,9 @@ def process_website_message(
         turns=history,
         reply_port=build_site_reply_port(settings),
         defer=schedule_contact_write if defer is not None else None,
+        book=request_book,
     )
+    site_book().replace(session)
     run_id = f"run_{uuid4().hex[:12]}"
     provider_event_id = f"{session_id}:{uuid4().hex[:12]}"
     website_message_in = build_message_in_event(
@@ -585,26 +598,20 @@ async def _maybe_ping_owner(
     settings: Settings,
     owner_port: MessagePort | None,
     force: bool = False,
-) -> bool:
-    if owner_port is None:
-        return False
-    session = site_book().get(session_id)
-    if (
-        session is None
-        or session.nonlead
-        or session.pinged
-        or not session.fields.has_phone_or_email()
-    ):
-        return False
-    if not force and not session.awaiting_ping and not session.confirmed:
-        return False
-    # `session.pinged` above is a process-local hint, not a guarantee: it dies with the
-    # task and two workers hold different copies of it. The durable claim below is what
-    # actually makes one website handoff produce one delivery per owner. This runs as a
-    # background task, after the request's session is gone, so it opens its own.
+) -> OwnerTelegramDelivery:
+    if owner_port is None or isinstance(owner_port, DisabledMessagePort):
+        return OwnerTelegramDelivery(no_attempt=True)
+    # The durable claim below makes one website handoff produce one delivery per owner.
+    # This runs as a background task after the request session is gone, so both the
+    # conversation snapshot and the claim come from its own DB session.
     db = get_session_factory()()
     try:
         store = LeadStore(db)
+        session = _durable_site_snapshot(store, session_id)
+        if session is None or session.nonlead or not session.fields.has_phone_or_email():
+            return OwnerTelegramDelivery(no_attempt=True)
+        if not force and not session.awaiting_ping and not session.confirmed:
+            return OwnerTelegramDelivery(no_attempt=True)
         lead_id, notification_key = website_ping_scope(session_id)
 
         def claim(recipient_id: str) -> bool:
@@ -630,13 +637,51 @@ async def _maybe_ping_owner(
             )
             db.commit()
 
-        sent = await ping_assaf_async(settings, owner_port, session, claim=claim, release=release)
+        def confirmed(recipient_id: str) -> bool:
+            return recipient_id in store.confirmed_owner_notification_recipients(
+                kind=KIND_WEBSITE_HANDOFF_DELIVERY,
+                lead_id=lead_id,
+                notification_key=notification_key,
+            )
+
+        delivery = await ping_assaf_delivery_async(
+            settings,
+            owner_port,
+            session,
+            claim=claim,
+            release=release,
+            confirmed=confirmed,
+        )
+        outcomes_persisted = store.record_owner_notification_recipient_delivery_outcomes_durably(
+            kind=KIND_WEBSITE_HANDOFF_DELIVERY,
+            lead_id=lead_id,
+            notification_key=notification_key,
+            delivered_recipient_ids=delivery.delivered,
+            rejected_recipient_ids=delivery.rejected,
+        )
+        if not outcomes_persisted and delivery.delivered:
+            delivery = OwnerTelegramDelivery(ambiguous=delivery.delivered + delivery.ambiguous)
+        accepted_recipients = set(
+            store.confirmed_owner_notification_recipients(
+                kind=KIND_WEBSITE_HANDOFF_DELIVERY,
+                lead_id=lead_id,
+                notification_key=notification_key,
+            )
+        )
+        all_recipients = settings.telegram_owner_user_id_set()
+        if all_recipients and all_recipients <= accepted_recipients:
+            store.merge_website_session_notification_flags(session_id, pinged=True)
+        db.commit()
     finally:
         db.close()
-    if sent:
-        session.pinged = True
-        session.awaiting_ping = False
-    return sent
+    return delivery
+
+
+def _delivery_accepted(delivery: OwnerTelegramDelivery | bool) -> bool:
+    """Keep narrow test/extension compatibility while the internal result is richer."""
+    if isinstance(delivery, bool):
+        return delivery
+    return bool(delivery.delivered) and not delivery.rejected and not delivery.ambiguous
 
 
 @router.get("/widget.js")
@@ -715,10 +760,10 @@ async def create_handoff(
     store = LeadStore(db)
     if not store.website_session_exists(session_id):
         raise HTTPException(status_code=404, detail="session not found")
-    session = site_book().get(session_id)
+    session = _durable_site_snapshot(store, session_id)
     if session is None:
-        session = site_book().open(session_id)
-        load_site_session(session, store.load_website_session_state(session_id))
+        raise HTTPException(status_code=404, detail="session state not found")
+    site_book().replace(session)
     if session.nonlead or not session.fields.has_phone_or_email():
         raise HTTPException(status_code=409, detail="phone or email required")
     settings = get_settings()
@@ -728,13 +773,20 @@ async def create_handoff(
         session_id=session_id,
         payload={"kind": "whatsapp_handoff"},
     )
-    pinged = await _maybe_ping_owner(
+    # Request-scoped dependencies finish after Starlette background work. Close this
+    # transaction before the delivery worker opens its own connection, or PostgreSQL
+    # can leave the worker waiting on state/token rows still owned by this request.
+    db.commit()
+    delivery = await _maybe_ping_owner(
         session_id=session_id,
         settings=settings,
         owner_port=owner_port,
         force=True,
     )
-    notification_status = "delivered" if pinged else "failed"
+    if _delivery_accepted(delivery):
+        notification_status = "delivered"
+    else:
+        notification_status = "failed"
     log_comm(
         channel=Channel.WEBSITE.value,
         provider="telegram",
@@ -742,7 +794,7 @@ async def create_handoff(
         direction="out",
         external_message_id="website_whatsapp_handoff",
         policy_result=notification_status,
-        success=pinged,
+        success=_delivery_accepted(delivery),
         automation_mode=settings.automation_mode.value,
     )
     whatsapp_url = click_to_chat_url(settings.whatsapp_click_to_chat, raw_token) or None
@@ -790,10 +842,10 @@ async def end_session(
     store = LeadStore(db)
     if not store.website_session_exists(session_id):
         raise HTTPException(status_code=404, detail="session not found")
-    session = site_book().get(session_id)
+    session = _durable_site_snapshot(store, session_id)
     if session is None:
-        session = site_book().open(session_id)
-        load_site_session(session, store.load_website_session_state(session_id))
+        raise HTTPException(status_code=404, detail="session state not found")
+    site_book().replace(session)
     visitor_turns = [role for role, _text in session.turns if role == "visitor"]
     if session.finalized or not visitor_turns:
         return EndSessionOut(accepted=True, finalized=False)
@@ -803,14 +855,19 @@ async def end_session(
         and session.fields.has_phone_or_email()
         and (session.confirmed or session.awaiting_ping)
     )
-    pinged = await _maybe_ping_owner(
+    db.commit()
+    delivery = await _maybe_ping_owner(
         session_id=session_id,
         settings=get_settings(),
         owner_port=owner_port,
     )
-    session.finalized = not notification_pending or pinged or session.pinged
-    store.save_website_session_state(session_id, dump_site_session(session))
-    return EndSessionOut(accepted=True, finalized=session.finalized)
+    # A partial fan-out is useful delivery evidence, but it does not finish the
+    # session: explicitly rejected recipients must remain eligible for another end.
+    refreshed = _durable_site_snapshot(store, session_id)
+    pinged = bool(refreshed and refreshed.pinged) or _delivery_accepted(delivery)
+    finalized = not notification_pending or pinged
+    store.merge_website_session_notification_flags(session_id, finalized=finalized)
+    return EndSessionOut(accepted=True, finalized=finalized)
 
 
 @router.post(
@@ -830,6 +887,7 @@ async def post_message(
     store = LeadStore(db)
     if not store.website_session_exists(session_id):
         raise HTTPException(status_code=404, detail="session not found")
+    deferred_contact_writes: list[Callable[[], None]] = []
     out = await asyncio.to_thread(
         process_website_message,
         store,
@@ -841,14 +899,19 @@ async def post_message(
         phone=body.phone,
         email=body.email,
         date=body.date,
-        defer=background.add_task,
+        defer=deferred_contact_writes.append,
     )
+    db.commit()
+    # FastAPI runs background tasks in registration order. Notify the owner before a
+    # slow/failing CRM adapter so a spreadsheet outage cannot delay the actual handoff.
     background.add_task(
         _maybe_ping_owner,
         session_id=session_id,
         settings=settings,
         owner_port=owner_port,
     )
+    for write_contact in deferred_contact_writes:
+        background.add_task(write_contact)
     return out
 
 
@@ -910,6 +973,7 @@ async def post_voice(
                 sheets=sheets,
                 voice_failed=True,
             )
+            db.commit()
             background.add_task(
                 _maybe_ping_owner,
                 session_id=session_id,
@@ -939,6 +1003,7 @@ async def post_voice(
                 sheets=sheets,
                 voice_failed=True,
             )
+            db.commit()
             background.add_task(
                 _maybe_ping_owner,
                 session_id=session_id,
@@ -972,6 +1037,7 @@ async def post_voice(
             sheets=sheets,
             voice_failed=True,
         )
+        db.commit()
         background.add_task(
             _maybe_ping_owner,
             session_id=session_id,
@@ -987,6 +1053,7 @@ async def post_voice(
         )
     if len(text) > 4000:
         text = text[:4000]
+    deferred_contact_writes: list[Callable[[], None]] = []
     out = await asyncio.to_thread(
         process_website_message,
         store,
@@ -996,14 +1063,17 @@ async def post_voice(
         sheets=sheets,
         audio_meta=result,
         stt_latency_ms=elapsed_ms(started),
-        defer=background.add_task,
+        defer=deferred_contact_writes.append,
     )
+    db.commit()
     background.add_task(
         _maybe_ping_owner,
         session_id=session_id,
         settings=settings,
         owner_port=owner_port,
     )
+    for write_contact in deferred_contact_writes:
+        background.add_task(write_contact)
     return VoiceMessageOut(
         lead_id=out.lead_id,
         next_action=out.next_action,

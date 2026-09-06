@@ -231,9 +231,7 @@ class TelegramPort:
                     payload["reply_markup"] = message.reply_markup
             await self._call("sendMessage", payload)
 
-    async def answer_callback_query(
-        self, callback_query_id: str, *, text: str = ""
-    ) -> None:
+    async def answer_callback_query(self, callback_query_id: str, *, text: str = "") -> None:
         """Required after every button press.
 
         Telegram clients show a spinner until this lands, and the platform warns bots that
@@ -243,6 +241,9 @@ class TelegramPort:
         if text:
             payload["text"] = text[:200]
         await self._call("answerCallbackQuery", payload)
+
+    async def send_chat_action(self, chat_id: str, *, action: str = "typing") -> None:
+        await self._call("sendChatAction", {"chat_id": chat_id, "action": action})
 
     async def edit_message_text(
         self,
@@ -308,8 +309,33 @@ class TelegramPort:
         try:
             body = response.json()
         except ValueError:
-            return {}
-        return body.get("result", {}) if isinstance(body, dict) else {}
+            _reraise_classified(
+                TelegramSendError,
+                f"Telegram {method} returned malformed JSON",
+                AdapterHttpError(None),
+            )
+        if not isinstance(body, dict) or not isinstance(body.get("ok"), bool):
+            _reraise_classified(
+                TelegramSendError,
+                f"Telegram {method} returned an ambiguous receipt",
+                AdapterHttpError(None),
+            )
+        if body["ok"] is not True:
+            _reraise_classified(
+                TelegramSendError,
+                f"Telegram {method} rejected the request",
+                AdapterHttpError(response.status_code),
+            )
+        result = body.get("result")
+        if method in {"sendMessage", "editMessageText"} and (
+            not isinstance(result, dict) or not result.get("message_id")
+        ):
+            _reraise_classified(
+                TelegramSendError,
+                f"Telegram {method} returned an ambiguous receipt",
+                AdapterHttpError(None),
+            )
+        return result if isinstance(result, dict) else {}
 
     async def download_voice(
         self, file_id: str, *, declared_mime_type: str = "", declared_filename: str = ""
@@ -432,8 +458,10 @@ class TelegramPort:
         filename_evidence = (
             file_path if _mime_from_filename(file_path) == mime_type else declared_filename
         )
-        return audio, mime_type, transcription_filename(
-            mime_type=mime_type, file_path=filename_evidence
+        return (
+            audio,
+            mime_type,
+            transcription_filename(mime_type=mime_type, file_path=filename_evidence),
         )
 
 
@@ -495,9 +523,7 @@ def parse_telegram_callback(payload: dict[str, Any]) -> dict[str, str] | None:
     message = query.get("message") or {}
     chat = message.get("chat") or {} if isinstance(message, dict) else {}
     chat_id = str(chat.get("id") or "") or user_id
-    message_id = (
-        str(message.get("message_id") or "") if isinstance(message, dict) else ""
-    )
+    message_id = str(message.get("message_id") or "") if isinstance(message, dict) else ""
     return {
         "id": str(update_id),
         "callback_query_id": query_id,

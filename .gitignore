@@ -6,6 +6,7 @@ dist/
 build/
 .pytest_cache/
 .pytest-*/
+.codex-pytest-tmp/
 .heavy-review-*/
 .ruff_cache/
 .mypy_cache/
