@@ -125,7 +125,8 @@ def test_website_second_message_leaves_opening_question() -> None:
             json={"text": "We run a clinic and miss calls all day on WhatsApp."},
         )
         assert second.status_code == 200
-        assert second.json()["next_action"] == "answer"
+        assert second.json()["next_action"] == "ask_contact"
+        assert "phone or email" in second.json()["message"]
 
 
 def test_graph_persists_extracted_sales_state() -> None:

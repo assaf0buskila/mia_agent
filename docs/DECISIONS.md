@@ -82,6 +82,7 @@ and the accepted ADRs say to.
 | ADR-051 | Visitor replies never name tools; owner STT/images/Sheets aliases | accepted | [record](adr/ADR-051-visitor-replies-never-name-tools-owner-stt-images-sheets-ali.md) |
 | ADR-052 | Delete the dead Sheets mirror and the unread meeting-first flag | accepted | [record](adr/ADR-052-delete-the-dead-sheets-mirror-and-the-unread-meeting-first-f.md) |
 | ADR-053 | Site Mia sells on a ladder; WhatsApp waits on Baileys | accepted | [record](adr/ADR-053-site-mia-sells-on-a-ladder-whatsapp-waits-on-baileys.md) |
+| ADR-054 | Website converts from known context; supersedes ADR-053 website turn counting | accepted | [record](adr/ADR-054-website-converts-from-known-context.md) |
 | NOTE | Gemini sales fallback (Assaf 2026-08-22) | accepted | [record](adr/NOTE-gemini-sales-fallback-assaf-2026-08-22.md) |
 
 `NOTE` is an accepted decision recorded without an ADR number. It still binds.

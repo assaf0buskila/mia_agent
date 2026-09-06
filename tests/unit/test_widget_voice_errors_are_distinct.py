@@ -59,7 +59,7 @@ def test_the_upload_handler_maps_the_codes_it_can_get() -> None:
 
 def test_an_empty_recording_is_not_reported_as_a_bad_one() -> None:
     """No captured frames means the mic gave us nothing, not that Mia misheard."""
-    stop_handler = WIDGET[WIDGET.index("rec.onstop = function () {") :]
+    stop_handler = WIDGET[WIDGET.index("mediaRecorder.onstop = function () {") :]
     stop_handler = stop_handler[: stop_handler.index("sendVoice(blob);")]
     assert "MIC_EMPTY" in stop_handler
     assert "MIC_ERR" not in stop_handler

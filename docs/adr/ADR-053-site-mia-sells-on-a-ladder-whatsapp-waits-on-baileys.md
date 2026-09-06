@@ -2,6 +2,7 @@
 
 - **Status:** accepted
 - **Date:** 2026-09-04
+- **Superseded by:** ADR-054 for website turn counting only; WhatsApp/Baileys remains binding.
 - **Assaf:** ADOPT (value fast, ask by turn 4; Baileys on a spare number first)
 
 **Context**

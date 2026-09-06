@@ -10,6 +10,85 @@ naming a tool at a visitor, or claiming an action she cannot perform.
 from __future__ import annotations
 
 import re
+from urllib.parse import urlsplit
+
+
+def discovery_topics_in(text: str) -> tuple[str, ...]:
+    """Recognize forbidden question families, independent of previous wording.
+
+    This is a bounded regression oracle, not a claim to understand arbitrary language.
+    Imperative requests count even when the model omits the question mark.
+    """
+    blob = " ".join(text.casefold().split())
+    families = {
+        "business": (
+            r"מה (?:העסק|אתם|אתן) (?:עושה|עושים|עושות)",
+            r"(?:ספרו|תארו).{0,25}(?:העסק|העיסוק)",
+            r"what (?:does your business|do you) do",
+            r"(?:tell me|describe).{0,25}(?:business|work)",
+        ),
+        "friction": (
+            r"מה.{0,24}(?:הכי הרבה|חוזר על עצמו|חוזר שוב ושוב|כל יום|גוזל|מטפלים)",
+            r"איזה חלק.{0,25}(?:חוזר|זמן)",
+            r"(?:what|which).{0,40}(?:repeat|repetitive|most time|handle most|manual)",
+            r"what.{0,20}(?:keeps happening|every day)",
+        ),
+    }
+    return tuple(
+        topic
+        for topic, patterns in families.items()
+        if any(re.search(pattern, blob) for pattern in patterns)
+    )
+
+
+def has_value_before_contact(text: str, context_terms: tuple[str, ...]) -> bool:
+    """Value must be visible before the contact ask, not just flagged in state."""
+    prefix = re.split(r"טלפון|אימייל|מייל|phone|email", text.casefold(), maxsplit=1)[0]
+    value_words = (
+        "להקל",
+        "הקלה",
+        "לבחון",
+        "להוריד",
+        "להפחית",
+        "לחסוך",
+        "לייעל",
+        "אוטומטי",
+        "לבדוק",
+        "reduce",
+        "ease",
+        "save",
+        "automate",
+        "take off",
+        "help",
+        "explore",
+    )
+    return bool(present(prefix, value_words) and present(prefix, context_terms))
+
+
+def non_contact_question(text: str) -> bool:
+    """A contact request may be phrased as a question; extra discovery may not."""
+    questions = re.findall(r"[^.!?？]*[?？]", text.casefold())
+    contact_words = ("טלפון", "אימייל", "מייל", "phone", "email")
+    return any(not present(question, contact_words) for question in questions)
+
+
+def website_cta_visible(action: str, url: str | None) -> bool:
+    """Public CTA contract, also exercised against the widget in its own tests."""
+    if action not in {"confirm_contact", "handoff"} or not url:
+        return False
+    try:
+        parsed = urlsplit(url)
+        return (
+            parsed.scheme == "https"
+            and parsed.hostname == "wa.me"
+            and not parsed.username
+            and not parsed.password
+            and parsed.port in {None, 443}
+            and parsed.path.strip("/").isdigit()
+        )
+    except ValueError:
+        return False
+
 
 # A digit run, with any thousands separators or decimals attached, so "1,200" and "1200"
 # are one token rather than three.
@@ -89,9 +168,7 @@ def unexpected_numbers(text: str, allowed: frozenset[str]) -> tuple[str, ...]:
     """
     permitted = {canonical_number(item) for item in allowed}
     return tuple(
-        token
-        for token in numbers_in(text)
-        if token and canonical_number(token) not in permitted
+        token for token in numbers_in(text) if token and canonical_number(token) not in permitted
     )
 
 

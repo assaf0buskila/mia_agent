@@ -144,7 +144,7 @@ def test_website_widget_js_safe_and_no_auto_open() -> None:
     assert "#ask-mia-send{background:#2f5f93;color:#fff}" in body
     assert "flex-direction:column-reverse" in body
     assert "askMia.sessionId" in body
-    assert "offer_whatsapp" in body
+    assert "confirm_contact" in body
     assert "#ask-mia-wa.offer{" in body
     assert "#ask-mia-header{" in body
     assert "ask-mia-launch-mark" in body

@@ -45,7 +45,7 @@ Website visitor
   site loop       app/surfaces/site.py         run_site_turn
                   app/surfaces/site_policy.py  deterministic next action
                   app/surfaces/site_reply.py   shared sales reply port
-                  identify-then-sell; CRM + Telegram ping only after phone or email
+                  known-context conversion; CRM + Telegram ping only after phone or email
        ▼
   Contacts CRM    app/surfaces/crm.py
                   spreadsheet 1HW8mnc9GFXraS6oG5VIxFcJvZq9gMDJBFRxY2mpVOhI
@@ -104,6 +104,14 @@ connected, tools must run.
 Glass Hebrew widget `app/web/ask_mia.js` at
 `https://mia.assafweb.com/v1/website/widget.js`. Answer first. Identity before ping.
 WhatsApp only after phone or email. Origin-bind stays.
+
+`SiteSession` stores business/friction closure, asked topics, discovery count,
+value/contact progress and safe page context in the existing session JSON (ADR-054).
+Python controls discovery and appends the contact CTA; a website-only reply intent
+allows the model to phrase a value hypothesis. Published-fact retrieval runs for
+actual product questions. Anonymous acquisition events retain sanitized attribution
+without creating a lead. The widget posts structured contact through `/messages`
+and displays WhatsApp on `confirm_contact` or `handoff`.
 
 ## Two-state tools
 

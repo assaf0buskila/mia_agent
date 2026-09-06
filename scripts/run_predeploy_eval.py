@@ -2,8 +2,8 @@
 
     MIA_PREDEPLOY_EVAL=1 uv run python scripts/run_predeploy_eval.py --json predeploy.json
 
-What it does: runs 27 scenarios -- 17 on the real website turn loop, 10 on the real owner
-agent loop -- against the models the deployment is actually configured with, and prints
+What it does: runs website conversion and owner safety scenarios against the models
+the deployment is actually configured with, and prints
 Pass@1, Pass^3, the tool path each scenario took, latency, tokens, and every failure.
 
 Why it is opt-in: these are real provider calls and they cost real money, so the suite

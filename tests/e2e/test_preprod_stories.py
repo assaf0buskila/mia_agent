@@ -635,7 +635,9 @@ def test_story_website_funnel_attribution_handoff() -> None:
         attr = store.get_canonical_event(
             provider="website", provider_event_id=f"{session_id}:attribution"
         )
-        assert attr is None
+        assert attr is not None
+        assert attr.lead_id is None
+        assert json.loads(attr.payload_json)["utm_source"] == "google"
         kinds = {
             json.loads(row.payload_json)["kind"]
             for row in db.scalars(

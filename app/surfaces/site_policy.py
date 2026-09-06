@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from urllib.parse import urlparse
 
 from app.domain.language import LANG_EN, LANG_HE, language_of, reply_language
@@ -33,12 +33,8 @@ ASK_CONTACT_AFTER_TURNS = 4
 KNOWLEDGE_TOOL = "knowledge_search"
 ASSAFWEB_HOSTS = frozenset({"www.assafweb.com", "assafweb.com"})
 
-ASSAFWEB_HOOK_HE = (
-    "ב-AssafWeb אסף בונה אתרים, אוטומציות וסוכני AI לעסקים."
-)
-ASSAFWEB_HOOK_EN = (
-    "AssafWeb builds sites, automations, and AI agents for businesses."
-)
+ASSAFWEB_HOOK_HE = "ב-AssafWeb אסף בונה אתרים, אוטומציות וסוכני AI לעסקים."
+ASSAFWEB_HOOK_EN = "AssafWeb builds sites, automations, and AI agents for businesses."
 CTA_ASSAF_HE = "רוצים שאעביר אתכם לאסף?"
 CTA_ASSAF_EN = "Want me to pass you to Assaf?"
 ASK_CONTACT_HE = "כדי שאסף יוכל להמשיך אתכם, צריך טלפון או אימייל."
@@ -46,9 +42,7 @@ ASK_CONTACT_EN = "To pass this to Assaf, I need a phone or email."
 ASK_NEED_HE = "מה הכי חשוב לכם שנפתור קודם?"
 ASK_NEED_EN = "What is the most important thing you need solved first?"
 NO_PRICE_HE = "אין מחיר מפורסם באתר assafweb.com לתת כאן. אסף יגיד."
-NO_PRICE_EN = (
-    "There is no published price on assafweb.com I can give from here. Assaf will say."
-)
+NO_PRICE_EN = "There is no published price on assafweb.com I can give from here. Assaf will say."
 CONFIRM_HE = "יש לי את המספר. מעבירה לאסף עכשיו."
 CONFIRM_EN = "I have your number. I will ping Assaf now."
 AFTER_PING_HE = (
@@ -62,16 +56,13 @@ AFTER_PING_EN = (
 VOICE_FAIL_HE = "לא הצלחתי לשמוע. כתבו כאן ואני ממשיכה."
 VOICE_FAIL_EN = "I could not hear that. Type here and I will keep going."
 BOT_HE = (
-    "כן, אני הסוכנת של אסף באתר. "
-    "אני עונה ממה שפורסם ב-AssafWeb ומעבירה אליו כשיש טלפון או אימייל."
+    "כן, אני הסוכנת של אסף באתר. אני עונה ממה שפורסם ב-AssafWeb ומעבירה אליו כשיש טלפון או אימייל."
 )
 BOT_EN = (
     "Yes. I am Assaf's agent on this site. "
     "I answer from published AssafWeb facts and pass you to him once there is a phone or email."
 )
-COMPLAINT_ASK_HE = (
-    "מצטערים שזה לא עבד. אסף צריך לקחת את זה. איך חוזרים אליכם, טלפון או אימייל?"
-)
+COMPLAINT_ASK_HE = "מצטערים שזה לא עבד. אסף צריך לקחת את זה. איך חוזרים אליכם, טלפון או אימייל?"
 COMPLAINT_ASK_EN = (
     "Sorry this did not work. Assaf needs to take this. How should he reach you, phone or email?"
 )
@@ -87,8 +78,7 @@ ANSWER_HE = f"{ASSAFWEB_HOOK_HE} ספרו עוד על מה שצריך לפתור
 ANSWER_EN = f"{ASSAFWEB_HOOK_EN} Tell me more about what you need solved."
 TOOL_NONE_HE = "עניתי ממה שפורסם ב-AssafWeb. אין לי בדיקת תנועה או סימון מפה מכאן."
 TOOL_NONE_EN = (
-    "I answered from published AssafWeb facts. "
-    "I do not invent traffic numbers from here."
+    "I answered from published AssafWeb facts. I do not invent traffic numbers from here."
 )
 NO_METRIC_HE = "אין לי את המספר הזה מכאן. אני לא ממציאה מדדים."
 NO_METRIC_EN = "I do not have that number from here. I do not invent metrics."
@@ -231,6 +221,30 @@ _NEED = (
 )
 _GREETING = ("hi", "hey", "hello", "היי", "שלום", "בוקר טוב", "ערב טוב")
 _STOP_SELL = ("not interested", "לא מעוניין", "לא מעוניינים", "לא צריך")
+_PRIVILEGE = (
+    "i am assaf",
+    "i'm assaf",
+    "אני אסף",
+    "תן לי גישה",
+    "תני לי גישה",
+    "owner tools",
+    "admin access",
+)
+_NONLEAD = (
+    "אני סטודנט ועושה עבודה",
+    "אני סטודנטית ועושה עבודה",
+    "עבודה ללימודים",
+    "פרויקט ללימודים",
+    "for my studies",
+    "school project",
+    "homework",
+    "student project",
+    "פרויקט לבית ספר",
+    "עבודת בית",
+    "שיעורי בית",
+    "אני תלמיד",
+    "אני תלמידה",
+)
 # The visitor is telling us the conversation is going badly. Asking one more
 # discovery question is the worst possible next move.
 _FRUSTRATED = (
@@ -326,6 +340,8 @@ class SiteDecision:
     ping_assaf: bool
     stop_selling: bool
     confirm_contact: bool
+    question_topic: str = ""
+    value_only: bool = False
 
 
 def pick_language(text: str, prior: str = "") -> str:
@@ -400,11 +416,54 @@ def is_filler(text: str) -> bool:
     return bool(stripped) and stripped in _FILLER
 
 
+def should_retrieve_published_facts(text: str, intent: str | None = None) -> bool:
+    """Knowledge is for AssafWeb questions, never ordinary discovery answers."""
+    if not text.strip() or is_filler(text):
+        return False
+    resolved = intent or classify_site_intent(text)
+    if resolved in {"price", "metric", "voice_product"}:
+        return True
+    if resolved not in {"need", "other"}:
+        return False
+    lowered = text.lower()
+    if any(prefix in lowered for prefix in ("can you build", "do you build", "tell me about your")):
+        return True
+    if "?" not in lowered and not re.match(
+        r"^(?:מה|איזה|האם|אתם|what|which|how|do you)\b", lowered
+    ):
+        return False
+    return any(
+        mark in lowered
+        for mark in (
+            "what do you offer",
+            "what can you build",
+            "services",
+            "capabilities",
+            "מה אתם מציעים",
+            "אתם מציעים",
+            "מה אתם בונים",
+            "איזה שירותים",
+            "יכולים לבנות",
+            "שעות הפעילות",
+            "מספר הטלפון",
+            "opening hours",
+            "office hours",
+            "your phone number",
+        )
+    )
+
+
 def classify_site_intent(text: str) -> str:
     lowered = text.lower()
     blob = f"{text} {lowered}"
+    if _has(blob, ("לתבוע אתכם", "תנאים משפטיים", "sue you", "legal terms")):
+        return "legal"
+    if _has(blob, ("אתם נוכלים", "תפסיקו לשקר", "you are scammers", "stop lying")):
+        return "abuse"
     if _has(blob, _COMPLAINT):
         return "complaint"
+    if _has(blob, _PRIVILEGE):
+        return "privilege"
     if _has(blob, _BOT):
         return "bot"
     if _has(blob, _VOICE_PRODUCT):
@@ -523,8 +582,7 @@ def published_price_line(facts: tuple[PublishedFact, ...]) -> str:
 def _looks_like_price_fact(text: str) -> bool:
     lowered = text.lower()
     return any(
-        mark in lowered
-        for mark in ("price", "pricing", "fee", "cost", "מחיר", "תעריף", "עלות")
+        mark in lowered for mark in ("price", "pricing", "fee", "cost", "מחיר", "תעריף", "עלות")
     )
 
 
@@ -538,6 +596,11 @@ def off_topic_reply(language: str, thought: str = "") -> str:
     hook = line(ASSAFWEB_HOOK_HE, ASSAFWEB_HOOK_EN, language)
     cta = line(CTA_ASSAF_HE, CTA_ASSAF_EN, language)
     return f"{joke} {hook} {cta}"
+
+
+def is_nonlead(text: str) -> bool:
+    """Explicit academic intent; an education business is still a prospect."""
+    return _has(text.casefold(), _NONLEAD)
 
 
 def decide_site_turn(
@@ -555,6 +618,16 @@ def decide_site_turn(
     visitor_turns: int = 0,
     frustrated: bool = False,
     need_seen: bool = False,
+    business_known: bool = False,
+    friction_known: bool = False,
+    value_shown: bool = False,
+    contact_requested: bool = False,
+    discovery_questions: int = 0,
+    last_question_topic: str = "",
+    business_summary: str = "",
+    friction_summary: str = "",
+    asked_topics: tuple[str, ...] = (),
+    nonlead: bool = False,
 ) -> SiteDecision:
     """Pick one canned reply. Phone/email only when the next step is Assaf or Sheet."""
     if voice_failed:
@@ -569,6 +642,58 @@ def decide_site_turn(
         )
 
     intent = classify_site_intent(thought)
+    if intent in {"legal", "abuse"}:
+        return SiteDecision(
+            reply=line(
+                "זה נושא שצריך לברר ישירות מול אסף. אין לי סמכות לקבוע תנאים או התחייבויות.",
+                "This needs to be discussed directly with Assaf. "
+                "I cannot determine terms or commitments.",
+                language,
+            ),
+            action="answer",
+            ask_contact=False,
+            write_sheet=False,
+            ping_assaf=False,
+            stop_selling=True,
+            confirm_contact=False,
+        )
+    if (nonlead or is_nonlead(thought)) and intent not in {
+        "price",
+        "metric",
+        "voice_product",
+        "bot",
+        "tool_status",
+        "privilege",
+    }:
+        return SiteDecision(
+            reply=line(
+                "אפשר לשאול כאן על מה שפורסם ב-AssafWeb.",
+                "You can ask about published AssafWeb information here.",
+                language,
+            ),
+            action="answer",
+            ask_contact=False,
+            write_sheet=False,
+            ping_assaf=False,
+            stop_selling=selling_stopped,
+            confirm_contact=False,
+        )
+    # A supplied contact is already the requested next step. Confirm and hand off
+    # immediately, even when structured conversion state is still anonymous.
+    if (
+        has_contact
+        and not already_confirmed
+        and intent in {"need", "other", "greeting", "ask_assaf"}
+    ):
+        return SiteDecision(
+            reply=line(CONFIRM_HE, CONFIRM_EN, language),
+            action="confirm_contact",
+            ask_contact=False,
+            write_sheet=True,
+            ping_assaf=not already_pinged,
+            stop_selling=selling_stopped,
+            confirm_contact=True,
+        )
     if complaint_open and intent not in {
         "complaint",
         "ask_assaf",
@@ -595,6 +720,34 @@ def decide_site_turn(
             complaint=True,
         )
 
+    if intent == "stop_sell":
+        return SiteDecision(
+            reply=line(
+                "בסדר. אני כאן אם תשתנה דעתכם.", "Understood. I am here if that changes.", language
+            ),
+            action="answer",
+            ask_contact=False,
+            write_sheet=False,
+            ping_assaf=False,
+            stop_selling=True,
+            confirm_contact=False,
+        )
+
+    if intent == "privilege":
+        return SiteDecision(
+            reply=line(
+                "אין כאן גישת בעלים. אפשר לשאול על שירותי AssafWeb.",
+                "Owner access is not available here. You can ask about AssafWeb services.",
+                language,
+            ),
+            action="identity",
+            ask_contact=False,
+            write_sheet=False,
+            ping_assaf=False,
+            stop_selling=selling_stopped,
+            confirm_contact=False,
+        )
+
     if intent == "bot":
         return SiteDecision(
             reply=line(BOT_HE, BOT_EN, language),
@@ -619,6 +772,21 @@ def decide_site_turn(
 
     if intent == "price":
         published = published_price_line(facts)
+        if has_contact and not already_confirmed and not nonlead:
+            confirmation = _assaf_or_confirm(
+                language,
+                has_contact=True,
+                already_confirmed=False,
+                already_pinged=already_pinged,
+                stop_selling=selling_stopped,
+                complaint=False,
+            )
+            answer = (
+                f"{line('מאתר assafweb.com:', 'From assafweb.com:', language)} {published}"
+                if published
+                else line(NO_PRICE_HE, NO_PRICE_EN, language)
+            )
+            return replace(confirmation, reply=f"{answer} {confirmation.reply}")
         if published:
             cite = line(
                 "מאתר assafweb.com:",
@@ -710,39 +878,9 @@ def decide_site_turn(
             confirm_contact=False,
         )
 
-    if intent in {"need", "other"}:
-        answer = _answer_from_facts(facts, language, tools_ran)
-        if (
-            not has_contact
-            and need_seen
-            and (frustrated or visitor_turns >= ASK_CONTACT_AFTER_TURNS)
-        ):
-            # Stop interrogating. Either they told us it is going badly, or they have
-            # answered enough that the next honest move is to offer Assaf.
-            # `need_seen` gates it on an actual business need: a student asking about
-            # a school project is not a lead and must never be asked for a phone.
-            return SiteDecision(
-                reply=line(ASK_CONTACT_HE, ASK_CONTACT_EN, language),
-                action="ask_contact",
-                ask_contact=True,
-                write_sheet=False,
-                ping_assaf=False,
-                stop_selling=selling_stopped,
-                confirm_contact=False,
-            )
-        if has_contact and not already_confirmed:
-            # They already left a number. Answer first, then confirm once and ping.
-            return SiteDecision(
-                reply=f"{answer} {line(CONFIRM_HE, CONFIRM_EN, language)}",
-                action="confirm_contact",
-                ask_contact=False,
-                write_sheet=True,
-                ping_assaf=not already_pinged,
-                stop_selling=selling_stopped,
-                confirm_contact=True,
-            )
+    if is_filler(thought):
         return SiteDecision(
-            reply=answer,
+            reply=line("בשמחה.", "You are welcome.", language),
             action="answer",
             ask_contact=False,
             write_sheet=False,
@@ -751,11 +889,27 @@ def decide_site_turn(
             confirm_contact=False,
         )
 
-    if intent == "stop_sell":
+    if is_nonlead(thought):
         return SiteDecision(
             reply=line(
-                "בסדר. אני כאן אם תשתנה דעתכם.",
-                "Understood. I am here if that changes.",
+                "בהצלחה בפרויקט. אפשר לשאול כאן על מה שפורסם ב-AssafWeb.",
+                "Good luck with the project. You can ask about published "
+                "AssafWeb information here.",
+                language,
+            ),
+            action="answer",
+            ask_contact=False,
+            write_sheet=False,
+            ping_assaf=False,
+            stop_selling=selling_stopped,
+            confirm_contact=False,
+        )
+
+    if selling_stopped and intent in {"need", "other", "greeting"}:
+        return SiteDecision(
+            reply=line(
+                "בסדר. אני כאן אם תרצו מידע.",
+                "Understood. I am here if you want information.",
                 language,
             ),
             action="answer",
@@ -766,28 +920,104 @@ def decide_site_turn(
             confirm_contact=False,
         )
 
-    # Greeting or leftover: one question, unless they already left a number.
-    if has_contact and not already_confirmed:
-        need = line(ASK_NEED_HE, ASK_NEED_EN, language)
-        confirm = line(CONFIRM_HE, CONFIRM_EN, language)
+    # Published facts are answered without reopening a discovery topic.
+    if should_retrieve_published_facts(thought, intent):
         return SiteDecision(
-            reply=f"{need} {confirm}",
-            action="confirm_contact",
+            reply=_answer_from_facts(facts, language, tools_ran),
+            action="answer",
             ask_contact=False,
-            write_sheet=True,
-            ping_assaf=not already_pinged,
+            write_sheet=False,
+            ping_assaf=False,
             stop_selling=selling_stopped,
-            confirm_contact=True,
+            confirm_contact=False,
         )
+    if has_contact:
+        return _assaf_or_confirm(
+            language,
+            has_contact=True,
+            already_confirmed=already_confirmed,
+            already_pinged=already_pinged,
+            stop_selling=selling_stopped,
+            complaint=False,
+        )
+    if not business_known and not need_seen:
+        if "business" not in asked_topics and discovery_questions < 3:
+            return SiteDecision(
+                reply=line(
+                    "מה העסק עושה בפועל?", "What does the business do in practice?", language
+                ),
+                action="ask_need",
+                ask_contact=False,
+                write_sheet=False,
+                ping_assaf=False,
+                stop_selling=False,
+                confirm_contact=False,
+                question_topic="business",
+            )
+        return SiteDecision(
+            reply=line(
+                "אני כאן כשתרצו לספר על הצורך שלכם.",
+                "I am here when you want to describe what you need.",
+                language,
+            ),
+            action="answer",
+            ask_contact=False,
+            write_sheet=False,
+            ping_assaf=False,
+            stop_selling=False,
+            confirm_contact=False,
+        )
+    if (
+        not friction_known
+        and not value_shown
+        and not contact_requested
+        and not frustrated
+        and "friction" not in asked_topics
+        and discovery_questions < 3
+    ):
+        return SiteDecision(
+            reply=line(
+                f"{ASSAFWEB_HOOK_HE} מה גוזל לכם הכי הרבה זמן מול הלקוחות היום?",
+                f"{ASSAFWEB_HOOK_EN} What takes most of your time with customers today?",
+                language,
+            ),
+            action="answer",
+            ask_contact=False,
+            write_sheet=False,
+            ping_assaf=False,
+            stop_selling=False,
+            confirm_contact=False,
+            question_topic="friction",
+        )
+    # Once a topic was asked, don't invent another version. Use an honest handoff
+    # hypothesis if an answer was unclear; never assume the missing friction.
+    value = _value_hypothesis(business_summary, friction_summary, language)
+    cta = line(ASK_CONTACT_HE, ASK_CONTACT_EN, language)
     return SiteDecision(
-        reply=line(ASK_NEED_HE, ASK_NEED_EN, language),
-        action="ask_need",
-        ask_contact=False,
+        reply=f"{value} {cta}" if not value_shown else cta,
+        action="ask_contact",
+        ask_contact=True,
         write_sheet=False,
         ping_assaf=False,
-        stop_selling=selling_stopped,
+        stop_selling=False,
         confirm_contact=False,
+        value_only=not value_shown,
     )
+
+
+def _value_hypothesis(business: str, friction: str, language: str) -> str:
+    del business
+    if in_english(language):
+        if "appoint" in friction.lower() or "schedul" in friction.lower():
+            return "We can explore ways to ease the appointment scheduling you described."
+        return "We can explore ways to ease the work you described."
+    if "וואטסאפ" in friction or "whatsapp" in friction.lower():
+        return "אפשר לבדוק איך להקל על ההתכתבויות ותיאום התורים בוואטסאפ."
+    if "תורים" in friction:
+        return "אפשר לבדוק איך להקל על תיאום התורים שתיארתם."
+    if "טלפונ" in friction or "שיחות" in friction:
+        return "אפשר לבדוק איך להקל על החזרה לשיחות שתיארתם."
+    return "אפשר לבדוק איך להקל על העבודה החוזרת מול הלקוחות."
 
 
 def _answer_from_facts(

@@ -1,9 +1,12 @@
 import asyncio
+import json
 import logging
+import re
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from time import perf_counter
+from urllib.parse import unquote, urlsplit
 from uuid import uuid4
 
 from fastapi import (
@@ -32,9 +35,11 @@ from app.core.public_website import public_website_guard
 from app.db.session import get_session_factory
 from app.db.store import LeadStore
 from app.domain.ai_runs import elapsed_ms, persist_ai_run
+from app.domain.attribution import sanitize_attribution
 from app.domain.behavior import CLIENT_BEHAVIOR_KINDS, sanitize_client_behavior
 from app.domain.events import (
     Channel,
+    build_attribution_event,
     build_behavior_event,
     build_message_in_event,
     build_message_out_event,
@@ -71,6 +76,7 @@ from app.surfaces.site_policy import (
     classify_site_intent,
     facts_from_knowledge_hits,
     is_filler,
+    should_retrieve_published_facts,
 )
 from app.surfaces.site_reply import build_site_reply_port
 
@@ -271,6 +277,28 @@ def _persist_behavior(
     )
 
 
+def _safe_acquisition_context(raw: dict[str, str | None]) -> dict[str, str]:
+    """Bounded attribution data; URL query/fragment credentials never persist."""
+    cleaned: dict[str, str] = {}
+    for key, value in raw.items():
+        try:
+            cleaned.update(sanitize_attribution({key: value}))
+        except ValueError:
+            continue
+    result: dict[str, str] = {}
+    for key, value in cleaned.items():
+        decoded = unquote(value)
+        if any(word in decoded.casefold() for word in ("token", "secret", "password")):
+            continue
+        if any(ord(char) < 32 for char in decoded) or "@" in decoded:
+            continue
+        if key.startswith("utm_"):
+            if not re.fullmatch(r"[\w\- ]{1,80}", decoded):
+                continue
+        result[key] = value
+    return result
+
+
 def process_website_session(
     store: LeadStore,
     *,
@@ -282,11 +310,26 @@ def process_website_session(
     utm_content: str | None = None,
     landing_page: str | None = None,
     referrer: str | None = None,
+    page_section: str | None = None,
 ) -> SessionOut:
     del sheets
     session_id = f"web_{uuid4().hex[:16]}"
     customer_id = store.open_website_session(session_id)
-    site_book().open(session_id)
+    live_session = site_book().open(session_id)
+    attribution = _safe_acquisition_context(
+        {
+            "utm_source": utm_source,
+            "utm_medium": utm_medium,
+            "utm_campaign": utm_campaign,
+            "utm_content": utm_content,
+            "landing_page": landing_page,
+            "referrer": referrer,
+        }
+    )
+    live_session.acquisition_context = attribution
+    live_session.page_path = urlsplit(attribution.get("landing_page", "")).path[:200]
+    safe_section = sanitize_client_behavior(kind="section_viewed", section=page_section)
+    live_session.page_section = safe_section.get("section", "") if safe_section else ""
     incoming = build_message_in_event(
         provider="website",
         channel=Channel.WEBSITE,
@@ -297,7 +340,19 @@ def process_website_session(
         lead_id=None,
     )
     store.save_canonical_event(provider="website", event=incoming)
-    del settings, utm_source, utm_medium, utm_campaign, utm_content, landing_page, referrer
+    if attribution:
+        store.save_canonical_event(
+            provider="website",
+            event=build_attribution_event(
+                provider="website",
+                channel=Channel.WEBSITE,
+                lead_id=None,
+                conversation_id=session_id,
+                payload=attribution,
+            ),
+        )
+    store.save_website_session_state(session_id, dump_site_session(live_session))
+    del settings
     return SessionOut(session_id=session_id, lead_id="", customer_id=customer_id)
 
 
@@ -338,6 +393,30 @@ def process_website_message(
     # History comes from the canonical events this session already persists, so the
     # phrasing port sees the real conversation without the site minting a lead.
     history = tuple(store.list_conversation_turns(session_id))
+
+    def schedule_contact_write(job: Callable[[], None]) -> None:
+        def write_and_persist() -> None:
+            try:
+                job()
+            except Exception:
+                _log.warning("website CRM write failed; contact remains pending")
+                return
+            # Match the existing post-response owner notification lifecycle. Never
+            # open another connection during the request's active transaction.
+            with get_session_factory()() as effect_db:
+                effect_store = LeadStore(effect_db)
+                raw_state = effect_store.load_website_session_state(session_id)
+                if raw_state:
+                    saved = json.loads(raw_state)
+                    saved["crm_written"] = True
+                    effect_store.save_website_session_state(
+                        session_id, json.dumps(saved, ensure_ascii=False)
+                    )
+                    effect_db.commit()
+
+        if defer is not None:
+            defer(write_and_persist)
+
     turn = run_site_turn(
         session_id=session_id,
         text=text,
@@ -352,7 +431,7 @@ def process_website_message(
         voice_failed=voice_failed,
         turns=history,
         reply_port=build_site_reply_port(settings),
-        defer=defer,
+        defer=schedule_contact_write if defer is not None else None,
     )
     run_id = f"run_{uuid4().hex[:12]}"
     provider_event_id = f"{session_id}:{uuid4().hex[:12]}"
@@ -477,7 +556,7 @@ def _published_facts_for_turn(
         # every acknowledgement used to buy an embedding call and two table scans.
         return (), ()
     intent = classify_site_intent(text)
-    if intent not in {"price", "need", "other", "metric", "voice_product"}:
+    if not should_retrieve_published_facts(text, intent):
         return (), ()
     try:
         from app.brain.context import retrieve_knowledge
@@ -510,7 +589,12 @@ async def _maybe_ping_owner(
     if owner_port is None:
         return False
     session = site_book().get(session_id)
-    if session is None or session.pinged or not session.fields.has_phone_or_email():
+    if (
+        session is None
+        or session.nonlead
+        or session.pinged
+        or not session.fields.has_phone_or_email()
+    ):
         return False
     if not force and not session.awaiting_ping and not session.confirmed:
         return False
@@ -546,9 +630,7 @@ async def _maybe_ping_owner(
             )
             db.commit()
 
-        sent = await ping_assaf_async(
-            settings, owner_port, session, claim=claim, release=release
-        )
+        sent = await ping_assaf_async(settings, owner_port, session, claim=claim, release=release)
     finally:
         db.close()
     if sent:
@@ -602,6 +684,7 @@ def create_session(
     utm_content: str | None = Query(None, max_length=200),
     landing_page: str | None = Query(None, max_length=200),
     referrer: str | None = Query(None, max_length=200),
+    page_section: str | None = Query(None, max_length=200),
 ) -> SessionOut:
     settings = get_settings()
     store = LeadStore(db)
@@ -615,6 +698,7 @@ def create_session(
         utm_content=utm_content,
         landing_page=landing_page,
         referrer=referrer,
+        page_section=page_section,
     )
 
 
@@ -632,7 +716,10 @@ async def create_handoff(
     if not store.website_session_exists(session_id):
         raise HTTPException(status_code=404, detail="session not found")
     session = site_book().get(session_id)
-    if session is None or not session.fields.has_phone_or_email():
+    if session is None:
+        session = site_book().open(session_id)
+        load_site_session(session, store.load_website_session_state(session_id))
+    if session.nonlead or not session.fields.has_phone_or_email():
         raise HTTPException(status_code=409, detail="phone or email required")
     settings = get_settings()
     raw_token, expires_at = store.issue_handoff_token(session_id, session_id)
@@ -705,19 +792,25 @@ async def end_session(
         raise HTTPException(status_code=404, detail="session not found")
     session = site_book().get(session_id)
     if session is None:
-        site_book().open(session_id)
-        session = site_book().get(session_id)
-    assert session is not None
+        session = site_book().open(session_id)
+        load_site_session(session, store.load_website_session_state(session_id))
     visitor_turns = [role for role, _text in session.turns if role == "visitor"]
     if session.finalized or not visitor_turns:
         return EndSessionOut(accepted=True, finalized=False)
-    session.finalized = True
-    await _maybe_ping_owner(
+    notification_pending = (
+        not session.nonlead
+        and not session.pinged
+        and session.fields.has_phone_or_email()
+        and (session.confirmed or session.awaiting_ping)
+    )
+    pinged = await _maybe_ping_owner(
         session_id=session_id,
         settings=get_settings(),
         owner_port=owner_port,
     )
-    return EndSessionOut(accepted=True, finalized=True)
+    session.finalized = not notification_pending or pinged or session.pinged
+    store.save_website_session_state(session_id, dump_site_session(session))
+    return EndSessionOut(accepted=True, finalized=session.finalized)
 
 
 @router.post(

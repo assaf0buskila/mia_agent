@@ -24,9 +24,12 @@ from app.surfaces.site_policy import (
     append_burst,
     classify_site_intent,
     decide_site_turn,
+    is_filler,
     is_frustrated,
+    is_nonlead,
     never_silent,
     pick_language,
+    should_retrieve_published_facts,
 )
 from app.surfaces.site_reply import phrase_site_reply
 
@@ -61,6 +64,21 @@ class SiteSession:
     language: str = ""
     tools_ran: tuple[str, ...] = ()
     need_seen: bool = False
+    nonlead: bool = False
+    business_known: bool = False
+    friction_known: bool = False
+    value_shown: bool = False
+    contact_requested: bool = False
+    contact_captured: bool = False
+    discovery_questions: int = 0
+    last_question_topic: str = ""
+    asked_topics: tuple[str, ...] = ()
+    business_summary: str = ""
+    friction_summary: str = ""
+    page_path: str = ""
+    page_section: str = ""
+    acquisition_context: dict[str, str] = field(default_factory=dict)
+    crm_written: bool = False
 
 
 @dataclass
@@ -76,6 +94,7 @@ class SiteTurn:
     # ai_run row; the table used to be fed only by the muted WhatsApp path.
     tokens_in: int = 0
     tokens_out: int = 0
+    model_reply_used: bool = False
 
 
 class SiteBook:
@@ -147,6 +166,21 @@ def dump_site_session(session: SiteSession) -> str:
             "selling_stopped": session.selling_stopped,
             "complaint_open": session.complaint_open,
             "need_seen": session.need_seen,
+            "nonlead": session.nonlead,
+            "business_known": session.business_known,
+            "friction_known": session.friction_known,
+            "value_shown": session.value_shown,
+            "contact_requested": session.contact_requested,
+            "contact_captured": session.contact_captured,
+            "discovery_questions": session.discovery_questions,
+            "last_question_topic": session.last_question_topic,
+            "asked_topics": list(session.asked_topics),
+            "business_summary": session.business_summary,
+            "friction_summary": session.friction_summary,
+            "page_path": session.page_path,
+            "page_section": session.page_section,
+            "acquisition_context": session.acquisition_context,
+            "crm_written": session.crm_written,
             "language": session.language,
             "tools_ran": list(session.tools_ran),
             "turns": [[role, text] for role, text in session.turns[-_STATE_TURN_LIMIT:]],
@@ -183,6 +217,32 @@ def load_site_session(session: SiteSession, raw: str) -> bool:
     session.selling_stopped = bool(data.get("selling_stopped"))
     session.complaint_open = bool(data.get("complaint_open"))
     session.need_seen = bool(data.get("need_seen"))
+    session.nonlead = bool(data.get("nonlead"))
+    session.business_known = bool(data.get("business_known"))
+    session.friction_known = bool(data.get("friction_known"))
+    session.value_shown = bool(data.get("value_shown"))
+    session.contact_requested = bool(data.get("contact_requested"))
+    session.contact_captured = bool(data.get("contact_captured"))
+    try:
+        session.discovery_questions = max(0, int(data.get("discovery_questions", 0) or 0))
+    except (TypeError, ValueError):
+        session.discovery_questions = 0
+    session.last_question_topic = str(data.get("last_question_topic", "") or "")
+    asked = data.get("asked_topics")
+    if isinstance(asked, list):
+        session.asked_topics = tuple(str(item) for item in asked)
+    session.business_summary = str(data.get("business_summary", "") or "")
+    session.friction_summary = str(data.get("friction_summary", "") or "")
+    session.page_path = str(data.get("page_path", "") or "")
+    session.page_section = str(data.get("page_section", "") or "")
+    acquisition = data.get("acquisition_context")
+    if isinstance(acquisition, dict):
+        session.acquisition_context = {
+            str(key): str(value)
+            for key, value in acquisition.items()
+            if isinstance(key, str) and isinstance(value, str)
+        }
+    session.crm_written = bool(data.get("crm_written"))
     session.language = str(data.get("language", "") or "")
     tools = data.get("tools_ran")
     if isinstance(tools, list):
@@ -233,12 +293,11 @@ def run_site_turn(
         email=email,
         date=date,
         text="" if voice_failed else raw,
+        website=True,
     )
     thought = raw.strip()
     if not voice_failed:
-        session.burst_parts, thought = append_burst(
-            session.burst_parts, raw, now=clock
-        )
+        session.burst_parts, thought = append_burst(session.burst_parts, raw, now=clock)
     session.language = pick_language(thought or raw, session.language or session.fields.language)
     if (
         not voice_failed
@@ -271,6 +330,11 @@ def run_site_turn(
     if not voice_failed:
         session.turns.append(("visitor", raw.strip()))
     intent = classify_site_intent(thought or raw)
+    if is_nonlead(raw):
+        session.nonlead = True
+    # Burst stitching is for phrasing context; state transitions must use the
+    # current human message so three rapid messages cannot close two topics at once.
+    _update_conversion_state(session, raw, intent)
     if tools_ran:
         session.tools_ran = tuple(dict.fromkeys((*session.tools_ran, *tools_ran)))
     named_tools = session.tools_ran if intent == "tool_status" else tools_ran
@@ -278,7 +342,11 @@ def run_site_turn(
     # badly. Both move the ladder off "ask another question".
     visitor_turns = sum(1 for role, _text in session.turns if role == "visitor")
     frustrated = not voice_failed and is_frustrated(thought or raw)
-    if intent == "need":
+    if (
+        intent == "need"
+        and not is_nonlead(raw)
+        and not should_retrieve_published_facts(raw, intent)
+    ):
         session.need_seen = True
     decision = decide_site_turn(
         thought=thought or raw,
@@ -294,6 +362,16 @@ def run_site_turn(
         visitor_turns=visitor_turns,
         frustrated=frustrated,
         need_seen=session.need_seen,
+        business_known=session.business_known,
+        friction_known=session.friction_known,
+        value_shown=session.value_shown,
+        contact_requested=session.contact_requested,
+        discovery_questions=session.discovery_questions,
+        last_question_topic=session.last_question_topic,
+        business_summary=session.business_summary,
+        friction_summary=session.friction_summary,
+        asked_topics=session.asked_topics,
+        nonlead=session.nonlead,
     )
     if decision.stop_selling:
         session.selling_stopped = True
@@ -305,6 +383,19 @@ def run_site_turn(
     action = decision.action
     if action not in SITE_ACTIONS:
         action = "answer"
+    if action in {"ask_need", "ask_contact"} and decision.ask_contact:
+        session.contact_requested = True
+    if decision.value_only:
+        session.value_shown = True
+        session.contact_requested = True
+    if decision.question_topic:
+        topic = decision.question_topic
+        session.last_question_topic = topic
+        if topic not in session.asked_topics:
+            session.discovery_questions += 1
+            session.asked_topics = (*session.asked_topics, topic)
+    if session.fields.has_phone_or_email():
+        session.contact_captured = True
     # `decide_site_turn` already chose the action. The port only phrases it, and falls
     # back to the exact canned line on every failure path.
     usage: dict[str, int] = {}
@@ -315,12 +406,44 @@ def run_site_turn(
         language=session.language,
         turns=turns,
         facts=facts,
-        port=reply_port,
+        port=None if decision.question_topic or intent in {"legal", "abuse"} else reply_port,
         visitor_turns=visitor_turns,
         frustrated=frustrated,
         usage=usage,
+        known_facts=tuple(
+            item
+            for item in (
+                f"business_context: {session.business_summary}" if session.business_known else "",
+                f"friction: {session.friction_summary}" if session.friction_known else "",
+                "contact: captured" if session.contact_captured else "",
+                "value_already_shown" if session.value_shown else "",
+            )
+            if item
+        ),
+        open_questions=tuple(
+            item
+            for item in (
+                "business_context" if not session.business_known else "",
+                "friction" if not session.friction_known else "",
+                "contact" if session.value_shown and not session.contact_captured else "",
+            )
+            if item
+        ),
+        asked_actions=session.asked_topics,
+        page_path=session.page_path,
+        page_section=session.page_section,
+        value_only=decision.value_only,
+        answer_only=True,
     )
     reply = never_silent(phrased, session.language)
+    if decision.value_only and not session.fields.has_phone_or_email():
+        cta = (
+            ASK_CONTACT
+            if session.language != "en"
+            else "To pass this to Assaf, I need a phone or email."
+        )
+        if cta not in reply:
+            reply = f"{reply.rstrip('?!')} {cta}"
     session.turns.append(("mia", reply))
     crm_wrote = False
     owner_pinged = False
@@ -328,12 +451,15 @@ def run_site_turn(
     if (
         session.fields.has_phone_or_email()
         and (decision.write_sheet or decision.ping_assaf)
+        and not session.crm_written
     ):
         record = _contact_from_session(session)
         if defer is not None:
             # Two Google Sheets round trips at 20s each. The visitor never waits on them.
-            defer(
-                lambda: log_contact(
+            def write_contact() -> None:
+                if session.crm_written:
+                    return
+                log_contact(
                     crm,
                     record,
                     who="מיה",
@@ -341,10 +467,11 @@ def run_site_turn(
                     action="שיחת אתר",
                     result="נרשם",
                 )
-            )
-            written = record
+                session.crm_written = True
+
+            defer(write_contact)
         else:
-            written = log_contact(
+            log_contact(
                 crm,
                 record,
                 who="מיה",
@@ -352,41 +479,26 @@ def run_site_turn(
                 action="שיחת אתר",
                 result="נרשם",
             )
+            session.crm_written = True
         crm_wrote = True
+    if session.fields.has_phone_or_email() and action in {"confirm_contact", "handoff"}:
         wa_url = click_to_chat_url(settings.whatsapp_click_to_chat) or None
-        if owner_port is not None and not session.pinged and decision.ping_assaf:
-            owner_pinged = _ping_assaf(
-                settings,
-                owner_port,
-                session,
-                claim=claim_owner_ping,
-                release=release_owner_ping,
-            )
-            if owner_pinged:
-                session.pinged = True
-                session.confirmed = True
-                log_contact(
-                    crm,
-                    ContactRecord(
-                        name=written.name,
-                        phone=written.phone,
-                        email=written.email,
-                        date=written.date,
-                        business=written.business,
-                        source=written.source,
-                        language=written.language,
-                        want=written.want,
-                        status=written.status,
-                        summary=written.summary,
-                        next_step=written.next_step,
-                        created=written.created,
-                        pinged="כן",
-                    ),
-                    who="מיה",
-                    channel="website",
-                    action="פינג לאסף",
-                    result="נשלח",
-                )
+    if (
+        session.fields.has_phone_or_email()
+        and owner_port is not None
+        and not session.pinged
+        and decision.ping_assaf
+    ):
+        owner_pinged = _ping_assaf(
+            settings,
+            owner_port,
+            session,
+            claim=claim_owner_ping,
+            release=release_owner_ping,
+        )
+        if owner_pinged:
+            session.pinged = True
+            session.confirmed = True
     return SiteTurn(
         reply=reply,
         next_action=action,
@@ -397,7 +509,107 @@ def run_site_turn(
         tools_ran=tools_ran,
         tokens_in=usage.get("tokens_in", 0),
         tokens_out=usage.get("tokens_out", 0),
+        model_reply_used=bool(usage.get("model_reply_used", 0)),
     )
+
+
+def _update_conversion_state(session: SiteSession, text: str, intent: str) -> None:
+    """Close a topic from the visitor's substantive answer, not keyword luck."""
+    clean = " ".join(text.split())[:240]
+    if (
+        session.nonlead
+        or session.selling_stopped
+        or session.complaint_open
+        or not clean
+        or _is_contact_only(clean)
+        or is_nonlead(clean)
+        or should_retrieve_published_facts(clean, intent)
+        or intent
+        in {
+            "complaint",
+            "legal",
+            "abuse",
+            "stop_sell",
+            "bot",
+            "privilege",
+            "tool_status",
+            "off_topic",
+            "price",
+            "metric",
+            "ask_assaf",
+            "voice_q",
+            "voice_product",
+        }
+    ):
+        return
+    if is_filler(clean):
+        return
+    substantive = len(clean) >= 8
+    if session.last_question_topic == "business" and substantive:
+        session.business_known = True
+        session.business_summary = clean
+        session.last_question_topic = ""
+    elif session.last_question_topic == "friction" and substantive:
+        session.friction_known = True
+        session.friction_summary = clean
+        session.last_question_topic = ""
+    business_markers = (
+        "יש לי עסק",
+        "אני עושה",
+        "אני בעל",
+        "אני מנהל",
+        "אני מנהלת",
+        "my business",
+        "i run",
+        "i own",
+        "salon",
+        "clinic",
+        "סטודיו",
+        "ציפורניים",
+        "לק ג'ל",
+        "nail",
+    )
+    if (
+        not session.business_known
+        and substantive
+        and (intent == "need" or any(mark in clean.lower() for mark in business_markers))
+    ):
+        session.business_known = True
+        session.business_summary = clean
+    friction_markers = (
+        "וואטסאפ",
+        "whatsapp",
+        "תורים",
+        "הודעות",
+        "לקוחות",
+        "מתאמת",
+        "מנהלת",
+        "עונה",
+        "עבודה ידנית",
+        "ידנית",
+        "manual",
+        "missed calls",
+        "מפספסים שיחות",
+    )
+    if (
+        not session.friction_known
+        and substantive
+        and any(mark in clean.lower() for mark in friction_markers)
+    ):
+        if session.business_known:
+            session.friction_known = True
+            session.friction_summary = clean
+    if session.friction_known:
+        session.fields = CapturedFields(
+            name=session.fields.name,
+            phone=session.fields.phone,
+            email=session.fields.email,
+            date=session.fields.date,
+            business=session.business_summary or session.fields.business,
+            want=session.friction_summary or session.fields.want,
+            language=session.fields.language,
+            summary=session.fields.summary,
+        )
 
 
 def _looks_like_need(text: str) -> bool:
@@ -554,7 +766,7 @@ def format_owner_ping(session: SiteSession) -> str:
     Mia did not learn something, the brief says so instead of filling the gap.
     """
     fields = session.fields
-    need = (fields.want.strip() or fields.summary.strip())
+    need = fields.want.strip() or fields.summary.strip()
     missing = _missing_for_owner(session)
     lines = [
         "ליד חדש מהאתר",
