@@ -2,7 +2,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy.exc import SQLAlchemyError
 
 from app import __version__
@@ -241,6 +241,26 @@ app.include_router(telegram_router)
 app.include_router(composio_router)
 # Off until MIA_WHATSAPP_BAILEYS_TOKEN is set; fails closed without it.
 app.include_router(baileys_router)
+
+_ROOT_LANDING_HTML = """<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mia API</title>
+</head>
+<body>
+<p>זה ה-API של Mia.</p>
+<p>האתר הציבורי ושאלת Mia נמצאים ב-<a href="https://www.assafweb.com">www.assafweb.com</a>.</p>
+</body>
+</html>
+"""
+
+
+@app.get("/", response_class=HTMLResponse, include_in_schema=False)
+def root() -> HTMLResponse:
+    """Public read-only landing so crawlers hitting the API host get 200, not JSON 404."""
+    return HTMLResponse(content=_ROOT_LANDING_HTML)
 
 
 @app.exception_handler(MiaError)
