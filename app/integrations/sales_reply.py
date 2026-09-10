@@ -49,7 +49,7 @@ _GEMINI_CHAT_COMPLETIONS_URL = (
 _MAX_TOKENS = 10_000_000
 _MAX_TRANSCRIPT_CHARS = 4000
 
-PROMPT_VERSION = "sales_reply_v11"
+PROMPT_VERSION = "sales_reply_v12"
 
 # What each deterministic action is trying to achieve this turn. The model phrases the
 # intent; it does not get to choose a different one.
@@ -158,9 +158,12 @@ _SYSTEM_PROMPT = (
     "15. Sign as AssafWeb's assistant when you introduce yourself.\n"
     "16. Answer then ask. If the customer's latest message contains a question and "
     "PUBLISHED ASSAFWEB FACTS covers it, answer that question in one short sentence "
-    "built only from those facts, then continue with the INTENT's one question in the "
-    "same message. If PUBLISHED ASSAFWEB FACTS does not cover it, say plainly that you "
-    "do not know that yet, then continue with INTENT. Never invent a fact to fill the "
+    "built only from those facts. Then, ONLY if INTENT calls for a question, continue with "
+    "that one question in the same message. If INTENT specifies no questions (such as on the "
+    "website answering turns), provide the clear answer as a statement and do NOT append "
+    "a question. If PUBLISHED ASSAFWEB FACTS does not cover it, say plainly that you "
+    "do not know that yet, then continue with INTENT only if INTENT calls for a question. "
+    "Never invent a fact to fill the "
     "answer sentence, and the answer sentence never counts toward the one question mark "
     "in rule 1: it is a statement, not a question. A listed PROSPECT TONE buys no "
     "exemption here: acknowledge in one short phrase, then answer in the same "

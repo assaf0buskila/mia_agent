@@ -567,9 +567,19 @@ class LeadStore:
             except (TypeError, ValueError):
                 current = incoming = None
             if isinstance(current, dict) and isinstance(incoming, dict):
-                for flag in ("pinged", "finalized", "crm_written"):
+                for flag in ("pinged", "finalized", "crm_written", "confirmed", "contact_captured"):
                     if current.get(flag) is True:
                         incoming[flag] = True
+                cur_f = current.get("fields") or {}
+                inc_f = incoming.get("fields") or {}
+                if isinstance(cur_f, dict) and isinstance(inc_f, dict):
+                    for k in ("name", "phone", "email", "date", "business", "want"):
+                        if cur_f.get(k) and not inc_f.get(k):
+                            inc_f[k] = cur_f[k]
+                    incoming["fields"] = inc_f
+                for st in ("business_known", "friction_known", "value_shown", "need_seen"):
+                    if current.get(st) is True:
+                        incoming[st] = True
                 merged_json = json.dumps(incoming, ensure_ascii=False)
             row.state_json = merged_json
             row.updated_at = stamp
@@ -2309,6 +2319,19 @@ class LeadStore:
             return
         existing.status = "failed"
         self.session.flush()
+
+    def release_operation(self, *, scope: str, key: str) -> None:
+        if not key or scope not in ALLOWLISTED_OPERATION_SCOPES:
+            return
+        existing = self.session.scalars(
+            select(IdempotencyRow).where(
+                IdempotencyRow.scope == scope,
+                IdempotencyRow.key == key,
+            )
+        ).one_or_none()
+        if existing is not None:
+            self.session.delete(existing)
+            self.session.flush()
 
     def get_operation_result(self, *, scope: str, key: str) -> str:
         if not key or scope not in ALLOWLISTED_OPERATION_SCOPES:

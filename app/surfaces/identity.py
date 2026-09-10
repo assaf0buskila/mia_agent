@@ -9,8 +9,9 @@ from app.surfaces.crm import ContactRecord, normalize_email, normalize_phone
 
 _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
 _PHONE_RE = re.compile(
-    r"(?:\+972[\s\-]?(?:5\d|[2-9])[\s\-]?\d{3}[\s\-]?\d{4}"
-    r"|0(?:5\d|[2-9])[\s\-]?\d{3}[\s\-]?\d{4})"
+    r"(?:\+?972[\s\-]?(?:[57]\d|[2-489])[\s\-]?\d{3}[\s\-]?\d{4}"
+    r"|0(?:[57]\d|[2-489])[\s\-]?\d{3}[\s\-]?\d{4}"
+    r"|\+[1-9]\d{6,14})"
 )
 _DATE_RE = re.compile(r"\b(\d{4}-\d{2}-\d{2}|\d{1,2}[./]\d{1,2}[./]\d{2,4})\b")
 _NAME_RE = re.compile(

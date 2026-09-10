@@ -1170,6 +1170,7 @@
           status.textContent = MIC_NA;
           return;
         }
+        mediaRecorder._miaMime = mime;
         mediaRecorder._miaStarted = Date.now();
         mediaRecorder._miaStream = stream;
         mediaRecorder._miaChunks = [];
@@ -1193,7 +1194,8 @@
             voiceFailed('no_chunks', MIC_EMPTY);
             return;
           }
-          var blob = new Blob(chunks, { type: chunks[0].type || 'audio/webm' });
+          var blobType = (chunks[0] && chunks[0].type) || this._miaMime || 'audio/webm';
+          var blob = new Blob(chunks, { type: blobType });
           if (!blob.size) {
             voiceFailed('empty_blob', MIC_EMPTY);
             return;

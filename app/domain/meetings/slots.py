@@ -20,12 +20,49 @@ _MEET_LINK_MAX = 512
 
 _STATUS_OFFERED = "offered"
 
-_EXACT_INDEX_RE = re.compile(r"^(?:slot\s+|option\s+|אפשרות\s+)?([123])$", re.IGNORECASE)
+_SLOT_PATTERN = (
+    r"^(?:מתאים\s+לי\s+|סגור\s+על\s+|נלך\s+על\s+)?"
+    r"(?:ה?(?:אפשרות|אופציה)|option|slot)?\s*"
+    r"(1|2|3|אחת|שתיים|שלוש|ה?ראשון|ה?ראשונה|ה?שני|ה?שניה|ה?שנייה|ה?שלישי|ה?שלישית|first|second|third)"
+    r"(?:\s*(?:בבקשה|מעולה|מתאים|סגור|תודה|please|works|thanks))?[.!]?$"
+)
+_SLOT_SELECTION_RE = re.compile(_SLOT_PATTERN, re.IGNORECASE)
+
+_SLOT_LOOKUP: dict[str, int] = {
+    "1": 1,
+    "אחת": 1,
+    "ראשון": 1,
+    "ראשונה": 1,
+    "הראשון": 1,
+    "הראשונה": 1,
+    "first": 1,
+    "2": 2,
+    "שתיים": 2,
+    "שני": 2,
+    "שניה": 2,
+    "שנייה": 2,
+    "השני": 2,
+    "השניה": 2,
+    "השנייה": 2,
+    "second": 2,
+    "3": 3,
+    "שלוש": 3,
+    "שלישי": 3,
+    "שלישית": 3,
+    "השלישי": 3,
+    "השלישית": 3,
+    "third": 3,
+}
 _HEBREW_ORDINAL = {
     "הראשון": 1,
+    "הראשונה": 1,
     "השני": 2,
+    "השניה": 2,
+    "השנייה": 2,
     "השלישי": 3,
+    "השלישית": 3,
 }
+_EXACT_INDEX_RE = _SLOT_SELECTION_RE
 _EVENT_ID_RE = re.compile(r"^[\x20-\x7E]+$")
 
 
@@ -116,9 +153,7 @@ def is_explicit_slot_selection(message: str) -> bool:
     text = message.strip()
     if not text:
         return False
-    if text in _HEBREW_ORDINAL:
-        return True
-    return _EXACT_INDEX_RE.fullmatch(text) is not None
+    return _SLOT_SELECTION_RE.fullmatch(text) is not None
 
 
 def compute_booking_key(*, lead_id: str, start: datetime, end: datetime) -> str:
@@ -145,13 +180,13 @@ def parse_slot_selection(
     text = message.strip()
     if not text:
         return None
-    if text in _HEBREW_ORDINAL:
-        index = _HEBREW_ORDINAL[text]
-        return index if 1 <= index <= len(offered_slots) else None
-    match = _EXACT_INDEX_RE.fullmatch(text)
-    if match:
-        index = int(match.group(1))
-        return index if 1 <= index <= len(offered_slots) else None
+    match = _SLOT_SELECTION_RE.fullmatch(text)
+    if not match:
+        return None
+    token = match.group(1).lower()
+    index = _SLOT_LOOKUP.get(token)
+    if index is not None and 1 <= index <= len(offered_slots):
+        return index
     return None
 
 

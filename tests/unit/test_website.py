@@ -7,6 +7,7 @@ from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
 from app.domain.attribution import sanitize_attribution
 from app.domain.events import Channel
+from app.domain.funnel import compute_website_funnel
 from app.domain.handoff.tokens import click_to_chat_url
 from app.domain.sales import NextAction, select_next_action
 from app.domain.tools import AdapterHttpError
@@ -838,3 +839,40 @@ def test_offer_whatsapp_reply_includes_click_to_chat_url_after_contact(monkeypat
         assert more.status_code == 200
         assert more.json()["next_action"] == "confirm_contact"
         assert more.json()["whatsapp_url"] == expected
+
+
+def test_website_funnel_events_emitted_and_computed(monkeypatch) -> None:
+    monkeypatch.setenv("MIA_WHATSAPP_CLICK_TO_CHAT", CLICK_CHAT)
+    init_db()
+    with TestClient(app) as client:
+        # 1. Session created -> mia_opened
+        session_id = client.post("/v1/website/sessions").json()["session_id"]
+        # 2. First message -> conversation_started
+        msg1 = client.post(
+            f"/v1/website/sessions/{session_id}/messages",
+            json={"text": "שלום"},
+        )
+        assert msg1.status_code == 200
+        # 3. Provide contact details -> whatsapp_handoff_offered
+        msg2 = client.post(
+            f"/v1/website/sessions/{session_id}/messages",
+            json={"text": "0501234567", "phone": "0501234567"},
+        )
+        assert msg2.status_code == 200
+        assert msg2.json()["whatsapp_url"] is not None
+        # 4. WhatsApp handoff clicked -> whatsapp_handoff
+        handoff = client.post(f"/v1/website/sessions/{session_id}/handoff")
+        assert handoff.status_code == 200
+
+    db = get_session_factory()()
+    try:
+        store = LeadStore(db)
+        funnel = compute_website_funnel(store, timezone="Asia/Jerusalem")
+        assert funnel is not None
+        assert funnel.sessions >= 1
+        assert funnel.conversations >= 1
+        assert funnel.whatsapp_offered >= 1
+        assert funnel.whatsapp_clicked >= 1
+    finally:
+        db.close()
+

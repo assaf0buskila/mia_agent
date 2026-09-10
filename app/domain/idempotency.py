@@ -9,6 +9,7 @@ ALLOWLISTED_OPERATION_SCOPES = frozenset(
     {
         "calendar_create",
         "calendar_reschedule",
+        "calendar_slot_lock",
         "canonical",
         "approval",
         "owner_task",

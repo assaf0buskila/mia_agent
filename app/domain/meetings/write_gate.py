@@ -29,12 +29,30 @@ _MEETING_MARKERS = (
     "פגישת",
     "meeting",
     "שיחה",
+    "שיחת",
+    "ייעוץ",
     "call",
     "intro",
     "consult",
     "זום",
     "zoom",
     "sync",
+    "דמו",
+    "demo",
+    "meet",
+)
+_REMOTE_MARKERS = (
+    "זום",
+    "zoom",
+    "meet",
+    "google meet",
+    "online",
+    "אונליין",
+    "טלפון",
+    "טלפונית",
+    "remote",
+    "שיחה",
+    "שיחת",
 )
 _WEATHER_MARKERS = (
     "מזג",
@@ -68,6 +86,15 @@ _TEL_AVIV_MARKERS = (
     "בת ים",
     "bnei brak",
     "בני ברק",
+    "הרצליה",
+    "herzliya",
+    "רמת השרון",
+    "פתח תקווה",
+    "petah tikva",
+    "רעננה",
+    "raanana",
+    "כפר סבא",
+    "ראשון לציון",
 )
 
 
@@ -90,7 +117,9 @@ def looks_like_meeting(text: str) -> bool:
 
 def near_tel_aviv(text: str) -> bool:
     blob = text.casefold()
-    return any(marker in blob for marker in _TEL_AVIV_MARKERS)
+    return any(marker in blob for marker in _TEL_AVIV_MARKERS) or any(
+        remote in blob for remote in _REMOTE_MARKERS
+    )
 
 
 def within_jerusalem_business_hours(start: datetime, end: datetime) -> bool:

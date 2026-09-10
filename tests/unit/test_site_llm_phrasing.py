@@ -268,3 +268,37 @@ def test_knowledge_lines_keep_only_assafweb_rows() -> None:
     assert len(lines) == 1
     assert "בונים אתרים" in lines[0]
     assert "assafweb.com" in lines[0]
+
+
+def test_declarative_openers_not_treated_as_forbidden_questions() -> None:
+    class DeclarativePort:
+        def compose(self, **kwargs: object) -> ComposeResult:
+            return ComposeResult(text="מה שאנחנו עושים זה אוטומציות לוואטסאפ של עסקים.")
+
+    reply = phrase_site_reply(
+        action="answer_product",
+        canned="ברירת מחדל",
+        latest_message="מה אתם עושים?",
+        language="he",
+        port=DeclarativePort(),
+        answer_only=True,
+    )
+    assert "מה שאנחנו עושים" in reply
+
+
+def test_value_only_allows_nuchal_and_numbers_like_24_7() -> None:
+    class ValuePort:
+        def compose(self, **kwargs: object) -> ComposeResult:
+            return ComposeResult(text="נוכל לתת מענה 24/7 כדי לחסוך 2-3 שעות עבודה ביום.")
+
+    reply = phrase_site_reply(
+        action="ask_value",
+        canned="ברירת מחדל",
+        latest_message="איך זה עוזר?",
+        language="he",
+        port=ValuePort(),
+        value_only=True,
+    )
+    assert "24/7" in reply
+    assert "נוכל" in reply
+

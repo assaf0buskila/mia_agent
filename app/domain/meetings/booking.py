@@ -164,17 +164,22 @@ def _persist_booked_from_provider(
     kill_switch: bool,
     demo_active: bool,
 ) -> BookingAttemptResult:
+    slot_lock_key = f"slot:{selected.start.isoformat()}"
     start_utc = to_utc_aware(selected.start)
     if start_utc is None:
+        store.release_operation(scope="calendar_slot_lock", key=slot_lock_key)
         return _retry_result(outcomes)
     scheduled_at = normalize_scheduled_at_utc(start_utc.isoformat())
     if scheduled_at is None:
+        store.release_operation(scope="calendar_slot_lock", key=slot_lock_key)
         return _retry_result(outcomes)
     booked_at_utc = to_utc_aware(booked_at)
     if booked_at_utc is None:
+        store.release_operation(scope="calendar_slot_lock", key=slot_lock_key)
         return _retry_result(outcomes)
     booked_at_iso = normalize_scheduled_at_utc(booked_at_utc.isoformat())
     if booked_at_iso is None:
+        store.release_operation(scope="calendar_slot_lock", key=slot_lock_key)
         return _retry_result(outcomes)
     meet_link = sanitize_meet_link(event.meet_link)
     if not store.mark_meeting_booked(
@@ -185,6 +190,7 @@ def _persist_booked_from_provider(
         booked_at=booked_at_iso,
         meeting_type=MEETING_TYPE_INTRO_CALL,
     ):
+        store.release_operation(scope="calendar_slot_lock", key=slot_lock_key)
         return _retry_result(outcomes)
     cancel_follow_up_for_booked(
         store,
@@ -213,6 +219,10 @@ def _persist_booked_from_provider(
         scheduled_at=scheduled_at,
         kill_switch=kill_switch,
         demo_active=demo_active,
+    )
+    store.release_operation(
+        scope="calendar_slot_lock",
+        key=f"slot:{selected.start.isoformat()}",
     )
     reply = _booked_confirmation_reply(
         scheduled_at=scheduled_at,
@@ -367,9 +377,15 @@ def attempt_meeting_booking(
             demo_active=demo_active,
         )
 
+    slot_key = f"slot:{selected.start.isoformat()}"
+    if not store.claim_operation(scope="calendar_slot_lock", key=slot_key):
+        store.clear_offered_slots(lead_id)
+        return _conflict_result(outcomes)
+
     if not slot_is_bookable(
         selected.start, selected.end, now=clock, timezone=timezone
     ):
+        store.release_operation(scope="calendar_slot_lock", key=slot_key)
         store.clear_offered_slots(lead_id)
         return _conflict_result(outcomes)
 
@@ -382,6 +398,7 @@ def attempt_meeting_booking(
             timezone=timezone,
         )
     except AdapterHttpError as exc:
+        store.release_operation(scope="calendar_slot_lock", key=slot_key)
         slots_latency = elapsed_ms(started)
         outcomes.append(
             ToolOutcome(
@@ -394,6 +411,7 @@ def attempt_meeting_booking(
         return _retry_result(outcomes)
     slots_latency = elapsed_ms(started)
     if not slot_interval_exactly_available(free_slots, selected=selected):
+        store.release_operation(scope="calendar_slot_lock", key=slot_key)
         outcomes.append(
             ToolOutcome(
                 tool="calendar_find_free_slots",
@@ -457,6 +475,7 @@ def attempt_meeting_booking(
     try:
         verify = booking_port.find_by_booking_key(booking_key=booking_key)
     except AdapterHttpError as exc:
+        store.release_operation(scope="calendar_slot_lock", key=slot_key)
         verify_latency = elapsed_ms(started)
         outcomes.append(
             ToolOutcome(
@@ -473,6 +492,7 @@ def attempt_meeting_booking(
     )
     outcomes.append(verify_outcome)
     if verify_outcome.status != "ok" or verify.event is None:
+        store.release_operation(scope="calendar_slot_lock", key=slot_key)
         return _retry_result(outcomes)
 
     return _persist_booked_from_provider(

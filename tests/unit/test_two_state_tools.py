@@ -256,7 +256,10 @@ def test_calendar_gate_rejects_weather_and_off_hours() -> None:
     assert weather.reason == "weather"
     assert looks_like_weather("what's the weather in Tel Aviv")
     assert looks_like_meeting("פגישת תכנון")
+    assert looks_like_meeting("שיחת ייעוץ")
     assert near_tel_aviv("פגישה בתל אביב")
+    assert near_tel_aviv("שיחת ייעוץ בזום")
+    assert near_tel_aviv("פגישה בהרצליה")
     evening = assess_calendar_write(
         title="פגישת תכנון בתל אביב",
         start=datetime(2026, 9, 2, 18, 0, tzinfo=IL).astimezone(UTC),

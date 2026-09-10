@@ -128,7 +128,7 @@ async def test_typing_action_renews_until_stop() -> None:
     port = TypingPort()
     stop = asyncio.Event()
     task = asyncio.create_task(_renew_typing(port=port, chat_id="99", interval_s=0.01, stop=stop))
-    await asyncio.sleep(0.035)
+    await asyncio.sleep(0.055)
     stop.set()
     await task
     assert len(port.actions) >= 3

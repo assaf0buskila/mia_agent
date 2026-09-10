@@ -188,12 +188,23 @@ _ASK_ASSAF = (
     "can i reach assaf",
     "connect me with assaf",
     "put me through",
+    "schedule",
+    "meeting",
+    "book a call",
+    "consultation",
     "לדבר עם אסף",
     "רוצה את אסף",
     "אפשר להגיע לאסף",
     "תחברו אותי לאסף",
     "תעבירו לאסף",
     "תעבירי לאסף",
+    "פגישה",
+    "לקבוע פגישה",
+    "תיאום פגישה",
+    "לתאם פגישה",
+    "לתאם שיחה",
+    "שיחת ייעוץ",
+    "לקבוע שיחה",
     "speak to a human",
     "real person",
     "בן אדם",
@@ -426,29 +437,54 @@ def should_retrieve_published_facts(text: str, intent: str | None = None) -> boo
     if resolved not in {"need", "other"}:
         return False
     lowered = text.lower()
-    if any(prefix in lowered for prefix in ("can you build", "do you build", "tell me about your")):
-        return True
-    if "?" not in lowered and not re.match(
-        r"^(?:מה|איזה|האם|אתם|what|which|how|do you)\b", lowered
-    ):
+    is_question = "?" in lowered or re.match(
+        r"^(?:מה|איזה|האם|אתם|איך|מי|איפה|what|which|how|do you|can you|who|where)\b",
+        lowered,
+    ) is not None
+    if not is_question:
         return False
+    if any(
+        prefix in lowered
+        for prefix in (
+            "can you",
+            "do you",
+            "tell me",
+            "מי זה",
+            "מה זה",
+            "איך זה",
+            "איפה",
+        )
+    ):
+        return True
     return any(
         mark in lowered
         for mark in (
-            "what do you offer",
-            "what can you build",
+            "what do you",
             "services",
             "capabilities",
-            "מה אתם מציעים",
-            "אתם מציעים",
-            "מה אתם בונים",
-            "איזה שירותים",
-            "יכולים לבנות",
-            "שעות הפעילות",
-            "מספר הטלפון",
+            "portfolio",
+            "how does it work",
             "opening hours",
             "office hours",
             "your phone number",
+            "מה אתם מציעים",
+            "אתם מציעים",
+            "מה אתם עושים",
+            "מה אתם בונים",
+            "איזה שירותים",
+            "איזה אוטומציות",
+            "יכולים לבנות",
+            "שעות הפעילות",
+            "מספר הטלפון",
+            "מי זה אסף",
+            "איך זה עובד",
+            "דוגמאות",
+            "וואטסאפ",
+            "בוט",
+            "סוכן",
+            "crm",
+            "מחיר",
+            "עלות",
         )
     )
 
@@ -502,7 +538,14 @@ def _is_greeting(text: str) -> bool:
 
 def _has(blob: str, needles: tuple[str, ...]) -> bool:
     lowered = blob.lower()
-    return any(needle in blob or needle in lowered for needle in needles)
+    for needle in needles:
+        if any("א" <= ch <= "ת" for ch in needle):
+            if needle in blob or needle in lowered:
+                return True
+        else:
+            if re.search(rf"\b{re.escape(needle)}\b", lowered):
+                return True
+    return False
 
 
 def never_silent(reply: str, language: str) -> str:
@@ -575,7 +618,7 @@ def published_price_line(facts: tuple[PublishedFact, ...]) -> str:
             continue
         if not is_pricing_fact(fact):
             continue
-        return text[:280]
+        return text[:800]
     return ""
 
 
@@ -1033,7 +1076,7 @@ def _answer_from_facts(
         if not text:
             continue
         cite = line("מאתר assafweb.com:", "From assafweb.com:", language)
-        return f"{cite} {text[:280]}"
+        return f"{cite} {text[:800]}"
     return line(ANSWER_HE, ANSWER_EN, language)
 
 
