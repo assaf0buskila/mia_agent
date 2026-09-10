@@ -84,6 +84,7 @@ and the accepted ADRs say to.
 | ADR-053 | Site Mia sells on a ladder; WhatsApp waits on Baileys | accepted | [record](adr/ADR-053-site-mia-sells-on-a-ladder-whatsapp-waits-on-baileys.md) |
 | ADR-054 | Website converts from known context; supersedes ADR-053 website turn counting | accepted | [record](adr/ADR-054-website-converts-from-known-context.md) |
 | ADR-055 | Telegram delivery receipts, bounded reasoning, and voice context | accepted | [record](adr/ADR-055-telegram-delivery-reasoning-and-voice.md) |
+| ADR-056 | Complete LinkedIn profile reads and approval routing | accepted | [record](adr/ADR-056-complete-linkedin-profile-and-approval-routing.md) |
 | NOTE | Gemini sales fallback (Assaf 2026-08-22) | accepted | [record](adr/NOTE-gemini-sales-fallback-assaf-2026-08-22.md) |
 
 `NOTE` is an accepted decision recorded without an ADR number. It still binds.

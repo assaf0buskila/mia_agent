@@ -75,13 +75,13 @@ def owner_telegram_reply_markup(
     *,
     channel: Channel,
     task_type: OwnerTaskType,
-    linkedin_approval_id: str = "",
+    turn_approval_id: str = "",
 ) -> dict | None:
-    """One-tap approve/reject for a just-proposed LinkedIn action or approval reads."""
+    """One-tap approve/reject bound to the exact current-turn proposal or approval reads."""
     if channel is not Channel.TELEGRAM:
         return None
-    if linkedin_approval_id:
-        return approval_keyboard(approval_token(linkedin_approval_id))
+    if turn_approval_id:
+        return approval_keyboard(approval_token(turn_approval_id))
     rows = store.list_all_pending_approvals()
     if task_type is OwnerTaskType.GMAIL_DRAFT:
         rows = [row for row in rows if row.action == ACTION_GMAIL_SEND]

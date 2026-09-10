@@ -18,6 +18,9 @@ from app.domain.approvals import (
 from app.domain.events import Channel, build_approval_required_event
 from app.integrations.composio_catalog import (
     DENIED_COMPOSIO_SLUGS,
+    NEVER_AUTO_PUBLISH_SLUGS,
+    NEVER_AUTO_SEND_SLUGS,
+    SHEETS_BOUNDED_WRITE_SLUGS,
     ComposioCatalog,
     risk_for_slug,
     validate_arguments,
@@ -66,6 +69,27 @@ def _risk_level(value: str) -> RiskLevel:
         return RiskLevel.R3_COMMERCIAL
 
 
+def _generic_write_denial(slug: str, toolkit: str, risk: RiskLevel) -> str:
+    """Return why a side effect cannot use the generic approval path."""
+    action = slug.strip().upper()
+    provider = toolkit.strip().upper()
+    if action in DENIED_COMPOSIO_SLUGS or risk is RiskLevel.R5_DESTRUCTIVE:
+        return "Destructive Composio tools are denied."
+    if action in NEVER_AUTO_SEND_SLUGS:
+        return "Send tools cannot use generic approval; use the named owner workflow."
+    if action in SHEETS_BOUNDED_WRITE_SLUGS or (
+        action.startswith("GOOGLESHEETS_") and risk is not RiskLevel.R0_READ
+    ):
+        return "Sheets writes cannot use generic approval; use the named bounded Sheets tools."
+    if action in NEVER_AUTO_PUBLISH_SLUGS or (
+        action.startswith("INSTAGRAM_") and risk is not RiskLevel.R0_READ
+    ):
+        return "Publishing cannot use generic approval. Instagram remains analytics-only."
+    if (provider == "LINKEDIN" or action.startswith("LINKEDIN_")) and risk is not RiskLevel.R0_READ:
+        return "LinkedIn writes must use the named LinkedIn approval workflow."
+    return ""
+
+
 def propose_composio_write(
     *,
     store,
@@ -83,6 +107,9 @@ def propose_composio_write(
     risk = risk_for_slug(tool.slug, tool.toolkit)
     if risk is RiskLevel.R0_READ:
         return "This is a read; use composio_execute_tool."
+    denial = _generic_write_denial(tool.slug, tool.toolkit, risk)
+    if denial:
+        return denial
     if tool.toolkit == "LINKEDIN" and frozenset(tool.slug.split("_")) & _NO_COLD_DM_WORDS:
         return "LinkedIn direct messages are not available; cold outreach remains denied."
     problem = validate_arguments(tool.input_schema, arguments)
@@ -123,9 +150,7 @@ def propose_composio_write(
             ),
         )
         store.complete_operation(scope="approval", key=key, result_json='{"ok":true}')
-    destructive = tool.slug in DENIED_COMPOSIO_SLUGS or risk is RiskLevel.R5_DESTRUCTIVE
-    prefix = "Composio destructive action" if destructive else "Composio action"
-    return f"{prefix} is ready for your exact approval: {tool.slug}. Nothing was executed."
+    return f"Composio action is ready for your exact approval: {tool.slug}. Nothing was executed."
 
 
 def composio_row_valid(row) -> tuple[str, dict] | None:
@@ -137,6 +162,8 @@ def composio_row_valid(row) -> tuple[str, dict] | None:
             or not isinstance(arguments, dict)
             or not composio_parameters_within_bound(row.proposed_parameters)
         ):
+            return None
+        if _generic_write_denial(slug, "", _risk_level(row.risk)):
             return None
         if row.payload_hash != _digest(
             channel=row.channel,
@@ -163,20 +190,22 @@ def execute_approved_composio_write(*, store, settings, resource_id: str, kill_s
     catalog = ComposioCatalog.from_settings(settings)
     if catalog is None:
         return "Composio is not connected. Nothing was executed."
-    if row.risk != RiskLevel.R5_DESTRUCTIVE.value:
-        try:
-            assert_allowed(
-                RiskAction(name=ACTION_COMPOSIO_WRITE, risk=_risk_level(row.risk)),
-                kill_switch=kill_switch,
-            )
-        except Exception:
-            return "Composio action denied by policy."
+    try:
+        assert_allowed(
+            RiskAction(name=ACTION_COMPOSIO_WRITE, risk=_risk_level(row.risk)),
+            kill_switch=kill_switch,
+        )
+    except Exception:
+        return "Composio action denied by policy."
     key = f"{resource_id}:execute"
     with catalog:
         tool = catalog.detail(slug)
+        current_risk = risk_for_slug(slug, tool.toolkit) if tool is not None else None
         if (
             tool is None
-            or risk_for_slug(slug, tool.toolkit).value != row.risk
+            or current_risk is None
+            or current_risk.value != row.risk
+            or bool(_generic_write_denial(slug, tool.toolkit, current_risk))
             or validate_arguments(tool.input_schema, arguments)
         ):
             return "Composio action no longer matches its approved tool contract."

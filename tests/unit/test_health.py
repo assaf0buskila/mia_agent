@@ -188,11 +188,8 @@ def test_health_is_alive() -> None:
     assert body["whatsapp_connected"] is False
     assert body["whatsapp_send"] is False
     assert body["risk"]["R4_meta_writes"] == "approval"
-    # Approval, not deny: a destructive slug becomes an approval row and runs once
-    # Assaf taps approve. The old label said "deny" and meant "never automatic",
-    # which read as "never" — and Telegram now has the approve button that made
-    # the difference visible.
-    assert body["risk"]["R5_destructive"] == "approval"
+    # R5 is denied even if a stale legacy approval row exists.
+    assert body["risk"]["R5_destructive"] == "deny"
     assert body["risk"]["kill_switch"] is False
     assert body["capabilities"]["http_api"] == "alive"
     assert body["capabilities"]["identity"] == "alive"

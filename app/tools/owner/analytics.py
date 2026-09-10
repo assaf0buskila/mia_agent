@@ -151,14 +151,25 @@ def _website_kpis(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
 
 
 def _linkedin_snapshot(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
-    del args
+    full_profile = args.get("full_profile") is True
     port = ctx.linkedin
     if port is None and ctx.settings.composio_ready():
         port = build_linkedin_port(ctx.settings)
     if port is None:
         return _house_unavailable(ctx, "LinkedIn")
-    text, _outcome = enrich_linkedin_ack("", port, ctx.kill_switch, principal=ctx.principal)
-    return _empty(text, "LinkedIn returned nothing.")
+    text, outcome = enrich_linkedin_ack(
+        "",
+        port,
+        ctx.kill_switch,
+        principal=ctx.principal,
+        full_profile=full_profile,
+    )
+    if outcome.status not in {"ok", "empty"}:
+        return ToolResult(ok=False, error=f"LinkedIn profile read failed ({outcome.status}).")
+    result = _empty(text, "LinkedIn returned nothing.")
+    if full_profile:
+        result.max_chars = 8_000
+    return result
 
 
 def _instagram_insights(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:

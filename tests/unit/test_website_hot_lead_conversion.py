@@ -107,7 +107,7 @@ def test_website_message_without_contact_does_not_emit_conversion() -> None:
 
 def test_composio_prompt_instructions() -> None:
     """Verify owner agent prompt instructions for Composio free discovery & approval."""
-    assert PROMPT_VERSION == "owner_agent_v8"
+    assert PROMPT_VERSION == "owner_agent_v9"
     assert "composio_search_tools" in SYSTEM_PROMPT
     assert "composio_get_tool_schema" in SYSTEM_PROMPT
     assert "composio_execute_tool" in SYSTEM_PROMPT

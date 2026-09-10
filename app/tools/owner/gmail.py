@@ -7,6 +7,7 @@ from typing import Any
 from app.capabilities.mail import mail_handlers
 from app.capabilities.policy import execute_capability
 from app.core.errors import PermissionDenied
+from app.domain.approvals import ACTION_GMAIL_SEND, RESOURCE_GMAIL, extract_approval_id
 from app.domain.events import Channel
 from app.domain.gmail.drafts import apply_owner_gmail_draft
 from app.domain.gmail.query import normalize_gmail_query
@@ -137,7 +138,16 @@ def _gmail_create_draft(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
         kill_switch=ctx.kill_switch,
         demo_active=ctx.demo_active,
     )
-    return ToolResult(ok=True, text=reply)
+    approval_id = extract_approval_id(reply) or ""
+    if approval_id:
+        row = ctx.store.get_approval_by_approval_id(approval_id)
+        if (
+            row is None
+            or row.resource_type != RESOURCE_GMAIL
+            or row.action != ACTION_GMAIL_SEND
+        ):
+            approval_id = ""
+    return ToolResult(ok=True, text=reply, approval_id=approval_id)
 
 
 def _gmail_summary(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:

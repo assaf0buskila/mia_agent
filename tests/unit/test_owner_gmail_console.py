@@ -157,6 +157,26 @@ def test_gmail_draft_creates_pending_approval_and_does_not_send() -> None:
         session.close()
 
 
+def test_gmail_draft_tool_returns_the_exact_created_approval_id() -> None:
+    session = _session()
+    try:
+        port = FakeGmailPort()
+        ctx = _ctx(session, gmail=port)
+        result = execute_tool(
+            "gmail_create_draft",
+            {"to": "dane@example.com", "subject": "היי", "body": "שלום"},
+            ctx,
+        )
+        assert result.ok is True
+        row = ctx.store.get_approval_by_approval_id(result.approval_id)
+        assert row is not None
+        assert row.resource_id == port.created_drafts[0].draft_id
+        assert row.action == "gmail_send"
+        assert port.sent_drafts == []
+    finally:
+        session.close()
+
+
 def test_approved_send_stays_off_when_flag_false() -> None:
     session = _session()
     try:
@@ -335,7 +355,7 @@ def test_owner_agent_prompt_plans_mail_paraphrases() -> None:
     """
     from app.graph.owner_agent import PROMPT_VERSION, SYSTEM_PROMPT
 
-    assert PROMPT_VERSION == "owner_agent_v8"
+    assert PROMPT_VERSION == "owner_agent_v9"
     assert "gmail_inbox" in SYSTEM_PROMPT
     assert "Hebrew" in SYSTEM_PROMPT and "English" in SYSTEM_PROMPT
     assert "seo_snapshot" in SYSTEM_PROMPT
