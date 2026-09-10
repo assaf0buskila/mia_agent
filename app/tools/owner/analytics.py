@@ -24,6 +24,11 @@ from app.integrations.seo_audit import build_seo_audit_port
 from app.tools.owner.types import ToolContext, ToolResult, _empty, _house_unavailable
 
 
+def _metric_value(value: object) -> object:
+    """Render real zeroes; only an absent value is unavailable."""
+    return "unavailable" if value is None or value == "" else value
+
+
 def _seo_snapshot(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     del args
     search_console = ctx.search_console
@@ -115,9 +120,9 @@ def _website_kpis(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
             for row in traffic_rows[:5]:
                 label = str(row.get("landing_page") or row.get("session_source") or "unknown")
                 page_bits.append(
-                    f"{label}: users {row.get('users') or 'unavailable'}, "
-                    f"sessions {row.get('sessions') or 'unavailable'}, "
-                    f"conversions {row.get('conversions') or 'unavailable'}"
+                    f"{label}: users {_metric_value(row.get('users'))}, "
+                    f"sessions {_metric_value(row.get('sessions'))}, "
+                    f"conversions {_metric_value(row.get('conversions'))}"
                 )
             lines.append("GA4 top pages: " + ("; ".join(page_bits) or "unavailable") + ".")
             if conversions:
@@ -141,10 +146,10 @@ def _website_kpis(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
         bits = []
         for row in rows[:5]:
             bits.append(
-                f"{row.get(key) or 'unknown'}: clicks {row.get('clicks') or 'unavailable'}, "
-                f"impressions {row.get('impressions') or 'unavailable'}, "
-                f"CTR {row.get('ctr') or 'unavailable'}, "
-                f"position {row.get('position') or 'unavailable'}"
+                f"{row.get(key) or 'unknown'}: clicks {_metric_value(row.get('clicks'))}, "
+                f"impressions {_metric_value(row.get('impressions'))}, "
+                f"CTR {_metric_value(row.get('ctr'))}, "
+                f"position {_metric_value(row.get('position'))}"
             )
         lines.append(label + ": " + "; ".join(bits) + ".")
     return ToolResult(ok=True, text="\n".join(lines))
