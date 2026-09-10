@@ -215,6 +215,50 @@ def test_owner_website_kpis_reports_partial_failure_and_empty_honestly() -> None
         session.close()
 
 
+def test_owner_website_kpis_preserves_zero_and_marks_only_missing_metrics() -> None:
+    from datetime import UTC, datetime
+
+    from app.integrations.ga4 import FakeGa4Port, Ga4PivotRow
+    from app.integrations.search_console import FakeSearchConsolePort, SearchAnalyticsRow
+
+    session = _session()
+    try:
+        ctx = _ctx(session)
+        ctx.ga4 = FakeGa4Port(
+            pivot_rows=[
+                Ga4PivotRow(
+                    landing_page="/zero",
+                    users="0",
+                    sessions=None,
+                    conversions="",
+                )
+            ]
+        )
+        ctx.search_console = FakeSearchConsolePort(
+            analytics_rows=[
+                SearchAnalyticsRow(
+                    page="/zero",
+                    query="zero query",
+                    clicks="0",
+                    impressions=None,
+                    ctr="0.0",
+                    position="",
+                )
+            ]
+        )
+        ctx.now = datetime(2026, 9, 10, tzinfo=UTC)
+
+        result = execute_tool("website_kpis", {}, ctx)
+
+        assert result.ok is True
+        assert "/zero: users 0, sessions unavailable, conversions unavailable" in result.text
+        assert "clicks 0, impressions unavailable, CTR 0.0, position unavailable" in result.text
+        assert "clicks unavailable" not in result.text
+        assert "CTR unavailable" not in result.text
+    finally:
+        session.close()
+
+
 def test_owner_sheets_writes_require_current_explicit_request_and_are_idempotent() -> None:
     from app.integrations.sheets import FakeSheetsPort
 

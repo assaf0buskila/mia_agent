@@ -98,10 +98,14 @@ def main():
             for toolkit in toolkits:
                 checked += 1
                 found = catalog.search("", toolkit, limit=50)
-                sample = found[0] if found else None
+                sample = next((
+                    tool for tool in found
+                    if risk_for_slug(tool.slug, tool.toolkit) is RiskLevel.R0_READ
+                ), None)
                 detail = catalog.detail(sample.slug) if sample else None
                 failures += int(not (detail and schema_text(detail)))
                 print(json.dumps({"kind": "catalog", "toolkit": toolkit,
+                                  "sample": sample.slug if sample else "",
                                   "listed": len(found), "schema_ok": bool(
                                       detail and schema_text(detail))}), flush=True)
             checked += 1

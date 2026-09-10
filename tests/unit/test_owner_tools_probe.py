@@ -34,6 +34,9 @@ class _Catalog:
         assert limit == 50
         return [
             SimpleNamespace(
+                slug="LINKEDIN_POST_UPDATE", toolkit="LINKEDIN", input_schema={},
+            ),
+            SimpleNamespace(
                 slug="LINKEDIN_GET_MY_INFO",
                 toolkit="LINKEDIN",
                 input_schema={},
@@ -109,7 +112,13 @@ def _wire_probe(
         classmethod(lambda _cls, _settings: catalog),
     )
     monkeypatch.setattr(module, "schema_text", lambda _tool: "{}")
-    monkeypatch.setattr(module, "risk_for_slug", lambda _slug, _toolkit: RiskLevel.R0_READ)
+    monkeypatch.setattr(
+        module, "risk_for_slug",
+        lambda slug, _toolkit: (
+            RiskLevel.R0_READ
+            if slug == "LINKEDIN_GET_MY_INFO" else RiskLevel.R4_FINANCIAL_MARKETING
+        ),
+    )
     monkeypatch.setattr(module, "validate_arguments", lambda _schema, _args: [])
 
 
