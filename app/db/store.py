@@ -567,7 +567,14 @@ class LeadStore:
             except (TypeError, ValueError):
                 current = incoming = None
             if isinstance(current, dict) and isinstance(incoming, dict):
-                for flag in ("pinged", "finalized", "crm_written", "confirmed", "contact_captured"):
+                for flag in (
+                    "pinged",
+                    "finalized",
+                    "crm_written",
+                    "confirmed",
+                    "contact_captured",
+                    "conversion_reported",
+                ):
                     if current.get(flag) is True:
                         incoming[flag] = True
                 cur_f = current.get("fields") or {}

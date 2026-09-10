@@ -484,6 +484,13 @@ def process_website_message(
             session_id=session_id,
             payload={"kind": "whatsapp_handoff_offered"},
         )
+    if session.fields.has_phone_or_email() and not session.conversion_reported:
+        session.conversion_reported = True
+        _persist_behavior(
+            store,
+            session_id=session_id,
+            payload={"kind": "website_conversion"},
+        )
     if audio_meta is not None:
         store.save_transcript(
             provider="website",
