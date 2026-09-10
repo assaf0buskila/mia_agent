@@ -199,6 +199,7 @@ _AUDIO_MAGIC: tuple[tuple[bytes, int, str], ...] = (
     (b"OggS", 0, "audio/ogg"),
     (b"\x1a\x45\xdf\xa3", 0, "audio/webm"),  # EBML: WebM and Matroska
     (b"ftyp", 4, "audio/mp4"),
+    (b"moov", 4, "audio/mp4"),
     (b"RIFF", 0, "audio/wav"),
     (b"ID3", 0, "audio/mpeg"),
 )
@@ -221,6 +222,9 @@ def sniff_audio_container(audio: bytes) -> str:
     for signature, offset, mime in _AUDIO_MAGIC:
         if audio[offset : offset + len(signature)] == signature:
             return mime
+    # ADTS AAC frame sync (12 sync bits). Must be checked before MP3's 11-bit sync.
+    if len(audio) >= 2 and audio[0] == 0xFF and (audio[1] & 0xF6) == 0xF0:
+        return "audio/aac"
     # MPEG audio frame sync, for mp3 without an ID3 header.
     if len(audio) >= 2 and audio[0] == 0xFF and (audio[1] & 0xE0) == 0xE0:
         return "audio/mpeg"
@@ -350,6 +354,11 @@ def process_website_session(
         lead_id=None,
     )
     store.save_canonical_event(provider="website", event=incoming)
+    _persist_behavior(
+        store,
+        session_id=session_id,
+        payload={"kind": "mia_opened"},
+    )
     if attribution:
         store.save_canonical_event(
             provider="website",
@@ -462,6 +471,19 @@ def process_website_message(
         provider="website",
         event=website_message_in,
     )
+    visitor_turns = sum(1 for role, _ in session.turns if role == "visitor")
+    if visitor_turns <= 1:
+        _persist_behavior(
+            store,
+            session_id=session_id,
+            payload={"kind": "conversation_started"},
+        )
+    if turn.whatsapp_url:
+        _persist_behavior(
+            store,
+            session_id=session_id,
+            payload={"kind": "whatsapp_handoff_offered"},
+        )
     if audio_meta is not None:
         store.save_transcript(
             provider="website",

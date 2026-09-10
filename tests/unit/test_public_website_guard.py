@@ -225,3 +225,23 @@ def test_voice_rate_limit_returns_429(monkeypatch: pytest.MonkeyPatch) -> None:
             assert port.call_count == 1
     finally:
         app.dependency_overrides.pop(get_transcription_port, None)
+
+
+def test_client_ip_inspects_forwarded_headers() -> None:
+    from types import SimpleNamespace
+
+    from app.core.public_website import client_ip
+
+    req1 = SimpleNamespace(
+        headers={"x-forwarded-for": "203.0.113.195, 70.41.3.18"},
+        client=SimpleNamespace(host="10.0.0.1"),
+    )
+    assert client_ip(req1) == "203.0.113.195"
+    req2 = SimpleNamespace(
+        headers={"cf-connecting-ip": "198.51.100.1"},
+        client=SimpleNamespace(host="10.0.0.1"),
+    )
+    assert client_ip(req2) == "198.51.100.1"
+    req3 = SimpleNamespace(headers={}, client=SimpleNamespace(host="192.168.1.1"))
+    assert client_ip(req3) == "192.168.1.1"
+

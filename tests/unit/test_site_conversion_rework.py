@@ -142,3 +142,29 @@ def test_contact_write_is_not_repeated_after_success() -> None:
     assert first.crm_wrote is True
     assert second.crm_wrote is False
     assert len(crm.activity) == 1
+
+
+def test_meeting_intent_requests_contact_without_discovery() -> None:
+    from app.surfaces.site_policy import classify_site_intent, decide_site_turn
+
+    assert classify_site_intent("אני רוצה לקבוע פגישה עם אסף") == "ask_assaf"
+    assert classify_site_intent("let's schedule a call") == "ask_assaf"
+
+    decision = decide_site_turn(
+        thought="אני רוצה לקבוע פגישה עם אסף",
+        language="he",
+        has_contact=False,
+        already_confirmed=False,
+        selling_stopped=False,
+        already_pinged=False,
+    )
+    assert decision.action == "ask_contact"
+    assert decision.ask_contact is True
+
+
+def test_training_and_brainstorm_do_not_trigger_weather() -> None:
+    from app.surfaces.site_policy import classify_site_intent
+
+    assert classify_site_intent("We need AI training for our agents") != "off_topic"
+    assert classify_site_intent("Brainstorming website ideas") != "off_topic"
+

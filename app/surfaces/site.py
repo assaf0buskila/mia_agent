@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import re
 import threading
 import time
 from collections.abc import Callable
@@ -648,12 +649,16 @@ def _conversation_summary(session: SiteSession) -> str:
     return " | ".join(lines)[:400]
 
 
+_EMAIL_PATTERN = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+
+
 def _is_contact_only(text: str) -> bool:
     stripped = text.strip()
-    if "@" in stripped and len(stripped) < 80:
+    if "@" in stripped and _EMAIL_PATTERN.fullmatch(stripped):
         return True
     digits = "".join(ch for ch in stripped if ch.isdigit())
-    return len(digits) >= 9 and len(stripped) <= 24
+    starts_valid = stripped.startswith("+") or stripped.startswith("0")
+    return len(digits) >= 9 and len(stripped) <= 24 and starts_valid
 
 
 def _ping_assaf(

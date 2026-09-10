@@ -208,6 +208,17 @@ def _seed_offered(
         ("הראשון", 1),
         ("השני", 2),
         ("השלישי", 3),
+        ("הראשונה", 1),
+        ("השנייה", 2),
+        ("השניה", 2),
+        ("השלישית", 3),
+        ("אחת", 1),
+        ("שתיים", 2),
+        ("שלוש", 3),
+        ("אופציה 1", 1),
+        ("מתאים לי 1", 1),
+        ("אפשרות 1 מעולה", 1),
+        ("2 בבקשה", 2),
         ("yes", None),
         ("21/08", None),
         ("4", None),
@@ -1363,3 +1374,48 @@ def test_website_e2e_booking() -> None:
             app.dependency_overrides.pop(get_calendar_booking_port, None)
     finally:
         db.close()
+
+
+def test_concurrent_slot_booking_lock_prevents_double_booking() -> None:
+    init_db()
+    db = get_session_factory()()
+    try:
+        store = LeadStore(db)
+        _, lead_id_a = store.open_channel_lead(channel=Channel.GMAIL, external_id="lead_a@ex.com")
+        _, lead_id_b = store.open_channel_lead(channel=Channel.GMAIL, external_id="lead_b@ex.com")
+        slot = _slot(4, 10)
+        _seed_offered(store, lead_id_a, [slot])
+        _seed_offered(store, lead_id_b, [slot])
+        db.commit()
+
+        # Simulate Lead A holding the slot lock in flight
+        slot_key = f"slot:{slot.start.isoformat()}"
+        assert store.claim_operation(scope="calendar_slot_lock", key=slot_key) is True
+        db.commit()
+
+        # Lead B concurrently attempts to book the same slot
+        booking = FakeCalendarBookingPort()
+        calendar = FakeCalendarPort([slot])
+        result_b = attempt_meeting_booking(
+            store,
+            lead_id=lead_id_b,
+            channel=Channel.GMAIL,
+            provider="gmail",
+            conversation_id="lead_b@ex.com",
+            inbound_provider_event_id="evt.lead_b.1",
+            message="1",
+            calendar=calendar,
+            booking_port=booking,
+            kill_switch=False,
+            timezone="Asia/Jerusalem",
+            now=FIXED_NOW,
+        )
+        assert result_b.kind == BookingResultKind.CONFLICT
+        assert booking.create_calls == []
+
+        # Release the lock and verify it can now be booked
+        store.release_operation(scope="calendar_slot_lock", key=slot_key)
+        db.commit()
+    finally:
+        db.close()
+

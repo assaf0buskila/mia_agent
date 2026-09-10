@@ -116,3 +116,39 @@ def test_broken_state_never_costs_the_visitor_their_turn() -> None:
         assert load_site_session(session, junk) in (True, False)
     # A new visitor with no stored state is simply new.
     assert load_site_session(SiteSession(session_id="web_new"), "") is False
+
+
+def test_concurrent_state_merge_preserves_fields_and_flags() -> None:
+    import json
+
+    from app.db.session import get_session_factory
+    from app.db.store import LeadStore
+
+    init_db()
+    db = get_session_factory()()
+    try:
+        store = LeadStore(db)
+        sid = "web_concurrent_test"
+        state1 = json.dumps({
+            "fields": {"phone": "0501234567", "name": "דנה"},
+            "pinged": True,
+            "business_known": True,
+        })
+        store.save_website_session_state(sid, state1)
+        db.commit()
+
+        # Simulate second concurrent turn that didn't have phone/name yet
+        state2 = json.dumps({"fields": {"want": "בוט"}, "friction_known": True})
+        store.save_website_session_state(sid, state2)
+        db.commit()
+
+        loaded = json.loads(store.load_website_session_state(sid) or "{}")
+        assert loaded["fields"]["phone"] == "0501234567"
+        assert loaded["fields"]["name"] == "דנה"
+        assert loaded["fields"]["want"] == "בוט"
+        assert loaded["pinged"] is True
+        assert loaded["business_known"] is True
+        assert loaded["friction_known"] is True
+    finally:
+        db.close()
+

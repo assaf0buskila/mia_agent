@@ -46,13 +46,23 @@ _STOPWORDS = frozenset(
 )
 
 
+_HEBREW_PREFIXES = frozenset({"ה", "ב", "ל", "כ", "מ", "ש", "ו"})
+
+
 def tokenize(text: str) -> list[str]:
-    """Unicode-aware word tokens. Hebrew and English both fall out of `[^\\W_]+`."""
-    return [
-        token
-        for token in (match.group(0).lower() for match in _TOKEN_RE.finditer(text))
-        if token and token not in _STOPWORDS
-    ]
+    r"""Unicode-aware word tokens. Hebrew and English both fall out of `[^\W_]+`."""
+    tokens: list[str] = []
+    for match in _TOKEN_RE.finditer(text):
+        raw = match.group(0).lower()
+        if not raw or raw in _STOPWORDS:
+            continue
+        tokens.append(raw)
+        # Strip single Hebrew prefix character for robust keyword recall (e.g. המחיר -> מחיר)
+        if len(raw) >= 4 and raw[0] in _HEBREW_PREFIXES:
+            sub = raw[1:]
+            if sub not in _STOPWORDS:
+                tokens.append(sub)
+    return tokens
 
 
 def hours_since(timestamp: str, *, now: datetime | None = None) -> float:

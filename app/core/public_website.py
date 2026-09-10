@@ -92,6 +92,12 @@ def origin_allowed(origin: str, settings: Settings) -> bool:
 
 
 def client_ip(request: Request) -> str:
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    cf_ip = request.headers.get("cf-connecting-ip")
+    if cf_ip:
+        return cf_ip.strip()
     if request.client is not None and request.client.host:
         return request.client.host
     return "unknown"
@@ -100,6 +106,13 @@ def client_ip(request: Request) -> str:
 def enforce_public_website(request: Request, *, bucket: str) -> None:
     settings = get_settings()
     origin = request.headers.get("origin", "")
+    if not origin:
+        sec_fetch = request.headers.get("sec-fetch-site", "")
+        referer = request.headers.get("referer", "")
+        if sec_fetch in {"same-origin", "same-site"} or (
+            referer and origin_allowed(_origin_from_url(referer), settings)
+        ):
+            origin = _origin_from_url(str(request.base_url))
     if not origin_allowed(origin, settings):
         raise HTTPException(status_code=403, detail="origin not allowed")
     ip = client_ip(request)

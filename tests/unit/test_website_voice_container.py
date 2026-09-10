@@ -19,18 +19,22 @@ from app.api.website import _voice_filename, sniff_audio_container
 OGG = b"OggS" + b"\x00" * 60
 WEBM = b"\x1a\x45\xdf\xa3" + b"\x00" * 60
 MP4 = b"\x00\x00\x00\x20" + b"ftyp" + b"isom" + b"\x00" * 40
+MP4_MOOV = b"\x00\x00\x00\x20" + b"moov" + b"\x00" * 44
 WAV = b"RIFF" + struct.pack("<I", 36) + b"WAVEfmt " + b"\x00" * 40
 MP3_ID3 = b"ID3\x03\x00" + b"\x00" * 60
 MP3_SYNC = b"\xff\xfb\x90\x00" + b"\x00" * 60
+AAC_ADTS = b"\xff\xf1\x50\x80" + b"\x00" * 60
 
 
 def test_each_container_is_identified_from_its_own_bytes() -> None:
     assert sniff_audio_container(OGG) == "audio/ogg"
     assert sniff_audio_container(WEBM) == "audio/webm"
     assert sniff_audio_container(MP4) == "audio/mp4"
+    assert sniff_audio_container(MP4_MOOV) == "audio/mp4"
     assert sniff_audio_container(WAV) == "audio/wav"
     assert sniff_audio_container(MP3_ID3) == "audio/mpeg"
     assert sniff_audio_container(MP3_SYNC) == "audio/mpeg"
+    assert sniff_audio_container(AAC_ADTS) == "audio/aac"
 
 
 def test_the_regression_an_ogg_recording_labelled_webm() -> None:
@@ -41,6 +45,12 @@ def test_the_regression_an_ogg_recording_labelled_webm() -> None:
     assert _voice_filename(sniff_audio_container(OGG)) == "note.ogg"
 
 
+def test_the_regression_an_aac_adts_recording() -> None:
+    """iOS Safari emitting ADTS AAC frames must be recognized as audio/aac and note.m4a."""
+    assert sniff_audio_container(AAC_ADTS) == "audio/aac"
+    assert _voice_filename(sniff_audio_container(AAC_ADTS)) == "note.m4a"
+
+
 def test_unknown_bytes_defer_to_the_claim_rather_than_guessing() -> None:
     """Sniffing must not become a second way to be wrong."""
     assert sniff_audio_container(b"not audio at all") == ""
@@ -49,7 +59,7 @@ def test_unknown_bytes_defer_to_the_claim_rather_than_guessing() -> None:
 
 def test_every_sniffed_container_has_a_filename_the_provider_understands() -> None:
     """A container we can name but not file would trade one silent failure for another."""
-    for blob in (OGG, WEBM, MP4, WAV, MP3_ID3):
+    for blob in (OGG, WEBM, MP4, MP4_MOOV, WAV, MP3_ID3, MP3_SYNC, AAC_ADTS):
         mime = sniff_audio_container(blob)
         assert mime, blob[:4]
         name = _voice_filename(mime)

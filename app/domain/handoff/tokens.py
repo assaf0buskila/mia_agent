@@ -27,14 +27,15 @@ def generate_handoff_token() -> str:
     return f"{TOKEN_PREFIX}{secrets.token_urlsafe(12)}"
 
 
-def compose_handoff_text(raw_token: str | None = None) -> str:
+def compose_handoff_text(raw_token: str | None = None, *, include_token: bool = False) -> str:
     """Customer-facing wa.me prefill.
 
     Until Cloud API inbound works, Mia does not consume this message. The token
-    is issued in the store for a later official API; it is not shown to the
+    is issued in the store for a later official API; by default it is not shown to the
     customer. Assaf gets the briefing on Telegram instead.
     """
-    _ = raw_token
+    if include_token and raw_token:
+        return f"{raw_token}\n{HANDOFF_COMPOSE_HINT_HE}"
     return HANDOFF_COMPOSE_HINT_HE
 
 

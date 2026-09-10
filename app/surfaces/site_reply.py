@@ -92,7 +92,7 @@ def knowledge_lines(facts: tuple[PublishedFact, ...]) -> tuple[str, ...]:
         text = " ".join(fact.text.split())
         if not text:
             continue
-        lines.append(f"{text[:280]} [{fact.url}]")
+        lines.append(f"{text[:800]} [{fact.url}]")
     return tuple(lines)
 
 
@@ -178,18 +178,31 @@ def phrase_site_reply(
         # The live website never delegates discovery or contact capture to the model.
         # Reject question-shaped statements too; punctuation alone is insufficient.
         request = re.search(
-            r"(?:^|[.!]\s*)(?:מה\s|איזה\s|ספרו\s|תארו\s|אמרו\s|"
-            r"what\s|which\s|tell me\b|describe\b|can you\b)",
+            r"(?:^|[.!]\s*)(?:מה\s+(?!ש)|איזה\s|ספרו\s+לי\b|תארו\s+לי\b|אמרו\s+לי\b|"
+            r"what\s+(?!we\b|assaf\b)|which\s|tell\s+me\b|describe\b|can\s+you\b)",
             text,
             re.IGNORECASE,
         )
         if "?" in text or "？" in text or request:
             return canned
-    if value_only and (
-        re.search(r"טלפון|אימייל|מייל|phone|email|\d|₪|\$|מבטיח|guarantee", text, re.I)
-        or not re.search(r"אפשר|ניתן|עשוי|יכול|could|may|might|can|explore", text, re.I)
-    ):
-        return canned
+    if value_only:
+        contact_or_price_leak = bool(
+            re.search(
+                r"טלפון|אימייל|מייל|\bphone\b|\bemail\b|0[2-9]\d{7,8}|(?:\+972|972)\d{8,9}|₪|\$",
+                text,
+                re.I,
+            )
+        )
+        has_guarantee = bool(re.search(r"מבטיח|בהתחייבות|guarantee", text, re.I))
+        has_hypothesis_modal = bool(
+            re.search(
+                r"אפשר|ניתן|עשוי|יכול|נוכל|נשמח|could|may|might|can|explore|help",
+                text,
+                re.I,
+            )
+        )
+        if contact_or_price_leak or has_guarantee or not has_hypothesis_modal:
+            return canned
     # Outer guard, mirroring `app.graph.orchestrator`: a paraphrase that lands on a line
     # Mia already said is worse than the canned line.
     if repeats_previous_mia_turn(text, list(turns)):
