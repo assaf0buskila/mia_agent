@@ -286,6 +286,46 @@ def test_calendar_gate_rejects_weather_and_off_hours() -> None:
     assert allowed.allowed is True
 
 
+def test_calendar_gate_requires_explicit_remote_medium_outside_tel_aviv() -> None:
+    start = datetime(2026, 9, 2, 10, 0, tzinfo=IL).astimezone(UTC)
+    end = start + timedelta(hours=1)
+
+    paris_meeting = assess_calendar_write(
+        title="Physical planning meeting",
+        start=start,
+        end=end,
+        location="Paris",
+        slots=[TimeSlot(start=start, end=end)],
+    )
+    hebrew_conversation = assess_calendar_write(
+        title="שיחת ייעוץ",
+        start=start,
+        end=end,
+        location="פריז",
+        slots=[TimeSlot(start=start, end=end)],
+    )
+    assert paris_meeting.allowed is False
+    assert paris_meeting.reason == "not_tel_aviv"
+    assert hebrew_conversation.allowed is False
+    assert hebrew_conversation.reason == "not_tel_aviv"
+
+    zoom = assess_calendar_write(
+        title="שיחת ייעוץ בזום",
+        start=start,
+        end=end,
+        slots=[TimeSlot(start=start, end=end)],
+    )
+    google_meet = assess_calendar_write(
+        title="Planning meeting",
+        start=start,
+        end=end,
+        location="Google Meet",
+        slots=[TimeSlot(start=start, end=end)],
+    )
+    assert zoom.allowed is True
+    assert google_meet.allowed is True
+
+
 def test_calendar_write_request_asks_assaf_for_weather() -> None:
     init_db()
     db = get_session_factory()()

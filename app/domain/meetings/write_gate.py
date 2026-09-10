@@ -44,15 +44,13 @@ _MEETING_MARKERS = (
 _REMOTE_MARKERS = (
     "זום",
     "zoom",
-    "meet",
     "google meet",
+    "meet.google.com",
     "online",
     "אונליין",
     "טלפון",
     "טלפונית",
     "remote",
-    "שיחה",
-    "שיחת",
 )
 _WEATHER_MARKERS = (
     "מזג",
