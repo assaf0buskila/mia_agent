@@ -85,6 +85,7 @@ and the accepted ADRs say to.
 | ADR-054 | Website converts from known context; supersedes ADR-053 website turn counting | accepted | [record](adr/ADR-054-website-converts-from-known-context.md) |
 | ADR-055 | Telegram delivery receipts, bounded reasoning, and voice context | accepted | [record](adr/ADR-055-telegram-delivery-reasoning-and-voice.md) |
 | ADR-056 | Complete LinkedIn profile reads and approval routing | accepted | [record](adr/ADR-056-complete-linkedin-profile-and-approval-routing.md) |
+| ADR-057 | Fast owner tool inventory and explicit context exclusion | accepted | [record](adr/ADR-057-fast-owner-tool-inventory.md) |
 | NOTE | Gemini sales fallback (Assaf 2026-08-22) | accepted | [record](adr/NOTE-gemini-sales-fallback-assaf-2026-08-22.md) |
 
 `NOTE` is an accepted decision recorded without an ADR number. It still binds.

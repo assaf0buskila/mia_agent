@@ -31,6 +31,11 @@ from app.domain.events import (
     stamp_correlation,
 )
 from app.domain.gmail.drafts import apply_gmail_send_decision, execute_approved_gmail_send
+from app.domain.owner.request_routing import (
+    is_tool_inventory_request,
+    owner_tool_inventory_reply,
+    requests_no_history,
+)
 from app.domain.owner.tasks import OwnerTaskType, classify_owner_task
 from app.domain.takeover import apply_owner_human_resume, apply_owner_human_takeover
 from app.domain.tools import AdapterHttpError
@@ -149,11 +154,13 @@ async def run_owner_loop(
     stamp_correlation(incoming, correlation_id)
     store.save_canonical_event(provider=provider, event=incoming)
     reply = ""
+    task_type = OwnerTaskType.NOTE
     # Human takeover and release existed only on the WhatsApp owner path, which is
     # off. So a conversation Mia escalated could be parked forever with no way to hand
     # it back to her from Telegram.
     if not demo_mode_active(settings):
         task = classify_owner_task(owner_text)
+        task_type = task.task_type
         if not task.needs_clarification:
             if task.task_type is OwnerTaskType.HUMAN_TAKEOVER:
                 ack = apply_owner_human_takeover(store, text=owner_text, kill_switch=False)
@@ -181,7 +188,11 @@ async def run_owner_loop(
             )
 
     crm_wrote = False
-    if not reply:
+    turn_approval_ids: list[str] = []
+    inventory_request = not reply and is_tool_inventory_request(owner_text)
+    if inventory_request:
+        reply = owner_tool_inventory_reply()
+    elif not reply:
         if talk is not None:
             reply, crm_wrote = talk(text=owner_text, crm=crm)
         else:
@@ -194,6 +205,7 @@ async def run_owner_loop(
                     item=item,
                     correlation_id=correlation_id,
                     deadline_at=deadline_at,
+                    approval_ids_out=turn_approval_ids,
                 )
             )
 
@@ -202,11 +214,19 @@ async def run_owner_loop(
     if deadline_at is not None and monotonic() >= deadline_at:
         return OwnerTurnResult(processed=True, sent=False, last_reply=None)
 
-    # Approvals proposed on Telegram had no button and no text command, so
-    # `pending_approvals` could only ever grow. Attach the keyboard whenever
-    # something is actually waiting on him.
+    # Bind a proposal button only to approval metadata created by this turn. The
+    # explicit pending-approvals command is the sole path allowed to select an
+    # existing pending row; a failed draft/calendar turn must not attach an old one.
+    markup_task_type = (
+        OwnerTaskType.PENDING_APPROVALS
+        if task_type is OwnerTaskType.PENDING_APPROVALS
+        else OwnerTaskType.NOTE
+    )
     markup = owner_telegram_reply_markup(
-        store, channel=channel, task_type=OwnerTaskType.PENDING_APPROVALS
+        store,
+        channel=channel,
+        task_type=markup_task_type,
+        turn_approval_id=turn_approval_ids[0] if turn_approval_ids else "",
     )
     message = outbound_reply(item, text=reply, channel=channel, reply_markup=markup)
     try:
@@ -240,7 +260,11 @@ async def run_owner_loop(
     # and must never sit between Assaf's message and his answer. It stays inside the
     # existing durable learning path -- no new store, no raw provider data, and the
     # function's own guards still decide what is worth keeping.
-    if not demo_mode_active(settings) and (deadline_at is None or monotonic() < deadline_at):
+    if (
+        not inventory_request
+        and not demo_mode_active(settings)
+        and (deadline_at is None or monotonic() < deadline_at)
+    ):
         try:
             from app.domain.owner.brain import learn_from_exchange
 
@@ -268,6 +292,7 @@ def _talk_with_optional_agent(
     item: dict[str, str],
     correlation_id: str = "",
     deadline_at: float | None = None,
+    approval_ids_out: list[str] | None = None,
 ) -> tuple[str, bool]:
     from app.domain.owner.brain import answer_owner
 
@@ -284,7 +309,12 @@ def _talk_with_optional_agent(
         return fallback, wrote
     started = perf_counter()
     try:
-        history = tuple(store.list_conversation_turns(event_conversation_id(item)))
+        no_history = requests_no_history(text)
+        history = (
+            ()
+            if no_history
+            else tuple(store.list_conversation_turns(event_conversation_id(item)))
+        )
         brain = BrainStore(store.session)
         result = answer_owner(
             principal=Principal.owner(source="telegram", actor_id=item["from"]),
@@ -292,7 +322,7 @@ def _talk_with_optional_agent(
             brain=brain,
             settings=settings,
             task_type=OwnerTaskType.NOTE,
-            owner_text=prepare_owner_utterance(text, history),
+            owner_text=text.strip() if no_history else prepare_owner_utterance(text, history),
             history=history,
             fallback_text=fallback,
             kill_switch=False,
@@ -336,6 +366,8 @@ def _talk_with_optional_agent(
             model_label=result.model,
         )
         reply = result.text or fallback
+        if approval_ids_out is not None:
+            approval_ids_out.extend(result.approval_ids)
         if _asks_for_sheet_url(reply):
             return fallback, wrote
         return reply, wrote

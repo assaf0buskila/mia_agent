@@ -41,6 +41,7 @@ from app.core.errors import MiaError
 from app.core.models import model_chain
 from app.db.store import LeadStore
 from app.domain.memory import ConversationTurn
+from app.domain.owner.request_routing import requests_no_history
 from app.domain.owner.tasks import OwnerTaskType
 from app.graph.owner_agent import AgentOutcome, run_owner_agent
 from app.integrations.calendar import (
@@ -297,7 +298,10 @@ def answer_owner(
 
     port = embedding_port or build_embedding_port(settings)
     moment = now or datetime.now(UTC)
-    if graph_state is not None and graph_state.get("retrieval_done"):
+    if requests_no_history(owner_text):
+        history = ()
+        context = None
+    elif graph_state is not None and graph_state.get("retrieval_done"):
         # Exactly one retrieval pass per turn: the graph already did it, through policy.
         context = owner_context_from_state(graph_state)
     else:

@@ -16,6 +16,7 @@ import json
 from typing import Any
 
 import httpx
+import pytest
 from app.brain.embeddings import FakeEmbeddingPort
 from app.brain.schemas import (
     KnowledgeCategory,
@@ -29,6 +30,7 @@ from app.capabilities.types import Principal
 from app.core.config import get_settings
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
+from app.domain.memory import ConversationTurn
 from app.domain.owner.brain import answer_owner, run_owner_turn
 from app.domain.owner.tasks import OwnerTaskType
 from app.integrations.llm_client import LlmClient
@@ -184,6 +186,39 @@ def _turn(brain, session, port, client, *, settings):
 
 
 # --------------------------------------------------------------------------- tests
+
+
+@pytest.mark.parametrize("message", [
+    "Read my current calendar. Don't use history.",
+    "תבדקי את היומן עכשיו אל תשתמשי בהיסטוריה",
+])
+def test_explicit_no_history_skips_retrieval_and_prior_context(monkeypatch, message):
+    from app.domain.owner import brain as owner_brain
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("history retrieval must not run")
+
+    monkeypatch.setattr(owner_brain, "assemble_owner_context", forbidden)
+    monkeypatch.setattr(owner_brain, "owner_context_from_state", forbidden)
+    session, brain = _seeded_brain()
+    embedding = FakeEmbeddingPort()
+    client, script = _client("Current calendar result")
+    try:
+        result = answer_owner(
+            principal=Principal.owner(source="test"), store=LeadStore(session), brain=brain,
+            settings=_settings(), task_type=OwnerTaskType.NOTE, owner_text=message,
+            history=(ConversationTurn(role="mia", text="STALE_HISTORY_SENTINEL"),),
+            fallback_text=FALLBACK, kill_switch=False, demo_active=False,
+            embedding_port=embedding, client=client,
+            graph_state={"retrieval_done": True, "memory_hits": [{"text": MEMORY_TEXT}]},
+        )
+    finally:
+        session.close()
+    assert result.used_agent
+    assert embedding.calls == 0
+    payload = json.dumps(script.requests)
+    assert "STALE_HISTORY_SENTINEL" not in payload
+    assert MEMORY_TEXT not in payload
 
 
 def test_one_owner_turn_retrieves_exactly_once(monkeypatch) -> None:

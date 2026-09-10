@@ -8,10 +8,16 @@ no button and no text command — `pending_approvals` could only grow.
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 
 from app.core.config import Settings
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
+from app.domain.approvals import (
+    ACTION_LINKEDIN_COMPOSIO_WRITE,
+    DECISION_PENDING,
+    approval_expires_at,
+)
 from app.domain.events import Channel
 from app.domain.owner.tasks import OwnerTaskType, classify_owner_task
 from app.integrations.base import OutboundMessage
@@ -98,19 +104,33 @@ def test_taking_over_from_telegram_stops_mia_replying() -> None:
         db.close()
 
 
-def test_the_keyboard_tracks_whether_anything_is_actually_pending() -> None:
-    """Order-independent: other tests share this DB and may leave approvals behind."""
+def test_only_explicit_pending_request_gets_an_existing_approval_keyboard() -> None:
     init_db()
     db = get_session_factory()()
     try:
         store = LeadStore(db)
-        port = CapturingPort()
-        _run("מה קורה היום?", store, port)
-        assert port.sent
-        has_pending = bool(store.list_all_pending_approvals())
-        has_buttons = bool(port.sent[0].reply_markup)
-        assert has_buttons == has_pending, (
-            "buttons must appear exactly when something is waiting on him"
+        store.upsert_linkedin_approval(
+            channel=Channel.TELEGRAM.value,
+            action=ACTION_LINKEDIN_COMPOSIO_WRITE,
+            risk="R4",
+            payload_hash="7" * 64,
+            decision=DECISION_PENDING,
+            resource_id="li_owner_controls_pending",
+            expires_at=approval_expires_at(now=datetime.now(UTC)),
+            proposed_parameters=(
+                '{"arguments":{"text":"pending"},"slug":"LINKEDIN_POST"}'
+            ),
         )
+        assert store.list_all_pending_approvals()
+
+        generic_port = CapturingPort()
+        _run("מה קורה היום?", store, generic_port)
+        assert generic_port.sent
+        assert generic_port.sent[0].reply_markup is None
+
+        pending_port = CapturingPort()
+        _run("מה מחכה לאישור?", store, pending_port)
+        assert pending_port.sent
+        assert pending_port.sent[0].reply_markup is not None
     finally:
         db.close()
