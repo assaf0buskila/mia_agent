@@ -86,6 +86,7 @@ class SiteSession:
     page_section: str = ""
     acquisition_context: dict[str, str] = field(default_factory=dict)
     crm_written: bool = False
+    conversion_reported: bool = False
 
 
 @dataclass
@@ -184,6 +185,7 @@ def dump_site_session(session: SiteSession) -> str:
             "value_shown": session.value_shown,
             "contact_requested": session.contact_requested,
             "contact_captured": session.contact_captured,
+            "conversion_reported": session.conversion_reported,
             "discovery_questions": session.discovery_questions,
             "last_question_topic": session.last_question_topic,
             "asked_topics": list(session.asked_topics),
@@ -235,6 +237,7 @@ def load_site_session(session: SiteSession, raw: str) -> bool:
     session.value_shown = bool(data.get("value_shown"))
     session.contact_requested = bool(data.get("contact_requested"))
     session.contact_captured = bool(data.get("contact_captured"))
+    session.conversion_reported = bool(data.get("conversion_reported"))
     try:
         session.discovery_questions = max(0, int(data.get("discovery_questions", 0) or 0))
     except (TypeError, ValueError):
@@ -887,7 +890,7 @@ def format_owner_ping(session: SiteSession) -> str:
     friction = session.friction_summary.strip() or fields.want.strip()
     missing = _missing_for_owner(session)
     lines = [
-        "ליד חדש מהאתר",
+        "ליד חדש מהאתר — ליד חם",
         f"שם: {fields.name.strip() or _UNKNOWN}",
         f"טלפון: {fields.phone.strip() or _UNKNOWN}",
         f"אימייל: {fields.email.strip() or _UNKNOWN}",

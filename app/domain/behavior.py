@@ -24,6 +24,7 @@ SERVER_BEHAVIOR_KINDS = frozenset({
     "conversation_started",
     "whatsapp_handoff",
     "whatsapp_handoff_offered",
+    "website_conversion",
 })
 
 ALL_BEHAVIOR_KINDS = CLIENT_BEHAVIOR_KINDS | SERVER_BEHAVIOR_KINDS
@@ -99,6 +100,8 @@ def behavior_provider_event_id(session_id: str, payload: dict[str, str]) -> str:
         return f"{session_id}:whatsapp_handoff"
     if kind == "whatsapp_handoff_offered":
         return f"{session_id}:whatsapp_handoff_offered"
+    if kind == "website_conversion":
+        return f"{session_id}:website_conversion"
     if kind == "page_viewed":
         return f"{session_id}:page:{payload['path']}"
     if kind == "section_viewed":
