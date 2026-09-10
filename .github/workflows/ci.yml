@@ -85,4 +85,4 @@ jobs:
         run: |
           docker run --rm -d --name mia-ci -p 127.0.0.1:8000:8000 -e MIA_ENV=test -e MIA_DATABASE_URL=sqlite:///:memory: mia:ci
           trap 'docker stop mia-ci' EXIT
-          curl --fail --retry 12 --retry-connrefused --retry-delay 2 http://127.0.0.1:8000/health/live
+          curl --fail --retry 12 --retry-all-errors --retry-connrefused --retry-delay 2 --max-time 10 http://127.0.0.1:8000/health/live
