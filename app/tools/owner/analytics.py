@@ -172,6 +172,8 @@ def _linkedin_snapshot(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     if outcome.status not in {"ok", "empty"}:
         return ToolResult(ok=False, error=f"LinkedIn profile read failed ({outcome.status}).")
     result = _empty(text, "LinkedIn returned nothing.")
+    if outcome.status == "ok" and text.strip():
+        result.evidence = "linkedin_profile"
     if full_profile:
         result.max_chars = 8_000
     return result

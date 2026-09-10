@@ -74,9 +74,8 @@ def sales_model_label(
 # him -- so it needs a name of its own to be recordable.
 OWNER_REPLY_ACTION = "owner_reply"
 
-# Mirrors `app.surfaces.site_policy.SITE_ACTIONS`. Duplicated rather than imported
-# because domain must not depend on a surface; `test_ai_runs_vocabulary.py` fails if
-# the two ever drift apart.
+# Historical website action vocabulary retained for existing AI-run records.
+# The v2 reasoning surface owns current response actions and prompt versions.
 WEBSITE_ACTIONS = frozenset(
     {
         "ask_need",
@@ -88,6 +87,7 @@ WEBSITE_ACTIONS = frozenset(
         "complaint",
         "identity",
         "confirm_contact",
+        "contact_saved",
         "voice_fail",
         "tool_status",
         "no_metric",

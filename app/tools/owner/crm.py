@@ -2,81 +2,41 @@
 
 from __future__ import annotations
 
-import json
-from hashlib import sha256
+from dataclasses import asdict
 from typing import Any
 
 from app.domain.tools import AdapterHttpError
 from app.domain.two_state import is_sheets_health_ask
 from app.integrations.sheets import build_sheets_port
+from app.services.crm_v2 import CrmError, CrmService
+from app.services.owner_actions import propose_owner_action, sync_owner_crm_sheet_in_session
 from app.surfaces.crm import (
     ACTIVITY_TAB,
-    CONTACTS_TAB,
     ContactRecord,
-    CrmDenied,
-    build_contacts_crm,
-    log_contact,
 )
-from app.tools.owner.types import OUTCOME_PARTIAL, ToolContext, ToolResult, _crm_spreadsheet_id
+from app.surfaces.owner_crm_intent import is_explicit_owner_crm_write_intent
+from app.tools.owner.types import ToolContext, ToolResult, _crm_spreadsheet_id
 
 
 def _crm_search(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     query = str(args.get("query") or ctx.owner_text or "").strip()
     port = ctx.sheets or build_sheets_port(ctx.settings)
-    reader = getattr(port, "read_locked_contacts", None)
-    rows = reader() if callable(reader) else []
-    read_activity = _read_locked_activity(port, ctx)
-    activity_failed = read_activity is None
-    activity_rows = read_activity or []
-    # Reading half of what was asked for is not a success. Every exit below carries
-    # this so a broken Activity tab can never look like a quiet one.
-    partial = OUTCOME_PARTIAL if activity_failed else ""
-    header = (
-        "Google Sheets CRM is connected. Live tabs: Contacts and Activity. "
-        "No lead ids. The sheet URL is already known."
+    problem = _sync_current_sheet_edits(ctx, port)
+    if problem:
+        return ToolResult(ok=False, error=problem)
+    contacts = CrmService(ctx.store.session).lookup(query=query or None, limit=20)
+    if not contacts:
+        return ToolResult(ok=True, text="No CRM contact matched.")
+    return ToolResult(
+        ok=True,
+        text="CRM contacts:\n"
+        + "\n".join(
+            f"- {item.id} rev {item.revision}: "
+            + " | ".join(value for value in item.fields.values() if value)
+            for item in contacts
+        ),
     )
-    if not rows and not activity_rows:
-        if activity_failed:
-            return ToolResult(
-                ok=True,
-                outcome=OUTCOME_PARTIAL,
-                text=(
-                    f"{header} Contacts is empty so far. {ACTIVITY_TAB} could not be "
-                    "read on this attempt, so this answer is incomplete."
-                ),
-            )
-        return ToolResult(ok=True, text=f"{header} Contacts is empty so far.")
-    body = rows[1:] if len(rows) > 1 else rows
-    needle = query.casefold()
-    health = _crm_health_query(query)
-    matches: list[str] = []
-    if not health:
-        for row in body:
-            blob = " | ".join(str(cell) for cell in row)
-            if "lead_" in blob.lower() or "01 Leads" in blob:
-                continue
-            if not needle or needle in blob.casefold():
-                matches.append(blob)
-            if len(matches) >= 8:
-                break
-    lines = [header, f"{CONTACTS_TAB} rows including header: {len(rows)}."]
-    if activity_rows:
-        lines.append(f"{ACTIVITY_TAB} rows including header: {len(activity_rows)}.")
-    elif activity_failed:
-        lines.append(
-            f"{ACTIVITY_TAB} could not be read on this attempt. The Contacts lines "
-            "below are complete; the Activity log is missing from this answer."
-        )
-    else:
-        lines.append(f"{ACTIVITY_TAB} is the log tab.")
-    if health:
-        return ToolResult(ok=True, outcome=partial, text="\n".join(lines))
-    if not matches:
-        lines.append("No Contacts row matched.")
-        return ToolResult(ok=True, outcome=partial, text="\n".join(lines))
-    lines.append("Contacts:")
-    lines.extend(matches)
-    return ToolResult(ok=True, outcome=partial, text="\n".join(lines))
+
 
 
 def _crm_health_query(query: str) -> bool:
@@ -115,6 +75,11 @@ def _read_locked_activity(port: object, ctx: ToolContext) -> list[list[str]] | N
 
 
 def _crm_upsert(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
+    if not is_explicit_owner_crm_write_intent(ctx.owner_text):
+        return ToolResult(
+            ok=False,
+            error="Contacts write requires an explicit affirmative request in this owner message.",
+        )
     record = ContactRecord(
         name=str(args.get("name") or "").strip(),
         phone=str(args.get("phone") or "").strip(),
@@ -133,53 +98,111 @@ def _crm_upsert(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     blob = " ".join(record.cells())
     if "lead_" in blob.lower():
         return ToolResult(ok=False, error="lead ids are not used")
+
+
+
+
+def _crm_record_activity(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
+    contact_id = str(args.get("contact_id") or "").strip()
+    kind = str(args.get("kind") or "activity").strip()
+    summary = str(args.get("summary") or "").strip()
+    if not contact_id or not summary:
+        return ToolResult(ok=False, error="contact_id and summary are required")
     port = ctx.sheets or build_sheets_port(ctx.settings)
-    crm = build_contacts_crm(ctx.settings, port)
-    # Durable duplicate protection, same shape as the sheets_append/update writes:
-    # keyed on the owner event plus the exact row, so a retried owner message cannot
-    # write the contact twice.
-    canonical = json.dumps(
-        {"event": ctx.source_ref, "operation": "crm_upsert", "cells": record.cells()},
-        ensure_ascii=True,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    key = sha256(canonical.encode("utf-8")).hexdigest()
-    if not ctx.store.claim_operation(scope="owner_crm_write", key=key):
-        return ToolResult(
-            ok=True, text="This exact Contacts row was already written for this message."
-        )
+    problem = _sync_current_sheet_edits(ctx, port)
+    if problem:
+        return ToolResult(ok=False, error=problem)
     try:
-        log_contact(
-            crm,
-            record,
-            who="אסף",
-            channel="telegram",
-            action="עדכון איש קשר",
-            result="נרשם",
+        snapshot = CrmService(ctx.store.session).snapshot_target(contact_id)
+        proposal = propose_owner_action(
+            ctx.store,
+            principal=ctx.principal,
+            source_ref=ctx.source_ref,
+            kind="crm.activity",
+            parameters={"contact_id": contact_id, "kind": kind, "summary": summary},
+            target=asdict(snapshot),
         )
-    except CrmDenied as exc:
-        ctx.store.fail_operation(scope="owner_crm_write", key=key)
-        return ToolResult(ok=False, error=str(exc) or "lead ids are not used")
-    except AdapterHttpError as exc:
-        # Composio reported the write failed, or the response did not match the
-        # adapter contract. Either way it is NOT a success: saying "Wrote Contacts"
-        # here is how a rejected CRM write reached Assaf as done.
-        # The row may still have landed before a transport failure, so keep the claim
-        # completed rather than freeing it for a silent duplicate retry.
-        ctx.store.complete_operation(
-            scope="owner_crm_write", key=key, result_json='{"ok":false}'
-        )
-        return ToolResult(
-            ok=False, error=f"Contacts write failed ({exc.tool_status()}); nothing was saved."
-        )
-    except (RuntimeError, ValueError, OSError):
-        ctx.store.fail_operation(scope="owner_crm_write", key=key)
-        return ToolResult(ok=False, error="Contacts write failed; nothing was saved.")
-    ctx.store.complete_operation(
-        scope="owner_crm_write", key=key, result_json='{"ok":true}'
-    )
+    except (CrmError, PermissionError, ValueError) as exc:
+        return ToolResult(ok=False, error=f"CRM activity proposal could not be bound: {exc}")
     return ToolResult(
         ok=True,
-        text=f"Wrote Contacts on {_crm_spreadsheet_id(ctx)}.",
+        text="Prepared an exact CRM activity proposal. Nothing was written.",
+        approval_id=proposal.approval_id,
     )
+
+
+def _crm_conflicts(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
+    port = ctx.sheets or build_sheets_port(ctx.settings)
+    problem = _sync_current_sheet_edits(ctx, port)
+    if problem:
+        return ToolResult(ok=False, error=problem)
+    contact_id = str(args.get("contact_id") or "").strip() or None
+    conflicts = CrmService(ctx.store.session).list_conflicts(contact_id=contact_id)
+    if not conflicts:
+        return ToolResult(ok=True, text="No unresolved CRM conflicts.")
+    return ToolResult(
+        ok=True,
+        text="Unresolved CRM conflicts:\n"
+        + "\n".join(
+            f"- {item.id} contact={item.contact_id} field={item.field_name or '-'} "
+            f"database={item.database_value!r} sheet={item.sheet_value!r}"
+            for item in conflicts
+        ),
+    )
+
+
+def _crm_resolve_conflict(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
+    conflict_id = str(args.get("conflict_id") or "").strip()
+    resolution = str(args.get("resolution") or "").strip().lower()
+    value = args.get("value")
+    if not conflict_id or resolution not in {"database", "sheet", "value"}:
+        return ToolResult(ok=False, error="conflict_id and a valid resolution are required")
+    if resolution == "value" and not isinstance(value, str):
+        return ToolResult(ok=False, error="value resolution requires an explicit value")
+    port = ctx.sheets or build_sheets_port(ctx.settings)
+    problem = _sync_current_sheet_edits(ctx, port)
+    if problem:
+        return ToolResult(ok=False, error=problem)
+    service = CrmService(ctx.store.session)
+    conflict = next(
+        (item for item in service.list_conflicts() if item.id == conflict_id), None
+    )
+    if conflict is None:
+        return ToolResult(ok=False, error="the unresolved CRM conflict was not found")
+    try:
+        contact = service.snapshot_target(conflict.contact_id)
+        proposal = propose_owner_action(
+            ctx.store,
+            principal=ctx.principal,
+            source_ref=ctx.source_ref,
+            kind="crm.resolve_conflict",
+            parameters={
+                "conflict_id": conflict.id,
+                "resolution": resolution,
+                "value": value if isinstance(value, str) else None,
+                "contact_id": contact.contact_id,
+                "expected_revision": contact.revision,
+            },
+            target={"conflict": asdict(conflict), "contact": asdict(contact)},
+        )
+    except (CrmError, PermissionError, ValueError) as exc:
+        return ToolResult(ok=False, error=f"CRM resolution proposal could not be bound: {exc}")
+    return ToolResult(
+        ok=True,
+        text="Prepared an exact CRM conflict-resolution proposal. Nothing was changed.",
+        approval_id=proposal.approval_id,
+    )
+
+
+def _sync_current_sheet_edits(ctx: ToolContext, port: object) -> str:
+    """Import owner-edited Contacts before every v2 CRM read/proposal snapshot."""
+    if not all(
+        callable(getattr(port, name, None))
+        for name in ("ensure_crm_workspace", "read_crm_contacts_chunk")
+    ):
+        return "CRM sheet import is unavailable; refusing to use a stale target"
+    try:
+        sync_owner_crm_sheet_in_session(ctx.store, sheets=port)
+    except (AdapterHttpError, OSError, RuntimeError, TypeError, ValueError):
+        return "CRM sheet import failed; refusing to use a stale target"
+    return ""

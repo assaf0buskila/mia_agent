@@ -20,6 +20,7 @@ from app.domain.gmail.drafts import (
 from app.integrations.composio_catalog import (
     DENIED_COMPOSIO_SLUGS,
     OWNER_REQUESTED_GMAIL_SEND_SLUGS,
+    VERIFIED_COMPOSIO_READ_SLUGS,
     risk_for_slug,
 )
 from app.integrations.gmail import FakeGmailPort, GmailDraft
@@ -28,9 +29,8 @@ from app.tools.registries.owner_tools import tool_names
 _APP = Path(__file__).resolve().parents[2] / "app"
 _NO_GMAIL_SEND_MODULES = (
     _APP / "api" / "website.py",
-    _APP / "domain" / "handoff" / "website_brief.py",
     _APP / "workers" / "due_scan.py",
-    _APP / "agents" / "client" / "graph.py",
+    _APP / "workers" / "crm_runtime.py",
 )
 
 
@@ -69,9 +69,7 @@ def test_recoverable_gmail_trash_is_not_delete_forever() -> None:
         assert risk_for_slug(slug).value == "R3"
 
 
-def test_gsc_and_ga_follow_official_catalog_without_invented_pins() -> None:
-    from app.tools.registries.mia_preloaded_tools import PRELOADED_TOOLS, preloaded_tool
-
+def test_gsc_and_ga_risk_policy_uses_official_operation_classes() -> None:
     assert "GOOGLE_SEARCH_CONSOLE_DELETE_SITE" in DENIED_COMPOSIO_SLUGS
     for slug, toolkit in (
         ("GOOGLE_SEARCH_CONSOLE_ADD_SITE", "GOOGLE_SEARCH_CONSOLE"),
@@ -80,22 +78,15 @@ def test_gsc_and_ga_follow_official_catalog_without_invented_pins() -> None:
     ):
         assert slug not in DENIED_COMPOSIO_SLUGS
         assert risk_for_slug(slug, toolkit).value == "R3"
-    assert risk_for_slug(
-        "GOOGLE_SEARCH_CONSOLE_GET_SITE", "GOOGLE_SEARCH_CONSOLE"
-    ).value == "R0"
-    assert risk_for_slug(
-        "GOOGLE_SEARCH_CONSOLE_LIST_SITEMAPS", "GOOGLE_SEARCH_CONSOLE"
-    ).value == "R0"
-    toolkits = {tool.toolkit for tool in PRELOADED_TOOLS}
-    assert "GMAIL" in toolkits
-    assert "GOOGLE_ANALYTICS" in toolkits
-    assert "GOOGLE_SEARCH_CONSOLE" in toolkits
-    assert "GOOGLE_SEARCH" not in toolkits
-    assert "SERPAPI" not in toolkits
-    assert "COMPOSIO_SEARCH" not in toolkits
-    assert preloaded_tool("GOOGLE_SEARCH_CONSOLE_ADD_SITE") is None
-    assert preloaded_tool("GOOGLE_SEARCH_CONSOLE_SUBMIT_SITEMAP") is None
-    assert preloaded_tool("GOOGLE_ANALYTICS_SEND_EVENTS") is None
+    # Only the exact verified read registry is R0. Similar-looking or unknown
+    # GSC/GA operations remain approval-classified and cannot become reads by naming.
+    assert "GOOGLE_SEARCH_CONSOLE_GET_SITE" not in VERIFIED_COMPOSIO_READ_SLUGS
+    assert "GOOGLE_SEARCH_CONSOLE_LIST_SITEMAPS" not in VERIFIED_COMPOSIO_READ_SLUGS
+    assert risk_for_slug("GOOGLE_SEARCH_CONSOLE_GET_SITE", "GOOGLE_SEARCH_CONSOLE").value == "R3"
+    assert (
+        risk_for_slug("GOOGLE_SEARCH_CONSOLE_LIST_SITEMAPS", "GOOGLE_SEARCH_CONSOLE").value == "R3"
+    )
+    assert risk_for_slug("GOOGLE_ANALYTICS_GET_SECRET_THING", "GOOGLE_ANALYTICS").value == "R3"
     visitor = Principal.client(source="website")
     with pytest.raises(PermissionDenied):
         authorize("search_console.query", principal=visitor)

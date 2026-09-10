@@ -1,32 +1,22 @@
 import inspect
 from datetime import UTC, datetime
 
-import pytest
-from app.api.inbound import process_inbound_texts
 from app.core.capabilities import CapabilityId, require_alive
 from app.db.models import CanonicalEventRow, OwnerWeeklyRow
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
-from app.domain.commitments import (
-    ACTION_LOG,
-    CONDITION_NONE,
-    TRIGGER_NONE,
-    plan_owner_commitment,
-)
 from app.domain.events import (
     Channel,
     build_meeting_booked_event,
     build_meeting_cancellation_requested_event,
 )
 from app.domain.kpis import week_start_on
-from app.domain.owner.tasks import OwnerTaskType, classify_owner_task
 from app.domain.owner.weeklies import (
     apply_owner_weekly,
     apply_owner_weekly_policy,
     compute_weekly_brief,
     format_weekly_brief,
 )
-from app.integrations.base import RecordingMessagePort
 from sqlalchemy import delete
 
 FROZEN_NOW = datetime(2026, 8, 21, 9, 0, tzinfo=UTC)
@@ -37,52 +27,6 @@ def _week_start() -> str:
     value = week_start_on(now=FROZEN_NOW, timezone=TIMEZONE)
     assert value is not None
     return value
-
-
-def test_classify_weekly_brief_english() -> None:
-    decision = classify_owner_task("send me the weekly brief")
-    assert decision.task_type == OwnerTaskType.WEEKLY_BRIEF
-    assert decision.needs_clarification is False
-
-
-def test_classify_weekly_brief_hebrew() -> None:
-    decision = classify_owner_task("תני לי סיכום שבועי")
-    assert decision.task_type == OwnerTaskType.WEEKLY_BRIEF
-    assert decision.needs_clarification is False
-
-
-def test_classify_daily_brief_still_daily_not_weekly() -> None:
-    decision = classify_owner_task("daily brief")
-    assert decision.task_type == OwnerTaskType.DAILY_BRIEF
-    assert decision.needs_clarification is False
-    weekly = classify_owner_task("weekly brief")
-    assert weekly.task_type == OwnerTaskType.WEEKLY_BRIEF
-    assert weekly.task_type != OwnerTaskType.DAILY_BRIEF
-
-
-def test_classify_weekly_brief_plus_analytics_clarification() -> None:
-    decision = classify_owner_task("weekly brief and instagram content")
-    assert decision.task_type == OwnerTaskType.NOTE
-    assert decision.needs_clarification is True
-    assert decision.matched_types == ["analytics", "weekly_brief"]
-
-
-def test_classify_bare_week_or_hashavua_not_weekly() -> None:
-    assert classify_owner_task("week").task_type == OwnerTaskType.NOTE
-    assert classify_owner_task("השבוע").task_type == OwnerTaskType.NOTE
-
-
-def test_plan_weekly_brief_trigger_none_even_with_due_at() -> None:
-    text = "weekly brief today"
-    decision = classify_owner_task(text)
-    plan = plan_owner_commitment(
-        decision=decision,
-        text=text,
-        due_at="2026-08-21",
-    )
-    assert plan.trigger == TRIGGER_NONE
-    assert plan.condition == CONDITION_NONE
-    assert plan.action == ACTION_LOG
 
 
 def test_format_weekly_brief_header_and_no_execute_line() -> None:
@@ -201,9 +145,7 @@ def test_apply_owner_weekly_policy_persists_and_upserts() -> None:
         assert row2 is not None
         assert row2.leads == updated.leads
     finally:
-        db.execute(
-            delete(OwnerWeeklyRow).where(OwnerWeeklyRow.week_start == week_start)
-        )
+        db.execute(delete(OwnerWeeklyRow).where(OwnerWeeklyRow.week_start == week_start))
         db.commit()
         db.close()
 
@@ -288,8 +230,7 @@ def test_compute_weekly_cancellation_requests_increment_in_iso_week() -> None:
     finally:
         db.execute(
             delete(CanonicalEventRow).where(
-                CanonicalEventRow.provider_event_id
-                == f"{lead_id}:cancellation_requested"
+                CanonicalEventRow.provider_event_id == f"{lead_id}:cancellation_requested"
             )
         )
         db.commit()
@@ -306,49 +247,3 @@ def test_owner_weeklies_module_no_message_or_openai() -> None:
     source = inspect.getsource(module)
     assert "MessagePort" not in source
     assert "openai" not in source.lower()
-
-
-@pytest.mark.asyncio
-async def test_owner_inbound_weekly_brief_scorecard_and_persist() -> None:
-    init_db()
-    db = get_session_factory()()
-    week_start = week_start_on(now=datetime.now(UTC), timezone=TIMEZONE)
-    assert week_start is not None
-    try:
-        store = LeadStore(db)
-        port = RecordingMessagePort()
-        owner_phone = "972509994701"
-        event_id = "evt.weekly.owner.1"
-        await process_inbound_texts(
-            provider="whatsapp",
-            channel=Channel.WHATSAPP,
-            items=[
-                {
-                    "id": event_id,
-                    "from": owner_phone,
-                    "text": "weekly brief",
-                }
-            ],
-            store=store,
-            port=port,
-            kill_switch=False,
-            owner_ids={owner_phone},
-        )
-        db.commit()
-        task = store.get_owner_task(provider="whatsapp", provider_event_id=event_id)
-        assert task is not None
-        assert task.task_type == "weekly_brief"
-        assert task.due_at is None
-        assert len(port.sent) == 1
-        ack = port.sent[0].text
-        assert "סיכום שבועי" in ack
-        assert "לא שלחתי מעקבים" in ack
-        assert "lead_" not in ack
-        row = store.get_owner_weekly(week_start)
-        assert row is not None
-    finally:
-        db.execute(
-            delete(OwnerWeeklyRow).where(OwnerWeeklyRow.week_start == week_start)
-        )
-        db.commit()
-        db.close()

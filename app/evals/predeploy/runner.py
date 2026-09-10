@@ -1,18 +1,4 @@
-"""Execute the predeploy scenarios against the real models.
-
-This is the only module in the package that calls a provider, and it refuses to do so
-until `gate_status` says the operator asked for it and `assert_sealed` says the process
-cannot reach production. Everything it drives is the real code path: `run_site_turn`
-with the real `SalesReplyPort`, and `answer_owner` with the real owner agent loop. The
-only substitutions are the integration ports and the embedding port, and both are
-substituted so the *result* is deterministic, not so the path is shorter.
-
-One suite-level check deserves its own note. `phrase_site_reply` swallows every provider
-failure and returns the canned line, which is correct in production and disastrous for a
-gate: a totally dead model would produce a full green board of canned copy. So the suite
-sums the tokens the website turns actually billed, and blocks the release if the number
-is zero.
-"""
+"""Execute the opt-in owner predeploy scenarios against the real model."""
 
 from __future__ import annotations
 
@@ -20,25 +6,15 @@ import os
 import time
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
-from uuid import uuid4
 
 from app.capabilities.types import Principal
 from app.core.config import Settings, get_settings
-from app.domain.memory import ConversationTurn
 from app.domain.owner.brain import answer_owner
 from app.domain.owner.tasks import OwnerTaskType
 from app.evals.predeploy.checks import (
     CLAIMED_ACTION_EN,
     CLAIMED_ACTION_HE,
-    contact_details_in,
-    discovery_topics_in,
-    has_value_before_contact,
-    missing_all,
-    non_contact_question,
     present,
-    states_number,
-    unexpected_numbers,
-    website_cta_visible,
 )
 from app.evals.predeploy.gate import GateStatus, gate_status
 from app.evals.predeploy.report import (
@@ -49,24 +25,16 @@ from app.evals.predeploy.report import (
     skipped_report,
 )
 from app.evals.predeploy.sandbox import (
-    SANDBOX_OWNER_ID,
-    SealedOwnerPort,
     assert_sealed,
     build_owner_world,
-    build_site_crm,
     seal_process_environment,
     sealed_settings,
 )
 from app.evals.predeploy.scenarios import (
     OWNER,
-    PRICE_MARKS,
-    WEBSITE,
     OwnerRun,
     OwnerScenario,
-    SiteRun,
-    SiteScenario,
     owner_scenarios,
-    website_scenarios,
 )
 from app.integrations.llm_client import (
     GEMINI_CHAT_URL,
@@ -74,9 +42,6 @@ from app.integrations.llm_client import (
     LlmClient,
     LlmModelChain,
 )
-from app.surfaces.site import SiteBook, run_site_turn
-from app.surfaces.site_policy import BURST_WINDOW_S, VISITOR_TOOL_LEAKS, is_filler
-from app.surfaces.site_reply import build_site_reply_port
 
 # A model id no provider will ever own. Used to prove the owner path degrades loudly
 # instead of silently dropping back to the keyword classifier.
@@ -85,206 +50,6 @@ BROKEN_MODEL = "mia-predeploy-no-such-model"
 # What the deterministic classifier would have said. Distinctive so a scenario can tell
 # "the agent answered" from "the agent gave up and this came through".
 OWNER_FALLBACK_TEXT = "PREDEPLOY_DETERMINISTIC_FALLBACK"
-
-# Wide enough that two scripted turns are never stitched into one burst. Real model
-# latency usually does this anyway; passing an explicit clock makes it certain.
-_TURN_GAP_S = BURST_WINDOW_S + 6.0
-
-
-def _site_session_id(scenario_id: str) -> str:
-    return f"predeploy-{scenario_id}-{uuid4().hex[:8]}"
-
-
-def run_website_scenario(
-    scenario: SiteScenario, *, settings: Settings, reply_port: object
-) -> SiteRun:
-    """Drive the real site turn loop once. Ports are per-run, so runs cannot interfere."""
-    book = SiteBook()
-    session_id = _site_session_id(scenario.scenario_id)
-    book.open(session_id)
-    crm = build_site_crm()
-    if scenario.seed_crm is not None:
-        scenario.seed_crm(crm)
-    seeded_writes = len(crm.tabs)
-    seeded_upserts = crm.tabs.count("Contacts")
-    owner_port = SealedOwnerPort()
-    replies: list[str] = []
-    actions: list[str] = []
-    turn_states: list[dict] = []
-    whatsapp_urls: list[str | None] = []
-    turn_tokens: list[int] = []
-    model_replies_used: list[bool] = []
-    history: list[ConversationTurn] = []
-    tokens_in = 0
-    tokens_out = 0
-    crm_wrote = False
-    owner_pinged = False
-    clock = time.monotonic()
-    last_index = len(scenario.turns) - 1
-    for index, text in enumerate(scenario.turns):
-        form = dict(scenario.form) if index == last_index else {}
-        turn = run_site_turn(
-            session_id=session_id,
-            text=text,
-            settings=settings,
-            crm=crm,
-            owner_port=owner_port,
-            name=form.get("name", ""),
-            phone=form.get("phone", ""),
-            email=form.get("email", ""),
-            date=form.get("date", ""),
-            book=book,
-            facts=scenario.facts,
-            now=clock + index * _TURN_GAP_S,
-            turns=tuple(history),
-            reply_port=reply_port,  # type: ignore[arg-type]
-        )
-        replies.append(turn.reply)
-        actions.append(turn.next_action)
-        session = book.get(session_id)
-        turn_states.append(
-            {
-                key: getattr(session, key, False if key != "discovery_questions" else 0)
-                for key in (
-                    "business_known",
-                    "friction_known",
-                    "value_shown",
-                    "discovery_questions",
-                )
-            }
-        )
-        whatsapp_urls.append(turn.whatsapp_url)
-        turn_tokens.append(turn.tokens_in + turn.tokens_out)
-        model_replies_used.append(bool(getattr(turn, "model_reply_used", False)))
-        history.append(ConversationTurn(role="prospect", text=text))
-        history.append(ConversationTurn(role="mia", text=turn.reply))
-        tokens_in += turn.tokens_in
-        tokens_out += turn.tokens_out
-        crm_wrote = crm_wrote or turn.crm_wrote
-        owner_pinged = owner_pinged or turn.owner_pinged
-    return SiteRun(
-        scenario_id=scenario.scenario_id,
-        replies=tuple(replies),
-        actions=tuple(actions),
-        crm=crm,
-        owner_port=owner_port,
-        crm_wrote=crm_wrote,
-        owner_pinged=owner_pinged,
-        crm_writes=max(0, len(crm.tabs) - seeded_writes),
-        tokens_in=tokens_in,
-        tokens_out=tokens_out,
-        turn_states=tuple(turn_states),
-        whatsapp_urls=tuple(whatsapp_urls),
-        turn_tokens=tuple(turn_tokens),
-        crm_upserts=crm.tabs.count("Contacts") - seeded_upserts,
-        model_replies_used=tuple(model_replies_used),
-    )
-
-
-def check_website_run(scenario: SiteScenario, run: SiteRun) -> tuple[str, ...]:
-    """Every website invariant, asserted on structure and substrings. No judge model."""
-    problems: list[str] = []
-    if not run.replies:
-        return ("the scenario produced no turns",)
-    visible_value = False
-    for index, reply in enumerate(run.replies, start=1):
-        if not reply.strip():
-            problems.append(f"turn {index} was silent; every seen turn owes a line")
-        leaks = present(reply, VISITOR_TOOL_LEAKS)
-        if leaks:
-            problems.append(f"turn {index} named internal tools to a visitor: {list(leaks)}")
-        details = contact_details_in(reply)
-        if details:
-            problems.append(f"turn {index} put contact details in visitor copy: {list(details)}")
-        forbidden = present(reply, scenario.forbid)
-        if forbidden:
-            problems.append(f"turn {index} carried forbidden content: {list(forbidden)}")
-        if scenario.forbid_price_marks and present(reply, PRICE_MARKS):
-            problems.append(f"turn {index} stated an unpublished price")
-        if (scenario.forbid_numbers or scenario.allow_numbers) and unexpected_numbers(
-            reply, scenario.allow_numbers
-        ):
-            problems.append(f"turn {index} invented numbers")
-        if index <= len(run.whatsapp_urls) and run.whatsapp_urls[index - 1]:
-            if not website_cta_visible(run.actions[index - 1], run.whatsapp_urls[index - 1]):
-                problems.append(f"turn {index} returned a WhatsApp URL the widget would hide")
-        if scenario.conversion_gate:
-            visible_value = visible_value or has_value_before_contact(reply, scenario.value_terms)
-            state = run.turn_states[index - 1] if index <= len(run.turn_states) else {}
-            topics = discovery_topics_in(reply)
-            for topic, deadline in (
-                ("business", scenario.business_known_by),
-                ("friction", scenario.friction_known_by),
-            ):
-                expected_closed = bool(deadline and index >= deadline)
-                if expected_closed and not state.get(f"{topic}_known"):
-                    problems.append(f"turn {index} failed to close {topic}")
-                if (expected_closed or state.get(f"{topic}_known")) and topic in topics:
-                    problems.append(f"turn {index} re-asked closed topic {topic}")
-            enough_context = state.get("business_known") and state.get("friction_known")
-            due = scenario.contact_by and index >= scenario.contact_by
-            if enough_context or due:
-                if run.actions[index - 1] not in {"ask_contact", "confirm_contact", "handoff"}:
-                    problems.append(f"turn {index} continued discovery instead of conversion")
-                if not state.get("value_shown") or not visible_value:
-                    problems.append(f"turn {index} requested contact without showing value")
-                if topics or non_contact_question(reply):
-                    problems.append(f"turn {index} value/contact move contained another question")
-            count = state.get("discovery_questions", 0)
-            if count > 3 or (count >= 3 and topics):
-                problems.append(f"turn {index} exceeded the discovery ceiling")
-    final = run.replies[-1]
-    if run.actions[-1] not in scenario.expect_actions:
-        problems.append(
-            f"final action was {run.actions[-1]!r}, expected one of "
-            f"{sorted(scenario.expect_actions)}"
-        )
-    if scenario.expect_sequence and run.actions != scenario.expect_sequence:
-        problems.append(
-            f"action ladder was {list(run.actions)}, expected {list(scenario.expect_sequence)}"
-        )
-    if scenario.require_any and missing_all(final, scenario.require_any):
-        # A required token that is a bare number is compared by value, not spelling:
-        # the corpus stores 4500 and a model writes "4,500", and a substring test reads
-        # a correctly quoted price as a missing one.
-        numeric = tuple(item for item in scenario.require_any if item.strip(",.").isdigit())
-        if not any(states_number(final, item) for item in numeric):
-            problems.append(f"the reply carried none of {list(scenario.require_any)}")
-    forbidden = present(final, scenario.forbid)
-    if forbidden:
-        problems.append(f"the reply carried forbidden content: {list(forbidden)}")
-    if scenario.forbid_price_marks:
-        marks = present(final, PRICE_MARKS)
-        if marks:
-            problems.append(f"a price appeared with no published price to quote: {list(marks)}")
-    if scenario.forbid_numbers or scenario.allow_numbers:
-        invented = unexpected_numbers(final, scenario.allow_numbers)
-        if invented:
-            problems.append(f"the reply invented numbers: {list(invented)}")
-    if scenario.expect_crm_write and not run.crm_wrote:
-        problems.append("an identified visitor asking for Assaf produced no CRM write")
-    if scenario.expect_crm_write and run.crm_upserts != 1:
-        problems.append(f"expected one CRM contact write, got {run.crm_upserts}")
-    if not scenario.expect_crm_write and (run.crm_wrote or run.crm_writes):
-        problems.append("the CRM was written for a visitor who never handed over contact")
-    pings = len(run.owner_port.sent)
-    if scenario.expect_owner_ping and pings != 1:
-        problems.append(f"expected one owner ping, got {pings}")
-    if scenario.conversion_gate and sum(run.turn_tokens) <= 0:
-        problems.append("conversion scenario used zero model tokens; fallback is not live proof")
-    if scenario.conversion_gate and not any(run.model_replies_used):
-        problems.append("every conversion reply used fallback; billed tokens alone are not proof")
-    if scenario.expect_owner_ping and not (run.owner_pinged and pings):
-        problems.append("the handoff never reached the owner port")
-    if not scenario.expect_owner_ping and pings:
-        problems.append(f"{pings} owner ping(s) fired on a turn that must not hand off")
-    for message in run.owner_port.sent:
-        if message.conversation_id != SANDBOX_OWNER_ID:
-            problems.append(f"an owner ping targeted {message.conversation_id!r}")
-    if scenario.expect_filler and not is_filler(scenario.turns[-1]):
-        problems.append("the message was expected to be filler and skip retrieval, but is not")
-    return tuple(problems)
-
 
 def _broken_client(settings: Settings) -> LlmModelChain:
     """A chain of real keys pointed at a model no provider owns."""
@@ -362,47 +127,6 @@ def _runs_for(hard_safety: bool) -> int:
     return HARD_SAFETY_RUNS if hard_safety else 1
 
 
-def _website_result(
-    scenario: SiteScenario, *, settings: Settings, reply_port: object
-) -> ScenarioResult:
-    attempts: list[AttemptResult] = []
-    for attempt in range(1, _runs_for(scenario.hard_safety) + 1):
-        started = time.perf_counter()
-        run = run_website_scenario(scenario, settings=settings, reply_port=reply_port)
-        failures = check_website_run(scenario, run)
-        attempts.append(
-            AttemptResult(
-                scenario_id=scenario.scenario_id,
-                attempt=attempt,
-                passed=not failures,
-                failures=failures,
-                tool_path=run.actions,
-                latency_ms=int((time.perf_counter() - started) * 1000),
-                tokens_in=run.tokens_in,
-                tokens_out=run.tokens_out,
-                turns=tuple(
-                    {
-                        "reply": reply,
-                        "action": run.actions[index],
-                        "state": run.turn_states[index],
-                        "tokens": run.turn_tokens[index],
-                        "model_reply_used": run.model_replies_used[index],
-                        "whatsapp_cta_visible": website_cta_visible(
-                            run.actions[index], run.whatsapp_urls[index]
-                        ),
-                    }
-                    for index, reply in enumerate(run.replies)
-                ),
-            )
-        )
-    return ScenarioResult(
-        scenario_id=scenario.scenario_id,
-        surface=WEBSITE,
-        hard_safety=scenario.hard_safety,
-        attempts=tuple(attempts),
-    )
-
-
 def _owner_result(scenario: OwnerScenario, *, settings: Settings) -> ScenarioResult:
     attempts: list[AttemptResult] = []
     for attempt in range(1, _runs_for(scenario.hard_safety) + 1):
@@ -438,17 +162,6 @@ def _owner_result(scenario: OwnerScenario, *, settings: Settings) -> ScenarioRes
 def _suite_failures(results: Sequence[ScenarioResult]) -> tuple[str, ...]:
     """Checks about the run as a whole, not about any one scenario."""
     problems: list[str] = []
-    site_tokens = sum(
-        attempt.tokens_in + attempt.tokens_out
-        for result in results
-        if result.surface == WEBSITE
-        for attempt in result.attempts
-    )
-    if results and not site_tokens:
-        problems.append(
-            "no website turn billed a single token: every reply fell back to canned copy, "
-            "so this run proved nothing about the live sales model"
-        )
     owner_tokens = sum(
         attempt.tokens_in + attempt.tokens_out
         for result in results
@@ -485,13 +198,8 @@ def run_suite(
     seal_process_environment()
     assert_sealed(sealed)
 
-    reply_port = build_site_reply_port(sealed)
     started_at = datetime.now(UTC)
     results: list[ScenarioResult] = []
-    for scenario in website_scenarios():
-        if only and scenario.scenario_id not in only:
-            continue
-        results.append(_website_result(scenario, settings=sealed, reply_port=reply_port))
     for owner in owner_scenarios():
         if only and owner.scenario_id not in only:
             continue

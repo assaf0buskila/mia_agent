@@ -57,7 +57,7 @@ def freeze_mia_clock(monkeypatch, frozen) -> None:
             return frozen.astimezone(tz)
 
     for path in (
-        # app.api.inbound no longer reads the clock: its only datetime.now lived in
+        # Owner ingress no longer reads the clock: its only datetime.now lived in
         # the removed Instagram inbound block. Nothing there left to freeze.
         "app.domain.meetings.booking.datetime",
         "app.domain.meetings.changes.datetime",

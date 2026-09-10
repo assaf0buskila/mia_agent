@@ -69,12 +69,18 @@ def test_owner_calendar_create_is_payload_bound_and_waits_for_approval() -> None
 def test_calendar_create_tool_returns_the_exact_created_approval_id() -> None:
     db, store = _store()
     try:
+        start = datetime(2026, 9, 2, 7, tzinfo=UTC)
         ctx = ToolContext(
-            principal=Principal.owner(source="test"),
+            principal=Principal.owner(source="telegram", actor_id="123"),
             store=store,
             brain=BrainStore(db),
             settings=Settings(_env_file=None),
             embedding_port=FakeEmbeddingPort(),
+            source_ref="tg:calendar-create-proposal",
+            owner_text="Create the planning meeting",
+            calendar=FakeCalendarPort(
+                [TimeSlot(start=start, end=start + timedelta(hours=1))]
+            ),
         )
         result = execute_tool(
             "calendar_create_meeting",
@@ -89,8 +95,8 @@ def test_calendar_create_tool_returns_the_exact_created_approval_id() -> None:
         assert result.ok is True
         row = store.get_approval_by_approval_id(result.approval_id)
         assert row is not None
-        assert row.action == ACTION_CALENDAR_CREATE
-        assert row.resource_type == RESOURCE_CALENDAR
+        assert row.action == "owner_external_write"
+        assert row.resource_type == "owner_proposal"
 
         ctx.kill_switch = True
         refused = execute_tool(

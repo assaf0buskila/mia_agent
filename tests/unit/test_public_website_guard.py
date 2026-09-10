@@ -16,11 +16,19 @@ from app.integrations.transcribe import FakeTranscriptionPort
 from app.main import app
 from fastapi.testclient import TestClient
 
-from tests.conftest import identify_website_visitor, without_injected_website_origin
+from tests.conftest import without_injected_website_origin
 
 _ALLOWED = "https://www.assafweb.com"
 _APEX = "https://assafweb.com"
 _AUDIO = ("note.webm", b"fake-webm-bytes", "audio/webm")
+
+
+def _session(client: TestClient) -> tuple[str, dict[str, str]]:
+    created = client.post("/v1/website/sessions", headers={"Origin": _ALLOWED}).json()
+    return created["session_id"], {
+        "Origin": _ALLOWED,
+        "X-Mia-Session-Credential": created["session_credential"],
+    }
 
 
 def test_widget_still_omits_credentials() -> None:
@@ -65,11 +73,15 @@ def test_allowed_origin_still_creates_session_and_message() -> None:
     with TestClient(app) as client:
         created = client.post("/v1/website/sessions", headers={"Origin": _ALLOWED})
         assert created.status_code == 200
-        session_id = created.json()["session_id"]
+        body = created.json()
+        session_id = body["session_id"]
         reply = client.post(
             f"/v1/website/sessions/{session_id}/messages",
-            json={"text": "hi"},
-            headers={"Origin": _ALLOWED},
+            json={"text": "hi", "client_message_id": "origin-message"},
+            headers={
+                "Origin": _ALLOWED,
+                "X-Mia-Session-Credential": body["session_credential"],
+            },
         )
         assert reply.status_code == 200
         assert reply.json()["next_action"] in {"ask_need", "ask_contact", "answer"}
@@ -83,9 +95,9 @@ def test_apex_origin_is_allowed() -> None:
 
 def test_message_without_origin_is_rejected() -> None:
     with TestClient(app) as client:
-        session_id = client.post(
-            "/v1/website/sessions", headers={"Origin": _ALLOWED}
-        ).json()["session_id"]
+        session_id = client.post("/v1/website/sessions", headers={"Origin": _ALLOWED}).json()[
+            "session_id"
+        ]
         with without_injected_website_origin():
             reply = client.post(
                 f"/v1/website/sessions/{session_id}/messages",
@@ -99,9 +111,9 @@ def test_voice_without_origin_does_not_transcribe() -> None:
     app.dependency_overrides[get_transcription_port] = lambda: port
     try:
         with TestClient(app) as client:
-            session_id = client.post(
-                "/v1/website/sessions", headers={"Origin": _ALLOWED}
-            ).json()["session_id"]
+            session_id = client.post("/v1/website/sessions", headers={"Origin": _ALLOWED}).json()[
+                "session_id"
+            ]
             with without_injected_website_origin():
                 reply = client.post(
                     f"/v1/website/sessions/{session_id}/voice",
@@ -118,13 +130,12 @@ def test_voice_allowed_origin_still_works() -> None:
     app.dependency_overrides[get_transcription_port] = lambda: port
     try:
         with TestClient(app) as client:
-            session_id = client.post(
-                "/v1/website/sessions", headers={"Origin": _ALLOWED}
-            ).json()["session_id"]
+            session_id, headers = _session(client)
             reply = client.post(
                 f"/v1/website/sessions/{session_id}/voice",
+                data={"client_message_id": "voice-"},
                 files={"file": _AUDIO},
-                headers={"Origin": _ALLOWED},
+                headers=headers,
             )
             assert reply.status_code == 200
             assert reply.json()["heard"] == "hi"
@@ -135,9 +146,9 @@ def test_voice_allowed_origin_still_works() -> None:
 
 def test_handoff_without_origin_is_rejected() -> None:
     with TestClient(app) as client:
-        session_id = client.post(
-            "/v1/website/sessions", headers={"Origin": _ALLOWED}
-        ).json()["session_id"]
+        session_id = client.post("/v1/website/sessions", headers={"Origin": _ALLOWED}).json()[
+            "session_id"
+        ]
         with without_injected_website_origin():
             reply = client.post(f"/v1/website/sessions/{session_id}/handoff")
         assert reply.status_code == 403
@@ -145,29 +156,37 @@ def test_handoff_without_origin_is_rejected() -> None:
 
 def test_handoff_allowed_origin_still_works() -> None:
     with TestClient(app) as client:
-        session_id = client.post(
-            "/v1/website/sessions", headers={"Origin": _ALLOWED}
-        ).json()["session_id"]
-        identify_website_visitor(client, session_id, headers={"Origin": _ALLOWED})
+        session_id, headers = _session(client)
+        captured = client.post(
+            f"/v1/website/sessions/{session_id}/messages",
+            json={
+                "text": "רוצה להמשיך עם אסף",
+                "email": "guard@example.com",
+                "client_message_id": "handoff-capture",
+            },
+            headers=headers,
+        )
+        assert captured.status_code == 200
         reply = client.post(
             f"/v1/website/sessions/{session_id}/handoff",
-            headers={"Origin": _ALLOWED},
+            headers=headers,
         )
         assert reply.status_code == 200
         assert "token" in reply.json()
 
 
-def test_events_are_not_origin_bound() -> None:
+def test_events_without_origin_are_rejected() -> None:
     with TestClient(app) as client:
-        session_id = client.post(
-            "/v1/website/sessions", headers={"Origin": _ALLOWED}
-        ).json()["session_id"]
+        session_id = client.post("/v1/website/sessions", headers={"Origin": _ALLOWED}).json()[
+            "session_id"
+        ]
         with without_injected_website_origin():
             reply = client.post(
                 f"/v1/website/sessions/{session_id}/events",
                 json={"kind": "page_viewed", "path": "/"},
             )
-        assert reply.status_code == 200
+        assert reply.status_code == 403
+        assert reply.json()["detail"] == "origin not allowed"
 
 
 def test_session_rate_limit_returns_429(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -184,21 +203,27 @@ def test_session_rate_limit_returns_429(monkeypatch: pytest.MonkeyPatch) -> None
 def test_handoff_rate_limit_returns_429(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(LIMITS_PER_IP, "handoff", 1)
     with TestClient(app) as client:
-        session_id = client.post(
-            "/v1/website/sessions", headers={"Origin": _ALLOWED}
-        ).json()["session_id"]
-        identify_website_visitor(client, session_id, headers={"Origin": _ALLOWED})
+        session_id, headers = _session(client)
+        captured = client.post(
+            f"/v1/website/sessions/{session_id}/messages",
+            json={
+                "text": "רוצה להמשיך עם אסף",
+                "email": "limiter@example.com",
+                "client_message_id": "limit-capture",
+            },
+            headers=headers,
+        )
+        assert captured.status_code == 200
         first = client.post(
             f"/v1/website/sessions/{session_id}/handoff",
-            headers={"Origin": _ALLOWED},
+            headers=headers,
         )
         assert first.status_code == 200
         second = client.post(
             f"/v1/website/sessions/{session_id}/handoff",
-            headers={"Origin": _ALLOWED},
+            headers=headers,
         )
         assert second.status_code == 429
-
 
 
 def test_voice_rate_limit_returns_429(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -207,19 +232,19 @@ def test_voice_rate_limit_returns_429(monkeypatch: pytest.MonkeyPatch) -> None:
     app.dependency_overrides[get_transcription_port] = lambda: port
     try:
         with TestClient(app) as client:
-            session_id = client.post(
-                "/v1/website/sessions", headers={"Origin": _ALLOWED}
-            ).json()["session_id"]
+            session_id, headers = _session(client)
             first = client.post(
                 f"/v1/website/sessions/{session_id}/voice",
+                data={"client_message_id": "voice-limit-1"},
                 files={"file": _AUDIO},
-                headers={"Origin": _ALLOWED},
+                headers=headers,
             )
             assert first.status_code == 200
             second = client.post(
                 f"/v1/website/sessions/{session_id}/voice",
+                data={"client_message_id": "voice-limit-2"},
                 files={"file": _AUDIO},
-                headers={"Origin": _ALLOWED},
+                headers=headers,
             )
             assert second.status_code == 429
             assert port.call_count == 1
@@ -303,4 +328,3 @@ def test_spoofed_xff_prefix_cannot_rotate_production_rate_limit_bucket(
             },
         )
         assert second.status_code == 429
-

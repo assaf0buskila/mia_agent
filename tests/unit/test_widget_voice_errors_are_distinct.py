@@ -15,9 +15,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-WIDGET = (
-    Path(__file__).resolve().parents[2] / "app" / "web" / "ask_mia.js"
-).read_text(encoding="utf-8")
+WIDGET = (Path(__file__).resolve().parents[2] / "app" / "web" / "ask_mia.js").read_text(
+    encoding="utf-8"
+)
 
 
 def _const(name: str) -> str:
@@ -50,7 +50,7 @@ def test_a_rate_limit_does_not_tell_the_visitor_to_retry() -> None:
 
 def test_the_upload_handler_maps_the_codes_it_can_get() -> None:
     # Anchor on the voice upload specifically; the text path has its own retryOnce.
-    handler = WIDGET[WIDGET.index("return postVoice(blob);") :]
+    handler = WIDGET[WIDGET.index("return postVoice(blob, clientMessageId);") :]
     handler = handler[: handler.index(".finally(")]
     for code, const in (("429", "MIC_BUSY"), ("415", "MIC_NA"), ("400", "MIC_EMPTY")):
         assert code in handler, code

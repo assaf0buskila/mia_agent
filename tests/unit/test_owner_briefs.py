@@ -2,77 +2,22 @@ import inspect
 from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
-import pytest
-from app.api.inbound import process_inbound_texts
 from app.core.capabilities import CapabilityId, require_alive
 from app.db.models import CanonicalEventRow, OwnerBriefRow
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
-from app.domain.commitments import (
-    ACTION_LOG,
-    CONDITION_NONE,
-    TRIGGER_NONE,
-    plan_owner_commitment,
-)
 from app.domain.events import (
     Channel,
     build_meeting_booked_event,
     build_meeting_cancellation_requested_event,
 )
-from app.domain.followups import follow_up_due_on
 from app.domain.kpis import KPI_EVENT_TYPES
 from app.domain.owner.briefs import (
     apply_owner_brief_policy,
     compute_daily_brief,
     format_daily_brief,
 )
-from app.domain.owner.tasks import OwnerTaskType, classify_owner_task
-from app.integrations.base import RecordingMessagePort
 from sqlalchemy import delete
-
-
-def test_classify_daily_brief_english() -> None:
-    decision = classify_owner_task("send me the daily brief")
-    assert decision.task_type == OwnerTaskType.DAILY_BRIEF
-    assert decision.needs_clarification is False
-
-
-def test_classify_daily_brief_hebrew() -> None:
-    decision = classify_owner_task("תני לי סיכום יומי")
-    assert decision.task_type == OwnerTaskType.DAILY_BRIEF
-    assert decision.needs_clarification is False
-
-
-def test_classify_meeting_debrief_not_daily_brief() -> None:
-    decision = classify_owner_task("סיכום פגישה lead_abc123456789")
-    assert decision.task_type == OwnerTaskType.MEETING_DEBRIEF
-    assert decision.needs_clarification is False
-
-
-def test_classify_instagram_content_is_analytics() -> None:
-    decision = classify_owner_task("analyze instagram content")
-    assert decision.task_type == OwnerTaskType.ANALYTICS
-    assert decision.needs_clarification is False
-
-
-def test_classify_daily_brief_plus_analytics_clarification() -> None:
-    decision = classify_owner_task("daily brief and instagram content")
-    assert decision.task_type == OwnerTaskType.NOTE
-    assert decision.needs_clarification is True
-    assert decision.matched_types == ["analytics", "daily_brief"]
-
-
-def test_plan_daily_brief_trigger_none_even_with_due_at() -> None:
-    text = "daily brief today"
-    decision = classify_owner_task(text)
-    plan = plan_owner_commitment(
-        decision=decision,
-        text=text,
-        due_at="2026-08-21",
-    )
-    assert plan.trigger == TRIGGER_NONE
-    assert plan.condition == CONDITION_NONE
-    assert plan.action == ACTION_LOG
 
 
 def test_compute_invalid_timezone_returns_none() -> None:
@@ -159,11 +104,7 @@ def test_apply_owner_brief_policy_persists_by_brief_date() -> None:
         assert row.cancellation_requests == snapshot.cancellation_requests
     finally:
         if "snapshot" in locals() and snapshot is not None:
-            db.execute(
-                delete(OwnerBriefRow).where(
-                    OwnerBriefRow.brief_date == snapshot.brief_date
-                )
-            )
+            db.execute(delete(OwnerBriefRow).where(OwnerBriefRow.brief_date == snapshot.brief_date))
             db.commit()
         db.close()
 
@@ -314,84 +255,13 @@ def test_compute_cancellation_requests_increment_for_today() -> None:
     finally:
         db.execute(
             delete(CanonicalEventRow).where(
-                CanonicalEventRow.provider_event_id
-                == f"{lead_id}:cancellation_requested"
+                CanonicalEventRow.provider_event_id == f"{lead_id}:cancellation_requested"
             )
         )
         db.commit()
         db.close()
 
 
-@pytest.mark.asyncio
-async def test_owner_inbound_daily_brief_booked_counts_in_ack() -> None:
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        port = RecordingMessagePort()
-        owner_phone = "972509994911"
-        event_id = "evt.owner.brief.booked.1"
-        timezone = "Asia/Jerusalem"
-        lead_id = "lead_d1a2i3l4y5b6"
-        booked = build_meeting_booked_event(
-            provider="website",
-            channel=Channel.WEBSITE,
-            lead_id=lead_id,
-            conversation_id="sess_inbound_brf001",
-            scheduled_at="2026-08-22T07:00:00+00:00",
-            occurred_at=datetime.now(UTC),
-        )
-        store.save_canonical_event(provider="website", event=booked)
-        cancel = build_meeting_cancellation_requested_event(
-            provider="website",
-            channel=Channel.WEBSITE,
-            lead_id="lead_d1a2i3l4y5b7",
-            conversation_id="sess_inbound_brf002",
-            occurred_at=datetime.now(UTC),
-        )
-        store.save_canonical_event(provider="website", event=cancel)
-        db.commit()
-        today = follow_up_due_on(
-            now=datetime.now(UTC),
-            timezone=timezone,
-            offset_days=0,
-        )
-        await process_inbound_texts(
-            provider="whatsapp",
-            channel=Channel.WHATSAPP,
-            items=[
-                {
-                    "id": event_id,
-                    "from": owner_phone,
-                    "text": "daily brief",
-                }
-            ],
-            store=store,
-            port=port,
-            kill_switch=False,
-            owner_ids={owner_phone},
-        )
-        db.commit()
-        assert len(port.sent) == 1
-        ack = port.sent[0].text
-        assert "פגישות נקבעו" in ack
-        assert "בקשות ביטול" in ack
-        assert "lead_" not in ack
-    finally:
-        if "today" in locals():
-            db.execute(delete(OwnerBriefRow).where(OwnerBriefRow.brief_date == today))
-        db.execute(
-            delete(CanonicalEventRow).where(
-                CanonicalEventRow.provider_event_id.in_(
-                    [
-                        f"{lead_id}:booked",
-                        "lead_d1a2i3l4y5b7:cancellation_requested",
-                    ]
-                )
-            )
-        )
-        db.commit()
-        db.close()
 
 
 def test_owner_briefs_module_no_message_or_meta_ports() -> None:
@@ -406,52 +276,3 @@ def test_owner_briefs_module_no_message_or_meta_ports() -> None:
 
 def test_require_alive_owner_brief() -> None:
     require_alive(CapabilityId.OWNER_BRIEF)
-
-
-@pytest.mark.asyncio
-async def test_owner_inbound_daily_brief_scorecard_and_persist() -> None:
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        port = RecordingMessagePort()
-        owner_phone = "972509990411"
-        event_id = "evt.owner.brief.inbound.1"
-        timezone = "Asia/Jerusalem"
-        today = follow_up_due_on(
-            now=datetime.now(UTC),
-            timezone=timezone,
-            offset_days=0,
-        )
-        await process_inbound_texts(
-            provider="whatsapp",
-            channel=Channel.WHATSAPP,
-            items=[
-                {
-                    "id": event_id,
-                    "from": owner_phone,
-                    "text": "daily brief",
-                }
-            ],
-            store=store,
-            port=port,
-            kill_switch=False,
-            owner_ids={owner_phone},
-        )
-        db.commit()
-        task = store.get_owner_task(provider="whatsapp", provider_event_id=event_id)
-        assert task is not None
-        assert task.task_type == "daily_brief"
-        assert task.due_at is None
-        assert len(port.sent) == 1
-        ack = port.sent[0].text
-        assert "סיכום יומי" in ack
-        assert "לא שלחתי מעקבים" in ack
-        assert "lead_" not in ack
-        row = store.get_owner_brief(today)
-        assert row is not None
-    finally:
-        if "today" in locals():
-            db.execute(delete(OwnerBriefRow).where(OwnerBriefRow.brief_date == today))
-            db.commit()
-        db.close()

@@ -68,6 +68,8 @@ async def test_telegram_timeout_sends_fallback_not_silence(monkeypatch) -> None:
     monkeypatch.setattr(turn_coalesce, "OWNER_TURN_TIMEOUT_S", 0.05)
     monkeypatch.setattr(telegram_owner, "COALESCE_WAIT_S", 0)
     monkeypatch.setenv("MIA_OWNER_TURN_TIMEOUT_SECONDS", "0.05")
+    monkeypatch.setenv("MIA_TELEGRAM_OWNER_USER_IDS", "99")
+    monkeypatch.setenv("MIA_KILL_SWITCH", "false")
 
     drained_with_open_session: list[bool] = []
 
@@ -248,6 +250,8 @@ async def test_telegram_burst_is_one_owner_turn(monkeypatch) -> None:
 
     monkeypatch.setattr(turn_coalesce, "COALESCE_WAIT_S", 0.05)
     monkeypatch.setattr(telegram_owner, "COALESCE_WAIT_S", 0.05)
+    monkeypatch.setenv("MIA_TELEGRAM_OWNER_USER_IDS", "99")
+    monkeypatch.setenv("MIA_KILL_SWITCH", "false")
     seen: list[str] = []
 
     async def capture(*, item, **kwargs):

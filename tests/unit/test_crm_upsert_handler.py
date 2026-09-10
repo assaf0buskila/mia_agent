@@ -1,7 +1,8 @@
-"""crm_upsert must fail loudly, and must not write the same contact twice.
+"""Current CRM owner writes are durable proposals, not direct Sheet mutations.
 
-Before this, the handler said "Wrote Contacts on <sheet>" on any non-exception, and
-had no idempotency claim at all — so a retried owner message wrote the row again.
+The former tests exercised the deleted Contacts adapter and its event claim. v2 keeps
+the durable CRM service as the record of truth and routes owner initiated activity
+through an exact, expiring approval bound to the imported contact revision.
 """
 
 from __future__ import annotations
@@ -12,36 +13,27 @@ from app.capabilities.types import Principal
 from app.core.config import Settings
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
-from app.domain.tools import AdapterResponseError
 from app.integrations.sheets import FakeSheetsPort
+from app.services.crm_v2 import CONTACT_FIELDS, CrmService
 from app.tools.registries.owner_tools import ToolContext, execute_tool
 
 OWNER = "12345"
-ARGS = {"name": "דנה", "phone": "0501234567", "want": "ניהול תורים"}
+ARGS = {
+    "name": "דנה",
+    "phone": "0501234567",
+    "want": "ניהול תורים",
+    "email": "",
+    "date": "",
+    "business": "",
+    "source": "telegram",
+    "language": "",
+    "status": "",
+    "summary": "",
+    "next_step": "",
+}
 
 
-class RefusingSheetsPort(FakeSheetsPort):
-    """Composio answered HTTP 200 and reported the write did not happen."""
-
-    def write_locked_contact(self, cells: list[str], *, key_column: str) -> None:
-        raise AdapterResponseError()
-
-
-class FlakySheetsPort(FakeSheetsPort):
-    """Fails once, then works — a transient provider blip."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.attempts = 0
-
-    def write_locked_contact(self, cells: list[str], *, key_column: str) -> None:
-        self.attempts += 1
-        if self.attempts == 1:
-            raise AdapterResponseError()
-        super().write_locked_contact(cells, key_column=key_column)
-
-
-def _ctx(db, sheets, *, source_ref: str) -> ToolContext:
+def _ctx(db, sheets, *, source_ref: str, owner_text: str) -> ToolContext:
     return ToolContext(
         principal=Principal.owner(source="telegram", actor_id=OWNER),
         store=LeadStore(db),
@@ -49,94 +41,92 @@ def _ctx(db, sheets, *, source_ref: str) -> ToolContext:
         settings=Settings(_env_file=None, sheets_spreadsheet_id=""),
         embedding_port=FakeEmbeddingPort(),
         sheets=sheets,
-        owner_text="תרשמי את דנה 0501234567",
+        owner_text=owner_text,
         source_ref=source_ref,
     )
 
 
-def test_a_good_write_reports_success() -> None:
+def _seed_current_contact(db, sheets: FakeSheetsPort) -> str:
+    created = CrmService(db).capture(
+        {"name": "דנה", "phone": "0501234567", "want": "ניהול תורים"},
+        source_ref="seed:crm-owner-test",
+    )
+    assert created.contact is not None
+    contact = created.contact
+    sheets.locked_contacts.append(
+        [contact.fields.get(name, "") for name in CONTACT_FIELDS] + [contact.id]
+    )
+    db.commit()
+    return contact.id
+
+
+def test_legacy_direct_crm_upsert_requires_current_explicit_owner_intent() -> None:
     init_db()
     db = get_session_factory()()
     try:
         out = execute_tool(
-            "crm_upsert", dict(ARGS), _ctx(db, FakeSheetsPort(), source_ref="tg.ok.1")
+            "crm_upsert",
+            dict(ARGS),
+            _ctx(
+                db,
+                FakeSheetsPort(),
+                source_ref="tg.crm.guard",
+                owner_text="תראי לי את אנשי הקשר",
+            ),
+        )
+        assert out.ok is False
+        assert "explicit affirmative request" in out.error
+    finally:
+        db.close()
+
+
+def test_crm_activity_is_an_exact_approval_and_does_not_write_before_decision() -> None:
+    init_db()
+    db = get_session_factory()()
+    try:
+        sheets = FakeSheetsPort()
+        contact_id = _seed_current_contact(db, sheets)
+        out = execute_tool(
+            "crm_record_activity",
+            {
+                "contact_id": contact_id,
+                "kind": "follow_up",
+                "summary": "הלקוחה ביקשה לחזור אליה מחר",
+            },
+            _ctx(
+                db,
+                sheets,
+                source_ref="tg.crm.activity.1",
+                owner_text="רשמי פעילות לאיש הקשר",
+            ),
         )
         assert out.ok is True
-        assert "Wrote Contacts" in out.text
+        assert out.approval_id
+        assert "Nothing was written" in out.text
+        assert sheets.locked_activity == []
+        row = LeadStore(db).get_approval_by_approval_id(out.approval_id)
+        assert row is not None
+        assert '"contact_id"' in row.proposed_parameters
     finally:
         db.close()
 
 
-def test_a_refused_write_is_never_reported_as_success() -> None:
-    """The regression this batch exists for."""
+def test_current_crm_contact_capture_is_idempotent_in_the_durable_database() -> None:
     init_db()
     db = get_session_factory()()
     try:
-        out = execute_tool(
-            "crm_upsert", dict(ARGS), _ctx(db, RefusingSheetsPort(), source_ref="tg.bad.1")
+        service = CrmService(db)
+        first = service.capture(
+            {"name": "דנה", "phone": "0501234567"},
+            source_ref="tg.crm.capture.1",
         )
-        assert out.ok is False, "a rejected CRM write must not be a success"
-        assert "Wrote Contacts" not in (out.text or "")
-        assert "nothing was saved" in (out.error or "")
-    finally:
-        db.close()
-
-
-def test_no_secret_in_the_failure_text() -> None:
-    init_db()
-    db = get_session_factory()()
-    try:
-        out = execute_tool(
-            "crm_upsert", dict(ARGS), _ctx(db, RefusingSheetsPort(), source_ref="tg.bad.2")
+        db.commit()
+        second = service.capture(
+            {"name": "דנה", "phone": "0501234567"},
+            source_ref="tg.crm.capture.1",
         )
-        blob = f"{out.text or ''}{out.error or ''}"
-        for secret in ("cmp-", "api_key", "x-api-key", "Bearer"):
-            assert secret not in blob
-    finally:
-        db.close()
-
-
-def test_the_same_owner_message_does_not_write_twice() -> None:
-    init_db()
-    db = get_session_factory()()
-    try:
-        sheets = FakeSheetsPort()
-        ctx = _ctx(db, sheets, source_ref="tg.dup.1")
-        first = execute_tool("crm_upsert", dict(ARGS), ctx)
-        second = execute_tool("crm_upsert", dict(ARGS), ctx)
-        assert first.ok and second.ok
-        assert "already written" in second.text
-        assert len(sheets.locked_contacts) == 1, "the row must be written once"
-    finally:
-        db.close()
-
-
-def test_a_different_owner_message_may_write_again() -> None:
-    """The claim is per owner event, not a permanent block on the contact."""
-    init_db()
-    db = get_session_factory()()
-    try:
-        sheets = FakeSheetsPort()
-        execute_tool("crm_upsert", dict(ARGS), _ctx(db, sheets, source_ref="tg.a"))
-        execute_tool("crm_upsert", dict(ARGS), _ctx(db, sheets, source_ref="tg.b"))
-        assert len(sheets.locked_contacts) == 2
-    finally:
-        db.close()
-
-
-def test_a_failed_write_does_not_silently_retry_into_a_duplicate() -> None:
-    """The row may have landed before the failure was reported, so the same owner
-    event must not quietly write it again."""
-    init_db()
-    db = get_session_factory()()
-    try:
-        sheets = FlakySheetsPort()
-        ctx = _ctx(db, sheets, source_ref="tg.flaky.1")
-        first = execute_tool("crm_upsert", dict(ARGS), ctx)
-        assert first.ok is False
-        second = execute_tool("crm_upsert", dict(ARGS), ctx)
-        assert second.ok is True
-        assert "already written" in second.text
-        assert sheets.attempts == 1, "the same event must not hit the provider twice"
+        db.commit()
+        assert first.contact is not None and second.contact is not None
+        assert second.contact.id == first.contact.id
     finally:
         db.close()

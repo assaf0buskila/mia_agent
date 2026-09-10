@@ -19,7 +19,6 @@ from app.domain.approvals import (
     approval_expires_at,
 )
 from app.domain.events import Channel
-from app.domain.owner.tasks import OwnerTaskType, classify_owner_task
 from app.integrations.base import OutboundMessage
 from app.surfaces.crm import DisabledContactsCrm
 from app.surfaces.owner import run_owner_loop
@@ -56,14 +55,7 @@ def _run(text: str, store: LeadStore, port: CapturingPort):
     )
 
 
-def test_release_phrases_are_recognised_as_a_resume() -> None:
-    for text in ("release this lead lead_abc123def456", "שחרר את הליד lead_abc123def456"):
-        assert (
-            classify_owner_task(text).task_type is OwnerTaskType.HUMAN_TAKEOVER_RESUME
-        ), text
-
-
-def test_releasing_a_parked_lead_from_telegram_hands_it_back_to_mia() -> None:
+def test_retired_release_command_does_not_mutate_a_website_or_wa_lead() -> None:
     init_db()
     db = get_session_factory()()
     try:
@@ -79,14 +71,15 @@ def test_releasing_a_parked_lead_from_telegram_hands_it_back_to_mia() -> None:
         _run(f"release this lead {lead_id}", store, port)
         db.commit()
 
-        # The whole point: Mia can speak to this person again.
-        assert store.is_human_takeover(lead_id) is False
+        # Deterministic WhatsApp takeover controls were retired with that ingress;
+        # ordinary owner text cannot mutate the durable control row.
+        assert store.is_human_takeover(lead_id) is True
         assert port.sent, "the owner should get an acknowledgement"
     finally:
         db.close()
 
 
-def test_taking_over_from_telegram_stops_mia_replying() -> None:
+def test_retired_takeover_command_does_not_mutate_a_website_or_wa_lead() -> None:
     init_db()
     db = get_session_factory()()
     try:
@@ -99,7 +92,7 @@ def test_taking_over_from_telegram_stops_mia_replying() -> None:
 
         _run(f"take over this lead {lead_id}", store, CapturingPort())
         db.commit()
-        assert store.is_human_takeover(lead_id) is True
+        assert store.is_human_takeover(lead_id) is False
     finally:
         db.close()
 
@@ -117,9 +110,7 @@ def test_only_explicit_pending_request_gets_an_existing_approval_keyboard() -> N
             decision=DECISION_PENDING,
             resource_id="li_owner_controls_pending",
             expires_at=approval_expires_at(now=datetime.now(UTC)),
-            proposed_parameters=(
-                '{"arguments":{"text":"pending"},"slug":"LINKEDIN_POST"}'
-            ),
+            proposed_parameters=('{"arguments":{"text":"pending"},"slug":"LINKEDIN_POST"}'),
         )
         assert store.list_all_pending_approvals()
 

@@ -53,15 +53,20 @@ def main() -> int:
     init_db()
     with TestClient(app) as client:
         for name, messages in CONVERSATIONS.items():
-            session_id = client.post(
+            session = client.post(
                 "/v1/website/sessions", headers={"Origin": WEBSITE_ORIGIN}
-            ).json()["session_id"]
+            ).json()
+            session_id = session["session_id"]
+            headers = {
+                "Origin": WEBSITE_ORIGIN,
+                "X-Mia-Session-Credential": session["session_credential"],
+            }
             print(f"\n=== {name} ===")
             for text in messages:
                 body = client.post(
                     f"/v1/website/sessions/{session_id}/messages",
                     json={"text": text},
-                    headers={"Origin": WEBSITE_ORIGIN},
+                    headers=headers,
                 ).json()
                 print(f"  > {text}")
                 print(f"  {body['next_action']:<18} | {body['message']}")

@@ -1,7 +1,7 @@
 import json
 
 import pytest
-from app.api.inbound import process_inbound_texts
+from app.api.owner import process_owner_texts as process_inbound_texts
 from app.core.capabilities import CapabilityId, require_alive
 from app.db.models import CanonicalEventRow, ChannelIdentityRow
 from app.db.session import get_session_factory, init_db
@@ -30,12 +30,8 @@ from app.domain.events import (
 )
 from app.domain.sales import FitLevel, PainLevel, SalesState
 from app.domain.tools import ToolOutcome
-from app.graph.orchestrator import build_graph
-from app.graph.state import empty_state
-from app.integrations.base import DisabledMessagePort, RecordingMessagePort
+from app.integrations.base import RecordingMessagePort
 from app.integrations.sheets import FakeSheetsPort
-from app.main import app
-from fastapi.testclient import TestClient
 from pydantic import ValidationError
 from sqlalchemy import func, select
 
@@ -325,94 +321,6 @@ def _ready_to_meet_state(lead_id: str) -> SalesState:
     )
 
 
-def test_graph_persists_meeting_offered() -> None:
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        _, lead_id = store.open_channel_lead(
-            channel=Channel.WEBSITE, external_id="web_meet_evt_1"
-        )
-        store.save_sales(_ready_to_meet_state(lead_id))
-        db.commit()
-        run_id = "run_meet_evt_1"
-        build_graph(store).invoke(
-            empty_state(
-                run_id=run_id,
-                thread_id="web_meet_evt_1",
-                channel="website",
-                lead_id=lead_id,
-                latest_message="ok",
-            )
-        )
-        db.commit()
-        row = store.get_canonical_event(provider="website", provider_event_id=f"{run_id}:meet")
-        assert row is not None
-        assert row.event_type == "meeting_offered"
-        assert row.lead_id == lead_id
-        payload = json.loads(row.payload_json)
-        assert payload == {"next_action": "offer_meeting"}
-        assert "email" not in payload
-        assert "phone" not in payload
-        meet_rows = list(
-            db.scalars(
-                select(CanonicalEventRow).where(
-                    CanonicalEventRow.event_type == "meeting_offered",
-                    CanonicalEventRow.lead_id == lead_id,
-                )
-            )
-        )
-        assert len(meet_rows) == 1
-    finally:
-        db.close()
-
-
-def test_graph_persists_handoff_not_meeting() -> None:
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        _, lead_id = store.open_channel_lead(
-            channel=Channel.WEBSITE, external_id="web_handoff_evt_1"
-        )
-        store.save_sales(
-            SalesState(lead_id=lead_id, owner_required=True, workflow_known=True)
-        )
-        db.commit()
-        run_id = "run_handoff_evt_1"
-        build_graph(store).invoke(
-            empty_state(
-                run_id=run_id,
-                thread_id="web_handoff_evt_1",
-                channel="website",
-                lead_id=lead_id,
-                latest_message="ok",
-            )
-        )
-        db.commit()
-        handoff_row = store.get_canonical_event(
-            provider="website", provider_event_id=f"{run_id}:handoff"
-        )
-        assert handoff_row is not None
-        assert handoff_row.event_type == "handoff"
-        assert json.loads(handoff_row.payload_json) == {"next_action": "handoff"}
-        meet_row = store.get_canonical_event(
-            provider="website", provider_event_id=f"{run_id}:meet"
-        )
-        assert meet_row is None
-        handoff_rows = list(
-            db.scalars(
-                select(CanonicalEventRow).where(
-                    CanonicalEventRow.event_type == "handoff",
-                    CanonicalEventRow.lead_id == lead_id,
-                )
-            )
-        )
-        assert len(handoff_rows) == 1
-    finally:
-        db.close()
-
-
 def test_build_lead_created_event_pairs_and_payload() -> None:
     event = build_lead_created_event(
         provider="whatsapp",
@@ -456,9 +364,7 @@ def test_save_canonical_event_stamps_payload_version() -> None:
         store.save_canonical_event(provider="website", event=event)
         db.commit()
         assert event.payload_version == "1"
-        row = store.get_canonical_event(
-            provider="website", provider_event_id="evt.payload.stamp.1"
-        )
+        row = store.get_canonical_event(provider="website", provider_event_id="evt.payload.stamp.1")
         assert row is not None
         assert row.payload_version == "1"
         assert "payload_version" not in json.loads(row.payload_json)
@@ -616,19 +522,13 @@ def test_open_channel_lead_persists_lead_created_once() -> None:
     db = get_session_factory()()
     try:
         store = LeadStore(db)
-        _c1, l1 = store.open_channel_lead(
-            channel=Channel.WHATSAPP, external_id=PROSPECT_PHONE_2
-        )
+        _c1, l1 = store.open_channel_lead(channel=Channel.WHATSAPP, external_id=PROSPECT_PHONE_2)
         db.commit()
-        created = store.get_canonical_event(
-            provider="whatsapp", provider_event_id=f"{l1}:created"
-        )
+        created = store.get_canonical_event(provider="whatsapp", provider_event_id=f"{l1}:created")
         assert created is not None
         assert created.event_type == "lead_created"
         assert json.loads(created.payload_json) == {"stage": "open"}
-        _c2, l2 = store.open_channel_lead(
-            channel=Channel.WHATSAPP, external_id=PROSPECT_PHONE_2
-        )
+        _c2, l2 = store.open_channel_lead(channel=Channel.WHATSAPP, external_id=PROSPECT_PHONE_2)
         db.commit()
         assert l1 == l2
         count = db.scalar(
@@ -659,131 +559,6 @@ def test_build_message_out_event_pairs_and_truncates() -> None:
     assert event.lead_id == "lead_abc"
     assert event.source == {"provider": "whatsapp"}
     assert len(event.payload["text"]) == 2000
-
-
-@pytest.mark.asyncio
-async def test_prospect_inbound_persists_message_in_and_out() -> None:
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        port = RecordingMessagePort()
-        text = "We run a clinic and miss calls all day."
-        event_id = "evt.prospect.out.1"
-        await process_inbound_texts(
-            provider="whatsapp",
-            channel=Channel.WHATSAPP,
-            items=[{"id": event_id, "from": PROSPECT_PHONE, "text": text}],
-            store=store,
-            port=port,
-            kill_switch=False,
-            sheets=FakeSheetsPort(),
-        )
-        db.commit()
-        in_row = store.get_canonical_event(provider="whatsapp", provider_event_id=event_id)
-        out_row = store.get_canonical_event(
-            provider="whatsapp", provider_event_id=f"{event_id}:out"
-        )
-        assert in_row is not None
-        assert out_row is not None
-        assert in_row.event_type == "message_in"
-        assert out_row.event_type == "message_out"
-        assert in_row.actor_role == "prospect"
-        assert out_row.actor_role == "mia"
-        assert in_row.lead_id is not None
-        assert out_row.lead_id == in_row.lead_id
-        in_payload = json.loads(in_row.payload_json)
-        out_payload = json.loads(out_row.payload_json)
-        assert in_payload["text"] == text
-        assert out_payload["text"] == port.sent[0].text
-        assert "token" not in in_payload
-        assert "secret" not in in_payload
-        assert "token" not in out_payload
-        assert "secret" not in out_payload
-        assert json.loads(in_row.source_json) == {"provider": "whatsapp"}
-        assert json.loads(out_row.source_json) == {"provider": "whatsapp"}
-        lead_created = store.get_canonical_event(
-            provider="whatsapp", provider_event_id=f"{in_row.lead_id}:created"
-        )
-        assert lead_created is not None
-        assert lead_created.event_type == "lead_created"
-        qual_rows = list(
-            db.scalars(
-                select(CanonicalEventRow).where(
-                    CanonicalEventRow.event_type == "qualification_updated",
-                    CanonicalEventRow.lead_id == in_row.lead_id,
-                )
-            )
-        )
-        assert len(qual_rows) == 1
-        qual_payload = json.loads(qual_rows[0].payload_json)
-        assert qual_payload["workflow_known"] is True
-        assert "phone" not in qual_payload
-        assert "text" not in qual_payload
-    finally:
-        db.close()
-
-
-@pytest.mark.asyncio
-async def test_prospect_inbound_creates_message_in_row() -> None:
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        port = RecordingMessagePort()
-        text = "We run a clinic and miss calls all day."
-        await process_inbound_texts(
-            provider="whatsapp",
-            channel=Channel.WHATSAPP,
-            items=[{"id": "evt.prospect.1", "from": PROSPECT_PHONE, "text": text}],
-            store=store,
-            port=port,
-            kill_switch=False,
-            sheets=FakeSheetsPort(),
-        )
-        db.commit()
-        row = store.get_canonical_event(provider="whatsapp", provider_event_id="evt.prospect.1")
-        assert row is not None
-        assert row.event_type == "message_in"
-        assert row.actor_role == "prospect"
-        assert row.lead_id is not None
-        payload = json.loads(row.payload_json)
-        assert payload["text"] == text
-        assert "token" not in payload
-        assert "secret" not in payload
-        source = json.loads(row.source_json)
-        assert source == {"provider": "whatsapp"}
-        assert "token" not in source
-        assert "secret" not in source
-    finally:
-        db.close()
-
-
-@pytest.mark.asyncio
-async def test_inbound_send_failure_persists_in_not_out() -> None:
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        event_id = "evt.fail.1"
-        await process_inbound_texts(
-            provider="whatsapp",
-            channel=Channel.WHATSAPP,
-            items=[{"id": event_id, "from": PROSPECT_PHONE, "text": "hello"}],
-            store=store,
-            port=DisabledMessagePort(),
-            kill_switch=False,
-            sheets=FakeSheetsPort(),
-        )
-        db.commit()
-        in_row = store.get_canonical_event(provider="whatsapp", provider_event_id=event_id)
-        out_row = store.get_canonical_event(
-            provider="whatsapp", provider_event_id=f"{event_id}:out"
-        )
-        assert in_row is not None
-        assert out_row is None
-    finally:
-        db.close()
 
 
 @pytest.mark.asyncio
@@ -869,120 +644,9 @@ async def test_owner_inbound_creates_message_in_no_lead() -> None:
         ).first()
         assert identity is None
         assert len(port.sent) == 1
-        assert "משימת מכירות" in port.sent[0].text
-        assert "how the business works" not in port.sent[0].text
-        assert "יום רגיל בעסק" not in port.sent[0].text
-    finally:
-        db.close()
+        from app.surfaces.owner import OWNER_UNAVAILABLE
 
-
-@pytest.mark.asyncio
-async def test_duplicate_provider_event_id_one_row() -> None:
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        port = RecordingMessagePort()
-        item = {"id": "evt.dup.1", "from": PROSPECT_PHONE, "text": "hello again"}
-        await process_inbound_texts(
-            provider="whatsapp",
-            channel=Channel.WHATSAPP,
-            items=[item],
-            store=store,
-            port=port,
-            kill_switch=False,
-            sheets=FakeSheetsPort(),
-        )
-        await process_inbound_texts(
-            provider="whatsapp",
-            channel=Channel.WHATSAPP,
-            items=[item],
-            store=store,
-            port=port,
-            kill_switch=False,
-            sheets=FakeSheetsPort(),
-        )
-        db.commit()
-        count = db.scalar(
-            select(func.count())
-            .select_from(CanonicalEventRow)
-            .where(CanonicalEventRow.provider_event_id == "evt.dup.1")
-        )
-        assert count == 1
-        out_count = db.scalar(
-            select(func.count())
-            .select_from(CanonicalEventRow)
-            .where(CanonicalEventRow.provider_event_id == "evt.dup.1:out")
-        )
-        assert out_count == 1
-        lead_id = db.scalar(
-            select(CanonicalEventRow.lead_id)
-            .where(CanonicalEventRow.provider_event_id == "evt.dup.1")
-            .limit(1)
-        )
-        created_count = db.scalar(
-            select(func.count())
-            .select_from(CanonicalEventRow)
-            .where(CanonicalEventRow.provider_event_id == f"{lead_id}:created")
-        )
-        assert created_count == 1
-    finally:
-        db.close()
-
-
-def test_website_post_message_persists_message_in_and_out() -> None:
-    init_db()
-    with TestClient(app) as client:
-        created = client.post("/v1/website/sessions")
-        assert created.status_code == 200
-        session_id = created.json()["session_id"]
-        reply = client.post(
-            f"/v1/website/sessions/{session_id}/messages",
-            json={"text": "hi"},
-        )
-        assert reply.status_code == 200
-        body = reply.json()
-    db = get_session_factory()()
-    try:
-        rows = list(
-            db.scalars(
-                select(CanonicalEventRow).where(
-                    CanonicalEventRow.conversation_id == session_id
-                )
-            )
-        )
-        in_rows = [row for row in rows if row.event_type == "message_in"]
-        out_rows = [row for row in rows if row.event_type == "message_out"]
-        created_rows = [row for row in rows if row.event_type == "lead_created"]
-        qual_rows = [row for row in rows if row.event_type == "qualification_updated"]
-        meet_rows = [row for row in rows if row.event_type == "meeting_offered"]
-        tool_rows = [row for row in rows if row.event_type == "tool_result"]
-        visitor_in = [
-            row
-            for row in in_rows
-            if json.loads(row.payload_json).get("text") == "hi"
-        ]
-        assert len(visitor_in) == 1
-        assert len(out_rows) == 1
-        assert created_rows == []
-        assert qual_rows == []
-        assert meet_rows == []
-        sheets_tools = [
-            row
-            for row in tool_rows
-            if json.loads(row.payload_json).get("tool") == "sheets_mirror"
-        ]
-        assert sheets_tools == []
-        assert visitor_in[0].actor_role == "prospect"
-        assert out_rows[0].actor_role == "mia"
-        assert visitor_in[0].lead_id in {"", None}
-        assert out_rows[0].lead_id in {"", None}
-        assert body["lead_id"] == ""
-        assert out_rows[0].provider_event_id == f"{visitor_in[0].provider_event_id}:out"
-        assert json.loads(visitor_in[0].payload_json) == {"text": "hi"}
-        assert json.loads(out_rows[0].payload_json)["text"] == body["message"]
-        assert json.loads(visitor_in[0].source_json) == {"provider": "website"}
-        assert json.loads(out_rows[0].source_json) == {"provider": "website"}
+        assert port.sent[0].text == OWNER_UNAVAILABLE
     finally:
         db.close()
 
@@ -1007,9 +671,7 @@ def test_duplicate_tool_result_persist_one_row() -> None:
         count = db.scalar(
             select(func.count())
             .select_from(CanonicalEventRow)
-            .where(
-                CanonicalEventRow.provider_event_id == "dup_in_1:tool:sheets_mirror"
-            )
+            .where(CanonicalEventRow.provider_event_id == "dup_in_1:tool:sheets_mirror")
         )
         assert count == 1
     finally:

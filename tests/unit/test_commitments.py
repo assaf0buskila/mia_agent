@@ -6,19 +6,15 @@ from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
 from app.domain.commitments import (
     ACTION_FOLLOW_UP,
-    ACTION_LOG,
-    ACTION_NONE,
     CONDITION_IF_NOT_REPLIED,
     CONDITION_NONE,
     TRIGGER_DUE_DATE,
     TRIGGER_NONE,
     parse_condition,
     parse_due_at,
-    plan_owner_commitment,
     scan_due_owner_tasks,
 )
 from app.domain.followups import follow_up_due_on
-from app.domain.owner.tasks import classify_owner_task
 
 _JERUSALEM = ZoneInfo("Asia/Jerusalem")
 _FIXED_NOW = datetime(2026, 8, 21, 10, 0, tzinfo=_JERUSALEM)
@@ -83,56 +79,6 @@ def test_parse_condition_if_not_replied_hebrew() -> None:
 
 def test_parse_condition_none_without_token() -> None:
     assert parse_condition("how's the campaign spend") == CONDITION_NONE
-
-
-def test_plan_sales_follow_up_with_due_and_condition() -> None:
-    text = "Schedule a follow-up with Daniel tomorrow if he has not replied."
-    decision = classify_owner_task(text)
-    due_at = parse_due_at(text, now=_FIXED_NOW, timezone="Asia/Jerusalem")
-    plan = plan_owner_commitment(decision=decision, text=text, due_at=due_at)
-    assert plan.trigger == TRIGGER_DUE_DATE
-    assert plan.condition == CONDITION_IF_NOT_REPLIED
-    assert plan.action == ACTION_FOLLOW_UP
-
-
-def test_plan_hebrew_sales_follow_up_with_condition() -> None:
-    text = "תעקבי מחר אם לא יענה"
-    decision = classify_owner_task(text)
-    due_at = parse_due_at(text, now=_FIXED_NOW, timezone="Asia/Jerusalem")
-    plan = plan_owner_commitment(decision=decision, text=text, due_at=due_at)
-    assert plan.trigger == TRIGGER_DUE_DATE
-    assert plan.condition == CONDITION_IF_NOT_REPLIED
-    assert plan.action == ACTION_FOLLOW_UP
-
-
-def test_plan_preference_all_none() -> None:
-    text = "from now on never say tomorrow"
-    decision = classify_owner_task(text)
-    plan = plan_owner_commitment(decision=decision, text=text, due_at=None)
-    assert plan.trigger == TRIGGER_NONE
-    assert plan.condition == CONDITION_NONE
-    assert plan.action == ACTION_NONE
-
-
-def test_plan_understanding_check_all_none() -> None:
-    text = "remind me tomorrow about the thing"
-    decision = classify_owner_task(text)
-    plan = plan_owner_commitment(decision=decision, text=text, due_at=None)
-    assert plan.trigger == TRIGGER_NONE
-    assert plan.condition == CONDITION_NONE
-    assert plan.action == ACTION_NONE
-
-
-def test_plan_calendar_tomorrow_no_due_trigger() -> None:
-    from app.domain.owner.tasks import OwnerTaskType
-
-    text = "check my calendar tomorrow"
-    decision = classify_owner_task(text)
-    due_at = parse_due_at(text, now=_FIXED_NOW, timezone="Asia/Jerusalem")
-    plan = plan_owner_commitment(decision=decision, text=text, due_at=due_at)
-    assert decision.task_type == OwnerTaskType.CALENDAR
-    assert plan.trigger == TRIGGER_NONE
-    assert plan.action == ACTION_LOG
 
 
 def _seed_owner_task(

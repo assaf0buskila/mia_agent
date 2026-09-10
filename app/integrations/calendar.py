@@ -91,10 +91,12 @@ class ComposioCalendarPort:
         *,
         api_key: str,
         user_id: str,
+        connected_account_id: str = "",
         client: httpx.Client | None = None,
     ) -> None:
         self._api_key = api_key
         self._user_id = user_id
+        self._connected_account_id = connected_account_id.strip()
         self._client = client
 
     def find_free_slots(
@@ -118,6 +120,8 @@ class ComposioCalendarPort:
                 "timezone": timezone,
             },
         }
+        if self._connected_account_id:
+            payload["connected_account_id"] = self._connected_account_id
         headers = {
             "x-api-key": self._api_key,
             "Content-Type": "application/json",
@@ -150,9 +154,7 @@ class ComposioCalendarPort:
                     data = json.loads(data)
                 except json.JSONDecodeError:
                     return []
-            raw_slots = _extract_time_slots(
-                data, time_min=window_min, time_max=window_max
-            )
+            raw_slots = _extract_time_slots(data, time_min=window_min, time_max=window_max)
             return [
                 slot
                 for slot in raw_slots
@@ -178,6 +180,9 @@ class FakeCalendarPort:
 
     def __init__(self, slots: list[TimeSlot] | None = None) -> None:
         self._slots = slots or []
+
+    def approval_connected_account_id(self) -> str:
+        return "fake-calendar-account"
 
     def find_free_slots(
         self,
@@ -232,9 +237,7 @@ def _extract_time_slots(
     if isinstance(calendars, dict) and calendars:
         busy_intervals = _collect_busy_intervals(calendars)
         if busy_intervals is not None:
-            return _gaps_from_busy(
-                time_min=time_min, time_max=time_max, busy=busy_intervals
-            )
+            return _gaps_from_busy(time_min=time_min, time_max=time_max, busy=busy_intervals)
     return []
 
 
@@ -459,10 +462,7 @@ def prepare_meeting_offer(
         ]
         numbered = "\n".join(lines)
         choices = ", ".join(str(index) for index in range(1, len(included) + 1))
-        suffix = (
-            f"\n\nזמין:\n{numbered}\n"
-            f"השיבו {choices} כדי לאשר."
-        )
+        suffix = f"\n\nזמין:\n{numbered}\nהשיבו {choices} כדי לאשר."
         return MeetingOfferResult(
             reply=f"{reply}{suffix}",
             outcome=calendar_availability_outcome(
@@ -648,8 +648,7 @@ class FakeCalendarAgendaPort:
         matches = [
             event
             for event in self._events
-            if _ensure_aware(event.start) < window_end
-            and _ensure_aware(event.end) > window_start
+            if _ensure_aware(event.start) < window_end and _ensure_aware(event.end) > window_start
         ]
         matches.sort(key=lambda event: _ensure_aware(event.start))
         return matches[: _cap_agenda_limit(limit)]

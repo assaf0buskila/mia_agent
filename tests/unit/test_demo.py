@@ -1,15 +1,9 @@
 import json
 
-import pytest
-from app.api.inbound import process_inbound_texts
 from app.core.config import MiaEnv, Settings
-from app.core.demo import SCRIPTED_MESSAGES, demo_mode_active
+from app.core.demo import demo_mode_active
 from app.db.models import CanonicalEventRow
 from app.db.session import get_session_factory, init_db
-from app.db.store import LeadStore
-from app.domain.events import Channel
-from app.integrations.base import RecordingMessagePort
-from app.integrations.sheets import FakeSheetsPort
 from app.main import app
 from fastapi.testclient import TestClient
 from sqlalchemy import select
@@ -44,72 +38,6 @@ def test_demo_endpoints_404_when_inactive() -> None:
         assert client.post("/v1/demo/scripted").status_code == 404
 
 
-def test_demo_status_when_active(monkeypatch) -> None:
-    monkeypatch.setenv("MIA_DEMO_MODE", "true")
-    with TestClient(app) as client:
-        response = client.get("/v1/demo/status")
-        assert response.status_code == 200
-        assert response.json() == {"active": True, "env": "test", "label": "synthetic"}
-
-
-def test_demo_scripted_identify_then_sell_when_active(monkeypatch) -> None:
-    monkeypatch.setenv("MIA_DEMO_MODE", "true")
-    init_db()
-    with TestClient(app) as client:
-        response = client.post("/v1/demo/scripted")
-        assert response.status_code == 200
-        body = response.json()
-        assert body["label"] == "synthetic"
-        assert "session_id" in body
-        assert body["lead_id"] == ""
-        assert len(body["steps"]) == len(SCRIPTED_MESSAGES)
-        for step, (text, _old_action) in zip(body["steps"], SCRIPTED_MESSAGES, strict=True):
-            assert step["user"] == text
-            assert step["next_action"] in {
-                "ask_need",
-                "ask_contact",
-                "handoff",
-                "no_price",
-                "answer",
-                "confirm_contact",
-                "off_topic",
-                "identity",
-            }
-            assert isinstance(step["message"], str)
-            assert step["message"]
-        dumped = json.dumps(body)
-        assert "email" not in body
-        assert "phone" not in body
-        assert "@" not in dumped
-        session_id = body["session_id"]
-    db = get_session_factory()()
-    try:
-        attr_rows = list(
-            db.scalars(
-                select(CanonicalEventRow).where(
-                    CanonicalEventRow.conversation_id == session_id,
-                    CanonicalEventRow.event_type == "attribution",
-                )
-            )
-        )
-        assert attr_rows == []
-        tool_rows = list(
-            db.scalars(
-                select(CanonicalEventRow).where(
-                    CanonicalEventRow.conversation_id == session_id,
-                    CanonicalEventRow.event_type == "tool_result",
-                )
-            )
-        )
-        sheets_tools = [
-            row for row in tool_rows
-            if json.loads(row.payload_json).get("tool") == "sheets_mirror"
-        ]
-        assert len(sheets_tools) == 0
-    finally:
-        db.close()
-
-
 def test_website_config_demo_true_when_flag_on(monkeypatch) -> None:
     monkeypatch.setenv("MIA_DEMO_MODE", "true")
     with TestClient(app) as client:
@@ -141,45 +69,5 @@ def test_demo_website_session_preserves_supplied_anonymous_attribution(monkeypat
         assert len(attr_rows) == 1
         assert attr_rows[0].lead_id is None
         assert json.loads(attr_rows[0].payload_json)["utm_source"] == "meta"
-    finally:
-        db.close()
-
-
-@pytest.mark.asyncio
-async def test_inbound_skips_sheets_mirror_when_demo_active(monkeypatch) -> None:
-    monkeypatch.setenv("MIA_DEMO_MODE", "true")
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        sheets = FakeSheetsPort()
-        port = RecordingMessagePort()
-        result = await process_inbound_texts(
-            provider="gmail",
-            channel=Channel.GMAIL,
-            items=[
-                {
-                    "id": "evt.demo.sheet.skip.1",
-                    "from": "demo.lead.skip.1@example.invalid",
-                    "text": "hello",
-                }
-            ],
-            store=store,
-            port=port,
-            kill_switch=False,
-            sheets=sheets,
-        )
-        db.commit()
-        assert result["processed"] == 1
-        tool_rows = list(
-            db.scalars(
-                select(CanonicalEventRow).where(
-                    CanonicalEventRow.event_type == "tool_result",
-                    CanonicalEventRow.provider_event_id
-                    == "evt.demo.sheet.skip.1:tool:sheets_mirror",
-                )
-            )
-        )
-        assert tool_rows == []
     finally:
         db.close()

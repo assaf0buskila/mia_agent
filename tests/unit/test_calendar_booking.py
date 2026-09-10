@@ -8,8 +8,6 @@ from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
-from app.api.deps import get_calendar_booking_port, get_calendar_port
-from app.api.inbound import process_inbound_texts
 from app.core.config import Settings
 from app.db.models import OwnerNotificationRow
 from app.db.session import get_session_factory, init_db
@@ -40,8 +38,6 @@ from app.domain.meetings.state import (
 )
 from app.domain.sales import FitLevel, NextAction, PainLevel, SalesState
 from app.domain.tools import AdapterHttpError
-from app.graph.replies import WEBSITE_REPLIES
-from app.integrations.base import RecordingMessagePort
 from app.integrations.calendar import (
     FakeCalendarPort,
     TimeSlot,
@@ -62,14 +58,12 @@ from app.integrations.calendar_booking import (
     lookup_tool_outcome,
     verify_tool_outcome,
 )
-from app.main import app
-from fastapi.testclient import TestClient
 from sqlalchemy import delete, select
 
 IL = ZoneInfo("Asia/Jerusalem")
 # Thursday 2026-08-20 09:00 Asia/Jerusalem (ADR-012 policy baseline)
 FIXED_NOW = datetime(2026, 8, 20, 6, 0, tzinfo=UTC)
-OFFER_COPY = WEBSITE_REPLIES[NextAction.OFFER_MEETING]
+OFFER_COPY = "אפשר לקבוע שיחה קצרה עם אסף."
 LEAD_EMAIL = "book.cal.1@example.com"
 
 
@@ -258,12 +252,8 @@ def test_validate_offered_slots_rejects_naive_and_normalizes_utc() -> None:
     il = ZoneInfo("Asia/Jerusalem")
     offset_start = clean[0].start.astimezone(il)
     offset_end = offset_start + timedelta(minutes=30)
-    key_utc = compute_booking_key(
-        lead_id="lead_x", start=aware.start, end=aware.end
-    )
-    key_offset = compute_booking_key(
-        lead_id="lead_x", start=offset_start, end=offset_end
-    )
+    key_utc = compute_booking_key(lead_id="lead_x", start=aware.start, end=aware.end)
+    key_offset = compute_booking_key(lead_id="lead_x", start=offset_start, end=offset_end)
     assert key_utc == key_offset
 
 
@@ -450,9 +440,7 @@ def test_fake_booking_success_updates_meeting_event_reply() -> None:
         assert result.kind == BookingResultKind.BOOKED
         assert "נקבעה פגישה" in result.reply
         assert "meet.google.com" in result.reply
-        verify_outcomes = [
-            o for o in result.tool_outcomes if o.tool == "calendar_booking_verify"
-        ]
+        verify_outcomes = [o for o in result.tool_outcomes if o.tool == "calendar_booking_verify"]
         assert verify_outcomes[0].status == "ok"
         row = store.get_meeting(lead_id)
         assert row is not None
@@ -462,9 +450,7 @@ def test_fake_booking_success_updates_meeting_event_reply() -> None:
         assert row.booked_at
         assert row.scheduled_at
         assert row.offered_slots_json == "[]"
-        booked = store.get_canonical_event(
-            provider="gmail", provider_event_id=f"{lead_id}:booked"
-        )
+        booked = store.get_canonical_event(provider="gmail", provider_event_id=f"{lead_id}:booked")
         assert booked is not None
         payload = json.loads(booked.payload_json)
         assert payload == {"status": "booked", "scheduled_at": payload["scheduled_at"]}
@@ -570,9 +556,7 @@ def test_crash_recovery_lookup_books_without_create() -> None:
         assert result.kind == BookingResultKind.BOOKED
         assert booking.create_calls == []
         assert len(booking.lookup_calls) == 1
-        assert not any(
-            o.tool == "calendar_find_free_slots" for o in result.tool_outcomes
-        )
+        assert not any(o.tool == "calendar_find_free_slots" for o in result.tool_outcomes)
         row = store.get_meeting(lead_id)
         assert row is not None
         assert row.status == STATUS_BOOKED
@@ -603,14 +587,25 @@ def test_composio_lookup_create_request_shape_no_pii() -> None:
         )
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
-    port = ComposioCalendarBookingPort(api_key="cmp", user_id="user-1", client=client)
+    port = ComposioCalendarBookingPort(
+        api_key="cmp",
+        user_id="user-1",
+        connected_account_id="calendar-account-1",
+        client=client,
+    )
     start = _local_dt(days_ahead=4, hour=10)
     end = start + timedelta(minutes=30)
     key = compute_booking_key(lead_id="lead_test_1", start=start, end=end)
     lookup = port.find_by_booking_key(booking_key=key)
     assert lookup.status == BookingLookupStatus.NOT_FOUND
     assert lookup_tool_outcome(lookup) == ("empty", 0)
-    port.create_event(booking_key=key, start=start, end=end, timezone="Asia/Jerusalem")
+    port.create_event(
+        booking_key=key,
+        start=start,
+        end=end,
+        timezone="Asia/Jerusalem",
+        location="Tel Aviv office",
+    )
     assert len(captured) == 2
     lookup_url, lookup_body = captured[0]
     create_url, create_body = captured[1]
@@ -618,10 +613,12 @@ def test_composio_lookup_create_request_shape_no_pii() -> None:
     assert create_url.endswith(f"/{COMPOSIO_CREATE_EVENT_TOOL}")
     assert lookup_body["version"] == COMPOSIO_GOOGLECALENDAR_VERSION
     assert create_body["version"] == COMPOSIO_GOOGLECALENDAR_VERSION
+    assert create_body["connected_account_id"] == "calendar-account-1"
     lookup_args = lookup_body["arguments"]
     create_args = create_body["arguments"]
     assert lookup_args["privateExtendedProperty"] == f"mia_booking_key={key}"
     assert create_args["summary"] == "AssafWeb intro call"
+    assert create_args["location"] == "Tel Aviv office"
     assert create_args["send_updates"] == "none"
     assert "attendees" not in create_args
     assert "description" not in create_args
@@ -677,9 +674,7 @@ def test_lookup_error_blocks_create() -> None:
         )
         assert result.kind == BookingResultKind.RETRY
         assert booking.create_calls == []
-        lookup_outcomes = [
-            o for o in result.tool_outcomes if o.tool == "calendar_booking_lookup"
-        ]
+        lookup_outcomes = [o for o in result.tool_outcomes if o.tool == "calendar_booking_lookup"]
         assert lookup_outcomes[0].status == "error"
     finally:
         db.close()
@@ -936,9 +931,7 @@ def test_create_timeout_verify_persists_booked() -> None:
         db.commit()
         assert result.kind == BookingResultKind.BOOKED
         create_outcomes = [o for o in result.tool_outcomes if o.tool == "calendar_create"]
-        verify_outcomes = [
-            o for o in result.tool_outcomes if o.tool == "calendar_booking_verify"
-        ]
+        verify_outcomes = [o for o in result.tool_outcomes if o.tool == "calendar_booking_verify"]
         assert create_outcomes[0].status == "error"
         assert verify_outcomes[0].status == "ok"
         row = store.get_meeting(lead_id)
@@ -1004,9 +997,7 @@ def test_verify_mismatch_returns_retry_not_booked() -> None:
         row = store.get_meeting(lead_id)
         assert row is not None
         assert row.status == STATUS_OFFERED
-        verify_outcomes = [
-            o for o in result.tool_outcomes if o.tool == "calendar_booking_verify"
-        ]
+        verify_outcomes = [o for o in result.tool_outcomes if o.tool == "calendar_booking_verify"]
         assert verify_outcomes[0].status == "error"
     finally:
         db.close()
@@ -1130,9 +1121,7 @@ def test_lookup_adapter_http_error_blocks_create() -> None:
     db = get_session_factory()()
     try:
         store = LeadStore(db)
-        _, lead_id = store.open_channel_lead(
-            channel=Channel.GMAIL, external_id="lkhttp401@ex.com"
-        )
+        _, lead_id = store.open_channel_lead(channel=Channel.GMAIL, external_id="lkhttp401@ex.com")
         slot = _slot(4, 10)
         _seed_offered(store, lead_id, [slot])
         db.commit()
@@ -1161,9 +1150,7 @@ def test_lookup_adapter_http_error_blocks_create() -> None:
         )
         assert result.kind == BookingResultKind.RETRY
         assert result.reply == BOOKING_RETRY
-        lookup_outcomes = [
-            o for o in result.tool_outcomes if o.tool == "calendar_booking_lookup"
-        ]
+        lookup_outcomes = [o for o in result.tool_outcomes if o.tool == "calendar_booking_lookup"]
         assert lookup_outcomes[0].status == "unauthorized"
         assert booking.create_calls == []
     finally:
@@ -1175,9 +1162,7 @@ def test_create_adapter_http_error_verify_recovery_books() -> None:
     db = get_session_factory()()
     try:
         store = LeadStore(db)
-        _, lead_id = store.open_channel_lead(
-            channel=Channel.GMAIL, external_id="crt500@ex.com"
-        )
+        _, lead_id = store.open_channel_lead(channel=Channel.GMAIL, external_id="crt500@ex.com")
         slot = _slot(4, 10)
         _seed_offered(store, lead_id, [slot])
         db.commit()
@@ -1224,9 +1209,7 @@ def test_create_adapter_http_error_verify_recovery_books() -> None:
         db.commit()
         assert result.kind == BookingResultKind.BOOKED
         create_outcomes = [o for o in result.tool_outcomes if o.tool == "calendar_create"]
-        verify_outcomes = [
-            o for o in result.tool_outcomes if o.tool == "calendar_booking_verify"
-        ]
+        verify_outcomes = [o for o in result.tool_outcomes if o.tool == "calendar_booking_verify"]
         assert create_outcomes[0].status == "retryable"
         assert verify_outcomes[0].status == "ok"
         row = store.get_meeting(lead_id)
@@ -1241,9 +1224,7 @@ def test_create_and_verify_adapter_http_error_returns_retry() -> None:
     db = get_session_factory()()
     try:
         store = LeadStore(db)
-        _, lead_id = store.open_channel_lead(
-            channel=Channel.GMAIL, external_id="crt500v429@ex.com"
-        )
+        _, lead_id = store.open_channel_lead(channel=Channel.GMAIL, external_id="crt500v429@ex.com")
         slot = _slot(4, 10)
         _seed_offered(store, lead_id, [slot])
         db.commit()
@@ -1283,95 +1264,12 @@ def test_create_and_verify_adapter_http_error_returns_retry() -> None:
         )
         assert result.kind == BookingResultKind.RETRY
         create_outcomes = [o for o in result.tool_outcomes if o.tool == "calendar_create"]
-        verify_outcomes = [
-            o for o in result.tool_outcomes if o.tool == "calendar_booking_verify"
-        ]
+        verify_outcomes = [o for o in result.tool_outcomes if o.tool == "calendar_booking_verify"]
         assert create_outcomes[0].status == "retryable"
         assert verify_outcomes[0].status == "rate_limited"
         row = store.get_meeting(lead_id)
         assert row is not None
         assert row.status == STATUS_OFFERED
-    finally:
-        db.close()
-
-
-@pytest.mark.asyncio
-async def test_inbound_e2e_booking_one_reply(monkeypatch) -> None:
-    from tests.conftest import freeze_mia_clock
-
-    freeze_mia_clock(monkeypatch, FIXED_NOW)
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        _, lead_id = store.open_channel_lead(channel=Channel.GMAIL, external_id=LEAD_EMAIL)
-        store.save_sales(_ready_state(lead_id))
-        slot = _slot(4, 11)
-        _seed_offered(store, lead_id, [slot, _slot(4, 14)])
-        db.commit()
-        calendar = FakeCalendarPort([slot, _slot(4, 14)])
-        booking = FakeCalendarBookingPort()
-        port = RecordingMessagePort()
-        result = await process_inbound_texts(
-            provider="gmail",
-            channel=Channel.GMAIL,
-            items=[{"id": "evt.e2e.book", "from": LEAD_EMAIL, "text": "1"}],
-            store=store,
-            port=port,
-            kill_switch=False,
-            calendar=calendar,
-            calendar_booking=booking,
-        )
-        db.commit()
-        assert result["processed"] == 1
-        assert len(port.sent) == 1
-        assert "נקבעה פגישה" in port.sent[0].text
-        assert len(booking.create_calls) == 1
-        row = store.get_meeting(lead_id)
-        assert row is not None
-        assert row.status == STATUS_BOOKED
-    finally:
-        db.close()
-
-
-def test_website_e2e_booking() -> None:
-    # This is the one test in this file that drives the live HTTP endpoint without
-    # freezing the clock, so the seeded slot must be computed from the real clock
-    # rather than a fixed offset from FIXED_NOW.
-    #
-    # Master fixed the same date-rot by freezing the clock to FIXED_NOW instead. Both
-    # fixes work in isolation, but not together: the body below seeds its slot from
-    # the real clock, so freezing "now" back to 2026-08-20 would leave the app
-    # judging a slot six days past a frozen present. Kept the real-clock version,
-    # which is self-consistent end to end.
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        session_id = "web_book_e2e_1"
-        _, lead_id = store.open_channel_lead(channel=Channel.WEBSITE, external_id=session_id)
-        store.save_sales(_ready_state(lead_id))
-        slot = _bookable_slot_from_now()
-        _seed_offered(store, lead_id, [slot], now=datetime.now(UTC))
-        db.commit()
-        fake_cal = FakeCalendarPort([slot])
-        fake_book = FakeCalendarBookingPort()
-        app.dependency_overrides[get_calendar_port] = lambda: fake_cal
-        app.dependency_overrides[get_calendar_booking_port] = lambda: fake_book
-        try:
-            with TestClient(app) as client:
-                response = client.post(
-                    f"/v1/website/sessions/{session_id}/messages",
-                    json={"text": "1"},
-                )
-                assert response.status_code == 200
-                body = response.json()
-                assert body["next_action"] in {"ask_need", "ask_contact", "answer"}
-                assert "נקבעה פגישה" not in body["message"]
-                assert fake_book.create_calls == []
-        finally:
-            app.dependency_overrides.pop(get_calendar_port, None)
-            app.dependency_overrides.pop(get_calendar_booking_port, None)
     finally:
         db.close()
 
@@ -1418,4 +1316,3 @@ def test_concurrent_slot_booking_lock_prevents_double_booking() -> None:
         db.commit()
     finally:
         db.close()
-

@@ -26,7 +26,10 @@ WINDOW_SECONDS = 900
 
 LIMITS_PER_IP = {
     "session": 30,
+    # The widget emits page/section/CTA/form lifecycle events, usually fewer than
+    # twenty per visit. Keep a generous IP ceiling while bounding scripted floods.
     "message": 40,
+    "event": 40,
     "voice": 12,
     "handoff": 8,
     # /end triggers finalization: a summary plus a Telegram push to Assaf. The widget

@@ -3,7 +3,6 @@ import re
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from app.api.inbound import process_inbound_texts
 from app.db.models import ApprovalRow, CanonicalEventRow, IdempotencyRow
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
@@ -30,10 +29,6 @@ from app.domain.approvals import (
 from app.domain.events import Channel, EventType
 from app.domain.sales import NextAction, SalesState
 from app.integrations.base import RecordingMessagePort
-from app.integrations.calendar import DisabledCalendarPort
-from app.integrations.sheets import DisabledSheetsPort
-from app.main import app
-from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 PROSPECT_PHONE = "972509995011"
@@ -42,9 +37,7 @@ PROSPECT_PHONE_APPROVAL = "972509995013"
 OWNER_PHONE_APPROVAL = "972509990050"
 
 _APPROVAL_PAYLOAD_KEYS = frozenset({"action", "risk", "decision"})
-_IDENTITY_PAYLOAD_KEYS = frozenset(
-    {"action", "channel", "resource_id", "resource_type", "risk"}
-)
+_IDENTITY_PAYLOAD_KEYS = frozenset({"action", "channel", "resource_id", "resource_type", "risk"})
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 _APR_ID = re.compile(r"^apr_[0-9a-f]{12}$")
 
@@ -77,28 +70,6 @@ def _assert_reserved_identity_empty(row: ApprovalRow) -> None:
     assert row.actor_id == ""
 
 
-def test_website_proposal_without_phone_asks_contact_and_creates_no_approval() -> None:
-    init_db()
-    with TestClient(app) as client:
-        session_id = client.post("/v1/website/sessions").json()["session_id"]
-        response = client.post(
-            f"/v1/website/sessions/{session_id}/messages",
-            json={"text": "Please send me a proposal"},
-        )
-        assert response.status_code == 200
-        body = response.json()
-        assert body["next_action"] in {"ask_contact", "answer", "ask_need"}
-        assert body["lead_id"] == ""
-    db = get_session_factory()()
-    try:
-        assert (
-            db.scalars(select(ApprovalRow).where(ApprovalRow.lead_id == session_id)).all()
-            == []
-        )
-    finally:
-        db.close()
-
-
 def test_campaign_pause_cannot_queue_any_approval() -> None:
     init_db()
     db = get_session_factory()()
@@ -110,40 +81,6 @@ def test_campaign_pause_cannot_queue_any_approval() -> None:
             kill_switch=False,
         )
         assert result.status == "none"
-    finally:
-        db.close()
-
-
-def test_website_proposal_with_phone_handoffs_without_approval_row() -> None:
-    init_db()
-    with TestClient(app) as client:
-        session_id = client.post("/v1/website/sessions").json()["session_id"]
-        first = client.post(
-            f"/v1/website/sessions/{session_id}/messages",
-            json={"text": "Please send me a proposal", "phone": "0501234567"},
-        )
-        assert first.json()["next_action"] in {"handoff", "confirm_contact", "answer"}
-        assert first.json()["lead_id"] == ""
-        again = client.post(
-            f"/v1/website/sessions/{session_id}/messages",
-            json={"text": "Please send me a proposal"},
-        )
-        assert again.json()["next_action"] in {"handoff", "confirm_contact", "answer"}
-    db = get_session_factory()()
-    try:
-        assert (
-            db.scalars(select(ApprovalRow).where(ApprovalRow.lead_id == session_id)).all()
-            == []
-        )
-        events = list(
-            db.scalars(
-                select(CanonicalEventRow).where(
-                    CanonicalEventRow.conversation_id == session_id,
-                    CanonicalEventRow.event_type == EventType.APPROVAL_REQUIRED.value,
-                )
-            )
-        )
-        assert events == []
     finally:
         db.close()
 
@@ -242,9 +179,7 @@ def test_apply_approval_policy_never_calls_message_port() -> None:
     db = get_session_factory()()
     try:
         store = LeadStore(db)
-        _, lead_id = store.open_channel_lead(
-            channel=Channel.WHATSAPP, external_id=PROSPECT_PHONE
-        )
+        _, lead_id = store.open_channel_lead(channel=Channel.WHATSAPP, external_id=PROSPECT_PHONE)
         sales = SalesState(
             lead_id=lead_id,
             workflow_known=True,
@@ -267,69 +202,8 @@ def test_apply_approval_policy_never_calls_message_port() -> None:
         db.close()
 
 
-def test_clinic_funnel_to_meeting_no_approval_row() -> None:
-    init_db()
-    with TestClient(app) as client:
-        session_id = client.post("/v1/website/sessions").json()["session_id"]
-        clinic = client.post(
-            f"/v1/website/sessions/{session_id}/messages",
-            json={"text": "We run a clinic and miss calls all day."},
-        )
-        assert clinic.status_code == 200
-        meeting = client.post(
-            f"/v1/website/sessions/{session_id}/messages",
-            json={"text": "let's book a meeting", "phone": "0501234567"},
-        )
-        assert meeting.json()["next_action"] in {"handoff", "confirm_contact", "answer"}
-    db = get_session_factory()()
-    try:
-        assert (
-            db.scalars(select(ApprovalRow).where(ApprovalRow.lead_id == session_id)).all()
-            == []
-        )
-    finally:
-        db.close()
-
-
-@pytest.mark.asyncio
-async def test_inbound_whatsapp_proposal_creates_approval() -> None:
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        port = RecordingMessagePort()
-        await process_inbound_texts(
-            provider="whatsapp",
-            channel=Channel.WHATSAPP,
-            items=[{
-                "id": "wamid.approval.1",
-                "from": PROSPECT_PHONE_2,
-                "text": "send me a proposal",
-            }],
-            store=store,
-            port=port,
-            kill_switch=False,
-            calendar=DisabledCalendarPort(),
-            sheets=DisabledSheetsPort(),
-        )
-        db.commit()
-        _, lead_id = store.open_channel_lead(
-            channel=Channel.WHATSAPP, external_id=PROSPECT_PHONE_2
-        )
-        row = store.get_approval(lead_id, ACTION_PROPOSAL_HANDOFF)
-        assert row is not None
-        assert row.decision == DECISION_PENDING
-        assert row.channel == Channel.WHATSAPP.value
-    finally:
-        db.close()
-
-
-def _seed_pending_approval(
-    store: LeadStore, *, external_id: str
-) -> tuple[str, str]:
-    _, lead_id = store.open_channel_lead(
-        channel=Channel.WHATSAPP, external_id=external_id
-    )
+def _seed_pending_approval(store: LeadStore, *, external_id: str) -> tuple[str, str]:
+    _, lead_id = store.open_channel_lead(channel=Channel.WHATSAPP, external_id=external_id)
     sales = SalesState(
         lead_id=lead_id,
         workflow_known=True,
@@ -355,11 +229,14 @@ def test_list_pending_approvals_rejects_unknown_action() -> None:
         _seed_pending_approval(store, external_id="972509995024")
         db.commit()
         assert store.list_pending_approvals(action="meta_budget") == []
-        assert store.decide_approval(
-            lead_id="lead_deadbeefdead",
-            action="meta_budget",
-            decision=DECISION_APPROVED,
-        ) is False
+        assert (
+            store.decide_approval(
+                lead_id="lead_deadbeefdead",
+                action="meta_budget",
+                decision=DECISION_APPROVED,
+            )
+            is False
+        )
     finally:
         db.close()
 
@@ -458,9 +335,7 @@ def test_apply_owner_approval_decision_already_decided_unchanged() -> None:
         row = store.get_approval(lead_id, ACTION_PROPOSAL_HANDOFF)
         assert row is not None
         assert row.decision == DECISION_APPROVED
-        assert ack_for_approval_result(second) == (
-            "הבקשה כבר טופלה. לא שיניתי כלום."
-        )
+        assert ack_for_approval_result(second) == ("הבקשה כבר טופלה. לא שיניתי כלום.")
     finally:
         db.close()
 
@@ -470,9 +345,7 @@ def test_apply_approval_policy_sets_resource_binding_and_hash() -> None:
     db = get_session_factory()()
     try:
         store = LeadStore(db)
-        _, lead_id = store.open_channel_lead(
-            channel=Channel.WEBSITE, external_id="web_appr_exp_1"
-        )
+        _, lead_id = store.open_channel_lead(channel=Channel.WEBSITE, external_id="web_appr_exp_1")
         sales = SalesState(
             lead_id=lead_id,
             workflow_known=True,
@@ -561,9 +434,7 @@ def test_owner_decide_tampered_resource_id_unbound() -> None:
     try:
         store = LeadStore(db)
         _, lead_a = _seed_pending_approval(store, external_id="972509995082")
-        _, lead_b = store.open_channel_lead(
-            channel=Channel.WHATSAPP, external_id="972509995083"
-        )
+        _, lead_b = store.open_channel_lead(channel=Channel.WHATSAPP, external_id="972509995083")
         row = store.get_approval(lead_a, ACTION_PROPOSAL_HANDOFF)
         assert row is not None
         row.resource_id = lead_b
@@ -635,9 +506,7 @@ def test_owner_decide_skips_expired_pending_with_lead_id() -> None:
         valid_row = store.get_approval(lead_valid, ACTION_PROPOSAL_HANDOFF)
         assert valid_row is not None
         assert valid_row.decision == DECISION_APPROVED
-        expired_still_pending = store.get_approval(
-            lead_expired, ACTION_PROPOSAL_HANDOFF
-        )
+        expired_still_pending = store.get_approval(lead_expired, ACTION_PROPOSAL_HANDOFF)
         assert expired_still_pending is not None
         assert expired_still_pending.decision == DECISION_PENDING
     finally:
@@ -690,73 +559,22 @@ def test_website_approval_rejects_oversize_json_before_persist() -> None:
     db = get_session_factory()()
     try:
         store = LeadStore(db)
-        assert apply_website_edit_approval_policy(
-            store,
-            before="a" * 255,
-            after="b" * 255,
-            channel=Channel.WEBSITE,
-            kill_switch=False,
-        ) is False
-        assert store.get_approval_by_resource(
-            RESOURCE_WEBSITE, WEBSITE_RESOURCE_ID, ACTION_WEBSITE_EDIT
-        ) is None
-    finally:
-        db.close()
-
-
-@pytest.mark.asyncio
-async def test_owner_inbound_approve_proposal_persist_only() -> None:
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        port = RecordingMessagePort()
-        await process_inbound_texts(
-            provider="whatsapp",
-            channel=Channel.WHATSAPP,
-            items=[{
-                "id": "wamid.approval.prospect.1",
-                "from": PROSPECT_PHONE_APPROVAL,
-                "text": "send me a proposal",
-            }],
-            store=store,
-            port=port,
-            kill_switch=False,
-            calendar=DisabledCalendarPort(),
-            sheets=DisabledSheetsPort(),
+        assert (
+            apply_website_edit_approval_policy(
+                store,
+                before="a" * 255,
+                after="b" * 255,
+                channel=Channel.WEBSITE,
+                kill_switch=False,
+            )
+            is False
         )
-        db.commit()
-        _, lead_id = store.open_channel_lead(
-            channel=Channel.WHATSAPP, external_id=PROSPECT_PHONE_APPROVAL
+        assert (
+            store.get_approval_by_resource(
+                RESOURCE_WEBSITE, WEBSITE_RESOURCE_ID, ACTION_WEBSITE_EDIT
+            )
+            is None
         )
-        pending = store.get_approval(lead_id, ACTION_PROPOSAL_HANDOFF)
-        assert pending is not None
-        assert pending.decision == DECISION_PENDING
-        port.sent.clear()
-        await process_inbound_texts(
-            provider="whatsapp",
-            channel=Channel.WHATSAPP,
-            items=[{
-                "id": "wamid.approval.owner.1",
-                "from": OWNER_PHONE_APPROVAL,
-                "text": f"approve the proposal {lead_id}",
-            }],
-            store=store,
-            port=port,
-            kill_switch=False,
-            owner_ids={OWNER_PHONE_APPROVAL},
-            calendar=DisabledCalendarPort(),
-            sheets=DisabledSheetsPort(),
-        )
-        db.commit()
-        row = store.get_approval(lead_id, ACTION_PROPOSAL_HANDOFF)
-        assert row is not None
-        assert row.decision == DECISION_APPROVED
-        assert row.approver == ""
-        assert len(port.sent) == 1
-        assert "לא שלחתי" in port.sent[0].text
-        assert "@" not in port.sent[0].text
-        assert lead_id not in port.sent[0].text
     finally:
         db.close()
 

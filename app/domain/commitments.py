@@ -9,7 +9,6 @@ from pydantic import BaseModel, field_validator
 from app.core.errors import PolicyDenied
 from app.core.risk import RiskAction, RiskLevel, assert_allowed
 from app.domain.followups import follow_up_due_on
-from app.domain.owner.tasks import OwnerTaskDecision, OwnerTaskType
 
 TRIGGER_NONE = "none"
 TRIGGER_DUE_DATE = "due_date"
@@ -46,7 +45,7 @@ _TOKENS: tuple[tuple[str, int], ...] = (
     ("next week", 7),
     ("בשבוע הבא", 7),
 )
-_HEBREW_LETTER = "\u0590-\u05FF"
+_HEBREW_LETTER = "\u0590-\u05ff"
 
 _CONDITION_TOKENS = (
     "if he has not replied",
@@ -210,43 +209,3 @@ def scan_due_owner_tasks(
             )
         )
     return results
-
-
-def plan_owner_commitment(
-    *, decision: OwnerTaskDecision, text: str, due_at: str | None
-) -> OwnerCommitment:
-    if (
-        decision.needs_clarification
-        or decision.task_type
-        in (OwnerTaskType.PREFERENCE, OwnerTaskType.APPROVAL)
-    ):
-        return OwnerCommitment(
-            trigger=TRIGGER_NONE,
-            condition=CONDITION_NONE,
-            action=ACTION_NONE,
-        )
-    action = _ACTION_BY_TYPE.get(decision.task_type.value, ACTION_LOG)
-    if due_at and decision.task_type not in (
-        OwnerTaskType.DAILY_BRIEF,
-        OwnerTaskType.WEEKLY_BRIEF,
-        OwnerTaskType.LEAD_REVIEW,
-        OwnerTaskType.CONTENT_IDEA,
-        OwnerTaskType.GMAIL_SUMMARY,
-        OwnerTaskType.GMAIL_DRAFT,
-        OwnerTaskType.SEO,
-        OwnerTaskType.CALENDAR,
-        OwnerTaskType.OWNER_NOTIFY,
-        OwnerTaskType.MEETING_BRIEF,
-        OwnerTaskType.HUMAN_TAKEOVER,
-        OwnerTaskType.HUMAN_TAKEOVER_RESUME,
-        OwnerTaskType.CONVERSATION_SCOPE,
-        OwnerTaskType.HOT_LEADS,
-        OwnerTaskType.OWNER_STATUS,
-    ):
-        trigger = TRIGGER_DUE_DATE
-    else:
-        trigger = TRIGGER_NONE
-    condition = (
-        parse_condition(text) if action == ACTION_FOLLOW_UP else CONDITION_NONE
-    )
-    return OwnerCommitment(trigger=trigger, condition=condition, action=action)

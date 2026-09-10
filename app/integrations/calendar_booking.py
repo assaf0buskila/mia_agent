@@ -142,6 +142,7 @@ class CalendarBookingPort(Protocol):
         timezone: str,
         calendar_id: str = "primary",
         summary: str = "AssafWeb intro call",
+        location: str = "",
         create_meeting_room: bool = True,
         allow_nonstandard_duration: bool = False,
     ) -> CalendarBookingEvent | None: ...
@@ -185,6 +186,7 @@ class DisabledCalendarBookingPort:
         timezone: str,
         calendar_id: str = "primary",
         summary: str = "AssafWeb intro call",
+        location: str = "",
         create_meeting_room: bool = True,
         allow_nonstandard_duration: bool = False,
     ) -> CalendarBookingEvent | None:
@@ -195,6 +197,7 @@ class DisabledCalendarBookingPort:
             timezone,
             calendar_id,
             summary,
+            location,
             create_meeting_room,
             allow_nonstandard_duration,
         )
@@ -256,6 +259,9 @@ class FakeCalendarBookingPort:
         self.get_calls: list[dict[str, str]] = []
         self.patch_calls: list[dict[str, Any]] = []
 
+    def approval_connected_account_id(self) -> str:
+        return "fake-calendar-account"
+
     def find_by_booking_key(
         self,
         *,
@@ -281,6 +287,7 @@ class FakeCalendarBookingPort:
         timezone: str,
         calendar_id: str = "primary",
         summary: str = "AssafWeb intro call",
+        location: str = "",
         create_meeting_room: bool = True,
         allow_nonstandard_duration: bool = False,
     ) -> CalendarBookingEvent | None:
@@ -292,6 +299,7 @@ class FakeCalendarBookingPort:
                 "timezone": timezone,
                 "calendar_id": calendar_id,
                 "summary": summary,
+                "location": location,
                 "create_meeting_room": create_meeting_room,
                 "allow_nonstandard_duration": allow_nonstandard_duration,
             }
@@ -380,10 +388,12 @@ class ComposioCalendarBookingPort:
         *,
         api_key: str,
         user_id: str,
+        connected_account_id: str = "",
         client: httpx.Client | None = None,
     ) -> None:
         self._api_key = api_key
         self._user_id = user_id
+        self._connected_account_id = connected_account_id.strip()
         self._client = client
 
     def find_by_booking_key(
@@ -428,6 +438,7 @@ class ComposioCalendarBookingPort:
         timezone: str,
         calendar_id: str = "primary",
         summary: str = "AssafWeb intro call",
+        location: str = "",
         create_meeting_room: bool = True,
         allow_nonstandard_duration: bool = False,
     ) -> CalendarBookingEvent | None:
@@ -446,9 +457,13 @@ class ComposioCalendarBookingPort:
             return None
         duration = end_utc - start_utc
         if (
-            not allow_nonstandard_duration
-            and duration != timedelta(minutes=MEETING_DURATION_MINUTES)
-        ) or duration < timedelta(minutes=5) or duration > timedelta(hours=12):
+            (
+                not allow_nonstandard_duration
+                and duration != timedelta(minutes=MEETING_DURATION_MINUTES)
+            )
+            or duration < timedelta(minutes=5)
+            or duration > timedelta(hours=12)
+        ):
             return None
         try:
             local_start = start_utc.astimezone(ZoneInfo(timezone))
@@ -458,6 +473,7 @@ class ComposioCalendarBookingPort:
         arguments = {
             "calendar_id": calendar_id,
             "summary": summary,
+            "location": location.strip(),
             "start_datetime": local_start.strftime("%Y-%m-%dT%H:%M:%S"),
             "end_datetime": local_end.strftime("%Y-%m-%dT%H:%M:%S"),
             "timezone": timezone,
@@ -517,9 +533,13 @@ class ComposioCalendarBookingPort:
             return None
         duration = end_utc - start_utc
         if (
-            not allow_nonstandard_duration
-            and duration != timedelta(minutes=MEETING_DURATION_MINUTES)
-        ) or duration < timedelta(minutes=5) or duration > timedelta(hours=12):
+            (
+                not allow_nonstandard_duration
+                and duration != timedelta(minutes=MEETING_DURATION_MINUTES)
+            )
+            or duration < timedelta(minutes=5)
+            or duration > timedelta(hours=12)
+        ):
             return None
         try:
             zone = ZoneInfo(timezone)
@@ -548,6 +568,8 @@ class ComposioCalendarBookingPort:
             "version": COMPOSIO_GOOGLECALENDAR_VERSION,
             "arguments": arguments,
         }
+        if self._connected_account_id:
+            payload["connected_account_id"] = self._connected_account_id
         headers = {
             "x-api-key": self._api_key,
             "Content-Type": "application/json",

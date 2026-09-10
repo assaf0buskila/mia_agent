@@ -8,8 +8,6 @@ from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
-from app.api.deps import get_calendar_booking_port, get_calendar_port, get_sheets_port
-from app.api.inbound import process_inbound_texts
 from app.core.config import Settings
 from app.db.models import CanonicalEventRow, IdempotencyRow
 from app.db.session import get_session_factory, init_db
@@ -47,7 +45,6 @@ from app.domain.meetings.state import (
 )
 from app.domain.sales import FitLevel, SalesState
 from app.domain.tools import AdapterHttpError
-from app.integrations.base import RecordingMessagePort
 from app.integrations.calendar import FakeCalendarPort, TimeSlot
 from app.integrations.calendar_booking import (
     COMPOSIO_EVENTS_GET_TOOL,
@@ -59,9 +56,6 @@ from app.integrations.calendar_booking import (
     EventLookupResult,
     FakeCalendarBookingPort,
 )
-from app.integrations.sheets import FakeSheetsPort
-from app.main import app
-from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 IL = ZoneInfo("Asia/Jerusalem")
@@ -307,11 +301,7 @@ def test_reschedule_get_uncertainty_blocks_patch(state: str) -> None:
             external_id=f"gate2.get.{state}@example.com",
             target=target,
         )
-        kwargs = (
-            {"get_errors": {event_id}}
-            if state == "error"
-            else {"get_not_found": {event_id}}
-        )
+        kwargs = {"get_errors": {event_id}} if state == "error" else {"get_not_found": {event_id}}
         booking = FakeCalendarBookingPort(**kwargs)
         result = resolve_booked_meeting_change(
             store,
@@ -394,9 +384,7 @@ def test_reschedule_conflict_blocks_patch_and_clears_slots() -> None:
             external_id="gate2.conflict@example.com",
             target=target,
         )
-        booking = FakeCalendarBookingPort(
-            events_by_id={event_id: _provider_event(event_id, old)}
-        )
+        booking = FakeCalendarBookingPort(events_by_id={event_id: _provider_event(event_id, old)})
         result = resolve_booked_meeting_change(
             store,
             lead_id=lead_id,
@@ -451,9 +439,7 @@ def test_patch_timeout_then_verified_target_succeeds() -> None:
         assert result.kind == MeetingChangeKind.RESCHEDULED
         patch = [item for item in result.tool_outcomes if item.tool == "calendar_patch_event"]
         verify = [
-            item
-            for item in result.tool_outcomes
-            if item.tool == "calendar_reschedule_verify"
+            item for item in result.tool_outcomes if item.tool == "calendar_reschedule_verify"
         ]
         assert patch[0].status == "error"
         assert verify[0].status == "ok"
@@ -497,9 +483,7 @@ def test_verify_mismatch_fails_without_local_update() -> None:
         assert row.scheduled_at == old.start.isoformat()
         assert row.rescheduled_at == ""
         verify = [
-            item
-            for item in result.tool_outcomes
-            if item.tool == "calendar_reschedule_verify"
+            item for item in result.tool_outcomes if item.tool == "calendar_reschedule_verify"
         ]
         assert verify[0].status == "error"
     finally:
@@ -545,9 +529,7 @@ def test_reschedule_get_adapter_http_error_returns_retry() -> None:
         )
         assert result.kind == MeetingChangeKind.RETRY
         assert result.reply == RESCHEDULE_RETRY
-        get_outcomes = [
-            o for o in result.tool_outcomes if o.tool == "calendar_reschedule_get"
-        ]
+        get_outcomes = [o for o in result.tool_outcomes if o.tool == "calendar_reschedule_get"]
         assert get_outcomes[0].status == "unauthorized"
         assert booking.patch_calls == []
     finally:
@@ -624,9 +606,7 @@ def test_patch_adapter_http_error_verify_recovery_reschedules() -> None:
         )
         assert result.kind == MeetingChangeKind.RESCHEDULED
         patch = [o for o in result.tool_outcomes if o.tool == "calendar_patch_event"]
-        verify = [
-            o for o in result.tool_outcomes if o.tool == "calendar_reschedule_verify"
-        ]
+        verify = [o for o in result.tool_outcomes if o.tool == "calendar_reschedule_verify"]
         assert patch[0].status == "retryable"
         assert verify[0].status == "ok"
         row = store.get_meeting(lead_id)
@@ -683,8 +663,7 @@ def test_repeat_reschedule_selection_is_idempotent() -> None:
             store.session.scalars(
                 select(CanonicalEventRow).where(
                     CanonicalEventRow.lead_id == lead_id,
-                    CanonicalEventRow.event_type
-                    == EventType.MEETING_RESCHEDULED.value,
+                    CanonicalEventRow.event_type == EventType.MEETING_RESCHEDULED.value,
                 )
             )
         )
@@ -704,9 +683,7 @@ def test_reschedule_claim_first_persist_completes_idempotency() -> None:
             external_id="gate2.claim.first@example.com",
             target=target,
         )
-        target_key = compute_booking_key(
-            lead_id=lead_id, start=target.start, end=target.end
-        )
+        target_key = compute_booking_key(lead_id=lead_id, start=target.start, end=target.end)
         claim_key = f"{lead_id}:rescheduled:{target_key}"
         booking = FakeCalendarBookingPort(
             events_by_id={event_id: _provider_event(event_id, target)}
@@ -781,8 +758,7 @@ def test_duplicate_reschedule_same_target_one_canonical() -> None:
             store.session.scalars(
                 select(CanonicalEventRow).where(
                     CanonicalEventRow.lead_id == lead_id,
-                    CanonicalEventRow.event_type
-                    == EventType.MEETING_RESCHEDULED.value,
+                    CanonicalEventRow.event_type == EventType.MEETING_RESCHEDULED.value,
                 )
             )
         )
@@ -846,8 +822,7 @@ def test_second_reschedule_different_target_claims_again() -> None:
             store.session.scalars(
                 select(CanonicalEventRow).where(
                     CanonicalEventRow.lead_id == lead_id,
-                    CanonicalEventRow.event_type
-                    == EventType.MEETING_RESCHEDULED.value,
+                    CanonicalEventRow.event_type == EventType.MEETING_RESCHEDULED.value,
                 )
             )
         )
@@ -1068,9 +1043,7 @@ def test_cancellation_same_inbound_writes_once() -> None:
             inbound_id=inbound_id,
         )
         first = resolve_booked_meeting_change(**kwargs, now=FIXED_NOW)
-        second = resolve_booked_meeting_change(
-            **kwargs, now=FIXED_NOW + timedelta(minutes=1)
-        )
+        second = resolve_booked_meeting_change(**kwargs, now=FIXED_NOW + timedelta(minutes=1))
         row = store.get_meeting(lead_id)
         assert row is not None
         assert first.reply == CANCELLATION_REQUESTED_REPLY
@@ -1281,203 +1254,6 @@ def test_cancellation_kill_switch_skips_local_write() -> None:
         assert result.kind == MeetingChangeKind.DENIED
         assert row.status == STATUS_BOOKED
         assert row.cancellation_requested_at == ""
-    finally:
-        db.close()
-
-
-@pytest.mark.asyncio
-async def test_inbound_reschedule_audits_redacted_and_sends_one_reply(monkeypatch) -> None:
-    from tests.conftest import freeze_mia_clock
-
-    freeze_mia_clock(monkeypatch, FIXED_NOW)
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        external_id = "gate2.inbound@example.com"
-        lead_id = _seed_booked(store, external_id=external_id)
-        target = _slot(4, 11)
-        meeting = store.get_meeting(lead_id)
-        assert meeting is not None
-        event_id = meeting.calendar_event_id
-        booking = FakeCalendarBookingPort(
-            events_by_id={event_id: _provider_event(event_id, _slot(4, 9))}
-        )
-        calendar = FakeCalendarPort([target])
-        message_port = RecordingMessagePort()
-        await process_inbound_texts(
-            provider="gmail",
-            channel=Channel.GMAIL,
-            items=[
-                {
-                    "id": "evt.gate2.offer",
-                    "from": external_id,
-                    "text": "reschedule",
-                }
-            ],
-            store=store,
-            port=message_port,
-            kill_switch=False,
-            calendar=calendar,
-            calendar_booking=booking,
-            sheets=FakeSheetsPort(),
-        )
-        await process_inbound_texts(
-            provider="gmail",
-            channel=Channel.GMAIL,
-            items=[
-                {
-                    "id": "evt.gate2.select",
-                    "from": external_id,
-                    "text": "1",
-                }
-            ],
-            store=store,
-            port=message_port,
-            kill_switch=False,
-            calendar=calendar,
-            calendar_booking=booking,
-            sheets=FakeSheetsPort(),
-        )
-        assert len(message_port.sent) == 2
-        assert RESCHEDULE_CONFIRMED in message_port.sent[-1].text
-        for tool in (
-            "calendar_reschedule_get",
-            "calendar_find_free_slots",
-            "calendar_patch_event",
-            "calendar_reschedule_verify",
-        ):
-            audit = store.get_canonical_event(
-                provider="gmail",
-                provider_event_id=f"evt.gate2.select:tool:{tool}",
-            )
-            assert audit is not None
-            payload = json.loads(audit.payload_json)
-            assert set(payload) == {"tool", "status", "result_count"}
-            serialized = audit.payload_json.lower()
-            assert "meet.google" not in serialized
-            assert event_id.lower() not in serialized
-            assert external_id.lower() not in serialized
-        rescheduled_rows = [
-            row
-            for row in store.session.scalars(
-                select(CanonicalEventRow).where(
-                    CanonicalEventRow.lead_id == lead_id,
-                    CanonicalEventRow.event_type
-                    == EventType.MEETING_RESCHEDULED.value,
-                )
-            )
-        ]
-        assert len(rescheduled_rows) == 1
-        payload = json.loads(rescheduled_rows[0].payload_json)
-        assert payload == {"status": "booked", "scheduled_at": payload["scheduled_at"]}
-    finally:
-        db.close()
-
-
-@pytest.mark.asyncio
-async def test_inbound_cancellation_is_local_only_and_sends_one_honest_reply() -> None:
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        external_id = "gate2.inbound.cancel@example.com"
-        lead_id = _seed_booked(store, external_id=external_id)
-        booking = FakeCalendarBookingPort()
-        message_port = RecordingMessagePort()
-        sheets = FakeSheetsPort()
-        result = await process_inbound_texts(
-            provider="gmail",
-            channel=Channel.GMAIL,
-            items=[
-                {
-                    "id": "evt.gate2.cancel.inbound",
-                    "from": external_id,
-                    "text": "cancel the meeting",
-                }
-            ],
-            store=store,
-            port=message_port,
-            kill_switch=False,
-            calendar=FakeCalendarPort([_slot(4, 11)]),
-            calendar_booking=booking,
-            sheets=sheets,
-        )
-        row = store.get_meeting(lead_id)
-        assert row is not None
-        assert result["processed"] == 1
-        assert len(message_port.sent) == 1
-        assert message_port.sent[0].text == CANCELLATION_REQUESTED_REPLY
-        assert row.status == STATUS_CANCELLATION_REQUESTED
-        assert booking.get_calls == []
-        assert booking.patch_calls == []
-    finally:
-        db.close()
-
-
-def test_website_e2e_reschedule_then_cancellation_request(monkeypatch) -> None:
-    from tests.conftest import freeze_mia_clock
-
-    freeze_mia_clock(monkeypatch, FIXED_NOW)
-    init_db()
-    db = get_session_factory()()
-    session_id = "web_gate2_reschedule_cancel"
-    try:
-        store = LeadStore(db)
-        lead_id = _seed_booked(
-            store,
-            external_id=session_id,
-            channel=Channel.WEBSITE,
-        )
-        target = _slot(4, 11)
-        meeting = store.get_meeting(lead_id)
-        assert meeting is not None
-        event_id = meeting.calendar_event_id
-        calendar = FakeCalendarPort([target])
-        booking = FakeCalendarBookingPort(
-            events_by_id={event_id: _provider_event(event_id, _slot(4, 9))}
-        )
-        sheets = FakeSheetsPort()
-        app.dependency_overrides[get_calendar_port] = lambda: calendar
-        app.dependency_overrides[get_calendar_booking_port] = lambda: booking
-        app.dependency_overrides[get_sheets_port] = lambda: sheets
-        try:
-            with TestClient(app) as client:
-                offer = client.post(
-                    f"/v1/website/sessions/{session_id}/messages",
-                    json={"text": "לשנות את המועד"},
-                )
-                selected = client.post(
-                    f"/v1/website/sessions/{session_id}/messages",
-                    json={"text": "1"},
-                )
-                cancelled = client.post(
-                    f"/v1/website/sessions/{session_id}/messages",
-                    json={"text": "לבטל את הפגישה"},
-                )
-            assert offer.status_code == 200
-            assert offer.json()["next_action"] in {
-                "ask_need",
-                "ask_contact",
-                "handoff",
-                "answer",
-                "confirm_contact",
-            }
-            assert selected.status_code == 200
-            assert cancelled.status_code == 200
-            assert cancelled.json()["next_action"] in {
-                "ask_need",
-                "ask_contact",
-                "handoff",
-                "answer",
-                "confirm_contact",
-            }
-        finally:
-            app.dependency_overrides.pop(get_calendar_port, None)
-            app.dependency_overrides.pop(get_calendar_booking_port, None)
-            app.dependency_overrides.pop(get_sheets_port, None)
-        db.expire_all()
-        assert booking.patch_calls == []
     finally:
         db.close()
 

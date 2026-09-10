@@ -8,7 +8,6 @@ from typing import Any
 
 import httpx
 import pytest
-from app.api import owner as owner_api
 from app.api import telegram as telegram_api
 from app.api.deps import get_telegram_port, get_transcription_port
 from app.core.config import Settings
@@ -152,7 +151,6 @@ def _configure_owner(monkeypatch) -> None:
 def _patch_owner_loop(monkeypatch, handler) -> None:
     monkeypatch.setattr(Settings, "owner_agent_ready", lambda self: True)
     monkeypatch.setattr(owner_brain_module, "answer_owner", handler)
-    monkeypatch.setattr(owner_api, "answer_owner", handler)
 
 
 @pytest.mark.asyncio
@@ -255,7 +253,9 @@ def test_voice_transcription_failure_is_visible_classified_and_does_not_enter_ow
     init_db()
     telegram = RecordingTelegramVoicePort()
     graph_calls: list[object] = []
-    monkeypatch.setattr(owner_api, "answer_owner", lambda **kwargs: graph_calls.append(kwargs))
+    monkeypatch.setattr(
+        owner_brain_module, "answer_owner", lambda **kwargs: graph_calls.append(kwargs)
+    )
     app.dependency_overrides[get_telegram_port] = lambda: telegram
     app.dependency_overrides[get_transcription_port] = lambda: FailingTranscriptionPort()
     try:
@@ -711,7 +711,9 @@ def test_invalid_voice_mime_is_visible_and_never_reaches_stt_or_owner_graph(
     telegram = InvalidMimeTelegramVoicePort(mime_type)
     transcribe = FakeTranscriptionPort("must not be used")
     graph_calls: list[object] = []
-    monkeypatch.setattr(owner_api, "answer_owner", lambda **kwargs: graph_calls.append(kwargs))
+    monkeypatch.setattr(
+        owner_brain_module, "answer_owner", lambda **kwargs: graph_calls.append(kwargs)
+    )
     app.dependency_overrides[get_telegram_port] = lambda: telegram
     app.dependency_overrides[get_transcription_port] = lambda: transcribe
     try:
@@ -761,7 +763,9 @@ def test_alternate_voice_port_cannot_bypass_media_validation(
     telegram = AlternateTelegramVoicePort(audio, mime_type)
     transcribe = FakeTranscriptionPort("must not be used")
     graph_calls: list[object] = []
-    monkeypatch.setattr(owner_api, "answer_owner", lambda **kwargs: graph_calls.append(kwargs))
+    monkeypatch.setattr(
+        owner_brain_module, "answer_owner", lambda **kwargs: graph_calls.append(kwargs)
+    )
     app.dependency_overrides[get_telegram_port] = lambda: telegram
     app.dependency_overrides[get_transcription_port] = lambda: transcribe
     try:
@@ -800,7 +804,9 @@ def test_malformed_voice_download_result_is_visible_once_and_never_reaches_stt_o
     telegram = MalformedTelegramVoicePort(malformed_result)
     transcribe = FakeTranscriptionPort("must not be used")
     graph_calls: list[object] = []
-    monkeypatch.setattr(owner_api, "answer_owner", lambda **kwargs: graph_calls.append(kwargs))
+    monkeypatch.setattr(
+        owner_brain_module, "answer_owner", lambda **kwargs: graph_calls.append(kwargs)
+    )
     app.dependency_overrides[get_telegram_port] = lambda: telegram
     app.dependency_overrides[get_transcription_port] = lambda: transcribe
     try:
@@ -832,7 +838,9 @@ def test_empty_voice_transcript_is_stt_failure_not_empty_hello(monkeypatch) -> N
     init_db()
     telegram = RecordingTelegramVoicePort()
     graph_calls: list[object] = []
-    monkeypatch.setattr(owner_api, "answer_owner", lambda **kwargs: graph_calls.append(kwargs))
+    monkeypatch.setattr(
+        owner_brain_module, "answer_owner", lambda **kwargs: graph_calls.append(kwargs)
+    )
     app.dependency_overrides[get_telegram_port] = lambda: telegram
     app.dependency_overrides[get_transcription_port] = lambda: FakeTranscriptionPort("   ")
     try:
@@ -893,12 +901,13 @@ def test_owner_photo_is_seen_and_reaches_owner_graph(monkeypatch) -> None:
     monkeypatch.setattr(
         telegram_owner_module,
         "_describe_owner_image",
-        lambda payload, mime: "צילום מסך של ווידג'ט צ'אט",
+        lambda payload, mime, **kwargs: "צילום מסך של ווידג'ט צ'אט",
     )
     _patch_owner_loop(
         monkeypatch,
-        lambda **kwargs: graph_inputs.append(dict(kwargs))
-        or OwnerBrainResult("ראיתי את התמונה", True, ()),
+        lambda **kwargs: (
+            graph_inputs.append(dict(kwargs)) or OwnerBrainResult("ראיתי את התמונה", True, ())
+        ),
     )
     app.dependency_overrides[get_telegram_port] = lambda: telegram
     app.dependency_overrides[get_transcription_port] = lambda: FakeTranscriptionPort("unused")
@@ -922,6 +931,7 @@ def test_owner_photo_is_seen_and_reaches_owner_graph(monkeypatch) -> None:
         assert telegram.downloaded_photos == ["photo-live-1"]
         assert graph_inputs
         assert "צילום מסך" in graph_inputs[0]["owner_text"]
+        assert graph_inputs[0]["raw_owner_request"] == ""
         assert "פה. מה צריך" not in telegram.sent[0].text
     finally:
         app.dependency_overrides.pop(get_telegram_port, None)

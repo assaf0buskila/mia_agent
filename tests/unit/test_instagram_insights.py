@@ -3,15 +3,12 @@ import json
 
 import httpx
 import pytest
-from app.api.inbound import process_inbound_texts
 from app.core.config import Settings
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
 from app.domain.content_insights import apply_content_insight_policy
 from app.domain.events import Channel, build_attribution_event
-from app.domain.owner.tasks import OwnerTaskType, ack_for_owner_task, classify_owner_task
 from app.domain.tools import AdapterHttpError
-from app.integrations.base import RecordingMessagePort
 from app.integrations.instagram_insights import (
     ContentInsight,
     DisabledInstagramInsightsPort,
@@ -22,7 +19,6 @@ from app.integrations.instagram_insights import (
     enrich_content_insights_ack,
     format_content_insights_line,
 )
-from app.integrations.sheets import FakeSheetsPort
 
 OWNER_IG_CONTENT_PHONE = "972509990081"
 OWNER_SHCNT_PHONE = "972509991301"
@@ -127,9 +123,7 @@ def test_graph_port_parses_media_and_insights_no_urls() -> None:
     assert items[0].permalink == "https://instagram.com/p/abc"
     assert "cdn.example" not in serialized
     assert "media_url" not in serialized
-    assert any(
-        "/media" in call and "caption" in call and "permalink" in call for call in calls
-    )
+    assert any("/media" in call and "caption" in call and "permalink" in call for call in calls)
     assert any("/media" in call for call in calls)
     assert any("/insights" in call for call in calls)
     assert all("access_token" not in call for call in calls)
@@ -150,26 +144,6 @@ def test_graph_port_media_list_401_raises_adapter_error() -> None:
     with pytest.raises(AdapterHttpError) as exc_info:
         port.list_recent_insights(limit=5)
     assert exc_info.value.status_code == 401
-
-
-def test_enrich_content_insights_ack_http_401_unauthorized_ack_unchanged() -> None:
-    class HttpErrorInsightsPort:
-        def list_recent_insights(self, *, limit: int = 5) -> list[ContentInsight]:
-            del limit
-            raise AdapterHttpError(401)
-
-    decision = classify_owner_task("analyze instagram content")
-    ack = ack_for_owner_task(decision)
-    enriched, outcome = enrich_content_insights_ack(
-        ack,
-        HttpErrorInsightsPort(),
-        store=None,
-        kill_switch=False,
-    )
-    assert enriched == ack
-    assert outcome.status == "unauthorized"
-    assert outcome.result_count == 0
-    assert "תוכן:" not in enriched
 
 
 def test_enrich_reports_bounded_instagram_read_as_partial_not_empty() -> None:
@@ -232,9 +206,7 @@ def test_graph_port_retries_supported_metrics_individually_after_mixed_batch_rej
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/media"):
-            return httpx.Response(
-                200, json={"data": [{"id": MEDIA_ID_1, "media_type": "IMAGE"}]}
-            )
+            return httpx.Response(200, json={"data": [{"id": MEDIA_ID_1, "media_type": "IMAGE"}]})
         if not request.url.path.endswith("/insights"):
             return httpx.Response(200, json={"username": "assafweb"})
         metric = str(request.url.params.get("metric") or "")
@@ -281,9 +253,7 @@ def test_graph_port_terminal_insight_failure_stops_without_metric_fallback(
     def handler(request: httpx.Request) -> httpx.Response:
         calls.append(str(request.url))
         if request.url.path.endswith("/media"):
-            return httpx.Response(
-                200, json={"data": [{"id": MEDIA_ID_1, "media_type": "IMAGE"}]}
-            )
+            return httpx.Response(200, json={"data": [{"id": MEDIA_ID_1, "media_type": "IMAGE"}]})
         if not request.url.path.endswith("/insights"):
             return httpx.Response(200, json={"username": "assafweb"})
         return httpx.Response(status_code, json={"error": {"message": "provider down"}})
@@ -318,17 +288,13 @@ def test_graph_port_stops_mixed_metric_fallback_on_terminal_400_provider_error(
         nonlocal calls
         calls += 1
         if request.url.path.endswith("/media"):
-            return httpx.Response(
-                200, json={"data": [{"id": MEDIA_ID_1, "media_type": "IMAGE"}]}
-            )
+            return httpx.Response(200, json={"data": [{"id": MEDIA_ID_1, "media_type": "IMAGE"}]})
         if not request.url.path.endswith("/insights"):
             return httpx.Response(200, json={"username": "assafweb"})
         metric = str(request.url.params.get("metric") or "")
         requested_metrics.append(metric)
         if "," in metric:
-            return httpx.Response(
-                400, json={"error": {"message": "mixed metrics unsupported"}}
-            )
+            return httpx.Response(400, json={"error": {"message": "mixed metrics unsupported"}})
         return httpx.Response(400, json={"error": error})
 
     port = GraphInstagramInsightsPort(
@@ -350,9 +316,7 @@ def test_graph_port_does_not_retry_generic_metric_error_individually() -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/media"):
-            return httpx.Response(
-                200, json={"data": [{"id": MEDIA_ID_1, "media_type": "IMAGE"}]}
-            )
+            return httpx.Response(200, json={"data": [{"id": MEDIA_ID_1, "media_type": "IMAGE"}]})
         if not request.url.path.endswith("/insights"):
             return httpx.Response(200, json={"username": "assafweb"})
         metric = str(request.url.params.get("metric") or "")
@@ -392,9 +356,7 @@ def test_graph_port_enforces_total_audit_call_budget(monkeypatch) -> None:
                     ]
                 },
             )
-        return httpx.Response(
-            400, json={"error": {"message": "mixed metrics unsupported"}}
-        )
+        return httpx.Response(400, json={"error": {"message": "mixed metrics unsupported"}})
 
     port = GraphInstagramInsightsPort(
         access_token="ig-token",
@@ -406,35 +368,6 @@ def test_graph_port_enforces_total_audit_call_budget(monkeypatch) -> None:
     with pytest.raises(InstagramInsightBudgetExceeded):
         port.list_recent_insights(limit=5)
     assert len(calls) == 11
-
-
-def test_enrich_appends_hebrew_line_and_persists() -> None:
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        decision = classify_owner_task("analyze instagram content")
-        ack = ack_for_owner_task(decision)
-        enriched, outcome = enrich_content_insights_ack(
-            ack,
-            FakeInstagramInsightsPort(SAMPLE_ITEMS),
-            store,
-            kill_switch=False,
-        )
-        db.commit()
-        assert "תוכן: 2 פוסטים, לידים מתוכן 0." in enriched
-        rows = [
-            row
-            for row in store.list_content_insights()
-            if row.media_id in {MEDIA_ID_1, MEDIA_ID_2}
-        ]
-        assert len(rows) == 2
-        first = next(row for row in rows if row.media_id == MEDIA_ID_1)
-        assert first.lead_signals == 0
-        assert outcome.status == "ok"
-        assert outcome.result_count == 2
-    finally:
-        db.close()
 
 
 def test_attribution_matching_ig_content_id_increments_lead_signals() -> None:
@@ -458,9 +391,7 @@ def test_attribution_matching_ig_content_id_increments_lead_signals() -> None:
         )
         apply_content_insight_policy(
             store,
-            items=[
-                ContentInsight(media_id=MEDIA_ID_ATTR, media_type="IMAGE", views="10")
-            ],
+            items=[ContentInsight(media_id=MEDIA_ID_ATTR, media_type="IMAGE", views="10")],
             kill_switch=False,
         )
         db.commit()
@@ -474,35 +405,12 @@ def test_attribution_matching_ig_content_id_increments_lead_signals() -> None:
         db.close()
 
 
-def test_enrich_kill_switch_denied_no_http() -> None:
-    class RaisingInsightsPort:
-        def list_recent_insights(self, *, limit: int = 5) -> list[ContentInsight]:
-            del limit
-            raise RuntimeError("must not call port when kill switch is on")
-
-    ack = ack_for_owner_task(classify_owner_task("instagram content performance"))
-    enriched, outcome = enrich_content_insights_ack(
-        ack,
-        RaisingInsightsPort(),
-        store=None,
-        kill_switch=True,
-    )
-    assert enriched == ack
-    assert outcome.status == "denied"
-
-
 def test_never_imports_message_port() -> None:
     import app.integrations.instagram_insights as module
 
     source = inspect.getsource(module)
     assert "MessagePort" not in source
     assert "instagram.py" not in source
-
-
-def test_classify_analyze_instagram_content_is_analytics() -> None:
-    decision = classify_owner_task("analyze instagram content")
-    assert decision.task_type == OwnerTaskType.ANALYTICS
-    assert decision.needs_clarification is False
 
 
 def test_build_port_live_when_token_and_account_set() -> None:
@@ -553,50 +461,6 @@ def test_format_content_insights_detail_names_posts_and_refuses_anonymous_totals
     assert "combined view/reach" in text.lower() or "No combined view/reach totals" in text
 
 
-@pytest.mark.asyncio
-async def test_owner_analytics_inbound_tool_result_instagram_insights() -> None:
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        sheets = FakeSheetsPort()
-        port = RecordingMessagePort()
-        await process_inbound_texts(
-            provider="whatsapp",
-            channel=Channel.WHATSAPP,
-            items=[
-                {
-                    "id": "evt.owner.ig.content.1",
-                    "from": OWNER_IG_CONTENT_PHONE,
-                    "text": "analyze instagram content",
-                    "source": "audio",
-                }
-            ],
-            store=store,
-            port=port,
-            kill_switch=False,
-            owner_ids={OWNER_IG_CONTENT_PHONE},
-            sheets=sheets,
-            instagram_insights=FakeInstagramInsightsPort(SAMPLE_ITEMS),
-        )
-        db.commit()
-        task = store.get_owner_task(
-            provider="whatsapp", provider_event_id="evt.owner.ig.content.1"
-        )
-        assert task is not None
-        assert task.task_type == "analytics"
-        sent = port.sent[0].text
-        assert "תוכן: 2 פוסטים" in sent
-        tool_row = store.get_canonical_event(
-            provider="whatsapp",
-            provider_event_id="evt.owner.ig.content.1:tool:instagram_insights",
-        )
-        assert tool_row is not None
-        payload = json.loads(tool_row.payload_json)
-        assert payload["status"] == "ok"
-        assert payload["result_count"] == 2
-    finally:
-        db.close()
 
 
 def test_build_insights_composio_when_sender_composio() -> None:
@@ -730,9 +594,7 @@ def test_composio_retries_only_classified_mixed_metric_incompatibility() -> None
             200,
             json={
                 "successful": True,
-                "data": {
-                    "data": [{"name": metric[0], "values": [{"value": 7}]}]
-                },
+                "data": {"data": [{"name": metric[0], "values": [{"value": 7}]}]},
             },
         )
 

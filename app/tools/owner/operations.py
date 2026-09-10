@@ -21,7 +21,6 @@ from app.domain.owner.reads import format_pending_approvals_ack, format_website_
 from app.domain.owner.snapshot import format_operator_snapshot_ack
 from app.domain.owner.status import format_owner_status_ack
 from app.domain.owner.weeklies import apply_owner_weekly
-from app.domain.whatsapp_drafts import draft_whatsapp_for_assaf
 from app.tools.owner.types import ToolContext, ToolResult, _empty
 
 # ----------------------------------------------------------------- owner reads
@@ -179,20 +178,6 @@ def _meeting_brief(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
             demo_active=ctx.demo_active,
         ),
         f"No meeting brief available for {lead_id}.",
-    )
-
-
-def _whatsapp_draft_assaf(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
-    del ctx
-    drafted = draft_whatsapp_for_assaf(
-        body=str(args.get("body") or ""),
-        destination=str(args.get("destination") or "assaf"),
-    )
-    if isinstance(drafted, str):
-        return ToolResult(ok=True, text=drafted)
-    return ToolResult(
-        ok=True,
-        text=f"WhatsApp draft for Assaf (not sent): {drafted.body}",
     )
 
 

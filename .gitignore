@@ -6,10 +6,12 @@ dist/
 build/
 .pytest_cache/
 .pytest-*/
+.pytest_tmp_*/
 .codex-pytest-tmp/
 .heavy-review-*/
 .ruff_cache/
 .mypy_cache/
+.cache/
 .coverage
 .env
 !.env.example

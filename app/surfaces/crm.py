@@ -32,6 +32,8 @@ CONTACTS_HEADERS: tuple[str, ...] = (
     "עודכן",
     "פינג לאסף",
 )
+CONTACT_ID_HEADER = "מזהה מיה"
+CONTACTS_V2_HEADERS: tuple[str, ...] = (*CONTACTS_HEADERS, CONTACT_ID_HEADER)
 
 ACTIVITY_HEADERS: tuple[str, ...] = (
     "מתי",
@@ -40,6 +42,8 @@ ACTIVITY_HEADERS: tuple[str, ...] = (
     "מה עשתה",
     "תוצאה",
 )
+ACTIVITY_ID_HEADER = "מזהה פעילות"
+ACTIVITY_V2_HEADERS: tuple[str, ...] = (*ACTIVITY_HEADERS, ACTIVITY_ID_HEADER)
 
 _IL_TZ = ZoneInfo("Asia/Jerusalem")
 

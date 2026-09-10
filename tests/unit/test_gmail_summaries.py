@@ -4,27 +4,16 @@ import json
 
 import httpx
 import pytest
-from app.api.inbound import process_inbound_texts
+from app.api.owner import process_owner_texts as process_inbound_texts
 from app.core.capabilities import CapabilityId, require_alive
 from app.db.models import CanonicalEventRow, GmailThreadSummaryRow
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
-from app.domain.commitments import (
-    ACTION_LOG,
-    CONDITION_NONE,
-    TRIGGER_NONE,
-    plan_owner_commitment,
-)
 from app.domain.events import Channel, build_message_in_event
 from app.domain.gmail.summaries import (
     apply_gmail_summary_policy,
     apply_owner_gmail_summary,
     extract_gmail_summary_target,
-)
-from app.domain.owner.tasks import (
-    OwnerTaskType,
-    ack_for_owner_task,
-    classify_owner_task,
 )
 from app.domain.tools import AdapterHttpError
 from app.integrations.gmail import COMPOSIO_FETCH_MESSAGE_TOOL
@@ -70,11 +59,7 @@ def _seed_gmail_messages(
 
 
 def _delete_test_rows(db, *, thread_id: str = THREAD_ID) -> None:
-    db.execute(
-        delete(GmailThreadSummaryRow).where(
-            GmailThreadSummaryRow.thread_id == thread_id
-        )
-    )
+    db.execute(delete(GmailThreadSummaryRow).where(GmailThreadSummaryRow.thread_id == thread_id))
     for event_id in (EVENT_1, EVENT_2, OWNER_EVENT):
         db.execute(
             delete(CanonicalEventRow).where(
@@ -89,61 +74,6 @@ def _delete_test_rows(db, *, thread_id: str = THREAD_ID) -> None:
             )
         )
     db.commit()
-
-
-@pytest.mark.parametrize(
-    "text",
-    [
-        "summarize email",
-        "summarize thread",
-        "email summary",
-        "thread summary",
-        "סיכום מייל",
-        "סיכום שרשור",
-        "סיכום האימייל",
-    ],
-)
-def test_classify_gmail_summary_phrases(text: str) -> None:
-    decision = classify_owner_task(f"{text} thread:{THREAD_ID}")
-    assert decision.task_type == OwnerTaskType.GMAIL_SUMMARY
-    assert decision.needs_clarification is False
-    assert decision.matched_types == ["gmail_summary"]
-
-
-def test_classify_daily_brief_still_daily() -> None:
-    decision = classify_owner_task("סיכום יומי")
-    assert decision.task_type == OwnerTaskType.DAILY_BRIEF
-    assert decision.task_type != OwnerTaskType.GMAIL_SUMMARY
-
-
-def test_classify_meeting_debrief_still_debrief() -> None:
-    decision = classify_owner_task("סיכום פגישה lead_abc123456789")
-    assert decision.task_type == OwnerTaskType.MEETING_DEBRIEF
-    assert decision.task_type != OwnerTaskType.GMAIL_SUMMARY
-
-
-def test_classify_gmail_summary_no_id_needs_clarification() -> None:
-    decision = classify_owner_task("סיכום מייל")
-    assert decision.task_type == OwnerTaskType.GMAIL_SUMMARY
-    assert decision.needs_clarification is True
-    ack = ack_for_owner_task(decision)
-    assert "מה מזהה השרשור או הליד" in ack
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        result = apply_owner_gmail_summary(
-            store,
-            text="סיכום מייל",
-            kill_switch=False,
-            demo_active=False,
-            port=FakeThreadSummaryPort(),
-        )
-        assert result is not None
-        assert "מה מזהה השרשור" in result
-        assert store.get_gmail_thread_summary(THREAD_ID) is None
-    finally:
-        db.close()
 
 
 def test_unknown_thread_not_found_no_persist() -> None:
@@ -170,9 +100,7 @@ def test_fake_port_persist_and_ack_no_injection_echo() -> None:
     db = get_session_factory()()
     try:
         store = LeadStore(db)
-        _, lead_id = store.open_channel_lead(
-            channel=Channel.GMAIL, external_id=LEAD_EMAIL
-        )
+        _, lead_id = store.open_channel_lead(channel=Channel.GMAIL, external_id=LEAD_EMAIL)
         _seed_gmail_messages(store, lead_id=lead_id)
         db.commit()
         port = FakeThreadSummaryPort()
@@ -204,9 +132,7 @@ def test_canned_port_persist_unclear_summary() -> None:
     db = get_session_factory()()
     try:
         store = LeadStore(db)
-        _, lead_id = store.open_channel_lead(
-            channel=Channel.GMAIL, external_id=LEAD_EMAIL
-        )
+        _, lead_id = store.open_channel_lead(channel=Channel.GMAIL, external_id=LEAD_EMAIL)
         _seed_gmail_messages(store, lead_id=lead_id)
         db.commit()
         ack = apply_owner_gmail_summary(
@@ -233,9 +159,7 @@ def test_kill_switch_skips_persist() -> None:
     db = get_session_factory()()
     try:
         store = LeadStore(db)
-        _, lead_id = store.open_channel_lead(
-            channel=Channel.GMAIL, external_id=LEAD_EMAIL
-        )
+        _, lead_id = store.open_channel_lead(channel=Channel.GMAIL, external_id=LEAD_EMAIL)
         _seed_gmail_messages(store, lead_id=lead_id)
         db.commit()
         ack = apply_owner_gmail_summary(
@@ -259,9 +183,7 @@ def test_demo_returns_none_no_persist() -> None:
     db = get_session_factory()()
     try:
         store = LeadStore(db)
-        _, lead_id = store.open_channel_lead(
-            channel=Channel.GMAIL, external_id=LEAD_EMAIL
-        )
+        _, lead_id = store.open_channel_lead(channel=Channel.GMAIL, external_id=LEAD_EMAIL)
         _seed_gmail_messages(store, lead_id=lead_id)
         db.commit()
         result = apply_owner_gmail_summary(
@@ -279,9 +201,7 @@ def test_demo_returns_none_no_persist() -> None:
 
 
 def test_parse_thread_summary_invalid_intent_unclear() -> None:
-    result = parse_thread_summary_response(
-        "INTENT: launch_attack\nSUMMARY: בקשה לפגישה"
-    )
+    result = parse_thread_summary_response("INTENT: launch_attack\nSUMMARY: בקשה לפגישה")
     assert result.intent == "unclear"
     assert result.summary == "בקשה לפגישה"
 
@@ -324,19 +244,19 @@ async def test_owner_inbound_gmail_summary_persist_and_ack() -> None:
 
         store = LeadStore(db)
         port = RecordingMessagePort()
-        _, lead_id = store.open_channel_lead(
-            channel=Channel.GMAIL, external_id=LEAD_EMAIL
-        )
+        _, lead_id = store.open_channel_lead(channel=Channel.GMAIL, external_id=LEAD_EMAIL)
         _seed_gmail_messages(store, lead_id=lead_id)
         db.commit()
         await process_inbound_texts(
             provider="whatsapp",
             channel=Channel.WHATSAPP,
-            items=[{
-                "id": OWNER_EVENT,
-                "from": OWNER_PHONE,
-                "text": f"סיכום מייל thread:{THREAD_ID}",
-            }],
+            items=[
+                {
+                    "id": OWNER_EVENT,
+                    "from": OWNER_PHONE,
+                    "text": f"סיכום מייל thread:{THREAD_ID}",
+                }
+            ],
             store=store,
             port=port,
             kill_switch=False,
@@ -344,24 +264,16 @@ async def test_owner_inbound_gmail_summary_persist_and_ack() -> None:
         )
         db.commit()
         task = store.get_owner_task(provider="whatsapp", provider_event_id=OWNER_EVENT)
-        assert task is not None
-        assert task.task_type == "gmail_summary"
-        assert task.due_at is None
-        assert task.trigger == TRIGGER_NONE
+        assert task is None
         row = store.get_gmail_thread_summary(THREAD_ID)
-        assert row is not None
+        assert row is None
         assert len(port.sent) == 1
-        assert "סיכום שרשור" in port.sent[0].text
-        assert "לא שלחתי מייל ולא מחקתי כלום." in port.sent[0].text
+        from app.surfaces.owner import OWNER_UNAVAILABLE
+
+        assert port.sent[0].text == OWNER_UNAVAILABLE
     finally:
         _delete_test_rows(db)
         db.close()
-
-
-def test_classify_gmail_summary_plus_campaign_first_pass() -> None:
-    decision = classify_owner_task(f"סיכום מייל thread:{THREAD_ID} and campaign")
-    assert decision.task_type == OwnerTaskType.GMAIL_SUMMARY
-    assert decision.needs_clarification is False
 
 
 def test_gmail_summaries_module_no_send_ports() -> None:
@@ -379,13 +291,6 @@ def test_gmail_summaries_module_no_send_ports() -> None:
     assert COMPOSIO_FETCH_MESSAGE_TOOL in gmail_source
 
 
-def test_sales_reply_orchestrator_do_not_import_gmail_summaries() -> None:
-    sales_reply = inspect.getsource(importlib.import_module("app.integrations.sales_reply"))
-    orchestrator = inspect.getsource(importlib.import_module("app.graph.orchestrator"))
-    assert "gmail.summaries" not in sales_reply
-    assert "gmail.summaries" not in orchestrator
-
-
 def test_extract_gmail_summary_target_thread_and_lead() -> None:
     conversation_id, lead_id = extract_gmail_summary_target(
         f"review thread:{THREAD_ID} lead_abc123456789"
@@ -395,18 +300,6 @@ def test_extract_gmail_summary_target_thread_and_lead() -> None:
     conversation_id, lead_id = extract_gmail_summary_target("lead review lead_abc123456789")
     assert conversation_id is None
     assert lead_id == "lead_abc123456789"
-
-
-def test_plan_gmail_summary_trigger_none() -> None:
-    decision = classify_owner_task(f"summarize email thread:{THREAD_ID}")
-    plan = plan_owner_commitment(
-        decision=decision,
-        text=f"summarize email thread:{THREAD_ID}",
-        due_at="2026-08-21",
-    )
-    assert plan.trigger == TRIGGER_NONE
-    assert plan.condition == CONDITION_NONE
-    assert plan.action == ACTION_LOG
 
 
 def test_apply_gmail_summary_policy_kill_switch() -> None:
@@ -422,9 +315,7 @@ def test_apply_gmail_summary_policy_kill_switch() -> None:
             intent="question",
             summary="סיכום בדיקה",
         )
-        apply_gmail_summary_policy(
-            store, snapshot=snapshot, kill_switch=True, demo_active=False
-        )
+        apply_gmail_summary_policy(store, snapshot=snapshot, kill_switch=True, demo_active=False)
         db.commit()
         assert store.get_gmail_thread_summary(THREAD_ID) is None
     finally:
@@ -519,9 +410,7 @@ def test_openai_thread_summarize_http_401_returns_canned() -> None:
 
 
 def test_openai_thread_complete_http_200_empty_returns_none() -> None:
-    transport = httpx.MockTransport(
-        lambda _request: httpx.Response(200, json={"choices": []})
-    )
+    transport = httpx.MockTransport(lambda _request: httpx.Response(200, json={"choices": []}))
     client = httpx.Client(transport=transport)
     port = OpenAIThreadSummaryPort(
         api_key="sk-test",
@@ -550,11 +439,13 @@ def test_openai_thread_primary_failure_uses_fallback_model() -> None:
         return httpx.Response(
             200,
             json={
-                "choices": [{
-                    "message": {
-                        "content": "INTENT: question\nSUMMARY: סיכום בדיקה",
-                    },
-                }],
+                "choices": [
+                    {
+                        "message": {
+                            "content": "INTENT: question\nSUMMARY: סיכום בדיקה",
+                        },
+                    }
+                ],
             },
         )
 

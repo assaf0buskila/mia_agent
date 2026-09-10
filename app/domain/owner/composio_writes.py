@@ -16,6 +16,11 @@ from app.domain.approvals import (
     is_approval_expired,
 )
 from app.domain.events import Channel, build_approval_required_event
+from app.domain.owner.composio_effects import (
+    EffectRoute,
+    composio_effect,
+    is_prohibited_meta_ads_mutation,
+)
 from app.integrations.composio_catalog import (
     DENIED_COMPOSIO_SLUGS,
     NEVER_AUTO_PUBLISH_SLUGS,
@@ -73,9 +78,11 @@ def _generic_write_denial(slug: str, toolkit: str, risk: RiskLevel) -> str:
     """Return why a side effect cannot use the generic approval path."""
     action = slug.strip().upper()
     provider = toolkit.strip().upper()
+    if is_prohibited_meta_ads_mutation(action, provider):
+        return "Meta Ads mutations are prohibited regardless of approval."
     if action in DENIED_COMPOSIO_SLUGS or risk is RiskLevel.R5_DESTRUCTIVE:
         return "Destructive Composio tools are denied."
-    if action in NEVER_AUTO_SEND_SLUGS:
+    if action in NEVER_AUTO_SEND_SLUGS and action != "GMAIL_SEND_DRAFT":
         return "Send tools cannot use generic approval; use the named owner workflow."
     if action in SHEETS_BOUNDED_WRITE_SLUGS or (
         action.startswith("GOOGLESHEETS_") and risk is not RiskLevel.R0_READ
@@ -88,6 +95,14 @@ def _generic_write_denial(slug: str, toolkit: str, risk: RiskLevel) -> str:
     if (provider == "LINKEDIN" or action.startswith("LINKEDIN_")) and risk is not RiskLevel.R0_READ:
         return "LinkedIn writes must use the named LinkedIn approval workflow."
     return ""
+
+
+def generic_composio_effect_supported(slug: str) -> bool:
+    """Use the shared finite effect registry for both proposal and execution."""
+    return composio_effect(slug).route in {
+        EffectRoute.GENERIC_CREATE,
+        EffectRoute.SNAPSHOT_WRITE,
+    }
 
 
 def propose_composio_write(

@@ -3,9 +3,7 @@ import inspect
 import json
 
 import pytest
-from app.api.inbound import process_inbound_texts
 from app.core.capabilities import CapabilityId, require_alive
-from app.db.models import CanonicalEventRow
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
 from app.domain.deals import STAGE_MEETING_OFFERED, apply_deal_policy
@@ -21,12 +19,8 @@ from app.domain.debriefs import (
     parse_debrief_next_step,
     parse_debrief_outcome,
 )
-from app.domain.events import Channel, EventType
+from app.domain.events import Channel
 from app.domain.sales import NextAction, SalesState
-from app.integrations.base import RecordingMessagePort
-from app.integrations.calendar import DisabledCalendarPort
-from app.integrations.sheets import DisabledSheetsPort
-from sqlalchemy import select
 
 OWNER_PHONE = "972509998201"
 OWNER_PHONE_2 = "972509998202"
@@ -51,135 +45,14 @@ LEAD_PHONE_325 = "972509998325"
 
 
 def _open_lead(store: LeadStore, *, external_id: str) -> str:
-    _, lead_id = store.open_channel_lead(
-        channel=Channel.WHATSAPP, external_id=external_id
-    )
+    _, lead_id = store.open_channel_lead(channel=Channel.WHATSAPP, external_id=external_id)
     return lead_id
 
 
-@pytest.mark.asyncio
-async def test_owner_debrief_persist_with_lead_id() -> None:
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        port = RecordingMessagePort()
-        lead_id = _open_lead(store, external_id=LEAD_PHONE)
-        db.commit()
-        transcript_body = f"אחרי הפגישה {lead_id} דיברנו על תהליך"
-        await process_inbound_texts(
-            provider="whatsapp",
-            channel=Channel.WHATSAPP,
-            items=[{
-                "id": "evt.debrief.persist.1",
-                "from": OWNER_PHONE,
-                "text": transcript_body,
-            }],
-            store=store,
-            port=port,
-            kill_switch=False,
-            owner_ids={OWNER_PHONE},
-            calendar=DisabledCalendarPort(),
-            sheets=DisabledSheetsPort(),
-        )
-        db.commit()
-        row = store.get_meeting_debrief(lead_id)
-        assert row is not None
-        assert row.outcome == OUTCOME_HELD
-        assert row.next_step == "none"
-        assert row.estimated_value == ""
-        assert row.notes == ""
-        events = list(
-            db.scalars(
-                select(CanonicalEventRow).where(
-                    CanonicalEventRow.lead_id == lead_id,
-                    CanonicalEventRow.event_type == EventType.MEETING_DEBRIEF.value,
-                )
-            )
-        )
-        assert len(events) == 1
-        assert events[0].provider_event_id == f"{lead_id}:debrief"
-        payload = json.loads(events[0].payload_json)
-        assert set(payload.keys()) == {"outcome", "next_step"}
-        assert payload == {"outcome": OUTCOME_HELD, "next_step": "none"}
-        assert len(port.sent) == 1
-        assert "נשמר סיכום פגישה" in port.sent[0].text
-        assert "לא עדכנתי שווי עסקה" in port.sent[0].text
-        assert transcript_body not in port.sent[0].text
-        assert lead_id not in port.sent[0].text
-    finally:
-        db.close()
 
 
-@pytest.mark.asyncio
-async def test_owner_debrief_missing_lead_id_understanding_check() -> None:
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        port = RecordingMessagePort()
-        await process_inbound_texts(
-            provider="whatsapp",
-            channel=Channel.WHATSAPP,
-            items=[{
-                "id": "evt.debrief.missing.1",
-                "from": OWNER_PHONE_2,
-                "text": "אחרי הפגישה דיברנו עם יעל",
-            }],
-            store=store,
-            port=port,
-            kill_switch=False,
-            owner_ids={OWNER_PHONE_2},
-        )
-        db.commit()
-        task = store.get_owner_task(
-            provider="whatsapp", provider_event_id="evt.debrief.missing.1"
-        )
-        assert task is not None
-        assert task.task_type == "meeting_debrief"
-        assert len(port.sent) == 1
-        assert "מה מזהה הליד" in port.sent[0].text
-        assert "יעל" not in port.sent[0].text
-    finally:
-        db.close()
 
 
-@pytest.mark.asyncio
-async def test_owner_debrief_unknown_lead_id() -> None:
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        port = RecordingMessagePort()
-        await process_inbound_texts(
-            provider="whatsapp",
-            channel=Channel.WHATSAPP,
-            items=[{
-                "id": "evt.debrief.unknown.1",
-                "from": OWNER_PHONE_3,
-                "text": f"אחרי הפגישה {UNKNOWN_LEAD_ID} no show",
-            }],
-            store=store,
-            port=port,
-            kill_switch=False,
-            owner_ids={OWNER_PHONE_3},
-        )
-        db.commit()
-        row = store.get_meeting_debrief(UNKNOWN_LEAD_ID)
-        assert row is None
-        events = list(
-            db.scalars(
-                select(CanonicalEventRow).where(
-                    CanonicalEventRow.provider_event_id
-                    == f"{UNKNOWN_LEAD_ID}:debrief",
-                )
-            )
-        )
-        assert len(events) == 0
-        assert len(port.sent) == 1
-        assert "לא מצאתי את הליד" in port.sent[0].text
-        assert UNKNOWN_LEAD_ID not in port.sent[0].text
-    finally:
-        db.close()
 
 
 def test_apply_owner_meeting_debrief_kill_switch_skips() -> None:
@@ -354,42 +227,6 @@ def test_debrief_does_not_change_deal_row() -> None:
         db.close()
 
 
-@pytest.mark.asyncio
-async def test_owner_audio_saves_transcript_and_empty_debrief_notes() -> None:
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        port = RecordingMessagePort()
-        lead_id = _open_lead(store, external_id=LEAD_PHONE_9)
-        db.commit()
-        owner_text = f"אחרי הפגישה {lead_id} נפגשנו"
-        await process_inbound_texts(
-            provider="whatsapp",
-            channel=Channel.WHATSAPP,
-            items=[{
-                "id": "evt.debrief.audio.1",
-                "from": OWNER_PHONE_9,
-                "text": owner_text,
-                "source": "audio",
-            }],
-            store=store,
-            port=port,
-            kill_switch=False,
-            owner_ids={OWNER_PHONE_9},
-        )
-        db.commit()
-        transcript = store.get_transcript(
-            provider="whatsapp", provider_event_id="evt.debrief.audio.1"
-        )
-        assert transcript is not None
-        assert transcript.transcript == owner_text
-        row = store.get_meeting_debrief(lead_id)
-        assert row is not None
-        assert row.notes == ""
-        assert owner_text not in row.notes
-    finally:
-        db.close()
 
 
 def test_ack_for_debrief_result_skipped_returns_none() -> None:
@@ -484,67 +321,8 @@ def test_apply_debrief_proposal_no_deal_change() -> None:
         db.close()
 
 
-@pytest.mark.asyncio
-async def test_inbound_debrief_follow_up_hebrew() -> None:
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        port = RecordingMessagePort()
-        lead_id = _open_lead(store, external_id=LEAD_PHONE_322)
-        db.commit()
-        await process_inbound_texts(
-            provider="whatsapp",
-            channel=Channel.WHATSAPP,
-            items=[{
-                "id": "evt.debrief.followup.1",
-                "from": OWNER_PHONE_220,
-                "text": f"אחרי הפגישה {lead_id} צריך מעקב",
-            }],
-            store=store,
-            port=port,
-            kill_switch=False,
-            owner_ids={OWNER_PHONE_220},
-        )
-        db.commit()
-        row = store.get_meeting_debrief(lead_id)
-        assert row is not None
-        assert row.next_step == NEXT_STEP_FOLLOW_UP
-        assert len(port.sent) == 1
-        assert "נשמר סיכום פגישה" in port.sent[0].text
-        assert "לא עדכנתי שווי עסקה" in port.sent[0].text
-    finally:
-        db.close()
 
 
-@pytest.mark.asyncio
-async def test_inbound_debrief_proposal_hebrew() -> None:
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        port = RecordingMessagePort()
-        lead_id = _open_lead(store, external_id=LEAD_PHONE_323)
-        db.commit()
-        await process_inbound_texts(
-            provider="whatsapp",
-            channel=Channel.WHATSAPP,
-            items=[{
-                "id": "evt.debrief.proposal.1",
-                "from": OWNER_PHONE_221,
-                "text": f"אחרי הפגישה {lead_id} לשלוח הצעה",
-            }],
-            store=store,
-            port=port,
-            kill_switch=False,
-            owner_ids={OWNER_PHONE_221},
-        )
-        db.commit()
-        row = store.get_meeting_debrief(lead_id)
-        assert row is not None
-        assert row.next_step == NEXT_STEP_PROPOSAL
-    finally:
-        db.close()
 
 
 def test_upsert_meeting_debrief_rejects_unknown_next_step() -> None:

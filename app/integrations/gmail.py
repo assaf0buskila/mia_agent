@@ -108,10 +108,12 @@ class ComposioGmailPort:
         *,
         api_key: str,
         user_id: str,
+        connected_account_id: str = "",
         client: httpx.Client | None = None,
     ) -> None:
         self._api_key = api_key
         self._user_id = user_id
+        self._connected_account_id = connected_account_id.strip()
         self._client = client
 
     def fetch_message(self, message_id: str) -> InboundEmail | None:
@@ -187,6 +189,8 @@ class ComposioGmailPort:
             "version": COMPOSIO_GMAIL_VERSION,
             "arguments": arguments,
         }
+        if self._connected_account_id:
+            payload["connected_account_id"] = self._connected_account_id
         headers = {
             "x-api-key": self._api_key,
             "Content-Type": "application/json",
@@ -239,6 +243,9 @@ class FakeGmailPort:
 
     def fetch_message(self, message_id: str) -> InboundEmail | None:
         return self._messages.get(message_id)
+
+    def approval_connected_account_id(self) -> str:
+        return "fake-gmail-account"
 
     def list_recent(self, *, limit: int = MAX_INBOX_ROWS) -> list[InboxRow]:
         return self._inbox[: _cap_limit(limit)]
@@ -486,9 +493,7 @@ def _map_fetch_data(data: dict[str, Any], *, message_id: str) -> InboundEmail:
     text = _extract_message_text(data)
     thread_id = _non_empty_str(data.get("thread_id") or data.get("threadId")) or ""
     mapped_id = _non_empty_str(data.get("messageId") or data.get("message_id")) or message_id
-    timestamp = (
-        _non_empty_str(data.get("messageTimestamp") or data.get("internalDate")) or ""
-    )
+    timestamp = _non_empty_str(data.get("messageTimestamp") or data.get("internalDate")) or ""
     return InboundEmail(
         message_id=mapped_id,
         sender=sender,
@@ -516,8 +521,7 @@ def _map_inbox_rows(data: dict[str, Any], *, limit: int) -> list[InboxRow]:
         rows.append(
             InboxRow(
                 message_id=message_id,
-                thread_id=_non_empty_str(item.get("threadId") or item.get("thread_id"))
-                or "",
+                thread_id=_non_empty_str(item.get("threadId") or item.get("thread_id")) or "",
                 sender=parse_sender_email(sender_raw) if sender_raw else "",
                 subject=_non_empty_str(item.get("subject")) or "",
                 snippet=_extract_message_text(item)[:MAX_SNIPPET_CHARS],

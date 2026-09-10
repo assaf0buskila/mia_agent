@@ -7,9 +7,6 @@ from typing import Any
 from app.capabilities.mail import mail_handlers
 from app.capabilities.policy import execute_capability
 from app.core.errors import PermissionDenied
-from app.domain.approvals import ACTION_GMAIL_SEND, RESOURCE_GMAIL, extract_approval_id
-from app.domain.events import Channel
-from app.domain.gmail.drafts import apply_owner_gmail_draft
 from app.domain.gmail.query import normalize_gmail_query
 from app.domain.gmail.summaries import apply_owner_gmail_summary
 from app.domain.tools import AdapterHttpError
@@ -21,6 +18,7 @@ from app.integrations.gmail import (
     format_email_body,
     format_inbox_rows,
 )
+from app.services.owner_actions import propose_owner_action, typed_composio_binding
 from app.tools.owner.types import ToolContext, ToolResult, _empty, _house_unavailable
 
 
@@ -121,33 +119,33 @@ def _gmail_read(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
 
 
 def _gmail_create_draft(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
+    if ctx.kill_switch:
+        return ToolResult(ok=False, error="Gmail draft denied")
     to = str(args.get("to") or "").strip()
     subject = str(args.get("subject") or "").strip()
     body = str(args.get("body") or "").strip()
     if not to or not (subject or body):
         return ToolResult(ok=False, error="to and subject or body are required")
-    port = _gmail_port(ctx)
-    if port is None:
-        return _house_unavailable(ctx, "Gmail")
-    text = f"שלח מייל ל {to} נושא: {subject}\n{body}"
-    reply = apply_owner_gmail_draft(
-        ctx.store,
-        text=text,
-        channel=Channel.TELEGRAM,
-        port=port,
-        kill_switch=ctx.kill_switch,
-        demo_active=ctx.demo_active,
+    try:
+        port = _gmail_port(ctx)
+        if port is None:
+            return _house_unavailable(ctx, "Gmail")
+        binding = typed_composio_binding(ctx.settings, "GMAIL", port=port)
+        proposal = propose_owner_action(
+            ctx.store,
+            principal=ctx.principal,
+            source_ref=ctx.source_ref,
+            kind="gmail.create_draft",
+            parameters={"to": to, "subject": subject, "body": body},
+            target={"recipient": to, "provider_binding": binding},
+        )
+    except (PermissionError, ValueError, RuntimeError) as exc:
+        return ToolResult(ok=False, error=f"Gmail draft proposal could not be bound: {exc}")
+    return ToolResult(
+        ok=True,
+        text="Prepared an exact Gmail draft proposal. No draft was created.",
+        approval_id=proposal.approval_id,
     )
-    approval_id = extract_approval_id(reply) or ""
-    if approval_id:
-        row = ctx.store.get_approval_by_approval_id(approval_id)
-        if (
-            row is None
-            or row.resource_type != RESOURCE_GMAIL
-            or row.action != ACTION_GMAIL_SEND
-        ):
-            approval_id = ""
-    return ToolResult(ok=True, text=reply, approval_id=approval_id)
 
 
 def _gmail_summary(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:

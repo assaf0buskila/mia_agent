@@ -22,7 +22,6 @@ from app.domain.sales import (
     FitLevel,
     NextAction,
     compute_missing_fields,
-    select_next_action,
 )
 
 if TYPE_CHECKING:
@@ -31,7 +30,7 @@ if TYPE_CHECKING:
 extract_review_lead_id = extract_approval_lead_id
 
 ALLOWLISTED_FIT = frozenset(item.value for item in FitLevel)
-ALLOWLISTED_NEXT_ACTION = frozenset(item.value for item in NextAction)
+ALLOWLISTED_NEXT_ACTION = frozenset({"", *(item.value for item in NextAction)})
 ALLOWLISTED_FOLLOW_UP_STATUS = frozenset({"pending", "cancelled", "recovered", ""})
 ALLOWLISTED_MEETING_STATUS = frozenset(
     {STATUS_OFFERED, STATUS_BOOKED, STATUS_CANCELLATION_REQUESTED, ""}
@@ -126,12 +125,16 @@ def build_lead_review_snapshot(store: LeadStore, *, lead_id: str) -> LeadReviewS
     deal = store.get_deal(lead_id)
     if deal is not None:
         deal_stage = deal.stage
+    prior_review = store.get_lead_review(lead_id)
+    historical_action = ""
+    if prior_review is not None and prior_review.next_action in ALLOWLISTED_NEXT_ACTION:
+        historical_action = prior_review.next_action
     return LeadReviewSnapshot(
         lead_id=lead_id,
         stage=lead.stage or "",
         fit=sales.fit.value,
         pain_level=int(sales.pain_level),
-        next_action=select_next_action(sales).value,
+        next_action=historical_action,
         missing_fields=",".join(missing_ordered),
         follow_up_status=follow_up_status,
         follow_up_due_at=follow_up_due_at,
@@ -174,7 +177,8 @@ def format_lead_review(snapshot: LeadReviewSnapshot) -> str:
         f"שלב: {snapshot.stage or ''}",
         f"התאמה: {_FIT_HE.get(snapshot.fit, snapshot.fit)}",
         f"כאב: P{snapshot.pain_level}",
-        f"פעולה הבאה: {_NEXT_ACTION_HE.get(snapshot.next_action, snapshot.next_action)}",
+        "פעולה היסטורית אחרונה: "
+        f"{_NEXT_ACTION_HE.get(snapshot.next_action, snapshot.next_action) or 'טרם נקבעה'}",
         f"חסר: {missing_he or 'אין'}",
         f"מעקב: {follow_up_line}",
         f"פגישה: {meeting_line}",

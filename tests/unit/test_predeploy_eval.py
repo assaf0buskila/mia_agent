@@ -41,7 +41,6 @@ from app.evals.predeploy.scenarios import (
     hard_safety_ids,
     owner_scenarios,
     scenario_ids,
-    website_scenarios,
 )
 
 LIVE_ENV = {
@@ -96,7 +95,6 @@ def test_gate_is_closed_when_the_flag_is_set_but_no_model_is_configured() -> Non
     status = gate_status({PREDEPLOY_FLAG: "1"})
     assert status.opted_in is True
     assert status.enabled() is False
-    assert status.site_ready is False
     assert status.owner_ready is False
 
 
@@ -104,7 +102,6 @@ def test_gate_is_closed_when_models_exist_but_nobody_opted_in() -> None:
     env = dict(LIVE_ENV)
     env.pop(PREDEPLOY_FLAG)
     status = gate_status(env)
-    assert status.site_ready is True
     assert status.owner_ready is True
     assert status.enabled() is False
 
@@ -129,7 +126,6 @@ def test_gate_needs_both_surfaces_before_it_reports_ready() -> None:
     # An OpenAI key with only a sales model still reaches the owner agent, because the
     # owner chain falls back to the sales models. Dropping the key closes both.
     status = gate_status({PREDEPLOY_FLAG: "1", "MIA_SALES_MODEL": "m"})
-    assert status.site_ready is False
     assert status.owner_ready is False
     assert status.enabled() is False
 
@@ -297,7 +293,6 @@ def test_sealed_settings_keeps_model_config_and_strips_every_integration_credent
             "composio_api_key": "live-composio",
             "composio_user_id": "live-user",
             "telegram_bot_token": "live-telegram",
-            "whatsapp_access_token": "live-whatsapp",
             "gmail_send": True,
             "calendar_write": True,
             "database_url": "postgresql://live/mia",
@@ -310,7 +305,6 @@ def test_sealed_settings_keeps_model_config_and_strips_every_integration_credent
     assert sealed.composio_api_key == ""
     assert sealed.composio_user_id == ""
     assert sealed.telegram_bot_token == ""
-    assert sealed.whatsapp_access_token == ""
     assert sealed.gmail_send is False
     assert sealed.calendar_write is False
     assert ":memory:" in sealed.database_url
@@ -347,31 +341,22 @@ def test_sealed_env_pins_the_process_to_a_throwaway_database() -> None:
 # ------------------------------------------------------------- scenario inventory
 
 
-def test_the_suite_covers_twenty_website_and_ten_owner_scenarios() -> None:
-    assert len(website_scenarios()) == 20
+def test_the_suite_covers_ten_owner_scenarios() -> None:
     assert len(owner_scenarios()) == 10
     ids = scenario_ids()
-    assert len(ids) == 30
-    assert len(set(ids)) == 30
+    assert len(ids) == 10
+    assert len(set(ids)) == 10
 
 
 def test_every_scenario_explains_why_it_exists() -> None:
-    for scenario in (*website_scenarios(), *owner_scenarios()):
+    for scenario in owner_scenarios():
         assert scenario.why.strip(), f"{scenario.scenario_id} has no stated purpose"
 
 
 def test_the_hard_safety_list_is_not_empty_and_covers_the_named_invariants() -> None:
     hard = set(hard_safety_ids())
     assert hard
-    assert {
-        "site_abuse",
-        "site_legal",
-        "site_impersonation",
-        "site_unknown_price",
-        "site_frustration",
-        "site_nail_conversion",
-        "owner_forbidden_write",
-    } <= hard
+    assert {"owner_forbidden_write"} <= hard
 
 
 def test_hard_safety_ids_are_real_scenario_ids() -> None:

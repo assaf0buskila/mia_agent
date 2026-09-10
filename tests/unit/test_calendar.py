@@ -4,17 +4,9 @@ from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
-from app.api.deps import get_calendar_port
-from app.api.inbound import process_inbound_texts
 from app.core.config import Settings
-from app.db.models import CanonicalEventRow
-from app.db.session import get_session_factory, init_db
-from app.db.store import LeadStore
-from app.domain.events import Channel
 from app.domain.sales import FitLevel, NextAction, PainLevel, SalesState
 from app.domain.tools import AdapterHttpError
-from app.graph.replies import WEBSITE_REPLIES
-from app.integrations.base import RecordingMessagePort
 from app.integrations.calendar import (
     COMPOSIO_FIND_FREE_SLOTS_TOOL,
     COMPOSIO_GOOGLECALENDAR_VERSION,
@@ -28,12 +20,9 @@ from app.integrations.calendar import (
     format_slot_time,
     prepare_meeting_offer,
 )
-from app.main import app
-from fastapi.testclient import TestClient
-from sqlalchemy import select
 
 LEAD_EMAIL = "cal.offer.1@example.com"
-OFFER_COPY = WEBSITE_REPLIES[NextAction.OFFER_MEETING]
+OFFER_COPY = "אפשר לקבוע שיחה קצרה עם אסף."
 FIXED_NOW = datetime(2026, 8, 20, 6, 0, tzinfo=UTC)
 IL_TZ = ZoneInfo("Asia/Jerusalem")
 
@@ -168,146 +157,6 @@ def test_calendar_protocol_is_read_only() -> None:
     names = {name for name in dir(CalendarPort) if not name.startswith("_")}
     assert "find_free_slots" in names
     assert not any(verb in name for name in names for verb in ("create", "delete", "update"))
-
-
-@pytest.mark.asyncio
-async def test_inbound_enriches_offer_meeting_with_fake_slots(monkeypatch) -> None:
-    from tests.conftest import freeze_mia_clock
-
-    freeze_mia_clock(monkeypatch, FIXED_NOW)
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        _, lead_id = store.open_channel_lead(channel=Channel.GMAIL, external_id=LEAD_EMAIL)
-        store.save_sales(_ready_to_meet_state(lead_id))
-        db.commit()
-
-        slot = _policy_gap(days_ahead=4, start_hour=10, end_hour=12)
-        calendar = FakeCalendarPort([slot])
-        port = RecordingMessagePort()
-
-        result = await process_inbound_texts(
-            provider="gmail",
-            channel=Channel.GMAIL,
-            items=[{"id": "evt.cal.1", "from": LEAD_EMAIL, "text": "ok"}],
-            store=store,
-            port=port,
-            kill_switch=False,
-            calendar=calendar,
-        )
-        db.commit()
-
-        assert result["processed"] == 1
-        assert len(port.sent) == 1
-        reply = port.sent[0].text
-        assert OFFER_COPY in reply
-        assert "זמין:" in reply
-        assert "Mon 24 Aug" in reply
-        cal_tool = store.get_canonical_event(
-            provider="gmail",
-            provider_event_id="evt.cal.1:tool:calendar_find_free_slots",
-        )
-        assert cal_tool is not None
-        payload = json.loads(cal_tool.payload_json)
-        assert payload["status"] == "ok"
-        assert payload["result_count"] >= 1
-        assert "start" not in payload and "time" not in payload
-        tool_run = store.get_tool_run("evt.cal.1:tool:calendar_find_free_slots")
-        assert tool_run is not None
-        assert tool_run.tool == "calendar_find_free_slots"
-        assert tool_run.status == "ok"
-        assert tool_run.latency_ms >= 0
-        assert tool_run.cost_usd == 0
-    finally:
-        db.close()
-
-
-@pytest.mark.asyncio
-async def test_inbound_disabled_calendar_keeps_static_offer_meeting() -> None:
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        _, lead_id = store.open_channel_lead(
-            channel=Channel.GMAIL,
-            external_id="cal.offer.2@example.com",
-        )
-        store.save_sales(_ready_to_meet_state(lead_id))
-        db.commit()
-
-        port = RecordingMessagePort()
-        await process_inbound_texts(
-            provider="gmail",
-            channel=Channel.GMAIL,
-            items=[{"id": "evt.cal.2", "from": "cal.offer.2@example.com", "text": "ok"}],
-            store=store,
-            port=port,
-            kill_switch=False,
-            calendar=DisabledCalendarPort(),
-        )
-        db.commit()
-
-        assert port.sent[0].text == OFFER_COPY
-        assert "זמין:" not in port.sent[0].text
-    finally:
-        db.close()
-
-
-def test_website_post_message_enriches_seeded_offer_meeting(monkeypatch) -> None:
-    # The slot and the asserted label ("Mon 24 Aug") are both derived from FIXED_NOW, so
-    # the clock has to be frozen too. Without it the seeded slot drifts inside the >=24h
-    # notice window as real time passes and the offer comes back with no slots — the test
-    # rotted on a date rather than on a code change.
-    from tests.conftest import freeze_mia_clock
-
-    freeze_mia_clock(monkeypatch, FIXED_NOW)
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        session_id = "web_cal_offer_1"
-        _, lead_id = store.open_channel_lead(channel=Channel.WEBSITE, external_id=session_id)
-        store.save_sales(_ready_to_meet_state(lead_id))
-        db.commit()
-
-        slot = _policy_gap(days_ahead=4, start_hour=10, end_hour=18)
-        fake = FakeCalendarPort([slot])
-
-        app.dependency_overrides[get_calendar_port] = lambda: fake
-        try:
-            with TestClient(app) as client:
-                response = client.post(
-                    f"/v1/website/sessions/{session_id}/messages",
-                    json={"text": "ok"},
-                )
-                assert response.status_code == 200
-                body = response.json()
-                assert body["next_action"] in {"ask_need", "ask_contact", "answer"}
-                assert body["lead_id"] == ""
-                assert OFFER_COPY not in body["message"]
-        finally:
-            app.dependency_overrides.pop(get_calendar_port, None)
-        db2 = get_session_factory()()
-        try:
-            in_row = db2.scalars(
-                select(CanonicalEventRow).where(
-                    CanonicalEventRow.conversation_id == session_id,
-                    CanonicalEventRow.event_type == "message_in",
-                )
-            ).first()
-            assert in_row is not None
-            cal_tool = db2.scalars(
-                select(CanonicalEventRow).where(
-                    CanonicalEventRow.provider_event_id
-                    == f"{in_row.provider_event_id}:tool:calendar_find_free_slots"
-                )
-            ).first()
-            assert cal_tool is None
-        finally:
-            db2.close()
-    finally:
-        db.close()
 
 
 def test_build_calendar_port_live_when_both_credentials_set() -> None:

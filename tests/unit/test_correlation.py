@@ -3,7 +3,7 @@ import inspect
 import json
 
 import pytest
-from app.api.inbound import process_inbound_texts
+from app.api.owner import process_owner_texts as process_inbound_texts
 from app.db.models import AiRunRow, CanonicalEventRow
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
@@ -44,7 +44,7 @@ def test_sanitize_payload_version() -> None:
 
 
 @pytest.mark.asyncio
-async def test_prospect_inbound_canonical_payload_version_is_one() -> None:
+async def test_retired_whatsapp_prospect_inbound_is_ignored() -> None:
     init_db()
     db = get_session_factory()()
     try:
@@ -61,47 +61,25 @@ async def test_prospect_inbound_canonical_payload_version_is_one() -> None:
             sheets=DisabledSheetsPort(),
         )
         db.commit()
-        in_row = store.get_canonical_event(
+        assert store.get_canonical_event(
             provider="whatsapp", provider_event_id=PAYLOAD_EVENT
-        )
-        assert in_row is not None
-        assert in_row.event_type == EventType.MESSAGE_IN.value
-        assert in_row.payload_version == "1"
-        payload = json.loads(in_row.payload_json)
-        assert "payload_version" not in payload
-        store.mark_webhook(
-            provider="whatsapp",
-            provider_event_id=PAYLOAD_EVENT,
-            status="failed",
-        )
-        db.commit()
-        await process_inbound_texts(
-            provider="whatsapp",
-            channel=Channel.WHATSAPP,
-            items=[{"id": PAYLOAD_EVENT, "from": PAYLOAD_PHONE, "text": VISITOR_TEXT}],
-            store=store,
-            port=port,
-            kill_switch=False,
-            calendar=DisabledCalendarPort(),
-            sheets=DisabledSheetsPort(),
-        )
-        db.commit()
-        in_row_after = store.get_canonical_event(
-            provider="whatsapp", provider_event_id=PAYLOAD_EVENT
-        )
-        assert in_row_after is not None
-        assert in_row_after.payload_version == "1"
+        ) is None
+        assert port.sent == []
     finally:
         db.close()
 
 
 @pytest.mark.asyncio
-async def test_prospect_whatsapp_inbound_shares_correlation_id() -> None:
+async def test_retired_whatsapp_prospect_inbound_creates_no_ai_run() -> None:
     init_db()
     db = get_session_factory()()
     try:
         store = LeadStore(db)
         port = RecordingMessagePort()
+        before = {
+            row.provider_event_id for row in db.scalars(select(CanonicalEventRow)).all()
+        }
+        before_ai_runs = {row.id for row in db.scalars(select(AiRunRow)).all()}
         event_id = "wamid.corr.prospect.1"
         await process_inbound_texts(
             provider="whatsapp",
@@ -114,35 +92,13 @@ async def test_prospect_whatsapp_inbound_shares_correlation_id() -> None:
             sheets=DisabledSheetsPort(),
         )
         db.commit()
-        _, lead_id = store.open_channel_lead(
-            channel=Channel.WHATSAPP,
-            external_id=PROSPECT_PHONE,
-        )
-        ai_row = db.scalars(select(AiRunRow).where(AiRunRow.lead_id == lead_id)).one()
-        rows = list(
-            db.scalars(
-                select(CanonicalEventRow).where(
-                    CanonicalEventRow.lead_id == lead_id,
-                    CanonicalEventRow.event_type.in_(
-                        [
-                            EventType.MESSAGE_IN.value,
-                            EventType.MESSAGE_OUT.value,
-                            EventType.TOOL_RESULT.value,
-                            EventType.QUALIFICATION_UPDATED.value,
-                        ]
-                    ),
-                )
-            ).all()
-        )
-        assert rows
-        assert all(row.correlation_id == ai_row.run_id for row in rows)
-        assert ai_row.run_id.startswith("run_")
-        in_row = store.get_canonical_event(provider="whatsapp", provider_event_id=event_id)
-        out_row = store.get_canonical_event(
-            provider="whatsapp", provider_event_id=f"{event_id}:out"
-        )
-        assert in_row is not None and out_row is not None
-        assert in_row.correlation_id == out_row.correlation_id == ai_row.run_id
+        after_ai_runs = {row.id for row in db.scalars(select(AiRunRow)).all()}
+        assert after_ai_runs == before_ai_runs
+        after = {
+            row.provider_event_id for row in db.scalars(select(CanonicalEventRow)).all()
+        }
+        assert after == before
+        assert port.sent == []
     finally:
         db.close()
 
@@ -154,10 +110,10 @@ async def test_owner_inbound_message_in_out_share_correlation_id() -> None:
     try:
         store = LeadStore(db)
         port = RecordingMessagePort()
-        event_id = "wamid.corr.owner.1"
+        event_id = "tg.corr.owner.1"
         await process_inbound_texts(
-            provider="whatsapp",
-            channel=Channel.WHATSAPP,
+            provider="telegram",
+            channel=Channel.TELEGRAM,
             items=[{"id": event_id, "from": OWNER_PHONE, "text": "daily brief"}],
             store=store,
             port=port,
@@ -167,19 +123,14 @@ async def test_owner_inbound_message_in_out_share_correlation_id() -> None:
             sheets=DisabledSheetsPort(),
         )
         db.commit()
-        in_row = store.get_canonical_event(provider="whatsapp", provider_event_id=event_id)
+        in_row = store.get_canonical_event(provider="telegram", provider_event_id=event_id)
         out_row = store.get_canonical_event(
-            provider="whatsapp", provider_event_id=f"{event_id}:out"
+            provider="telegram", provider_event_id=f"{event_id}:out"
         )
         assert in_row is not None and out_row is not None
         assert in_row.correlation_id
         assert in_row.correlation_id == out_row.correlation_id
         assert in_row.correlation_id.startswith("cor_")
-        owner_perm = store.get_tool_run(
-            f"owner:{OWNER_PHONE}:tool:owner_permissions"
-        )
-        assert owner_perm is not None
-        assert owner_perm.correlation_id == in_row.correlation_id
     finally:
         db.close()
 
@@ -187,18 +138,18 @@ async def test_owner_inbound_message_in_out_share_correlation_id() -> None:
 def test_website_message_in_and_out_share_correlation_without_ai_run() -> None:
     init_db()
     with TestClient(app) as client:
-        session_id = client.post("/v1/website/sessions").json()["session_id"]
+        session = client.post("/v1/website/sessions").json()
+        session_id = session["session_id"]
         response = client.post(
             f"/v1/website/sessions/{session_id}/messages",
-            json={"text": VISITOR_TEXT},
+            json={"text": VISITOR_TEXT, "client_message_id": "correlation-website-1"},
+            headers={"X-Mia-Session-Credential": session["session_credential"]},
         )
-        assert response.status_code == 200
+        assert response.status_code == 200, response.text
         assert response.json()["lead_id"] == ""
     db = get_session_factory()()
     try:
-        assert (
-            db.scalars(select(AiRunRow).where(AiRunRow.lead_id == session_id)).all() == []
-        )
+        assert db.scalars(select(AiRunRow).where(AiRunRow.lead_id == session_id)).all() == []
         rows = list(
             db.scalars(
                 select(CanonicalEventRow).where(
@@ -215,11 +166,15 @@ def test_website_message_in_and_out_share_correlation_without_ai_run() -> None:
             if row.event_type == EventType.MESSAGE_IN.value
             and json.loads(row.payload_json).get("text") == VISITOR_TEXT
         ]
-        visitor_out = [row for row in rows if row.event_type == EventType.MESSAGE_OUT.value]
+        visitor_out = [
+            row
+            for row in rows
+            if row.event_type == EventType.MESSAGE_OUT.value
+            and row.provider_event_id == f"{session_id}:v2:correlation-website-1:out"
+        ]
         assert len(visitor_in) == 1
         assert len(visitor_out) == 1
-        assert visitor_in[0].correlation_id.startswith("run_")
-        assert visitor_in[0].correlation_id == visitor_out[0].correlation_id
+        assert visitor_in[0].correlation_id == visitor_out[0].correlation_id == ""
     finally:
         db.close()
 

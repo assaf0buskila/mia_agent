@@ -4,8 +4,6 @@ import re
 from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
-import pytest
-from app.api.inbound import process_inbound_texts
 from app.core.config import get_settings
 from app.db.models import CanonicalEventRow, FollowUpRow
 from app.db.session import get_session_factory, init_db
@@ -32,10 +30,6 @@ from app.domain.followups import (
 from app.domain.humanity import lint_customer_reply
 from app.domain.sales import FitLevel, NextAction, SalesState
 from app.integrations.base import RecordingMessagePort
-from app.integrations.calendar import DisabledCalendarPort
-from app.integrations.sheets import DisabledSheetsPort
-from app.main import app
-from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 PROSPECT_PHONE = "972509994001"
@@ -68,60 +62,13 @@ def test_follow_up_due_on_tomorrow_jerusalem() -> None:
     assert due_at == "2026-08-22"
 
 
-def test_website_identify_then_sell_does_not_create_follow_ups() -> None:
-    init_db()
-    with TestClient(app) as client:
-        session_id = client.post("/v1/website/sessions").json()["session_id"]
-        clinic = client.post(
-            f"/v1/website/sessions/{session_id}/messages",
-            json={"text": "We run a clinic and miss calls all day."},
-        )
-        assert clinic.status_code == 200
-        assert clinic.json()["next_action"] == "answer"
-        meeting = client.post(
-            f"/v1/website/sessions/{session_id}/messages",
-            json={"text": "let's book a meeting", "phone": "0501234567"},
-        )
-        assert meeting.json()["next_action"] in {"handoff", "confirm_contact", "answer"}
-        stop = client.post(
-            f"/v1/website/sessions/{session_id}/messages",
-            json={"text": "not interested"},
-        )
-        assert stop.json()["next_action"] in {"handoff", "confirm_contact", "answer"}
-        student = client.post(
-            f"/v1/website/sessions/{session_id}/messages",
-            json={"text": "I'm a student with a school project"},
-        )
-        assert student.json()["next_action"] in {"handoff", "confirm_contact", "answer"}
-        assert student.json()["lead_id"] == ""
-    db = get_session_factory()()
-    try:
-        assert (
-            db.scalars(select(FollowUpRow).where(FollowUpRow.lead_id == session_id)).all()
-            == []
-        )
-        events = list(
-            db.scalars(
-                select(CanonicalEventRow).where(
-                    CanonicalEventRow.conversation_id == session_id,
-                    CanonicalEventRow.event_type == "follow_up",
-                )
-            )
-        )
-        assert events == []
-    finally:
-        db.close()
-
-
 def test_kill_switch_skips_follow_up_create(monkeypatch) -> None:
     monkeypatch.setenv("MIA_KILL_SWITCH", "true")
     init_db()
     db = get_session_factory()()
     try:
         store = LeadStore(db)
-        _, lead_id = store.open_channel_lead(
-            channel=Channel.WEBSITE, external_id="web_kill_fu_1"
-        )
+        _, lead_id = store.open_channel_lead(channel=Channel.WEBSITE, external_id="web_kill_fu_1")
         sales = SalesState(
             lead_id=lead_id,
             fit=FitLevel.GOOD,
@@ -302,9 +249,7 @@ def test_reactivate_cancelled_follow_up() -> None:
         row = store.get_follow_up(lead_id)
         assert row is not None
         assert row.status == STATUS_PENDING
-        rows = list(
-            db.scalars(select(FollowUpRow).where(FollowUpRow.lead_id == lead_id)).all()
-        )
+        rows = list(db.scalars(select(FollowUpRow).where(FollowUpRow.lead_id == lead_id)).all())
         assert len(rows) == 1
         events = list(
             db.scalars(
@@ -324,9 +269,7 @@ def test_apply_follow_up_policy_never_calls_message_port() -> None:
     db = get_session_factory()()
     try:
         store = LeadStore(db)
-        _, lead_id = store.open_channel_lead(
-            channel=Channel.WHATSAPP, external_id=PROSPECT_PHONE
-        )
+        _, lead_id = store.open_channel_lead(channel=Channel.WHATSAPP, external_id=PROSPECT_PHONE)
         sales = SalesState(
             lead_id=lead_id,
             fit=FitLevel.GOOD,
@@ -363,9 +306,7 @@ def test_two_leads_each_get_follow_up_row() -> None:
         settings = get_settings()
         lead_ids: list[str] = []
         for external_id in ("web_fu_a", "web_fu_b"):
-            _, lead_id = store.open_channel_lead(
-                channel=Channel.WEBSITE, external_id=external_id
-            )
+            _, lead_id = store.open_channel_lead(channel=Channel.WEBSITE, external_id=external_id)
             sales = SalesState(
                 lead_id=lead_id,
                 fit=FitLevel.GOOD,
@@ -388,9 +329,7 @@ def test_two_leads_each_get_follow_up_row() -> None:
             )
             lead_ids.append(lead_id)
         db.commit()
-        rows = list(
-            db.scalars(select(FollowUpRow).where(FollowUpRow.lead_id.in_(lead_ids))).all()
-        )
+        rows = list(db.scalars(select(FollowUpRow).where(FollowUpRow.lead_id.in_(lead_ids))).all())
         assert len(rows) == 2
         assert {row.lead_id for row in rows} == set(lead_ids)
     finally:
@@ -431,9 +370,7 @@ def _seed_due_follow_up(
 
 
 def _follow_up_for_lead(db, lead_id: str) -> FollowUpRow:
-    return db.scalars(
-        select(FollowUpRow).where(FollowUpRow.lead_id == lead_id)
-    ).one()
+    return db.scalars(select(FollowUpRow).where(FollowUpRow.lead_id == lead_id)).one()
 
 
 def test_scan_due_follow_ups_whatsapp_possible_fit_send_ready() -> None:
@@ -707,9 +644,7 @@ def test_evaluate_follow_up_send_whatsapp_due_today_allowed() -> None:
     db = get_session_factory()()
     try:
         store = LeadStore(db)
-        _, lead_id = store.open_channel_lead(
-            channel=Channel.WHATSAPP, external_id=PROSPECT_PHONE
-        )
+        _, lead_id = store.open_channel_lead(channel=Channel.WHATSAPP, external_id=PROSPECT_PHONE)
         settings = get_settings()
         now = datetime(2026, 8, 21, 12, 0, tzinfo=ZoneInfo("Asia/Jerusalem"))
         due_at = follow_up_due_on(now=now, timezone=settings.calendar_timezone, offset_days=0)
@@ -739,9 +674,7 @@ def test_evaluate_follow_up_send_website_channel_not_sendable() -> None:
     db = get_session_factory()()
     try:
         store = LeadStore(db)
-        _, lead_id = store.open_channel_lead(
-            channel=Channel.WEBSITE, external_id="web_send_eval_1"
-        )
+        _, lead_id = store.open_channel_lead(channel=Channel.WEBSITE, external_id="web_send_eval_1")
         settings = get_settings()
         now = datetime(2026, 8, 21, 12, 0, tzinfo=ZoneInfo("Asia/Jerusalem"))
         due_at = follow_up_due_on(now=now, timezone=settings.calendar_timezone, offset_days=0)
@@ -803,9 +736,7 @@ def test_evaluate_follow_up_send_cancelled() -> None:
     db = get_session_factory()()
     try:
         store = LeadStore(db)
-        _, lead_id = store.open_channel_lead(
-            channel=Channel.WHATSAPP, external_id=PROSPECT_PHONE
-        )
+        _, lead_id = store.open_channel_lead(channel=Channel.WHATSAPP, external_id=PROSPECT_PHONE)
         settings = get_settings()
         now = datetime(2026, 8, 21, 12, 0, tzinfo=ZoneInfo("Asia/Jerusalem"))
         due_at = follow_up_due_on(now=now, timezone=settings.calendar_timezone, offset_days=0)
@@ -835,9 +766,7 @@ def test_evaluate_follow_up_send_recovered() -> None:
     db = get_session_factory()()
     try:
         store = LeadStore(db)
-        _, lead_id = store.open_channel_lead(
-            channel=Channel.WHATSAPP, external_id=PROSPECT_PHONE
-        )
+        _, lead_id = store.open_channel_lead(channel=Channel.WHATSAPP, external_id=PROSPECT_PHONE)
         settings = get_settings()
         now = datetime(2026, 8, 21, 12, 0, tzinfo=ZoneInfo("Asia/Jerusalem"))
         due_at = follow_up_due_on(now=now, timezone=settings.calendar_timezone, offset_days=0)
@@ -867,9 +796,7 @@ def test_evaluate_follow_up_send_no_row() -> None:
     db = get_session_factory()()
     try:
         store = LeadStore(db)
-        _, lead_id = store.open_channel_lead(
-            channel=Channel.WHATSAPP, external_id="972509994099"
-        )
+        _, lead_id = store.open_channel_lead(channel=Channel.WHATSAPP, external_id="972509994099")
         settings = get_settings()
         decision = evaluate_follow_up_send(
             store,
@@ -889,9 +816,7 @@ def test_evaluate_follow_up_send_kill_switch() -> None:
     db = get_session_factory()()
     try:
         store = LeadStore(db)
-        _, lead_id = store.open_channel_lead(
-            channel=Channel.WHATSAPP, external_id=PROSPECT_PHONE
-        )
+        _, lead_id = store.open_channel_lead(channel=Channel.WHATSAPP, external_id=PROSPECT_PHONE)
         settings = get_settings()
         now = datetime(2026, 8, 21, 12, 0, tzinfo=ZoneInfo("Asia/Jerusalem"))
         due_at = follow_up_due_on(now=now, timezone=settings.calendar_timezone, offset_days=0)
@@ -921,9 +846,7 @@ def test_evaluate_follow_up_send_poor_fit() -> None:
     db = get_session_factory()()
     try:
         store = LeadStore(db)
-        _, lead_id = store.open_channel_lead(
-            channel=Channel.WHATSAPP, external_id=PROSPECT_PHONE
-        )
+        _, lead_id = store.open_channel_lead(channel=Channel.WHATSAPP, external_id=PROSPECT_PHONE)
         settings = get_settings()
         now = datetime(2026, 8, 21, 12, 0, tzinfo=ZoneInfo("Asia/Jerusalem"))
         due_at = follow_up_due_on(now=now, timezone=settings.calendar_timezone, offset_days=0)
@@ -954,9 +877,7 @@ def test_evaluate_follow_up_send_never_touches_message_port() -> None:
     db = get_session_factory()()
     try:
         store = LeadStore(db)
-        _, lead_id = store.open_channel_lead(
-            channel=Channel.WHATSAPP, external_id=PROSPECT_PHONE
-        )
+        _, lead_id = store.open_channel_lead(channel=Channel.WHATSAPP, external_id=PROSPECT_PHONE)
         settings = get_settings()
         now = datetime(2026, 8, 21, 12, 0, tzinfo=ZoneInfo("Asia/Jerusalem"))
         due_at = follow_up_due_on(now=now, timezone=settings.calendar_timezone, offset_days=0)
@@ -1157,9 +1078,7 @@ def test_count_canonical_events_for_lead_rejects_non_frequency_type() -> None:
     db = get_session_factory()()
     try:
         store = LeadStore(db)
-        _, lead_id = store.open_channel_lead(
-            channel=Channel.WEBSITE, external_id="web_cap_beh_1"
-        )
+        _, lead_id = store.open_channel_lead(channel=Channel.WEBSITE, external_id="web_cap_beh_1")
         store.save_canonical_event(
             provider=Channel.WEBSITE.value,
             event=build_behavior_event(
@@ -1286,147 +1205,5 @@ def test_claim_follow_up_persist_first_true_complete_second_false() -> None:
             key=follow_up_claim_key(inbound_id),
         )
         assert json.loads(result) == {"ok": True}
-    finally:
-        db.close()
-
-
-@pytest.mark.asyncio
-async def test_inbound_failed_webhook_retry_skips_second_follow_up_upsert() -> None:
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        port = RecordingMessagePort()
-        messages = [
-            "We run a clinic and miss calls all day.",
-            "ok that's right",
-            "I decide this quarter",
-            "let's book a meeting",
-        ]
-        lead_id = ""
-        for index, text in enumerate(messages):
-            await process_inbound_texts(
-                provider="whatsapp",
-                channel=Channel.WHATSAPP,
-                items=[{"id": f"wamid.fu.claim.{index}", "from": CLAIM_PHONE, "text": text}],
-                store=store,
-                port=port,
-                kill_switch=False,
-                calendar=DisabledCalendarPort(),
-                sheets=DisabledSheetsPort(),
-            )
-            db.commit()
-            _, lead_id = store.open_channel_lead(
-                channel=Channel.WHATSAPP, external_id=CLAIM_PHONE
-            )
-        row = store.get_follow_up(lead_id)
-        assert row is not None
-        assert row.status == STATUS_PENDING
-        db_row = db.scalars(
-            select(FollowUpRow).where(FollowUpRow.lead_id == lead_id)
-        ).one()
-        db_row.due_at = "2099-01-01"
-        db.commit()
-
-        store.mark_webhook(
-            provider="whatsapp",
-            provider_event_id="wamid.fu.claim.3",
-            status="failed",
-        )
-        db.commit()
-
-        await process_inbound_texts(
-            provider="whatsapp",
-            channel=Channel.WHATSAPP,
-            items=[{"id": "wamid.fu.claim.3", "from": CLAIM_PHONE, "text": "let's book a meeting"}],
-            store=store,
-            port=port,
-            kill_switch=False,
-            calendar=DisabledCalendarPort(),
-            sheets=DisabledSheetsPort(),
-        )
-        db.commit()
-        row = store.get_follow_up(lead_id)
-        assert row is not None
-        assert row.status == STATUS_PENDING
-        assert row.due_at == "2099-01-01"
-        result = store.get_operation_result(
-            scope=FOLLOW_UP_SCOPE,
-            key=follow_up_claim_key("wamid.fu.claim.3"),
-        )
-        assert json.loads(result) == {"ok": True}
-    finally:
-        db.close()
-
-
-@pytest.mark.asyncio
-async def test_inbound_prospect_offer_meeting_creates_follow_up() -> None:
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        port = RecordingMessagePort()
-        messages = [
-            "We run a clinic and miss calls all day.",
-            "ok that's right",
-            "I decide this quarter",
-            "let's book a meeting",
-        ]
-        lead_id = ""
-        for index, text in enumerate(messages):
-            await process_inbound_texts(
-                provider="whatsapp",
-                channel=Channel.WHATSAPP,
-                items=[{"id": f"wamid.fu.{index}", "from": PROSPECT_PHONE_2, "text": text}],
-                store=store,
-                port=port,
-                kill_switch=False,
-                calendar=DisabledCalendarPort(),
-                sheets=DisabledSheetsPort(),
-            )
-            db.commit()
-            _, lead_id = store.open_channel_lead(
-                channel=Channel.WHATSAPP, external_id=PROSPECT_PHONE_2
-            )
-        row = store.get_follow_up(lead_id)
-        assert row is not None
-        assert row.status == STATUS_PENDING
-        assert row.channel == Channel.WHATSAPP.value
-    finally:
-        db.close()
-
-
-@pytest.mark.asyncio
-async def test_inbound_stop_cancels_follow_up() -> None:
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        port = RecordingMessagePort()
-        funnel = [
-            "We run a clinic and miss calls all day.",
-            "ok that's right",
-            "I decide this quarter",
-            "let's book a meeting",
-            "not interested",
-        ]
-        for index, text in enumerate(funnel):
-            await process_inbound_texts(
-                provider="whatsapp",
-                channel=Channel.WHATSAPP,
-                items=[{"id": f"wamid.stop.{index}", "from": PROSPECT_PHONE_STOP, "text": text}],
-                store=store,
-                port=port,
-                kill_switch=False,
-                calendar=DisabledCalendarPort(),
-                sheets=DisabledSheetsPort(),
-            )
-            db.commit()
-        _, lead_id = store.open_channel_lead(
-            channel=Channel.WHATSAPP, external_id=PROSPECT_PHONE_STOP
-        )
-        row = store.get_follow_up(lead_id)
-        assert row is not None
-        assert row.status == STATUS_CANCELLED
     finally:
         db.close()

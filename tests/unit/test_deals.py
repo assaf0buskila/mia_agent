@@ -1,8 +1,6 @@
 import importlib
 import json
 
-import pytest
-from app.api.inbound import process_inbound_texts
 from app.db.models import CanonicalEventRow, DealRow
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
@@ -14,11 +12,6 @@ from app.domain.deals import (
 )
 from app.domain.events import Channel
 from app.domain.sales import NextAction
-from app.integrations.base import RecordingMessagePort
-from app.integrations.calendar import DisabledCalendarPort
-from app.integrations.sheets import FakeSheetsPort
-from app.main import app
-from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 WEB_SESSION_SHEETS = "web_deal_sheet_997009"
@@ -38,38 +31,6 @@ def _deal_events_for_lead(db, lead_id: str) -> list[CanonicalEventRow]:
             )
         )
     )
-
-
-def test_website_identify_then_sell_does_not_persist_deals() -> None:
-    init_db()
-    with TestClient(app) as client:
-        created = client.post(
-            "/v1/website/sessions",
-            params={"utm_source": "meta", "utm_campaign": "yuma"},
-        )
-        session_id = created.json()["session_id"]
-        assert created.json()["lead_id"] == ""
-        clinic = client.post(
-            f"/v1/website/sessions/{session_id}/messages",
-            json={"text": "We run a clinic and miss calls all day."},
-        )
-        assert clinic.status_code == 200
-        assert clinic.json()["next_action"] == "answer"
-        proposal = client.post(
-            f"/v1/website/sessions/{session_id}/messages",
-            json={"text": "Please send me a proposal", "phone": "0501234567"},
-        )
-        assert proposal.status_code == 200
-        assert proposal.json()["next_action"] in {"handoff", "confirm_contact"}
-        assert proposal.json()["lead_id"] == ""
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        assert store.get_website_lead_id(session_id) is None
-        assert _deal_for_lead(db, session_id) is None
-        assert _deal_events_for_lead(db, session_id) == []
-    finally:
-        db.close()
 
 
 def test_proposal_then_offer_meeting_does_not_downgrade() -> None:
@@ -168,45 +129,6 @@ def test_stop_action_does_not_persist_deal() -> None:
         db.close()
 
 
-def test_disqualify_does_not_create_deal() -> None:
-    init_db()
-    with TestClient(app) as client:
-        session_id = client.post("/v1/website/sessions").json()["session_id"]
-        response = client.post(
-            f"/v1/website/sessions/{session_id}/messages",
-            json={"text": "I'm a student with a school project"},
-        )
-        assert response.status_code == 200
-        assert response.json()["next_action"] in {"ask_contact", "answer", "ask_need"}
-        assert response.json()["lead_id"] == ""
-    db = get_session_factory()()
-    try:
-        assert _deal_for_lead(db, session_id) is None
-        assert _deal_events_for_lead(db, session_id) == []
-    finally:
-        db.close()
-
-
-def test_kill_switch_does_not_503_website_and_does_not_persist_deal(monkeypatch) -> None:
-    monkeypatch.setenv("MIA_KILL_SWITCH", "true")
-    init_db()
-    with TestClient(app) as client:
-        session_id = client.post("/v1/website/sessions").json()["session_id"]
-        response = client.post(
-            f"/v1/website/sessions/{session_id}/messages",
-            json={"text": "We run a clinic and miss calls all day."},
-        )
-        assert response.status_code == 200
-        assert response.json()["next_action"] in {"ask_contact", "answer", "ask_need"}
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        assert store.get_website_lead_id(session_id) is None
-        assert _deal_for_lead(db, session_id) is None
-    finally:
-        db.close()
-
-
 def test_apply_deal_policy_skips_persist_when_killed() -> None:
     init_db()
     db = get_session_factory()()
@@ -265,41 +187,5 @@ def test_deal_updated_event_payload_has_no_value_keys() -> None:
         serialized = json.dumps(events[0].payload_json) + json.dumps(events[0].source_json)
         for forbidden in ("expected_value", "closed_value", "@"):
             assert forbidden not in serialized.lower()
-    finally:
-        db.close()
-
-
-@pytest.mark.asyncio
-async def test_whatsapp_clinic_funnel_persists_deal() -> None:
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        port = RecordingMessagePort()
-        messages = [
-            "We run a clinic and miss calls all day.",
-            "ok that's right",
-            "I decide this quarter",
-            "let's book a meeting",
-        ]
-        for index, text in enumerate(messages):
-            await process_inbound_texts(
-                provider="whatsapp",
-                channel=Channel.WHATSAPP,
-                items=[{"id": f"wamid.deal.{index}", "from": WA_PHONE_MEETING, "text": text}],
-                store=store,
-                port=port,
-                kill_switch=False,
-                calendar=DisabledCalendarPort(),
-                sheets=FakeSheetsPort(),
-            )
-            db.commit()
-        _, lead_id = store.open_channel_lead(
-            channel=Channel.WHATSAPP, external_id=WA_PHONE_MEETING
-        )
-        row = _deal_for_lead(db, lead_id)
-        assert row is not None
-        assert row.stage == STAGE_MEETING_OFFERED
-        assert row.source == Channel.WHATSAPP.value
     finally:
         db.close()

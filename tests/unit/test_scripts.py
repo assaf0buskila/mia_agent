@@ -9,7 +9,7 @@ import pytest
 
 def test_local_website_probe_sends_origin_for_session_and_messages(monkeypatch) -> None:
     module = runpy.run_path("scripts/probe_website_flow.py")
-    calls: list[dict[str, object]] = []
+    calls: list[tuple[str, dict[str, object]]] = []
 
     class Response:
         def __init__(self, path: str):
@@ -17,7 +17,7 @@ def test_local_website_probe_sends_origin_for_session_and_messages(monkeypatch) 
 
         def json(self):
             if self.path == "/v1/website/sessions":
-                return {"session_id": "session"}
+                return {"session_id": "session", "session_credential": "credential"}
             return {"next_action": "continue", "message": "reply"}
 
     class Client:
@@ -31,7 +31,7 @@ def test_local_website_probe_sends_origin_for_session_and_messages(monkeypatch) 
             return False
 
         def post(self, _path, **kwargs):
-            calls.append(kwargs)
+            calls.append((_path, kwargs))
             return Response(_path)
 
     globals_ = module["main"].__globals__
@@ -39,7 +39,17 @@ def test_local_website_probe_sends_origin_for_session_and_messages(monkeypatch) 
     monkeypatch.setitem(globals_, "TestClient", Client)
     assert module["main"]() == 0
     assert calls
-    assert all(call["headers"] == {"Origin": module["WEBSITE_ORIGIN"]} for call in calls)
+    assert calls[0][0] == "/v1/website/sessions"
+    assert calls[0][1]["headers"] == {"Origin": module["WEBSITE_ORIGIN"]}
+    assert all(
+        call[1]["headers"]
+        == {
+            "Origin": module["WEBSITE_ORIGIN"],
+            "X-Mia-Session-Credential": "credential",
+        }
+        for call in calls
+        if call[0] != "/v1/website/sessions"
+    )
 
 
 def test_live_probe_post_includes_allowed_origin(monkeypatch) -> None:
@@ -80,11 +90,6 @@ def test_ecs_revision_script_rejects_plaintext_env_option(monkeypatch) -> None:
     with pytest.raises(SystemExit) as exc_info:
         module["main"]()
     assert exc_info.value.code == 2
-
-
-def test_eval_diff_includes_calendar_and_routing() -> None:
-    module = runpy.run_path("scripts/eval_diff.py")
-    assert {"calendar", "routing"} <= set(module["RUNNERS"])
 
 
 def test_ecs_migration_script_pins_override_to_mia_migrate(monkeypatch) -> None:
@@ -153,11 +158,47 @@ def test_new_revision_is_based_on_what_production_is_serving() -> None:
 
     def fake_aws(*args: str) -> dict:
         calls.append(args)
+        task_definition = "arn:aws:ecs:eu-north-1:1:task-definition/mia:29"
         if args[1] == "describe-services":
             return {
                 "services": [
-                    {"taskDefinition": "arn:aws:ecs:eu-north-1:1:task-definition/mia:29"}
+                    {
+                        "taskDefinition": task_definition,
+                        "desiredCount": 1,
+                        "runningCount": 1,
+                        "pendingCount": 0,
+                        "deployments": [
+                            {
+                                "status": "PRIMARY",
+                                "rolloutState": "COMPLETED",
+                                "taskDefinition": task_definition,
+                                "desiredCount": 1,
+                                "runningCount": 1,
+                                "pendingCount": 0,
+                            }
+                        ],
+                    }
                 ]
+            }
+        if args[1] == "list-tasks":
+            return {"taskArns": ["arn:aws:ecs:eu-north-1:1:task/mia/task-1"]}
+        if args[1] == "describe-tasks":
+            return {
+                "failures": [],
+                "tasks": [
+                    {
+                        "taskDefinitionArn": task_definition,
+                        "lastStatus": "RUNNING",
+                        "healthStatus": "HEALTHY",
+                        "containers": [
+                            {
+                                "name": "mia",
+                                "lastStatus": "RUNNING",
+                                "healthStatus": "HEALTHY",
+                            }
+                        ],
+                    }
+                ],
             }
         raise AssertionError(f"unexpected call: {args}")
 

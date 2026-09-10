@@ -20,12 +20,16 @@ DEFECT_A: tuple[str, ...] = (
 WEBSITE_ORIGIN = "https://www.assafweb.com"
 
 
-def _post(url: str, payload: dict | None) -> dict:
+def _post(url: str, payload: dict | None, *, credential: str = "") -> dict:
     data = json.dumps(payload).encode("utf-8") if payload is not None else b"{}"
     request = urllib.request.Request(
         url,
         data=data,
-        headers={"Content-Type": "application/json", "Origin": WEBSITE_ORIGIN},
+        headers={
+            "Content-Type": "application/json",
+            "Origin": WEBSITE_ORIGIN,
+            **({"X-Mia-Session-Credential": credential} if credential else {}),
+        },
         method="POST",
     )
     with urllib.request.urlopen(request, timeout=45) as response:
@@ -49,13 +53,15 @@ def main() -> None:
 
     session = _post(f"{base}/v1/website/sessions", None)
     session_id = session["session_id"]
+    credential = session["session_credential"]
     print(f"session={session_id}\n")
 
     replies: list[str] = []
-    for text in DEFECT_A:
+    for index, text in enumerate(DEFECT_A, start=1):
         out = _post(
             f"{base}/v1/website/sessions/{session_id}/messages",
-            {"text": text},
+            {"text": text, "client_message_id": f"live-probe-{index}"},
+            credential=credential,
         )
         reply = out["message"]
         replies.append(reply)
@@ -64,15 +70,6 @@ def main() -> None:
         print(f"  action={out['next_action']} lead={out['lead_id']}\n")
 
     print(f"distinct replies: {len(set(replies))}/{len(replies)}")
-    looped = [r for r in replies if "יום רגיל בעסק" in r]
-    print(f"opening-question restarts: {len(looped)}")
-
-    handoff = _post(
-        f"{base}/v1/website/sessions/{session_id}/handoff", None
-    )
-    token = handoff["token"]
-    print(f"\nhandoff token: {token[:6]}… expires {handoff['expires_at']}")
-    print(f"whatsapp_url present: {handoff.get('whatsapp_url') is not None}")
 
 
 if __name__ == "__main__":

@@ -19,6 +19,7 @@
   var api = resolveApiOrigin(script);
   if (!api) return;
   var sessionId = null;
+  var sessionCredential = '';
   var opened = false;
   var busy = false;
   var recording = false;
@@ -54,7 +55,7 @@
   var SESSION_KEY = 'askMia.sessionId';
   var SESSION_META_KEY = 'askMia.sessionMeta';
   var TRANSCRIPT_KEY = 'askMia.transcript';
-  var SESSION_RE = /^web_[a-f0-9]{16}$/;
+  var SESSION_RE = /^(?:web_[a-f0-9]{16}|[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})$/i;
   var SESSION_LIFETIME_MS = 30 * 24 * 60 * 60 * 1000;
   var configuredSessionLifetimeMs = SESSION_LIFETIME_MS;
   var hostLifetime = Number(script && script.getAttribute('data-mia-session-lifetime-ms'));
@@ -72,6 +73,17 @@
   // Only populated from the server's config response. Never infer a destination
   // from a Mia reply, a page link, or visitor text.
   var configuredWhatsAppUrl = '';
+  function newClientMessageId() {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID();
+    }
+    return 'msg_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2);
+  }
+  function sessionHeaders(existing) {
+    var headers = Object.assign({}, existing || {});
+    if (sessionCredential) headers['X-Mia-Session-Credential'] = sessionCredential;
+    return headers;
+  }
   var SVG_NS = 'http://www.w3.org/2000/svg';
   var MIA_MARK_PATH =
     'M7 23V8h4.2L16 16.8 20.8 8H25v15h-3.4V13.1L16 21.2l-5.6-8.1V23H7z';
@@ -158,74 +170,298 @@
   }
 
   var style = document.createElement('style');
-  style.textContent =
-    '#ask-mia-root{position:fixed;inset-inline-end:1.1rem;bottom:max(1.1rem,env(safe-area-inset-bottom,0px));z-index:9999;display:flex;flex-direction:column-reverse;align-items:flex-end;gap:.65rem;font:16px/1.55 Assistant,system-ui,sans-serif;color:#061b35;color-scheme:light;-webkit-font-smoothing:antialiased}' +
-    '#ask-mia-launcher{display:inline-flex;align-items:center;justify-content:center;gap:.45rem;border:1px solid #ffffff59;border-radius:999px;padding-block:0;padding-inline-start:.4rem;padding-inline-end:1.05rem;height:56px;min-height:56px;min-width:56px;background:linear-gradient(135deg,#2f5f93,#2563eb);color:#fff;cursor:pointer;box-shadow:0 18px 44px #2563eb59;transition:transform .16s ease,box-shadow .16s ease;font:inherit;font-weight:800;line-height:1;animation:ask-mia-glow 2.8s ease-in-out infinite}' +
-    '#ask-mia-launcher:hover{transform:translateY(-2px)}' +
-    '#ask-mia-launcher:focus-visible{outline:2px solid #2563eb;outline-offset:2px}' +
-    '#ask-mia-panel[hidden],#ask-mia-wa[hidden]{display:none!important}' +
-    '.whatsapp-fab{display:none!important}' +
-    '.ask-mia-launch-mark{width:2rem;height:2rem;border-radius:999px;background:#d9eeff;color:#061b35;display:inline-flex;align-items:center;justify-content:center;font-weight:700;font-size:1rem;flex:0 0 auto}' +
-    '.ask-mia-launch-mark svg,.ask-mia-avatar svg,.ask-mia-bubble-avatar svg{width:1.2rem;height:1.2rem;display:block}' +
-    '#ask-mia-launch-label{white-space:nowrap;font-size:.92rem;font-weight:800;color:#fff}' +
-    '#ask-mia-panel{width:min(24rem,calc(100vw - 1.5rem));background:linear-gradient(180deg,#F8FBFF,#eef7ff);color:#061b35;border:1px solid #ffffff59;border-radius:1.35rem;box-shadow:0 28px 70px rgba(6,27,53,.28),0 0 0 1px #2f5f9321,inset 0 1px 0 #ffffff59;display:flex;flex-direction:column;overflow:hidden;isolation:isolate;backdrop-filter:saturate(1.25) blur(18px);-webkit-backdrop-filter:saturate(1.25) blur(18px)}' +
-    '#ask-mia-panel:not([hidden]){animation:ask-mia-rise .28s ease}' +
-    '#ask-mia-header{display:flex;align-items:center;gap:.7rem;padding:.9rem 1rem;background:linear-gradient(135deg,#061b35,#2f5f93);color:#fff;border-bottom:3px solid #2563eb}' +
-    '#ask-mia-close{margin-inline-start:auto;border:0;background:#2f5f93;color:#fff;border-radius:.65rem;padding:.35rem .7rem;min-height:44px;cursor:pointer;font:inherit;font-size:.78rem;font-weight:700}' +
-    '#ask-mia-close:focus-visible{outline:2px solid #2563eb;outline-offset:2px}' +
-    '.ask-mia-avatar{width:2.25rem;height:2.25rem;border-radius:999px;background:#d9eeff;color:#061b35;display:inline-flex;align-items:center;justify-content:center;font-weight:700;flex:0 0 auto;box-shadow:0 0 0 3px #2563eb59}' +
-    '.ask-mia-title{display:flex;align-items:center;gap:.4rem}' +
-    '.ask-mia-name{display:block;color:#fff;font-weight:700;font-size:1rem;line-height:1.2;letter-spacing:.01em}' +
-    '.ask-mia-live{width:.42rem;height:.42rem;border-radius:999px;background:#2563eb;box-shadow:0 0 0 .22rem #2563eb59;animation:ask-mia-pulse 1.8s ease-in-out infinite}' +
-    '.ask-mia-sub{display:block;color:#d9eeff;font-size:.74rem;font-weight:500}' +
-    '#ask-mia-transcript{max-height:17.5rem;overflow:auto;padding:1rem;display:flex;flex-direction:column;gap:.85rem}' +
-    '.ask-mia-row{display:flex;align-items:flex-end;gap:.5rem;max-width:100%}' +
-    '.ask-mia-row-mia{align-self:flex-start}' +
-    '.ask-mia-row-user{align-self:flex-end;flex-direction:row-reverse}' +
-    '.ask-mia-bubble-avatar{width:2rem;height:2rem;border-radius:999px;flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;font-weight:700;font-size:.72rem}' +
-    '.ask-mia-row-mia .ask-mia-bubble-avatar{background:#d9eeff;color:#061b35}' +
-    '.ask-mia-row-user .ask-mia-bubble-avatar{background:#2f5f93;color:#fff}' +
-    '.ask-mia-msg{padding:.65rem .8rem;border-radius:.85rem;white-space:pre-wrap;word-break:break-word;unicode-bidi:plaintext}' +
-    '.ask-mia-mia{background:#eef7ff;color:#061b35;max-width:min(90%,16rem);border:1px solid #2f5f9321;border-end-start-radius:.2rem;box-shadow:0 8px 20px rgba(6,27,53,.06)}' +
-    '.ask-mia-user{background:#2f5f93;color:#fff;max-width:min(90%,16rem);border-end-end-radius:.2rem;box-shadow:0 8px 20px rgba(6,27,53,.12)}' +
-    '.ask-mia-dots{display:inline-flex;align-items:center;gap:.2rem;height:1.1rem}' +
-    '.ask-mia-dots span{width:.35rem;height:.35rem;border-radius:999px;background:#061b35;display:block;animation:ask-mia-bounce .6s ease-in-out infinite}' +
-    '.ask-mia-dots span:nth-child(2){animation-delay:.1s}' +
-    '.ask-mia-dots span:nth-child(3){animation-delay:.2s}' +
-    '@keyframes ask-mia-bounce{0%,100%{transform:translateY(0)}50%{transform:translateY(-4px)}}' +
-    '@keyframes ask-mia-pulse{0%,100%{opacity:1}50%{opacity:.45}}' +
-    '@keyframes ask-mia-glow{0%,100%{box-shadow:0 18px 44px #2563eb59}50%{box-shadow:0 22px 56px #2563eb59}}' +
-    '@keyframes ask-mia-rise{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}' +
-    '#ask-mia-compose{display:flex;flex-direction:column;gap:.45rem;padding:1rem;border-top:1px solid #2f5f9321;background:#F8FBFF}' +
-    '#ask-mia-input{resize:vertical;min-height:2.75rem;max-height:8rem;padding:.65rem .75rem;border:1px solid #7ba7d3;border-radius:.85rem;font:inherit;font-size:16px;color:#061b35;background:#fff}' +
-    '#ask-mia-input:focus{outline:2px solid #2563eb;outline-offset:1px;border-color:#2563eb}' +
-    '#ask-mia-hint{margin:0;font-size:.75rem;color:#2f5f93}' +
-    '#ask-mia-actions{display:flex;gap:.35rem;flex-wrap:wrap}' +
-    '#ask-mia-actions button{border:0;border-radius:.65rem;padding:.45rem .75rem;min-height:44px;cursor:pointer;font:inherit;color:#061b35}' +
-    '#ask-mia-send{background:#2f5f93;color:#fff}' +
-    '#ask-mia-mic{background:#d9eeff;color:#061b35}' +
-    '#ask-mia-mic.recording{background:#b00;color:#fff}' +
-    '#ask-mia-mic:focus-visible{outline:2px solid #2563eb;outline-offset:2px}' +
-    '#ask-mia-wa{background:#25d366;color:#fff}' +
-    '.ask-mia-handoff{display:flex;flex-direction:column;gap:.45rem;max-width:min(90%,16rem)}' +
-    '.ask-mia-handoff-title{font-weight:700;color:#061b35}' +
-    '.ask-mia-handoff-note{font-size:.85rem;color:#2f5f93}' +
-    '.ask-mia-handoff-cta{display:inline-flex;align-items:center;justify-content:center;' +
-    'gap:.35rem;margin-top:.15rem;padding:.5rem .75rem;min-height:44px;width:100%;' +
-    'box-sizing:border-box;border-radius:.65rem;cursor:pointer;' +
-    'background:#25d366;color:#fff;font-weight:700;text-decoration:none}' +
-    '.ask-mia-handoff-cta:focus-visible{outline:2px solid #2563eb;outline-offset:2px}' +
-    '.ask-mia-contact{display:flex;flex-direction:column;gap:.45rem;padding:.7rem;' +
-    'background:#eef7ff;border:1px solid #2f5f9321;border-radius:.8rem;max-width:100%}' +
-    '.ask-mia-contact label{font-size:.78rem;color:#2f5f93;font-weight:700}' +
-    '.ask-mia-contact input{box-sizing:border-box;width:100%;min-height:44px;padding:.55rem;' +
-    'border:1px solid #7ba7d3;border-radius:.55rem;background:#fff;color:#061b35}' +
-    '.ask-mia-contact button{min-height:44px;border:0;border-radius:.55rem;padding:.55rem;' +
-    'background:#2f5f93;color:#fff;font-weight:700;cursor:pointer}' +
-    '.ask-mia-contact small{color:#2f5f93}' +
-    '#ask-mia-wa.offer{box-shadow:0 0 0 2px #2563eb}' +
-    '#ask-mia-status{min-height:1rem;padding:0 .75rem .5rem;color:#b00;font-size:.85rem}' +
-    '@media (prefers-reduced-motion:reduce){#ask-mia-launcher,#ask-mia-send,#ask-mia-mic,#ask-mia-wa,#ask-mia-input,#ask-mia-panel:not([hidden]){transition:none;animation:none}#ask-mia-launcher:hover{transform:none}.ask-mia-dots span,.ask-mia-live{animation:none}}';
+  style.textContent = `
+    #ask-mia-root {
+      --ask-mia-viewport-height: 100dvh;
+      position: fixed;
+      inset-inline-end: max(16px, env(safe-area-inset-right, 0px));
+      bottom: max(16px, env(safe-area-inset-bottom, 0px));
+      z-index: 9999;
+      display: flex;
+      flex-direction: column-reverse;
+      align-items: flex-end;
+      gap: 12px;
+      max-width: calc(100vw - 24px);
+      font: 16px/1.5 Assistant, system-ui, sans-serif;
+      color: #061b35;
+      color-scheme: light;
+      direction: rtl;
+      -webkit-font-smoothing: antialiased;
+    }
+    #ask-mia-root, #ask-mia-root * { box-sizing: border-box; }
+    #ask-mia-root #ask-mia-panel[hidden],
+    #ask-mia-root #ask-mia-wa[hidden] { display: none !important; }
+    #ask-mia-root #ask-mia-launcher {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      height: 56px;
+      min-width: 56px;
+      padding: 0 8px 0 18px;
+      border: 1px solid #ffffff59;
+      border-radius: 999px;
+      background: linear-gradient(135deg, #2f5f93, #2563eb);
+      color: #fff;
+      box-shadow: 0 18px 44px #2563eb59;
+      cursor: pointer;
+      font: inherit;
+      font-weight: 800;
+      transition: transform .18s ease, box-shadow .18s ease;
+    }
+    #ask-mia-root #ask-mia-launcher:hover { transform: translateY(-2px); }
+    #ask-mia-root :is(button, textarea, input, a):focus-visible {
+      outline: 3px solid #2563eb;
+      outline-offset: 2px;
+    }
+    #ask-mia-root .ask-mia-launch-mark,
+    #ask-mia-root .ask-mia-avatar,
+    #ask-mia-root .ask-mia-bubble-avatar {
+      display: inline-flex;
+      flex: 0 0 auto;
+      align-items: center;
+      justify-content: center;
+      border-radius: 999px;
+    }
+    #ask-mia-root .ask-mia-launch-mark {
+      width: 40px;
+      height: 40px;
+      background: #d9eeff;
+      color: #061b35;
+    }
+    #ask-mia-root .ask-mia-launch-mark svg,
+    #ask-mia-root .ask-mia-avatar svg,
+    #ask-mia-root .ask-mia-bubble-avatar svg { width: 20px; height: 20px; display: block; }
+    #ask-mia-root #ask-mia-launch-label { color: #fff; white-space: nowrap; font-size: 15px; }
+    #ask-mia-root #ask-mia-panel {
+      width: min(400px, calc(100vw - 24px));
+      height: min(600px, calc(var(--ask-mia-viewport-height) - 96px));
+      min-height: min(440px, calc(var(--ask-mia-viewport-height) - 96px));
+      max-height: calc(var(--ask-mia-viewport-height) - 96px);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      isolation: isolate;
+      border: 1px solid #ffffff59;
+      border-radius: 22px;
+      background: #f8fbff;
+      box-shadow: 0 28px 70px rgba(6, 27, 53, .28), 0 0 0 1px #2f5f9321;
+      animation: ask-mia-rise .24s ease-out;
+    }
+    #ask-mia-root #ask-mia-header {
+      display: flex;
+      flex: 0 0 auto;
+      align-items: center;
+      gap: 12px;
+      min-height: 76px;
+      padding: 12px 16px;
+      border-bottom: 3px solid #2563eb;
+      background: linear-gradient(135deg, #061b35, #2f5f93);
+      color: #fff;
+    }
+    #ask-mia-root .ask-mia-avatar {
+      width: 44px;
+      height: 44px;
+      background: #d9eeff;
+      color: #061b35;
+      box-shadow: 0 0 0 3px #2563eb59;
+    }
+    #ask-mia-root .ask-mia-title { display: flex; align-items: center; gap: 8px; }
+    #ask-mia-root .ask-mia-name { color: #fff; font-size: 17px; line-height: 1.2; }
+    #ask-mia-root .ask-mia-ai-badge {
+      padding: 2px 7px;
+      border: 1px solid #ffffff59;
+      border-radius: 999px;
+      color: #d9eeff;
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: .04em;
+    }
+    #ask-mia-root .ask-mia-sub { display: block; margin-top: 3px; color: #d9eeff; font-size: 12px; }
+    #ask-mia-root #ask-mia-close {
+      width: 44px;
+      height: 44px;
+      margin-inline-start: auto;
+      border: 0;
+      border-radius: 12px;
+      background: transparent;
+      color: #fff;
+      cursor: pointer;
+      font: 26px/1 system-ui, sans-serif;
+    }
+    #ask-mia-root #ask-mia-close:hover { background: #2f5f93; }
+    #ask-mia-root #ask-mia-transcript {
+      flex: 1 1 auto;
+      min-height: 0;
+      overflow-x: hidden;
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      padding: 20px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      background: radial-gradient(circle at 12% 8%, #d9eeff 0, transparent 34%), #f8fbff;
+      scrollbar-color: #7ba7d3 transparent;
+    }
+    #ask-mia-root .ask-mia-row { display: flex; align-items: flex-end; gap: 8px; max-width: 100%; }
+    #ask-mia-root .ask-mia-row-mia { align-self: flex-start; }
+    #ask-mia-root .ask-mia-row-user { align-self: flex-end; flex-direction: row-reverse; }
+    #ask-mia-root .ask-mia-bubble-avatar { width: 30px; height: 30px; font-size: 11px; }
+    #ask-mia-root .ask-mia-row-mia .ask-mia-bubble-avatar { background: #d9eeff; color: #061b35; }
+    #ask-mia-root .ask-mia-row-user .ask-mia-bubble-avatar { background: #2f5f93; color: #fff; }
+    #ask-mia-root .ask-mia-msg {
+      max-width: min(82%, 292px);
+      padding: 10px 13px;
+      border-radius: 16px;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      unicode-bidi: plaintext;
+    }
+    #ask-mia-root .ask-mia-mia {
+      border: 1px solid #2f5f9321;
+      border-end-start-radius: 4px;
+      background: #fff;
+      color: #061b35;
+      box-shadow: 0 8px 20px rgba(6, 27, 53, .06);
+    }
+    #ask-mia-root .ask-mia-user {
+      border-end-end-radius: 4px;
+      background: #2f5f93;
+      color: #fff;
+      box-shadow: 0 8px 20px rgba(6, 27, 53, .12);
+    }
+    #ask-mia-root .ask-mia-dots { display: inline-flex; align-items: center; gap: 4px; height: 18px; }
+    #ask-mia-root .ask-mia-dots span {
+      width: 6px;
+      height: 6px;
+      border-radius: 999px;
+      background: #2f5f93;
+      animation: ask-mia-bounce .65s ease-in-out infinite;
+    }
+    #ask-mia-root .ask-mia-dots span:nth-child(2) { animation-delay: .1s; }
+    #ask-mia-root .ask-mia-dots span:nth-child(3) { animation-delay: .2s; }
+    #ask-mia-root #ask-mia-compose {
+      position: relative;
+      flex: 0 0 auto;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px;
+      padding: 12px 14px 8px;
+      border-top: 1px solid #2f5f9321;
+      background: #fff;
+    }
+    #ask-mia-root #ask-mia-input {
+      grid-column: 1 / -1;
+      width: 100%;
+      min-height: 50px;
+      max-height: 112px;
+      resize: none;
+      padding: 12px 14px;
+      border: 1px solid #7ba7d3;
+      border-radius: 14px;
+      background: #f8fbff;
+      color: #061b35;
+      font: inherit;
+      font-size: 16px;
+    }
+    #ask-mia-root #ask-mia-input:focus { border-color: #2563eb; }
+    #ask-mia-root #ask-mia-hint { align-self: center; margin: 0; color: #2f5f93; font-size: 12px; }
+    #ask-mia-root #ask-mia-actions { display: flex; gap: 8px; }
+    #ask-mia-root #ask-mia-actions button {
+      min-width: 44px;
+      min-height: 44px;
+      border: 0;
+      border-radius: 12px;
+      padding: 8px 12px;
+      cursor: pointer;
+      font: inherit;
+      font-weight: 700;
+    }
+    #ask-mia-root #ask-mia-send { display: inline-flex; align-items: center; gap: 6px; }
+    #ask-mia-root #ask-mia-send svg { width: 17px; height: 17px; }
+    #ask-mia-root #ask-mia-send { background: #2f5f93; color: #fff; }
+    #ask-mia-root #ask-mia-mic { background: #d9eeff; color: #061b35; }
+    #ask-mia-root #ask-mia-mic.recording { background: #b00; color: #fff; }
+    #ask-mia-root #ask-mia-wa { background: #25d366; color: #fff; }
+    #ask-mia-root .ask-mia-handoff { display: flex; flex-direction: column; gap: 8px; max-width: min(86%, 292px); }
+    #ask-mia-root .ask-mia-handoff-title { color: #061b35; font-weight: 700; }
+    #ask-mia-root .ask-mia-handoff-note { color: #2f5f93; font-size: 14px; }
+    #ask-mia-root .ask-mia-handoff-cta {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 100%;
+      min-height: 44px;
+      padding: 8px 12px;
+      border-radius: 12px;
+      background: #25d366;
+      color: #fff;
+      font-weight: 700;
+      text-decoration: none;
+    }
+    #ask-mia-root .ask-mia-contact {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      width: min(100%, 300px);
+      padding: 12px;
+      border: 1px solid #2f5f9321;
+      border-radius: 14px;
+      background: #eef7ff;
+    }
+    #ask-mia-root .ask-mia-contact label,
+    #ask-mia-root .ask-mia-contact small { color: #2f5f93; font-size: 12px; }
+    #ask-mia-root .ask-mia-contact input,
+    #ask-mia-root .ask-mia-contact button {
+      width: 100%;
+      min-height: 44px;
+      border-radius: 10px;
+      font: inherit;
+    }
+    #ask-mia-root .ask-mia-contact input { padding: 9px; border: 1px solid #7ba7d3; background: #fff; }
+    #ask-mia-root .ask-mia-contact button { border: 0; background: #2f5f93; color: #fff; font-weight: 700; }
+    #ask-mia-root #ask-mia-status {
+      flex: 0 0 auto;
+      min-height: 20px;
+      padding: 0 14px max(8px, env(safe-area-inset-bottom, 0px));
+      background: #fff;
+      color: #b00;
+      font-size: 13px;
+    }
+    @keyframes ask-mia-bounce {
+      0%, 100% { transform: translateY(0); }
+      50% { transform: translateY(-4px); }
+    }
+    @keyframes ask-mia-rise {
+      from { opacity: 0; transform: translateY(12px) scale(.98); }
+      to { opacity: 1; transform: translateY(0) scale(1); }
+    }
+    @media (max-width: 480px) {
+      #ask-mia-root {
+        inset-inline: 8px;
+        bottom: max(8px, env(safe-area-inset-bottom, 0px));
+        max-width: none;
+      }
+      #ask-mia-root #ask-mia-panel {
+        width: 100%;
+        height: min(600px, calc(var(--ask-mia-viewport-height) - 80px));
+        min-height: min(380px, calc(var(--ask-mia-viewport-height) - 80px));
+        max-height: calc(var(--ask-mia-viewport-height) - 80px);
+        border-radius: 18px;
+      }
+      #ask-mia-root #ask-mia-transcript { padding: 16px 12px; }
+      #ask-mia-root .ask-mia-msg { max-width: 84%; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      #ask-mia-root *, #ask-mia-root *::before, #ask-mia-root *::after {
+        scroll-behavior: auto !important;
+        animation-duration: .01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: .01ms !important;
+      }
+      #ask-mia-root #ask-mia-launcher:hover { transform: none; }
+    }
+  `;
 
   var root = document.createElement('div');
   root.id = 'ask-mia-root';
@@ -249,6 +485,9 @@
   panel.id = 'ask-mia-panel';
   panel.hidden = true;
   panel.dir = 'rtl';
+  panel.setAttribute('role', 'dialog');
+  panel.setAttribute('aria-modal', 'false');
+  panel.setAttribute('aria-labelledby', 'ask-mia-title');
 
   var header = document.createElement('div');
   header.id = 'ask-mia-header';
@@ -260,28 +499,33 @@
   titleRow.className = 'ask-mia-title';
   var nameEl = document.createElement('strong');
   nameEl.className = 'ask-mia-name';
+  nameEl.id = 'ask-mia-title';
   nameEl.textContent = 'מיה';
-  var live = document.createElement('span');
-  live.className = 'ask-mia-live';
-  live.setAttribute('aria-hidden', 'true');
+  var aiBadge = document.createElement('span');
+  aiBadge.className = 'ask-mia-ai-badge';
+  aiBadge.textContent = 'AI';
   titleRow.appendChild(nameEl);
-  titleRow.appendChild(live);
+  titleRow.appendChild(aiBadge);
   var subEl = document.createElement('span');
   subEl.className = 'ask-mia-sub';
-  subEl.textContent = 'שאלו. מיה תבין.';
+  subEl.textContent = 'עוזרת AI של אסף';
   brand.appendChild(titleRow);
   brand.appendChild(subEl);
   var closeBtn = document.createElement('button');
   closeBtn.id = 'ask-mia-close';
   closeBtn.type = 'button';
   closeBtn.setAttribute('aria-label', 'סגירה');
-  closeBtn.textContent = 'סגירה';
+  closeBtn.textContent = '×';
   header.appendChild(avatar);
   header.appendChild(brand);
   header.appendChild(closeBtn);
 
   var transcript = document.createElement('div');
   transcript.id = 'ask-mia-transcript';
+  transcript.setAttribute('role', 'log');
+  transcript.setAttribute('aria-live', 'polite');
+  transcript.setAttribute('aria-relevant', 'additions text');
+  transcript.setAttribute('aria-label', 'השיחה עם מיה');
 
   var compose = document.createElement('div');
   compose.id = 'ask-mia-compose';
@@ -292,6 +536,7 @@
   input.setAttribute('maxlength', '4000');
   input.setAttribute('aria-label', 'הודעה למיה');
   input.setAttribute('aria-describedby', 'ask-mia-hint');
+  input.setAttribute('placeholder', 'כתבו הודעה למיה...');
 
   var hint = document.createElement('p');
   hint.id = 'ask-mia-hint';
@@ -303,7 +548,12 @@
   var sendBtn = document.createElement('button');
   sendBtn.id = 'ask-mia-send';
   sendBtn.type = 'button';
-  sendBtn.textContent = 'שליחה';
+  sendBtn.setAttribute('aria-label', 'שליחת הודעה');
+  var sendIcon = sendPlaneSvg();
+  if (sendIcon) sendBtn.appendChild(sendIcon);
+  var sendLabel = document.createElement('span');
+  sendLabel.textContent = 'שליחה';
+  sendBtn.appendChild(sendLabel);
 
   var micBtn = document.createElement('button');
   micBtn.id = 'ask-mia-mic';
@@ -320,6 +570,8 @@
 
   var status = document.createElement('div');
   status.id = 'ask-mia-status';
+  status.setAttribute('role', 'status');
+  status.setAttribute('aria-live', 'polite');
   var contactBlock = null;
 
   function showContactCapture() {
@@ -372,8 +624,9 @@
       submit.disabled = true;
       busy = true;
       status.textContent = '';
+      var contactMessageId = newClientMessageId();
       retryOnce(function () {
-        return postContact(name.value.trim(), phoneValue, emailValue);
+        return postContact(name.value.trim(), phoneValue, emailValue, contactMessageId);
       })
         .then(function (data) {
           applyReply(data);
@@ -483,23 +736,40 @@
   function loadStoredSession() {
     try {
       var value = localStorage.getItem(SESSION_KEY);
-      if (typeof value !== 'string' || !SESSION_RE.test(value)) return null;
+      if (typeof value !== 'string' || !SESSION_RE.test(value)) {
+        clearStoredSession();
+        return null;
+      }
       var rawMeta = localStorage.getItem(SESSION_META_KEY);
       var meta = rawMeta ? JSON.parse(rawMeta) : null;
-      if (!meta || !Number.isFinite(meta.updatedAt) ||
+      if (!meta || typeof meta.credential !== 'string' || !meta.credential.trim() ||
+          !Number.isFinite(meta.updatedAt) ||
           Date.now() - meta.updatedAt > configuredSessionLifetimeMs) {
         clearStoredSession();
         return null;
       }
+      sessionCredential = typeof meta.credential === 'string' ? meta.credential : '';
+      configuredWhatsAppUrl =
+        typeof meta.whatsappUrl === 'string' && isWaMeUrl(meta.whatsappUrl)
+          ? meta.whatsappUrl
+          : '';
       return value;
     } catch (err) {}
     return null;
   }
 
-  function saveStoredSession(id) {
+  function saveStoredSession(id, credential) {
     try {
+      if (typeof credential === 'string') sessionCredential = credential;
       localStorage.setItem(SESSION_KEY, id);
-      localStorage.setItem(SESSION_META_KEY, JSON.stringify({ updatedAt: Date.now() }));
+      localStorage.setItem(
+        SESSION_META_KEY,
+        JSON.stringify({
+          updatedAt: Date.now(),
+          credential: sessionCredential,
+          whatsappUrl: configuredWhatsAppUrl,
+        })
+      );
     } catch (err) {}
   }
 
@@ -509,6 +779,7 @@
       localStorage.removeItem(SESSION_META_KEY);
       localStorage.removeItem(TRANSCRIPT_KEY);
     } catch (err) {}
+    sessionCredential = '';
     storedTranscript = [];
   }
 
@@ -583,7 +854,12 @@
     handoffPending = true;
     fetch(
       api + '/v1/website/sessions/' + encodeURIComponent(sessionId) + '/handoff',
-      { method: 'POST', credentials: 'omit', keepalive: true }
+      {
+        method: 'POST',
+        credentials: 'omit',
+        keepalive: true,
+        headers: sessionHeaders(),
+      }
     )
       .then(function (response) {
         if (!response.ok) throw new Error('handoff failed');
@@ -593,9 +869,8 @@
         if (sessionId !== handoffSessionId) return;
         if (data.notification_status === 'delivered') {
           status.textContent = 'אסף קיבל את תקציר השיחה.';
-          clearStoredSession();
-          sessionId = null;
-          conversationFinished = true;
+        } else if (data.notification_status === 'pending') {
+          status.textContent = 'הפרטים נשמרו וההעברה לאסף ממתינה.';
         } else if (data.notification_status === 'failed') {
           status.textContent = 'לא הצלחתי להעביר את השיחה לאסף כרגע.';
         }
@@ -627,6 +902,7 @@
     configuredWhatsAppUrl = isWaMeUrl(url) ? url : '';
     waBtn.hidden = !configuredWhatsAppUrl;
     waBtn.classList.toggle('offer', !!configuredWhatsAppUrl);
+    if (sessionId) saveStoredSession(sessionId);
   }
 
   function makeWhatsAppCta(url) {
@@ -687,7 +963,7 @@
       {
         method: 'POST',
         credentials: 'omit',
-        headers: { 'Content-Type': 'application/json' },
+        headers: sessionHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify(payload),
       }
     ).catch(function () {});
@@ -705,12 +981,17 @@
     sessionEnded = true;
     var url = api + '/v1/website/sessions/' + encodeURIComponent(sessionId) + '/end';
     try {
-      if (navigator.sendBeacon) {
+      if (!sessionCredential && navigator.sendBeacon) {
         navigator.sendBeacon(url, new Blob([], { type: 'text/plain' }));
         return;
       }
     } catch (err) {}
-    fetch(url, { method: 'POST', keepalive: true, credentials: 'omit' }).catch(function () {});
+    fetch(url, {
+      method: 'POST',
+      keepalive: true,
+      credentials: 'omit',
+      headers: sessionHeaders(),
+    }).catch(function () {});
   }
 
   function postEvent(kind, extra) {
@@ -751,6 +1032,9 @@
 
   function fetchJson(url, opts, timeoutMs) {
     var options = Object.assign({ credentials: 'omit' }, opts || {});
+    if (sessionId && url.indexOf('/v1/website/sessions/' + encodeURIComponent(sessionId)) >= 0) {
+      options.headers = sessionHeaders(options.headers);
+    }
     if (
       timeoutMs &&
       typeof AbortSignal !== 'undefined' &&
@@ -800,6 +1084,14 @@
     panel.hidden = true;
     launcher.setAttribute('aria-expanded', 'false');
     endSession();
+    launcher.focus();
+  }
+
+  function syncViewportHeight() {
+    var viewport = window.visualViewport;
+    var height = viewport && Number(viewport.height) > 0 ? viewport.height : window.innerHeight;
+    if (!Number(height) || !root.style || typeof root.style.setProperty !== 'function') return;
+    root.style.setProperty('--ask-mia-viewport-height', Math.round(height) + 'px');
   }
 
   function togglePanel() {
@@ -810,11 +1102,14 @@
   function createWebsiteSession() {
     return fetchJson(api + '/v1/website/sessions?' + sessionQuery(), { method: 'POST' }).then(
       function (data) {
-        if (typeof data.session_id === 'string' && SESSION_RE.test(data.session_id)) {
-          sessionId = data.session_id;
-          sessionEnded = false;
-          saveStoredSession(sessionId);
+        if (typeof data.session_id !== 'string' || !SESSION_RE.test(data.session_id) ||
+            typeof data.session_credential !== 'string' || !data.session_credential.trim()) {
+          throw new Error('invalid session response');
         }
+        sessionId = data.session_id;
+        sessionCredential = data.session_credential;
+        sessionEnded = false;
+        saveStoredSession(sessionId);
         if (sessionId) {
           postEvent('page_viewed', { path: location.pathname });
           flushEventQueue();
@@ -841,6 +1136,7 @@
         if (existing) {
           sessionId = existing;
           saveStoredSession(sessionId);
+          if (configuredWhatsAppUrl) showConfiguredWhatsApp(configuredWhatsAppUrl);
           postEvent('page_viewed', { path: location.pathname });
           flushEventQueue();
           return existing;
@@ -881,6 +1177,24 @@
     var painted = visible ? appendMsg('mia', visible) : false;
     if (!visible) status.textContent = ERR;
     if (data.next_action === 'ask_contact') showContactCapture();
+    if (data.next_action === 'contact_saved') {
+      var deliveryStatus = typeof data.delivery_status === 'string'
+        ? data.delivery_status
+        : '';
+      if (deliveryStatus === 'confirmed') {
+        status.textContent = 'הפרטים נשמרו והמסירה לאסף אושרה.';
+      } else if (deliveryStatus === 'pending') {
+        status.textContent = 'הפרטים נשמרו והמסירה לאסף עדיין ממתינה.';
+      } else if (deliveryStatus === 'failed') {
+        status.textContent = 'הפרטים נשמרו, אך המסירה לאסף נכשלה.';
+      } else {
+        status.textContent = 'הפרטים נשמרו.';
+      }
+      if (replyUrl) {
+        placeWhatsAppCta(replyUrl, painted);
+        showConfiguredWhatsApp(replyUrl);
+      }
+    }
     if (offering) {
       waBtn.hidden = true;
       waBtn.classList.remove('offer');
@@ -897,7 +1211,7 @@
 
   function retryOnce(run) {
     return run().catch(function (err) {
-      if (!err || err.status !== 404) throw err;
+      if (!err || (err.status !== 401 && err.status !== 404)) throw err;
       return createWebsiteSession().then(function (id) {
         if (!id) throw new Error('fail');
         return run();
@@ -905,18 +1219,18 @@
     });
   }
 
-  function postText(text) {
+  function postText(text, clientMessageId) {
     return fetchJson(
       api + '/v1/website/sessions/' + encodeURIComponent(sessionId) + '/messages',
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: text }),
+        body: JSON.stringify({ text: text, client_message_id: clientMessageId }),
       }
     );
   }
 
-  function postContact(name, phone, email) {
+  function postContact(name, phone, email, clientMessageId) {
     return fetchJson(
       api + '/v1/website/sessions/' + encodeURIComponent(sessionId) + '/messages',
       {
@@ -927,6 +1241,7 @@
           name: name || '',
           phone: phone || '',
           email: email || '',
+          client_message_id: clientMessageId,
         }),
       }
     );
@@ -946,8 +1261,9 @@
     busy = true;
     status.textContent = '';
     showLoading();
+    var clientMessageId = newClientMessageId();
     retryOnce(function () {
-      return postText(text);
+      return postText(text, clientMessageId);
     })
       .then(applyReply)
       .catch(function () {
@@ -983,11 +1299,12 @@
     burstTimer = setTimeout(flushBurst, BURST_MS);
   }
 
-  function postVoice(blob) {
+  function postVoice(blob, clientMessageId) {
     var form = new FormData();
     var mime = blob.type || 'audio/webm';
     var name = mime.indexOf('mp4') >= 0 ? 'note.mp4' : 'note.webm';
     form.append('file', blob, name);
+    form.append('client_message_id', clientMessageId);
     return fetchJson(
       api + '/v1/website/sessions/' + encodeURIComponent(sessionId) + '/voice',
       { method: 'POST', body: form },
@@ -1019,8 +1336,9 @@
     status.textContent = '';
     appendMsg('user', 'הקלטה');
     showLoading();
+    var clientMessageId = newClientMessageId();
     retryOnce(function () {
-      return postVoice(blob);
+      return postVoice(blob, clientMessageId);
     })
       .then(applyReply)
       .catch(function (err) {
@@ -1388,6 +1706,12 @@
       sendMessage();
     }
   });
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && !panel.hidden) {
+      e.preventDefault();
+      closePanel();
+    }
+  });
 
   actions.appendChild(sendBtn);
   actions.appendChild(micBtn);
@@ -1408,6 +1732,13 @@
     }
     document.head.appendChild(style);
     document.body.appendChild(root);
+    syncViewportHeight();
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener('resize', syncViewportHeight);
+      window.visualViewport.addEventListener('scroll', syncViewportHeight);
+    } else {
+      window.addEventListener('resize', syncViewportHeight);
+    }
     setupFunnelTracking();
     fetchJson(api + '/v1/website/config')
       .then(function (cfg) {

@@ -1,25 +1,10 @@
-"""Thin OpenAI client with compatible Chat Completions and Responses modes.
+"""Shared purpose-specific LLM transports and provider fallback.
 
-Deliberately not a refactor of `sales_reply.py` / `owner_reply.py`: those are live,
-heavily-tested paraphrase paths and this slice does not touch them. This client serves the
-new owner agent loop and memory extraction.
-
-Wire-shape notes, all from the current Chat Completions reference:
-
-- Tools nest under `function`: `{"type":"function","function":{name, description,
-  parameters, strict}}`. The Responses API flattens this; Chat Completions does not.
-- `message.tool_calls[].function.arguments` is a **JSON string**, not an object.
-- `finish_reason == "length"` means the response — possibly a tool-call argument string —
-  is truncated. It must be checked *before* parsing JSON, or a truncation is misreported
-  as a malformed-JSON bug.
-- `message.refusal` is a non-null string on a safety refusal, with `content` null.
-- The Gemini OpenAI-compat layer accepts the same `tools` shape but **silently ignores**
-  unsupported parameters, so a 200 there is not proof the schema was honoured. Callers
-  validate the parsed object and fall back.
-- GPT-5.6 on Chat Completions rejects function tools unless `reasoning_effort` is
-  `"none"` (otherwise OpenAI returns HTTP 400). Generic Chat callers retain that
-  compatibility behavior. Owner OpenAI clients use Responses so reasoning and tools
-  work together; Gemini and structured extraction remain on their compatible routes.
+Owner and website OpenAI reasoning use Responses. Gemini uses its compatible
+Chat Completions endpoint. Tool schemas are normalized at the transport boundary;
+provider-private continuation state never crosses to another provider. Callers
+validate tool requests and own execution, approval and side-effect deduplication.
+Extraction has a separate configurable provider chain.
 """
 
 from __future__ import annotations
@@ -32,6 +17,8 @@ from urllib.parse import urlparse
 import httpx
 
 from app.core.errors import MiaError
+from app.core.models import model_chain
+from app.core.owner_timing import owner_stage
 
 OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions"
 OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
@@ -39,11 +26,24 @@ GEMINI_CHAT_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/
 
 DEFAULT_TIMEOUT = 45.0
 MAX_TOOL_ARGUMENT_CHARS = 20_000
+_GEMINI_REASONING_LEVELS = frozenset({"none", "minimal", "low", "medium", "high"})
 
 
 class LlmError(MiaError):
     code = "llm_call_failed"
     http_status = 502
+
+
+def _reasoning_for_endpoint(value: str, url: str) -> str:
+    """Map configured effort to the levels supported by each endpoint."""
+    effort = value.strip().lower()
+    if not effort:
+        return ""
+    if url == GEMINI_CHAT_URL:
+        if effort in {"xhigh", "max"}:
+            return "high"
+        return effort if effort in _GEMINI_REASONING_LEVELS else ""
+    return effort
 
 
 class ToolCall(NamedTuple):
@@ -178,7 +178,7 @@ class LlmClient:
         self._model = model
         self._url = url
         self._timeout = timeout
-        self._reasoning_effort = reasoning_effort.strip().lower()
+        self._reasoning_effort = _reasoning_for_endpoint(reasoning_effort, url)
         self._client = client
 
     @property
@@ -213,6 +213,7 @@ class LlmClient:
                 tool_choice=tool_choice,
                 parallel_tool_calls=parallel_tool_calls,
                 max_completion_tokens=max_completion_tokens,
+                response_format=response_format,
             )
             body = self._post(payload, timeout=timeout)
             return self._parse_responses(body)
@@ -229,7 +230,12 @@ class LlmClient:
             # GPT-5.6 Chat Completions rejects function tools unless reasoning is
             # disabled (or the caller moves to /v1/responses). Without this, live
             # owner-agent turns 400 as Hebrew "שגיאת ספק" / provider_error.
-            payload["reasoning_effort"] = "none"
+            if self._url == OPENAI_CHAT_URL:
+                payload["reasoning_effort"] = "none"
+            elif self._reasoning_effort:
+                payload["reasoning_effort"] = self._reasoning_effort
+        elif self._reasoning_effort:
+            payload["reasoning_effort"] = self._reasoning_effort
         if response_format is not None:
             payload["response_format"] = response_format
         if max_completion_tokens is not None:
@@ -281,6 +287,7 @@ class LlmClient:
         tool_choice: str | dict[str, Any] | None,
         parallel_tool_calls: bool | None,
         max_completion_tokens: int | None,
+        response_format: dict[str, Any] | None,
     ) -> dict[str, Any]:
         input_items: list[dict[str, Any]] = []
         instructions: list[str] = []
@@ -346,6 +353,17 @@ class LlmClient:
                 payload["parallel_tool_calls"] = parallel_tool_calls
         if max_completion_tokens is not None:
             payload["max_output_tokens"] = max_completion_tokens
+        if response_format is not None:
+            schema = response_format.get("json_schema")
+            if response_format.get("type") == "json_schema" and isinstance(schema, dict):
+                payload["text"] = {
+                    "format": {
+                        "type": "json_schema",
+                        "name": schema.get("name", "response"),
+                        "schema": schema.get("schema", {}),
+                        "strict": schema.get("strict", True),
+                    }
+                }
         return payload
 
     def _parse_responses(self, body: dict[str, Any]) -> LlmResponse:
@@ -533,15 +551,28 @@ class LlmModelChain:
             raise LlmError("no model configured")
         self.errors = []
         last: LlmError | None = None
+        continuation = _has_tool_continuation(kwargs.get("messages"))
+        if not continuation:
+            # A reusable purpose client begins each independent turn at its primary.
+            self._active_index = 0
         requested_timeout = kwargs.get("timeout")
         deadline = (
             monotonic() + float(requested_timeout)
             if isinstance(requested_timeout, (int, float)) and requested_timeout > 0
             else None
         )
-        candidates = self._clients[self._active_index :]
-        for relative_index, client in enumerate(candidates):
-            index = self._active_index + relative_index
+        if continuation:
+            active_provider = self._clients[self._active_index].provider
+            candidate_indexes = [self._active_index]
+            candidate_indexes.extend(
+                index
+                for index in range(self._active_index + 1, len(self._clients))
+                if self._clients[index].provider != active_provider
+            )
+        else:
+            candidate_indexes = list(range(len(self._clients)))
+        for index in candidate_indexes:
+            client = self._clients[index]
             self.last_model = client.model
             try:
                 attempt_kwargs = dict(kwargs)
@@ -550,11 +581,12 @@ class LlmModelChain:
                     if remaining <= 0:
                         raise LlmError("llm request failed: deadline exceeded")
                     attempt_kwargs["timeout"] = remaining
-                response = client.complete(**attempt_kwargs)
+                with owner_stage("model_attempt", model=client.model):
+                    response = client.complete(**attempt_kwargs)
             except LlmError as exc:
-                self.errors.append(f"{client.model}:{exc}")
+                self.errors.append(f"{client.model}:{_llm_error_class(exc)}")
                 status = _status_from_error(exc)
-                is_last = index == len(self._clients) - 1
+                is_last = index == candidate_indexes[-1]
                 tools_sent = bool(kwargs.get("tools"))
                 # Look past sibling rungs: with OpenAI primary + OpenAI fallback +
                 # Gemini, the primary must still advance so the chain can walk through
@@ -588,6 +620,69 @@ class LlmModelChain:
             self._active_index = index
             return response
         raise last or LlmError("all models failed")
+
+
+def _has_tool_continuation(messages: object) -> bool:
+    if not isinstance(messages, list):
+        return False
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        if message.get("role") == "tool" or isinstance(message.get("tool_calls"), list):
+            return True
+        output = message.get("_responses_output")
+        if isinstance(output, list) and any(
+            isinstance(item, dict) and item.get("type") == "function_call" for item in output
+        ):
+            return True
+    return False
+
+
+def _llm_error_class(error: LlmError) -> str:
+    """Stable diagnostics without provider bodies, prompts, credentials, or media."""
+    status = _status_from_error(error)
+    if status == 429:
+        return "rate_limited"
+    if status in {401, 403}:
+        return "access_denied"
+    if status in {404, 410}:
+        return "model_unavailable"
+    if status is not None and 500 <= status <= 599:
+        return "provider_unavailable"
+    text = str(error).lower()
+    if "deadline" in text or "timeout" in text:
+        return "timeout"
+    if "not json" in text or "not an object" in text or "no output" in text:
+        return "invalid_response"
+    if "empty" in text:
+        return "empty_response"
+    return "request_failed"
+
+
+def build_site_client(settings: Any) -> LlmModelChain:
+    """Purpose-specific website chain: OpenAI Responses, then Gemini compatibility."""
+    timeout = settings.llm_request_timeout_seconds
+    clients: list[LlmClient] = [
+        LlmClient(
+            api_key=settings.openai_api_key,
+            model=name,
+            url=OPENAI_RESPONSES_URL,
+            timeout=timeout,
+            reasoning_effort=settings.sales_reasoning_effort,
+        )
+        for name in model_chain(settings.sales_model, settings.sales_fallback_model)
+    ]
+    if settings.gemini_api_key.strip() and settings.sales_gemini_model.strip():
+        clients.append(
+            LlmClient(
+                api_key=settings.gemini_api_key,
+                model=settings.sales_gemini_model.strip(),
+                url=GEMINI_CHAT_URL,
+                timeout=timeout,
+                reasoning_effort=settings.sales_reasoning_effort,
+            )
+        )
+    return LlmModelChain(clients)
 
 
 def _status_from_error(error: LlmError) -> int | None:

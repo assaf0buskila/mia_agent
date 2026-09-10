@@ -31,7 +31,7 @@ def test_health_carries_the_versions_needed_to_identify_a_release() -> None:
     block = _deployment_block(Settings(_env_file=None, build_sha="deadbeef"))
     for key in ("commit_sha", "env", "app_version", "prompt_version", "schema_version"):
         assert key in block, key
-    assert block["prompt_version"].startswith("sales_reply_v")
+    assert block["prompt_version"].startswith("site_v2_v")
 
 
 def test_health_deployment_leaks_no_secret() -> None:

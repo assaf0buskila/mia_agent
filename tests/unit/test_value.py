@@ -10,10 +10,8 @@ from app.db.store import LeadStore
 from app.domain.events import Channel, EventType, build_business_value_event
 from app.domain.followups import STATUS_RECOVERED, apply_follow_up_policy
 from app.domain.meetings.booking import _persist_meeting_booked_event
-from app.domain.sales import FitLevel, NextAction, PainLevel, SalesState
+from app.domain.sales import FitLevel, NextAction, SalesState
 from app.domain.value import ValueKind, count_business_value, persist_business_value
-from app.graph.orchestrator import build_graph
-from app.graph.state import empty_state
 from sqlalchemy import select
 
 
@@ -43,9 +41,7 @@ def test_persist_business_value_duplicate_writes_once_and_counts() -> None:
     db = get_session_factory()()
     try:
         store = LeadStore(db)
-        _, lead_id = store.open_channel_lead(
-            channel=Channel.WEBSITE, external_id="web_value_dup_1"
-        )
+        _, lead_id = store.open_channel_lead(channel=Channel.WEBSITE, external_id="web_value_dup_1")
         db.commit()
         assert (
             persist_business_value(
@@ -80,100 +76,12 @@ def test_persist_business_value_duplicate_writes_once_and_counts() -> None:
         db.close()
 
 
-def test_graph_persists_business_value_qualified_on_fit_transition() -> None:
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        _, lead_id = store.open_channel_lead(
-            channel=Channel.WEBSITE, external_id="web_value_qual_1"
-        )
-        store.save_sales(
-            SalesState(
-                lead_id=lead_id,
-                fit=FitLevel.POSSIBLE,
-                pain_level=PainLevel.P2,
-                workflow_known=True,
-                buying_reality_known=False,
-                authority_known=False,
-            )
-        )
-        db.commit()
-        run_id = "run_value_qual_1"
-        build_graph(store).invoke(
-            empty_state(
-                run_id=run_id,
-                thread_id="web_value_qual_1",
-                channel="website",
-                lead_id=lead_id,
-                latest_message="i decide",
-            )
-        )
-        db.commit()
-        row = store.get_canonical_event(
-            provider="website", provider_event_id=f"{lead_id}:value:qualified"
-        )
-        assert row is not None
-        assert row.event_type == EventType.BUSINESS_VALUE.value
-        payload = json.loads(row.payload_json)
-        assert payload == {"kind": "qualified", "estimated_value_ils": ""}
-        qual_row = store.get_canonical_event(
-            provider="website", provider_event_id=f"{run_id}:qual"
-        )
-        assert qual_row is not None
-    finally:
-        db.close()
-
-
-def test_graph_persists_business_value_handoff_and_existing_handoff() -> None:
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        _, lead_id = store.open_channel_lead(
-            channel=Channel.WEBSITE, external_id="web_value_hand_1"
-        )
-        store.save_sales(
-            SalesState(lead_id=lead_id, owner_required=True, workflow_known=True)
-        )
-        db.commit()
-        run_id = "run_value_hand_1"
-        build_graph(store).invoke(
-            empty_state(
-                run_id=run_id,
-                thread_id="web_value_hand_1",
-                channel="website",
-                lead_id=lead_id,
-                latest_message="ok",
-            )
-        )
-        db.commit()
-        handoff_row = store.get_canonical_event(
-            provider="website", provider_event_id=f"{run_id}:handoff"
-        )
-        assert handoff_row is not None
-        assert handoff_row.event_type == "handoff"
-        value_row = store.get_canonical_event(
-            provider="website", provider_event_id=f"{lead_id}:value:handoff"
-        )
-        assert value_row is not None
-        assert value_row.event_type == EventType.BUSINESS_VALUE.value
-        assert json.loads(value_row.payload_json) == {
-            "kind": "handoff",
-            "estimated_value_ils": "",
-        }
-    finally:
-        db.close()
-
-
 def test_follow_up_recover_persists_business_value_recovered() -> None:
     init_db()
     db = get_session_factory()()
     try:
         store = LeadStore(db)
-        _, lead_id = store.open_channel_lead(
-            channel=Channel.WEBSITE, external_id="web_value_rec_1"
-        )
+        _, lead_id = store.open_channel_lead(channel=Channel.WEBSITE, external_id="web_value_rec_1")
         sales = SalesState(
             lead_id=lead_id,
             fit=FitLevel.GOOD,
@@ -302,12 +210,8 @@ def test_count_business_value_filters_by_lead_id() -> None:
     db = get_session_factory()()
     try:
         store = LeadStore(db)
-        _, lead_a = store.open_channel_lead(
-            channel=Channel.WEBSITE, external_id="web_value_cnt_a"
-        )
-        _, lead_b = store.open_channel_lead(
-            channel=Channel.WEBSITE, external_id="web_value_cnt_b"
-        )
+        _, lead_a = store.open_channel_lead(channel=Channel.WEBSITE, external_id="web_value_cnt_a")
+        _, lead_b = store.open_channel_lead(channel=Channel.WEBSITE, external_id="web_value_cnt_b")
         persist_business_value(
             store,
             provider="website",
