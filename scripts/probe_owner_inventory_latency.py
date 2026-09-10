@@ -43,13 +43,16 @@ async def main():
         with get_session_factory()() as db:
             port = RecordingMessagePort()
             crm = FakeContactsCrm()
+            store = LeadStore(db)
+            event_id = 'probe_inventory_' + uuid4().hex
+            store.claim_webhook(provider='telegram', provider_event_id=event_id)
             started = perf_counter()
             try:
                 result = await owner_surface.run_owner_loop(
                     provider='telegram', channel=Channel.TELEGRAM,
-                    item={'id': 'probe_inventory_' + uuid4().hex, 'from': actor,
+                    item={'id': event_id, 'from': actor,
                           'text': 'מה הכלים שלך אל תשתמשי בהיסטוריה?'},
-                    store=LeadStore(db), port=port, settings=settings,
+                    store=store, port=port, settings=settings,
                     crm=crm, owner_ids=owners,
                 )
                 durations.append(round((perf_counter() - started) * 1000, 2))
