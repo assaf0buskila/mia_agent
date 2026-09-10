@@ -44,9 +44,6 @@ class Settings(BaseSettings):
     app_name: str = "mia"
 
     website_url: str = Field(default="https://www.assafweb.com")
-    website_inactivity_minutes: int = Field(default=30)
-    # ADR-028: the booked meeting is the website's default exit; WhatsApp is the
-    # fallback. Shipping ON — the flag exists so it is reversible without a deploy.
     public_base_url: str = Field(default="http://127.0.0.1:8000")
     cors_origins: str = Field(
         default=(
@@ -58,35 +55,38 @@ class Settings(BaseSettings):
     database_url: str = Field(default="sqlite:///:memory:")
     composio_api_key: str = Field(default="")
     composio_user_id: str = Field(default="")
-    composio_webhook_secret: str = Field(default="")
     # Ask Composio for resource ids (GSC site, GA4 property) when the matching env var is
     # blank. Default false: ports are built per request, so this adds one network call per
     # process on first use. Verify with `scripts/probe_composio_discovery.py`, then turn
     # it on.
     composio_discovery: bool = False
+    crm_delivery_enabled: bool = False
     openai_api_key: str = Field(default="")
     openai_transcribe_model: str = Field(default="gpt-transcribe")
     openai_transcribe_fallback_model: str = Field(default="")
+    gemini_transcribe_model: str = Field(default="")
+    transcription_timeout_seconds: float = Field(default=20.0, gt=0.0, le=120.0)
     sales_model: str = Field(default="")
     sales_fallback_model: str = Field(default="")
     gemini_api_key: str = Field(default="")
     sales_gemini_model: str = Field(default="")
+    sales_reasoning_effort: Literal[
+        "none", "minimal", "low", "medium", "high", "xhigh", "max"
+    ] = "low"
+    llm_request_timeout_seconds: float = Field(default=45.0, gt=0.0, le=120.0)
 
     # Brain. Model ids stay config, never hard-coded (AGENTS.md build-time model policy).
     # Recommended values are documented in .env.example.
     owner_agent_model: str = Field(default="")
     owner_agent_fallback_model: str = Field(default="")
-    # Last resort for the owner agent and memory extraction: the Gemini
-    # OpenAI-compatibility endpoint, which documents the same nested `tools` shape, so the
-    # tool loop works unchanged. Without this, an OpenAI-side block on every configured
-    # model drops Telegram back to the keyword classifier even though Gemini is connected
-    # and already serving website sales.
+    # Owner-only Gemini fallback. Sales and extraction use their own configured models.
     owner_agent_gemini_model: str = Field(default="")
     owner_agent_max_steps: int = Field(default=8)
-    owner_agent_reasoning_effort: Literal["low", "medium", "high", "xhigh", "max"] = "medium"
+    owner_agent_reasoning_effort: Literal[
+        "none", "minimal", "low", "medium", "high", "xhigh", "max"
+    ] = "medium"
     owner_turn_timeout_seconds: float = Field(default=45.0, gt=0.0, le=300.0)
     telegram_typing_interval_seconds: float = Field(default=4.0, gt=0.5, le=10.0)
-    extraction_model: str = Field(default="")
     embedding_provider: str = Field(default="openai")
     embedding_model: str = Field(default="")
     embedding_dim: int = Field(default=1536)
@@ -123,23 +123,10 @@ class Settings(BaseSettings):
         default="llms-full.txt,llms.txt,pricing.md",
     )
 
-    whatsapp_verify_token: str = Field(default="")
-    whatsapp_owner_phones: str = Field(default="")
-    whatsapp_app_secret: str = Field(default="")
-    whatsapp_access_token: str = Field(default="")
-    whatsapp_phone_number_id: str = Field(default="")
-    whatsapp_graph_version: str = Field(default="v25.0")
     whatsapp_click_to_chat: str = Field(default="")
-    whatsapp_sender: str = Field(default="direct")
-    whatsapp_require_business_scope: bool = True
-    # Baileys sidecar. Reverse-engineered WhatsApp Web, so it is opt-in and off by
-    # default: MIA_WHATSAPP_SENDER=baileys plus a URL and a shared token.
     # Stamped into the image at build time from the tested commit. Never derived
     # from the working tree at runtime: the point is to prove which code is serving.
     build_sha: str = Field(default="")
-    whatsapp_baileys_url: str = Field(default="")
-    whatsapp_baileys_token: str = Field(default="")
-    whatsapp_handoff_send: bool = False
 
     telegram_bot_token: str = Field(default="")
     telegram_webhook_secret: str = Field(default="")
@@ -180,14 +167,6 @@ class Settings(BaseSettings):
         configured.add(LOCKED_SPREADSHEET_ID)
         return frozenset(configured)
 
-    def whatsapp_owner_phone_set(self) -> set[str]:
-        phones: set[str] = set()
-        for part in self.whatsapp_owner_phones.split(","):
-            normalized = part.strip().lstrip("+").replace(" ", "")
-            if normalized:
-                phones.add(normalized)
-        return phones
-
     def sales_llm_ready(self) -> bool:
         """True when a live sales paraphrase path is configured. Never returns secrets."""
         openai_chain = model_chain(self.sales_model, self.sales_fallback_model)
@@ -201,18 +180,13 @@ class Settings(BaseSettings):
     def owner_agent_ready(self) -> bool:
         """True when the owner tool-calling loop can run. Never returns secrets.
 
-        False keeps the deterministic keyword classifier as the owner path, which is how
-        the test suite and any key-less deployment run.
+        False produces an honest unavailable reply; no alternate conversation engine runs.
 
-        The live chain also tries the sales models: a blank or broken
-        `MIA_OWNER_AGENT_MODEL` must not report the console down when Ask Mia's
-        model is already answering on the website.
+        Owner and website model ids are separate purpose-specific contracts.
         """
         chain = model_chain(
             self.owner_agent_model,
             self.owner_agent_fallback_model,
-            self.sales_model,
-            self.sales_fallback_model,
         )
         openai_ok = bool(self.openai_api_key.strip() and chain)
         gemini_ok = bool(self.gemini_api_key.strip() and self.owner_agent_gemini_model.strip())
@@ -226,12 +200,6 @@ class Settings(BaseSettings):
             return bool(self.gemini_api_key.strip())
         return bool(self.openai_api_key.strip())
 
-    def extraction_ready(self) -> bool:
-        """True when memory extraction/consolidation can run. Never returns secrets."""
-        if not self.memory_write_enabled or not self.extraction_model.strip():
-            return False
-        return bool(self.openai_api_key.strip() or self.gemini_api_key.strip())
-
     def brain_ready(self) -> bool:
         """True when the brain has any usable retrieval path (semantic or keyword)."""
         return bool(self.memory_enabled)
@@ -242,10 +210,6 @@ class Settings(BaseSettings):
     def composio_ready(self) -> bool:
         """True when Composio API key + user id are set. Never returns secrets or ids."""
         return bool(self.composio_api_key.strip() and self.composio_user_id.strip())
-
-    def composio_webhook_ready(self) -> bool:
-        """True when Composio webhook secret is set. Never returns the secret."""
-        return bool(self.composio_webhook_secret.strip())
 
     def postgres_ready(self) -> bool:
         """True when DATABASE_URL is Postgres. Never returns the DSN."""
@@ -261,34 +225,6 @@ class Settings(BaseSettings):
         if host in {"localhost", "127.0.0.1", "::1"}:
             return False
         return not host.endswith(".trycloudflare.com")
-
-    def whatsapp_ingest_ready(self) -> bool:
-        """True when the Meta inbound webhook path can verify. Never Composio-key-only."""
-        return bool(self.whatsapp_verify_token.strip() and self.whatsapp_app_secret.strip())
-
-    def whatsapp_owner_ready(self) -> bool:
-        """True when at least one owner phone id is set. Never returns the numbers."""
-        return bool(self.whatsapp_owner_phone_set())
-
-    def whatsapp_provider_label(self) -> str:
-        """Outbound owner only. Inbound is always Meta (ADR-016). Never secrets."""
-        sender = self.whatsapp_sender.strip().lower()
-        if sender == "composio":
-            return "composio"
-        return "meta"
-
-    def whatsapp_connected_ready(self) -> bool:
-        """True when the chosen outbound auth pool is present. Not ingest."""
-        if self.whatsapp_provider_label() == "composio":
-            return self.composio_ready()
-        return bool(self.whatsapp_access_token.strip())
-
-    def whatsapp_send_ready(self) -> bool:
-        """True when the chosen outbound port would not be Disabled."""
-        phone = self.whatsapp_phone_number_id.strip()
-        if self.whatsapp_provider_label() == "composio":
-            return bool(self.composio_ready() and phone)
-        return bool(self.whatsapp_access_token.strip() and phone)
 
     def telegram_owner_user_id_set(self) -> set[str]:
         ids: set[str] = set()

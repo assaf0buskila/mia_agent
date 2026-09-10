@@ -17,16 +17,20 @@ def test_two_website_tenants_are_isolated_and_client_is_denied_owner_mail() -> N
     """
     init_db()
     with TestClient(app) as client:
-        session_a = client.post("/v1/website/sessions").json()["session_id"]
-        session_b = client.post("/v1/website/sessions").json()["session_id"]
+        created_a = client.post("/v1/website/sessions").json()
+        created_b = client.post("/v1/website/sessions").json()
+        session_a = created_a["session_id"]
+        session_b = created_b["session_id"]
         assert session_a != session_b
         posted_a = client.post(
             f"/v1/website/sessions/{session_a}/messages",
-            json={"text": "tenant-a-secret-never-share"},
+            json={"text": "tenant-a-secret-never-share", "client_message_id": "tenant-a-1"},
+            headers={"X-Mia-Session-Credential": created_a["session_credential"]},
         )
         posted_b = client.post(
             f"/v1/website/sessions/{session_b}/messages",
-            json={"text": "tenant-b-other-text"},
+            json={"text": "tenant-b-other-text", "client_message_id": "tenant-b-1"},
+            headers={"X-Mia-Session-Credential": created_b["session_credential"]},
         )
         assert posted_a.status_code == 200
         assert posted_b.status_code == 200
@@ -34,7 +38,8 @@ def test_two_website_tenants_are_isolated_and_client_is_denied_owner_mail() -> N
         assert posted_b.json()["lead_id"] == ""
         missing = client.post(
             "/v1/website/sessions/web_does_not_exist/messages",
-            json={"text": "probe"},
+            json={"text": "probe", "client_message_id": "missing-1"},
+            headers={"X-Mia-Session-Credential": created_a["session_credential"]},
         )
         assert missing.status_code == 404
     db = get_session_factory()()

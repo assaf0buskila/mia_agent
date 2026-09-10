@@ -24,7 +24,7 @@ class Element {
   addEventListener(t,fn) {(this.listeners[t] ||= []).push(fn);}
   dispatchEvent(e) {e.target ||= this; for (const fn of this.listeners[e.type] || []) fn(e);}
   click() {if (!this.disabled) this.dispatchEvent({type: 'click', preventDefault() {}});}
-  focus() {}
+  focus() {this.focused = true;}
   matches(s) {
     if (s.startsWith('#')) return this.id === s.slice(1);
     if (s.startsWith('.')) return this.className.split(' ').includes(s.slice(1));
@@ -43,7 +43,7 @@ class Element {
 }
 const allText = e => e.textContent + e.children.map(allText).join('');
 async function settle() {for (let i = 0; i < 5; i++) await new Promise(setImmediate);}
-function world({storage = new Map(), apple = false, rejectTimeslice = false} = {}) {
+function world({storage = new Map(), apple = false, rejectTimeslice = false, sessionResponse = null} = {}) {
   const document = new Element('document');
   document.head = new Element('head'); document.body = new Element('body');
   document.appendChild(document.head); document.appendChild(document.body);
@@ -58,7 +58,7 @@ function world({storage = new Map(), apple = false, rejectTimeslice = false} = {
   const window = new Element('window'); window.open = () => {};
   const state = {document, window, storage, calls: [], recorders: [], streams: [], timers: new Map(),
     rejectContact: false, expireContact: false, sessionCount: 0, stopDeferred: false,
-    contactUrl: 'https://wa.me/972501234567', deferHandoff: false};
+    contactUrl: 'https://wa.me/972501234567', deferHandoff: false, unauthorizedMessages: 0};
   class Recorder {
     static isTypeSupported() {return true;}
     constructor(stream, options = {}) {this.stream = stream; this.mimeType = options.mimeType; this.state = 'inactive'; this.starts = []; state.recorders.push(this);}
@@ -78,8 +78,18 @@ function world({storage = new Map(), apple = false, rejectTimeslice = false} = {
     fetch(url, options = {}) {
       state.calls.push({url, options});
       if (url.endsWith('/config')) return ok({opening: 'שלום', session_lifetime_ms: 86400000});
-      if (url.includes('/sessions?')) {state.sessionCount++; return ok({session_id: 'web_' + String(state.sessionCount).padStart(16,'0')});}
+      if (url.includes('/sessions?')) {
+        state.sessionCount++;
+        return ok(sessionResponse || {
+          session_id: '12345678-1234-4234-8234-' + String(state.sessionCount).padStart(12,'0'),
+          session_credential: 'credential-' + state.sessionCount,
+        });
+      }
       if (url.includes('/messages')) {
+        if (state.unauthorizedMessages > 0) {
+          state.unauthorizedMessages--;
+          return Promise.resolve({ok: false, status: 401, json: () => Promise.resolve({})});
+        }
         const payload = JSON.parse(options.body);
         if (state.expireContact && (payload.phone || payload.email)) {state.expireContact = false; return Promise.resolve({ok: false, status: 404, json: () => Promise.resolve({})});}
         if ((payload.phone || payload.email) && !state.rejectContact) return ok({message: 'הפרטים התקבלו', next_action: 'confirm_contact', whatsapp_url: state.contactUrl});
@@ -112,6 +122,23 @@ function world({storage = new Map(), apple = false, rejectTimeslice = false} = {
   return state;
 }
 async function main() {
+  const accessible = world(); await accessible.open();
+  assert.equal(accessible.el('panel').getAttribute('role'), 'dialog');
+  assert.equal(accessible.el('panel').getAttribute('aria-labelledby'), 'ask-mia-title');
+  assert.equal(accessible.el('transcript').getAttribute('role'), 'log');
+  assert.equal(accessible.el('transcript').getAttribute('aria-live'), 'polite');
+  assert.ok(allText(accessible.el('header')).includes('עוזרת AI של אסף'));
+  const css = accessible.document.head.children[0].textContent;
+  assert.ok(css.includes('width: min(400px, calc(100vw - 24px))'));
+  assert.ok(css.includes('--ask-mia-viewport-height: 100dvh'));
+  assert.ok(css.includes('overflow-x: hidden'));
+  assert.equal(css.includes('.whatsapp-fab'), false, 'widget must not restyle host WhatsApp controls');
+  assert.equal(css.includes('\n    .ask-mia-'), false, 'component classes stay rooted under #ask-mia-root');
+  accessible.document.dispatchEvent({type: 'keydown', key: 'Escape', preventDefault() {}});
+  await settle();
+  assert.equal(accessible.el('panel').hidden, true, 'Escape closes the panel');
+  assert.equal(accessible.el('launcher').focused, true, 'closing returns focus to launcher');
+
   const w = world(); await w.open(); await w.send('אני צריכה עזרה');
   const form = await w.submit();
   assert.equal(w.calls.filter(c => c.url.includes('/messages')).length, 1, 'empty form never posts');
@@ -125,9 +152,9 @@ async function main() {
   assert.equal(allText(w.el('transcript')).includes('dana@example.test'), false);
   const cta = w.document.querySelector('.ask-mia-handoff-cta'); assert.ok(cta, 'confirmation immediately paints CTA');
   assert.equal(cta.href, 'https://wa.me/972501234567'); cta.click(); await settle();
-  assert.equal(w.storage.has('askMia.sessionId'), false, 'delivered handoff finishes stored session');
-  await w.send('שיחה חדשה'); assert.equal(w.sessionCount, 2, 'new message starts fresh after completion');
-  assert.equal(allText(w.el('transcript')).includes('אני צריכה עזרה'), false, 'fresh chat clears painted transcript');
+  assert.equal(w.storage.has('askMia.sessionId'), true, 'delivered handoff keeps the resumable session');
+  await w.send('שיחה חדשה'); assert.equal(w.sessionCount, 1, 'conversation continues after handoff');
+  assert.equal(allText(w.el('transcript')).includes('אני צריכה עזרה'), true, 'continued chat keeps its transcript');
   const expiredContact = world(); await expiredContact.open(); await expiredContact.send('צריכה עזרה');
   expiredContact.expireContact = true; await expiredContact.submit({email: 'dana@example.test'});
   assert.equal(expiredContact.sessionCount, 2, 'expired contact session retries with a new session');
@@ -140,10 +167,10 @@ async function main() {
   delayed.resolveHandoff(); await settle();
   for (const [id,timer] of [...delayed.timers]) if (timer.ms <= 1000) {delayed.timers.delete(id); timer.fn();}
   await settle();
-  assert.equal(delayed.sessionCount, 2, 'queued send starts a fresh session');
-  assert.equal(allText(delayed.el('transcript')).includes('השיחה הישנה'), false);
+  assert.equal(delayed.sessionCount, 1, 'queued send continues the resumable session');
+  assert.equal(allText(delayed.el('transcript')).includes('השיחה הישנה'), true);
   const queued = delayed.calls.filter(c => c.url.includes('/messages')).at(-1);
-  assert.ok(queued.url.includes('web_0000000000000002'));
+  assert.ok(queued.url.includes('12345678-1234-4234-8234-000000000001'));
   assert.equal(JSON.parse(queued.options.body).text, 'שיחה חדשה');
   for (const url of ['', 'https://evil.example/972501234567']) {
     const missing = world(); missing.contactUrl = url;
@@ -167,11 +194,49 @@ async function main() {
   assert.ok(fallback.calls.some(c => c.options.body && String(c.options.body).includes('no_chunks')), 'no_chunks telemetry');
   const active = new Map([
     ['askMia.sessionId', 'web_0123456789abcdef'],
-    ['askMia.sessionMeta', JSON.stringify({updatedAt: Date.now()})],
+    ['askMia.sessionMeta', JSON.stringify({updatedAt: Date.now(), credential: 'legacy-credential'})],
     ['askMia.transcript', JSON.stringify([{role: 'user', text: 'active conversation'}])],
   ]);
   const resumed = world({storage: new Map(active)}); await resumed.open();
   assert.equal(resumed.sessionCount, 0); assert.ok(allText(resumed.el('transcript')).includes('active conversation'));
+  await resumed.send('Continue');
+  assert.equal(resumed.calls.find(c => c.url.includes('/messages')).options.headers['X-Mia-Session-Credential'], 'legacy-credential');
+  const uuidSession = '12345678-1234-4234-8234-000000000001';
+  assert.equal(w.storage.get('askMia.sessionId'), uuidSession, 'actual API UUID shape is retained');
+  const uuidResumed = world({storage: new Map(w.storage)}); await uuidResumed.open();
+  assert.equal(uuidResumed.sessionCount, 0, 'credentialed UUID reload keeps the same session');
+  await uuidResumed.send('Continue UUID');
+  const uuidRequest = uuidResumed.calls.find(c => c.url.includes('/messages'));
+  assert.ok(uuidRequest.url.includes(uuidSession));
+  assert.equal(uuidRequest.options.headers['X-Mia-Session-Credential'], 'credential-1');
+  for (const credential of [undefined, '', '   ']) {
+    const storage = new Map(active);
+    storage.set('askMia.sessionMeta', JSON.stringify({updatedAt: Date.now(), credential}));
+    const cutover = world({storage}); await cutover.open();
+    assert.equal(cutover.sessionCount, 1, 'credentialless legacy session is replaced');
+    assert.equal(allText(cutover.el('transcript')).includes('active conversation'), false);
+    await cutover.send('New authenticated turn');
+    assert.equal(cutover.calls.find(c => c.url.includes('/messages')).options.headers['X-Mia-Session-Credential'], 'credential-1');
+  }
+  const retryAuth = world(); await retryAuth.open(); retryAuth.unauthorizedMessages = 1;
+  await retryAuth.send('Retry the same message');
+  const retried = retryAuth.calls.filter(c => c.url.includes('/messages'));
+  assert.equal(retryAuth.sessionCount, 2);
+  assert.equal(retried.length, 2);
+  assert.equal(JSON.parse(retried[0].options.body).client_message_id, JSON.parse(retried[1].options.body).client_message_id);
+  assert.equal(retried[1].options.headers['X-Mia-Session-Credential'], 'credential-2');
+  const deniedAgain = world(); await deniedAgain.open(); deniedAgain.unauthorizedMessages = 3;
+  await deniedAgain.send('Bounded retry');
+  assert.equal(deniedAgain.sessionCount, 2);
+  assert.equal(deniedAgain.calls.filter(c => c.url.includes('/messages')).length, 2, '401 retries only once');
+  for (const response of [
+    {session_id: '../owner', session_credential: 'x'},
+    {session_id: uuidSession, session_credential: ''},
+  ]) {
+    const invalid = world({sessionResponse: response}); await invalid.open(); await invalid.send('Hello');
+    assert.equal(invalid.calls.some(c => c.url.includes('/messages')), false);
+    assert.equal(invalid.storage.has('askMia.sessionId'), false);
+  }
   for (const meta of [null, JSON.stringify({updatedAt: 1})]) {
     const storage = new Map(active); if (meta) storage.set('askMia.sessionMeta', meta); else storage.delete('askMia.sessionMeta');
     const expired = world({storage}); await expired.open(); assert.equal(expired.sessionCount, 1);

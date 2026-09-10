@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 
-from app.api.inbound import process_inbound_texts
+from app.api.owner import process_owner_texts as process_inbound_texts
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
 from app.domain.events import Channel

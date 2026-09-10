@@ -19,6 +19,7 @@ BUSINESS_GET_INFORMATION = "business.get_information"
 LEADS_GET_RECENT = "leads.get_recent"
 MEMORY_SEARCH = "memory.search"
 KNOWLEDGE_SEARCH = "knowledge.search"
+KNOWLEDGE_REFRESH = "knowledge.refresh"
 RESEARCH_SEARCH = "research.search"
 LINKEDIN_GET_PROFILE = "linkedin.get_profile"
 SEARCH_CONSOLE_QUERY = "search_console.query"
@@ -55,6 +56,9 @@ CAPABILITIES: tuple[CapabilitySpec, ...] = (
     spec(LEADS_GET_RECENT, Sensitivity.READ, _OWNER),
     spec(MEMORY_SEARCH, Sensitivity.READ, _OWNER),
     spec(KNOWLEDGE_SEARCH, Sensitivity.READ, _BOTH),
+    # Updating the internal public corpus is preauthorized only for the authenticated
+    # owner. It never publishes or changes the configured source website.
+    spec(KNOWLEDGE_REFRESH, Sensitivity.WRITE, _OWNER),
     spec(RESEARCH_SEARCH, Sensitivity.READ, _OWNER),
     spec(LINKEDIN_GET_PROFILE, Sensitivity.READ, _OWNER),
     spec(SEARCH_CONSOLE_QUERY, Sensitivity.READ, _OWNER),

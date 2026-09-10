@@ -15,6 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from app.capabilities.types import Principal
 from app.db.store import LeadStore
 from app.domain.approvals import (
     ACTION_CALENDAR_CREATE,
@@ -40,6 +41,12 @@ from app.domain.approvals import (
     website_resource_hash_matches,
 )
 from app.integrations.telegram_format import bold, code, join_sections
+from app.services.owner_actions import (
+    ACTION_OWNER_EXTERNAL_WRITE,
+    RESOURCE_OWNER_PROPOSAL,
+    decide_owner_action,
+    read_owner_action,
+)
 
 MAX_TOKEN_LEN = 60
 
@@ -56,6 +63,7 @@ class OwnerCallbackResolution:
     calendar_resource_id_to_execute: str | None = None
     linkedin_resource_id_to_execute: str | None = None
     composio_resource_id_to_execute: str | None = None
+    owner_action_resource_id_to_execute: str | None = None
 
 
 def approval_token(approval_id: str) -> str:
@@ -128,6 +136,12 @@ def _callback_binding_is_valid(row) -> bool:
             and not is_approval_expired(row, now=now)
             and composio_row_valid(row) is not None
         )
+    if row.action == ACTION_OWNER_EXTERNAL_WRITE:
+        return (
+            row.resource_type == RESOURCE_OWNER_PROPOSAL
+            and not is_approval_expired(row, now=now)
+            and read_owner_action(row) is not None
+        )
     return False
 
 
@@ -154,7 +168,11 @@ def _apply_callback_decision(store: LeadStore, row, *, decision: str) -> bool:
 
 
 def resolve_owner_callback_result(
-    store: LeadStore, *, decision: str, token: str
+    store: LeadStore,
+    *,
+    decision: str,
+    token: str,
+    principal: Principal | None = None,
 ) -> OwnerCallbackResolution:
     """Apply one callback decision and expose a valid approved Gmail draft structurally."""
     if decision not in ("approve", "reject"):
@@ -163,6 +181,25 @@ def resolve_owner_callback_result(
     if row is None:
         return OwnerCallbackResolution(_UNKNOWN)
     head = _APPROVED_HEAD if decision == "approve" else _REJECTED_HEAD
+    if row.action == ACTION_OWNER_EXTERNAL_WRITE:
+        if principal is None:
+            return OwnerCallbackResolution(_UNKNOWN)
+        result = decide_owner_action(
+            store,
+            principal=principal,
+            approval_id=token,
+            decision=(DECISION_APPROVED if decision == "approve" else DECISION_REJECTED),
+        )
+        if result.status not in {"decided", "already_decided"}:
+            return OwnerCallbackResolution(
+                join_sections(bold("האישור אינו תקף"), _UNKNOWN, f"מזהה: {code(token)}")
+            )
+        return OwnerCallbackResolution(
+            join_sections(bold(head), f"מזהה: {code(token)}"),
+            owner_action_resource_id_to_execute=(
+                result.proposal_id if decision == "approve" else None
+            ),
+        )
     if row.decision != DECISION_PENDING:
         if row.action == ACTION_GMAIL_SEND and row.decision == DECISION_APPROVED:
             if not _callback_binding_is_valid(row):

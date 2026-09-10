@@ -1,6 +1,6 @@
 {
   "Name": "mia-due-scan",
-  "Description": "Persist-only due scan. Never send. Create only after GET /health is green.",
+  "Description": "Explicit owner-task reminders only; one allowlisted Telegram reminder per local day.",
   "State": "ENABLED",
   "ScheduleExpression": "rate(15 minutes)",
   "ScheduleExpressionTimezone": "Asia/Jerusalem",

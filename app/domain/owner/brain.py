@@ -27,9 +27,8 @@ from app.brain.context import (
     build_profile_block,
 )
 from app.brain.embeddings import EmbeddingPort, build_embedding_port
-from app.brain.extraction import consolidate, extract_candidates
 from app.brain.retrieval import MemoryScoreWeights, fit_to_budget
-from app.brain.schemas import BrainContext, MemorySource, RetrievedItem
+from app.brain.schemas import BrainContext, RetrievedItem
 from app.brain.store import BrainStore
 from app.capabilities.knowledge import knowledge_handlers
 from app.capabilities.memory import memory_handlers
@@ -39,6 +38,7 @@ from app.channels.telegram import message_to_owner_state
 from app.core.config import Settings
 from app.core.errors import MiaError
 from app.core.models import model_chain
+from app.core.owner_timing import owner_stage
 from app.db.store import LeadStore
 from app.domain.memory import ConversationTurn
 from app.domain.owner.request_routing import requests_no_history
@@ -59,7 +59,6 @@ from app.integrations.instagram_insights import (
 from app.integrations.linkedin import LinkedInPort, build_linkedin_port
 from app.integrations.llm_client import (
     GEMINI_CHAT_URL,
-    OPENAI_CHAT_URL,
     OPENAI_RESPONSES_URL,
     LlmClient,
     LlmModelChain,
@@ -71,23 +70,6 @@ from app.integrations.sheets import SheetsPort, build_sheets_port
 from app.integrations.telegram_format import hebrew_datetime
 from app.tools.registries.owner_tools import ToolContext
 
-# These approval/high-risk intents mutate state or bind an approval. They keep the deterministic
-# handler and never route through the model. ADR-042's bounded Sheets values tools are the narrow
-# low-risk exception, with deterministic allowlist, intent, policy and idempotency guards.
-DETERMINISTIC_TASK_TYPES: frozenset[OwnerTaskType] = frozenset(
-    {
-        OwnerTaskType.APPROVAL,
-        OwnerTaskType.PREFERENCE,
-        OwnerTaskType.HUMAN_TAKEOVER,
-        OwnerTaskType.HUMAN_TAKEOVER_RESUME,
-        OwnerTaskType.CONVERSATION_SCOPE,
-        OwnerTaskType.LEAD_OUTREACH,
-        OwnerTaskType.MEETING_DEBRIEF,
-        OwnerTaskType.GMAIL_DRAFT,
-        OwnerTaskType.OWNER_STATUS,
-    }
-)
-
 # The honest failure line for a NOTE turn the agent was allowed to run but could not
 # complete (provider error, refusal, truncation, empty reply, budget/ceiling exhausted).
 # Deliberately not "מה שהבנתי" -- that phrase means "I couldn't classify this", which is
@@ -97,6 +79,8 @@ DETERMINISTIC_TASK_TYPES: frozenset[OwnerTaskType] = frozenset(
 NOTE_AGENT_FAILURE_TEXT = "הבדיקה לא עברה כרגע. תנסה שוב."
 
 _NOTE_FAILURE_CLASSES: tuple[tuple[str, str], ...] = (
+    ("fresh linkedin profile evidence unavailable", "פרופיל LinkedIn עדכני לא זמין"),
+    ("incomplete_evidence", "פרופיל LinkedIn לא הושלם"),
     ("empty_reply", "תשובה ריקה"),
     ("empty reply", "תשובה ריקה"),
     ("timeout", "תם הזמן"),
@@ -158,11 +142,6 @@ class OwnerBrainResult(NamedTuple):
     approval_ids: tuple[str, ...] = ()
 
 
-def agent_allowed_for(task_type: OwnerTaskType) -> bool:
-    """True when the agent may answer this intent instead of the canned handler."""
-    return task_type not in DETERMINISTIC_TASK_TYPES
-
-
 def build_agent_client(settings: Settings) -> LlmModelChain:
     """Every configured model, in order.
 
@@ -170,30 +149,36 @@ def build_agent_client(settings: Settings) -> LlmModelChain:
     `chain[0]` was ever used. A primary the account cannot call therefore dropped straight
     to the keyword classifier instead of trying the secondary.
 
-    The live sales model is appended after the dedicated owner ids: website Ask Mia
-    already proves that pair is callable, so a broken owner-agent id must not take the
-    whole Telegram console down with it.
+    Website and owner ids stay separate so one purpose cannot silently borrow another
+    purpose's rollout or capability assumptions.
     """
     chain = model_chain(
         settings.owner_agent_model,
         settings.owner_agent_fallback_model,
-        settings.sales_model,
-        settings.sales_fallback_model,
     )
     clients = [
         LlmClient(
             api_key=settings.openai_api_key,
             model=name,
             url=OPENAI_RESPONSES_URL,
+            timeout=settings.llm_request_timeout_seconds,
             reasoning_effort=settings.owner_agent_reasoning_effort,
         )
         for name in chain
     ]
-    clients.extend(_gemini_clients(settings, settings.owner_agent_gemini_model))
+    clients.extend(
+        _gemini_clients(
+            settings,
+            settings.owner_agent_gemini_model,
+            reasoning_effort=settings.owner_agent_reasoning_effort,
+        )
+    )
     return LlmModelChain(clients)
 
 
-def _gemini_clients(settings: Settings, model: str) -> list[LlmClient]:
+def _gemini_clients(
+    settings: Settings, model: str, *, reasoning_effort: str = ""
+) -> list[LlmClient]:
     """Gemini OpenAI-compat as the cross-provider last resort.
 
     Same `tools` wire shape as Chat Completions, so the agent loop needs no changes. It is
@@ -204,28 +189,15 @@ def _gemini_clients(settings: Settings, model: str) -> list[LlmClient]:
     name = model.strip()
     if not key or not name:
         return []
-    return [LlmClient(api_key=key, model=name, url=GEMINI_CHAT_URL)]
-
-
-def build_extraction_client(settings: Settings) -> LlmModelChain:
-    """Extraction with the same OpenAI-then-Gemini shape as the agent.
-
-    Gemini's compat layer does not document raw `response_format: json_schema`, so a
-    silently-ignored schema is possible. `parse_extraction` already validates the payload
-    and returns nothing on a mismatch, which is the correct degradation: no memory written
-    rather than junk memory written.
-    """
-    clients = []
-    if settings.extraction_model.strip():
-        clients.append(
-            LlmClient(
-                api_key=settings.openai_api_key,
-                model=settings.extraction_model.strip(),
-                url=OPENAI_CHAT_URL,
-            )
+    return [
+        LlmClient(
+            api_key=key,
+            model=name,
+            url=GEMINI_CHAT_URL,
+            timeout=settings.llm_request_timeout_seconds,
+            reasoning_effort=reasoning_effort,
         )
-    clients.extend(_gemini_clients(settings, settings.owner_agent_gemini_model))
-    return LlmModelChain(clients)
+    ]
 
 
 def _weights(settings: Settings) -> MemoryScoreWeights:
@@ -260,6 +232,7 @@ def answer_owner(
     settings: Settings,
     task_type: OwnerTaskType,
     owner_text: str,
+    raw_owner_request: str | None = None,
     history: tuple[ConversationTurn, ...],
     fallback_text: str,
     kill_switch: bool,
@@ -289,7 +262,7 @@ def answer_owner(
     """Answer one owner message, preferring the agent and degrading to `fallback_text`."""
     if kill_switch or not settings.brain_ready():
         return OwnerBrainResult(fallback_text, False, (), fallback_reason="kill_switch_or_disabled")
-    if not agent_allowed_for(task_type):
+    if task_type is OwnerTaskType.APPROVAL:
         # By design: approvals, takeover, scope, preferences never reach the model.
         return OwnerBrainResult(fallback_text, False, (), fallback_reason="deterministic_intent")
     agent_client = client or build_agent_client(settings)
@@ -308,14 +281,15 @@ def answer_owner(
         # No graph state (a direct caller, or the retrieve node never ran because no
         # brain/settings were wired into `run_owner_turn`). Retrieve here instead -- still
         # once.
-        context = assemble_owner_context(
-            brain,
-            query=owner_text,
-            embedding_port=port,
-            max_chars=settings.memory_max_context_chars,
-            weights=_weights(settings),
-            now=moment,
-        )
+        with owner_stage("retrieval", source_ref=source_ref):
+            context = assemble_owner_context(
+                brain,
+                query=owner_text,
+                embedding_port=port,
+                max_chars=settings.memory_max_context_chars,
+                weights=_weights(settings),
+                now=moment,
+            )
     house = bind_owner_house_ports(settings)
     ctx = ToolContext(
         principal=principal,
@@ -340,7 +314,7 @@ def answer_owner(
         kill_switch=kill_switch,
         demo_active=demo_active,
         source_ref=source_ref,
-        owner_text=owner_text,
+        owner_text=(raw_owner_request if raw_owner_request is not None else owner_text),
         now=moment,
     )
     outcome: AgentOutcome = run_owner_agent(
@@ -624,13 +598,14 @@ def run_owner_turn(
     def retrieve(state: OwnerState) -> dict:
         if brain is None or settings is None:
             return {}
-        return retrieve_owner_context(
-            state,
-            principal=principal,
-            brain=brain,
-            settings=settings,
-            embedding_port=embedding_port,
-        )
+        with owner_stage("retrieval", source_ref=run_id):
+            return retrieve_owner_context(
+                state,
+                principal=principal,
+                brain=brain,
+                settings=settings,
+                embedding_port=embedding_port,
+            )
 
     def respond(state: OwnerState) -> dict:
         result = produce(state)
@@ -672,45 +647,3 @@ def run_owner_turn(
         _LOG.warning("owner_graph_no_result run_id=%s", run_id)
         return OwnerBrainResult(fallback_text, False, (), fallback_reason=GRAPH_NO_RESULT_REASON)
     return result
-
-
-def learn_from_exchange(
-    *,
-    brain: BrainStore,
-    settings: Settings,
-    owner_text: str,
-    history: tuple[ConversationTurn, ...] = (),
-    embedding_port: EmbeddingPort | None = None,
-    client: LlmClient | None = None,
-    source_ref: str = "",
-    kill_switch: bool = False,
-    demo_active: bool = False,
-) -> int:
-    """Extract and consolidate durable facts from one owner message.
-
-    Runs after the reply is composed so it never adds latency to what Assaf sees. Only
-    owner-channel text reaches this function — a website visitor cannot write owner memory.
-    Returns the number of memories added or updated.
-    """
-    if kill_switch or demo_active or not settings.memory_write_enabled:
-        return 0
-    if not settings.extraction_ready() or not owner_text.strip():
-        return 0
-    extraction_client = client or build_extraction_client(settings)
-    if not extraction_client.enabled():
-        return 0
-    result = extract_candidates(extraction_client, owner_message=owner_text, history=history)
-    if not result.candidates and not result.gaps:
-        return 0
-    port = embedding_port or build_embedding_port(settings)
-    counts = consolidate(
-        brain,
-        candidates=result.candidates,
-        embedding_port=port,
-        client=extraction_client,
-        source=MemorySource.TELEGRAM,
-        source_ref=source_ref,
-    )
-    for question in result.gaps:
-        brain.open_gap(topic=question[:120], question=question, priority=5)
-    return counts.get("add", 0) + counts.get("update", 0) + counts.get("delete", 0)

@@ -9,20 +9,22 @@ non-R0 approval proposal. LinkedIn publishing routes to its named approval workf
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
+from hashlib import sha256
 from typing import Any
 
 from app.capabilities.policy import authorize
 from app.core.errors import PermissionDenied
 from app.core.risk import RiskLevel
-from app.domain.approvals import (
-    ACTION_COMPOSIO_WRITE,
-    ACTION_LINKEDIN_COMPOSIO_WRITE,
-    RESOURCE_COMPOSIO_TOOL,
-    RESOURCE_LINKEDIN_TOOL,
+from app.domain.owner.composio_effects import (
+    EffectRoute,
+    composio_effect,
+    snapshot_effect_target,
 )
-from app.domain.events import Channel
-from app.domain.owner.composio_writes import composio_approval_resource_id, propose_composio_write
-from app.domain.owner.linkedin_writes import linkedin_approval_resource_id, propose_linkedin_write
+from app.domain.owner.composio_writes import (
+    _generic_write_denial,
+    generic_composio_effect_supported,
+)
 from app.integrations.composio_catalog import (
     NEVER_AUTO_PUBLISH_SLUGS,
     NEVER_AUTO_SEND_SLUGS,
@@ -33,8 +35,11 @@ from app.integrations.composio_catalog import (
     schema_text,
     validate_arguments,
 )
+from app.services.owner_actions import propose_owner_action
 from app.surfaces.crm import a1_targets_archive_tab, is_archive_tab
 from app.tools.owner.types import _NOT_CONNECTED, ToolContext, ToolResult
+
+_LINKEDIN_MESSAGE_WORDS = frozenset({"MESSAGE", "DM", "INMAIL"})
 
 # ---------------------------------------------------------- Composio meta-tools
 
@@ -128,7 +133,12 @@ def _composio_execute_tool(ctx: ToolContext, args: dict[str, Any]) -> ToolResult
 
 
 def _composio_propose_side_effect(
-    ctx: ToolContext, catalog: ComposioCatalog, slug: str, values: dict[str, Any]
+    ctx: ToolContext,
+    catalog: ComposioCatalog,
+    slug: str,
+    values: dict[str, Any],
+    *,
+    named_linkedin: bool = False,
 ) -> ToolResult:
     try:
         authorize(
@@ -138,25 +148,94 @@ def _composio_propose_side_effect(
         )
     except PermissionDenied:
         return ToolResult(ok=False, error="Composio execution denied")
-    text = propose_composio_write(
-        store=ctx.store,
-        channel=Channel.TELEGRAM,
-        catalog=catalog,
-        slug=slug,
-        arguments=values,
-        kill_switch=ctx.kill_switch,
+    slug = slug.strip().upper()
+    tool = catalog.detail(slug)
+    if tool is None or tool.slug != slug:
+        return ToolResult(ok=False, error="tool is not in an ACTIVE owner toolkit")
+    risk = risk_for_slug(tool.slug, tool.toolkit)
+    effect = composio_effect(tool.slug, tool.toolkit)
+    denial = _generic_write_denial(tool.slug, tool.toolkit, risk)
+    if named_linkedin and tool.toolkit == "LINKEDIN":
+        denial = ""
+        if risk is RiskLevel.R5_DESTRUCTIVE:
+            denial = "Destructive LinkedIn tools are denied."
+        elif frozenset(tool.slug.split("_")) & _LINKEDIN_MESSAGE_WORDS:
+            denial = "LinkedIn direct messages are not available."
+    problem = validate_arguments(tool.input_schema, values)
+    if (
+        effect.route is EffectRoute.NAMED_WORKFLOW
+        and risk is not RiskLevel.R0_READ
+        and risk is not RiskLevel.R5_DESTRUCTIVE
+        and not problem
+    ):
+        return _route_named_effect(ctx, effect.workflow, values)
+    if risk is RiskLevel.R0_READ or denial or problem:
+        error = denial or problem or "verified reads must use composio_execute_tool"
+        return ToolResult(ok=False, error=error)
+    if not generic_composio_effect_supported(tool.slug):
+        return ToolResult(
+            ok=False,
+            error=(
+                "This mutation is not a supported create-only effect and has no "
+                "typed current-resource snapshot reader, so exact approval is unavailable."
+            ),
+        )
+    if effect.identity_argument:
+        identity = values.get(effect.identity_argument)
+        if not isinstance(identity, str) or not identity.strip():
+            return ToolResult(
+                ok=False,
+                error="The exact target identity is required before approval.",
+            )
+    connection = catalog.active_connection_snapshot(tool.toolkit)
+    if connection is None:
+        return ToolResult(
+            ok=False,
+            error="An exact single active Composio connection could not be bound.",
+        )
+    target = {
+        "slug": tool.slug,
+        "toolkit": tool.toolkit,
+        "input_schema": tool.input_schema,
+        "risk": risk.value,
+        "account_hash": sha256(ctx.settings.composio_user_id.encode()).hexdigest(),
+        "connection": asdict(connection),
+        "effect_route": effect.route.value,
+    }
+    if effect.route is EffectRoute.SNAPSHOT_WRITE:
+        resource = snapshot_effect_target(
+            catalog,
+            effect,
+            values,
+            connected_account_id=connection.connected_account_id,
+        )
+        if resource is None:
+            return ToolResult(
+                ok=False,
+                error="The current target could not be read, so exact approval is unavailable.",
+            )
+        target["resource"] = resource
+    try:
+        proposal = propose_owner_action(
+            ctx.store,
+            principal=ctx.principal,
+            source_ref=ctx.source_ref,
+            kind="composio.write",
+            parameters={
+                "slug": tool.slug,
+                "toolkit": tool.toolkit,
+                "arguments": values,
+            },
+            target=target,
+            risk=risk.value,
+        )
+    except (PermissionError, TypeError, ValueError) as exc:
+        return ToolResult(ok=False, error=f"Composio proposal could not be bound: {exc}")
+    return ToolResult(
+        ok=True,
+        text=f"Composio action is ready for exact approval: {tool.slug}.",
+        approval_id=proposal.approval_id,
     )
-    ready_prefixes = ("Composio action is ready",)
-    if not any(text.startswith(prefix) for prefix in ready_prefixes):
-        return ToolResult(ok=False, text=text, error=text)
-    resource_id = composio_approval_resource_id(slug, values)
-    row = ctx.store.get_approval_by_resource(
-        RESOURCE_COMPOSIO_TOOL, resource_id, ACTION_COMPOSIO_WRITE
-    )
-    approval_id = str(row.approval_id or "").strip() if row is not None else ""
-    if not approval_id:
-        return ToolResult(ok=False, error="Composio approval binding was not persisted")
-    return ToolResult(ok=True, text=text, approval_id=approval_id)
 
 
 def _composio_propose_action_tool(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
@@ -197,24 +276,9 @@ def _composio_propose_linkedin_tool(ctx: ToolContext, args: dict[str, Any]) -> T
         return ToolResult(ok=True, text=_NOT_CONNECTED)
     slug = str(args.get("tool_slug") or "").strip().upper()
     with catalog:
-        text = propose_linkedin_write(
-            store=ctx.store,
-            channel=Channel.TELEGRAM,
-            catalog=catalog,
-            slug=slug,
-            arguments=values,
-            kill_switch=ctx.kill_switch,
+        return _composio_propose_side_effect(
+            ctx, catalog, slug, values, named_linkedin=True
         )
-    if not text.startswith("LinkedIn action is ready"):
-        return ToolResult(ok=False, text=text, error=text)
-    resource_id = linkedin_approval_resource_id(slug, values)
-    row = ctx.store.get_approval_by_resource(
-        RESOURCE_LINKEDIN_TOOL, resource_id, ACTION_LINKEDIN_COMPOSIO_WRITE
-    )
-    approval_id = str(row.approval_id or "").strip() if row is not None else ""
-    if not approval_id:
-        return ToolResult(ok=False, error="LinkedIn approval binding was not persisted")
-    return ToolResult(ok=True, text=text, approval_id=approval_id)
 
 
 def _parse_composio_arguments(args: dict[str, Any]) -> dict[str, Any] | ToolResult:
@@ -239,6 +303,125 @@ def _composio_sheet_args_banned(values: dict[str, Any]) -> bool:
     return False
 
 
+def _route_named_effect(ctx: ToolContext, workflow: str, values: dict[str, Any]) -> ToolResult:
+    """Translate documented provider arguments into an existing typed owner workflow."""
+    if workflow == "gmail_create_draft":
+        if values.get("is_html") is True:
+            return ToolResult(ok=False, error="HTML drafts are unavailable in the typed Gmail path")
+        from app.tools.owner.gmail import _gmail_create_draft
+
+        return _gmail_create_draft(
+            ctx,
+            {
+                "to": values.get("recipient_email"),
+                "subject": values.get("subject"),
+                "body": values.get("body"),
+            },
+        )
+    if workflow in {"sheets_update", "sheets_append"}:
+        from app.tools.owner.sheets import _sheets_append, _sheets_update
+
+        if not (
+            isinstance(values.get("spreadsheetId"), str)
+            and isinstance(values.get("range"), str)
+            and isinstance(values.get("values"), list)
+        ):
+            return ToolResult(
+                ok=False,
+                error="The typed Sheets path requires spreadsheetId, range and values.",
+            )
+        routed = {
+            "spreadsheet_id": values.get("spreadsheetId"),
+            "range": values.get("range"),
+            "values": values.get("values"),
+        }
+        handler = _sheets_append if workflow == "sheets_append" else _sheets_update
+        return handler(ctx, routed)
+    if workflow == "crm_upsert":
+        return ToolResult(
+            ok=False,
+            error=(
+                "Upsert Rows requires the typed CRM contact workflow with a current "
+                "identity read."
+            ),
+        )
+    if workflow == "calendar_create_meeting":
+        from app.tools.owner.calendar import _calendar_create_meeting
+
+        allowed = {
+            "calendar_id", "event_duration_hour", "event_duration_minutes", "location",
+            "start_datetime", "summary", "timezone",
+        }
+        if any(
+            value not in (None, "", False, [], {})
+            for key, value in values.items()
+            if key not in allowed
+        ):
+            return ToolResult(
+                ok=False,
+                error="Use the typed calendar tool for these event options.",
+            )
+        if str(values.get("calendar_id") or "primary") != "primary":
+            return ToolResult(
+                ok=False,
+                error="The typed calendar path supports the primary calendar only.",
+            )
+        minutes = int(values.get("event_duration_minutes") or 0) + 60 * int(
+            values.get("event_duration_hour") or 0
+        )
+        return _calendar_create_meeting(
+            ctx,
+            {
+                "title": values.get("summary"),
+                "start": values.get("start_datetime"),
+                "minutes": minutes or 30,
+                "location": values.get("location"),
+            },
+        )
+    if workflow == "calendar_reschedule":
+        from datetime import datetime
+
+        from app.tools.owner.calendar import _calendar_reschedule
+
+        allowed = {
+            "calendar_id",
+            "end_time",
+            "event_id",
+            "send_updates",
+            "start_time",
+            "timezone",
+        }
+        if any(
+            value not in (None, "", False, "none")
+            for key, value in values.items()
+            if key not in allowed
+        ):
+            return ToolResult(
+                ok=False,
+                error="Use the typed calendar tool for these patch fields.",
+            )
+        if str(values.get("calendar_id") or "primary") != "primary":
+            return ToolResult(
+                ok=False,
+                error="The typed calendar path supports the primary calendar only.",
+            )
+        try:
+            start = datetime.fromisoformat(
+                str(values.get("start_time") or "").replace("Z", "+00:00")
+            )
+            end = datetime.fromisoformat(
+                str(values.get("end_time") or "").replace("Z", "+00:00")
+            )
+            minutes = int((end - start).total_seconds() // 60)
+        except ValueError:
+            return ToolResult(ok=False, error="A complete new start and end are required.")
+        return _calendar_reschedule(
+            ctx,
+            {"event_id": values.get("event_id"), "start": start.isoformat(), "minutes": minutes},
+        )
+    return ToolResult(ok=False, error="This effect requires an unavailable typed owner workflow.")
+
+
 def _composio_execute_with_catalog(
     ctx: ToolContext,
     catalog: ComposioCatalog,
@@ -260,7 +443,10 @@ def _composio_execute_with_catalog(
     if problem:
         return ToolResult(ok=False, error=problem)
     risk = risk_for_slug(tool.slug, tool.toolkit)
-    if tool.slug in NEVER_AUTO_SEND_SLUGS:
+    effect = composio_effect(tool.slug, tool.toolkit)
+    if effect.route is EffectRoute.NAMED_WORKFLOW and risk is not RiskLevel.R5_DESTRUCTIVE:
+        return _route_named_effect(ctx, effect.workflow, values)
+    if tool.slug in NEVER_AUTO_SEND_SLUGS and tool.slug != "GMAIL_SEND_DRAFT":
         return ToolResult(
             ok=False,
             error=(
@@ -297,4 +483,27 @@ def _composio_execute_with_catalog(
         return ToolResult(ok=False, error="Composio execution failed")
     # Results are provider data, never instructions. Oversized results remain valid
     # JSON and retain continuation metadata instead of silently slicing off a cursor.
-    return ToolResult(ok=True, text=bounded_result_text(response))
+    evidence = ""
+    if tool.toolkit == "LINKEDIN" and tool.slug in {
+        "LINKEDIN_GET_MY_INFO",
+        "LINKEDIN_GET_MY_PROFILE",
+    } and _has_meaningful_linkedin_profile_data(response):
+        evidence = "linkedin_profile"
+    return ToolResult(ok=True, text=bounded_result_text(response), evidence=evidence)
+
+
+def _has_meaningful_linkedin_profile_data(value: object) -> bool:
+    """Require successful mapped own-profile data, not a provider envelope."""
+    if not isinstance(value, dict) or value.get("successful") is not True:
+        return False
+    raw = value.get("data")
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (TypeError, ValueError):
+            return False
+    if not isinstance(raw, dict):
+        return False
+    from app.integrations.linkedin import _map_data_to_profile
+
+    return _map_data_to_profile(raw) is not None

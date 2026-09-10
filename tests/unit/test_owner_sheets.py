@@ -147,12 +147,8 @@ def test_configured_mia_sheet_initializes_fixed_crm_workspace_idempotently() -> 
             if a1_range == CRM_WORKSPACE_SCHEMA_RANGE:
                 return httpx.Response(200, json={"successful": True, "data": {"values": []}})
             sheet_name = a1_range.split("!", 1)[0]
-            headers = next(
-                headers for name, headers in CRM_WORKSPACE_TABS if name == sheet_name
-            )
-            return httpx.Response(
-                200, json={"successful": True, "data": {"values": [headers]}}
-            )
+            headers = next(headers for name, headers in CRM_WORKSPACE_TABS if name == sheet_name)
+            return httpx.Response(200, json={"successful": True, "data": {"values": [headers]}})
         return httpx.Response(200, json={"successful": True, "data": {}})
 
     port = ComposioSheetsPort(
@@ -181,14 +177,11 @@ def test_configured_mia_sheet_initializes_fixed_crm_workspace_idempotently() -> 
     update_requests = [body for tool, body in requests if tool == COMPOSIO_VALUES_UPDATE_TOOL]
     assert len(update_requests) == 3
     assert not any(
-        body["arguments"]["range"].startswith(f"{LEGACY_LEADS_TAB}!")
-        for body in update_requests
+        body["arguments"]["range"].startswith(f"{LEGACY_LEADS_TAB}!") for body in update_requests
     )
     assert all(body["arguments"]["spreadsheetId"] == _SHEET for body in update_requests)
     marker = next(
-        body
-        for body in update_requests
-        if body["arguments"]["range"] == CRM_WORKSPACE_SCHEMA_RANGE
+        body for body in update_requests if body["arguments"]["range"] == CRM_WORKSPACE_SCHEMA_RANGE
     )
     assert marker["arguments"]["values"] == [[CRM_WORKSPACE_SCHEMA_VERSION]]
 
@@ -269,9 +262,7 @@ def test_crm_schema_marker_repairs_a_damaged_fixed_header() -> None:
             else:
                 sheet_name = a1_range.split("!", 1)[0]
                 values = next(
-                    [headers]
-                    for name, headers in CRM_WORKSPACE_TABS
-                    if name == sheet_name
+                    [headers] for name, headers in CRM_WORKSPACE_TABS if name == sheet_name
                 )
                 if sheet_name == CONTACTS_TAB:
                     values = [["Damaged header"]]
@@ -289,7 +280,7 @@ def test_crm_schema_marker_repairs_a_damaged_fixed_header() -> None:
     updates = [body for tool, body in requests if tool == COMPOSIO_VALUES_UPDATE_TOOL]
     assert len(updates) == 2
     assert {body["arguments"]["range"] for body in updates} == {
-        f"{CONTACTS_TAB}!A1:N1",
+        f"{CONTACTS_TAB}!A1:O1",
         CRM_WORKSPACE_SCHEMA_RANGE,
     }
 
@@ -311,6 +302,29 @@ def test_crm_workspace_without_a_configured_sheet_is_a_noop() -> None:
     )
     port.ensure_crm_workspace()
     assert called is False
+
+
+def test_crm_field_limited_update_uses_raw_single_cell_ranges() -> None:
+    requests: list[tuple[str, dict]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append((str(request.url).rsplit("/", 1)[-1], json.loads(request.content)))
+        return httpx.Response(200, json={"successful": True, "data": {}})
+
+    port = ComposioSheetsPort(
+        api_key="cmp-fields-test",
+        user_id="user-fields-test",
+        spreadsheet_id=_SHEET,
+        allowed_spreadsheet_ids=frozenset({_SHEET}),
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    port.update_crm_contact_fields(row_number=7, fields={0: "Owner", 14: "crm_123"})
+
+    assert [body["arguments"]["range"] for _tool, body in requests] == [
+        "Contacts!A7",
+        "Contacts!O7",
+    ]
+    assert all(body["arguments"]["valueInputOption"] == "RAW" for _, body in requests)
 
 
 def test_owner_sheets_tab_discovery_rejects_an_unallowlisted_reference_before_http() -> None:

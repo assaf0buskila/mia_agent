@@ -134,7 +134,6 @@ from app.domain.memory import (
     clip_turn_text,
     normalize_turn_role,
 )
-from app.domain.reconciliation import is_stale_received
 from app.domain.sales import (
     MAX_ASKED_ACTIONS,
     FitLevel,
@@ -153,6 +152,21 @@ from app.integrations.transcribe import (
 )
 
 WEBHOOK_STATUSES = frozenset({"received", "processed", "sent", "failed"})
+STALE_WEBHOOK_SECONDS = 300
+
+
+def _is_stale_webhook(*, claimed_at: str, now: datetime) -> bool:
+    if not claimed_at:
+        return True
+    try:
+        claimed_dt = datetime.fromisoformat(claimed_at)
+    except ValueError:
+        return True
+    if claimed_dt.tzinfo is None:
+        claimed_dt = claimed_dt.replace(tzinfo=UTC)
+    return (now - claimed_dt).total_seconds() > STALE_WEBHOOK_SECONDS
+
+
 RECONCILIATION_FINDING_KINDS = frozenset(
     {"webhook_received", "sent_without_out", "handoff_expired"}
 )
@@ -2483,7 +2497,7 @@ class LeadStore:
                 self.session.flush()
                 return True
             if existing.status == "received":
-                if is_stale_received(claimed_at=existing.claimed_at, now=now):
+                if _is_stale_webhook(claimed_at=existing.claimed_at, now=now):
                     existing.status = "received"
                     existing.claimed_at = claimed_at
                     self._fill_webhook_envelope_if_empty(

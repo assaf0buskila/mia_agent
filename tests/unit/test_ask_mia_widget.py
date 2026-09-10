@@ -13,6 +13,12 @@ def _source() -> str:
     return WIDGET.read_text(encoding="utf-8")
 
 
+def _css_rule(selector: str) -> str:
+    matches = re.findall(rf"(?m)^\s*{re.escape(selector)}\s*\{{([^}}]*)\}}", _source())
+    assert matches, f"missing scoped style: {selector}"
+    return " ".join(matches)
+
+
 def _function_body(source: str, name: str) -> str:
     needle = f"function {name}("
     start = source.index(needle)
@@ -37,8 +43,9 @@ def test_widget_source_is_present() -> None:
 def test_panel_is_created_hidden() -> None:
     source = _source()
     assert "waBtn.hidden = true" in source
-    assert "height:56px" in source
-    assert "min-width:56px" in source
+    launcher = _css_rule("#ask-mia-root #ask-mia-launcher")
+    assert "height: 56px" in launcher
+    assert "min-width: 56px" in launcher
     assert "panel.hidden = true" in source
     assert source.index("panel.hidden = true") < source.index("function mount()")
     assert source.index("aria-expanded', 'false'") < source.index("function mount()")
@@ -78,8 +85,6 @@ def test_no_auto_open_timer_scroll_or_exit_intent() -> None:
         "auto-open",
         "autoopen",
         "auto_open",
-        "addeventlistener('scroll'",
-        'addeventlistener("scroll"',
         "addeventlistener('mouseout'",
         "addeventlistener('load'",
     ):
@@ -91,6 +96,8 @@ def test_no_auto_open_timer_scroll_or_exit_intent() -> None:
     mount_fn = _function_body(source, "mount")
     assert "openPanel" not in mount_fn
     assert "initSession" not in mount_fn
+    assert "window.visualViewport.addEventListener('scroll', syncViewportHeight)" in mount_fn
+    assert "openPanel" not in _function_body(source, "syncViewportHeight")
     observer = source[source.index("IntersectionObserver") :]
     observer = observer[: observer.index("MutationObserver")]
     assert "openPanel" not in observer
@@ -142,22 +149,21 @@ def test_whatsapp_green_and_assafweb_brand_tokens() -> None:
     assert "#061b35" in source
     assert "#2f5f93" in source
     assert "#2563eb" in source
-    assert "#F8FBFF" in source
+    assert "#f8fbff" in source
     assert "#d9eeff" in source
-    assert "#ask-mia-send{background:#2f5f93;color:#fff}" in source
-    assert "linear-gradient(135deg,#2f5f93,#2563eb)" in source
-    assert "backdrop-filter:saturate(1.25) blur(18px)" in source
-    assert "width:min(24rem,calc(100vw - 1.5rem))" in source
-    assert "border-radius:1.35rem" in source
-    assert "ask-mia-live" in source
-    assert "ask-mia-glow" in source
+    assert "background: #2f5f93" in _css_rule("#ask-mia-root #ask-mia-send")
+    assert "linear-gradient(135deg, #2f5f93, #2563eb)" in source
+    panel = _css_rule("#ask-mia-root #ask-mia-panel")
+    assert "width: min(400px, calc(100vw - 24px))" in panel
+    assert "border-radius: 22px" in panel
+    assert "isolation: isolate" in panel
+    assert "ask-mia-ai-badge" in source
     assert "ask-mia-rise" in source
-    assert "isolation:isolate" in source
-    assert "inset 0 1px 0 #ffffff59" in source
-    assert "linear-gradient(135deg,#061b35,#2f5f93)" in source
+    assert "linear-gradient(135deg, #061b35, #2f5f93)" in source
     assert "ask-mia-close" in source
     assert "סגירה" in source
-    assert "#ask-mia-launcher:focus-visible{outline:2px solid #2563eb" in source
+    focus = _css_rule("#ask-mia-root :is(button, textarea, input, a):focus-visible")
+    assert "outline: 3px solid #2563eb" in focus
 
 
 def test_widget_uses_only_assafweb_palette_colors() -> None:
@@ -198,9 +204,11 @@ def test_messages_use_chat_bubble_layout() -> None:
     assert "ask-mia-row ask-mia-row-" in paint
     assert "bubbleAvatar(role)" in paint
     assert "ask-mia-bubble-avatar" in source
-    assert "flex-direction:row-reverse" in source
-    assert ".ask-mia-user{background:#2f5f93;color:#fff" in source
-    assert ".ask-mia-mia{background:#eef7ff;color:#061b35" in source
+    assert "flex-direction: row-reverse" in _css_rule("#ask-mia-root .ask-mia-row-user")
+    assert "background: #2f5f93" in _css_rule("#ask-mia-root .ask-mia-user")
+    assert "color: #fff" in _css_rule("#ask-mia-root .ask-mia-user")
+    assert "background: #fff" in _css_rule("#ask-mia-root .ask-mia-mia")
+    assert "color: #061b35" in _css_rule("#ask-mia-root .ask-mia-mia")
     assert "burstParts.push(text)" in send
     assert "showLoading()" in flush
     assert "hideLoading()" in flush
@@ -213,13 +221,11 @@ def test_visible_ask_mia_pill_sits_at_true_bottom() -> None:
     """Clients see one bottom control: a labeled Ask Mia pill, not a second FAB."""
     source = _source()
     assert "clip:rect(0,0,0,0)" not in source
-    assert "bottom:max(1.1rem,env(safe-area-inset-bottom,0px))" in source
-    assert (
-        "#ask-mia-launch-label{white-space:nowrap;font-size:.92rem;"
-        "font-weight:800;color:#fff}"
-    ) in source
-    assert "display:inline-flex" in source
-    assert ".whatsapp-fab{display:none!important}" in source
+    assert "bottom: max(16px, env(safe-area-inset-bottom, 0px))" in _css_rule("#ask-mia-root")
+    label = _css_rule("#ask-mia-root #ask-mia-launch-label")
+    assert "white-space: nowrap" in label and "color: #fff" in label
+    assert "display: inline-flex" in _css_rule("#ask-mia-root #ask-mia-launcher")
+    assert ".whatsapp-fab" not in source, "host controls must keep their styling"
     assert "שאלו את מיה" in source
     assert "bottom:5.4rem" not in source
 
@@ -229,8 +235,8 @@ def test_accessibility_invariants() -> None:
     assert "aria-expanded" in source
     assert "aria-controls" in source
     assert "aria-label" in source
-    assert "min-height:44px" in source
-    assert "min-width:56px" in source
+    assert "min-height: 44px" in _css_rule("#ask-mia-root #ask-mia-actions button")
+    assert "min-width: 56px" in _css_rule("#ask-mia-root #ask-mia-launcher")
     assert ":focus-visible" in source
     assert "panel.dir = 'rtl'" in source
     assert "prefers-reduced-motion" in source
@@ -239,6 +245,10 @@ def test_accessibility_invariants() -> None:
     assert "aria-expanded', 'true'" in open_fn
     assert "aria-expanded', 'false'" in close_fn
     assert "closeBtn.addEventListener('click', closePanel)" in source
+    assert "launcher.focus()" in close_fn
+    assert "e.key === 'Escape' && !panel.hidden" in source
+    assert "panel.setAttribute('role', 'dialog')" in source
+    assert "עוזרת AI של אסף" in source
 
 
 def test_svg_mark_with_letter_fallback() -> None:
@@ -277,16 +287,16 @@ def test_mic_lives_in_composer_not_launcher() -> None:
     assert "launcher.appendChild(micBtn)" not in source
     assert "ask-mia-launch-mic" not in source
     assert "#ask-mia-launcher" in source
-    assert "height:56px" in source
-    assert "linear-gradient(135deg,#2f5f93,#2563eb)" in source
+    assert "height: 56px" in _css_rule("#ask-mia-root #ask-mia-launcher")
+    assert "linear-gradient(135deg, #2f5f93, #2563eb)" in source
     assert "שאלו את מיה" in source
-    send_css_idx = source.index("#ask-mia-actions button{")
-    mic_css_idx = source.index("#ask-mia-mic{background:#d9eeff")
-    launcher_css_idx = source.index("#ask-mia-launcher{")
+    send_css_idx = source.index("#ask-mia-root #ask-mia-actions button {")
+    mic_css_idx = source.index("#ask-mia-root #ask-mia-mic {")
+    launcher_css_idx = source.index("#ask-mia-root #ask-mia-launcher {")
     assert launcher_css_idx < send_css_idx
     assert send_css_idx < mic_css_idx
-    assert "min-height:44px" in source[send_css_idx:mic_css_idx]
-    assert "border-radius:.65rem" in source[send_css_idx:mic_css_idx]
+    assert "min-height: 44px" in source[send_css_idx:mic_css_idx]
+    assert "border-radius: 12px" in source[send_css_idx:mic_css_idx]
 
 
 def test_voice_hint_and_recording_copy() -> None:
@@ -325,7 +335,8 @@ def test_widget_stitches_message_bursts() -> None:
     assert "burstParts.push(text)" in send
     assert "if (busy) return;" not in send
     assert "burstParts.join(' ')" in flush
-    assert "postText(text)" in flush
+    assert "postText(text, clientMessageId)" in flush
+    assert "var clientMessageId = newClientMessageId()" in flush
     assert "setTimeout(flushBurst, BURST_MS)" in send
 
 
@@ -342,13 +353,14 @@ def test_session_restore_skips_opening_and_retries_stale() -> None:
     assert "burstParts.push(text)" in send
     assert "retryOnce" in flush
     retry = _function_body(source, "retryOnce")
+    assert "err.status !== 401" in retry
     assert "err.status !== 404" in retry
     voice = _function_body(source, "sendVoice")
     assert "retryOnce" in voice
     assert "appendMsg('mia', MIC_ERR)" in voice
     assert "AbortSignal.timeout" in source
     assert "25000" in _function_body(source, "postVoice")
-    assert "unicode-bidi:plaintext" in source
+    assert "unicode-bidi: plaintext" in _css_rule("#ask-mia-root .ask-mia-msg")
     assert "scrubMia" in source
     assert "isAppleCapture" in source
     assert "mediaRecorder.start()" in source
@@ -451,7 +463,7 @@ def test_widget_open_send_uses_textcontent_and_wa_me_href_only() -> None:
     send = _function_body(source, "sendMessage")
     flush = _function_body(source, "flushBurst")
     assert "appendMsg('user', text)" in send
-    assert "postText(text)" in flush
+    assert "postText(text, clientMessageId)" in flush
     assert "applyReply" in flush
     paint = _function_body(source, "paintMsg")
     assert "el.textContent =" in paint
@@ -509,8 +521,4 @@ def test_whatsapp_offer_is_a_tappable_button_not_a_raw_url() -> None:
     assert "stripWaMeUrls" in restore
     paint = _function_body(source, "paintMsg")
     assert "el.textContent =" in paint
-    assert ".ask-mia-handoff-cta{" in source
-    assert "background:#25d366" in source[source.index(".ask-mia-handoff-cta{") :][
-        :400
-    ]
-
+    assert "background: #25d366" in _css_rule("#ask-mia-root .ask-mia-handoff-cta")

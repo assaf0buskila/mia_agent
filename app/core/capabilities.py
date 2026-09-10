@@ -13,36 +13,26 @@ class CapabilityId(StrEnum):
     IDENTITY = "identity"
     SALES_STATE = "sales_state"
     SALES_REPLY = "sales_reply"
-    OWNER_REPLY = "owner_reply"
     HUMANITY_LINTER = "humanity_linter"
     LANGGRAPH = "langgraph"
     WEBSITE = "website"
-    WHATSAPP = "whatsapp"
     VOICE_STT = "voice_stt"
     TELEGRAM = "telegram"
     INSTAGRAM = "instagram"
     GMAIL = "gmail"
     CALENDAR = "calendar"
-    META_ADS = "meta_ads"
     CONTENT_PERFORMANCE = "content_performance"
     CONTENT_IDEAS = "content_ideas"
-    CAMPAIGN_ANALYSIS = "campaign_analysis"
-    CAMPAIGN_PACING = "campaign_pacing"
-    CAMPAIGN_PRELAUNCH = "campaign_prelaunch"
     RESEARCH = "research"
     SEARCH_CONSOLE = "search_console"
     GA4 = "ga4"
     SEO_AUDIT = "seo_audit"
     LINKEDIN = "linkedin"
-    OWNER_LEARNING = "owner_learning"
     OWNER_BRIEF = "owner_brief"
     OWNER_WEEKLY = "owner_weekly"
-    GRAPH_LAB = "graph_lab"
     DEMO_MODE = "demo_mode"
     FOLLOW_UP = "follow_up"
     DUE_SCAN = "due_scan"
-    RECONCILIATION = "reconciliation"
-    CONVERSATION_KILL = "conversation_kill"
     MEETING_BRIEF = "meeting_brief"
     MEETING_DEBRIEF = "meeting_debrief"
     LEAD_REVIEW = "lead_review"
@@ -58,13 +48,9 @@ class CapabilityId(StrEnum):
     AWS_RUNTIME = "aws_runtime"
     FDE_EXECUTION_POLICY = "fde_execution_policy"
     FDE_SHADOW = "fde_shadow"
-    FDE_FEEDBACK = "fde_feedback"
     FDE_VALUE = "fde_value"
     FDE_FAILURE_POLICY = "fde_failure_policy"
-    FDE_HUMAN_TAKEOVER = "fde_human_takeover"
     FDE_IDEMPOTENCY = "fde_idempotency"
-    PRELOADED_TOOLS = "preloaded_tools"
-    MODEL_TASK_CLASSES = "model_task_classes"
     FRESHNESS_POLICY = "freshness_policy"
     BRAIN_MEMORY = "brain_memory"
     BRAIN_KNOWLEDGE = "brain_knowledge"
@@ -132,21 +118,15 @@ CAPABILITIES: tuple[Capability, ...] = (
     ),
     Capability(
         id=CapabilityId.SALES_STATE,
-        prd="§10",
+        prd="v2 durable historical lead state",
         status=WiringStatus.ALIVE,
-        port="app.domain.sales",
+        port="app.db.store",
     ),
     Capability(
         id=CapabilityId.SALES_REPLY,
         prd="§9",
         status=WiringStatus.ALIVE,
-        port="app.integrations.sales_reply",
-    ),
-    Capability(
-        id=CapabilityId.OWNER_REPLY,
-        prd="ADR-025",
-        status=WiringStatus.ALIVE,
-        port="app.integrations.owner_reply",
+        port="app.surfaces.site_v2",
     ),
     Capability(
         id=CapabilityId.HUMANITY_LINTER,
@@ -158,19 +138,13 @@ CAPABILITIES: tuple[Capability, ...] = (
         id=CapabilityId.LANGGRAPH,
         prd="§25–27",
         status=WiringStatus.ALIVE,
-        port="app.graph.orchestrator",
+        port="app.agents.owner.graph",
     ),
     Capability(
         id=CapabilityId.WEBSITE,
         prd="§7, §30",
         status=WiringStatus.ALIVE,
         port="app.api.website",
-    ),
-    Capability(
-        id=CapabilityId.WHATSAPP,
-        prd="§17",
-        status=WiringStatus.ALIVE,
-        port="app.integrations.whatsapp",
     ),
     Capability(
         id=CapabilityId.VOICE_STT,
@@ -215,12 +189,6 @@ CAPABILITIES: tuple[Capability, ...] = (
         port="app.integrations.calendar",
     ),
     Capability(
-        id=CapabilityId.META_ADS,
-        prd="§20",
-        status=WiringStatus.SPECIFIED,
-        port="",
-    ),
-    Capability(
         id=CapabilityId.CONTENT_PERFORMANCE,
         prd="§16 / §19",
         status=WiringStatus.ALIVE,
@@ -231,24 +199,6 @@ CAPABILITIES: tuple[Capability, ...] = (
         prd="§2.2",
         status=WiringStatus.ALIVE,
         port="app.domain.content_ideas",
-    ),
-    Capability(
-        id=CapabilityId.CAMPAIGN_ANALYSIS,
-        prd="§20.2",
-        status=WiringStatus.SPECIFIED,
-        port="",
-    ),
-    Capability(
-        id=CapabilityId.CAMPAIGN_PACING,
-        prd="§19.2 / §20",
-        status=WiringStatus.SPECIFIED,
-        port="",
-    ),
-    Capability(
-        id=CapabilityId.CAMPAIGN_PRELAUNCH,
-        prd="§20.3",
-        status=WiringStatus.SPECIFIED,
-        port="",
     ),
     Capability(
         id=CapabilityId.RESEARCH,
@@ -281,12 +231,6 @@ CAPABILITIES: tuple[Capability, ...] = (
         port="app.integrations.linkedin",
     ),
     Capability(
-        id=CapabilityId.OWNER_LEARNING,
-        prd="§13",
-        status=WiringStatus.ALIVE,
-        port="app.domain.learning",
-    ),
-    Capability(
         id=CapabilityId.OWNER_BRIEF,
         prd="§2.2 / §17",
         status=WiringStatus.ALIVE,
@@ -297,12 +241,6 @@ CAPABILITIES: tuple[Capability, ...] = (
         prd="§2.2 / §17",
         status=WiringStatus.ALIVE,
         port="app.domain.owner.weeklies",
-    ),
-    Capability(
-        id=CapabilityId.GRAPH_LAB,
-        prd="§28",
-        status=WiringStatus.ALIVE,
-        port="app.evals",
     ),
     Capability(
         id=CapabilityId.DEMO_MODE,
@@ -321,18 +259,6 @@ CAPABILITIES: tuple[Capability, ...] = (
         prd="§12.1, §12.4",
         status=WiringStatus.ALIVE,
         port="app.workers.due_scan",
-    ),
-    Capability(
-        id=CapabilityId.RECONCILIATION,
-        prd="§31.3",
-        status=WiringStatus.ALIVE,
-        port="app.domain.reconciliation",
-    ),
-    Capability(
-        id=CapabilityId.CONVERSATION_KILL,
-        prd="§34.2",
-        status=WiringStatus.ALIVE,
-        port="app.domain.conversation_kill",
     ),
     Capability(
         id=CapabilityId.MEETING_BRIEF,
@@ -413,12 +339,6 @@ CAPABILITIES: tuple[Capability, ...] = (
         port="app.domain.shadow",
     ),
     Capability(
-        id=CapabilityId.FDE_FEEDBACK,
-        prd="FDE operating layer",
-        status=WiringStatus.ALIVE,
-        port="app.domain.feedback",
-    ),
-    Capability(
         id=CapabilityId.FDE_VALUE,
         prd="FDE operating layer",
         status=WiringStatus.ALIVE,
@@ -431,28 +351,10 @@ CAPABILITIES: tuple[Capability, ...] = (
         port="app.domain.policies.failure_policy",
     ),
     Capability(
-        id=CapabilityId.FDE_HUMAN_TAKEOVER,
-        prd="FDE operating layer",
-        status=WiringStatus.ALIVE,
-        port="app.domain.takeover",
-    ),
-    Capability(
         id=CapabilityId.FDE_IDEMPOTENCY,
         prd="FDE operating layer",
         status=WiringStatus.ALIVE,
         port="app.domain.idempotency",
-    ),
-    Capability(
-        id=CapabilityId.PRELOADED_TOOLS,
-        prd="Pre-prod Adjustment F",
-        status=WiringStatus.ALIVE,
-        port="app.tools.registries.mia_preloaded_tools",
-    ),
-    Capability(
-        id=CapabilityId.MODEL_TASK_CLASSES,
-        prd="Pre-prod Adjustment J",
-        status=WiringStatus.ALIVE,
-        port="app.domain.policies.task_classes",
     ),
     Capability(
         id=CapabilityId.FRESHNESS_POLICY,

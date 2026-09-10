@@ -14,6 +14,7 @@ RUN apk upgrade --no-cache \
 # The tested commit, passed by the build: docker build --build-arg MIA_BUILD_SHA=$(git rev-parse HEAD)
 # Reported on /health as deployment.commit_sha so a stale image is visible from prod.
 ARG MIA_BUILD_SHA=""
+LABEL org.opencontainers.image.revision=${MIA_BUILD_SHA}
 ENV MIA_BUILD_SHA=${MIA_BUILD_SHA}
 ENV PATH="/app/.venv/bin:$PATH"
 ENV PYTHONUNBUFFERED=1

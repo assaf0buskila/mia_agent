@@ -3,10 +3,7 @@ import inspect
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
-import pytest
-from app.api.inbound import process_inbound_texts
 from app.core.capabilities import CapabilityId, require_alive
-from app.core.errors import PolicyDenied
 from app.db.models import OwnerNotificationRow, OwnerTaskRow
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
@@ -24,8 +21,6 @@ from app.domain.owner.notifications import (
     apply_owner_notify,
     persist_meeting_booked_owner_notify,
 )
-from app.domain.owner.tasks import OwnerTaskType, classify_owner_task
-from app.integrations.base import RecordingMessagePort
 from app.integrations.calendar import FakeCalendarPort, TimeSlot
 from app.integrations.calendar_booking import CalendarBookingEvent, FakeCalendarBookingPort
 from sqlalchemy import delete, select
@@ -84,9 +79,7 @@ def _notify_rows(
 
 def _delete_notify_rows(db, *, lead_ids: tuple[str, ...]) -> None:
     for lead_id in lead_ids:
-        db.execute(
-            delete(OwnerNotificationRow).where(OwnerNotificationRow.lead_id == lead_id)
-        )
+        db.execute(delete(OwnerNotificationRow).where(OwnerNotificationRow.lead_id == lead_id))
     db.commit()
 
 
@@ -115,9 +108,7 @@ def _seed_booked(
 ) -> str:
     from app.domain.meetings.state import apply_meeting_policy
 
-    _, lead_id = store.open_channel_lead(
-        channel=Channel.GMAIL, external_id=external_id
-    )
+    _, lead_id = store.open_channel_lead(channel=Channel.GMAIL, external_id=external_id)
     apply_meeting_policy(
         store,
         lead_id=lead_id,
@@ -265,34 +256,6 @@ def test_second_book_same_lead_keeps_first_notify_row() -> None:
         db.close()
 
 
-@pytest.mark.parametrize(
-    "text",
-    [
-        "booked meetings",
-        "what got booked",
-        "meeting notifications",
-        "מה נקבע",
-        "פגישות שנקבעו",
-        "התראות פגישות",
-    ],
-)
-def test_classify_owner_notify_phrases(text: str) -> None:
-    decision = classify_owner_task(text)
-    assert decision.task_type == OwnerTaskType.OWNER_NOTIFY
-    assert decision.needs_clarification is False
-    assert decision.matched_types == ["owner_notify"]
-
-
-def test_classify_calendar_not_owner_notify() -> None:
-    decision = classify_owner_task("check my calendar")
-    assert decision.task_type == OwnerTaskType.CALENDAR
-
-
-def test_classify_preference_without_notify_phrases() -> None:
-    decision = classify_owner_task("from now on remember my style")
-    assert decision.task_type == OwnerTaskType.PREFERENCE
-
-
 def test_apply_owner_notify_marks_seen_then_empty() -> None:
     init_db()
     db = get_session_factory()()
@@ -385,9 +348,7 @@ def test_apply_owner_notify_kill_switch_format_only() -> None:
     try:
         _clear_unseen_notifications(db)
         store = LeadStore(db)
-        _, lead_id = store.open_channel_lead(
-            channel=Channel.GMAIL, external_id="notify.ks@ex.com"
-        )
+        _, lead_id = store.open_channel_lead(channel=Channel.GMAIL, external_id="notify.ks@ex.com")
         store.upsert_owner_notification(
             kind=KIND_MEETING_BOOKED,
             lead_id=lead_id,
@@ -411,102 +372,8 @@ def test_apply_owner_notify_kill_switch_format_only() -> None:
         db.close()
 
 
-@pytest.mark.asyncio
-async def test_owner_inbound_notify_after_booking() -> None:
-    init_db()
-    db = get_session_factory()()
-    try:
-        _clear_unseen_notifications(db)
-        store = LeadStore(db)
-        _, lead_id = store.open_channel_lead(
-            channel=Channel.GMAIL, external_id="notify.inbound@ex.com"
-        )
-        slot = _slot(4, 15)
-        _seed_offered(store, lead_id, [slot])
-        db.commit()
-        booked = attempt_meeting_booking(
-            store,
-            lead_id=lead_id,
-            channel=Channel.GMAIL,
-            provider="gmail",
-            conversation_id="notify.inbound@ex.com",
-            inbound_provider_event_id="evt.notify.inbound.book",
-            message="1",
-            calendar=FakeCalendarPort([slot]),
-            booking_port=FakeCalendarBookingPort(),
-            kill_switch=False,
-            timezone="Asia/Jerusalem",
-            now=FIXED_NOW,
-        )
-        assert booked.kind == BookingResultKind.BOOKED
-        db.commit()
-        port = RecordingMessagePort()
-        result = await process_inbound_texts(
-            provider="whatsapp",
-            channel=Channel.WHATSAPP,
-            items=[{
-                "id": OWNER_EVENT,
-                "from": OWNER_PHONE,
-                "text": "מה נקבע",
-            }],
-            store=store,
-            port=port,
-            kill_switch=False,
-            owner_ids={OWNER_PHONE},
-        )
-        db.commit()
-        assert result["processed"] == 1
-        assert len(port.sent) == 1
-        reply = port.sent[0].text
-        assert lead_id in reply
-        assert "מועד:" in reply
-        rows = _notify_rows(db, lead_id=lead_id)
-        assert rows[0].seen_at
-    finally:
-        _delete_test_rows(db, event_ids=(OWNER_EVENT,))
-        _delete_notify_rows(db, lead_ids=(lead_id,))
-        db.close()
 
 
-@pytest.mark.asyncio
-async def test_owner_inbound_notify_kill_switch() -> None:
-    init_db()
-    db = get_session_factory()()
-    try:
-        _clear_unseen_notifications(db)
-        store = LeadStore(db)
-        _, lead_id = store.open_channel_lead(
-            channel=Channel.GMAIL, external_id="notify.inbound.ks@ex.com"
-        )
-        store.upsert_owner_notification(
-            kind=KIND_MEETING_BOOKED,
-            lead_id=lead_id,
-            scheduled_at=_slot(4, 16).start.isoformat(),
-        )
-        db.commit()
-        port = RecordingMessagePort()
-        with pytest.raises(PolicyDenied):
-            await process_inbound_texts(
-                provider="whatsapp",
-                channel=Channel.WHATSAPP,
-                items=[{
-                    "id": OWNER_EVENT_KILL,
-                    "from": OWNER_PHONE,
-                    "text": "booked meetings",
-                }],
-                store=store,
-                port=port,
-                kill_switch=True,
-                owner_ids={OWNER_PHONE},
-            )
-        db.commit()
-        assert len(port.sent) == 0
-        rows = _notify_rows(db, lead_id=lead_id)
-        assert rows[0].seen_at == ""
-    finally:
-        _delete_test_rows(db, event_ids=(OWNER_EVENT_KILL,))
-        _delete_notify_rows(db, lead_ids=(lead_id,))
-        db.close()
 
 
 def test_owner_notify_module_no_forbidden_imports() -> None:
@@ -638,9 +505,7 @@ def test_second_reschedule_same_lead_keeps_first_notify_row() -> None:
             now=FIXED_NOW,
         )
         assert first.kind == MeetingChangeKind.RESCHEDULED
-        rows_after_first = _notify_rows(
-            db, lead_id=lead_id, kind=KIND_MEETING_RESCHEDULED
-        )
+        rows_after_first = _notify_rows(db, lead_id=lead_id, kind=KIND_MEETING_RESCHEDULED)
         assert len(rows_after_first) == 1
         first_scheduled = rows_after_first[0].scheduled_at
         assert store.save_reschedule_slots(
@@ -671,9 +536,7 @@ def test_second_reschedule_same_lead_keeps_first_notify_row() -> None:
         )
         db.commit()
         assert second.kind == MeetingChangeKind.RESCHEDULED
-        rows_after_second = _notify_rows(
-            db, lead_id=lead_id, kind=KIND_MEETING_RESCHEDULED
-        )
+        rows_after_second = _notify_rows(db, lead_id=lead_id, kind=KIND_MEETING_RESCHEDULED)
         assert len(rows_after_second) == 1
         assert rows_after_second[0].scheduled_at == first_scheduled
     finally:
@@ -687,9 +550,7 @@ def test_first_cancellation_request_persists_notify() -> None:
     try:
         store = LeadStore(db)
         slot = _slot(4, 10)
-        lead_id = _seed_booked(
-            store, external_id="notify.cancel@ex.com", slot=slot
-        )
+        lead_id = _seed_booked(store, external_id="notify.cancel@ex.com", slot=slot)
         first = resolve_booked_meeting_change(
             store,
             lead_id=lead_id,
@@ -721,9 +582,7 @@ def test_first_cancellation_request_persists_notify() -> None:
         db.commit()
         assert first.kind == MeetingChangeKind.CANCELLATION_REQUESTED
         assert second.kind == MeetingChangeKind.CANCELLATION_REQUESTED
-        rows = _notify_rows(
-            db, lead_id=lead_id, kind=KIND_MEETING_CANCELLATION_REQUESTED
-        )
+        rows = _notify_rows(db, lead_id=lead_id, kind=KIND_MEETING_CANCELLATION_REQUESTED)
         assert len(rows) == 1
         assert rows[0].seen_at == ""
         assert rows[0].scheduled_at == slot.start.isoformat()
@@ -748,12 +607,8 @@ def test_reschedule_and_cancel_skip_persist_on_demo_and_kill_switch() -> None:
             external_id="notify.skip.ks@ex.com",
             target=target,
         )
-        lead_id_cancel_demo = _seed_booked(
-            store, external_id="notify.skip.cancel.demo@ex.com"
-        )
-        lead_id_cancel_ks = _seed_booked(
-            store, external_id="notify.skip.cancel.ks@ex.com"
-        )
+        lead_id_cancel_demo = _seed_booked(store, external_id="notify.skip.cancel.demo@ex.com")
+        lead_id_cancel_ks = _seed_booked(store, external_id="notify.skip.cancel.ks@ex.com")
         booking_demo = FakeCalendarBookingPort(
             events_by_id={
                 event_id_demo: CalendarBookingEvent(
@@ -832,22 +687,24 @@ def test_reschedule_and_cancel_skip_persist_on_demo_and_kill_switch() -> None:
             now=FIXED_NOW,
         )
         db.commit()
-        assert _notify_rows(
-            db, lead_id=lead_id_demo, kind=KIND_MEETING_RESCHEDULED
-        ) == []
-        assert _notify_rows(
-            db, lead_id=lead_id_ks, kind=KIND_MEETING_RESCHEDULED
-        ) == []
-        assert _notify_rows(
-            db,
-            lead_id=lead_id_cancel_demo,
-            kind=KIND_MEETING_CANCELLATION_REQUESTED,
-        ) == []
-        assert _notify_rows(
-            db,
-            lead_id=lead_id_cancel_ks,
-            kind=KIND_MEETING_CANCELLATION_REQUESTED,
-        ) == []
+        assert _notify_rows(db, lead_id=lead_id_demo, kind=KIND_MEETING_RESCHEDULED) == []
+        assert _notify_rows(db, lead_id=lead_id_ks, kind=KIND_MEETING_RESCHEDULED) == []
+        assert (
+            _notify_rows(
+                db,
+                lead_id=lead_id_cancel_demo,
+                kind=KIND_MEETING_CANCELLATION_REQUESTED,
+            )
+            == []
+        )
+        assert (
+            _notify_rows(
+                db,
+                lead_id=lead_id_cancel_ks,
+                kind=KIND_MEETING_CANCELLATION_REQUESTED,
+            )
+            == []
+        )
     finally:
         _delete_notify_rows(
             db,
@@ -910,9 +767,7 @@ def test_apply_owner_notify_mixed_kinds_and_extra_line() -> None:
         for lead_id in lead_ids[:3]:
             rows = list(
                 db.scalars(
-                    select(OwnerNotificationRow).where(
-                        OwnerNotificationRow.lead_id == lead_id
-                    )
+                    select(OwnerNotificationRow).where(OwnerNotificationRow.lead_id == lead_id)
                 ).all()
             )
             assert len(rows) == 1
@@ -922,63 +777,4 @@ def test_apply_owner_notify_mixed_kinds_and_extra_line() -> None:
         assert extra_rows[0].seen_at == ""
     finally:
         _delete_notify_rows(db, lead_ids=tuple(lead_ids))
-        db.close()
-
-
-@pytest.mark.asyncio
-async def test_owner_inbound_notify_after_cancellation() -> None:
-    init_db()
-    db = get_session_factory()()
-    owner_event = "evt.owner.notify.cancel.inbound"
-    try:
-        _clear_unseen_notifications(db)
-        store = LeadStore(db)
-        slot = _slot(4, 15)
-        lead_id = _seed_booked(
-            store, external_id="notify.inbound.cancel@ex.com", slot=slot
-        )
-        db.commit()
-        cancel = resolve_booked_meeting_change(
-            store,
-            lead_id=lead_id,
-            provider="gmail",
-            channel=Channel.GMAIL,
-            conversation_id="notify.inbound.cancel@ex.com",
-            message="cancel my meeting",
-            calendar=FakeCalendarPort([]),
-            booking_port=FakeCalendarBookingPort(),
-            kill_switch=False,
-            demo_active=False,
-            timezone="Asia/Jerusalem",
-            now=FIXED_NOW,
-        )
-        assert cancel.kind == MeetingChangeKind.CANCELLATION_REQUESTED
-        db.commit()
-        port = RecordingMessagePort()
-        result = await process_inbound_texts(
-            provider="whatsapp",
-            channel=Channel.WHATSAPP,
-            items=[{
-                "id": owner_event,
-                "from": OWNER_PHONE,
-                "text": "מה נקבע",
-            }],
-            store=store,
-            port=port,
-            kill_switch=False,
-            owner_ids={OWNER_PHONE},
-        )
-        db.commit()
-        assert result["processed"] == 1
-        assert len(port.sent) == 1
-        reply = port.sent[0].text
-        assert "בקשת ביטול." in reply
-        assert lead_id in reply
-        rows = _notify_rows(
-            db, lead_id=lead_id, kind=KIND_MEETING_CANCELLATION_REQUESTED
-        )
-        assert rows[0].seen_at
-    finally:
-        _delete_test_rows(db, event_ids=(owner_event,))
-        _delete_notify_rows(db, lead_ids=(lead_id,))
         db.close()

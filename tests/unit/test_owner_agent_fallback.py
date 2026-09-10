@@ -1,4 +1,3 @@
-
 """Model fallback chain, and the observability that was missing.
 
 Live symptom this covers: the owner agent was pinned to a model the account could not
@@ -246,7 +245,6 @@ def _settings_with_both() -> object:
     settings.owner_agent_model = "openai-primary"
     settings.owner_agent_fallback_model = "openai-secondary"
     settings.owner_agent_gemini_model = "gemini-3.7-flash"
-    settings.extraction_model = "openai-extract"
     settings.sales_model = ""
     settings.sales_fallback_model = ""
     return settings
@@ -256,13 +254,6 @@ def test_gemini_is_the_last_resort_in_the_agent_chain() -> None:
     """An OpenAI-side block on every model must not kill the console when Gemini works."""
     chain = build_agent_client(_settings_with_both())
     assert chain.models == ("openai-primary", "openai-secondary", "gemini-3.7-flash")
-
-
-def test_extraction_also_falls_over_to_gemini() -> None:
-    from app.domain.owner.brain import build_extraction_client
-
-    chain = build_extraction_client(_settings_with_both())
-    assert chain.models == ("openai-extract", "gemini-3.7-flash")
 
 
 def test_gemini_is_skipped_without_a_key_or_a_model() -> None:
@@ -286,23 +277,19 @@ def test_gemini_client_targets_the_openai_compat_endpoint() -> None:
     assert clients[0].model == "gemini-3.7-flash"
 
 
-def test_sales_model_is_appended_as_an_owner_agent_fallback() -> None:
-    """Website Ask Mia already proves the sales model is callable. A broken owner-agent
-    id must not take Telegram down when that same key can still answer."""
+def test_sales_model_is_not_borrowed_by_the_owner_agent() -> None:
+    """Each surface keeps its configured purpose-specific model ids."""
     settings = _settings_with_both()
     settings.sales_model = "sales-live"
     settings.sales_fallback_model = ""
     assert build_agent_client(settings).models == (
         "openai-primary",
         "openai-secondary",
-        "sales-live",
         "gemini-3.7-flash",
     )
 
 
-def test_owner_agent_ready_when_only_the_sales_model_is_configured() -> None:
-    """Live .env.example leaves MIA_OWNER_AGENT_MODEL blank. Health and the
-    console must still treat a working sales model as enough to run the agent."""
+def test_owner_agent_is_not_ready_when_only_the_sales_model_is_configured() -> None:
     settings = Settings(
         _env_file=None,
         openai_api_key="k",
@@ -313,8 +300,8 @@ def test_owner_agent_ready_when_only_the_sales_model_is_configured() -> None:
         owner_agent_gemini_model="",
         gemini_api_key="",
     )
-    assert settings.owner_agent_ready() is True
-    assert build_agent_client(settings).models == ("sales-live",)
+    assert settings.owner_agent_ready() is False
+    assert build_agent_client(settings).models == ()
     blank = Settings(
         _env_file=None,
         openai_api_key="k",
@@ -363,9 +350,7 @@ def test_a_tool_payload_400_advances_instead_of_killing_the_console() -> None:
     the tool schema; the next model may still answer a capabilities question."""
     tools = [{"type": "function", "function": {"name": "x", "parameters": {}}}]
     chain = LlmModelChain([_client("strict", _status(400)), _client("good", _ok("יכולות"))])
-    assert (
-        chain.complete(messages=_messages(), tools=tools).text == "יכולות"
-    )
+    assert chain.complete(messages=_messages(), tools=tools).text == "יכולות"
     assert chain.last_model == "good"
 
 

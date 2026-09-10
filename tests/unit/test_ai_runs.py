@@ -1,13 +1,6 @@
-import hashlib
 import json
 
 import pytest
-from app.agents.client.graph import compile_client_graph
-from app.api.inbound import process_inbound_texts
-from app.api.website import process_website_message
-from app.capabilities.types import Principal
-from app.channels.website import message_to_client_state
-from app.core.config import get_settings
 from app.db.models import AiRunRow
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
@@ -24,29 +17,10 @@ from app.domain.events import Channel, persist_tool_outcome
 from app.domain.policies import POLICY_VERSION
 from app.domain.sales import NextAction
 from app.domain.tools import ToolOutcome
-from app.integrations.base import RecordingMessagePort
-from app.integrations.calendar import DisabledCalendarPort
-from app.integrations.sales_reply import (
-    _SYSTEM_PROMPT,
-    FakeSalesReplyPort,
-    ReplyContext,
-    build_user_content,
-)
-from app.integrations.sales_reply import (
-    PROMPT_VERSION as SALES_REPLY_PROMPT_VERSION,
-)
-from app.integrations.sheets import DisabledSheetsPort
-from app.main import app
-from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
 PROSPECT_PHONE = "972509994901"
 VISITOR_TEXT = "hi"
-# Bumped with PROMPT_VERSION sales_reply_v12: clarified Rule 16 so answers are
-# provided as clear statements without appending questions when INTENT specifies no questions.
-_FROZEN_SYSTEM_PROMPT_SHA256 = (
-    "ffdbf2526f92c24742408d089d62b26d58b955978376be4fc15fd79939144450"
-)
 
 
 def _all_ai_run_values(row: AiRunRow) -> str:
@@ -69,113 +43,6 @@ def _all_ai_run_values(row: AiRunRow) -> str:
             "decision_confidence": row.decision_confidence,
         }
     )
-
-
-def test_website_first_message_persists_ai_run() -> None:
-    init_db()
-    with TestClient(app) as client:
-        session_id = client.post("/v1/website/sessions").json()["session_id"]
-        response = client.post(
-            f"/v1/website/sessions/{session_id}/messages",
-            json={"text": VISITOR_TEXT},
-        )
-        assert response.status_code == 200
-        assert response.json()["lead_id"] == ""
-        assert response.json()["next_action"] in {"ask_need", "ask_contact", "answer"}
-    db = get_session_factory()()
-    try:
-        assert db.scalars(select(AiRunRow).where(AiRunRow.lead_id == session_id)).all() == []
-    finally:
-        db.close()
-
-
-def test_website_second_message_does_not_persist_ai_run() -> None:
-    init_db()
-    with TestClient(app) as client:
-        session_id = client.post("/v1/website/sessions").json()["session_id"]
-        first = client.post(
-            f"/v1/website/sessions/{session_id}/messages",
-            json={"text": VISITOR_TEXT},
-        )
-        second = client.post(
-            f"/v1/website/sessions/{session_id}/messages",
-            json={"text": "We run a clinic and miss calls all day."},
-        )
-        assert first.json()["lead_id"] == ""
-        assert second.json()["next_action"] == "answer"
-    db = get_session_factory()()
-    try:
-        assert db.scalars(select(AiRunRow).where(AiRunRow.lead_id == session_id)).all() == []
-    finally:
-        db.close()
-
-
-def test_kill_switch_stops_website_chat_without_ai_run() -> None:
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        _, lead_id = store.open_channel_lead(
-            channel=Channel.WEBSITE, external_id="web_kill_switch"
-        )
-        db.commit()
-        settings = get_settings().model_copy(update={"kill_switch": True})
-        from app.surfaces.site import reset_site_book, site_book
-
-        reset_site_book()
-        site_book().open("web_kill_switch")
-        out = process_website_message(
-            store,
-            session_id="web_kill_switch",
-            text=VISITOR_TEXT,
-            settings=settings,
-            sheets=DisabledSheetsPort(),
-        )
-        assert out.message
-        assert out.lead_id == ""
-        db.commit()
-        rows = list(db.scalars(select(AiRunRow).where(AiRunRow.lead_id == lead_id)))
-        assert rows == []
-    finally:
-        db.close()
-
-
-@pytest.mark.asyncio
-async def test_whatsapp_inbound_persists_ai_run() -> None:
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        await process_inbound_texts(
-            provider="whatsapp",
-            channel=Channel.WHATSAPP,
-            items=[
-                {
-                    "id": "wamid.ai_run.1",
-                    "from": PROSPECT_PHONE,
-                    "text": VISITOR_TEXT,
-                }
-            ],
-            store=store,
-            port=RecordingMessagePort(),
-            kill_switch=False,
-            calendar=DisabledCalendarPort(),
-            sheets=DisabledSheetsPort(),
-        )
-        db.commit()
-        _, lead_id = store.open_channel_lead(
-            channel=Channel.WHATSAPP, external_id=PROSPECT_PHONE
-        )
-        row = db.scalars(select(AiRunRow).where(AiRunRow.lead_id == lead_id)).one()
-        assert row.run_id.startswith("run_")
-        assert row.next_action == NextAction.UNDERSTAND_WORKFLOW.value
-        assert row.model == MODEL_CANNED
-        assert row.prompt_version == PROMPT_VERSION
-        assert row.decision_confidence == "1.0"
-        assert row.automation_mode == "auto_approved"
-        assert VISITOR_TEXT not in _all_ai_run_values(row)
-    finally:
-        db.close()
 
 
 def test_persist_ai_run_duplicate_run_id_writes_once() -> None:
@@ -318,9 +185,7 @@ def test_persist_ai_run_writes_prompt_version() -> None:
     db = get_session_factory()()
     try:
         store = LeadStore(db)
-        _, lead_id = store.open_channel_lead(
-            channel=Channel.WEBSITE, external_id="web_prompt_ver"
-        )
+        _, lead_id = store.open_channel_lead(channel=Channel.WEBSITE, external_id="web_prompt_ver")
         db.commit()
         persist_ai_run(
             store,
@@ -346,9 +211,7 @@ def test_persist_ai_run_prompt_version_first_write_wins() -> None:
     db = get_session_factory()()
     try:
         store = LeadStore(db)
-        _, lead_id = store.open_channel_lead(
-            channel=Channel.WEBSITE, external_id="web_prompt_fww"
-        )
+        _, lead_id = store.open_channel_lead(channel=Channel.WEBSITE, external_id="web_prompt_fww")
         db.commit()
         persist_ai_run(
             store,
@@ -424,110 +287,12 @@ def test_sanitize_prompt_version(value: str, expected: str) -> None:
     assert sanitize_prompt_version(value) == expected
 
 
-def test_prompt_version_constant_from_sales_reply() -> None:
-    assert PROMPT_VERSION == SALES_REPLY_PROMPT_VERSION == "sales_reply_v12"
-
-
-def test_sales_reply_system_prompt_frozen_hash() -> None:
-    # If this fails, bump PROMPT_VERSION in sales_reply.py and ai_runs.py and update the hash.
-    digest = hashlib.sha256(_SYSTEM_PROMPT.encode("utf-8")).hexdigest()
-    assert digest == _FROZEN_SYSTEM_PROMPT_SHA256
-
-
-def test_v9_system_prompt_carries_both_contracts() -> None:
-    """ADR-040: one version, two contracts. Losing either half is the merge bug."""
-    # Answer-then-ask (ADR-028), the shipped production contract.
-    assert "16. Answer then ask." in _SYSTEM_PROMPT
-    assert "PUBLISHED ASSAFWEB FACTS covers it" in _SYSTEM_PROMPT
-    # Prospect tone (ADR-040), delivery only.
-    assert "5b. PROSPECT TONE" in _SYSTEM_PROMPT
-    assert "instruction about delivery and nothing else" in _SYSTEM_PROMPT
-    # Tone loses every conflict with answer-then-ask, and buys no silence.
-    assert "A listed PROSPECT TONE buys no exemption here" in _SYSTEM_PROMPT
-    # No manufactured empathy when the detector found nothing.
-    assert "When no PROSPECT TONE is listed, do not invent a feeling" in _SYSTEM_PROMPT
-
-
-def test_v9_user_content_omits_tone_block_entirely_without_cues() -> None:
-    """A neutral visitor gets no PROSPECT TONE section at all, not an empty header."""
-    content = build_user_content(
-        action=NextAction.UNDERSTAND_WORKFLOW,
-        canned="fallback",
-        latest_message="we run a bakery in haifa",
-        channel="website",
-        context=ReplyContext(
-            knowledge=("- [published] Every launch includes a month of guidance.",)
-        ),
-    )
-    assert "PROSPECT TONE" not in content
-    assert "PUBLISHED ASSAFWEB FACTS" in content
-
-
-def test_v9_user_content_renders_knowledge_and_tone_together() -> None:
-    """Both blocks reach the model, and tone reaches it as an instruction, not a label."""
-    content = build_user_content(
-        action=NextAction.HANDLE_OBJECTION,
-        canned="fallback",
-        latest_message="How long does a launch take? This is getting ridiculous.",
-        channel="website",
-        context=ReplyContext(
-            knowledge=("- [published] Every launch includes a month of guidance.",),
-            emotional_cues=("frustrated", "overwhelmed"),
-        ),
-    )
-    assert "PUBLISHED ASSAFWEB FACTS" in content
-    assert "PROSPECT TONE" in content
-    assert "frustrated, overwhelmed" in content
-    assert "This is how to deliver, not what to say" in content
-    assert "Tone never decides whether you answer their question." in content
-
-
-def test_v9_client_graph_passes_structured_knowledge_and_tone_to_reply_port(monkeypatch) -> None:
-    """ADR-040/038: one ClientGraph retrieval supplies facts and sales compose supplies tone."""
-    def fake_execute(*args: object, **kwargs: object) -> dict[str, object]:
-        return {"hits": [{"id": "faq-1", "label": "FAQ", "text": "Published fact."}]}
-
-    monkeypatch.setattr("app.agents.client.graph.execute_capability", fake_execute)
-    init_db()
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        _, lead_id = store.open_channel_lead(
-            channel=Channel.WEBSITE, external_id="web_v9_wiring"
-        )
-        db.commit()
-        port = FakeSalesReplyPort()
-        graph = compile_client_graph(
-            store,
-            reply_port=port,
-            principal=Principal.client(source="website", actor_id="web_v9_wiring"),
-        )
-        graph.invoke(
-            message_to_client_state(
-                run_id="run_v9_wiring",
-                session_id="web_v9_wiring",
-                lead_id=lead_id,
-                text="This is ridiculous, what do you offer?",
-            )
-        )
-        call = port.calls[0]
-        assert call["knowledge_hits"] == [
-            {"id": "faq-1", "label": "FAQ", "text": "Published fact."}
-        ]
-        assert call["context"].emotional_cues == ("frustrated",)
-    finally:
-        db.close()
-
-
-
 def test_persist_ai_run_writes_policy_version() -> None:
     init_db()
     db = get_session_factory()()
     try:
         store = LeadStore(db)
-        _, lead_id = store.open_channel_lead(
-            channel=Channel.WEBSITE, external_id="web_policy_ver"
-        )
+        _, lead_id = store.open_channel_lead(channel=Channel.WEBSITE, external_id="web_policy_ver")
         db.commit()
         persist_ai_run(
             store,
@@ -680,9 +445,7 @@ def test_persist_ai_run_stores_latency_ms() -> None:
     db = get_session_factory()()
     try:
         store = LeadStore(db)
-        _, lead_id = store.open_channel_lead(
-            channel=Channel.WEBSITE, external_id="web_latency"
-        )
+        _, lead_id = store.open_channel_lead(channel=Channel.WEBSITE, external_id="web_latency")
         db.commit()
         persist_ai_run(
             store,
@@ -722,9 +485,7 @@ def test_persist_ai_run_stores_automation_mode_shadow() -> None:
     db = get_session_factory()()
     try:
         store = LeadStore(db)
-        _, lead_id = store.open_channel_lead(
-            channel=Channel.WEBSITE, external_id="web_auto_shadow"
-        )
+        _, lead_id = store.open_channel_lead(channel=Channel.WEBSITE, external_id="web_auto_shadow")
         db.commit()
         persist_ai_run(
             store,
@@ -750,9 +511,7 @@ def test_persist_ai_run_stores_empty_automation_mode_for_bogus() -> None:
     db = get_session_factory()()
     try:
         store = LeadStore(db)
-        _, lead_id = store.open_channel_lead(
-            channel=Channel.WEBSITE, external_id="web_auto_bogus"
-        )
+        _, lead_id = store.open_channel_lead(channel=Channel.WEBSITE, external_id="web_auto_bogus")
         db.commit()
         persist_ai_run(
             store,
@@ -778,9 +537,7 @@ def test_persist_ai_run_stores_automation_mode_hybrid() -> None:
     db = get_session_factory()()
     try:
         store = LeadStore(db)
-        _, lead_id = store.open_channel_lead(
-            channel=Channel.WEBSITE, external_id="web_auto_hybrid"
-        )
+        _, lead_id = store.open_channel_lead(channel=Channel.WEBSITE, external_id="web_auto_hybrid")
         db.commit()
         persist_ai_run(
             store,
@@ -806,9 +563,7 @@ def test_persist_ai_run_automation_mode_first_write_wins() -> None:
     db = get_session_factory()()
     try:
         store = LeadStore(db)
-        _, lead_id = store.open_channel_lead(
-            channel=Channel.WEBSITE, external_id="web_auto_fww"
-        )
+        _, lead_id = store.open_channel_lead(channel=Channel.WEBSITE, external_id="web_auto_fww")
         db.commit()
         persist_ai_run(
             store,
@@ -845,9 +600,7 @@ def test_persist_tool_outcome_passes_latency_ms() -> None:
     db = get_session_factory()()
     try:
         store = LeadStore(db)
-        _, lead_id = store.open_channel_lead(
-            channel=Channel.WEBSITE, external_id="web_tool_lat"
-        )
+        _, lead_id = store.open_channel_lead(channel=Channel.WEBSITE, external_id="web_tool_lat")
         db.commit()
         outcome = ToolOutcome(tool="calendar_find_free_slots", status="ok", result_count=2)
         persist_tool_outcome(

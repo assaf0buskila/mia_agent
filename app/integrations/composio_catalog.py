@@ -207,6 +207,14 @@ class CatalogTool:
     version: str = ""
 
 
+@dataclass(frozen=True)
+class ActiveConnectionSnapshot:
+    connected_account_id: str
+    toolkit: str
+    status: str
+    is_disabled: bool
+
+
 class ComposioCatalog:
     """Small REST adapter. Results are cached process-wide, never in prompts."""
 
@@ -310,6 +318,67 @@ class ComposioCatalog:
         self._toolkits_cache[cache_key] = (monotonic() + _CACHE_TTL_SECONDS, result)
         self._active_lookup_authoritative = True
         return result
+
+    def active_connection_snapshot(
+        self, toolkit: str
+    ) -> ActiveConnectionSnapshot | None:
+        """Return one exact current account binding, bypassing process caches.
+
+        Tool execution does not identify a connected account explicitly, so multiple
+        active accounts for the same toolkit are ambiguous and cannot support an exact
+        approval.
+        """
+        expected = toolkit.strip().upper()
+        if not expected:
+            return None
+        matches: list[ActiveConnectionSnapshot] = []
+        cursor = ""
+        seen_cursors: set[str] = set()
+        while True:
+            params = {
+                "user_ids": self._user_id,
+                "statuses": "ACTIVE",
+                "limit": str(_PAGE_LIMIT),
+            }
+            if cursor:
+                params["cursor"] = cursor
+            body = self._request("GET", "/connected_accounts", params=params)
+            if body is None:
+                return None
+            for item in body.get("items", []):
+                if not isinstance(item, dict):
+                    continue
+                raw_toolkit = item.get("toolkit")
+                slug = raw_toolkit.get("slug") if isinstance(raw_toolkit, dict) else None
+                account_id = item.get("id")
+                if (
+                    item.get("user_id") == self._user_id
+                    and item.get("status") == "ACTIVE"
+                    and item.get("is_disabled") is False
+                    and isinstance(slug, str)
+                    and slug.strip().upper() == expected
+                    and isinstance(account_id, str)
+                    and account_id.strip()
+                ):
+                    matches.append(
+                        ActiveConnectionSnapshot(
+                            connected_account_id=account_id.strip(),
+                            toolkit=expected,
+                            status="ACTIVE",
+                            is_disabled=False,
+                        )
+                    )
+            next_cursor = body.get("next_cursor")
+            if (
+                not isinstance(next_cursor, str)
+                or not next_cursor
+                or next_cursor in seen_cursors
+            ):
+                break
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
+        unique = {item.connected_account_id: item for item in matches}
+        return next(iter(unique.values())) if len(unique) == 1 else None
 
     @staticmethod
     def _schema(item: dict[str, Any]) -> dict[str, Any]:
@@ -436,8 +505,16 @@ class ComposioCatalog:
         self._detail_cache[key] = (monotonic() + _CACHE_TTL_SECONDS, detail)
         return detail
 
-    def execute(self, tool: CatalogTool, arguments: dict[str, Any]) -> dict[str, Any] | None:
+    def execute(
+        self,
+        tool: CatalogTool,
+        arguments: dict[str, Any],
+        *,
+        connected_account_id: str | None = None,
+    ) -> dict[str, Any] | None:
         payload: dict[str, Any] = {"user_id": self._user_id, "arguments": arguments}
+        if connected_account_id:
+            payload["connected_account_id"] = connected_account_id
         if tool.version:
             payload["version"] = tool.version
         body = self._request("POST", f"/tools/execute/{tool.slug}", json=payload)
@@ -447,8 +524,42 @@ class ComposioCatalog:
 
     # Kept as the narrow read-facing name for existing callers.  Side-effect callers
     # must use the approval-bound domain workflow, never this compatibility method.
-    def execute_read(self, tool: CatalogTool, arguments: dict[str, Any]) -> dict[str, Any] | None:
-        return self.execute(tool, arguments)
+    def execute_read(
+        self,
+        tool: CatalogTool,
+        arguments: dict[str, Any],
+        *,
+        connected_account_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        return self.execute(
+            tool,
+            arguments,
+            connected_account_id=connected_account_id,
+        )
+
+
+VERIFIED_COMPOSIO_READ_SLUGS: frozenset[str] = frozenset(
+    {
+        "GMAIL_FETCH_EMAILS",
+        "GMAIL_FETCH_MESSAGE_BY_MESSAGE_ID",
+        "GMAIL_GET_DRAFT",
+        "GOOGLECALENDAR_EVENTS_GET",
+        "GOOGLECALENDAR_EVENTS_LIST",
+        "GOOGLECALENDAR_FIND_FREE_SLOTS",
+        "GOOGLESHEETS_GET_SHEET_NAMES",
+        "GOOGLESHEETS_VALUES_GET",
+        "GOOGLE_ANALYTICS_LIST_ACCOUNT_SUMMARIES",
+        "GOOGLE_ANALYTICS_LIST_CONVERSION_EVENTS",
+        "GOOGLE_ANALYTICS_RUN_PIVOT_REPORT",
+        "GOOGLE_SEARCH_CONSOLE_INSPECT_URL",
+        "GOOGLE_SEARCH_CONSOLE_LIST_SITES",
+        "GOOGLE_SEARCH_CONSOLE_SEARCH_ANALYTICS_QUERY",
+        "INSTAGRAM_GET_IG_MEDIA_INSIGHTS",
+        "INSTAGRAM_GET_IG_USER_MEDIA",
+        "LINKEDIN_GET_MY_INFO",
+        "LINKEDIN_GET_MY_PROFILE",
+    }
+)
 
 
 def risk_for_slug(slug: str, toolkit: str = "") -> RiskLevel:
@@ -472,7 +583,7 @@ def risk_for_slug(slug: str, toolkit: str = "") -> RiskLevel:
     # example LIST_AND_JOIN). Without provider risk metadata, refuse the ambiguity.
     if words & _COMPOUND_WORDS:
         return RiskLevel.R3_COMMERCIAL
-    if words & _READ_WORDS:
+    if slug.upper() in VERIFIED_COMPOSIO_READ_SLUGS:
         return RiskLevel.R0_READ
     return RiskLevel.R3_COMMERCIAL
 

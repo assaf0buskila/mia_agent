@@ -1,44 +1,86 @@
-name: ci
+name: Mia v2 checks
 
 on:
-  push:
   pull_request:
+  push:
+    branches: [master]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: mia-v2-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  MIA_ENV: test
+  MIA_DATABASE_URL: "sqlite:///:memory:"
+
 jobs:
-  test:
+  checks:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.8.15"
           python-version: "3.12"
-      - run: python scripts/assert_origin_bind.py
-      - run: uv sync --group dev
+      - run: uv sync --frozen --group dev
+      - run: uv run python scripts/assert_origin_bind.py
       - run: uv run ruff check app tests
-      - run: uv run pytest
+      - run: node --check app/web/ask_mia.js
+      - run: uv run pytest --basetemp=.cache/pytest-ci
 
-  image:
+  postgres:
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: python3 scripts/assert_origin_bind.py
-      - run: docker build -f deploy/Dockerfile -t mia:ci .
-
-  deploy:
-    needs: [test, image]
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: python3 scripts/assert_origin_bind.py
-      - name: Fail closed without AWS
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.6-pg18-trixie
         env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: mia_v2
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d mia_v2"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      MIA_DATABASE_URL: postgresql+psycopg://postgres@localhost:5432/mia_v2
+      MIA_TEST_POSTGRES_URL: postgresql+psycopg://postgres@localhost:5432/mia_v2
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.8.15"
+          python-version: "3.12"
+      - run: uv sync --frozen --group dev
+      - run: uv run python scripts/assert_origin_bind.py
+      - name: Fresh schema and repeat migration
         run: |
-          if [ -z "${AWS_ACCESS_KEY_ID}" ]; then
-            echo "fail-closed: AWS credentials missing; refusing deploy"
-            exit 1
-          fi
-          echo "AWS present. This workflow still does not update ECS. Operator cut is scripts/deploy_ecs_revision.py after a green CI SHA."
-          exit 1
+          uv run mia-migrate
+          uv run mia-migrate
+      - name: PostgreSQL concurrency and migration behavior
+        run: uv run pytest tests/unit/test_crm_v2.py tests/unit/test_v2_migration_postgres.py tests/unit/test_website_v2_postgres.py --basetemp=.cache/pytest-postgres-ci
+
+  container:
+    runs-on: ubuntu-latest
+    needs: [checks, postgres]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - run: python scripts/assert_origin_bind.py
+      - run: docker build -f deploy/Dockerfile --build-arg MIA_BUILD_SHA="${{ github.sha }}" -t mia:ci .
+      - name: Nonroot startup smoke
+        run: |
+          docker run --rm -d --name mia-ci -p 127.0.0.1:8000:8000 -e MIA_ENV=test -e MIA_DATABASE_URL=sqlite:///:memory: mia:ci
+          trap 'docker stop mia-ci' EXIT
+          curl --fail --retry 12 --retry-connrefused --retry-delay 2 http://127.0.0.1:8000/health/live

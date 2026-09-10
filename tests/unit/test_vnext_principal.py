@@ -104,7 +104,6 @@ async def test_owner_mint_rejects_empty_or_non_numeric_allowlists_before_side_ef
         search_console_port=object(),
         ga4_port=object(),
         seo_audit_port=object(),
-        owner_reply_port=object(),
     )
     for owner_ids in (set(), {"not-numeric"}, {"456"}):
         result = await process_owner_item(owner_ids=owner_ids, **base)  # type: ignore[arg-type]
@@ -119,21 +118,7 @@ async def test_owner_batch_rejects_before_constructing_default_adapters(
     def forbidden(*_args, **_kwargs):
         raise AssertionError("unauthorized owner batch must not construct an adapter")
 
-    for name in (
-        "get_settings",
-        "build_calendar_port",
-        "build_calendar_agenda_port",
-        "build_gmail_port",
-        "build_sheets_port",
-        "build_instagram_insights_port",
-        "build_research_port",
-        "build_linkedin_port",
-        "build_search_console_port",
-        "build_ga4_port",
-        "build_seo_audit_port",
-        "build_owner_reply_port",
-    ):
-        monkeypatch.setattr(owner, name, forbidden)
+    monkeypatch.setattr(owner, "get_settings", forbidden)
     result = await process_owner_texts(
         provider="telegram",
         channel=Channel.TELEGRAM,

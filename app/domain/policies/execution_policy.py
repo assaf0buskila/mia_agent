@@ -89,15 +89,11 @@ _REGISTRY: dict[str, ActionPolicy] = {
     CapabilityId.SALES_REPLY.value: _ai_auto(
         CapabilityId.SALES_REPLY, risk=RiskLevel.R2_CUSTOMER_MESSAGE
     ),
-    CapabilityId.OWNER_REPLY.value: _ai_auto(
-        CapabilityId.OWNER_REPLY, risk=RiskLevel.R1_LOW_WRITE
-    ),
     CapabilityId.HUMANITY_LINTER.value: _det(
         CapabilityId.HUMANITY_LINTER, risk=RiskLevel.R0_READ
     ),
     CapabilityId.LANGGRAPH.value: _det(CapabilityId.LANGGRAPH, risk=RiskLevel.R0_READ),
     CapabilityId.WEBSITE.value: _det(CapabilityId.WEBSITE, risk=RiskLevel.R1_LOW_WRITE),
-    CapabilityId.WHATSAPP.value: _det(CapabilityId.WHATSAPP, risk=RiskLevel.R1_LOW_WRITE),
     CapabilityId.TELEGRAM.value: _det(CapabilityId.TELEGRAM, risk=RiskLevel.R1_LOW_WRITE),
     CapabilityId.VOICE_STT.value: _ai_auto(CapabilityId.VOICE_STT, risk=RiskLevel.R0_READ),
     CapabilityId.INSTAGRAM.value: _det(CapabilityId.INSTAGRAM, risk=RiskLevel.R1_LOW_WRITE),
@@ -117,25 +113,15 @@ _REGISTRY: dict[str, ActionPolicy] = {
     ),
     CapabilityId.RESEARCH.value: _det(CapabilityId.RESEARCH, risk=RiskLevel.R0_READ),
     CapabilityId.LINKEDIN.value: _det(CapabilityId.LINKEDIN, risk=RiskLevel.R0_READ),
-    CapabilityId.OWNER_LEARNING.value: _det(
-        CapabilityId.OWNER_LEARNING, risk=RiskLevel.R1_LOW_WRITE
-    ),
     CapabilityId.OWNER_BRIEF.value: _det(
         CapabilityId.OWNER_BRIEF, risk=RiskLevel.R1_LOW_WRITE
     ),
     CapabilityId.OWNER_WEEKLY.value: _det(
         CapabilityId.OWNER_WEEKLY, risk=RiskLevel.R1_LOW_WRITE
     ),
-    CapabilityId.GRAPH_LAB.value: _det(CapabilityId.GRAPH_LAB, risk=RiskLevel.R0_READ),
     CapabilityId.DEMO_MODE.value: _det(CapabilityId.DEMO_MODE, risk=RiskLevel.R0_READ),
     CapabilityId.FOLLOW_UP.value: _det(CapabilityId.FOLLOW_UP, risk=RiskLevel.R1_LOW_WRITE),
     CapabilityId.DUE_SCAN.value: _det(CapabilityId.DUE_SCAN, risk=RiskLevel.R1_LOW_WRITE),
-    CapabilityId.RECONCILIATION.value: _det(
-        CapabilityId.RECONCILIATION, risk=RiskLevel.R1_LOW_WRITE
-    ),
-    CapabilityId.CONVERSATION_KILL.value: _det(
-        CapabilityId.CONVERSATION_KILL, risk=RiskLevel.R1_LOW_WRITE
-    ),
     CapabilityId.MEETING_BRIEF.value: _det(
         CapabilityId.MEETING_BRIEF, risk=RiskLevel.R1_LOW_WRITE
     ),
@@ -171,29 +157,20 @@ _REGISTRY: dict[str, ActionPolicy] = {
     CapabilityId.FDE_SHADOW.value: _det(
         CapabilityId.FDE_SHADOW, risk=RiskLevel.R1_LOW_WRITE
     ),
-    CapabilityId.FDE_FEEDBACK.value: _det(
-        CapabilityId.FDE_FEEDBACK, risk=RiskLevel.R1_LOW_WRITE
-    ),
     CapabilityId.FDE_VALUE.value: _det(
         CapabilityId.FDE_VALUE, risk=RiskLevel.R1_LOW_WRITE
     ),
     CapabilityId.FDE_FAILURE_POLICY.value: _det(
         CapabilityId.FDE_FAILURE_POLICY, risk=RiskLevel.R0_READ
     ),
-    CapabilityId.FDE_HUMAN_TAKEOVER.value: _det(
-        CapabilityId.FDE_HUMAN_TAKEOVER, risk=RiskLevel.R1_LOW_WRITE
-    ),
     CapabilityId.FDE_IDEMPOTENCY.value: _det(
         CapabilityId.FDE_IDEMPOTENCY, risk=RiskLevel.R1_LOW_WRITE
     ),
-    CapabilityId.PRELOADED_TOOLS.value: _det(
-        CapabilityId.PRELOADED_TOOLS, risk=RiskLevel.R0_READ
-    ),
-    CapabilityId.MODEL_TASK_CLASSES.value: _det(
-        CapabilityId.MODEL_TASK_CLASSES, risk=RiskLevel.R0_READ
-    ),
     CapabilityId.FRESHNESS_POLICY.value: _det(
         CapabilityId.FRESHNESS_POLICY, risk=RiskLevel.R0_READ
+    ),
+    CapabilityId.OWNER_AGENT.value: _ai_auto(
+        CapabilityId.OWNER_AGENT, risk=RiskLevel.R0_READ
     ),
 }
 

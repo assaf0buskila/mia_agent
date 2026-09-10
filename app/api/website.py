@@ -1,90 +1,49 @@
+from __future__ import annotations
+
 import asyncio
+import json
 import logging
 import re
-from collections.abc import Callable
-from datetime import UTC, datetime
+from hashlib import sha256
 from pathlib import Path
-from time import perf_counter
-from urllib.parse import unquote, urlsplit
+from urllib.parse import unquote
 from uuid import uuid4
 
-from fastapi import (
-    APIRouter,
-    BackgroundTasks,
-    Depends,
-    File,
-    HTTPException,
-    Query,
-    UploadFile,
-)
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Query, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from app.api.deps import (
-    get_db,
-    get_sheets_port,
-    get_telegram_port,
-    get_transcription_port,
-)
+from app.api.deps import get_db, get_transcription_port
 from app.core.config import Settings, get_settings
 from app.core.demo import demo_mode_active
-from app.core.logging import log_comm
 from app.core.public_website import public_website_guard
 from app.db.session import get_session_factory
 from app.db.store import LeadStore
-from app.domain.ai_runs import elapsed_ms, persist_ai_run
 from app.domain.attribution import sanitize_attribution
 from app.domain.behavior import CLIENT_BEHAVIOR_KINDS, sanitize_client_behavior
 from app.domain.events import (
     Channel,
     build_attribution_event,
     build_behavior_event,
-    build_message_in_event,
     build_message_out_event,
-    persist_tool_outcome,
-    stamp_correlation,
-    transcription_outcome,
-)
-from app.domain.handoff.delivery import (
-    KIND_WEBSITE_HANDOFF_DELIVERY,
-    WEBSITE_HANDOFF_DELIVERY_KINDS,
-    website_ping_scope,
 )
 from app.domain.handoff.tokens import click_to_chat_url
 from app.domain.tools import AdapterHttpError
-from app.integrations.base import DisabledMessagePort, MessagePort
-from app.integrations.sheets import SheetsPort
-from app.integrations.transcribe import (
-    TranscriptionError,
-    TranscriptionPort,
-    TranscriptResult,
+from app.integrations.transcribe import TranscriptionError, TranscriptionPort, TranscriptResult
+from app.surfaces.site_public import site_opening
+from app.surfaces.site_v2 import (
+    begin_site_message,
+    complete_site_message_error,
+    create_site_session,
+    finish_site_session,
+    require_site_credential,
+    run_site_v2_turn,
+    site_delivery_status,
 )
-from app.services.notifications import OwnerTelegramDelivery
-from app.surfaces.crm import build_contacts_crm
-from app.surfaces.site import (
-    SiteBook,
-    SiteSession,
-    dump_site_session,
-    load_site_session,
-    ping_assaf_delivery_async,
-    run_site_turn,
-    site_book,
-    site_opening,
-)
-from app.surfaces.site_policy import (
-    KNOWLEDGE_TOOL,
-    PublishedFact,
-    classify_site_intent,
-    facts_from_knowledge_hits,
-    is_filler,
-    should_retrieve_published_facts,
-)
-from app.surfaces.site_reply import build_site_reply_port
 
 router = APIRouter(prefix="/v1/website", tags=["website"])
 _log = logging.getLogger("mia.comm")
-
 _WIDGET_PATH = Path(__file__).resolve().parent.parent / "web" / "ask_mia.js"
 _MAX_AUDIO_BYTES = 16_000_000
 _VOICE_MIME_ALLOW = frozenset(
@@ -119,10 +78,12 @@ class SessionOut(BaseModel):
     session_id: str
     lead_id: str
     customer_id: str
+    session_credential: str
 
 
 class MessageIn(BaseModel):
     text: str = Field(min_length=1, max_length=4000)
+    client_message_id: str = Field(default="", max_length=120)
     name: str = Field(default="", max_length=80)
     phone: str = Field(default="", max_length=40)
     email: str = Field(default="", max_length=120)
@@ -133,19 +94,12 @@ class MessageOut(BaseModel):
     lead_id: str
     next_action: str
     message: str
+    delivery_status: str = "none"
     whatsapp_url: str | None = None
 
 
 class VoiceMessageOut(MessageOut):
     heard: str
-
-
-def _durable_site_snapshot(store: LeadStore, session_id: str) -> SiteSession | None:
-    """Return committed website state without mutating a process-local active turn."""
-    snapshot = SiteSession(session_id=session_id)
-    if not load_site_session(snapshot, store.load_website_session_state(session_id)):
-        return None
-    return snapshot
 
 
 class WebsiteConfigOut(BaseModel):
@@ -154,7 +108,6 @@ class WebsiteConfigOut(BaseModel):
     widget: str
     opening: str
     demo: bool
-    # WhatsApp is offered only after phone or email exists. Config never pre-shows it.
     whatsapp_url: str | None = None
 
 
@@ -182,6 +135,143 @@ class EndSessionOut(BaseModel):
     finalized: bool
 
 
+def _run_v2_message_transaction(
+    *,
+    settings: Settings,
+    session_id: str,
+    credential: str | None,
+    client_message_id: str,
+    payload: dict[str, str],
+    text: str,
+    transcript: TranscriptResult | None = None,
+    error_message: str = "",
+) -> tuple[dict[str, object], bool]:
+    """Own the complete synchronous transaction on one worker thread."""
+    with get_session_factory()() as worker_db, worker_db.begin():
+        _state, replay = begin_site_message(
+            worker_db,
+            session_id=session_id,
+            credential=credential,
+            client_message_id=client_message_id,
+            payload=payload,
+        )
+        if replay is not None:
+            return replay, True
+        if transcript is not None:
+            LeadStore(worker_db).save_transcript(
+                provider="website_v2",
+                provider_event_id=f"{session_id}:v2:{client_message_id}",
+                channel=Channel.WEBSITE.value,
+                external_id=session_id,
+                actor_role="prospect",
+                transcript=text,
+                stt_provider=transcript.stt_provider,
+                stt_model=transcript.stt_model,
+                language=transcript.language,
+                duration_ms=transcript.duration_ms,
+                confidence=transcript.confidence,
+            )
+        if error_message:
+            out = complete_site_message_error(
+                worker_db,
+                session_id=session_id,
+                credential=credential,
+                client_message_id=client_message_id,
+                message=error_message,
+            )
+        else:
+            out = run_site_v2_turn(
+                worker_db,
+                settings=settings,
+                session_id=session_id,
+                credential=credential,
+                client_message_id=client_message_id,
+                text=text,
+                name=payload.get("name", ""),
+                phone=payload.get("phone", ""),
+                email=payload.get("email", ""),
+                date=payload.get("date", ""),
+            )
+        return {
+            "lead_id": "",
+            "next_action": out.next_action,
+            "message": out.message,
+            "delivery_status": out.delivery_status or "none",
+            "whatsapp_url": out.whatsapp_url,
+        }, False
+
+
+def _create_v2_handoff_transaction(
+    *, session_id: str, credential: str | None, settings: Settings
+) -> HandoffOut:
+    with get_session_factory()() as worker_db, worker_db.begin():
+        row = require_site_credential(worker_db, session_id, credential, lock=True)
+        try:
+            state = json.loads(row.state_json or "{}")
+        except (TypeError, ValueError):
+            state = {}
+        if not isinstance(state, dict) or not state.get("captured"):
+            raise HTTPException(status_code=409, detail="phone or email required")
+        store = LeadStore(worker_db)
+        raw_token, expires_at = store.issue_handoff_token(session_id, session_id)
+        _persist_behavior(store, session_id=session_id, payload={"kind": "whatsapp_handoff"})
+        return HandoffOut(
+            token=raw_token,
+            expires_at=expires_at,
+            whatsapp_url=click_to_chat_url(settings.whatsapp_click_to_chat, raw_token) or None,
+            notification_status=site_delivery_status(worker_db, row),
+        )
+
+
+def _finish_v2_session_transaction(*, session_id: str, credential: str | None) -> bool:
+    with get_session_factory()() as worker_db, worker_db.begin():
+        return finish_site_session(worker_db, session_id, credential)
+
+
+def _require_v2_session(
+    db: Session, session_id: str, credential: str | None, *, lock: bool = False
+):
+    store = LeadStore(db)
+    if not store.website_session_exists(session_id):
+        raise HTTPException(status_code=404, detail="session not found")
+    try:
+        return require_site_credential(db, session_id, credential, lock=lock)
+    except HTTPException as exc:
+        if exc.status_code == 404:
+            raise HTTPException(
+                status_code=401,
+                detail="session credential required; start a new session",
+            ) from exc
+        raise
+
+
+def _persist_behavior(store: LeadStore, *, session_id: str, payload: dict[str, str]) -> None:
+    store.save_canonical_event(
+        provider="website_v2",
+        event=build_behavior_event(session_id=session_id, lead_id="", payload=payload),
+    )
+
+
+def _safe_acquisition_context(raw: dict[str, str | None]) -> dict[str, str]:
+    cleaned: dict[str, str] = {}
+    for key, value in raw.items():
+        try:
+            cleaned.update(sanitize_attribution({key: value}))
+        except ValueError:
+            continue
+    result: dict[str, str] = {}
+    for key, value in cleaned.items():
+        decoded = unquote(value)
+        if any(word in decoded.casefold() for word in ("token", "secret", "password")):
+            continue
+        if any(ord(char) < 32 for char in decoded) or "@" in decoded:
+            continue
+        if key.startswith("utm_") and not re.fullmatch(r"[\w\- ]{1,80}", decoded):
+            continue
+        result[key] = value
+    return result
+
+
 def _normalize_voice_mime(content_type: str | None) -> str:
     raw = (content_type or "").split(";")[0].strip().lower()
     if not raw:
@@ -193,11 +283,9 @@ def _normalize_voice_mime(content_type: str | None) -> str:
     return raw
 
 
-# Container signatures. The provider identifies audio by filename and content type, so
-# a truthful label is the difference between a transcript and silence.
 _AUDIO_MAGIC: tuple[tuple[bytes, int, str], ...] = (
     (b"OggS", 0, "audio/ogg"),
-    (b"\x1a\x45\xdf\xa3", 0, "audio/webm"),  # EBML: WebM and Matroska
+    (b"\x1a\x45\xdf\xa3", 0, "audio/webm"),
     (b"ftyp", 4, "audio/mp4"),
     (b"moov", 4, "audio/mp4"),
     (b"RIFF", 0, "audio/wav"),
@@ -206,50 +294,34 @@ _AUDIO_MAGIC: tuple[tuple[bytes, int, str], ...] = (
 
 
 def sniff_audio_container(audio: bytes) -> str:
-    """The container the bytes actually are, or "" when nothing matches.
-
-    The browser's label cannot be trusted. `MediaRecorder` leaves `blob.type` empty on
-    several browsers, and the widget then assumes webm -- so a Firefox recording, which
-    is ogg/opus, arrives labelled `audio/webm` and named `note.webm`. The provider
-    honours that label, fails to demux, and returns empty text, which surfaces to the
-    visitor as "I did not hear that" with nothing wrong with the audio or the mic.
-
-    Verified against production: the same opus bytes transcribe as `audio/ogg` and come
-    back empty as `audio/webm`.
-    """
     if not audio:
         return ""
     for signature, offset, mime in _AUDIO_MAGIC:
         if audio[offset : offset + len(signature)] == signature:
             return mime
-    # ADTS AAC frame sync (12 sync bits). Must be checked before MP3's 11-bit sync.
     if len(audio) >= 2 and audio[0] == 0xFF and (audio[1] & 0xF6) == 0xF0:
         return "audio/aac"
-    # MPEG audio frame sync, for mp3 without an ID3 header.
     if len(audio) >= 2 and audio[0] == 0xFF and (audio[1] & 0xE0) == 0xE0:
         return "audio/mpeg"
     return ""
 
 
 def _voice_filename(mime: str) -> str:
-    if mime == "audio/mp4":
-        return "note.mp4"
-    if mime in {"audio/mpeg", "audio/mp3"}:
-        return "note.mp3"
-    if mime == "audio/ogg":
-        return "note.ogg"
-    if mime in {"audio/wav", "audio/x-wav"}:
-        return "note.wav"
-    if mime in {"audio/aac", "audio/m4a"}:
-        return "note.m4a"
-    return "note.webm"
+    return {
+        "audio/mp4": "note.mp4",
+        "audio/mpeg": "note.mp3",
+        "audio/mp3": "note.mp3",
+        "audio/ogg": "note.ogg",
+        "audio/wav": "note.wav",
+        "audio/x-wav": "note.wav",
+        "audio/aac": "note.m4a",
+        "audio/m4a": "note.m4a",
+    }.get(mime, "note.webm")
 
 
 def _log_voice_failure(
     *, session_id: str, reason: str, mime: str, size_bytes: int, detail: str = ""
 ) -> None:
-    """Say why a voice note failed. All three branches used to be silent, so a visitor
-    seeing "לא הצלחתי לשמוע" left no trace anywhere and could not be diagnosed."""
     _log.warning(
         "website voice failed session=%s reason=%s mime=%s bytes=%s detail=%s",
         session_id,
@@ -269,448 +341,9 @@ async def _read_audio_capped(upload: UploadFile) -> bytes:
             break
         total += len(chunk)
         if total > _MAX_AUDIO_BYTES:
-            del chunks
             raise HTTPException(status_code=413, detail="audio too large")
         chunks.append(chunk)
     return b"".join(chunks)
-
-
-def _persist_behavior(
-    store: LeadStore,
-    *,
-    session_id: str,
-    payload: dict[str, str],
-) -> None:
-    store.save_canonical_event(
-        provider="website",
-        event=build_behavior_event(
-            session_id=session_id,
-            lead_id="",
-            payload=payload,
-        ),
-    )
-
-
-def _safe_acquisition_context(raw: dict[str, str | None]) -> dict[str, str]:
-    """Bounded attribution data; URL query/fragment credentials never persist."""
-    cleaned: dict[str, str] = {}
-    for key, value in raw.items():
-        try:
-            cleaned.update(sanitize_attribution({key: value}))
-        except ValueError:
-            continue
-    result: dict[str, str] = {}
-    for key, value in cleaned.items():
-        decoded = unquote(value)
-        if any(word in decoded.casefold() for word in ("token", "secret", "password")):
-            continue
-        if any(ord(char) < 32 for char in decoded) or "@" in decoded:
-            continue
-        if key.startswith("utm_"):
-            if not re.fullmatch(r"[\w\- ]{1,80}", decoded):
-                continue
-        result[key] = value
-    return result
-
-
-def process_website_session(
-    store: LeadStore,
-    *,
-    settings: Settings,
-    sheets: SheetsPort | None = None,
-    utm_source: str | None = None,
-    utm_medium: str | None = None,
-    utm_campaign: str | None = None,
-    utm_content: str | None = None,
-    landing_page: str | None = None,
-    referrer: str | None = None,
-    page_section: str | None = None,
-) -> SessionOut:
-    del sheets
-    session_id = f"web_{uuid4().hex[:16]}"
-    customer_id = store.open_website_session(session_id)
-    live_session = site_book().open(session_id)
-    attribution = _safe_acquisition_context(
-        {
-            "utm_source": utm_source,
-            "utm_medium": utm_medium,
-            "utm_campaign": utm_campaign,
-            "utm_content": utm_content,
-            "landing_page": landing_page,
-            "referrer": referrer,
-        }
-    )
-    live_session.acquisition_context = attribution
-    live_session.page_path = urlsplit(attribution.get("landing_page", "")).path[:200]
-    safe_section = sanitize_client_behavior(kind="section_viewed", section=page_section)
-    live_session.page_section = safe_section.get("section", "") if safe_section else ""
-    incoming = build_message_in_event(
-        provider="website",
-        channel=Channel.WEBSITE,
-        provider_event_id=f"{session_id}:open",
-        conversation_id=session_id,
-        text="",
-        actor_role="prospect",
-        lead_id=None,
-    )
-    store.save_canonical_event(provider="website", event=incoming)
-    _persist_behavior(
-        store,
-        session_id=session_id,
-        payload={"kind": "mia_opened"},
-    )
-    if attribution:
-        store.save_canonical_event(
-            provider="website",
-            event=build_attribution_event(
-                provider="website",
-                channel=Channel.WEBSITE,
-                lead_id=None,
-                conversation_id=session_id,
-                payload=attribution,
-            ),
-        )
-    store.save_website_session_state(session_id, dump_site_session(live_session))
-    del settings
-    return SessionOut(session_id=session_id, lead_id="", customer_id=customer_id)
-
-
-def process_website_message(
-    store: LeadStore,
-    *,
-    session_id: str,
-    text: str,
-    settings: Settings,
-    sheets: SheetsPort,
-    audio_meta: TranscriptResult | None = None,
-    stt_latency_ms: int = 0,
-    name: str = "",
-    phone: str = "",
-    email: str = "",
-    date: str = "",
-    owner_port: MessagePort | None = None,
-    voice_failed: bool = False,
-    defer: Callable[[Callable[[], None]], None] | None = None,
-) -> MessageOut:
-    del owner_port
-    if not store.website_session_exists(session_id):
-        raise HTTPException(status_code=404, detail="session not found")
-    # A different worker may have committed a newer turn than this process-local
-    # cache knows about. Work on a detached book so refreshing from the authoritative
-    # row cannot overwrite another request that is currently using the cached object.
-    request_book = SiteBook()
-    session = request_book.open(session_id)
-    load_site_session(session, store.load_website_session_state(session_id))
-    cached_session = site_book().get(session_id)
-    if cached_session is not None:
-        # Burst timing is intentionally process-local and is not business state.
-        # Carry only that ephemeral coalescing window into the detached snapshot.
-        session.burst_parts = list(cached_session.burst_parts)
-        # These completion flags are monotonic. A true process-local value may come
-        # from work that just finished; it cannot make committed business data stale.
-        session.pinged = session.pinged or cached_session.pinged
-        session.finalized = session.finalized or cached_session.finalized
-        session.crm_written = session.crm_written or cached_session.crm_written
-    turn_started = perf_counter()
-    facts, tools_ran = _published_facts_for_turn(
-        store, text, voice_failed=voice_failed, settings=settings
-    )
-    crm = build_contacts_crm(settings, sheets)
-    # History comes from the canonical events this session already persists, so the
-    # phrasing port sees the real conversation without the site minting a lead.
-    history = tuple(store.list_conversation_turns(session_id))
-
-    def schedule_contact_write(job: Callable[[], None]) -> None:
-        def write_and_persist() -> None:
-            try:
-                job()
-            except Exception:
-                _log.warning("website CRM write failed; contact remains pending")
-                return
-            # Match the existing post-response owner notification lifecycle. Never
-            # open another connection during the request's active transaction.
-            with get_session_factory()() as effect_db:
-                effect_store = LeadStore(effect_db)
-                effect_store.merge_website_session_notification_flags(session_id, crm_written=True)
-                effect_db.commit()
-
-        if defer is not None:
-            defer(write_and_persist)
-
-    turn = run_site_turn(
-        session_id=session_id,
-        text=text,
-        settings=settings,
-        crm=crm,
-        name=name,
-        phone=phone,
-        email=email,
-        date=date,
-        facts=facts,
-        tools_ran=tools_ran,
-        voice_failed=voice_failed,
-        turns=history,
-        reply_port=build_site_reply_port(settings),
-        defer=schedule_contact_write if defer is not None else None,
-        book=request_book,
-    )
-    site_book().replace(session)
-    run_id = f"run_{uuid4().hex[:12]}"
-    provider_event_id = f"{session_id}:{uuid4().hex[:12]}"
-    website_message_in = build_message_in_event(
-        provider="website",
-        channel=Channel.WEBSITE,
-        provider_event_id=provider_event_id,
-        conversation_id=session_id,
-        text=text,
-        actor_role="prospect",
-        lead_id=None,
-    )
-    stamp_correlation(website_message_in, run_id)
-    store.save_canonical_event(
-        provider="website",
-        event=website_message_in,
-    )
-    visitor_turns = sum(1 for role, _ in session.turns if role == "visitor")
-    if visitor_turns <= 1:
-        _persist_behavior(
-            store,
-            session_id=session_id,
-            payload={"kind": "conversation_started"},
-        )
-    if turn.whatsapp_url:
-        _persist_behavior(
-            store,
-            session_id=session_id,
-            payload={"kind": "whatsapp_handoff_offered"},
-        )
-    if session.fields.has_phone_or_email() and not session.conversion_reported:
-        session.conversion_reported = True
-        _persist_behavior(
-            store,
-            session_id=session_id,
-            payload={"kind": "website_conversion"},
-        )
-    if audio_meta is not None:
-        store.save_transcript(
-            provider="website",
-            provider_event_id=provider_event_id,
-            channel=Channel.WEBSITE.value,
-            external_id=session_id,
-            actor_role="prospect",
-            transcript=text,
-            stt_provider=audio_meta.stt_provider,
-            stt_model=audio_meta.stt_model,
-            language=audio_meta.language,
-            duration_ms=audio_meta.duration_ms,
-            confidence=audio_meta.confidence,
-        )
-        if text.strip():
-            persist_tool_outcome(
-                store,
-                provider="website",
-                channel=Channel.WEBSITE,
-                inbound_provider_event_id=provider_event_id,
-                conversation_id=session_id,
-                lead_id=None,
-                outcome=transcription_outcome(
-                    transcribed=True,
-                    latency_ms=stt_latency_ms,
-                ),
-                correlation_id=run_id,
-            )
-    # Persist inside the request's own transaction. get_db commits it; a second
-    # connection here would roll this request back underneath itself.
-    store.save_website_session_state(session_id, dump_site_session(session))
-    message = (turn.reply or "").strip()
-    if not message:
-        from app.surfaces.site_policy import never_silent
-
-        message = never_silent("", "he")
-    if message:
-        website_message_out = build_message_out_event(
-            provider="website",
-            channel=Channel.WEBSITE,
-            inbound_provider_event_id=provider_event_id,
-            conversation_id=session_id,
-            text=message,
-            lead_id=None,
-        )
-        stamp_correlation(website_message_out, run_id)
-        store.save_canonical_event(provider="website", event=website_message_out)
-    # The live website turn writes its own ai_run. Until now `persist_ai_run` had a
-    # single call site on the muted WhatsApp prospect path, so the table the daily
-    # brief reports on was fed by nothing a real visitor could reach.
-    persist_ai_run(
-        store,
-        run_id=run_id,
-        lead_id=None,
-        channel=Channel.WEBSITE.value,
-        # The website's real action, not a lossy translation into NextAction. The
-        # `channel` column already says which vocabulary a row is written in, and
-        # recording OFFER_WHATSAPP for what was actually `confirm_contact` would make
-        # the funnel numbers wrong in a way nobody would ever catch.
-        next_action=turn.next_action,
-        # The switch is deliberately not named on this path: it does not gate site
-        # chat, so this turn ran regardless of it and the row says so by default.
-        sales_model=settings.sales_model,
-        openai_api_key=settings.openai_api_key,
-        sales_fallback_model=settings.sales_fallback_model,
-        gemini_api_key=settings.gemini_api_key,
-        sales_gemini_model=settings.sales_gemini_model,
-        latency_ms=elapsed_ms(turn_started),
-        tokens_in=turn.tokens_in,
-        tokens_out=turn.tokens_out,
-        automation_mode=settings.automation_mode.value,
-    )
-    log_comm(
-        channel=Channel.WEBSITE.value,
-        provider="website",
-        actor_type="business_lead",
-        direction="in",
-        external_message_id=provider_event_id,
-        conversation_id=session_id,
-        policy_result=turn.next_action,
-        latency_ms=elapsed_ms(turn_started),
-        success=True,
-        automation_mode=settings.automation_mode.value,
-    )
-    return MessageOut(
-        lead_id="",
-        next_action=turn.next_action,
-        message=message,
-        whatsapp_url=turn.whatsapp_url,
-    )
-
-
-def _published_facts_for_turn(
-    store: LeadStore,
-    text: str,
-    *,
-    voice_failed: bool,
-    settings: Settings | None = None,
-) -> tuple[tuple[PublishedFact, ...], tuple[str, ...]]:
-    """Look up assafweb.com facts only when the turn needs them. Never GSC or JSON-LD."""
-    if voice_failed or not text.strip():
-        return (), ()
-    if is_filler(text):
-        # "תודה" / "ok" classify as `other`, which is in the trigger set below, so
-        # every acknowledgement used to buy an embedding call and two table scans.
-        return (), ()
-    intent = classify_site_intent(text)
-    if not should_retrieve_published_facts(text, intent):
-        return (), ()
-    try:
-        from app.brain.context import retrieve_knowledge
-        from app.brain.embeddings import build_embedding_port
-        from app.brain.store import BrainStore
-
-        live = settings or get_settings()
-        hits = retrieve_knowledge(
-            BrainStore(store.session),
-            query=text,
-            embedding_port=build_embedding_port(live),
-            limit=3,
-            min_similarity=live.knowledge_min_similarity,
-        )
-    except Exception:
-        return (), ()
-    facts = facts_from_knowledge_hits(hits)
-    if not facts:
-        return (), ()
-    return facts, (KNOWLEDGE_TOOL,)
-
-
-async def _maybe_ping_owner(
-    *,
-    session_id: str,
-    settings: Settings,
-    owner_port: MessagePort | None,
-    force: bool = False,
-) -> OwnerTelegramDelivery:
-    if owner_port is None or isinstance(owner_port, DisabledMessagePort):
-        return OwnerTelegramDelivery(no_attempt=True)
-    # The durable claim below makes one website handoff produce one delivery per owner.
-    # This runs as a background task after the request session is gone, so both the
-    # conversation snapshot and the claim come from its own DB session.
-    db = get_session_factory()()
-    try:
-        store = LeadStore(db)
-        session = _durable_site_snapshot(store, session_id)
-        if session is None or session.nonlead or not session.fields.has_phone_or_email():
-            return OwnerTelegramDelivery(no_attempt=True)
-        if not force and not session.awaiting_ping and not session.confirmed:
-            return OwnerTelegramDelivery(no_attempt=True)
-        lead_id, notification_key = website_ping_scope(session_id)
-
-        def claim(recipient_id: str) -> bool:
-            won = store.try_claim_owner_notification_recipient_compatible(
-                kind=KIND_WEBSITE_HANDOFF_DELIVERY,
-                compatible_kinds=WEBSITE_HANDOFF_DELIVERY_KINDS,
-                lead_id=lead_id,
-                notification_key=notification_key,
-                recipient_id=recipient_id,
-                claimed_at=datetime.now(UTC).isoformat(),
-            )
-            # Commit before sending. An uncommitted claim is invisible to the other
-            # worker, which would then send the same ping.
-            db.commit()
-            return won
-
-        def release(recipient_id: str) -> None:
-            store.release_owner_notification_recipient_claim(
-                kind=KIND_WEBSITE_HANDOFF_DELIVERY,
-                lead_id=lead_id,
-                notification_key=notification_key,
-                recipient_id=recipient_id,
-            )
-            db.commit()
-
-        def confirmed(recipient_id: str) -> bool:
-            return recipient_id in store.confirmed_owner_notification_recipients(
-                kind=KIND_WEBSITE_HANDOFF_DELIVERY,
-                lead_id=lead_id,
-                notification_key=notification_key,
-            )
-
-        delivery = await ping_assaf_delivery_async(
-            settings,
-            owner_port,
-            session,
-            claim=claim,
-            release=release,
-            confirmed=confirmed,
-        )
-        outcomes_persisted = store.record_owner_notification_recipient_delivery_outcomes_durably(
-            kind=KIND_WEBSITE_HANDOFF_DELIVERY,
-            lead_id=lead_id,
-            notification_key=notification_key,
-            delivered_recipient_ids=delivery.delivered,
-            rejected_recipient_ids=delivery.rejected,
-        )
-        if not outcomes_persisted and delivery.delivered:
-            delivery = OwnerTelegramDelivery(ambiguous=delivery.delivered + delivery.ambiguous)
-        accepted_recipients = set(
-            store.confirmed_owner_notification_recipients(
-                kind=KIND_WEBSITE_HANDOFF_DELIVERY,
-                lead_id=lead_id,
-                notification_key=notification_key,
-            )
-        )
-        all_recipients = settings.telegram_owner_user_id_set()
-        if all_recipients and all_recipients <= accepted_recipients:
-            store.merge_website_session_notification_flags(session_id, pinged=True)
-        db.commit()
-    finally:
-        db.close()
-    return delivery
-
-
-def _delivery_accepted(delivery: OwnerTelegramDelivery | bool) -> bool:
-    """Keep narrow test/extension compatibility while the internal result is richer."""
-    if isinstance(delivery, bool):
-        return delivery
-    return bool(delivery.delivered) and not delivery.rejected and not delivery.ambiguous
 
 
 @router.get("/widget.js")
@@ -745,13 +378,10 @@ def website_config() -> WebsiteConfigOut:
 
 
 @router.post(
-    "/sessions",
-    response_model=SessionOut,
-    dependencies=[Depends(public_website_guard("session"))],
+    "/sessions", response_model=SessionOut, dependencies=[Depends(public_website_guard("session"))]
 )
 def create_session(
     db: Session = Depends(get_db),
-    sheets: SheetsPort = Depends(get_sheets_port),
     utm_source: str | None = Query(None, max_length=200),
     utm_medium: str | None = Query(None, max_length=200),
     utm_campaign: str | None = Query(None, max_length=200),
@@ -760,19 +390,64 @@ def create_session(
     referrer: str | None = Query(None, max_length=200),
     page_section: str | None = Query(None, max_length=200),
 ) -> SessionOut:
-    settings = get_settings()
+    session_id = str(uuid4())
     store = LeadStore(db)
-    return process_website_session(
-        store,
-        settings=settings,
-        sheets=sheets,
-        utm_source=utm_source,
-        utm_medium=utm_medium,
-        utm_campaign=utm_campaign,
-        utm_content=utm_content,
-        landing_page=landing_page,
-        referrer=referrer,
-        page_section=page_section,
+    customer_id = store.open_website_session(session_id)
+    lead_id = ""
+    safe_attribution = _safe_acquisition_context(
+        {
+            "utm_source": utm_source,
+            "utm_medium": utm_medium,
+            "utm_campaign": utm_campaign,
+            "utm_content": utm_content,
+            "landing_page": landing_page,
+            "referrer": referrer,
+        }
+    )
+    credential, _row = create_site_session(
+        db,
+        session_id=session_id,
+        page={
+            "utm_source": utm_source or "",
+            "utm_medium": utm_medium or "",
+            "utm_campaign": utm_campaign or "",
+            "utm_content": utm_content or "",
+            "landing_page": landing_page or "",
+            "referrer": referrer or "",
+            "page_section": page_section or "",
+        },
+    )
+    store.save_canonical_event(
+        provider="website_v2",
+        event=build_message_out_event(
+            provider="website_v2",
+            channel=Channel.WEBSITE,
+            inbound_provider_event_id=f"{session_id}:open",
+            conversation_id=session_id,
+            text=site_opening(),
+        ),
+    )
+    _persist_behavior(store, session_id=session_id, payload={"kind": "mia_opened"})
+    if page_section:
+        payload = sanitize_client_behavior(kind="section_view", section=page_section)
+        if payload is not None:
+            _persist_behavior(store, session_id=session_id, payload=payload)
+    if safe_attribution:
+        store.save_canonical_event(
+                provider="website_v2",
+                event=build_attribution_event(
+                    provider="website_v2",
+                    channel=Channel.WEBSITE,
+                    conversation_id=session_id,
+                    lead_id=None,
+                    payload=safe_attribution,
+                ),
+        )
+    return SessionOut(
+        session_id=session_id,
+        lead_id=lead_id,
+        customer_id=customer_id,
+        session_credential=credential,
     )
 
 
@@ -783,78 +458,39 @@ def create_session(
 )
 async def create_handoff(
     session_id: str,
+    session_credential: str | None = Header(None, alias="X-Mia-Session-Credential"),
     db: Session = Depends(get_db),
-    owner_port: MessagePort = Depends(get_telegram_port),
 ) -> HandoffOut:
-    store = LeadStore(db)
-    if not store.website_session_exists(session_id):
-        raise HTTPException(status_code=404, detail="session not found")
-    session = _durable_site_snapshot(store, session_id)
-    if session is None:
-        raise HTTPException(status_code=404, detail="session state not found")
-    site_book().replace(session)
-    if session.nonlead or not session.fields.has_phone_or_email():
-        raise HTTPException(status_code=409, detail="phone or email required")
-    settings = get_settings()
-    raw_token, expires_at = store.issue_handoff_token(session_id, session_id)
-    _persist_behavior(
-        store,
+    _require_v2_session(db, session_id, session_credential)
+    db.rollback()
+    return await asyncio.to_thread(
+        _create_v2_handoff_transaction,
         session_id=session_id,
-        payload={"kind": "whatsapp_handoff"},
-    )
-    # Request-scoped dependencies finish after Starlette background work. Close this
-    # transaction before the delivery worker opens its own connection, or PostgreSQL
-    # can leave the worker waiting on state/token rows still owned by this request.
-    db.commit()
-    delivery = await _maybe_ping_owner(
-        session_id=session_id,
-        settings=settings,
-        owner_port=owner_port,
-        force=True,
-    )
-    if _delivery_accepted(delivery):
-        notification_status = "delivered"
-    else:
-        notification_status = "failed"
-    log_comm(
-        channel=Channel.WEBSITE.value,
-        provider="telegram",
-        actor_type="owner_notification",
-        direction="out",
-        external_message_id="website_whatsapp_handoff",
-        policy_result=notification_status,
-        success=_delivery_accepted(delivery),
-        automation_mode=settings.automation_mode.value,
-    )
-    whatsapp_url = click_to_chat_url(settings.whatsapp_click_to_chat, raw_token) or None
-    return HandoffOut(
-        token=raw_token,
-        expires_at=expires_at,
-        whatsapp_url=whatsapp_url,
-        notification_status=notification_status,
+        credential=session_credential,
+        settings=get_settings(),
     )
 
 
-@router.post("/sessions/{session_id}/events", response_model=BehaviorEventOut)
+@router.post(
+    "/sessions/{session_id}/events",
+    response_model=BehaviorEventOut,
+    dependencies=[Depends(public_website_guard("event"))],
+)
 def post_behavior_event(
     session_id: str,
     body: BehaviorEventIn,
+    session_credential: str | None = Header(None, alias="X-Mia-Session-Credential"),
     db: Session = Depends(get_db),
 ) -> BehaviorEventOut:
     if body.kind not in CLIENT_BEHAVIOR_KINDS:
         raise HTTPException(status_code=422, detail="invalid behavior kind")
-    store = LeadStore(db)
-    if not store.website_session_exists(session_id):
-        raise HTTPException(status_code=404, detail="session not found")
+    _require_v2_session(db, session_id, session_credential)
     payload = sanitize_client_behavior(
-        kind=body.kind,
-        path=body.path,
-        section=body.section,
-        cta=body.cta,
+        kind=body.kind, path=body.path, section=body.section, cta=body.cta
     )
     if payload is None:
         return BehaviorEventOut(accepted=False, kind=body.kind)
-    _persist_behavior(store, session_id=session_id, payload=payload)
+    _persist_behavior(LeadStore(db), session_id=session_id, payload=payload)
     return BehaviorEventOut(accepted=True, kind=body.kind)
 
 
@@ -865,37 +501,14 @@ def post_behavior_event(
 )
 async def end_session(
     session_id: str,
+    session_credential: str | None = Header(None, alias="X-Mia-Session-Credential"),
     db: Session = Depends(get_db),
-    owner_port: MessagePort = Depends(get_telegram_port),
 ) -> EndSessionOut:
-    store = LeadStore(db)
-    if not store.website_session_exists(session_id):
-        raise HTTPException(status_code=404, detail="session not found")
-    session = _durable_site_snapshot(store, session_id)
-    if session is None:
-        raise HTTPException(status_code=404, detail="session state not found")
-    site_book().replace(session)
-    visitor_turns = [role for role, _text in session.turns if role == "visitor"]
-    if session.finalized or not visitor_turns:
-        return EndSessionOut(accepted=True, finalized=False)
-    notification_pending = (
-        not session.nonlead
-        and not session.pinged
-        and session.fields.has_phone_or_email()
-        and (session.confirmed or session.awaiting_ping)
+    _require_v2_session(db, session_id, session_credential)
+    db.rollback()
+    finalized = await asyncio.to_thread(
+        _finish_v2_session_transaction, session_id=session_id, credential=session_credential
     )
-    db.commit()
-    delivery = await _maybe_ping_owner(
-        session_id=session_id,
-        settings=get_settings(),
-        owner_port=owner_port,
-    )
-    # A partial fan-out is useful delivery evidence, but it does not finish the
-    # session: explicitly rejected recipients must remain eligible for another end.
-    refreshed = _durable_site_snapshot(store, session_id)
-    pinged = bool(refreshed and refreshed.pinged) or _delivery_accepted(delivery)
-    finalized = not notification_pending or pinged
-    store.merge_website_session_notification_flags(session_id, finalized=finalized)
     return EndSessionOut(accepted=True, finalized=finalized)
 
 
@@ -907,41 +520,33 @@ async def end_session(
 async def post_message(
     session_id: str,
     body: MessageIn,
-    background: BackgroundTasks,
+    session_credential: str | None = Header(None, alias="X-Mia-Session-Credential"),
     db: Session = Depends(get_db),
-    sheets: SheetsPort = Depends(get_sheets_port),
-    owner_port: MessagePort = Depends(get_telegram_port),
 ) -> MessageOut:
-    settings = get_settings()
-    store = LeadStore(db)
-    if not store.website_session_exists(session_id):
-        raise HTTPException(status_code=404, detail="session not found")
-    deferred_contact_writes: list[Callable[[], None]] = []
-    out = await asyncio.to_thread(
-        process_website_message,
-        store,
+    _require_v2_session(db, session_id, session_credential)
+    if not body.client_message_id.strip():
+        raise HTTPException(status_code=422, detail="client_message_id required")
+    db.rollback()
+    result, _replayed = await asyncio.to_thread(
+        _run_v2_message_transaction,
+        settings=get_settings(),
         session_id=session_id,
+        credential=session_credential,
+        client_message_id=body.client_message_id,
+        payload={
+            "text": body.text,
+            "name": body.name,
+            "phone": body.phone,
+            "email": body.email,
+            "date": body.date,
+        },
         text=body.text,
-        settings=settings,
-        sheets=sheets,
-        name=body.name,
-        phone=body.phone,
-        email=body.email,
-        date=body.date,
-        defer=deferred_contact_writes.append,
     )
-    db.commit()
-    # FastAPI runs background tasks in registration order. Notify the owner before a
-    # slow/failing CRM adapter so a spreadsheet outage cannot delay the actual handoff.
-    background.add_task(
-        _maybe_ping_owner,
-        session_id=session_id,
-        settings=settings,
-        owner_port=owner_port,
-    )
-    for write_contact in deferred_contact_writes:
-        background.add_task(write_contact)
-    return out
+    return MessageOut.model_validate(result)
+
+
+def _voice_error_message() -> str:
+    return "לא הצלחתי לשמוע את ההקלטה. אפשר לנסות שוב או לכתוב לי."
 
 
 @router.post(
@@ -951,24 +556,22 @@ async def post_message(
 )
 async def post_voice(
     session_id: str,
-    background: BackgroundTasks,
+    session_credential: str | None = Header(None, alias="X-Mia-Session-Credential"),
+    client_message_id: str = Form(""),
     db: Session = Depends(get_db),
-    sheets: SheetsPort = Depends(get_sheets_port),
     transcribe_port: TranscriptionPort = Depends(get_transcription_port),
-    owner_port: MessagePort = Depends(get_telegram_port),
     file: UploadFile = File(...),
 ) -> VoiceMessageOut:
-    settings = get_settings()
-    store = LeadStore(db)
-    if not store.website_session_exists(session_id):
-        raise HTTPException(status_code=404, detail="session not found")
+    _require_v2_session(db, session_id, session_credential)
+    if not client_message_id.strip():
+        raise HTTPException(status_code=422, detail="client_message_id required")
+    db.rollback()
     claimed = _normalize_voice_mime(file.content_type)
     audio = await _read_audio_capped(file)
     if not audio:
         raise HTTPException(status_code=400, detail="empty audio")
     audio_bytes = len(audio)
-    # Believe the bytes over the browser. A mislabelled container transcribes to
-    # nothing, and the visitor is told Mia could not hear them.
+    payload = {"audio_sha256": sha256(audio).hexdigest(), "mime": claimed}
     sniffed = sniff_audio_container(audio)
     mime = sniffed or claimed
     if sniffed and sniffed != claimed:
@@ -979,13 +582,10 @@ async def post_voice(
             sniffed,
             audio_bytes,
         )
-    started = perf_counter()
     try:
         try:
-            result = await transcribe_port.transcribe(
-                audio=audio,
-                mime_type=mime,
-                filename=_voice_filename(mime),
+            transcript = await transcribe_port.transcribe(
+                audio=audio, mime_type=mime, filename=_voice_filename(mime)
             )
         except RuntimeError:
             _log_voice_failure(
@@ -994,28 +594,17 @@ async def post_voice(
                 mime=mime,
                 size_bytes=audio_bytes,
             )
-            out = process_website_message(
-                store,
+            failed, _replayed = await asyncio.to_thread(
+                _run_v2_message_transaction,
+                settings=get_settings(),
                 session_id=session_id,
+                credential=session_credential,
+                client_message_id=client_message_id,
+                payload=payload,
                 text="",
-                settings=settings,
-                sheets=sheets,
-                voice_failed=True,
+                error_message=_voice_error_message(),
             )
-            db.commit()
-            background.add_task(
-                _maybe_ping_owner,
-                session_id=session_id,
-                settings=settings,
-                owner_port=owner_port,
-            )
-            return VoiceMessageOut(
-                lead_id=out.lead_id,
-                next_action=out.next_action,
-                message=out.message,
-                whatsapp_url=out.whatsapp_url,
-                heard="",
-            )
+            return VoiceMessageOut(heard="", **MessageOut.model_validate(failed).model_dump())
         except (TranscriptionError, AdapterHttpError) as exc:
             _log_voice_failure(
                 session_id=session_id,
@@ -1024,89 +613,47 @@ async def post_voice(
                 size_bytes=audio_bytes,
                 detail=type(exc).__name__,
             )
-            out = process_website_message(
-                store,
+            failed, _replayed = await asyncio.to_thread(
+                _run_v2_message_transaction,
+                settings=get_settings(),
                 session_id=session_id,
+                credential=session_credential,
+                client_message_id=client_message_id,
+                payload=payload,
                 text="",
-                settings=settings,
-                sheets=sheets,
-                voice_failed=True,
+                error_message=_voice_error_message(),
             )
-            db.commit()
-            background.add_task(
-                _maybe_ping_owner,
-                session_id=session_id,
-                settings=settings,
-                owner_port=owner_port,
-            )
-            return VoiceMessageOut(
-                lead_id=out.lead_id,
-                next_action=out.next_action,
-                message=out.message,
-                whatsapp_url=out.whatsapp_url,
-                heard="",
-            )
+            return VoiceMessageOut(heard="", **MessageOut.model_validate(failed).model_dump())
     finally:
         del audio
-    text = (result.text or "").strip()
+    text = (transcript.text or "").strip()
     if not text:
-        # The provider answered, with nothing in it: silence, a tap too short to carry
-        # speech, or a container it could not decode.
         _log_voice_failure(
-            session_id=session_id,
-            reason="empty_transcript",
-            mime=mime,
-            size_bytes=audio_bytes,
+            session_id=session_id, reason="empty_transcript", mime=mime, size_bytes=audio_bytes
         )
-        out = process_website_message(
-            store,
+        failed, _replayed = await asyncio.to_thread(
+            _run_v2_message_transaction,
+            settings=get_settings(),
             session_id=session_id,
+            credential=session_credential,
+            client_message_id=client_message_id,
+            payload=payload,
             text="",
-            settings=settings,
-            sheets=sheets,
-            voice_failed=True,
+            error_message=_voice_error_message(),
         )
-        db.commit()
-        background.add_task(
-            _maybe_ping_owner,
-            session_id=session_id,
-            settings=settings,
-            owner_port=owner_port,
-        )
-        return VoiceMessageOut(
-            lead_id=out.lead_id,
-            next_action=out.next_action,
-            message=out.message,
-            whatsapp_url=out.whatsapp_url,
-            heard="",
-        )
-    if len(text) > 4000:
-        text = text[:4000]
-    deferred_contact_writes: list[Callable[[], None]] = []
-    out = await asyncio.to_thread(
-        process_website_message,
-        store,
+        return VoiceMessageOut(heard="", **MessageOut.model_validate(failed).model_dump())
+    text = text[:4000]
+    out, replayed = await asyncio.to_thread(
+        _run_v2_message_transaction,
+        settings=get_settings(),
         session_id=session_id,
+        credential=session_credential,
+        client_message_id=client_message_id,
+        payload=payload,
         text=text,
-        settings=settings,
-        sheets=sheets,
-        audio_meta=result,
-        stt_latency_ms=elapsed_ms(started),
-        defer=deferred_contact_writes.append,
+        transcript=transcript,
     )
-    db.commit()
-    background.add_task(
-        _maybe_ping_owner,
-        session_id=session_id,
-        settings=settings,
-        owner_port=owner_port,
-    )
-    for write_contact in deferred_contact_writes:
-        background.add_task(write_contact)
     return VoiceMessageOut(
-        lead_id=out.lead_id,
-        next_action=out.next_action,
-        message=out.message,
-        whatsapp_url=out.whatsapp_url,
-        heard=text,
+        heard="" if replayed else text,
+        **MessageOut.model_validate(out).model_dump(),
     )

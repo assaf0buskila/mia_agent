@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from app.brain.schemas import MemoryCategory, MemoryKind, MemorySource, clamp_importance
@@ -72,6 +73,11 @@ def _remember(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     text = str(args.get("text") or "").strip()
     if not text:
         return ToolResult(ok=False, error="text is required")
+    if not _has_explicit_remember_intent(ctx.owner_text):
+        return ToolResult(
+            ok=False,
+            error="lasting memory requires an explicit remember request in this owner message",
+        )
     if not ctx.settings.memory_write_enabled:
         return ToolResult(ok=False, error="memory writing is disabled")
     try:
@@ -86,7 +92,12 @@ def _remember(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     if ctx.embedding_port.enabled():
         vectors = ctx.embedding_port.embed([text])
         vector = vectors[0] if vectors else None
-    ctx.brain.save_memory(
+    # Webhook retries and repeated model calls for one owner event are no-ops. A
+    # different owner event may deliberately reaffirm the same fact.
+    for existing in ctx.brain.list_memories(limit=200):
+        if existing.source_ref == ctx.source_ref and existing.text == text:
+            return ToolResult(ok=True, text="Already stored for this message.")
+    memory_id = ctx.brain.save_memory(
         text=text,
         kind=kind,
         category=category,
@@ -96,7 +107,41 @@ def _remember(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
         embedding=vector,
         embedding_model=ctx.embedding_port.model,
     )
+    supersedes = str(args.get("supersedes_memory_id") or "").strip()
+    if supersedes:
+        old = ctx.brain.get_memory(supersedes)
+        if old is None or not ctx.brain.supersede_memory(supersedes, replacement_id=memory_id):
+            return ToolResult(
+                ok=False,
+                error="replacement was stored but the named prior memory was not active",
+            )
     return ToolResult(ok=True, text="Stored.")
+
+
+_REMEMBER_REQUEST_RE = re.compile(
+    r"^(?:please\s+)?(?:remember\s+(?!when\b)(?:that\s+|this\s+|instead\s+)?\S|"
+    r"(?:can|could|would)\s+you\s+(?:please\s+)?remember\s+(?:that|this)\b|"
+    r"(?:save|store)\s+(?:this|that|the following).{0,20}(?:memory|remember)|"
+    r"(?:correct|update|replace)\s+(?:your\s+)?memory\s*:|"
+    r"(?:בבקשה\s+)?(?:תזכור|תזכרי|זכור|זכרי)(?:\s+(?:ש|את זה|במקום)|\s*:)|"
+    r"(?:אפשר|האם תוכל|האם תוכלי)\s+(?:ש)?(?:תזכור|תזכרי)\s+ש|"
+    r"(?:שמור|שמרי)(?:\s+(?:את זה\s+)?בזיכרון|\s*:)|"
+    r"(?:תקן|תקני|עדכן|עדכני)\s+(?:את\s+)?הזיכרון\s*:)",
+    re.IGNORECASE,
+)
+_REMEMBER_NEGATION_RE = re.compile(
+    r"(?:\b(?:do not|don't|dont|never)\s+(?:remember|save)\b|"
+    r"(?:אל|לא)\s+(?:תזכור|תזכרי|זכור|זכרי|שמור|שמרי))",
+    re.IGNORECASE,
+)
+
+
+def _has_explicit_remember_intent(owner_text: str) -> bool:
+    """Only the current authenticated owner's words can authorize lasting memory."""
+    text = owner_text.strip()
+    if not text or text.startswith(("\"", "'", "“", "‘", "`")):
+        return False
+    return bool(_REMEMBER_REQUEST_RE.search(text)) and not bool(_REMEMBER_NEGATION_RE.search(text))
 
 
 def _list_known_entities(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:

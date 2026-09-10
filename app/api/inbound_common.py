@@ -76,12 +76,23 @@ def owner_telegram_reply_markup(
     channel: Channel,
     task_type: OwnerTaskType,
     turn_approval_id: str = "",
+    turn_approval_ids: tuple[str, ...] = (),
 ) -> dict | None:
-    """One-tap approve/reject bound to the exact current-turn proposal or approval reads."""
+    """Buttons for every exact proposal created by this turn or an explicit pending read."""
     if channel is not Channel.TELEGRAM:
         return None
-    if turn_approval_id:
-        return approval_keyboard(approval_token(turn_approval_id))
+    exact_ids = tuple(
+        dict.fromkeys(
+            value.strip()
+            for value in (*turn_approval_ids, turn_approval_id)
+            if value.strip()
+        )
+    )
+    if exact_ids:
+        keyboard_rows: list[list[dict]] = []
+        for approval_id in exact_ids:
+            keyboard_rows.extend(approval_keyboard(approval_token(approval_id))["inline_keyboard"])
+        return {"inline_keyboard": keyboard_rows}
     rows = store.list_all_pending_approvals()
     if task_type is OwnerTaskType.GMAIL_DRAFT:
         rows = [row for row in rows if row.action == ACTION_GMAIL_SEND]

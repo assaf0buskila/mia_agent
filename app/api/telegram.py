@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_db, get_telegram_port, get_transcription_port
 from app.api.inbound_common import outbound_reply
+from app.capabilities.types import Principal
 from app.core.config import AutomationMode, get_settings
 from app.core.demo import demo_mode_active
 from app.core.outbound import send_inbound_reply
@@ -29,6 +30,7 @@ from app.integrations.base import MessagePort
 from app.integrations.calendar import build_calendar_port
 from app.integrations.calendar_booking import build_calendar_booking_port
 from app.integrations.gmail import build_gmail_port
+from app.integrations.sheets import build_sheets_port
 from app.integrations.telegram import (
     TelegramMediaError,
     TelegramSendError,
@@ -171,9 +173,52 @@ async def _handle_callback(
     if not decision or not token:
         return {"processed": 0, "ignored": True, "reason": "unrecognized_callback"}
     store = LeadStore(db)
-    resolved = resolve_owner_callback_result(store, decision=decision, token=token)
-    reply_text = resolved.text
-    if resolved.gmail_draft_id_to_send is not None:
+    crm_pre_synced = False
+    crm_sync_failed = False
+    crm_sync_blocked = False
+    if decision == "approve":
+        from app.services.owner_actions import (
+            read_owner_action,
+            sync_owner_crm_sheet_in_session,
+        )
+
+        pending = store.get_approval_by_approval_id(token)
+        envelope = read_owner_action(pending)
+        if envelope is not None and envelope.get("kind") in {
+            "crm.upsert",
+            "crm.activity",
+            "crm.resolve_conflict",
+        }:
+            if settings.kill_switch:
+                # The callback acknowledgement/edit is operational, but an approval
+                # callback must not initialize or read Sheets while writes are stopped.
+                # Leave the owner action pending so it can be retried after recovery.
+                crm_sync_blocked = True
+            else:
+                try:
+                    sync_owner_crm_sheet_in_session(
+                        store, sheets=build_sheets_port(settings)
+                    )
+                    crm_pre_synced = True
+                except Exception:
+                    db.rollback()
+                    crm_sync_failed = True
+
+    if crm_sync_blocked:
+        resolved = None
+        reply_text = "מתג העצירה פעיל. האישור נשאר ממתין ולא בוצע."
+    elif crm_sync_failed:
+        resolved = None
+        reply_text = "לא הצלחתי לרענן את ה-CRM. האישור נשאר ממתין ולא בוצע."
+    else:
+        resolved = resolve_owner_callback_result(
+            store,
+            decision=decision,
+            token=token,
+            principal=Principal.owner(source="telegram", actor_id=callback["from"]),
+        )
+        reply_text = resolved.text
+    if resolved is not None and resolved.gmail_draft_id_to_send is not None:
         reply_text = execute_approved_gmail_send(
             store=store,
             settings=settings,
@@ -182,7 +227,7 @@ async def _handle_callback(
             kill_switch=settings.kill_switch,
             demo_active=demo_mode_active(settings),
         )
-    if resolved.calendar_resource_id_to_execute is not None:
+    if resolved is not None and resolved.calendar_resource_id_to_execute is not None:
         reply_text = execute_approved_calendar_change(
             store=store,
             settings=settings,
@@ -192,20 +237,36 @@ async def _handle_callback(
             kill_switch=settings.kill_switch,
             demo_active=demo_mode_active(settings),
         )
-    if resolved.linkedin_resource_id_to_execute is not None:
+    if resolved is not None and resolved.linkedin_resource_id_to_execute is not None:
         reply_text = execute_approved_linkedin_write(
             store=store,
             settings=settings,
             resource_id=resolved.linkedin_resource_id_to_execute,
             kill_switch=settings.kill_switch,
         )
-    if resolved.composio_resource_id_to_execute is not None:
+    if resolved is not None and resolved.composio_resource_id_to_execute is not None:
         reply_text = execute_approved_composio_write(
             store=store,
             settings=settings,
             resource_id=resolved.composio_resource_id_to_execute,
             kill_switch=settings.kill_switch,
         )
+    if resolved is not None and resolved.owner_action_resource_id_to_execute is not None:
+        from app.services.owner_actions import execute_approved_owner_action_with_adapters
+
+        outcome = execute_approved_owner_action_with_adapters(
+            store,
+            settings=settings,
+            principal=Principal.owner(source="telegram", actor_id=callback["from"]),
+            proposal_id=resolved.owner_action_resource_id_to_execute,
+            crm_pre_synced=crm_pre_synced,
+        )
+        reply_text = outcome.text or {
+            "target_changed": "היעד השתנה. צריך להכין בקשת אישור חדשה.",
+            "already_handled": "הפעולה כבר טופלה או ממתינה לבדיקה. לא ביצעתי שוב.",
+            "unknown": "תוצאת הפעולה אינה ודאית וממתינה לבדיקה. לא ביצעתי שוב.",
+            "expired": "האישור פג. צריך להכין בקשת אישור חדשה.",
+        }.get(outcome.status, "הפעולה לא בוצעה.")
     edit = getattr(port, "edit_message_text", None)
     if callable(edit) and callback.get("message_id"):
         try:

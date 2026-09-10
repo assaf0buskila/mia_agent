@@ -11,8 +11,7 @@ from __future__ import annotations
 import json
 import re
 import unicodedata
-from dataclasses import dataclass
-from hashlib import sha256
+from dataclasses import asdict, dataclass
 from typing import Any
 
 from app.capabilities.policy import authorize, execute_capability
@@ -20,6 +19,8 @@ from app.capabilities.sheets import sheets_handlers, validate_sheets_write_args
 from app.core.errors import InvalidArguments, PermissionDenied
 from app.domain.tools import AdapterHttpError
 from app.integrations.sheets import DisabledSheetsPort, SheetsPort, build_sheets_port
+from app.services.crm_v2 import CONTACT_FIELDS, CrmError, CrmService
+from app.services.owner_actions import propose_owner_action, typed_composio_binding
 from app.tools.owner.types import (
     _NOT_CONNECTED,
     ToolContext,
@@ -130,6 +131,8 @@ def _sheets_list_tabs(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
 
 
 def _sheets_write(ctx: ToolContext, args: dict[str, Any], *, append: bool) -> ToolResult:
+    if ctx.kill_switch:
+        return ToolResult(ok=False, error="sheets write denied")
     allowed_spreadsheet_ids = ctx.settings.allowed_sheets_spreadsheet_ids()
     if not _has_bound_sheets_write_request(
         ctx.owner_text,
@@ -165,41 +168,88 @@ def _sheets_write(ctx: ToolContext, args: dict[str, Any], *, append: bool) -> To
     port = _owner_sheets_port(ctx)
     if port is None:
         return ToolResult(ok=True, text=_NOT_CONNECTED)
-    canonical = json.dumps(
-        {"event": ctx.source_ref, "operation": name, "args": validated_args},
-        ensure_ascii=True,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    key = sha256(canonical.encode("utf-8")).hexdigest()
-    if not ctx.store.claim_operation(scope="owner_sheets_write", key=key):
+    tab = a1_range.split("!", 1)[0].strip("'")
+    if tab == "Contacts":
+        return _propose_contacts_write(ctx, a1_range=a1_range, values=values, port=port)
+    if tab == "Activity":
         return ToolResult(
-            ok=True, text="This exact Sheets write was already handled for this owner event."
+            ok=False,
+            error=(
+                "Activity rows require an exact CRM contact id. Read the contact, "
+                "then use crm_record_activity."
+            ),
         )
     try:
-        out = execute_capability(
-            name,
+        binding = typed_composio_binding(ctx.settings, "GOOGLESHEETS", port=port)
+        current = port.read_values(
+            spreadsheet_id=spreadsheet_id,
+            a1_range=a1_range,
+        )
+        proposal = propose_owner_action(
+            ctx.store,
             principal=ctx.principal,
-            args=validated_args,
-            handlers=sheets_handlers(port, allowed_spreadsheet_ids=allowed_spreadsheet_ids),
-            kill_switch=ctx.kill_switch,
+            source_ref=ctx.source_ref,
+            kind=name,
+            parameters=validated_args,
+            target={
+                "spreadsheet_id": spreadsheet_id,
+                "range": a1_range,
+                "values": current,
+                "provider_binding": binding,
+            },
         )
-    except PermissionDenied:
-        ctx.store.fail_operation(scope="owner_sheets_write", key=key)
-        return ToolResult(ok=False, error="sheets write denied")
-    except AdapterHttpError as exc:
-        # An append may have reached Google before a transport failure. Keep the completed
-        # claim so the same owner-event retry cannot duplicate it.
-        ctx.store.complete_operation(
-            scope="owner_sheets_write", key=key, result_json='{"ok":false}'
+    except (PermissionError, ValueError, RuntimeError, AdapterHttpError) as exc:
+        return ToolResult(ok=False, error=f"Sheets proposal could not be bound: {exc}")
+    return ToolResult(
+        ok=True,
+        text=(
+            f"Prepared an exact Sheets {'append' if append else 'update'} proposal. "
+            "Nothing was written."
+        ),
+        approval_id=proposal.approval_id,
+    )
+
+
+def _propose_contacts_write(
+    ctx: ToolContext, *, a1_range: str, values: list[list[str]], port: object
+) -> ToolResult:
+    """Translate one bounded Contacts row into a durable CRM proposal."""
+    match = re.fullmatch(r"'?Contacts'?!A(?:[1-9]\d*)?(?::([A-N])(?:[1-9]\d*)?)?", a1_range)
+    if match is None or len(values) != 1:
+        return ToolResult(
+            ok=False,
+            error="Use one Contacts row starting at column A, or read the contact first.",
         )
-        return ToolResult(ok=False, error=f"Sheets write unavailable ({exc.tool_status()})")
-    except (RuntimeError, ValueError, OSError):
-        ctx.store.fail_operation(scope="owner_sheets_write", key=key)
-        return ToolResult(ok=False, error="Sheets write failed")
-    ctx.store.complete_operation(scope="owner_sheets_write", key=key, result_json='{"ok":true}')
-    count = int(out.get("appended" if append else "updated") or 0)
-    return ToolResult(ok=True, text=f"{count} Sheet row(s) {'appended' if append else 'updated'}.")
+    row = values[0]
+    if not row or len(row) > len(CONTACT_FIELDS):
+        return ToolResult(ok=False, error="Contacts row shape is invalid")
+    fields = dict(zip(CONTACT_FIELDS, row, strict=False))
+    from app.tools.owner.crm import _sync_current_sheet_edits
+
+    problem = _sync_current_sheet_edits(ctx, port)
+    if problem:
+        return ToolResult(ok=False, error=problem)
+    try:
+        snapshot = CrmService(ctx.store.session).snapshot_identity(fields)
+        proposal = propose_owner_action(
+            ctx.store,
+            principal=ctx.principal,
+            source_ref=ctx.source_ref,
+            kind="crm.upsert",
+            parameters={
+                "fields": fields,
+                "contact_id": snapshot.contact_id,
+                "expected_revision": snapshot.revision,
+            },
+            target=asdict(snapshot),
+        )
+    except (CrmError, PermissionError, ValueError) as exc:
+        return ToolResult(ok=False, error=f"CRM proposal could not be bound: {exc}")
+    return ToolResult(
+        ok=True,
+        text="Translated the Contacts row into an exact CRM proposal. Nothing was written.",
+        approval_id=proposal.approval_id,
+    )
 
 
 def _sheets_update(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:

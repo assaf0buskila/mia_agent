@@ -1,6 +1,8 @@
 import math
 import re
+from base64 import b64encode
 from typing import Protocol
+from urllib.parse import quote
 
 import httpx
 from pydantic import BaseModel, ConfigDict
@@ -11,6 +13,10 @@ from app.core.models import model_chain
 from app.domain.tools import AdapterHttpError
 
 _OPENAI_TRANSCRIPTIONS_URL = "https://api.openai.com/v1/audio/transcriptions"
+_GEMINI_GENERATE_URL = (
+    "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+)
+_MAX_GEMINI_INLINE_AUDIO_BYTES = 14_000_000
 # The prompt should match the audio language, so the Hebrew-primary owner channel gets a
 # Hebrew prompt. Product names go in `keywords` for models that support it.
 _ASSAFWEB_STT_PROMPT = (
@@ -87,7 +93,7 @@ def transcription_request_fields(
     raise TranscriptionError("OpenAI transcription model is unsupported")
 
 
-_STT_PROVIDER_ALLOWLIST = frozenset({"openai", "fake"})
+_STT_PROVIDER_ALLOWLIST = frozenset({"openai", "gemini", "fake"})
 _STT_MODEL_RE = re.compile(r"^[a-zA-Z0-9._-]{1,64}$")
 _LANGUAGE_RE = re.compile(r"^[a-z]{2}(-[A-Z]{2})?$")
 _MAX_DURATION_MS = 86_400_000
@@ -233,6 +239,7 @@ class OpenAITranscribePort:
         prompt: str = _ASSAFWEB_STT_PROMPT,
         languages: tuple[str, ...] = _DEFAULT_LANGUAGES,
         keywords: tuple[str, ...] = _ASSAFWEB_STT_KEYWORDS,
+        timeout: float = 20.0,
         client: httpx.AsyncClient | None = None,
     ) -> None:
         self._api_key = api_key
@@ -246,6 +253,7 @@ class OpenAITranscribePort:
             if keyword and not any(char in keyword for char in "<>\r\n")
         )
         self._client = client
+        self._timeout = timeout
 
     async def transcribe(
         self, *, audio: bytes, mime_type: str, filename: str = "note.ogg"
@@ -288,7 +296,7 @@ class OpenAITranscribePort:
                     headers=headers,
                 )
             else:
-                async with httpx.AsyncClient(timeout=20.0) as client:
+                async with httpx.AsyncClient(timeout=self._timeout) as client:
                     response = await client.post(
                         _OPENAI_TRANSCRIPTIONS_URL,
                         files=files,
@@ -328,6 +336,131 @@ class OpenAITranscribePort:
         )
 
 
+class GeminiTranscribePort:
+    """Native Gemini audio adapter used only after the OpenAI STT chain fails."""
+
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        model: str,
+        prompt: str = _ASSAFWEB_STT_PROMPT,
+        timeout: float = 20.0,
+        client: httpx.AsyncClient | None = None,
+    ) -> None:
+        self._api_key = api_key
+        self._model = model.strip()
+        self._prompt = prompt
+        self._timeout = timeout
+        self._client = client
+
+    async def transcribe(
+        self, *, audio: bytes, mime_type: str, filename: str = "note.ogg"
+    ) -> TranscriptResult:
+        del filename
+        if not self._api_key.strip() or not self._model:
+            raise TranscriptionError("Gemini transcription is not configured")
+        if not audio:
+            raise TranscriptionError("Gemini transcription received empty audio")
+        if len(audio) > _MAX_GEMINI_INLINE_AUDIO_BYTES:
+            raise TranscriptionError("Gemini transcription audio is too large")
+        payload = {
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [
+                        {
+                            "text": (
+                                f"{self._prompt}\n\nTranscribe only what is audible. "
+                                "Preserve Hebrew and English code switching. Mark an "
+                                "uncertain word as [לא ברור] instead of guessing."
+                            )
+                        },
+                        {
+                            "inline_data": {
+                                "mime_type": mime_type,
+                                "data": b64encode(audio).decode("ascii"),
+                            }
+                        },
+                    ],
+                }
+            ]
+        }
+        url = _GEMINI_GENERATE_URL.format(model=quote(self._model, safe=""))
+        headers = {"x-goog-api-key": self._api_key}
+        try:
+            if self._client is not None:
+                response = await self._client.post(
+                    url, json=payload, headers=headers, timeout=self._timeout
+                )
+            else:
+                async with httpx.AsyncClient(timeout=self._timeout) as client:
+                    response = await client.post(url, json=payload, headers=headers)
+        except httpx.HTTPError as exc:
+            raise TranscriptionError("Gemini transcription request failed") from exc
+        if response.status_code >= 400:
+            raise TranscriptionError(
+                f"Gemini transcription failed: HTTP {response.status_code}"
+            )
+        text = self._response_text(response)
+        if not text:
+            raise TranscriptionError("Gemini transcription returned empty text")
+        return TranscriptResult(
+            text=text,
+            stt_provider="gemini",
+            stt_model=sanitize_stt_model(self._model),
+            # Gemini audio understanding does not expose calibrated confidence here.
+            language="",
+            confidence="",
+        )
+
+    @staticmethod
+    def _response_text(response: httpx.Response) -> str:
+        try:
+            payload = response.json()
+        except (TypeError, ValueError) as exc:
+            raise TranscriptionError("Gemini transcription returned invalid response") from exc
+        if not isinstance(payload, dict):
+            raise TranscriptionError("Gemini transcription returned invalid response")
+        direct = payload.get("text") or payload.get("output_text")
+        if isinstance(direct, str) and direct.strip():
+            return direct.strip()
+        candidates = payload.get("candidates")
+        if not isinstance(candidates, list):
+            return ""
+        parts: list[str] = []
+        for candidate in candidates:
+            content = candidate.get("content") if isinstance(candidate, dict) else None
+            raw_parts = content.get("parts") if isinstance(content, dict) else None
+            if not isinstance(raw_parts, list):
+                continue
+            for part in raw_parts:
+                value = part.get("text") if isinstance(part, dict) else None
+                if isinstance(value, str) and value.strip():
+                    parts.append(value.strip())
+        return "\n".join(parts).strip()
+
+
+class FallbackTranscriptionPort:
+    """Try provider adapters in order without exposing audio or provider bodies."""
+
+    def __init__(self, ports: tuple[TranscriptionPort, ...]) -> None:
+        self._ports = ports
+
+    async def transcribe(
+        self, *, audio: bytes, mime_type: str, filename: str = "note.ogg"
+    ) -> TranscriptResult:
+        last: Exception | None = None
+        for port in self._ports:
+            try:
+                return await port.transcribe(
+                    audio=audio, mime_type=mime_type, filename=filename
+                )
+            except (TranscriptionError, AdapterHttpError, httpx.HTTPError, RuntimeError) as exc:
+                last = exc
+        raise TranscriptionError("all transcription providers failed") from last
+
+
 class DisabledTranscriptionPort:
     async def transcribe(
         self, *, audio: bytes, mime_type: str, filename: str = "note.ogg"
@@ -353,10 +486,26 @@ class FakeTranscriptionPort:
 
 def build_transcription_port(settings: Settings) -> TranscriptionPort:
     chain = model_chain(settings.openai_transcribe_model, settings.openai_transcribe_fallback_model)
+    ports: list[TranscriptionPort] = []
     if settings.openai_api_key and chain:
-        return OpenAITranscribePort(
-            api_key=settings.openai_api_key,
-            model=chain[0],
-            fallback_model=chain[1] if len(chain) > 1 else "",
+        ports.append(
+            OpenAITranscribePort(
+                api_key=settings.openai_api_key,
+                model=chain[0],
+                fallback_model=chain[1] if len(chain) > 1 else "",
+                timeout=settings.transcription_timeout_seconds,
+            )
         )
+    if settings.gemini_api_key.strip() and settings.gemini_transcribe_model.strip():
+        ports.append(
+            GeminiTranscribePort(
+                api_key=settings.gemini_api_key,
+                model=settings.gemini_transcribe_model,
+                timeout=settings.transcription_timeout_seconds,
+            )
+        )
+    if len(ports) == 1:
+        return ports[0]
+    if ports:
+        return FallbackTranscriptionPort(tuple(ports))
     return DisabledTranscriptionPort()

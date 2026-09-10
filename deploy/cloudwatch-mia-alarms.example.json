@@ -71,7 +71,7 @@
     },
     {
       "AlarmName": "mia-scheduled-task-stopped",
-      "AlarmDescription": "mia-due-scan or mia-reconcile stopped running. Both schedules use MaximumRetryAttempts 0 with no dead-letter queue, so a failing job is otherwise completely silent, including the job whose whole purpose is noticing drift.",
+      "AlarmDescription": "Owner reminder schedule mia-due-scan failed. CRM delivery and reconciliation run inside the application worker.",
       "Namespace": "AWS/Events",
       "MetricName": "FailedInvocations",
       "Statistic": "Sum",

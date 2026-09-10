@@ -46,12 +46,14 @@ def get_session_factory() -> sessionmaker[Session]:
 
 def init_db() -> None:
     from app.db import models as _models  # noqa: F401
+    from app.db import site_v2 as _site_v2  # noqa: F401
 
     Base.metadata.create_all(bind=get_engine())
 
 
 def schema_ready(engine: Engine) -> bool:
     from app.db import models as _models  # noqa: F401
+    from app.db import site_v2 as _site_v2  # noqa: F401
 
     try:
         inspector = inspect(engine)

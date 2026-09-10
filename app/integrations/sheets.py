@@ -41,15 +41,14 @@ from app.domain.tools import (
     AdapterSchemaError,
 )
 from app.surfaces.crm import (
-    ACTIVITY_HEADERS as CONTACTS_ACTIVITY_HEADERS,
-)
-from app.surfaces.crm import (
     ACTIVITY_TAB as CONTACTS_ACTIVITY_TAB,
 )
 from app.surfaces.crm import (
+    ACTIVITY_V2_HEADERS,
     CONTACTS_HEADERS,
     CONTACTS_READ_COLUMNS,
     CONTACTS_TAB,
+    CONTACTS_V2_HEADERS,
     LOCKED_SPREADSHEET_ID,
     a1_targets_archive_tab,
     sheet_tab_from_a1,
@@ -77,11 +76,12 @@ _MODEL_PATTERN = re.compile(r"^[a-zA-Z0-9._-]+$")
 
 
 CRM_WORKSPACE_TABS: tuple[tuple[str, list[str]], ...] = (
-    (CONTACTS_TAB, list(CONTACTS_HEADERS)),
-    (CONTACTS_ACTIVITY_TAB, list(CONTACTS_ACTIVITY_HEADERS)),
+    (CONTACTS_TAB, list(CONTACTS_V2_HEADERS)),
+    (CONTACTS_ACTIVITY_TAB, list(ACTIVITY_V2_HEADERS)),
 )
-CRM_WORKSPACE_SCHEMA_VERSION = "mia-contacts-v1"
-CRM_WORKSPACE_SCHEMA_RANGE = f"{CONTACTS_ACTIVITY_TAB}!F1"
+CRM_WORKSPACE_SCHEMA_VERSION = "mia-contacts-v2"
+CRM_WORKSPACE_SCHEMA_RANGE = f"{CONTACTS_TAB}!P1"
+CRM_SYNC_CHUNK_SIZE = 100
 
 
 def _crm_header_range(sheet_name: str, headers: list[str]) -> str:
@@ -242,12 +242,25 @@ class SheetsPort(Protocol):
         self, *, spreadsheet_id: str, a1_range: str, values: list[list[str]]
     ) -> None: ...
 
-
     def write_locked_contact(self, cells: list[str], *, key_column: str) -> None: ...
 
     def append_locked_activity(self, cells: list[str]) -> None: ...
 
     def read_locked_contacts(self) -> list[list[str]]: ...
+
+    def read_crm_contacts_chunk(self, *, start_row: int, limit: int = 100) -> list[list[str]]: ...
+
+    def read_crm_activity_chunk(self, *, start_row: int, limit: int = 100) -> list[list[str]]: ...
+
+    def upsert_crm_contact(self, cells: list[str]) -> None: ...
+
+    def upsert_crm_activity(self, cells: list[str]) -> None: ...
+
+    def update_crm_contact_fields(self, *, row_number: int, fields: dict[int, str]) -> None: ...
+
+    def append_crm_contact(self, cells: list[str]) -> None: ...
+
+    def append_crm_activity(self, cells: list[str]) -> None: ...
 
 
 class DisabledSheetsPort:
@@ -268,7 +281,6 @@ class DisabledSheetsPort:
     def append_values(self, *, spreadsheet_id: str, a1_range: str, values: list[list[str]]) -> None:
         del spreadsheet_id, a1_range, values
 
-
     def write_locked_contact(self, cells: list[str], *, key_column: str) -> None:
         del cells, key_column
 
@@ -277,6 +289,33 @@ class DisabledSheetsPort:
 
     def read_locked_contacts(self) -> list[list[str]]:
         return []
+
+    def read_crm_contacts_chunk(self, *, start_row: int, limit: int = 100) -> list[list[str]]:
+        del start_row, limit
+        return []
+
+    def read_crm_activity_chunk(self, *, start_row: int, limit: int = 100) -> list[list[str]]:
+        del start_row, limit
+        return []
+
+    def upsert_crm_contact(self, cells: list[str]) -> None:
+        del cells
+        raise ValueError("CRM Sheets destination is not configured")
+
+    def upsert_crm_activity(self, cells: list[str]) -> None:
+        del cells
+
+    def update_crm_contact_fields(self, *, row_number: int, fields: dict[int, str]) -> None:
+        del row_number, fields
+        raise ValueError("CRM Sheets destination is not configured")
+
+    def append_crm_contact(self, cells: list[str]) -> None:
+        del cells
+        raise ValueError("CRM Sheets destination is not configured")
+
+    def append_crm_activity(self, cells: list[str]) -> None:
+        del cells
+        raise ValueError("CRM Sheets destination is not configured")
 
 
 class ComposioSheetsPort:
@@ -293,6 +332,7 @@ class ComposioSheetsPort:
         user_id: str,
         spreadsheet_id: str = "",
         allowed_spreadsheet_ids: frozenset[str] = frozenset(),
+        connected_account_id: str = "",
         client: httpx.Client | None = None,
     ) -> None:
         self._api_key = api_key
@@ -303,6 +343,7 @@ class ComposioSheetsPort:
             authorized.add(self._spreadsheet_id)
         self._allowed_spreadsheet_ids = frozenset(authorized)
         self._client = client
+        self._connected_account_id = connected_account_id.strip()
         self._crm_ready = False
         self._workspace_key = (
             sha256(api_key.encode("utf-8")).hexdigest()[:16],
@@ -316,6 +357,8 @@ class ComposioSheetsPort:
             "version": COMPOSIO_GOOGLESHEETS_VERSION,
             "arguments": arguments,
         }
+        if self._connected_account_id:
+            payload["connected_account_id"] = self._connected_account_id
         request_headers = {
             "x-api-key": self._api_key,
             "Content-Type": "application/json",
@@ -386,9 +429,7 @@ class ComposioSheetsPort:
             values=None,
             allowed_spreadsheet_ids=self._allowed_spreadsheet_ids,
         )
-        data = self._execute_tool(
-            COMPOSIO_GET_SHEET_NAMES_TOOL, {"spreadsheetId": target}
-        )
+        data = self._execute_tool(COMPOSIO_GET_SHEET_NAMES_TOOL, {"spreadsheetId": target})
         raw_names = (data or {}).get("sheetNames")
         if not isinstance(raw_names, list):
             # Current provider responses have used both field names. Accept neither
@@ -488,9 +529,7 @@ class ComposioSheetsPort:
                     COMPOSIO_VALUES_GET_TOOL,
                     {"spreadsheetId": spreadsheet_id, "range": header_range},
                 )
-                header_is_current[sheet_name] = (header_data or {}).get("values") == [
-                    headers
-                ]
+                header_is_current[sheet_name] = (header_data or {}).get("values") == [headers]
 
             if marker_is_current and all(header_is_current.values()):
                 self._workspace_ready_until[self._workspace_key] = (
@@ -622,6 +661,135 @@ class ComposioSheetsPort:
             rows.append(cells)
         return rows
 
+    def _read_crm_chunk(
+        self, *, tab: str, width: str, start_row: int, limit: int
+    ) -> list[list[str]]:
+        if start_row < 2 or not 1 <= limit <= CRM_SYNC_CHUNK_SIZE:
+            raise ValueError("CRM reads require row >= 2 and a 1-100 row chunk")
+        end_row = start_row + limit - 1
+        data = self._execute_tool(
+            COMPOSIO_VALUES_GET_TOOL,
+            {
+                "spreadsheetId": self._spreadsheet_id or LOCKED_SPREADSHEET_ID,
+                "range": f"{tab}!A{start_row}:{width}{end_row}",
+            },
+        )
+        raw_values = (data or {}).get("values")
+        if not isinstance(raw_values, list) or len(raw_values) > limit:
+            raise AdapterSchemaError()
+        rows: list[list[str]] = []
+        max_columns = 15 if tab == CONTACTS_TAB else 6
+        for raw_row in raw_values:
+            if not isinstance(raw_row, list) or len(raw_row) > max_columns:
+                raise AdapterSchemaError()
+            rows.append([str(cell) if cell is not None else "" for cell in raw_row])
+        return rows
+
+    def read_crm_contacts_chunk(self, *, start_row: int, limit: int = 100) -> list[list[str]]:
+        return self._read_crm_chunk(tab=CONTACTS_TAB, width="O", start_row=start_row, limit=limit)
+
+    def read_crm_activity_chunk(self, *, start_row: int, limit: int = 100) -> list[list[str]]:
+        return self._read_crm_chunk(
+            tab=CONTACTS_ACTIVITY_TAB, width="F", start_row=start_row, limit=limit
+        )
+
+    def upsert_crm_contact(self, cells: list[str]) -> None:
+        if len(cells) != 15 or not cells[14].strip():
+            raise ValueError("CRM contact row requires 15 cells and a Mia contact id")
+        target_id = cells[14].strip()
+        start_row = 2
+        while start_row <= 100_001:
+            rows = self.read_crm_contacts_chunk(start_row=start_row)
+            for offset, row in enumerate(rows):
+                if len(row) > 14 and row[14].strip() == target_id:
+                    row_number = start_row + offset
+                    self._execute_tool(
+                        COMPOSIO_VALUES_UPDATE_TOOL,
+                        {
+                            "spreadsheetId": self._spreadsheet_id or LOCKED_SPREADSHEET_ID,
+                            "range": f"{CONTACTS_TAB}!A{row_number}:O{row_number}",
+                            "values": [list(cells)],
+                            "valueInputOption": "RAW",
+                        },
+                    )
+                    return
+            if len(rows) < CRM_SYNC_CHUNK_SIZE:
+                break
+            start_row += CRM_SYNC_CHUNK_SIZE
+        self._execute_tool(
+            COMPOSIO_VALUES_APPEND_TOOL,
+            {
+                "spreadsheetId": self._spreadsheet_id or LOCKED_SPREADSHEET_ID,
+                "range": f"{CONTACTS_TAB}!A:O",
+                "values": [list(cells)],
+                "valueInputOption": "RAW",
+            },
+        )
+
+    def update_crm_contact_fields(self, *, row_number: int, fields: dict[int, str]) -> None:
+        """Update only verified cells in an existing Contacts row (0-based columns)."""
+        if row_number < 2 or not fields or any(index < 0 or index > 14 for index in fields):
+            raise ValueError("invalid CRM contact field update")
+        for index, value in sorted(fields.items()):
+            column = chr(ord("A") + index)
+            self._execute_tool(
+                COMPOSIO_VALUES_UPDATE_TOOL,
+                {
+                    "spreadsheetId": self._spreadsheet_id or LOCKED_SPREADSHEET_ID,
+                    "range": f"{CONTACTS_TAB}!{column}{row_number}",
+                    "values": [[str(value)]],
+                    "valueInputOption": "RAW",
+                },
+            )
+
+    def append_crm_contact(self, cells: list[str]) -> None:
+        if len(cells) != 15 or not cells[14].strip():
+            raise ValueError("CRM contact row requires 15 cells and a Mia contact id")
+        self._execute_tool(
+            COMPOSIO_VALUES_APPEND_TOOL,
+            {
+                "spreadsheetId": self._spreadsheet_id or LOCKED_SPREADSHEET_ID,
+                "range": f"{CONTACTS_TAB}!A:O",
+                "values": [list(cells)],
+                "valueInputOption": "RAW",
+            },
+        )
+
+    def upsert_crm_activity(self, cells: list[str]) -> None:
+        if len(cells) != 6 or not cells[5].strip():
+            raise ValueError("CRM activity row requires 6 cells and a stable activity id")
+        target_id = cells[5].strip()
+        start_row = 2
+        while start_row <= 100_001:
+            rows = self.read_crm_activity_chunk(start_row=start_row)
+            if any(len(row) > 5 and row[5].strip() == target_id for row in rows):
+                return
+            if len(rows) < CRM_SYNC_CHUNK_SIZE:
+                break
+            start_row += CRM_SYNC_CHUNK_SIZE
+        self._execute_tool(
+            COMPOSIO_VALUES_APPEND_TOOL,
+            {
+                "spreadsheetId": self._spreadsheet_id or LOCKED_SPREADSHEET_ID,
+                "range": f"{CONTACTS_ACTIVITY_TAB}!A:F",
+                "values": [list(cells)],
+                "valueInputOption": "RAW",
+            },
+        )
+
+    def append_crm_activity(self, cells: list[str]) -> None:
+        if len(cells) != 6 or not cells[5].strip():
+            raise ValueError("CRM activity row requires 6 cells and a stable activity id")
+        self._execute_tool(
+            COMPOSIO_VALUES_APPEND_TOOL,
+            {
+                "spreadsheetId": self._spreadsheet_id or LOCKED_SPREADSHEET_ID,
+                "range": f"{CONTACTS_ACTIVITY_TAB}!A:F",
+                "values": [list(cells)],
+                "valueInputOption": "RAW",
+            },
+        )
+
     def append_locked_activity(self, cells: list[str]) -> None:
         self._execute_tool(
             COMPOSIO_VALUES_APPEND_TOOL,
@@ -642,10 +810,14 @@ class FakeSheetsPort:
         self.owner_operations: list[tuple[str, str, str, list[list[str]]]] = []
         self.sheet_names: dict[str, list[str]] = {}
         self.locked_contacts: list[list[str]] = []
+        self.locked_activity: list[list[str]] = []
         self.crm_workspace_ensures = 0
 
     def ensure_crm_workspace(self) -> None:
         self.crm_workspace_ensures += 1
+
+    def approval_connected_account_id(self) -> str:
+        return "fake-sheets-account"
 
     def list_sheet_names(self, *, spreadsheet_id: str) -> list[str]:
         return list(self.sheet_names.get(spreadsheet_id, []))
@@ -663,16 +835,73 @@ class FakeSheetsPort:
         self.owner_values.setdefault((spreadsheet_id, a1_range), []).extend(normalized)
         self.owner_operations.append(("append", spreadsheet_id, a1_range, normalized))
 
-
     def write_locked_contact(self, cells: list[str], *, key_column: str) -> None:
         row = list(cells)
         self.locked_contacts.append(row)
-        self.owner_operations.append(
-            ("contact", LOCKED_SPREADSHEET_ID, key_column, [row])
-        )
+        self.owner_operations.append(("contact", LOCKED_SPREADSHEET_ID, key_column, [row]))
 
     def read_locked_contacts(self) -> list[list[str]]:
         return [list(CONTACTS_HEADERS), *[list(row) for row in self.locked_contacts]]
+
+    def read_crm_contacts_chunk(self, *, start_row: int, limit: int = 100) -> list[list[str]]:
+        offset = max(0, start_row - 2)
+        return [list(row) for row in self.locked_contacts[offset : offset + limit]]
+
+    def read_crm_activity_chunk(self, *, start_row: int, limit: int = 100) -> list[list[str]]:
+        offset = max(0, start_row - 2)
+        return [list(row) for row in self.locked_activity[offset : offset + limit]]
+
+    def upsert_crm_contact(self, cells: list[str]) -> None:
+        row = list(cells)
+        if len(row) != 15 or not row[14]:
+            raise ValueError("CRM contact row requires id")
+        for index, existing in enumerate(self.locked_contacts):
+            if len(existing) > 14 and existing[14] == row[14]:
+                self.locked_contacts[index] = row
+                break
+        else:
+            self.locked_contacts.append(row)
+        self.owner_operations.append(("contact_v2", LOCKED_SPREADSHEET_ID, "מזהה מיה", [row]))
+
+    def upsert_crm_activity(self, cells: list[str]) -> None:
+        row = list(cells)
+        if len(row) != 6 or not row[5]:
+            raise ValueError("CRM activity row requires id")
+        if not any(
+            len(existing) > 5 and existing[5] == row[5] for existing in self.locked_activity
+        ):
+            self.locked_activity.append(row)
+        self.owner_operations.append(
+            ("activity_v2", LOCKED_SPREADSHEET_ID, CONTACTS_ACTIVITY_TAB, [row])
+        )
+
+    def update_crm_contact_fields(self, *, row_number: int, fields: dict[int, str]) -> None:
+        index = row_number - 2
+        if index < 0 or index >= len(self.locked_contacts):
+            raise ValueError("CRM contact row does not exist")
+        row = self.locked_contacts[index]
+        row.extend([""] * (15 - len(row)))
+        for column, value in fields.items():
+            row[column] = str(value)
+        self.owner_operations.append(
+            ("contact_fields_v2", LOCKED_SPREADSHEET_ID, str(row_number), [[str(fields)]])
+        )
+
+    def append_crm_contact(self, cells: list[str]) -> None:
+        row = list(cells)
+        if len(row) != 15 or not row[14]:
+            raise ValueError("CRM contact row requires id")
+        self.locked_contacts.append(row)
+        self.owner_operations.append(("contact_append_v2", LOCKED_SPREADSHEET_ID, "A:O", [row]))
+
+    def append_crm_activity(self, cells: list[str]) -> None:
+        row = list(cells)
+        if len(row) != 6 or not row[5]:
+            raise ValueError("CRM activity row requires id")
+        self.locked_activity.append(row)
+        self.owner_operations.append(
+            ("activity_append_v2", LOCKED_SPREADSHEET_ID, CONTACTS_ACTIVITY_TAB, [row])
+        )
 
     def append_locked_activity(self, cells: list[str]) -> None:
         self.owner_operations.append(

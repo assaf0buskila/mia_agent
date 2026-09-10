@@ -1,4 +1,4 @@
-"""Owner Telegram notifications. ClientGraph never sends these itself."""
+"""Allowlisted owner Telegram notifications with durable delivery receipts."""
 
 from __future__ import annotations
 

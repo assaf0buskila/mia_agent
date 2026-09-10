@@ -122,6 +122,8 @@ class ToolResult:
     approval_id: str = ""
     # Blank means "derive it from ok". Set explicitly for timeout and partial.
     outcome: str = ""
+    # Trusted adapter assertion; never populated from provider text.
+    evidence: str = ""
 
     def outcome_label(self) -> str:
         """success | failure | timeout | partial. Never blank."""

@@ -744,3 +744,140 @@ class KnowledgeGapRow(Base):
     asked_at: Mapped[str] = mapped_column(String(64), default="")
     answered_at: Mapped[str] = mapped_column(String(64), default="")
     created_at: Mapped[str] = mapped_column(String(64), default="")
+
+
+class CrmContactRow(Base):
+    """Canonical CRM contact. Sheets is an editable projection of this row."""
+
+    __tablename__ = "crm_contacts"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    fields_json: Mapped[str] = mapped_column(Text, default="{}")
+    source_ref: Mapped[str] = mapped_column(String(255), default="")
+    conversation_id: Mapped[str] = mapped_column(String(255), default="")
+    created_at: Mapped[str] = mapped_column(String(64), default="")
+    updated_at: Mapped[str] = mapped_column(String(64), default="")
+
+
+class CrmContactConversationRow(Base):
+    """Durable many-to-one link from a public conversation to its CRM contact."""
+
+    __tablename__ = "crm_contact_conversations"
+    __table_args__ = (
+        UniqueConstraint("conversation_id", name="uq_crm_contact_conversation"),
+        Index("ix_crm_contact_conversation_contact", "contact_id", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    contact_id: Mapped[str] = mapped_column(ForeignKey("crm_contacts.id"))
+    conversation_id: Mapped[str] = mapped_column(String(255))
+    captured_fields_json: Mapped[str] = mapped_column(Text, default="{}")
+    source_ref: Mapped[str] = mapped_column(String(255), default="")
+    created_at: Mapped[str] = mapped_column(String(64), default="")
+    updated_at: Mapped[str] = mapped_column(String(64), default="")
+
+
+class CrmIdentityRow(Base):
+    __tablename__ = "crm_identities"
+    __table_args__ = (
+        UniqueConstraint("kind", "normalized_value", name="uq_crm_identity_value"),
+        Index("ix_crm_identity_contact", "contact_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    contact_id: Mapped[str] = mapped_column(ForeignKey("crm_contacts.id"))
+    kind: Mapped[str] = mapped_column(String(16))
+    normalized_value: Mapped[str] = mapped_column(String(320))
+    source_ref: Mapped[str] = mapped_column(String(255), default="")
+    created_at: Mapped[str] = mapped_column(String(64), default="")
+
+
+class CrmActivityRow(Base):
+    __tablename__ = "crm_activities"
+    __table_args__ = (
+        UniqueConstraint("source_ref", name="uq_crm_activity_source_ref"),
+        Index("ix_crm_activity_contact", "contact_id", "occurred_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    contact_id: Mapped[str] = mapped_column(ForeignKey("crm_contacts.id"), index=True)
+    occurred_at: Mapped[str] = mapped_column(String(64))
+    who: Mapped[str] = mapped_column(String(160), default="")
+    channel: Mapped[str] = mapped_column(String(32), default="")
+    action: Mapped[str] = mapped_column(Text, default="")
+    result: Mapped[str] = mapped_column(Text, default="")
+    source_ref: Mapped[str] = mapped_column(String(255))
+    created_at: Mapped[str] = mapped_column(String(64), default="")
+
+
+class CrmSyncSnapshotRow(Base):
+    __tablename__ = "crm_sync_snapshots"
+
+    contact_id: Mapped[str] = mapped_column(ForeignKey("crm_contacts.id"), primary_key=True)
+    field_name: Mapped[str] = mapped_column(String(32), primary_key=True)
+    value: Mapped[str] = mapped_column(Text, default="")
+    contact_revision: Mapped[int] = mapped_column(Integer, default=0)
+    sheet_row: Mapped[int] = mapped_column(Integer, default=0)
+    synced_at: Mapped[str] = mapped_column(String(64), default="")
+
+
+class CrmIssueRow(Base):
+    __tablename__ = "crm_issues"
+    __table_args__ = (Index("ix_crm_issue_open", "status", "contact_id"),)
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    contact_id: Mapped[str] = mapped_column(String(64), default="", index=True)
+    issue_type: Mapped[str] = mapped_column(String(32))
+    field_name: Mapped[str] = mapped_column(String(32), default="")
+    base_value: Mapped[str] = mapped_column(Text, default="")
+    database_value: Mapped[str] = mapped_column(Text, default="")
+    sheet_value: Mapped[str] = mapped_column(Text, default="")
+    details_json: Mapped[str] = mapped_column(Text, default="{}")
+    status: Mapped[str] = mapped_column(String(16), default="open", index=True)
+    resolution: Mapped[str] = mapped_column(String(16), default="")
+    created_at: Mapped[str] = mapped_column(String(64), default="")
+    resolved_at: Mapped[str] = mapped_column(String(64), default="")
+
+
+class CrmIssueContactRow(Base):
+    __tablename__ = "crm_issue_contacts"
+
+    issue_id: Mapped[str] = mapped_column(
+        ForeignKey("crm_issues.id", ondelete="CASCADE"), primary_key=True
+    )
+    contact_id: Mapped[str] = mapped_column(
+        ForeignKey("crm_contacts.id", ondelete="CASCADE"), primary_key=True, index=True
+    )
+
+
+class CrmOutboxRow(Base):
+    __tablename__ = "crm_outbox"
+    __table_args__ = (
+        UniqueConstraint("dedupe_key", name="uq_crm_outbox_dedupe"),
+        Index("ix_crm_outbox_claim", "status", "next_attempt_at", "lease_expires_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    dedupe_key: Mapped[str] = mapped_column(String(255))
+    aggregate_type: Mapped[str] = mapped_column(String(24))
+    aggregate_id: Mapped[str] = mapped_column(String(64), index=True)
+    destination: Mapped[str] = mapped_column(String(16), index=True)
+    payload_json: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    next_attempt_at: Mapped[str] = mapped_column(String(64), default="")
+    lease_owner: Mapped[str] = mapped_column(String(80), default="")
+    lease_expires_at: Mapped[str] = mapped_column(String(64), default="")
+    last_attempt_at: Mapped[str] = mapped_column(String(64), default="")
+    confirmed_at: Mapped[str] = mapped_column(String(64), default="")
+    last_error: Mapped[str] = mapped_column(String(255), default="")
+    created_at: Mapped[str] = mapped_column(String(64), default="")
+
+
+class CrmWorkerStateRow(Base):
+    __tablename__ = "crm_worker_state"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[str] = mapped_column(Text, default="")
+    updated_at: Mapped[str] = mapped_column(String(64), default="")

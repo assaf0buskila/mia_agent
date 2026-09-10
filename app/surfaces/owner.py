@@ -20,9 +20,9 @@ from app.core.config import Settings
 from app.core.demo import demo_mode_active
 from app.core.errors import MiaError
 from app.core.logging import log_owner_agent
+from app.core.owner_timing import owner_stage
 from app.db.store import LeadStore
 from app.domain.ai_runs import OWNER_REPLY_ACTION, elapsed_ms, persist_ai_run
-from app.domain.approvals import DECISION_APPROVED
 from app.domain.events import (
     Channel,
     build_message_in_event,
@@ -30,39 +30,22 @@ from app.domain.events import (
     new_correlation_id,
     stamp_correlation,
 )
-from app.domain.gmail.drafts import apply_gmail_send_decision, execute_approved_gmail_send
 from app.domain.owner.request_routing import (
+    is_pending_approvals_request,
     is_tool_inventory_request,
     owner_tool_inventory_reply,
     requests_no_history,
 )
-from app.domain.owner.tasks import OwnerTaskType, classify_owner_task
-from app.domain.takeover import apply_owner_human_resume, apply_owner_human_takeover
+from app.domain.owner.tasks import OwnerTaskType
 from app.domain.tools import AdapterHttpError
 from app.integrations.base import MessagePort
 from app.integrations.gmail import GmailPort
-from app.surfaces.crm import ContactsCrm, log_contact
-from app.surfaces.identity import extract_fields
-from app.surfaces.turn_coalesce import prepare_owner_utterance
+from app.surfaces.crm import ContactsCrm
 
 _log = logging.getLogger("mia.owner")
 
 OWNER_FALLBACK = "פה. מה צריך?"
-CONTACT_LOGGED = "רשמתי ב-Contacts."
-CONTACT_REFUSED = "בלי טלפון או אימייל אני לא כותבת שורה."
-_SHEET_WALLS = (
-    "spreadsheet url",
-    "google sheet url",
-    "paste the google sheet",
-    "paste the sheet url",
-    "send me the link",
-    "limited access",
-    "not the source of truth",
-    "not source of truth",
-    "קישור לשיט",
-    "תשלח את הלינק",
-    "תדביק קישור",
-)
+OWNER_UNAVAILABLE = "מנוע השיחה של מיה לא זמין כרגע."
 
 
 @dataclass(frozen=True)
@@ -72,48 +55,7 @@ class OwnerLoopResult:
     crm_wrote: bool
 
 
-def talk_as_dude(
-    *,
-    text: str,
-    crm: ContactsCrm | None = None,
-    source: str = "telegram",
-    clock: datetime | None = None,
-) -> tuple[str, bool]:
-    """One owner turn without a task classifier. Returns reply and whether CRM wrote."""
-    want = text.strip()
-    if not want:
-        return OWNER_FALLBACK, False
-    fields = extract_fields(want)
-    if crm is None:
-        return _owner_reply(want, logged=False, refused=False), False
-    if fields.has_phone_or_email():
-        record = fields.to_contact(source=source)
-        log_contact(
-            crm,
-            record,
-            who="אסף",
-            channel="telegram",
-            action="עדכון איש קשר",
-            result="נרשם",
-            clock=clock,
-        )
-        return _owner_reply(want, logged=True, refused=False), True
-    if _looks_like_contact_log(want):
-        return CONTACT_REFUSED, False
-    return _owner_reply(want, logged=False, refused=False), False
-
-
-def _looks_like_contact_log(text: str) -> bool:
-    lowered = text.lower()
-    needles = ("תרשמי", "תרשום", "לשים בשיט", "contacts", "איש קשר", "תוסיפי", "log contact")
-    return any(needle in lowered or needle in text for needle in needles)
-
-
-def _owner_reply(text: str, *, logged: bool, refused: bool) -> str:
-    if refused:
-        return CONTACT_REFUSED
-    if logged:
-        return f"{CONTACT_LOGGED} מה הלאה?"
+def _owner_reply(text: str) -> str:
     if _looks_hebrew(text):
         return OWNER_FALLBACK
     return "Here. What do you need?"
@@ -136,10 +78,21 @@ async def run_owner_loop(
     channel: Channel = Channel.TELEGRAM,
     talk=None,
     deadline_at: float | None = None,
+    delivery_state: dict[str, bool] | None = None,
 ) -> OwnerTurnResult:
     """Allowlisted owner turn: talk, optional Gmail send after he asked, optional CRM write."""
     if not _is_authorized_owner(actor_id=item["from"], owner_ids=owner_ids):
         return OwnerTurnResult(processed=False, sent=False, last_reply=None)
+    if settings.kill_switch:
+        try:
+            store.mark_webhook(
+                provider=provider,
+                provider_event_id=item["id"],
+                status="processed",
+            )
+        except KeyError:
+            pass
+        return OwnerTurnResult(processed=True, sent=False, last_reply=None)
     owner_text = (item.get("text") or "").strip()
     correlation_id = new_correlation_id()
     incoming = build_message_in_event(
@@ -155,59 +108,34 @@ async def run_owner_loop(
     store.save_canonical_event(provider=provider, event=incoming)
     reply = ""
     task_type = OwnerTaskType.NOTE
-    # Human takeover and release existed only on the WhatsApp owner path, which is
-    # off. So a conversation Mia escalated could be parked forever with no way to hand
-    # it back to her from Telegram.
-    if not demo_mode_active(settings):
-        task = classify_owner_task(owner_text)
-        task_type = task.task_type
-        if not task.needs_clarification:
-            if task.task_type is OwnerTaskType.HUMAN_TAKEOVER:
-                ack = apply_owner_human_takeover(store, text=owner_text, kill_switch=False)
-                if ack is not None:
-                    reply = ack
-            elif task.task_type is OwnerTaskType.HUMAN_TAKEOVER_RESUME:
-                ack = apply_owner_human_resume(store, text=owner_text, kill_switch=False)
-                if ack is not None:
-                    reply = ack
-
-    if not reply and gmail_port is not None:
-        gmail_intent, gmail_draft_id = apply_gmail_send_decision(
-            store,
-            text=owner_text,
-            kill_switch=False,
-        )
-        if gmail_intent == DECISION_APPROVED and gmail_draft_id:
-            reply = execute_approved_gmail_send(
-                store=store,
-                settings=settings,
-                port=gmail_port,
-                draft_id=gmail_draft_id,
-                kill_switch=False,
-                demo_active=demo_mode_active(settings),
-            )
-
     crm_wrote = False
     turn_approval_ids: list[str] = []
     inventory_request = not reply and is_tool_inventory_request(owner_text)
-    if inventory_request:
+    pending_request = not reply and is_pending_approvals_request(owner_text)
+    if pending_request:
+        from app.domain.owner.reads import format_pending_approvals_ack
+
+        task_type = OwnerTaskType.PENDING_APPROVALS
+        reply = format_pending_approvals_ack(store)
+    elif inventory_request:
         reply = owner_tool_inventory_reply()
     elif not reply:
-        if talk is not None:
-            reply, crm_wrote = talk(text=owner_text, crm=crm)
-        else:
-            reply, crm_wrote = await asyncio.to_thread(
-                lambda: _talk_with_optional_agent(
-                    text=owner_text,
-                    crm=crm,
-                    settings=settings,
-                    store=store,
-                    item=item,
-                    correlation_id=correlation_id,
-                    deadline_at=deadline_at,
-                    approval_ids_out=turn_approval_ids,
-                )
+        reply, crm_wrote = await asyncio.to_thread(
+            lambda: _talk_with_optional_agent(
+                text=owner_text,
+                authorization_text=(
+                    item["owner_request_text"]
+                    if "owner_request_text" in item
+                    else owner_text
+                ).strip(),
+                settings=settings,
+                store=store,
+                item=item,
+                correlation_id=correlation_id,
+                deadline_at=deadline_at,
+                approval_ids_out=turn_approval_ids,
             )
+        )
 
     # The worker sends the one timeout notice after it has drained this coroutine.
     # Do not send a late model answer and race that notice.
@@ -226,23 +154,34 @@ async def run_owner_loop(
         store,
         channel=channel,
         task_type=markup_task_type,
-        turn_approval_id=turn_approval_ids[0] if turn_approval_ids else "",
+        turn_approval_ids=tuple(turn_approval_ids),
     )
     message = outbound_reply(item, text=reply, channel=channel, reply_markup=markup)
     try:
-        await port.send(message)
+        with owner_stage("send", source_ref=item.get("id", ""), tool="telegram"):
+            await port.send(message)
         sent = True
+        if delivery_state is not None:
+            delivery_state["sent"] = True
     except (RuntimeError, MiaError, AdapterHttpError):
         # TelegramPort.send raises TelegramSendError (a MiaError) and AdapterHttpError.
         # `except RuntimeError` only caught the not-configured DisabledMessagePort, so a
         # Telegram 429 — likely on a split 4096-char reply — threw away an answer the
         # owner had already waited and paid for, and left the webhook row `received`.
         sent = False
-    store.mark_webhook(
-        provider=provider,
-        provider_event_id=item["id"],
-        status="sent" if sent else "processed",
-    )
+    try:
+        store.mark_webhook(
+            provider=provider,
+            provider_event_id=item["id"],
+            status="sent" if sent else "processed",
+        )
+    except Exception as exc:  # noqa: BLE001 - accepted delivery must not be re-noticed
+        if not sent:
+            raise
+        _log.warning(
+            "owner webhook status update failed after delivery error=%s",
+            type(exc).__name__,
+        )
     if sent:
         outgoing = build_message_out_event(
             provider=provider,
@@ -253,32 +192,13 @@ async def run_owner_loop(
             lead_id=None,
         )
         stamp_correlation(outgoing, correlation_id)
-        store.save_canonical_event(provider=provider, event=outgoing)
-    # Learn from what Assaf actually said. `learn_from_exchange` existed and ran only
-    # on the muted WhatsApp owner path, so Mia formed no durable memory from her one
-    # live owner channel. Deliberately after the send: extraction costs a model call
-    # and must never sit between Assaf's message and his answer. It stays inside the
-    # existing durable learning path -- no new store, no raw provider data, and the
-    # function's own guards still decide what is worth keeping.
-    if (
-        not inventory_request
-        and not demo_mode_active(settings)
-        and (deadline_at is None or monotonic() < deadline_at)
-    ):
         try:
-            from app.domain.owner.brain import learn_from_exchange
-
-            learn_from_exchange(
-                brain=BrainStore(store.session),
-                settings=settings,
-                owner_text=owner_text,
-                history=tuple(store.list_conversation_turns(event_conversation_id(item))),
-                source_ref=item.get("id", ""),
-                kill_switch=False,
-                demo_active=False,
+            store.save_canonical_event(provider=provider, event=outgoing)
+        except Exception as exc:  # noqa: BLE001 - reply already reached Telegram
+            _log.warning(
+                "owner outbound event save failed after delivery error=%s",
+                type(exc).__name__,
             )
-        except Exception as exc:  # noqa: BLE001 - learning must never cost a reply
-            _log.warning("owner learning failed error=%s", type(exc).__name__)
     del crm_wrote
     return OwnerTurnResult(processed=True, sent=sent, last_reply=reply)
 
@@ -286,7 +206,8 @@ async def run_owner_loop(
 def _talk_with_optional_agent(
     *,
     text: str,
-    crm: ContactsCrm,
+    authorization_text: str | None = None,
+    crm: object | None = None,
     settings: Settings,
     store: LeadStore,
     item: dict[str, str],
@@ -294,26 +215,21 @@ def _talk_with_optional_agent(
     deadline_at: float | None = None,
     approval_ids_out: list[str] | None = None,
 ) -> tuple[str, bool]:
+    del crm  # compatibility only; all mutations flow through registered v2 tools
     from app.domain.owner.brain import answer_owner
 
     try:
-        fallback, wrote = talk_as_dude(text=text, crm=crm)
+        fallback, wrote = _owner_reply(text), False
     except (MiaError, AdapterHttpError) as exc:
-        # `talk_as_dude` writes the CRM row, and the live Sheets adapter raises
-        # AdapterHttpError. This sat outside the guard below, so a Sheets 500 aborted
-        # the whole turn and the owner got the generic failure line instead of an
-        # answer the agent could still have given.
-        _log.warning("owner crm write failed error=%s", type(exc).__name__)
+        _log.warning("owner fallback failed error=%s", type(exc).__name__)
         fallback, wrote = OWNER_FALLBACK, False
     if not settings.owner_agent_ready():
-        return fallback, wrote
+        return OWNER_UNAVAILABLE, False
     started = perf_counter()
     try:
         no_history = requests_no_history(text)
         history = (
-            ()
-            if no_history
-            else tuple(store.list_conversation_turns(event_conversation_id(item)))
+            () if no_history else tuple(store.list_conversation_turns(event_conversation_id(item)))
         )
         brain = BrainStore(store.session)
         result = answer_owner(
@@ -322,10 +238,15 @@ def _talk_with_optional_agent(
             brain=brain,
             settings=settings,
             task_type=OwnerTaskType.NOTE,
-            owner_text=text.strip() if no_history else prepare_owner_utterance(text, history),
+            # Keep the exact current owner message as the authorization source. Any
+            # contextual hint belongs in graph context, never in write-intent text.
+            owner_text=text.strip(),
+            raw_owner_request=(
+                authorization_text if authorization_text is not None else text
+            ).strip(),
             history=history,
             fallback_text=fallback,
-            kill_switch=False,
+            kill_switch=settings.kill_switch,
             demo_active=demo_mode_active(settings),
             source_ref=item.get("id", ""),
             now=datetime.now(UTC),
@@ -353,7 +274,7 @@ def _talk_with_optional_agent(
             lead_id=None,
             channel=Channel.TELEGRAM.value,
             next_action=OWNER_REPLY_ACTION,
-            kill_switch=False,
+            kill_switch=settings.kill_switch,
             sales_model=settings.owner_agent_model,
             openai_api_key=settings.openai_api_key,
             sales_fallback_model=settings.owner_agent_fallback_model,
@@ -368,16 +289,9 @@ def _talk_with_optional_agent(
         reply = result.text or fallback
         if approval_ids_out is not None:
             approval_ids_out.extend(result.approval_ids)
-        if _asks_for_sheet_url(reply):
-            return fallback, wrote
         return reply, wrote
     except Exception as exc:
         # Never silent: a brain outage here used to answer every real question with the
         # greeting "פה. מה צריך?" and leave nothing in the logs to explain why.
         _log.warning("owner agent turn failed error=%s", type(exc).__name__)
         return fallback, wrote
-
-
-def _asks_for_sheet_url(text: str) -> bool:
-    lowered = text.lower()
-    return any(wall in lowered or wall in text for wall in _SHEET_WALLS)

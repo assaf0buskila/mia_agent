@@ -8,7 +8,6 @@ def test_sales_llm_ready_needs_key_and_model() -> None:
     assert blank.sales_llm_ready() is False
     assert blank.sales_gemini_ready() is False
     assert blank.composio_ready() is False
-    assert blank.composio_webhook_ready() is False
     keyed = Settings(
         _env_file=None,
         openai_api_key="k",
@@ -30,9 +29,6 @@ def test_sales_llm_ready_needs_key_and_model() -> None:
     assert key_only.composio_ready() is False
     both = Settings(_env_file=None, composio_api_key="k", composio_user_id="user_1")
     assert both.composio_ready() is True
-    assert both.composio_webhook_ready() is False
-    hook = Settings(_env_file=None, composio_webhook_secret="s")
-    assert hook.composio_webhook_ready() is True
     sqlite = Settings(_env_file=None, database_url="sqlite:///./mia.db")
     assert sqlite.postgres_ready() is False
     pg = Settings(_env_file=None, database_url="postgres://u:p@db:5432/mia")
@@ -46,35 +42,9 @@ def test_sales_llm_ready_needs_key_and_model() -> None:
     assert tunnel.public_https_ready() is False
     live_host = Settings(_env_file=None, public_base_url="https://mia.assafweb.com")
     assert live_host.public_https_ready() is True
-    no_owner = Settings(_env_file=None, whatsapp_owner_phones="")
-    assert no_owner.whatsapp_owner_ready() is False
-    assert no_owner.whatsapp_ingest_ready() is False
-    owner = Settings(
-        _env_file=None,
-        whatsapp_owner_phones="15555550100",
-        whatsapp_verify_token="v",
-        whatsapp_app_secret="s",
-    )
-    assert owner.whatsapp_owner_ready() is True
-    assert owner.whatsapp_ingest_ready() is True
-    no_send = Settings(
-        _env_file=None,
-        whatsapp_access_token="",
-        whatsapp_phone_number_id="",
-    )
-    assert no_send.whatsapp_send_ready() is False
-    assert no_send.whatsapp_connected_ready() is False
-    meta_send = Settings(
-        _env_file=None,
-        whatsapp_access_token="t",
-        whatsapp_phone_number_id="123",
-    )
-    assert meta_send.whatsapp_provider_label() == "meta"
-    assert meta_send.whatsapp_send_ready() is True
-    assert meta_send.whatsapp_connected_ready() is True
 
 
-def test_brain_health_respects_owner_and_extraction_fallback_readiness() -> None:
+def test_brain_health_respects_purpose_specific_owner_fallback_readiness() -> None:
     sales_fallback = Settings(
         _env_file=None,
         openai_api_key="key",
@@ -82,36 +52,48 @@ def test_brain_health_respects_owner_and_extraction_fallback_readiness() -> None
         owner_agent_model="",
     )
     health = brain_health(sales_fallback)
-    assert health["owner_agent"] == {"ready": True, "missing": [], "max_steps": 8}
+    assert health["owner_agent"] == {
+        "ready": False,
+        "missing": ["MIA_OWNER_AGENT_MODEL"],
+        "max_steps": 8,
+    }
 
     gemini_fallback = Settings(
         _env_file=None,
         gemini_api_key="key",
         owner_agent_gemini_model="owner-model",
-        extraction_model="extract-model",
     )
     health = brain_health(gemini_fallback)
     assert health["owner_agent"]["ready"] is True
     assert health["owner_agent"]["missing"] == []
-    assert health["memory_extraction"] == {"ready": True, "missing": []}
+    assert "memory_extraction" not in health
 
-    missing_openai = brain_health(
-        Settings(_env_file=None, owner_agent_model="owner-model")
-    )
+    missing_openai = brain_health(Settings(_env_file=None, owner_agent_model="owner-model"))
     assert missing_openai["owner_agent"] == {
         "ready": False,
         "missing": ["MIA_OPENAI_API_KEY"],
         "max_steps": 8,
     }
 
-    missing_gemini = brain_health(
-        Settings(_env_file=None, owner_agent_gemini_model="owner-model")
-    )
+    missing_gemini = brain_health(Settings(_env_file=None, owner_agent_gemini_model="owner-model"))
     assert missing_gemini["owner_agent"] == {
         "ready": False,
         "missing": ["MIA_GEMINI_API_KEY"],
         "max_steps": 8,
     }
+
+
+def test_voice_health_accepts_configured_gemini_transcription() -> None:
+    health = brain_health(
+        Settings(
+            _env_file=None,
+            gemini_api_key="test-key",
+            gemini_transcribe_model="audio-model",
+            telegram_bot_token="test-token",
+            openai_api_key="",
+        )
+    )
+    assert health["voice_in"] == {"ready": True, "missing": []}
 
 
 def test_health_live_is_minimal() -> None:
@@ -179,59 +161,26 @@ def test_health_is_alive() -> None:
     assert body["sales_llm"] is False
     assert body["sales_gemini"] is False
     assert body["composio"] is False
-    assert body["composio_webhook"] is False
     assert body["postgres"] is False
     assert body["public_https"] is False
-    assert body["whatsapp_ingest"] is False
-    assert body["whatsapp_owner"] is False
-    assert body["whatsapp_provider"] == "meta"
-    assert body["whatsapp_connected"] is False
-    assert body["whatsapp_send"] is False
-    assert body["risk"]["R4_meta_writes"] == "approval"
+    assert body["risk"]["R4_meta_writes"] == "deny"
     # R5 is denied even if a stale legacy approval row exists.
     assert body["risk"]["R5_destructive"] == "deny"
     assert body["risk"]["kill_switch"] is False
-    assert body["capabilities"]["http_api"] == "alive"
-    assert body["capabilities"]["identity"] == "alive"
-    assert body["capabilities"]["sales_state"] == "alive"
-    assert body["capabilities"]["sales_reply"] == "alive"
-    assert body["capabilities"]["risk_policy"] == "alive"
-    assert body["capabilities"]["website"] == "alive"
-    assert body["capabilities"]["langgraph"] == "alive"
-    assert body["capabilities"]["whatsapp"] == "alive"
-    assert body["capabilities"]["voice_stt"] == "alive"
-    assert body["capabilities"]["instagram"] == "alive"
-    assert "manychat" not in body["capabilities"]
-    assert body["capabilities"]["gmail"] == "alive"
-    assert body["capabilities"]["calendar"] == "alive"
-    assert body["capabilities"]["meta_ads"] == "specified"
-    assert body["capabilities"]["content_performance"] == "alive"
-    assert body["capabilities"]["campaign_analysis"] == "specified"
-    assert body["capabilities"]["campaign_pacing"] == "specified"
-    assert body["capabilities"]["research"] == "alive"
-    assert body["capabilities"]["linkedin"] == "alive"
-    assert body["capabilities"]["owner_learning"] == "alive"
-    assert body["capabilities"]["graph_lab"] == "alive"
-    assert body["capabilities"]["demo_mode"] == "alive"
-    assert body["capabilities"]["follow_up"] == "alive"
-    assert body["capabilities"]["due_scan"] == "alive"
-    assert body["capabilities"]["conversation_kill"] == "alive"
-    assert body["capabilities"]["meeting_brief"] == "alive"
-    assert body["capabilities"]["meeting_debrief"] == "alive"
-    assert body["capabilities"]["meetings"] == "alive"
-    assert body["capabilities"]["ai_runs"] == "alive"
-    assert body["capabilities"]["tool_runs"] == "alive"
-    assert body["capabilities"]["canonical_events"] == "alive"
-    assert body["capabilities"]["aws_runtime"] == "specified"
-    assert body["capabilities"]["brain_memory"] == "alive"
-    assert body["capabilities"]["brain_knowledge"] == "wired"
-    assert body["capabilities"]["brain_retrieval"] == "wired"
-    assert body["capabilities"]["embeddings"] == "wired"
-    assert body["capabilities"]["owner_agent"] == "wired"
-    assert "instagram" in body["capabilities"]
+    for capability in ("http_api", "risk_policy", "website", "telegram", "canonical_events"):
+        assert body["capabilities"][capability] == "alive"
+    assert "whatsapp" not in body["capabilities"]
+    assert "reconciliation" not in body["capabilities"]
+    assert body["v2"] == {
+        "owner_enabled": True,
+        "website_enabled": True,
+        "crm_enabled": True,
+        "delivery_configured": False,
+        "delivery_paused": False,
+        "passive_owner_memory_enabled": False,
+    }
     integrations = body["owner_integrations"]
     assert integrations["gmail_send"] is False
-    assert integrations["whatsapp_handoff_send"] is False
     assert integrations["research_apify"] is False
     assert integrations["composio"] is False
     assert "MIA_COMPOSIO_API_KEY" in integrations["missing"]

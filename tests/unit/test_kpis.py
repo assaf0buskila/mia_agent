@@ -1,15 +1,11 @@
 from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
-from app.api.deps import get_sheets_port
 from app.db.models import CanonicalEventRow
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
 from app.domain.events import Channel, build_meeting_booked_event
 from app.domain.kpis import KPI_EVENT_TYPES, compute_weekly_kpi, week_start_on
-from app.integrations.sheets import FakeSheetsPort
-from app.main import app
-from fastapi.testclient import TestClient
 from sqlalchemy import delete
 
 
@@ -99,24 +95,6 @@ def test_count_follow_ups_rejects_unknown_status() -> None:
         db.close()
 
 
-def test_compute_after_website_session_and_message() -> None:
-    init_db()
-    fake = FakeSheetsPort()
-    app.dependency_overrides[get_sheets_port] = lambda: fake
-    try:
-        with TestClient(app) as client:
-            session = client.post("/v1/website/sessions").json()
-            session_id = session["session_id"]
-            response = client.post(
-                f"/v1/website/sessions/{session_id}/messages",
-                json={"text": "tell me about automation"},
-            )
-            assert response.status_code == 200
-            assert response.json()["next_action"] in {"ask_contact", "answer", "ask_need"}
-    finally:
-        app.dependency_overrides.pop(get_sheets_port, None)
-
-
 def test_compute_excludes_events_outside_current_week() -> None:
     init_db()
     db = get_session_factory()()
@@ -143,25 +121,3 @@ def test_compute_excludes_events_outside_current_week() -> None:
         assert current.leads == before_leads
     finally:
         db.close()
-
-
-def test_website_identify_then_sell_reaches_handoff() -> None:
-    init_db()
-    fake = FakeSheetsPort()
-    app.dependency_overrides[get_sheets_port] = lambda: fake
-    try:
-        with TestClient(app) as client:
-            created = client.post("/v1/website/sessions")
-            session_id = created.json()["session_id"]
-            clinic = client.post(
-                f"/v1/website/sessions/{session_id}/messages",
-                json={"text": "We run a clinic and miss calls all day."},
-            )
-            assert clinic.status_code == 200
-            identified = client.post(
-                f"/v1/website/sessions/{session_id}/messages",
-                json={"text": "let's book a meeting", "phone": "0501234567"},
-            )
-            assert identified.json()["next_action"] in {"handoff", "confirm_contact"}
-    finally:
-        app.dependency_overrides.pop(get_sheets_port, None)

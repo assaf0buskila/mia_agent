@@ -16,6 +16,7 @@ from app.agents.owner.graph import compile_owner_graph
 from app.api.owner import process_owner_texts
 from app.capabilities.types import Principal
 from app.channels.telegram import message_to_owner_state
+from app.core.config import Settings
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
 from app.domain.events import Channel
@@ -115,7 +116,24 @@ def test_audio_and_text_reach_the_responder_through_the_same_graph() -> None:
 # ------------------------------------------------------------ the real owner entry
 
 
-async def _drive(item: dict[str, str], spy: _GraphSpy) -> RecordingMessagePort:
+def _graph_answer(**kwargs) -> OwnerBrainResult:
+    return run_owner_turn(
+        principal=kwargs["principal"],
+        owner_id=kwargs["principal"].actor_id,
+        telegram_chat_id=kwargs["principal"].actor_id,
+        run_id=kwargs["source_ref"],
+        latest_message=kwargs["owner_text"],
+        kill_switch=kwargs["kill_switch"],
+        produce=lambda _state: OwnerBrainResult("תשובה אחת לשניהם", True, ()),
+        source=kwargs["input_source"],
+    )
+
+
+async def _drive(
+    item: dict[str, str], spy: _GraphSpy, monkeypatch
+) -> RecordingMessagePort:
+    monkeypatch.setattr(Settings, "owner_agent_ready", lambda _self: True)
+    monkeypatch.setattr(owner_brain, "answer_owner", _graph_answer)
     init_db()
     session = get_session_factory()()
     port = RecordingMessagePort()
@@ -147,6 +165,7 @@ async def test_a_voice_note_enters_owner_graph_tagged_as_audio(monkeypatch) -> N
             "source": "audio",
         },
         spy,
+        monkeypatch,
     )
     assert spy.states_in[0]["source"] == "audio"
     assert spy.states_in[0]["thread_id"] == f"tg:{OWNER_ID}"
@@ -161,6 +180,7 @@ async def test_a_typed_message_enters_the_same_graph_tagged_as_text(monkeypatch)
     port = await _drive(
         {"id": "evt.owner.text.1", "from": OWNER_ID, "text": "מה קרה היום?"},
         spy,
+        monkeypatch,
     )
     assert spy.states_in[0]["source"] == "text"
     assert spy.states_in[0]["thread_id"] == f"tg:{OWNER_ID}"

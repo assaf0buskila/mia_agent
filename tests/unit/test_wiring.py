@@ -3,7 +3,6 @@ from datetime import UTC, datetime
 import pytest
 from app.core.capabilities import CapabilityId, require_alive
 from app.domain.events import CanonicalEvent, Channel, EventType
-from app.graph.state import empty_state
 from app.integrations.base import DisabledMessagePort, OutboundMessage
 
 
@@ -20,13 +19,6 @@ def test_canonical_event_is_serializable() -> None:
     assert dumped["channel"] == "website"
     restored = CanonicalEvent.model_validate(dumped)
     assert restored.event_id == "evt_1"
-
-
-def test_graph_state_has_no_non_serializable_defaults() -> None:
-    state = empty_state(run_id="run_1", thread_id="thread_1", channel="website")
-    assert state["approval_required"] is False
-    assert isinstance(state["errors"], list)
-    assert isinstance(state["cost"], dict)
 
 
 @pytest.mark.asyncio

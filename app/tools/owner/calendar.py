@@ -2,22 +2,23 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from app.domain.approvals import DECISION_PENDING, RESOURCE_CALENDAR, is_approval_expired
-from app.domain.events import Channel
-from app.domain.meetings.write_gate import ASK_ASSAF
+from app.domain.meetings.slots import sanitize_event_id
 from app.domain.owner.calendar import (
     apply_owner_calendar,
     format_calendar_agenda,
     resolve_agenda_window,
 )
-from app.domain.owner.calendar_writes import (
-    apply_owner_calendar_change_request,
-    parse_calendar_change_request,
-)
 from app.integrations.calendar import build_calendar_agenda_port, build_calendar_port
+from app.integrations.calendar_booking import (
+    BookingLookupStatus,
+    DisabledCalendarBookingPort,
+    build_calendar_booking_port,
+)
+from app.services.owner_actions import propose_owner_action, typed_composio_binding
 from app.tools.owner.types import ToolContext, ToolResult, _empty, _house_unavailable
 
 
@@ -41,37 +42,126 @@ def _calendar_availability(ctx: ToolContext, args: dict[str, Any]) -> ToolResult
 
 
 def _calendar_create_meeting(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
+    if ctx.kill_switch:
+        return ToolResult(ok=False, error="calendar write denied")
     title = str(args.get("title") or "").strip()
     start = str(args.get("start") or "").strip()
     minutes = str(args.get("minutes") or "30").strip()
     location = str(args.get("location") or "").strip()
     if not title or not start:
         return ToolResult(ok=False, error="title and start are required")
-    line = f"צור אירוע: {title} {location} | {start} | {minutes} | {ctx.timezone()}"
-    change = parse_calendar_change_request(line, default_timezone=ctx.timezone())
-    reply = apply_owner_calendar_change_request(
-        ctx.store,
-        text=line,
-        channel=Channel.TELEGRAM,
-        kill_switch=ctx.kill_switch,
-        demo_active=ctx.demo_active,
-        default_timezone=ctx.timezone(),
-    )
-    approval_id = ""
-    if change is not None:
-        row = ctx.store.get_approval_by_resource(
-            RESOURCE_CALENDAR,
-            change.resource_id,
-            change.action,
+    try:
+        duration = int(minutes)
+        if duration < 5 or duration > 720:
+            raise ValueError("duration must be between 5 and 720 minutes")
+        start_at = datetime.fromisoformat(start.replace("Z", "+00:00"))
+        if start_at.tzinfo is None:
+            start_at = start_at.replace(tzinfo=ZoneInfo(ctx.timezone()))
+        end_at = start_at + timedelta(minutes=duration)
+        calendar = ctx.calendar or build_calendar_port(ctx.settings)
+        slots = calendar.find_free_slots(
+            time_min=start_at,
+            time_max=end_at,
+            duration_minutes=duration,
+            timezone=ctx.timezone(),
         )
-        if (
-            row is not None
-            and row.decision == DECISION_PENDING
-            and not is_approval_expired(row, now=datetime.now(UTC))
-            and "לא שיניתי ביומן. אשר בלחצן למטה." in (reply or "")
-        ):
-            approval_id = str(row.approval_id or "").strip()
-    return ToolResult(ok=True, text=reply or ASK_ASSAF, approval_id=approval_id)
+        free = any(slot.start <= start_at and slot.end >= end_at for slot in slots)
+        if not free:
+            return ToolResult(ok=False, error="the requested calendar time is not free")
+        binding = typed_composio_binding(ctx.settings, "GOOGLECALENDAR", port=calendar)
+        proposal = propose_owner_action(
+            ctx.store,
+            principal=ctx.principal,
+            source_ref=ctx.source_ref,
+            kind="calendar.create",
+            parameters={
+                "title": title,
+                "start": start_at.isoformat(),
+                "end": end_at.isoformat(),
+                "timezone": ctx.timezone(),
+                "location": location,
+            },
+            target={
+                "free": True,
+                "start": start_at.isoformat(),
+                "end": end_at.isoformat(),
+                "provider_binding": binding,
+            },
+        )
+    except (PermissionError, ValueError, RuntimeError, ZoneInfoNotFoundError) as exc:
+        return ToolResult(ok=False, error=f"calendar proposal could not be bound: {exc}")
+    return ToolResult(
+        ok=True,
+        text="Prepared an exact calendar proposal. Nothing was created.",
+        approval_id=proposal.approval_id,
+    )
+
+
+def _calendar_reschedule(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
+    """Bind a model-resolved event id and its current provider snapshot."""
+    if ctx.kill_switch:
+        return ToolResult(ok=False, error="calendar write denied")
+    event_id = sanitize_event_id(str(args.get("event_id") or "").strip())
+    start_raw = str(args.get("start") or "").strip()
+    try:
+        minutes = int(args.get("minutes") or 30)
+        start = datetime.fromisoformat(start_raw.replace("Z", "+00:00"))
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=ZoneInfo(ctx.timezone()))
+    except (TypeError, ValueError, ZoneInfoNotFoundError):
+        return ToolResult(ok=False, error="event_id, valid start and duration are required")
+    if event_id is None or minutes < 5 or minutes > 720:
+        return ToolResult(ok=False, error="event_id, valid start and duration are required")
+    booking = build_calendar_booking_port(ctx.settings)
+    if isinstance(booking, DisabledCalendarBookingPort):
+        return _house_unavailable(ctx, "Calendar")
+    current = booking.get_event(event_id=event_id, timezone=ctx.timezone())
+    if current.status is not BookingLookupStatus.FOUND or current.event is None:
+        return ToolResult(ok=False, error="the selected calendar event is unavailable")
+    event = current.event
+    end = start + timedelta(minutes=minutes)
+    calendar = ctx.calendar or build_calendar_port(ctx.settings)
+    slots = calendar.find_free_slots(
+        time_min=start,
+        time_max=end,
+        duration_minutes=minutes,
+        timezone=ctx.timezone(),
+    )
+    destination_free = any(slot.start <= start and slot.end >= end for slot in slots)
+    if not destination_free:
+        return ToolResult(ok=False, error="the requested new calendar time is not free")
+    try:
+        binding = typed_composio_binding(ctx.settings, "GOOGLECALENDAR", port=booking)
+    except RuntimeError as exc:
+        return ToolResult(ok=False, error=f"calendar proposal could not be bound: {exc}")
+    target = {
+        "event_id": event.event_id,
+        "start": event.start.isoformat() if event.start else "",
+        "end": event.end.isoformat() if event.end else "",
+        "destination_free": True,
+        "provider_binding": binding,
+    }
+    try:
+        proposal = propose_owner_action(
+            ctx.store,
+            principal=ctx.principal,
+            source_ref=ctx.source_ref,
+            kind="calendar.reschedule",
+            parameters={
+                "event_id": event.event_id,
+                "start": start.isoformat(),
+                "end": end.isoformat(),
+                "timezone": ctx.timezone(),
+            },
+            target=target,
+        )
+    except (PermissionError, ValueError) as exc:
+        return ToolResult(ok=False, error=f"calendar proposal could not be bound: {exc}")
+    return ToolResult(
+        ok=True,
+        text="Prepared an exact calendar move proposal. Nothing was changed.",
+        approval_id=proposal.approval_id,
+    )
 
 
 def _calendar_agenda(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:

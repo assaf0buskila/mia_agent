@@ -15,9 +15,10 @@ from app.core.config import Settings
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
 from app.graph.owner_agent import TOOL_DEADLINE_REPLY, _run_tool_with_timeout
+from app.integrations.sheets import FakeSheetsPort
+from app.services.crm_v2 import CONTACT_FIELDS, CrmService
 from app.tools.registries.owner_tools import (
     OUTCOME_FAILURE,
-    OUTCOME_PARTIAL,
     OUTCOME_SUCCESS,
     OUTCOME_TIMEOUT,
     ToolContext,
@@ -37,22 +38,20 @@ def _ctx(db, sheets=None) -> ToolContext:
     )
 
 
-class _ActivityBrokenSheets:
-    """Contacts reads fine. Activity raises — exactly the half-failure case."""
+class _CrmImportBrokenSheets(FakeSheetsPort):
+    """Current CRM reads must fail closed when Contacts import is unavailable."""
 
-    def read_locked_contacts(self) -> list[list[str]]:
-        return [["name", "phone"], ["Dana", "050-0000000"]]
-
-    def read_values(self, **_kwargs) -> list[list[str]]:
-        raise RuntimeError("activity tab unavailable")
+    def read_crm_contacts_chunk(self, **_kwargs) -> list[list[str]]:
+        raise RuntimeError("contacts import unavailable")
 
 
-class _ActivityEmptySheets:
-    def read_locked_contacts(self) -> list[list[str]]:
-        return [["name", "phone"], ["Dana", "050-0000000"]]
-
-    def read_values(self, **_kwargs) -> list[list[str]]:
-        return []
+class _CurrentCrmSheets(FakeSheetsPort):
+    def __init__(self) -> None:
+        super().__init__()
+        # Contacts A:N plus the stable Mia id in O, as imported by the v2 service.
+        self.locked_contacts.append(
+            ["Dana", "050-0000000"] + [""] * 12 + ["crm_outcome_truth_1"]
+        )
 
 
 def test_outcome_defaults_follow_ok() -> None:
@@ -100,27 +99,36 @@ def test_a_timeout_is_not_a_success() -> None:
         db.close()
 
 
-def test_a_lost_activity_tab_is_reported_as_partial() -> None:
+def test_a_lost_crm_import_is_reported_as_failure() -> None:
     init_db()
     db = get_session_factory()()
     try:
-        result = execute_tool("crm_search", {"query": "Dana"}, _ctx(db, _ActivityBrokenSheets()))
-        assert result.ok is True
-        assert result.outcome_label() == OUTCOME_PARTIAL
-        assert "could not be read" in result.text
-        assert result.payload()["outcome"] == OUTCOME_PARTIAL
+        result = execute_tool(
+            "crm_search", {"query": "Dana"}, _ctx(db, _CrmImportBrokenSheets())
+        )
+        assert result.ok is False
+        assert result.outcome_label() == OUTCOME_FAILURE
+        assert "stale target" in result.error
     finally:
         db.close()
 
 
-def test_an_empty_activity_tab_is_still_a_clean_success() -> None:
-    """The point of the previous test is the distinction, so pin the other side."""
+def test_a_current_crm_import_is_a_clean_success() -> None:
     init_db()
     db = get_session_factory()()
     try:
-        result = execute_tool("crm_search", {"query": "Dana"}, _ctx(db, _ActivityEmptySheets()))
+        sheets = _CurrentCrmSheets()
+        seeded = CrmService(db).capture(
+            {"name": "Dana", "phone": "050-0000000"}, source_ref="seed:outcome-truth"
+        )
+        assert seeded.contact is not None
+        sheets.locked_contacts[0] = [
+            seeded.contact.fields.get(name, "") for name in CONTACT_FIELDS
+        ] + [seeded.contact.id]
+        db.commit()
+        result = execute_tool("crm_search", {"query": "Dana"}, _ctx(db, sheets))
         assert result.ok is True
         assert result.outcome_label() == OUTCOME_SUCCESS
-        assert "could not be read" not in result.text
+        assert "Dana" in result.text
     finally:
         db.close()

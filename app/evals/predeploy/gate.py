@@ -1,4 +1,4 @@
-"""Opt-in gate for the real-model predeploy suite.
+"""Opt-in gate for the real-model owner predeploy suite.
 
 `app/evals/harness.py` stays the deterministic eval that runs in CI on every commit and
 never calls a model. This suite is the opposite trade: it calls the *configured* models
@@ -48,13 +48,12 @@ class GateStatus:
     """Why the suite may or may not run. `reasons` is operator-facing copy."""
 
     opted_in: bool
-    site_ready: bool
     owner_ready: bool
     reasons: tuple[str, ...]
 
     def enabled(self) -> bool:
-        """True only when the flag is set and both surfaces have a callable model."""
-        return self.opted_in and self.site_ready and self.owner_ready
+        """True only when opted in and the owner model is callable."""
+        return self.opted_in and self.owner_ready
 
 
 def _value(env: Mapping[str, str], name: str) -> str:
@@ -63,16 +62,6 @@ def _value(env: Mapping[str, str], name: str) -> str:
 
 def _flag_set(env: Mapping[str, str]) -> bool:
     return _value(env, PREDEPLOY_FLAG).lower() in _TRUTHY
-
-
-def _site_ready(env: Mapping[str, str]) -> bool:
-    """Mirrors `Settings.sales_llm_ready`, on raw env so no `.env` is read."""
-    openai_ok = bool(
-        _value(env, OPENAI_KEY)
-        and (_value(env, SALES_MODEL) or _value(env, SALES_FALLBACK_MODEL))
-    )
-    gemini_ok = bool(_value(env, GEMINI_KEY) and _value(env, SALES_GEMINI_MODEL))
-    return openai_ok or gemini_ok
 
 
 def _owner_ready(env: Mapping[str, str]) -> bool:
@@ -91,18 +80,12 @@ def _owner_ready(env: Mapping[str, str]) -> bool:
 def gate_status(env: Mapping[str, str]) -> GateStatus:
     """Decide whether the real-model suite may run, and say why when it may not."""
     opted_in = _flag_set(env)
-    site_ready = _site_ready(env)
     owner_ready = _owner_ready(env)
     reasons: list[str] = []
     if not opted_in:
         reasons.append(
             f"{PREDEPLOY_FLAG} is not set to 1. This suite calls real models and costs "
             "money, so it never runs unless it is asked for explicitly."
-        )
-    if not site_ready:
-        reasons.append(
-            f"No callable website sales model. Set {OPENAI_KEY} plus {SALES_MODEL} "
-            f"(or {SALES_FALLBACK_MODEL}), or {GEMINI_KEY} plus {SALES_GEMINI_MODEL}."
         )
     if not owner_ready:
         reasons.append(
@@ -112,7 +95,6 @@ def gate_status(env: Mapping[str, str]) -> GateStatus:
         )
     return GateStatus(
         opted_in=opted_in,
-        site_ready=site_ready,
         owner_ready=owner_ready,
         reasons=tuple(reasons),
     )

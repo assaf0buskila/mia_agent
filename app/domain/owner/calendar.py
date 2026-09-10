@@ -235,7 +235,7 @@ def format_calendar_agenda(
         else:
             local_end = _ensure_aware(event.end).astimezone(zone)
             when = f"{local_start.strftime('%Y-%m-%d %H:%M')}-{local_end.strftime('%H:%M')}"
-        line = f"{index}. {when} · {summary}"
+        line = f"{index}. {when} · {summary} · event_id: {event.event_id}"
         if event.location:
             line = f"{line} · {event.location}"
         lines.append(line)

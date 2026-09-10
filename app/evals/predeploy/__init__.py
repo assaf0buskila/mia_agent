@@ -1,9 +1,7 @@
 """Opt-in real-model predeploy eval suite.
 
-Separate from `app.evals.harness`, which is the deterministic suite that runs on every
-commit and makes no model calls. This package calls the configured models against the
-real website and owner code paths, so it is off unless `MIA_PREDEPLOY_EVAL=1` and real
-model credentials are both present.
+This package calls configured models against the owner code path, so it is off unless
+`MIA_PREDEPLOY_EVAL=1` and real model credentials are both present.
 
 Entry point: `scripts/run_predeploy_eval.py`.
 """
@@ -40,7 +38,6 @@ from app.evals.predeploy.scenarios import (
     hard_safety_ids,
     owner_scenarios,
     scenario_ids,
-    website_scenarios,
 )
 
 __all__ = [
@@ -72,6 +69,5 @@ __all__ = [
     "seal_process_environment",
     "sealed_settings",
     "skipped_report",
-    "website_scenarios",
     "write_report",
 ]

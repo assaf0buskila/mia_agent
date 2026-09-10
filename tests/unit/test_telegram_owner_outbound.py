@@ -4,14 +4,13 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
-from app.api import owner as owner_api
-from app.api.inbound import process_inbound_texts
 from app.api.inbound_common import (
     outbound_reply as _outbound_reply,
 )
 from app.api.inbound_common import (
     owner_telegram_reply_markup as _owner_telegram_reply_markup,
 )
+from app.api.owner import process_owner_texts as process_inbound_texts
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
 from app.domain.approvals import (
@@ -26,7 +25,6 @@ from app.domain.approvals import (
     payload_hash,
 )
 from app.domain.events import Channel
-from app.domain.owner.brain import OwnerBrainResult
 from app.domain.owner.callbacks import approval_token
 from app.domain.owner.tasks import OwnerTaskType
 from app.integrations.base import RecordingMessagePort
@@ -110,11 +108,18 @@ def test_store_keeps_long_linkedin_payload_exact() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("has_turn_approval", [True, False])
-@pytest.mark.parametrize("tool_name", [
-    "composio_propose_linkedin_action", "calendar_create_meeting", "gmail_create_draft",
-])
+@pytest.mark.parametrize(
+    "tool_name",
+    [
+        "composio_propose_linkedin_action",
+        "calendar_create_meeting",
+        "gmail_create_draft",
+    ],
+)
 async def test_proposal_turn_keyboard_ignores_an_unrelated_newer_approval(
-    monkeypatch, tool_name, has_turn_approval,
+    monkeypatch,
+    tool_name,
+    has_turn_approval,
 ) -> None:
     init_db()
     db = get_session_factory()()
@@ -148,16 +153,13 @@ async def test_proposal_turn_keyboard_ignores_an_unrelated_newer_approval(
         )
         assert unrelated is not None
         db.commit()
-        monkeypatch.setattr(
-            owner_api,
-            "run_owner_turn",
-            lambda **_kwargs: OwnerBrainResult(
-                "LinkedIn action is ready for approval.",
-                True,
-                (tool_name,),
-                approval_ids=(exact.approval_id,) if has_turn_approval else (),
-            ),
-        )
+
+        def fake_talk(*, approval_ids_out, **_kwargs):
+            if has_turn_approval:
+                approval_ids_out.append(exact.approval_id)
+            return "LinkedIn action is ready for approval.", False
+
+        monkeypatch.setattr("app.surfaces.owner._talk_with_optional_agent", fake_talk)
         port = RecordingMessagePort()
 
         await process_inbound_texts(
@@ -180,9 +182,7 @@ async def test_proposal_turn_keyboard_ignores_an_unrelated_newer_approval(
         assert port.sent[0].reply_markup == (
             approval_keyboard(approval_token(exact.approval_id)) if has_turn_approval else None
         )
-        assert port.sent[0].reply_markup != approval_keyboard(
-            approval_token(unrelated.approval_id)
-        )
+        assert port.sent[0].reply_markup != approval_keyboard(approval_token(unrelated.approval_id))
     finally:
         db.close()
 
@@ -256,6 +256,107 @@ async def test_pending_approvals_owner_turn_attaches_keyboard() -> None:
         assert "מחכים לאישור" in sent.text
     finally:
         db.close()
+
+
+@pytest.mark.asyncio
+async def test_file_sqlite_crm_callback_syncs_before_decision_and_executes_once(
+    monkeypatch, tmp_path
+) -> None:
+    """The callback uses one transaction, so file SQLite cannot lock itself."""
+    from app.api import telegram as telegram_api
+    from app.capabilities.types import Principal
+    from app.core.config import Settings
+    from app.db.base import Base
+    from app.db.session import make_engine
+    from app.integrations import sheets as sheets_integration
+    from app.integrations.sheets import FakeSheetsPort
+    from app.services import owner_actions as owner_actions_service
+    from app.services.crm_v2 import CrmService
+    from app.services.owner_actions import propose_owner_action
+    from sqlalchemy.orm import sessionmaker
+
+    engine = make_engine(f"sqlite:///{tmp_path / 'crm-callback.db'}")
+    Base.metadata.create_all(engine)
+    session_factory = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+    db = session_factory()
+    try:
+        settings = Settings(
+            telegram_owner_user_ids=_OWNER_ID,
+            crm_v2_enabled=True,
+        )
+        store = LeadStore(db)
+        fields = {"name": "Callback Contact", "email": "callback@example.com"}
+        snapshot = CrmService(db).snapshot_identity(fields)
+        proposal = propose_owner_action(
+            store,
+            principal=Principal.owner(source="telegram", actor_id=_OWNER_ID),
+            source_ref="telegram:file-sqlite-crm-callback",
+            kind="crm.upsert",
+            parameters={
+                "fields": fields,
+                "contact_id": snapshot.contact_id,
+                "expected_revision": snapshot.revision,
+            },
+            target={
+                "contact_id": snapshot.contact_id,
+                "revision": snapshot.revision,
+                "snapshot_hash": snapshot.snapshot_hash,
+                "fields": snapshot.fields,
+            },
+        )
+        db.commit()
+        sheets_port = FakeSheetsPort()
+        monkeypatch.setattr(telegram_api, "build_sheets_port", lambda _settings: sheets_port)
+        monkeypatch.setattr(sheets_integration, "build_sheets_port", lambda _settings: sheets_port)
+        outcomes = []
+        original_execute = owner_actions_service.execute_approved_owner_action_with_adapters
+
+        def capture_outcome(*args, **kwargs):
+            outcome = original_execute(*args, **kwargs)
+            outcomes.append(outcome)
+            return outcome
+
+        monkeypatch.setattr(
+            owner_actions_service,
+            "execute_approved_owner_action_with_adapters",
+            capture_outcome,
+        )
+        port = _CallbackPort()
+        callback = {
+            "callback_query_id": "q-crm-file",
+            "from": _OWNER_ID,
+            "data": f"ok:{approval_token(proposal.approval_id)}",
+            "chat_id": _OWNER_ID,
+            "message_id": "44",
+        }
+
+        first = await telegram_api._handle_callback(
+            callback=callback,
+            port=port,
+            owner_ids={_OWNER_ID},
+            db=db,
+            settings=settings,
+        )
+        db.commit()
+        second = await telegram_api._handle_callback(
+            callback={**callback, "callback_query_id": "q-crm-file-replay"},
+            port=port,
+            owner_ids={_OWNER_ID},
+            db=db,
+            settings=settings,
+        )
+        db.commit()
+
+        assert first["processed"] == second["processed"] == 1
+        assert outcomes[0].status == "executed", outcomes
+        assert outcomes[1].status == "already_handled", outcomes
+        assert "CRM contact" in port.edited[0]["text"]
+        contacts = CrmService(db).lookup(query="callback@example.com")
+        assert len(contacts) == 1
+        assert contacts[0].revision == 1
+    finally:
+        db.close()
+        engine.dispose()
 
 
 class _CallbackPort(RecordingMessagePort):
@@ -413,9 +514,7 @@ def test_gmail_callback_defers_then_never_replays_an_ambiguous_send(monkeypatch)
             expires_at=approval_expires_at(now=datetime.now(UTC)),
         )
         db.commit()
-        row = store.get_approval_by_resource(
-            RESOURCE_GMAIL, draft_id, ACTION_GMAIL_SEND
-        )
+        row = store.get_approval_by_resource(RESOURCE_GMAIL, draft_id, ACTION_GMAIL_SEND)
         assert row is not None
         telegram_port = _CallbackPort()
         original_send = gmail_port.send_draft
@@ -517,9 +616,7 @@ def test_gmail_invalid_callback_never_sends(monkeypatch, bad_field: str) -> None
             expires_at=approval_expires_at(now=datetime.now(UTC)),
         )
         db.commit()
-        row = store.get_approval_by_resource(
-            RESOURCE_GMAIL, draft_id, ACTION_GMAIL_SEND
-        )
+        row = store.get_approval_by_resource(RESOURCE_GMAIL, draft_id, ACTION_GMAIL_SEND)
         assert row is not None
         if bad_field == "payload_hash":
             row.payload_hash = "x" * 64

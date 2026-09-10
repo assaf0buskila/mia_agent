@@ -171,5 +171,12 @@ def test_freshness_policy_capability_alive() -> None:
 
 def test_orchestrator_does_not_import_stamp_freshness() -> None:
     repo_root = Path(__file__).resolve().parents[2]
-    source = (repo_root / "app/graph/orchestrator.py").read_text(encoding="utf-8")
-    assert "stamp_freshness" not in source
+    assert not (repo_root / "app/graph/orchestrator.py").exists()
+    # Freshness now belongs to the surviving provider adapters. Keep a source-level
+    # guard against silently losing the evidence stamp while the retired graph is gone.
+    for relative in (
+        "app/integrations/instagram_insights.py",
+        "app/integrations/linkedin.py",
+        "app/integrations/research.py",
+    ):
+        assert "stamp_freshness" in (repo_root / relative).read_text(encoding="utf-8")

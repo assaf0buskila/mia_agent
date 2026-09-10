@@ -5,7 +5,10 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+.pytest-*/
+.pytest_tmp_*/
 .ruff_cache/
+.cache/
 docs/
 tests/
 *.md

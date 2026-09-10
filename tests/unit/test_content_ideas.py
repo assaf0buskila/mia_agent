@@ -1,29 +1,17 @@
 import inspect
 from datetime import UTC, datetime
-from unittest.mock import patch
 
-import pytest
-from app.api.inbound import process_inbound_texts
 from app.core.capabilities import CapabilityId, require_alive
 from app.db.models import ContentIdeaRow, ContentInsightRow
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
-from app.domain.commitments import (
-    ACTION_LOG,
-    CONDITION_NONE,
-    TRIGGER_NONE,
-    plan_owner_commitment,
-)
 from app.domain.content_ideas import (
     apply_content_idea_policy,
     apply_owner_content_ideas,
     compute_content_idea_snapshot,
     format_content_ideas_ack,
 )
-from app.domain.events import Channel
 from app.domain.followups import follow_up_due_on
-from app.domain.owner.tasks import OwnerTaskType, classify_owner_task
-from app.integrations.base import RecordingMessagePort
 from sqlalchemy import delete
 
 FROZEN_NOW = datetime(2026, 8, 21, 9, 0, tzinfo=UTC)
@@ -59,64 +47,9 @@ def _seed_insight(
 
 def _cleanup(db, idea_date: str, media_ids: list[str]) -> None:
     for media_id in media_ids:
-        db.execute(
-            delete(ContentInsightRow).where(ContentInsightRow.media_id == media_id)
-        )
+        db.execute(delete(ContentInsightRow).where(ContentInsightRow.media_id == media_id))
     db.execute(delete(ContentIdeaRow).where(ContentIdeaRow.idea_date == idea_date))
     db.commit()
-
-
-def test_classify_content_ideas_english() -> None:
-    decision = classify_owner_task("send me content ideas")
-    assert decision.task_type == OwnerTaskType.CONTENT_IDEA
-    assert decision.needs_clarification is False
-    assert decision.matched_types == ["content_idea"]
-
-
-def test_classify_content_ideas_hebrew() -> None:
-    decision = classify_owner_task("תני לי רעיונות לתוכן")
-    assert decision.task_type == OwnerTaskType.CONTENT_IDEA
-    assert decision.needs_clarification is False
-
-
-def test_classify_content_performance_still_analytics() -> None:
-    decision = classify_owner_task("content performance")
-    assert decision.task_type == OwnerTaskType.ANALYTICS
-    assert decision.needs_clarification is False
-
-
-def test_classify_bare_ideas_not_content_idea() -> None:
-    decision = classify_owner_task("some ideas for tomorrow")
-    assert decision.task_type == OwnerTaskType.NOTE
-    assert decision.needs_clarification is True
-    assert "content_idea" not in decision.matched_types
-
-
-def test_classify_bare_reayonot_not_content_idea() -> None:
-    decision = classify_owner_task("יש לי רעיונות")
-    assert decision.task_type == OwnerTaskType.NOTE
-    assert decision.needs_clarification is True
-    assert "content_idea" not in decision.matched_types
-
-
-def test_classify_content_ideas_first_pass() -> None:
-    decision = classify_owner_task("content ideas and instagram content")
-    assert decision.task_type == OwnerTaskType.CONTENT_IDEA
-    assert decision.needs_clarification is False
-    assert decision.matched_types == ["content_idea"]
-
-
-def test_plan_content_idea_trigger_none_even_with_due_at() -> None:
-    text = "content ideas today"
-    decision = classify_owner_task(text)
-    plan = plan_owner_commitment(
-        decision=decision,
-        text=text,
-        due_at="2026-08-21",
-    )
-    assert plan.trigger == TRIGGER_NONE
-    assert plan.condition == CONDITION_NONE
-    assert plan.action == ACTION_LOG
 
 
 def test_compute_ranks_reels_before_image() -> None:
@@ -364,56 +297,3 @@ def test_content_ideas_module_no_llm_or_publish_ports() -> None:
 
 def test_require_alive_content_ideas() -> None:
     require_alive(CapabilityId.CONTENT_IDEAS)
-
-
-@pytest.mark.asyncio
-async def test_owner_inbound_content_ideas_ack_and_persist() -> None:
-    init_db()
-    db = get_session_factory()()
-    idea_date = _idea_date()
-    owner_phone = "972509994601"
-    event_id = "evt.ideas.owner.1"
-    try:
-        store = LeadStore(db)
-        port = RecordingMessagePort()
-        _seed_insight(
-            store,
-            media_id=MEDIA_REELS,
-            media_type="REELS",
-            lead_signals=2,
-        )
-        db.commit()
-        with patch("app.domain.content_ideas.datetime") as mock_dt:
-            mock_dt.now.return_value = FROZEN_NOW
-            mock_dt.UTC = UTC
-            await process_inbound_texts(
-                provider="whatsapp",
-                channel=Channel.WHATSAPP,
-                items=[
-                    {
-                        "id": event_id,
-                        "from": owner_phone,
-                        "text": "content ideas",
-                    }
-                ],
-                store=store,
-                port=port,
-                kill_switch=False,
-                owner_ids={owner_phone},
-            )
-        db.commit()
-        task = store.get_owner_task(provider="whatsapp", provider_event_id=event_id)
-        assert task is not None
-        assert task.task_type == "content_idea"
-        assert task.due_at is None
-        assert len(port.sent) == 1
-        ack = port.sent[0].text
-        assert "רעיונות לתוכן (לא פוסטים מוכנים):" in ack
-        assert "אלה רעיונות בלבד. לא כתבתי פוסט ולא פרסמתי." in ack
-        assert MEDIA_REELS not in ack
-        row = store.get_content_idea(idea_date)
-        assert row is not None
-        assert row.kinds == ["more_reels"]
-    finally:
-        _cleanup(db, idea_date, [MEDIA_REELS])
-        db.close()

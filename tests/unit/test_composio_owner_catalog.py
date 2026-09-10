@@ -37,6 +37,7 @@ from app.domain.owner.linkedin_writes import (
     propose_linkedin_write,
 )
 from app.integrations.composio_catalog import (
+    ActiveConnectionSnapshot,
     CatalogTool,
     ComposioCatalog,
     bounded_result_text,
@@ -49,6 +50,54 @@ from app.tools.registries.owner_tools import ToolContext, execute_tool, tool_def
 
 def _client(handler):
     return httpx.Client(transport=httpx.MockTransport(handler))
+
+
+def test_exact_connection_snapshot_is_fresh_and_execute_pins_account() -> None:
+    state = {"id": "ca_first", "status": "ACTIVE", "disabled": False}
+    execution_payloads: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "connected_accounts" in str(request.url):
+            return httpx.Response(
+                200,
+                json={
+                    "items": [
+                        {
+                            "id": state["id"],
+                            "toolkit": {"slug": "gmail"},
+                            "user_id": "assaf",
+                            "status": state["status"],
+                            "is_disabled": state["disabled"],
+                        }
+                    ]
+                },
+            )
+        execution_payloads.append(json.loads(request.content))
+        return httpx.Response(200, json={"successful": True, "data": {}})
+
+    catalog = ComposioCatalog(api_key="key", user_id="assaf", client=_client(handler))
+    tool = CatalogTool(
+        slug="GMAIL_CREATE_DRAFT",
+        toolkit="GMAIL",
+        description="draft",
+        input_schema={"type": "object", "properties": {}},
+    )
+    first = catalog.active_connection_snapshot("GMAIL")
+    assert first is not None and first.connected_account_id == "ca_first"
+
+    state["id"] = "ca_rebound"
+    rebound = catalog.active_connection_snapshot("GMAIL")
+    assert rebound is not None and rebound.connected_account_id == "ca_rebound"
+    assert rebound != first
+
+    state["disabled"] = True
+    assert catalog.active_connection_snapshot("GMAIL") is None
+    state["disabled"] = False
+    assert (
+        catalog.execute(tool, {"to": "owner@example.com"}, connected_account_id="ca_first")
+        is not None
+    )
+    assert execution_payloads[-1]["connected_account_id"] == "ca_first"
 
 
 def test_active_toolkits_and_tool_list_cache_per_owner_and_never_use_unconnected_toolkit() -> None:
@@ -479,7 +528,9 @@ def test_slug_risk_ignores_read_words_in_toolkit_prefix() -> None:
     assert (
         risk_for_slug("GOOGLE_SEARCH_CONSOLE_SUBMIT_SITEMAP", "GOOGLE_SEARCH_CONSOLE").value == "R3"
     )
-    assert risk_for_slug("NOTION_FETCH_DATA", "NOTION").value == "R0"
+    assert risk_for_slug("NOTION_FETCH_DATA", "NOTION").value == "R3"
+    assert risk_for_slug("NOVEL_GET_RESOURCE", "NOVEL").value == "R3"
+    assert risk_for_slug("NOVEL_GET_AND_SIDE_EFFECT", "NOVEL").value == "R3"
 
 
 def test_client_cannot_access_any_dynamic_composio_capability() -> None:
@@ -558,6 +609,9 @@ class _Catalog:
         del arguments
         return {"successful": True, "data": {"slug": tool.slug, "name": "Assaf"}}
 
+    def active_connection_snapshot(self, toolkit):
+        return ActiveConnectionSnapshot("ca_owner", toolkit, "ACTIVE", False)
+
 
 class _ComposioStore:
     def __init__(self) -> None:
@@ -595,7 +649,7 @@ def _context(*, kill_switch: bool = False) -> ToolContext:
     return ToolContext(
         store=_ComposioStore(),
         brain=None,
-        settings=SimpleNamespace(),
+        settings=SimpleNamespace(composio_user_id="assaf"),
         principal=Principal.owner(source="telegram", actor_id="1"),
         embedding_port=None,
         kill_switch=kill_switch,
@@ -633,6 +687,10 @@ def test_official_sheet_ig_linkedin_policy_keeps_deletes_off_and_does_not_autopu
     catalog = _Catalog()
     monkeypatch.setattr(
         ComposioCatalog, "from_settings", classmethod(lambda cls, settings: catalog)
+    )
+    monkeypatch.setattr(
+        "app.tools.owner.composio.propose_owner_action",
+        lambda *_args, **_kwargs: SimpleNamespace(approval_id="apr_owner_v2"),
     )
     ctx = _context()
     delete_denied = execute_tool(
@@ -692,7 +750,7 @@ def test_official_sheet_ig_linkedin_policy_keeps_deletes_off_and_does_not_autopu
         )
         assert not result.ok
         assert "destructive" not in (result.error or "")
-        assert "sheets_update" in (result.error or "")
+        assert "typed" in (result.error or "")
 
     for slug in (
         "INSTAGRAM_POST_IG_USER_MEDIA",
@@ -709,12 +767,19 @@ def test_official_sheet_ig_linkedin_policy_keeps_deletes_off_and_does_not_autopu
         assert "never auto-executed" in result.error
         assert "destructive" not in (result.error or "")
 
-    for slug in ("LINKEDIN_CREATE_LINKED_IN_POST", "LINKEDIN_POST_UPDATE"):
+    for slug in ("LINKEDIN_CREATE_LINKED_IN_POST",):
         result = execute_tool(
             "composio_execute_tool", {"tool_slug": slug, "arguments_json": "{}"}, ctx
         )
         assert result.ok and result.approval_id
-        assert "LinkedIn action is ready" in result.text
+        assert "Composio action is ready" in result.text
+    unsupported_update = execute_tool(
+        "composio_execute_tool",
+        {"tool_slug": "LINKEDIN_POST_UPDATE", "arguments_json": "{}"},
+        ctx,
+    )
+    assert not unsupported_update.ok
+    assert "typed current-resource snapshot" in unsupported_update.error
 
 
 def test_gmail_send_is_never_auto_executed_and_delete_is_denied(
@@ -727,7 +792,6 @@ def test_gmail_send_is_never_auto_executed_and_delete_is_denied(
     ctx = _context()
     for slug in (
         "GMAIL_SEND_EMAIL",
-        "GMAIL_SEND_DRAFT",
         "GMAIL_REPLY_TO_THREAD",
         "GMAIL_FORWARD_MESSAGE",
         "GOOGLE_ANALYTICS_SEND_EVENTS",
@@ -740,6 +804,13 @@ def test_gmail_send_is_never_auto_executed_and_delete_is_denied(
         assert not result.ok
         assert "never auto-executed" in result.error
         assert "destructive" not in result.error
+    draft_send = execute_tool(
+        "composio_execute_tool",
+        {"tool_slug": "GMAIL_SEND_DRAFT", "arguments_json": "{}"},
+        ctx,
+    )
+    assert not draft_send.ok
+    assert "target identity" in draft_send.error
     for slug in (
         "GMAIL_DELETE_THREAD",
         "GMAIL_DELETE_MESSAGE",
@@ -758,7 +829,8 @@ def test_gmail_send_is_never_auto_executed_and_delete_is_denied(
         {"tool_slug": "GMAIL_MOVE_TO_TRASH", "arguments_json": "{}"},
         ctx,
     )
-    assert trash.ok and "Composio action is ready" in trash.text
+    assert not trash.ok
+    assert "typed current-resource snapshot" in trash.error
     for slug in (
         "GOOGLE_SEARCH_CONSOLE_ADD_SITE",
         "GOOGLE_SEARCH_CONSOLE_SUBMIT_SITEMAP",
@@ -769,7 +841,8 @@ def test_gmail_send_is_never_auto_executed_and_delete_is_denied(
             {"tool_slug": slug, "arguments_json": "{}"},
             ctx,
         )
-        assert write.ok and "Composio action is ready" in write.text
+        assert not write.ok
+        assert "typed current-resource snapshot" in write.error
 
 
 @pytest.mark.parametrize(
@@ -798,7 +871,7 @@ def test_direct_generic_proposal_refuses_excluded_classes_without_persisting(
     assert ctx.store.saved == []
 
 
-def test_direct_generic_linkedin_proposal_routes_to_named_approval(monkeypatch) -> None:
+def test_direct_generic_linkedin_update_without_typed_target_is_denied(monkeypatch) -> None:
     catalog = _Catalog()
     monkeypatch.setattr(
         ComposioCatalog, "from_settings", classmethod(lambda cls, settings: catalog)
@@ -809,9 +882,9 @@ def test_direct_generic_linkedin_proposal_routes_to_named_approval(monkeypatch) 
         {"tool_slug": "LINKEDIN_POST_UPDATE", "arguments_json": "{}"},
         ctx,
     )
-    assert result.ok and result.approval_id
-    assert ctx.store.row.resource_type == "linkedin_tool"
-    assert ctx.store.row.action == "linkedin_composio_write"
+    assert not result.ok
+    assert "typed current-resource snapshot" in result.error
+    assert ctx.store.saved == []
 
 
 def test_legacy_r5_approval_is_refused_by_callback_and_executor(monkeypatch) -> None:
@@ -842,15 +915,11 @@ def test_legacy_r5_approval_is_refused_by_callback_and_executor(monkeypatch) -> 
             RESOURCE_COMPOSIO_TOOL, resource_id, ACTION_COMPOSIO_WRITE
         )
         assert row is not None
-        callback = resolve_owner_callback_result(
-            store, decision="approve", token=row.approval_id
-        )
+        callback = resolve_owner_callback_result(store, decision="approve", token=row.approval_id)
         assert callback.composio_resource_id_to_execute is None
         assert row.decision == DECISION_PENDING
 
-        assert store.decide_composio_approval(
-            resource_id=resource_id, decision=DECISION_APPROVED
-        )
+        assert store.decide_composio_approval(resource_id=resource_id, decision=DECISION_APPROVED)
 
         def forbidden_catalog(_cls, _settings):
             raise AssertionError("legacy R5 approval must fail before catalog/provider access")
@@ -931,13 +1000,9 @@ def test_linkedin_side_effect_is_bound_for_approval_and_never_executes_at_propos
     assert result.startswith("LinkedIn action is ready")
     assert len(store.saved) == 1
     assert store.saved[0]["risk"] == "R4"
-    approved = resolve_owner_callback_result(
-        store, decision="approve", token="apr_linkedin_test"
-    )
+    approved = resolve_owner_callback_result(store, decision="approve", token="apr_linkedin_test")
     assert approved.linkedin_resource_id_to_execute == store.row.resource_id
-    replay = resolve_owner_callback_result(
-        store, decision="approve", token="apr_linkedin_test"
-    )
+    replay = resolve_owner_callback_result(store, decision="approve", token="apr_linkedin_test")
     assert replay.linkedin_resource_id_to_execute == store.row.resource_id
 
 
@@ -1120,7 +1185,9 @@ def test_owner_prompt_has_only_three_small_meta_tools_not_catalog_payload() -> N
     assert {"composio_search_tools", "composio_get_tool_schema", "composio_execute_tool"}.issubset(
         names
     )
-    assert len(names) < 45
+    # Four narrow v2 tools cover calendar moves plus durable CRM activity/conflicts;
+    # keep the prompt bounded while allowing that reviewed surface.
+    assert len(names) < 50
 
 
 def test_all_advertised_object_schemas_are_closed_recursively() -> None:

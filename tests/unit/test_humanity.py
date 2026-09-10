@@ -25,15 +25,6 @@ from app.domain.meetings.copy import (
     BOOKING_RETRY,
     CONFLICT_SLOT_TAKEN,
 )
-from app.domain.sales import NextAction, SalesState
-from app.graph.replies import (
-    OBJECTION_REPLIES,
-    QUALIFY_REPLIES,
-    REFRAME_REPLIES,
-    WEBSITE_REPLIES,
-    WEBSITE_RETRY_REPLIES,
-    reply_for,
-)
 
 
 @pytest.mark.parametrize(
@@ -150,22 +141,7 @@ def test_customer_reply_or_canned_returns_canned_on_failure() -> None:
 
 
 def _all_canned_customer_replies() -> list[str]:
-    texts: list[str] = []
-    texts.extend(WEBSITE_REPLIES.values())
-    texts.extend(WEBSITE_RETRY_REPLIES.values())
-    texts.extend(QUALIFY_REPLIES.values())
-    texts.extend(OBJECTION_REPLIES.values())
-    texts.extend(REFRAME_REPLIES.values())
-    texts.append(reply_for("website", NextAction.OFFER_MEETING, SalesState(lead_id="l1")))
-    texts.append(
-        reply_for(
-            "website",
-            NextAction.OFFER_MEETING,
-            SalesState(lead_id="l1", company_domain="acme.com"),
-        )
-    )
-    texts.extend(
-        (
+    return [
             CONFLICT_SLOT_TAKEN,
             BOOKING_RETRY,
             BOOKING_DENIED,
@@ -180,9 +156,7 @@ def _all_canned_customer_replies() -> list[str]:
             MEETING_OFFERED_FOLLOW_UP,
             MIA_INTRO_HE,
             "זמין:\n1. Sun 01 Jan 10:00\nהשיבו 1 כדי לאשר.",
-        )
-    )
-    return texts
+    ]
 
 
 @pytest.mark.parametrize("text", _all_canned_customer_replies())
@@ -199,41 +173,3 @@ def test_humanity_module_has_no_http_or_ports() -> None:
     source = inspect.getsource(importlib.import_module("app.domain.humanity"))
     for forbidden in ("httpx", "MessagePort", "OpenAI"):
         assert forbidden not in source
-
-
-_CUSTOMER_FEMININE_ONLY = (
-    "שאלי",
-    "נסי ",
-    "לחצי",
-    "תקליטי",
-    "כתבי",
-    "המשיכי",
-    "הקליטי",
-)
-_CUSTOMER_MASCULINE_ONLY = (
-    " אתה ",
-    "ספר לי",
-    "תקן אותי",
-    "בוא נמשיך",
-    "מה שאתה",
-    "נסה שוב",
-    "בחר מועד",
-    "השב ",
-)
-
-
-def test_canned_customer_hebrew_addresses_both_genders() -> None:
-    from app.domain.handoff import website_brief as brief
-
-    blob = "\n".join(_all_canned_customer_replies())
-    paste_lines = [
-        value
-        for name, value in vars(brief).items()
-        if name.endswith("_LINE") and isinstance(value, str)
-    ]
-    blob += "\n" + "\n".join(paste_lines)
-    for needle in _CUSTOMER_FEMININE_ONLY + _CUSTOMER_MASCULINE_ONLY:
-        assert needle not in blob, needle
-    assert "ספרו לי" in blob
-    assert "אתם" in blob
-    assert "בואו נמשיך" in blob

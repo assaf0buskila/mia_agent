@@ -13,13 +13,14 @@ from typing import Any
 
 from app.agents.owner.graph import compile_owner_graph
 from app.api import telegram as telegram_api
-from app.api.inbound import process_inbound_texts
 from app.api.owner import process_owner_texts
 from app.channels.telegram import message_to_owner_state
+from app.core.config import Settings
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
 from app.domain.events import Channel
 from app.domain.owner import brain as owner_brain
+from app.domain.owner.brain import OwnerBrainResult, run_owner_turn
 from app.integrations.base import RecordingMessagePort
 
 OWNER_ID = "550077"
@@ -49,7 +50,19 @@ def test_telegram_owner_entry_is_deferred_worker() -> None:
     from app.workers.telegram_owner import process_telegram_owner_update
 
     assert telegram_api.process_telegram_owner_update is process_telegram_owner_update
-    assert process_owner_texts is not process_inbound_texts
+
+
+def _graph_answer(**kwargs) -> OwnerBrainResult:
+    return run_owner_turn(
+        principal=kwargs["principal"],
+        owner_id=kwargs["principal"].actor_id,
+        telegram_chat_id=kwargs["principal"].actor_id,
+        run_id=kwargs["source_ref"],
+        latest_message=kwargs["owner_text"],
+        kill_switch=kwargs["kill_switch"],
+        produce=lambda _state: OwnerBrainResult("graph reply", True, ()),
+        source=kwargs["input_source"],
+    )
 
 
 class _MarkingGraph:
@@ -81,6 +94,8 @@ async def test_the_text_telegram_sends_comes_out_of_the_graph_state(monkeypatch)
     """
     graph = _MarkingGraph()
     monkeypatch.setattr(owner_brain, "compile_owner_graph", graph)
+    monkeypatch.setattr(Settings, "owner_agent_ready", lambda _self: True)
+    monkeypatch.setattr(owner_brain, "answer_owner", _graph_answer)
     init_db()
     session = get_session_factory()()
     port = RecordingMessagePort()

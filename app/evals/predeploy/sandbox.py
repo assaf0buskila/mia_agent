@@ -27,7 +27,6 @@ run proceed against something live.
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -36,7 +35,6 @@ from app.brain.store import BrainStore
 from app.core.config import Settings
 from app.db.session import get_session_factory, init_db, reset_engine
 from app.db.store import LeadStore
-from app.integrations.base import OutboundMessage
 from app.integrations.calendar import FakeCalendarAgendaPort, FakeCalendarPort
 from app.integrations.ga4 import FakeGa4Port
 from app.integrations.gmail import FakeGmailPort
@@ -46,11 +44,8 @@ from app.integrations.research import FakeResearchPort
 from app.integrations.search_console import FakeSearchConsolePort
 from app.integrations.seo_audit import FakeSeoAuditPort
 from app.integrations.sheets import FakeSheetsPort
-from app.surfaces.crm import FakeContactsCrm
 
-# A Telegram owner id that exists only here. It is what lets the website handoff path
-# actually run end to end (`_ping_assaf` returns early when the owner set is empty)
-# while `MIA_TELEGRAM_BOT_TOKEN` stays blank, so no real Telegram adapter can be built.
+# A Telegram owner id that exists only inside this sealed process.
 SANDBOX_OWNER_ID = "900000001"
 
 # Process-level seal. Applied once, before the first scenario, because `get_engine` and
@@ -68,12 +63,6 @@ SEALED_ENV: dict[str, str] = {
     "MIA_TELEGRAM_BOT_TOKEN": "",
     "MIA_TELEGRAM_WEBHOOK_SECRET": "",
     "MIA_TELEGRAM_OWNER_USER_IDS": SANDBOX_OWNER_ID,
-    "MIA_WHATSAPP_ACCESS_TOKEN": "",
-    "MIA_WHATSAPP_APP_SECRET": "",
-    "MIA_WHATSAPP_VERIFY_TOKEN": "",
-    "MIA_WHATSAPP_PHONE_NUMBER_ID": "",
-    "MIA_WHATSAPP_BAILEYS_URL": "",
-    "MIA_WHATSAPP_BAILEYS_TOKEN": "",
     "MIA_INSTAGRAM_ACCESS_TOKEN": "",
     "MIA_FIRECRAWL_API_KEY": "",
     "MIA_APIFY_TOKEN": "",
@@ -99,13 +88,6 @@ _SEALED_FIELDS: dict[str, Any] = {
     "telegram_bot_token": "",
     "telegram_webhook_secret": "",
     "telegram_owner_user_ids": SANDBOX_OWNER_ID,
-    "whatsapp_access_token": "",
-    "whatsapp_app_secret": "",
-    "whatsapp_verify_token": "",
-    "whatsapp_phone_number_id": "",
-    "whatsapp_baileys_url": "",
-    "whatsapp_baileys_token": "",
-    "whatsapp_handoff_send": False,
     "instagram_access_token": "",
     "firecrawl_api_key": "",
     "apify_token": "",
@@ -121,29 +103,6 @@ _SEALED_FIELDS: dict[str, Any] = {
 
 class SealBroken(RuntimeError):
     """A live credential or a live database survived the seal. Never run past this."""
-
-
-class _Delivered:
-    """An already-finished awaitable.
-
-    `run_site_turn` calls `MessagePort.send` synchronously and discards the result, so a
-    real coroutine here would leak an un-awaited warning on every handoff turn. This
-    satisfies both that call site and `ping_assaf_async`.
-    """
-
-    def __await__(self) -> Iterator[Any]:
-        return iter(())
-
-
-class SealedOwnerPort:
-    """Records the owner ping instead of sending it. There is no Telegram behind this."""
-
-    def __init__(self) -> None:
-        self.sent: list[OutboundMessage] = []
-
-    def send(self, message: OutboundMessage) -> _Delivered:
-        self.sent.append(message)
-        return _Delivered()
 
 
 def sealed_settings(base: Settings) -> Settings:
@@ -170,8 +129,6 @@ def assert_sealed(settings: Settings) -> None:
         live.append("composio credentials survived the seal")
     if settings.telegram_bot_token.strip():
         live.append("telegram bot token survived the seal")
-    if settings.whatsapp_access_token.strip() or settings.whatsapp_phone_number_id.strip():
-        live.append("whatsapp credentials survived the seal")
     if settings.instagram_access_token.strip():
         live.append("instagram token survived the seal")
     if settings.gmail_send:
@@ -235,8 +192,3 @@ def build_owner_world(settings: Settings) -> OwnerWorld:
         brain=BrainStore(session),
         embedding=FakeEmbeddingPort(),
     )
-
-
-def build_site_crm() -> FakeContactsCrm:
-    """The website CRM double. `FakeContactsCrm` enforces the same tab lock as live."""
-    return FakeContactsCrm()

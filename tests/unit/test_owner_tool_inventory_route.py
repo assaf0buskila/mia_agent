@@ -63,7 +63,6 @@ async def test_live_owner_surface_answers_inventory_without_history_model_or_lea
 
     monkeypatch.setattr("app.surfaces.owner._talk_with_optional_agent", fail_talk)
     monkeypatch.setattr(LeadStore, "list_conversation_turns", fail_history)
-    monkeypatch.setattr("app.domain.owner.brain.learn_from_exchange", fail_learn)
 
     init_db()
     db = get_session_factory()()
@@ -75,9 +74,7 @@ async def test_live_owner_surface_answers_inventory_without_history_model_or_lea
         "chat_id": OWNER_ID,
         "text": "מה הכלים שלך אל תשתמשי בהיסטוריה?",
     }
-    store.claim_webhook(
-        provider="telegram", provider_event_id=item["id"], channel="telegram"
-    )
+    store.claim_webhook(provider="telegram", provider_event_id=item["id"], channel="telegram")
     started = perf_counter()
     try:
         result = await run_owner_loop(
@@ -94,7 +91,7 @@ async def test_live_owner_surface_answers_inventory_without_history_model_or_lea
         db.close()
 
     assert result.sent is True
-    assert port.sent and "42 כלים רשומים" in port.sent[0].text
+    assert port.sent and "46 כלים רשומים" in port.sent[0].text
     assert calls == {"talk": 0, "history": 0, "learn": 0}
     assert elapsed < 1.0
 
@@ -151,10 +148,6 @@ async def test_live_surface_uses_only_current_agent_approval_metadata(
 
     monkeypatch.setattr("app.surfaces.owner._talk_with_optional_agent", fake_talk)
     monkeypatch.setattr(
-        "app.surfaces.owner.classify_owner_task",
-        lambda _text: SimpleNamespace(task_type=task_type, needs_clarification=False),
-    )
-    monkeypatch.setattr(
         LeadStore,
         "list_all_pending_approvals",
         lambda _self: [SimpleNamespace(approval_id="apr_old_unrelated")],
@@ -170,9 +163,7 @@ async def test_live_surface_uses_only_current_agent_approval_metadata(
         "chat_id": OWNER_ID,
         "text": "prepare this action",
     }
-    store.claim_webhook(
-        provider="telegram", provider_event_id=item["id"], channel="telegram"
-    )
+    store.claim_webhook(provider="telegram", provider_event_id=item["id"], channel="telegram")
     try:
         await run_owner_loop(
             item=item,
@@ -186,10 +177,6 @@ async def test_live_surface_uses_only_current_agent_approval_metadata(
     finally:
         db.close()
 
-    expected = (
-        approval_keyboard(approval_token("apr_exact_turn")) if approval_ids else None
-    )
+    expected = approval_keyboard(approval_token("apr_exact_turn")) if approval_ids else None
     assert port.sent[0].reply_markup == expected
-    assert port.sent[0].reply_markup != approval_keyboard(
-        approval_token("apr_old_unrelated")
-    )
+    assert port.sent[0].reply_markup != approval_keyboard(approval_token("apr_old_unrelated"))

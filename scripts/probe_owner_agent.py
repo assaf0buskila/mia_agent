@@ -107,12 +107,8 @@ def main() -> int:
         return 2
 
     configured: list[tuple[str, str]] = []
-    for name in model_chain(
-        settings.owner_agent_model, settings.owner_agent_fallback_model
-    ):
+    for name in model_chain(settings.owner_agent_model, settings.owner_agent_fallback_model):
         configured.append(("owner agent", name))
-    if settings.extraction_model.strip():
-        configured.append(("memory extraction", settings.extraction_model.strip()))
     for name in model_chain(settings.sales_model, settings.sales_fallback_model):
         configured.append(("website sales (known-good reference)", name))
     if settings.embedding_model.strip():

@@ -19,7 +19,6 @@ from app.brain.context import (
     retrieve_memories,
 )
 from app.brain.embeddings import DisabledEmbeddingPort, FakeEmbeddingPort
-from app.brain.extraction import parse_extraction, reconcile_candidate
 from app.brain.retrieval import (
     MemoryScoreWeights,
     bm25_scores,
@@ -29,10 +28,8 @@ from app.brain.retrieval import (
     reciprocal_rank_fusion,
 )
 from app.brain.schemas import (
-    MemoryCandidate,
     MemoryCategory,
     MemoryKind,
-    MemoryOperation,
     MemorySource,
     MemoryStatus,
 )
@@ -45,7 +42,6 @@ from app.brain.vectors import (
     rank_by_similarity,
 )
 from app.db.session import get_session_factory, init_db
-from app.integrations.llm_client import LlmClient
 
 WEIGHTS = MemoryScoreWeights()
 
@@ -455,15 +451,11 @@ def test_unrelated_question_is_bounded_by_the_do_not_know_instruction() -> None:
             ("Assaf built Cafe Ana", MemoryKind.SEMANTIC, MemoryCategory.BUSINESS, 6),
         ],
     )
-    context = assemble_owner_context(
-        brain, query="what is my sister's name", embedding_port=emb
-    )
+    context = assemble_owner_context(brain, query="what is my sister's name", embedding_port=emb)
     rendered = render_context_block(context)
     assert "do not know" in rendered
     # Whatever surfaced must be a real stored memory, never invented.
-    known = set(stored) | {
-        record.text for record in brain.list_memories()
-    }
+    known = set(stored) | {record.text for record in brain.list_memories()}
     for item in context.memories:
         assert item.text in known
 
@@ -527,76 +519,6 @@ def test_touch_updates_last_used_so_recency_means_something() -> None:
 
 
 # ------------------------------------------------------- extraction behaviour
-
-
-def test_low_importance_facts_are_never_stored() -> None:
-    """The cheapest forgetting mechanism is not writing it down."""
-    result = parse_extraction(
-        {
-            "facts": [
-                {
-                    "text": "Assaf had a sandwich",
-                    "kind": "episodic",
-                    "category": "event",
-                    "importance": 1,
-                    "entities": [],
-                },
-                {
-                    "text": "Assaf founded AssafWeb",
-                    "kind": "semantic",
-                    "category": "business",
-                    "importance": 9,
-                    "entities": [],
-                },
-            ],
-            "questions": [],
-        }
-    )
-    assert [candidate.text for candidate in result.candidates] == ["Assaf founded AssafWeb"]
-    assert result.skipped == 1
-
-
-def test_extraction_survives_a_malformed_payload() -> None:
-    result = parse_extraction({"facts": ["not an object", {"no_text": 1}], "questions": "nope"})
-    assert result.candidates == ()
-    assert result.gaps == ()
-
-
-def test_exact_restatement_is_a_noop_without_calling_the_model() -> None:
-    brain, emb = _brain(), FakeEmbeddingPort()
-    ids = _seed(
-        brain,
-        emb,
-        [
-            (
-                "Assaf uses Python FastAPI and Supabase as his stack",
-                MemoryKind.SEMANTIC,
-                MemoryCategory.SKILL,
-                8,
-            )
-        ],
-    )
-    existing = brain.get_memory(next(iter(ids.values())))
-    operation, target, _text = reconcile_candidate(
-        LlmClient(api_key="", model=""),
-        candidate=MemoryCandidate(
-            text="Assaf uses Python FastAPI and Supabase as his stack", importance=7
-        ),
-        neighbours=[existing],
-    )
-    assert operation is MemoryOperation.NOOP
-    assert target == existing.memory_id
-
-
-def test_first_ever_fact_is_added_without_a_model_call() -> None:
-    operation, target, text = reconcile_candidate(
-        LlmClient(api_key="", model=""),
-        candidate=MemoryCandidate(text="Assaf launched AssafWeb", importance=8),
-        neighbours=[],
-    )
-    assert operation is MemoryOperation.ADD
-    assert target == ""
-    assert text == "Assaf launched AssafWeb"
 
 
 def test_gaps_are_opened_once_and_resolved() -> None:

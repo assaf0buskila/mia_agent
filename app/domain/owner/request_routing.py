@@ -19,11 +19,27 @@ _INVENTORY_PATTERNS = (
 _INVENTORY_FILLER = re.compile(
     r"(?:בבקשה|נא|please|mia|מיה|לי|just|רק|עכשיו|currently|current|available)", re.I
 )
+_PENDING_APPROVAL_PATTERNS = (
+    re.compile(r"מה\s+מחכה\s+לאישור", re.I),
+    re.compile(r"(?:what|which)\s+(?:is\s+)?(?:waiting|pending).*approval", re.I),
+)
+
+
+def is_pending_approvals_request(text: str) -> bool:
+    return any(pattern.search(text.strip()) for pattern in _PENDING_APPROVAL_PATTERNS)
 
 _TOOL_GROUPS: tuple[tuple[str, frozenset[str]], ...] = (
     (
         "זיכרון וידע",
-        frozenset({"search_memory", "search_knowledge", "remember", "list_known_entities"}),
+        frozenset(
+            {
+                "search_memory",
+                "search_knowledge",
+                "refresh_website_knowledge",
+                "remember",
+                "list_known_entities",
+            }
+        ),
     ),
     (
         "תפעול ולידים",
@@ -52,6 +68,7 @@ _TOOL_GROUPS: tuple[tuple[str, frozenset[str]], ...] = (
                 "calendar_availability",
                 "calendar_agenda",
                 "calendar_create_meeting",
+                "calendar_reschedule",
                 "gmail_summary",
                 "gmail_inbox",
                 "gmail_search",
@@ -66,6 +83,9 @@ _TOOL_GROUPS: tuple[tuple[str, frozenset[str]], ...] = (
             {
                 "crm_search",
                 "crm_upsert",
+                "crm_record_activity",
+                "crm_conflicts",
+                "crm_resolve_conflict",
                 "sheets_list_tabs",
                 "sheets_read",
                 "sheets_update",
@@ -85,7 +105,6 @@ _TOOL_GROUPS: tuple[tuple[str, frozenset[str]], ...] = (
         ),
     ),
     ("מחקר ציבורי", frozenset({"research_search"})),
-    ("טיוטת WhatsApp לאסף", frozenset({"whatsapp_draft_assaf"})),
     (
         "כלים מחיבורים פעילים נוספים",
         frozenset(
