@@ -769,22 +769,16 @@ async def process_owner_item(
         )
         ack_text = phrased.text
     last_reply = ack_text
-    linkedin_approval_id = (
-        brain_result.approval_ids[0]
-        if brain_result.approval_ids
-        and (
-            "composio_propose_linkedin_action" in brain_result.tools_used
-            or "composio_execute_tool" in brain_result.tools_used
-            or "composio_propose_action" in brain_result.tools_used
-        )
-        else ""
-    )
+    turn_approval_id = brain_result.approval_ids[0] if brain_result.approval_ids else ""
     owner_markup = owner_telegram_reply_markup(
         store,
         channel=channel,
         task_type=decision.task_type,
-        linkedin_approval_id=linkedin_approval_id,
+        turn_approval_id=turn_approval_id,
     )
+    if (brain_result.used_agent and not turn_approval_id
+            and decision.task_type is not OwnerTaskType.PENDING_APPROVALS):
+        owner_markup = None
     # Learn after the reply is settled, never before: memory formation must not
     # delay or change what Assaf sees this turn.
     learn_from_exchange(

@@ -1,9 +1,11 @@
 import inspect
 import json
+from types import SimpleNamespace
 
 import httpx
 import pytest
 from app.api.inbound import process_inbound_texts
+from app.capabilities.linkedin import linkedin_get_profile
 from app.capabilities.types import Principal
 from app.core.config import Settings
 from app.db.models import CanonicalEventRow
@@ -19,14 +21,18 @@ from app.integrations.linkedin import (
     ComposioLinkedInPort,
     DisabledLinkedInPort,
     FakeLinkedInPort,
+    LinkedInEducation,
+    LinkedInExperience,
     LinkedInPort,
     LinkedInProfile,
     build_linkedin_port,
     enrich_linkedin_ack,
+    format_full_profile,
     format_profile_line,
 )
 from app.integrations.research import DisabledResearchPort
 from app.integrations.sheets import FakeSheetsPort
+from app.tools.owner.analytics import _linkedin_snapshot
 from sqlalchemy import select
 
 from tests.unit.sales_copy import assert_discovery_reply
@@ -91,6 +97,89 @@ def test_format_profile_line_omits_missing_fields() -> None:
     )
     assert format_profile_line(LinkedInProfile(name="Assaf")) == "פרופיל: Assaf."
     assert format_profile_line(LinkedInProfile()) == ""
+
+
+def test_full_profile_formatter_is_factual_and_names_missing_sections() -> None:
+    profile = LinkedInProfile(
+        name="Assaf Web",
+        headline="Growth operator",
+        about="I build practical sales systems.",
+        location="Tel Aviv",
+        experience=[
+            LinkedInExperience(
+                title="Founder",
+                company="AssafWeb",
+                start_date="2024-1",
+                description="Web and AI sales systems",
+            )
+        ],
+        education=[
+            LinkedInEducation(school="Example University", degree="BSc")
+        ],
+        skills=["Sales", "Automation"],
+    )
+
+    rendered = format_full_profile(profile)
+
+    assert rendered.startswith("פרופיל: Assaf Web — Growth operator.")
+    assert "I build practical sales systems." in rendered
+    assert "Founder · AssafWeb" in rendered
+    assert "Example University | BSc" in rendered
+    assert "כישורים: Sales, Automation" in rendered
+    assert "לא נמסר בתוצאת הפרופיל: תעשייה, קישור ציבורי, שפות." in rendered
+    assert "not supported" not in rendered.lower()
+
+
+def test_enrich_linkedin_ack_full_profile_preserves_capability_fields() -> None:
+    profile = LinkedInProfile(
+        name="Assaf Web",
+        headline="Builder",
+        location="Israel",
+        languages=["Hebrew", "English"],
+    )
+    enriched, outcome = enrich_linkedin_ack(
+        "",
+        FakeLinkedInPort(profile),
+        kill_switch=False,
+        principal=_OWNER,
+        full_profile=True,
+    )
+
+    assert outcome.status == "ok"
+    assert "מיקום: Israel" in enriched
+    assert "שפות: Hebrew, English" in enriched
+    assert "לא נמסר בתוצאת הפרופיל:" in enriched
+
+
+def test_capability_returns_typed_profile_and_machine_readable_missing_sections() -> None:
+    result = linkedin_get_profile(
+        FakeLinkedInPort(LinkedInProfile(name="Assaf", skills=["Automation"])),
+        {},
+    )
+
+    assert result["name"] == "Assaf"
+    assert result["profile"]["skills"] == ["Automation"]
+    assert "headline" in result["missing_sections"]
+    assert "skills" not in result["missing_sections"]
+
+
+def test_owner_tool_reports_provider_failure_instead_of_masking_it_as_empty() -> None:
+    class HttpErrorLinkedInPort:
+        def get_my_profile(self) -> LinkedInProfile | None:
+            raise AdapterHttpError(500)
+
+    ctx = SimpleNamespace(
+        linkedin=HttpErrorLinkedInPort(),
+        settings=Settings(_env_file=None),
+        kill_switch=False,
+        principal=_OWNER,
+    )
+
+    result = _linkedin_snapshot(ctx, {"full_profile": True})  # type: ignore[arg-type]
+
+    assert result.ok is False
+    assert "LinkedIn profile read failed" in result.error
+    assert "returned nothing" not in result.error
 
 
 @pytest.mark.asyncio
@@ -472,3 +561,125 @@ def test_composio_linkedin_port_maps_nested_localized_objects() -> None:
     )
     profile = port.get_my_profile()
     assert profile == LinkedInProfile(name="Assaf Web", headline="Builder")
+
+
+def test_composio_linkedin_port_maps_allowlisted_full_profile_and_discards_unknowns() -> None:
+    transport = httpx.MockTransport(
+        lambda _request: httpx.Response(
+            200,
+            json={
+                "data": {
+                    "name": " Assaf   Web ",
+                    "headline": "Founder",
+                    "summary": "Builds\nAI sales systems",
+                    "geoLocationName": "Tel Aviv",
+                    "industryName": "Software",
+                    "publicProfileUrl": "https://www.linkedin.com/in/assaf-web",
+                    "vanityName": "assaf-web",
+                    "positions": [
+                        {
+                            "title": "Founder",
+                            "company": {"name": "AssafWeb"},
+                            "timePeriod": {
+                                "startDate": {"year": 2024, "month": 2}
+                            },
+                            "description": "AI sales systems",
+                        }
+                    ],
+                    "educations": [
+                        {
+                            "schoolName": "Example University",
+                            "degreeName": "BSc",
+                            "fieldOfStudy": "Computer Science",
+                        }
+                    ],
+                    "skills": [{"name": "Automation"}, "Sales"],
+                    "languages": [{"language": "Hebrew"}, "English"],
+                    "emailAddress": "private@example.com",
+                    "accessToken": "secret-token",
+                    "arbitraryProviderPayload": {"secret": "do-not-copy"},
+                },
+                "error": None,
+                "successful": True,
+            },
+        )
+    )
+    client = httpx.Client(transport=transport)
+    profile = ComposioLinkedInPort(
+        api_key="cmp-test",
+        user_id="user-123",
+        client=client,
+    ).get_my_profile()
+
+    assert profile is not None
+    assert profile.name == "Assaf Web"
+    assert profile.about == "Builds AI sales systems"
+    assert profile.location == "Tel Aviv"
+    assert profile.industry == "Software"
+    assert profile.experience[0].company == "AssafWeb"
+    assert profile.experience[0].start_date == "2024-2"
+    assert profile.education[0].field_of_study == "Computer Science"
+    assert profile.skills == ["Automation", "Sales"]
+    assert profile.languages == ["Hebrew", "English"]
+    serialized = json.dumps(profile.model_dump())
+    assert "private@example.com" not in serialized
+    assert "secret-token" not in serialized
+    assert "do-not-copy" not in serialized
+
+
+def test_full_profile_mapping_enforces_section_and_text_bounds() -> None:
+    data = {
+        "name": "A" * 500,
+        "summary": "B" * 2_000,
+        "positions": [
+            {"title": f"Role {index}", "description": "D" * 900}
+            for index in range(20)
+        ],
+        "educations": [{"schoolName": f"School {index}"} for index in range(20)],
+        "skills": [f"Skill {index}" for index in range(40)],
+        "languages": [f"Language {index}" for index in range(20)],
+    }
+    transport = httpx.MockTransport(
+        lambda _request: httpx.Response(
+            200,
+            json={"data": data, "error": None, "successful": True},
+        )
+    )
+    profile = ComposioLinkedInPort(
+        api_key="cmp-test",
+        user_id="user-123",
+        client=httpx.Client(transport=transport),
+    ).get_my_profile()
+
+    assert profile is not None
+    assert len(profile.name) == 240
+    assert len(profile.about) == 1_200
+    assert len(profile.experience) == 10
+    assert len(profile.experience[0].description) == 500
+    assert len(profile.education) == 8
+    assert len(profile.skills) == 20
+    assert len(profile.languages) == 12
+    assert len(format_full_profile(profile)) <= 8_000
+
+
+def test_non_linkedin_profile_url_is_discarded() -> None:
+    transport = httpx.MockTransport(
+        lambda _request: httpx.Response(
+            200,
+            json={
+                "data": {
+                    "name": "Assaf",
+                    "publicProfileUrl": "javascript:alert(1)",
+                },
+                "successful": True,
+            },
+        )
+    )
+    profile = ComposioLinkedInPort(
+        api_key="cmp-test",
+        user_id="user-123",
+        client=httpx.Client(transport=transport),
+    ).get_my_profile()
+
+    assert profile is not None
+    assert profile.profile_url == ""

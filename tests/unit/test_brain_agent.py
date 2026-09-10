@@ -163,6 +163,40 @@ def test_agent_calls_a_tool_then_answers() -> None:
     assert "Mia" in tool_messages[0]["content"]
 
 
+def test_full_linkedin_profile_reads_and_discovers_before_model_answer(monkeypatch) -> None:
+    from app.tools.owner.types import ToolResult
+
+    calls = []
+
+    def fresh_read(name, arguments, ctx, **kwargs):
+        calls.append((name, arguments))
+        return ToolResult(
+            ok=True, text="Fresh profile section " + "x" * 4200 + " END_PROFILE",
+            max_chars=8000,
+        )
+
+    monkeypatch.setattr("app.graph.owner_agent._run_tool_with_timeout", fresh_read)
+    session = _session()
+    client, transport = _client([_assistant_text("פרופיל עדכני")])
+    result = run_owner_agent(
+        client=client, ctx=_ctx(session), owner_message="Show my full LinkedIn profile"
+    )
+    assert calls == [
+        ("linkedin_snapshot", {"full_profile": True}),
+        ("composio_search_tools", {"query": "profile", "toolkit": "LINKEDIN", "limit": 10}),
+    ]
+    assert result.tools_used == ("linkedin_snapshot", "composio_search_tools")
+    assert any(
+        "FRESH PROFILE READ" in m.get("content", "")
+        for m in transport.requests[0]["messages"]
+    )
+    assert transport.requests[0]["messages"][-1]["content"] == "Show my full LinkedIn profile"
+    assert any(
+        "END_PROFILE" in m.get("content", "")
+        for m in transport.requests[0]["messages"]
+    )
+
+
 def test_agent_carries_the_exact_approval_created_by_its_tool_call(monkeypatch) -> None:
     from app.graph import owner_agent as owner_agent_module
     from app.tools.registries.owner_tools import ToolResult

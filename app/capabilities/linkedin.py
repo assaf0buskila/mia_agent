@@ -11,11 +11,19 @@ def linkedin_get_profile(port: LinkedInPort, args: dict[str, Any]) -> dict[str, 
     del args
     profile = port.get_my_profile()
     if profile is None:
-        return {"found": False, "name": "", "headline": ""}
+        return {
+            "found": False,
+            "name": "",
+            "headline": "",
+            "profile": None,
+            "missing_sections": [],
+        }
     return {
         "found": True,
         "name": profile.name,
         "headline": profile.headline,
+        "profile": profile.model_dump(),
+        "missing_sections": profile.missing_sections(),
     }
 
 

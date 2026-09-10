@@ -12,7 +12,7 @@ Checks:
     A  version   production reports the commit that was just deployed
     B  ladder    a real conversation reaches an offer instead of asking forever
     C  pricing   a price question never invents a number
-    D  approval  R5 reports the current approval policy, not the stale deny
+    D  approval  R5 reports deny, including after an old approval row exists
     E  turn      a normal website turn succeeds without a server error
 """
 
@@ -178,12 +178,12 @@ def check_pricing(base: str, *, require_quote: bool) -> str:
 def check_approval_policy(base: str) -> str:
     risk = (_get(base, "/health").get("risk") or {})
     value = str(risk.get("R5_destructive") or "")
-    if value != "approval":
+    if value != "deny":
         raise SmokeFailure(
-            f"R5_destructive reports {value!r}, expected 'approval'. Production is "
+            f"R5_destructive reports {value!r}, expected 'deny'. Production is "
             "stale, or the policy changed."
         )
-    return "R5 reports approval"
+    return "R5 reports deny"
 
 
 def check_basic_turn(base: str) -> str:

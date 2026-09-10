@@ -30,7 +30,7 @@ def _health(**over) -> dict:
             "prompt_version": "sales_reply_v11",
             "schema_version": "20260904_website_session_state.sql",
         },
-        "risk": {"R5_destructive": "approval"},
+        "risk": {"R5_destructive": "deny"},
     }
     body.update(over)
     return body
@@ -178,9 +178,9 @@ def test_pricing_fails_on_a_refusal_that_is_not_the_published_wording(monkeypatc
         smoke.check_pricing("http://x", require_quote=False)
 
 
-def test_approval_policy_fails_on_the_stale_deny(monkeypatch) -> None:
+def test_approval_policy_fails_on_the_stale_approval(monkeypatch) -> None:
     monkeypatch.setattr(
-        smoke, "_get", lambda base, path: _health(risk={"R5_destructive": "deny"})
+        smoke, "_get", lambda base, path: _health(risk={"R5_destructive": "approval"})
     )
     with pytest.raises(smoke.SmokeFailure, match="stale"):
         smoke.check_approval_policy("http://x")

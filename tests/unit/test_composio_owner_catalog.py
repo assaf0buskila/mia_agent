@@ -1,6 +1,7 @@
 """ADR-043: dynamic owner Composio reads remain narrow, cached and policy-gated."""
 
 import json
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import httpx
@@ -12,9 +13,25 @@ from app.capabilities.registry import (
     COMPOSIO_TOOL_SCHEMA,
 )
 from app.capabilities.types import Principal
+from app.core.config import Settings
 from app.core.errors import PermissionDenied
+from app.db.session import get_session_factory, init_db
+from app.db.store import LeadStore
+from app.domain.approvals import (
+    ACTION_COMPOSIO_WRITE,
+    DECISION_APPROVED,
+    DECISION_PENDING,
+    RESOURCE_COMPOSIO_TOOL,
+    approval_expires_at,
+)
 from app.domain.events import Channel
 from app.domain.owner.callbacks import resolve_owner_callback_result
+from app.domain.owner.composio_writes import (
+    _digest,
+    _parameters,
+    composio_approval_resource_id,
+    execute_approved_composio_write,
+)
 from app.domain.owner.linkedin_writes import (
     MAX_LINKEDIN_APPROVAL_PARAMETERS_BYTES,
     propose_linkedin_write,
@@ -547,6 +564,12 @@ class _ComposioStore:
         self.saved: list[dict] = []
         self.row = None
 
+    def upsert_linkedin_approval(self, **kwargs):
+        self.saved.append(kwargs)
+        self.row = SimpleNamespace(
+            **kwargs, resource_type="linkedin_tool", approval_id="apr_linkedin_test"
+        )
+
     def upsert_composio_approval(self, **kwargs):
         self.saved.append(kwargs)
         self.row = SimpleNamespace(
@@ -595,7 +618,7 @@ def test_dynamic_execute_is_read_only_schema_checked_and_kill_switch_checked(mon
         {"tool_slug": "GMAIL_DELETE_THREAD", "arguments_json": "{}"},
         _context(),
     )
-    assert denied.ok and "destructive action is ready" in denied.text
+    assert not denied.ok and "denied" in denied.error.lower()
     killed = execute_tool(
         "composio_execute_tool",
         {"tool_slug": "LINKEDIN_GET_MY_INFO", "arguments_json": "{}"},
@@ -617,25 +640,26 @@ def test_official_sheet_ig_linkedin_policy_keeps_deletes_off_and_does_not_autopu
         {"tool_slug": "GOOGLESHEETS_DELETE_DIMENSION", "arguments_json": "{}"},
         ctx,
     )
-    assert delete_denied.ok and "destructive action is ready" in delete_denied.text
+    assert not delete_denied.ok and "denied" in delete_denied.error.lower()
     clear_denied = execute_tool(
         "composio_execute_tool",
         {"tool_slug": "GOOGLESHEETS_CLEAR_VALUES", "arguments_json": "{}"},
         ctx,
     )
-    assert clear_denied.ok and "destructive action is ready" in clear_denied.text
+    assert not clear_denied.ok and "denied" in clear_denied.error.lower()
     ig_delete = execute_tool(
         "composio_execute_tool",
         {"tool_slug": "INSTAGRAM_DELETE_COMMENT", "arguments_json": "{}"},
         ctx,
     )
-    assert ig_delete.ok and "destructive action is ready" in ig_delete.text
+    assert not ig_delete.ok and "denied" in ig_delete.error.lower()
     li_delete = execute_tool(
         "composio_execute_tool",
         {"tool_slug": "LINKEDIN_DELETE_POST", "arguments_json": "{}"},
         ctx,
     )
-    assert li_delete.ok and "destructive action is ready" in li_delete.text
+    assert not li_delete.ok and "denied" in li_delete.error.lower()
+    assert ctx.store.saved == []
 
     sheet_read = execute_tool(
         "composio_execute_tool",
@@ -675,8 +699,6 @@ def test_official_sheet_ig_linkedin_policy_keeps_deletes_off_and_does_not_autopu
         "INSTAGRAM_POST_IG_USER_MEDIA_PUBLISH",
         "INSTAGRAM_CREATE_MEDIA_CONTAINER",
         "INSTAGRAM_CREATE_POST",
-        "LINKEDIN_CREATE_LINKED_IN_POST",
-        "LINKEDIN_POST_UPDATE",
     ):
         result = execute_tool(
             "composio_execute_tool",
@@ -687,8 +709,15 @@ def test_official_sheet_ig_linkedin_policy_keeps_deletes_off_and_does_not_autopu
         assert "never auto-executed" in result.error
         assert "destructive" not in (result.error or "")
 
+    for slug in ("LINKEDIN_CREATE_LINKED_IN_POST", "LINKEDIN_POST_UPDATE"):
+        result = execute_tool(
+            "composio_execute_tool", {"tool_slug": slug, "arguments_json": "{}"}, ctx
+        )
+        assert result.ok and result.approval_id
+        assert "LinkedIn action is ready" in result.text
 
-def test_gmail_send_is_never_auto_executed_and_delete_requires_approval(
+
+def test_gmail_send_is_never_auto_executed_and_delete_is_denied(
     monkeypatch,
 ) -> None:
     catalog = _Catalog()
@@ -723,7 +752,7 @@ def test_gmail_send_is_never_auto_executed_and_delete_requires_approval(
             {"tool_slug": slug, "arguments_json": "{}"},
             ctx,
         )
-        assert denied.ok and "destructive action is ready" in denied.text
+        assert not denied.ok and "denied" in denied.error.lower()
     trash = execute_tool(
         "composio_execute_tool",
         {"tool_slug": "GMAIL_MOVE_TO_TRASH", "arguments_json": "{}"},
@@ -741,6 +770,105 @@ def test_gmail_send_is_never_auto_executed_and_delete_requires_approval(
             ctx,
         )
         assert write.ok and "Composio action is ready" in write.text
+
+
+@pytest.mark.parametrize(
+    "slug",
+    [
+        "GMAIL_SEND_EMAIL",
+        "GOOGLESHEETS_VALUES_UPDATE",
+        "INSTAGRAM_CREATE_POST",
+        "GMAIL_DELETE_THREAD",
+    ],
+)
+def test_direct_generic_proposal_refuses_excluded_classes_without_persisting(
+    monkeypatch, slug: str
+) -> None:
+    catalog = _Catalog()
+    monkeypatch.setattr(
+        ComposioCatalog, "from_settings", classmethod(lambda cls, settings: catalog)
+    )
+    ctx = _context()
+    result = execute_tool(
+        "composio_propose_action",
+        {"tool_slug": slug, "arguments_json": "{}"},
+        ctx,
+    )
+    assert not result.ok
+    assert ctx.store.saved == []
+
+
+def test_direct_generic_linkedin_proposal_routes_to_named_approval(monkeypatch) -> None:
+    catalog = _Catalog()
+    monkeypatch.setattr(
+        ComposioCatalog, "from_settings", classmethod(lambda cls, settings: catalog)
+    )
+    ctx = _context()
+    result = execute_tool(
+        "composio_propose_action",
+        {"tool_slug": "LINKEDIN_POST_UPDATE", "arguments_json": "{}"},
+        ctx,
+    )
+    assert result.ok and result.approval_id
+    assert ctx.store.row.resource_type == "linkedin_tool"
+    assert ctx.store.row.action == "linkedin_composio_write"
+
+
+def test_legacy_r5_approval_is_refused_by_callback_and_executor(monkeypatch) -> None:
+    init_db()
+    db = get_session_factory()()
+    try:
+        store = LeadStore(db)
+        slug = "GMAIL_DELETE_THREAD"
+        arguments: dict = {}
+        parameters = _parameters(slug, arguments)
+        resource_id = composio_approval_resource_id(slug, arguments)
+        store.upsert_composio_approval(
+            channel=Channel.TELEGRAM.value,
+            action=ACTION_COMPOSIO_WRITE,
+            risk="R5",
+            payload_hash=_digest(
+                channel=Channel.TELEGRAM.value,
+                resource_id=resource_id,
+                risk="R5",
+                parameters=parameters,
+            ),
+            decision=DECISION_PENDING,
+            resource_id=resource_id,
+            expires_at=approval_expires_at(now=datetime.now(UTC)),
+            proposed_parameters=parameters,
+        )
+        row = store.get_approval_by_resource(
+            RESOURCE_COMPOSIO_TOOL, resource_id, ACTION_COMPOSIO_WRITE
+        )
+        assert row is not None
+        callback = resolve_owner_callback_result(
+            store, decision="approve", token=row.approval_id
+        )
+        assert callback.composio_resource_id_to_execute is None
+        assert row.decision == DECISION_PENDING
+
+        assert store.decide_composio_approval(
+            resource_id=resource_id, decision=DECISION_APPROVED
+        )
+
+        def forbidden_catalog(_cls, _settings):
+            raise AssertionError("legacy R5 approval must fail before catalog/provider access")
+
+        monkeypatch.setattr(
+            ComposioCatalog,
+            "from_settings",
+            classmethod(forbidden_catalog),
+        )
+        result = execute_approved_composio_write(
+            store=store,
+            settings=Settings(_env_file=None),
+            resource_id=resource_id,
+            kill_switch=False,
+        )
+        assert "nothing was executed" in result.lower()
+    finally:
+        db.close()
 
 
 def test_linkedin_side_effect_is_bound_for_approval_and_never_executes_at_proposal_time() -> None:
@@ -969,6 +1097,14 @@ def test_all_meta_tools_deny_before_config_or_catalog_lookup(monkeypatch) -> Non
         (
             "composio_execute_tool",
             {"tool_slug": "GMAIL_SEARCH_EMAILS", "arguments_json": "{}"},
+        ),
+        (
+            "composio_propose_linkedin_action",
+            {"tool_slug": "LINKEDIN_POST_UPDATE", "arguments_json": "{}"},
+        ),
+        (
+            "composio_propose_action",
+            {"tool_slug": "GMAIL_MOVE_TO_TRASH", "arguments_json": "{}"},
         ),
     )
     for name, arguments in calls:

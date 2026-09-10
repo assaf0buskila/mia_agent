@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
+from app.domain.approvals import DECISION_PENDING, RESOURCE_CALENDAR, is_approval_expired
 from app.domain.events import Channel
 from app.domain.meetings.write_gate import ASK_ASSAF
 from app.domain.owner.calendar import (
@@ -12,7 +13,10 @@ from app.domain.owner.calendar import (
     format_calendar_agenda,
     resolve_agenda_window,
 )
-from app.domain.owner.calendar_writes import apply_owner_calendar_change_request
+from app.domain.owner.calendar_writes import (
+    apply_owner_calendar_change_request,
+    parse_calendar_change_request,
+)
 from app.integrations.calendar import build_calendar_agenda_port, build_calendar_port
 from app.tools.owner.types import ToolContext, ToolResult, _empty, _house_unavailable
 
@@ -44,6 +48,7 @@ def _calendar_create_meeting(ctx: ToolContext, args: dict[str, Any]) -> ToolResu
     if not title or not start:
         return ToolResult(ok=False, error="title and start are required")
     line = f"צור אירוע: {title} {location} | {start} | {minutes} | {ctx.timezone()}"
+    change = parse_calendar_change_request(line, default_timezone=ctx.timezone())
     reply = apply_owner_calendar_change_request(
         ctx.store,
         text=line,
@@ -52,7 +57,21 @@ def _calendar_create_meeting(ctx: ToolContext, args: dict[str, Any]) -> ToolResu
         demo_active=ctx.demo_active,
         default_timezone=ctx.timezone(),
     )
-    return ToolResult(ok=True, text=reply or ASK_ASSAF)
+    approval_id = ""
+    if change is not None:
+        row = ctx.store.get_approval_by_resource(
+            RESOURCE_CALENDAR,
+            change.resource_id,
+            change.action,
+        )
+        if (
+            row is not None
+            and row.decision == DECISION_PENDING
+            and not is_approval_expired(row, now=datetime.now(UTC))
+            and "לא שיניתי ביומן. אשר בלחצן למטה." in (reply or "")
+        ):
+            approval_id = str(row.approval_id or "").strip()
+    return ToolResult(ok=True, text=reply or ASK_ASSAF, approval_id=approval_id)
 
 
 def _calendar_agenda(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:

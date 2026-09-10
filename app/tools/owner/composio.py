@@ -2,8 +2,8 @@
 
 `_composio_execute_with_catalog` is the Composio write boundary. Its check order is
 load-bearing: archive-tab ban, active-toolkit check, schema bound, argument validation,
-the never-auto-send / never-auto-publish / bounded-Sheets refusals, and only then the
-non-R0 approval proposal. Reordering would turn a hard refusal into a proposal.
+the never-auto-send / Instagram-publish / bounded-Sheets refusals, and only then the
+non-R0 approval proposal. LinkedIn publishing routes to its named approval workflow.
 """
 
 from __future__ import annotations
@@ -146,7 +146,7 @@ def _composio_propose_side_effect(
         arguments=values,
         kill_switch=ctx.kill_switch,
     )
-    ready_prefixes = ("Composio action is ready", "Composio destructive action is ready")
+    ready_prefixes = ("Composio action is ready",)
     if not any(text.startswith(prefix) for prefix in ready_prefixes):
         return ToolResult(ok=False, text=text, error=text)
     resource_id = composio_approval_resource_id(slug, values)
@@ -160,6 +160,12 @@ def _composio_propose_side_effect(
 
 
 def _composio_propose_action_tool(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
+    try:
+        authorize(
+            "composio.propose_write", principal=ctx.principal, kill_switch=ctx.kill_switch
+        )
+    except PermissionDenied:
+        return ToolResult(ok=False, error="Composio execution denied")
     values = _parse_composio_arguments(args)
     if isinstance(values, ToolResult):
         return values
@@ -168,6 +174,9 @@ def _composio_propose_action_tool(ctx: ToolContext, args: dict[str, Any]) -> Too
         return ToolResult(ok=True, text=_NOT_CONNECTED)
     slug = str(args.get("tool_slug") or "").strip().upper()
     with catalog:
+        tool = catalog.detail(slug)
+        if tool is not None and tool.toolkit == "LINKEDIN":
+            return _composio_propose_linkedin_tool(ctx, args)
         return _composio_propose_side_effect(ctx, catalog, slug, values)
 
 
@@ -261,6 +270,10 @@ def _composio_execute_with_catalog(
             ),
         )
     if tool.slug in NEVER_AUTO_PUBLISH_SLUGS:
+        if tool.toolkit == "LINKEDIN":
+            # Publishing stays approval-bound. Route the exact validated action to
+            # its existing proposal workflow instead of asking the model to retry.
+            return _composio_propose_linkedin_tool(ctx, args)
         return ToolResult(
             ok=False,
             error=(

@@ -1,6 +1,9 @@
 import json
 from datetime import UTC, datetime, timedelta
 
+from app.brain.embeddings import FakeEmbeddingPort
+from app.brain.store import BrainStore
+from app.capabilities.types import Principal
 from app.core.config import Settings
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
@@ -18,6 +21,7 @@ from app.domain.owner.calendar_writes import (
 )
 from app.integrations.calendar import FakeCalendarPort, TimeSlot
 from app.integrations.calendar_booking import FakeCalendarBookingPort
+from app.tools.registries.owner_tools import ToolContext, execute_tool
 
 
 def _store():
@@ -58,6 +62,48 @@ def test_owner_calendar_create_is_payload_bound_and_waits_for_approval() -> None
         assert decision == DECISION_APPROVED
         assert resource_id == row.resource_id
         assert row.decision == DECISION_APPROVED
+    finally:
+        db.close()
+
+
+def test_calendar_create_tool_returns_the_exact_created_approval_id() -> None:
+    db, store = _store()
+    try:
+        ctx = ToolContext(
+            principal=Principal.owner(source="test"),
+            store=store,
+            brain=BrainStore(db),
+            settings=Settings(_env_file=None),
+            embedding_port=FakeEmbeddingPort(),
+        )
+        result = execute_tool(
+            "calendar_create_meeting",
+            {
+                "title": "פגישת תכנון בתל אביב",
+                "start": "2026-09-02T10:00",
+                "minutes": "60",
+                "location": None,
+            },
+            ctx,
+        )
+        assert result.ok is True
+        row = store.get_approval_by_approval_id(result.approval_id)
+        assert row is not None
+        assert row.action == ACTION_CALENDAR_CREATE
+        assert row.resource_type == RESOURCE_CALENDAR
+
+        ctx.kill_switch = True
+        refused = execute_tool(
+            "calendar_create_meeting",
+            {
+                "title": "פגישת תכנון בתל אביב",
+                "start": "2026-09-02T10:00",
+                "minutes": "60",
+                "location": None,
+            },
+            ctx,
+        )
+        assert refused.approval_id == ""
     finally:
         db.close()
 

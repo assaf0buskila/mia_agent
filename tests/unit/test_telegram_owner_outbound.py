@@ -78,7 +78,7 @@ def test_linkedin_proposal_markup_binds_the_exact_new_approval_id() -> None:
         SimpleNamespace(),  # type: ignore[arg-type]
         channel=Channel.TELEGRAM,
         task_type=OwnerTaskType.NOTE,
-        linkedin_approval_id="apr_linkedin_exact",
+        turn_approval_id="apr_linkedin_exact",
     )
     assert markup == approval_keyboard(approval_token("apr_linkedin_exact"))
 
@@ -109,7 +109,13 @@ def test_store_keeps_long_linkedin_payload_exact() -> None:
 
 
 @pytest.mark.asyncio
-async def test_linkedin_turn_keyboard_ignores_an_unrelated_newer_approval(monkeypatch) -> None:
+@pytest.mark.parametrize("has_turn_approval", [True, False])
+@pytest.mark.parametrize("tool_name", [
+    "composio_propose_linkedin_action", "calendar_create_meeting", "gmail_create_draft",
+])
+async def test_proposal_turn_keyboard_ignores_an_unrelated_newer_approval(
+    monkeypatch, tool_name, has_turn_approval,
+) -> None:
     init_db()
     db = get_session_factory()()
     try:
@@ -148,8 +154,8 @@ async def test_linkedin_turn_keyboard_ignores_an_unrelated_newer_approval(monkey
             lambda **_kwargs: OwnerBrainResult(
                 "LinkedIn action is ready for approval.",
                 True,
-                ("composio_propose_linkedin_action",),
-                approval_ids=(exact.approval_id,),
+                (tool_name,),
+                approval_ids=(exact.approval_id,) if has_turn_approval else (),
             ),
         )
         port = RecordingMessagePort()
@@ -159,7 +165,7 @@ async def test_linkedin_turn_keyboard_ignores_an_unrelated_newer_approval(monkey
             channel=Channel.TELEGRAM,
             items=[
                 {
-                    "id": "evt.linkedin.exact.turn.keyboard",
+                    "id": "evt.exact.turn.keyboard." + tool_name,
                     "from": _OWNER_ID,
                     "text": "prepare a linkedin post for approval",
                 }
@@ -171,8 +177,8 @@ async def test_linkedin_turn_keyboard_ignores_an_unrelated_newer_approval(monkey
         )
 
         assert len(port.sent) == 1
-        assert port.sent[0].reply_markup == approval_keyboard(
-            approval_token(exact.approval_id)
+        assert port.sent[0].reply_markup == (
+            approval_keyboard(approval_token(exact.approval_id)) if has_turn_approval else None
         )
         assert port.sent[0].reply_markup != approval_keyboard(
             approval_token(unrelated.approval_id)

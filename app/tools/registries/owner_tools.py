@@ -2,8 +2,9 @@
 
 Tools are reads, owner-memory writes, or ADR-042's narrowly bounded Sheets value writes.
 Sheets updates/appends remain owner-only, allowlisted, policy/idempotency guarded and require
-current-message intent. Messages, bookings, approvals, spending, publishing and deletion stay
-outside this registry on deterministic approval/high-risk paths.
+current-message intent. Draft and proposal tools may create exact approval requests here.
+Approval decisions and provider execution of bookings, sending, publishing and deletion
+stay on the deterministic approval/high-risk paths.
 The owner agent may therefore read, write owner memory, or perform only these bounded Sheets
 value updates/appends; it cannot send, book, approve, spend, publish, or delete.
 
@@ -607,12 +608,18 @@ _register(
     ToolSpec(
         name="linkedin_snapshot",
         description=(
-            "Assaf's own LinkedIn profile as LinkedIn has it -- his name and headline, "
+            "Fresh read of Assaf's own LinkedIn profile. Set full_profile=true for all "
+            "supported profile sections and an explicit list of fields not returned. "
             "his account only, not company or competitor data. Use when Assaf asks what "
             "his LinkedIn profile says. Profile only: this returns no post, follower or "
             "impression analytics. Takes no input. Never posts or DMs."
         ),
-        parameters=_NO_ARGS,
+        parameters={
+            "type": "object",
+            "properties": {"full_profile": {"type": ["boolean", "null"]}},
+            "required": ["full_profile"],
+            "additionalProperties": False,
+        },
         handler=_linkedin_snapshot,
     )
 )
@@ -840,9 +847,11 @@ _register(
     ToolSpec(
         name="composio_propose_action",
         description=(
-            "Prepares one exact Composio side-effect (write, post, delete, update, etc.) "
-            "from any ACTIVE connected toolkit. Validates the current schema and creates "
-            "a Telegram approval; it never executes the action itself. Prefer "
+            "Prepares one exact eligible Composio side-effect from an ACTIVE connected "
+            "toolkit. Destructive actions, Gmail sends, Instagram publishing and generic "
+            "Sheets writes are denied. LinkedIn writes route to their named approval path. "
+            "It validates the current schema and creates a Telegram approval; it never "
+            "executes the action itself. Prefer "
             "composio_execute_tool — it auto-proposes side effects after schema preflight. "
             "Gmail send and bounded Sheets writes stay on their named paths."
         ),

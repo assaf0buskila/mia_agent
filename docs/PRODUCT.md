@@ -43,6 +43,11 @@ Customer Hebrew is 2nd-person plural / impersonal, native, and dash-free. Mix la
 
 ## CRM
 
+Owner full LinkedIn profile requests read current supported profile sections and discover
+additional active profile tools. Sections the provider omits are reported as unavailable,
+never reconstructed from history. LinkedIn publishing prepares an exact Telegram approval;
+it does not publish during preparation (ADR-056).
+
 Locked spreadsheet `1HW8mnc9GFXraS6oG5VIxFcJvZq9gMDJBFRxY2mpVOhI`. Live tabs: **Contacts** and **Activity** only. Archive tabs are gone. Mia already has the ID. She never asks Assaf for the URL.
 
 Contacts A1:N1:

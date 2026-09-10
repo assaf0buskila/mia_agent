@@ -133,6 +133,11 @@ model and tool iterations; resource cleanup waits for active work to stop. Teleg
 typing progress runs while work is active. Successful STT provenance is persisted
 before coalescing, and the owner agent receives an audio-origin hint (ADR-055).
 
+Explicit full LinkedIn profile requests prefetch the bounded profile and active profile
+tool discovery. These requests omit historical context and keep fresh tool results in
+a separate bounded message. Profile sections cross the adapter/capability boundary as
+allowlisted typed fields; missing sections are explicit (ADR-056).
+
 Everything Mia knows beyond the current turn lives under `app/brain/`. **Every
 retrieval constant lives there too**, in the module that uses it, not in this document.
 Read the code for a number; read this for the shape.
