@@ -13,13 +13,14 @@ same-origin preview page keeps working.
 from __future__ import annotations
 
 from collections import defaultdict, deque
+from ipaddress import ip_address
 from threading import Lock
 from time import monotonic
 from urllib.parse import urlparse
 
 from fastapi import HTTPException, Request
 
-from app.core.config import Settings, get_settings
+from app.core.config import MiaEnv, Settings, get_settings
 
 WINDOW_SECONDS = 900
 
@@ -91,15 +92,21 @@ def origin_allowed(origin: str, settings: Settings) -> bool:
     return cleaned in allowed_website_origins(settings)
 
 
-def client_ip(request: Request) -> str:
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    cf_ip = request.headers.get("cf-connecting-ip")
-    if cf_ip:
-        return cf_ip.strip()
+def client_ip(request: Request, *, settings: Settings | None = None) -> str:
+    """Return the validated rate-limit peer for the deployed network shape.
+
+    Production runs behind an ALB configured to append its peer to X-Forwarded-For.
+    Earlier entries are client supplied and must not select the rate-limit bucket.
+    Outside production there is no trusted proxy boundary, so forwarded headers are
+    ignored and the direct request peer is used.
+    """
+    settings = settings or get_settings()
+    if settings.env == MiaEnv.PROD:
+        forwarded = request.headers.get("x-forwarded-for")
+        if forwarded:
+            return _validated_ip(forwarded.rsplit(",", maxsplit=1)[-1])
     if request.client is not None and request.client.host:
-        return request.client.host
+        return _validated_ip(request.client.host)
     return "unknown"
 
 
@@ -115,7 +122,7 @@ def enforce_public_website(request: Request, *, bucket: str) -> None:
             origin = _origin_from_url(str(request.base_url))
     if not origin_allowed(origin, settings):
         raise HTTPException(status_code=403, detail="origin not allowed")
-    ip = client_ip(request)
+    ip = client_ip(request, settings=settings)
     ip_limit = LIMITS_PER_IP[bucket]
     if not _limiter.allow(f"{bucket}:ip:{ip}", limit=ip_limit):
         raise HTTPException(
@@ -156,6 +163,13 @@ def public_website_guard(bucket: str):
 
 def _normalize_origin(value: str) -> str:
     return value.strip().rstrip("/")
+
+
+def _validated_ip(value: str) -> str:
+    try:
+        return str(ip_address(value.strip()))
+    except ValueError:
+        return "unknown"
 
 
 def _origin_from_url(url: str) -> str:

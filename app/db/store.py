@@ -2597,14 +2597,12 @@ class LeadStore:
         )
 
     def save_canonical_event(self, *, provider: str, event: CanonicalEvent) -> None:
-        existing = self.get_canonical_event(
-            provider=provider, provider_event_id=event.idempotency_key
-        )
-        if existing is not None:
-            return
         stamp_payload_version(event)
-        self.session.add(
-            CanonicalEventRow(
+        # Fixed per-session behavior IDs can arrive concurrently. Let the unique
+        # constraint choose the first event without aborting the losing request.
+        self._insert_ignoring_conflicts(
+            CanonicalEventRow.__table__,
+            dict(
                 event_id=event.event_id,
                 provider=provider,
                 provider_event_id=event.idempotency_key,

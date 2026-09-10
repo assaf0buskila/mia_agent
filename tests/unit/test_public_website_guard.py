@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 from app.api.deps import get_transcription_port
-from app.core.config import Settings
+from app.core.config import MiaEnv, Settings
 from app.core.public_website import (
     LIMITS_PER_IP,
     allowed_website_origins,
@@ -227,21 +227,80 @@ def test_voice_rate_limit_returns_429(monkeypatch: pytest.MonkeyPatch) -> None:
         app.dependency_overrides.pop(get_transcription_port, None)
 
 
-def test_client_ip_inspects_forwarded_headers() -> None:
+def test_client_ip_uses_validated_alb_appended_peer_in_production() -> None:
     from types import SimpleNamespace
 
     from app.core.public_website import client_ip
 
-    req1 = SimpleNamespace(
-        headers={"x-forwarded-for": "203.0.113.195, 70.41.3.18"},
+    production = Settings(_env_file=None, env=MiaEnv.PROD)
+    request = SimpleNamespace(
+        headers={"x-forwarded-for": "198.51.100.10, 203.0.113.195"},
         client=SimpleNamespace(host="10.0.0.1"),
     )
-    assert client_ip(req1) == "203.0.113.195"
-    req2 = SimpleNamespace(
-        headers={"cf-connecting-ip": "198.51.100.1"},
+    assert client_ip(request, settings=production) == "203.0.113.195"
+
+    cf_spoof = SimpleNamespace(
+        headers={"cf-connecting-ip": "192.0.2.50"},
         client=SimpleNamespace(host="10.0.0.1"),
     )
-    assert client_ip(req2) == "198.51.100.1"
-    req3 = SimpleNamespace(headers={}, client=SimpleNamespace(host="192.168.1.1"))
-    assert client_ip(req3) == "192.168.1.1"
+    assert client_ip(cf_spoof, settings=production) == "10.0.0.1"
+
+
+def test_client_ip_ignores_untrusted_forwarded_headers_outside_production() -> None:
+    from types import SimpleNamespace
+
+    from app.core.public_website import client_ip
+
+    development = Settings(_env_file=None, env=MiaEnv.DEV)
+    request = SimpleNamespace(
+        headers={
+            "x-forwarded-for": "198.51.100.10, 203.0.113.195",
+            "cf-connecting-ip": "192.0.2.50",
+        },
+        client=SimpleNamespace(host="127.0.0.1"),
+    )
+    assert client_ip(request, settings=development) == "127.0.0.1"
+
+
+def test_client_ip_rejects_invalid_production_forwarded_peer() -> None:
+    from types import SimpleNamespace
+
+    from app.core.public_website import client_ip
+
+    production = Settings(_env_file=None, env=MiaEnv.PROD)
+    request = SimpleNamespace(
+        headers={"x-forwarded-for": "198.51.100.10, attacker-controlled"},
+        client=SimpleNamespace(host="198.51.100.10"),
+    )
+    assert client_ip(request, settings=production) == "unknown"
+
+
+def test_spoofed_xff_prefix_cannot_rotate_production_rate_limit_bucket(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.core.public_website as public_website
+
+    monkeypatch.setitem(LIMITS_PER_IP, "session", 1)
+    monkeypatch.setattr(
+        public_website,
+        "get_settings",
+        lambda: Settings(_env_file=None, env=MiaEnv.PROD),
+    )
+    with TestClient(app) as client:
+        first = client.post(
+            "/v1/website/sessions",
+            headers={
+                "Origin": _ALLOWED,
+                "X-Forwarded-For": "198.51.100.10, 203.0.113.195",
+            },
+        )
+        assert first.status_code == 200
+        second = client.post(
+            "/v1/website/sessions",
+            headers={
+                "Origin": _ALLOWED,
+                "X-Forwarded-For": "198.51.100.11, 203.0.113.195",
+            },
+        )
+        assert second.status_code == 429
 
