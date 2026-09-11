@@ -151,6 +151,11 @@ class SiteV2State:
     # A name the model read out of the visitor's own words, kept until a validated
     # phone or email arrives. Never a substitute for server-side contact validation.
     pending_name: str = ""
+    # Contact the server extracted from a visitor message that did not yet read as
+    # consent. Kept so an explicit confirmation on the next turn can complete the
+    # capture; the value always originates from a server regex over the visitor's own
+    # text, never from the model.
+    pending_contact: dict[str, str] = field(default_factory=dict)
     captured: bool = False
     contact_id: str = ""
     delivery_job_ids: list[str] = field(default_factory=list)
@@ -247,6 +252,15 @@ def _load_state(row: SiteV2SessionRow) -> SiteV2State:
         business_context=str(raw.get("business_context") or "")[:1000],
         next_step=str(raw.get("next_step") or "")[:500],
         pending_name=str(raw.get("pending_name") or "")[:80],
+        pending_contact={
+            str(k): str(v)[:120]
+            for k, v in (
+                raw.get("pending_contact")
+                if isinstance(raw.get("pending_contact"), dict)
+                else {}
+            ).items()
+            if k in {"phone", "email"} and v
+        },
         captured=bool(raw.get("captured")),
         contact_id=str(raw.get("contact_id") or "")[:80],
         delivery_job_ids=[
@@ -370,6 +384,24 @@ def _classified_consent(
     return decision
 
 
+def _contact_readback(state: SiteV2State) -> str:
+    """Mia's previous turn, when it quoted a remembered contact back for confirmation.
+
+    Returning the turn verbatim lets the consent classifier see exactly what the visitor
+    is agreeing to. An empty string means there is nothing safe to confirm against.
+    """
+    if not state.pending_contact or not state.turns:
+        return ""
+    last = state.turns[-1]
+    if last.get("role") != "mia":
+        return ""
+    text = str(last.get("text") or "")
+    for value in (state.pending_contact.get("phone", ""), state.pending_contact.get("email", "")):
+        if value and value in text:
+            return text
+    return ""
+
+
 def _actual_contact(
     state: SiteV2State,
     *,
@@ -405,12 +437,35 @@ def _actual_contact(
     # detectors can help shape a prompt, but cannot decide whether this input is a
     # voluntary follow-up request and must not gate semantically valid wording.
     if not has_contact:
-        return {}
-    contact_value = supplied_phone or supplied_email
-    if not exact_form_operation and _classified_consent(
-        client, text=text, contact_value=contact_value, prior_invitation=prior_invitation
-    ) != "affirmative":
-        return {}
+        # Mia routinely reads the contact back and asks the visitor to confirm.  That
+        # confirmation carries no phone or email of its own, so without this branch the
+        # capture could never complete and the lead was lost however clearly the visitor
+        # consented.  The value still comes from a server regex over the visitor's own
+        # earlier message, and is only consumed when Mia quoted it verbatim on the
+        # previous turn and the classifier reads this turn as affirmative.
+        readback = _contact_readback(state)
+        if not readback:
+            return {}
+        supplied_phone = state.pending_contact.get("phone", "")
+        supplied_email = state.pending_contact.get("email", "")
+        contact_value = supplied_phone or supplied_email
+        if _classified_consent(
+            client, text=text, contact_value=contact_value, prior_invitation=readback
+        ) != "affirmative":
+            return {}
+    else:
+        contact_value = supplied_phone or supplied_email
+        if not exact_form_operation and _classified_consent(
+            client, text=text, contact_value=contact_value, prior_invitation=prior_invitation
+        ) != "affirmative":
+            # Remember it so an explicit confirmation on the next turn can complete the
+            # capture instead of dead-ending.
+            state.pending_contact = {
+                key: value
+                for key, value in (("phone", supplied_phone), ("email", supplied_email))
+                if value
+            }
+            return {}
     current: dict[str, str] = {}
     # The widget's contact form is the primary source of a name; fall back to one the
     # model previously read verbatim out of the visitor's own message.
@@ -706,6 +761,7 @@ def run_site_v2_turn(
         if result.contact is not None and result.status != "conflict":
             captured = True
             state.captured = True
+            state.pending_contact = {}
             state.contact = {key: value for key, value in contact.items() if value}
             state.contact_id = result.contact.id
             state.delivery_job_ids = list(
