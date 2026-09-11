@@ -786,6 +786,87 @@ def test_a_span_pointing_at_another_contact_is_rejected(span: str) -> None:
     assert _span_covers_contact(span, "052-7654321", text=text) is False
 
 
+class _TruncatingConsent(_SiteClient):
+    """Provider exhausted max_output_tokens while reasoning: no prose, no tool call.
+
+    This is exactly what the Responses adapter returns for status=incomplete, and it
+    is not an error, so the model chain does not fall back.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.requested_budget: int | None = None
+
+    def complete(self, **kwargs):  # noqa: ANN003
+        if not _has_tool(kwargs, "classify_contact_consent"):
+            return super().complete(**kwargs)
+        self.requested_budget = kwargs.get("max_completion_tokens")
+        return LlmResponse("", (), "length", "", 120, 180, {"role": "assistant"})
+
+
+def test_a_truncated_consent_verdict_fails_closed_and_is_visible() -> None:
+    from app.surfaces.site_v2 import SiteV2State, _actual_contact
+
+    client = _TruncatingConsent()
+    result = _actual_contact(
+        SiteV2State(), client=client, text="אני רונית, הטלפון שלי 052-7654321",
+        name="", phone="", email="", date="",
+    )
+    assert result == {}, "a truncated classification must never be read as consent"
+
+
+def test_the_consent_classifier_requests_headroom_for_reasoning_tokens() -> None:
+    """Regression for the production dead end where every free-text lead was lost.
+
+    On the Responses API, max_output_tokens bounds reasoning and visible output
+    together. A budget of 180 was consumed entirely by reasoning, so the classifier
+    never emitted its tool call and every verdict silently became "ambiguous". The
+    guard is on what is actually requested at the call boundary, not on a constant.
+    """
+    from app.surfaces.site_v2 import SiteV2State, _actual_contact
+
+    client = _TruncatingConsent()
+    _actual_contact(
+        SiteV2State(), client=client, text="אני רונית, הטלפון שלי 052-7654321",
+        name="", phone="", email="", date="",
+    )
+    assert client.requested_budget is not None
+    assert client.requested_budget >= 512
+
+
+def test_a_dictated_phone_number_is_extracted_from_number_words() -> None:
+    """Transcription renders spoken digits as words; capture must still find them.
+
+    The transcript below is verbatim from a live voice test against production, where
+    the number was never captured because no digits ever reached the phone regex.
+    """
+    from app.surfaces.site_v2 import SiteV2State, _actual_contact, _spoken_digits_to_numerals
+
+    heard = (
+        "Hi, I run a dental clinic in Tel Aviv. My phone number is zero five two, "
+        "one one one, two two three three. Please call me back."
+    )
+    assert "0521112233" in _spoken_digits_to_numerals(heard)
+    hebrew = "הטלפון שלי אפס חמש שתיים אחת אחת אחת שתיים שתיים שלוש שלוש"
+    assert "0521112233" in _spoken_digits_to_numerals(hebrew)
+    prose = "we offer two options and three plans, one of them free"
+    assert _spoken_digits_to_numerals(prose) == prose
+
+    client = _StagedConsent("affirmative")
+    result = _actual_contact(
+        SiteV2State(), client=client, text=heard, name="", phone="", email="", date="",
+    )
+    assert result.get("phone") == "0521112233"
+
+
+def test_a_span_quoting_the_spoken_words_still_covers_the_extracted_number() -> None:
+    from app.surfaces.site_v2 import _span_covers_contact
+
+    heard = "My phone number is zero five two, one one one, two two three three."
+    span = "zero five two, one one one, two two three three"
+    assert _span_covers_contact(span, "0521112233", text=heard) is True
+
+
 def test_a_bare_confirmation_without_a_readback_never_captures() -> None:
     """Without Mia quoting the contact back there is nothing the visitor agreed to."""
     from app.surfaces.site_v2 import SiteV2State, _actual_contact

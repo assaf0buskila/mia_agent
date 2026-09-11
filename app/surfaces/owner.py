@@ -281,12 +281,23 @@ def _talk_with_optional_agent(
             automation_mode=settings.automation_mode.value,
             model_label=result.model,
         )
-        reply = result.text or fallback
+        if result.fallback_reason not in ("", "deterministic_intent") and (
+            not result.text or result.text == fallback
+        ):
+            # The brain could not run — kill switch, no model, or the agent failed — and
+            # handed back the generic greeting as its text. `result.text or fallback` then
+            # answered a real question with "פה. מה צריך?" and the owner could not tell an
+            # outage from a working assistant. A specific failure note the brain composed
+            # for a read that just failed is more useful than this, and is kept.
+            reply = OWNER_UNAVAILABLE
+        else:
+            reply = result.text or fallback
         if approval_ids_out is not None:
             approval_ids_out.extend(result.approval_ids)
         return reply, wrote
     except Exception as exc:
-        # Never silent: a brain outage here used to answer every real question with the
-        # greeting "פה. מה צריך?" and leave nothing in the logs to explain why.
+        # A brain outage here used to answer every real question with the greeting
+        # "פה. מה צריך?". Logging was added first; the reply itself still lied until
+        # this returned the honest unavailable message instead.
         _log.warning("owner agent turn failed error=%s", type(exc).__name__)
-        return fallback, wrote
+        return OWNER_UNAVAILABLE, wrote

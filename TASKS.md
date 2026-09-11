@@ -1,62 +1,45 @@
-# Mia v2 release plan
+# TASKS.md
 
-Updated 2026-09-11. Resumed from HANDOFF.md. User requested fast execution with
-Luna and completion of the already-authorized implementation, cleanup, review and
-deployment. HEAVY retains planning, security decisions and independent acceptance.
-Preserve the existing dirty tree and immutable `.cache/mia-v2-baseline/` inventory.
+Updated 2026-09-11. Production: `mia:61`, commit `fb6cc8d`. Detail in `HANDOFF.md`.
 
-## Ordered gates
+## Done today
 
-- [x] Read operating contract, handoff, product context and current branch.
-- [x] Verify local Docker PostgreSQL, AWS account and GitHub authentication.
-- [x] Luna: repair kill-switch CRM callback, delivery fairness, whole-input contact
-  consent and unsupported widget response promise; add behavioral regressions.
-- [x] Luna: port remaining obsolete tests to v2 contracts and repair fixtures;
-  document retired behavior and retained coverage without weakening invariants.
-- [x] Run full pytest, isolated PostgreSQL migration/concurrency, Ruff, widget
-  behavior/origin, browser appearance and real API integration, startup/container.
-- [x] Obtain fresh independent HEAVY review of repairs and final release state.
-- [x] Replace stale documentation and reconcile cleanup against the initial baseline.
-- [ ] Commit reviewed release, push branch/PR and pass CI for the exact commit SHA.
-- [ ] Build, scan and push image; verify immutable digest and matching SHA provenance.
-- [ ] Pause the two schedulers before registering a candidate: both currently
-  select the latest family revision. Keep reconcile disabled; migrate, deploy,
-  then enable owner due scan pinned to the accepted revision.
-- [ ] Verify serving task/digest/SHA, schema, health, routes, providers and workers.
-- [ ] Record deployment evidence and give Assaf the live acceptance checklist.
+- [x] P0 — CRM delivery worker failing every cycle since the v2 rollout. Fixed (#55),
+      deployed, failure loop confirmed stopped.
+- [x] v2 dead-code cleanup merged (#56). 1967 passed / 7 skipped, ruff clean.
+- [x] Widget inline mode for embedding Mia as a box (#56), serving on production.
+- [x] Mia now invites contact details; `submit_lead` `name`/`next_step` are no longer
+      discarded (#56).
+- [x] Capture: confirmation-turn dead end and byte-equal span check fixed (#56, #57).
+- [x] Reason-code logging on every consent failure path — #58 green, not yet merged.
 
-## Evidence and boundaries
+## Open
 
-Final local gates: **1,991 passed / zero failures, errors or skips**, 104.6s.
-Fresh independent HEAVY review passed with no unresolved findings. Ruff, widget
-behavior/origin, four viewport visual checks, real API/widget session/message/
-capture/reload checks, and settled-source nonroot container startup passed.
-All 45 migrations are present in isolated PostgreSQL; repeat applies nothing.
-Evidence: `.cache/mia-v2-release/final.xml`, `final.txt`, `postgres.xml`,
-`local-migration.json`, `widget-*`, `container-final.json`, `cleanup-inventory.json`.
+- [ ] **Website lead capture — root cause found and fixed, needs deploy.** The consent
+      classifier ran on the Responses API with reasoning enabled and a 180-token
+      `max_output_tokens`. Reasoning consumed the budget, no tool call was emitted, and
+      the adapter reports that truncation as a normal response — so every verdict silently
+      became "ambiguous" and the chain never fell back. Fixed on
+      `claude/mia-consent-observability`: budget 600, truncation logged, regression tests
+      that guard the requested budget. Deploy, then prove a lead lands in Telegram.
+- [x] Contact-turn reply blanking to `"איך אפשר לעזור?"` — most likely the same cause on
+      the post-tool completion (500-token cap). Reply budget raised to 900; truncation and
+      the empty-reply fallback are now logged so the validator path stays visible.
+- [x] Voice: a dictated number arrives as words ("zero five two…"). Now normalised to
+      digits (English and Hebrew) before extraction; the consent span check accepts the
+      spoken form too.
+- [x] Owner surface returned the greeting `"פה. מה צריך?"` when the brain failed. Now
+      returns `OWNER_UNAVAILABLE`, unless the brain composed a specific failure note.
+- [ ] Website: merge assaf-landingPage#28 (Mia inline in the hero, replacing the scripted
+      demo) once capture is proven. Merging auto-deploys to Vercel.
+- [ ] Product decision: is meeting booking (`app/domain/meetings`) retired, or waiting to
+      be re-wired? It has no callers and ~100 tests.
+- [ ] Small: `build_contacts_crm` is an orphan; `scripts/calibrate_knowledge_floor.py`
+      tunes a setting that no longer exists; the main checkout still has stale uncommitted
+      `crm_v2.py` edits superseded by #55.
 
-Cleanup: 179 deletions = 66 preexisting user deletions + 113 implementation
-cleanup deletions. The immutable 93-path initial baseline remains intact.
-Docker `mia-v2-release-pg` is running on localhost:51403 with isolated database
-`mia_v2`. All local tests use `MIA_ENV=test`, fake external adapters and distinct
-workspace pytest basetemp directories. Never read `.env` or production secrets.
+## Live acceptance (Assaf)
 
-AWS account 535252061205 and GitHub authentication were verified on this resumed
-run. Fresh production serving/rollback evidence is task mia:57, digest
-`sha256:78f25971a5a891f05ef745d5b0055cb8d723cc2fc14a5561cbcfad153894ef54`,
-commit `58b40b341c992508349e23cdc55d3cc5f456c41b`. The due scan runs every 15 minutes
-and reconcile hourly; both currently target unrevisioned family `mia`.
-
-The old `.pytest_tmp_migrate_crm/` ACL issue remains excluded from Git and Docker;
-do not alter ACLs or delete it. Preserve baseline/evidence caches. No v2 commit or
-deployment has occurred yet. Live Telegram/browser/Sheets acceptance follows
-deployment and belongs to the user.
-
-## User live acceptance
-
-Telegram conversation; Hebrew voice/image and captions; exact approve/reject,
-expired/changed target and repeated callbacks; explicit memories only. Website
-exploration/pricing/value, volunteered follow-up contact, continued conversation
-and reload history. Confirm Telegram lead brief and Contacts/Activity records,
-then owner edits and conflict behavior. Real model and device quality cannot be
-established by local fake-provider checks.
+Telegram: natural conversation, Hebrew voice and image, explicit memory, approve /
+reject / expired-target flows. Website: exploration → pricing → volunteer contact →
+brief arrives in Telegram, Contacts/Activity rows, Sheet edits and conflict handling.

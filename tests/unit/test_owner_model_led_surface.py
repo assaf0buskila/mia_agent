@@ -390,3 +390,92 @@ async def test_preloop_adapter_builder_failure_sends_one_failure(monkeypatch) ->
     )
     assert len(port.sent) == 1
     assert "לא עברה" in port.sent[0].text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("reason", "note", "expect"),
+    [
+        ("agent_error", "", "unavailable"),
+        ("no_model_configured", "", "unavailable"),
+        ("kill_switch_or_disabled", "", "unavailable"),
+        ("deterministic_intent", "", "greeting"),
+        ("agent_error", "הקריאה נכשלה: תקלה זמנית אצל הספק.", "note"),
+    ],
+)
+async def test_a_failed_brain_never_answers_a_real_question_with_the_greeting(
+    monkeypatch, reason: str, note: str, expect: str
+) -> None:
+    """The brain returns the greeting as its text when it cannot run.
+
+    `result.text or fallback` then sent "פה. מה צריך?" in reply to a real question, so
+    the owner could not tell an outage from a working assistant. Only a deliberate short
+    acknowledgement, or a specific failure note the brain composed, keeps its text.
+    """
+    from app.domain.events import Channel
+    from app.domain.owner import brain
+    from app.domain.owner.brain import OwnerBrainResult
+
+    def fake_answer_owner(**kwargs):  # noqa: ANN003
+        return OwnerBrainResult(
+            note or kwargs["fallback_text"], False, (), fallback_reason=reason
+        )
+
+    monkeypatch.setattr(brain, "answer_owner", fake_answer_owner)
+    monkeypatch.setattr(Settings, "owner_agent_ready", lambda self: True)
+    event_id = f"surface-brain-fallback-{reason}-{expect}"
+    _claim(event_id)
+    db = get_session_factory()()
+    store = LeadStore(db)
+    port = RecordingMessagePort()
+    try:
+        await owner.run_owner_loop(
+            item={
+                "id": event_id, "from": ACTOR, "chat_id": ACTOR, "text": "מה מצב הלידים היום?"
+            },
+            store=store,
+            port=port,
+            settings=Settings(_env_file=None, telegram_owner_user_ids=ACTOR),
+            owner_ids={ACTOR},
+            channel=Channel.TELEGRAM,
+        )
+    finally:
+        db.close()
+    assert len(port.sent) == 1
+    expected = {
+        "unavailable": owner.OWNER_UNAVAILABLE,
+        "greeting": owner.OWNER_FALLBACK,
+        "note": note,
+    }[expect]
+    assert port.sent[0].text == expected
+
+
+@pytest.mark.asyncio
+async def test_a_crashing_brain_answers_unavailable_not_the_greeting(monkeypatch) -> None:
+    from app.domain.events import Channel
+    from app.domain.owner import brain
+
+    def boom(**_kwargs):  # noqa: ANN003
+        raise RuntimeError("provider exploded")
+
+    monkeypatch.setattr(brain, "answer_owner", boom)
+    monkeypatch.setattr(Settings, "owner_agent_ready", lambda self: True)
+    event_id = "surface-brain-crash"
+    _claim(event_id)
+    db = get_session_factory()()
+    store = LeadStore(db)
+    port = RecordingMessagePort()
+    try:
+        await owner.run_owner_loop(
+            item={
+                "id": event_id, "from": ACTOR, "chat_id": ACTOR, "text": "מה מצב הלידים היום?"
+            },
+            store=store,
+            port=port,
+            settings=Settings(_env_file=None, telegram_owner_user_ids=ACTOR),
+            owner_ids={ACTOR},
+            channel=Channel.TELEGRAM,
+        )
+    finally:
+        db.close()
+    assert [message.text for message in port.sent] == [owner.OWNER_UNAVAILABLE]
