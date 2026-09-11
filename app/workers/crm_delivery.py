@@ -11,6 +11,7 @@ from typing import Literal, Protocol
 from uuid import uuid4
 
 from sqlalchemy import and_, or_, select, text, update
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, aliased
 
 from app.db.models import (
@@ -109,6 +110,8 @@ class CrmDeliveryWorker:
 
     def run_once(self, *, force_import: bool = False, limit: int = MAX_BATCH) -> WorkerRun:
         import_failed = False
+        # A failed import only pauses Sheet-bound jobs. It must never stop Telegram
+        # lead delivery, so database errors from the import session count here too.
         try:
             imported = self.sync_from_sheets(force=force_import)
         except (
@@ -116,6 +119,7 @@ class CrmDeliveryWorker:
             AdapterResponseError,
             OSError,
             RuntimeError,
+            SQLAlchemyError,
             TypeError,
             ValueError,
         ):

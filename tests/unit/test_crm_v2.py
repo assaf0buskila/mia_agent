@@ -21,7 +21,7 @@ from app.db.models import (
 from app.integrations.sheets import FakeSheetsPort
 from app.services.crm_v2 import ActivityInput, CrmError, CrmRevisionConflict, CrmService
 from app.workers.crm_delivery import CrmDeliveryWorker
-from sqlalchemy import create_engine, select, text
+from sqlalchemy import create_engine, event, select, text
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -33,8 +33,16 @@ def sessions() -> sessionmaker[Session]:
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
+
+    # Match production: PostgreSQL enforces foreign keys and app/db/session.py
+    # disables autoflush. The old default fixture had neither, which hid a child
+    # row being flushed before its parent in production.
+    @event.listens_for(engine, "connect")
+    def _enable_foreign_keys(dbapi_connection, _record) -> None:
+        dbapi_connection.execute("PRAGMA foreign_keys=ON")
+
     Base.metadata.create_all(engine)
-    factory = sessionmaker(engine, expire_on_commit=False)
+    factory = sessionmaker(engine, expire_on_commit=False, autoflush=False)
     try:
         yield factory
     finally:
@@ -334,6 +342,9 @@ def test_finish_refuses_to_complete_a_lease_no_longer_owned(
         job = session.get(CrmOutboxRow, job_id)
         assert job is not None
         job.lease_owner = "worker-b"
+        # Another worker's takeover arrives as committed database state; the fixture
+        # (like production) does not autoflush, so make the simulated change visible.
+        session.flush()
         with pytest.raises(RuntimeError, match="lease ownership changed"):
             worker._finish(session, job, "confirmed")
         session.rollback()
@@ -772,6 +783,107 @@ def test_failed_import_blocks_contacts_but_independent_telegram_still_delivers(
         assert contact_job.status == "pending"
 
 
+def _legacy_sheet_row(**fields: str) -> list[str]:
+    from app.services.crm_v2 import CONTACT_FIELDS
+
+    return [fields.get(name, "") for name in CONTACT_FIELDS] + [""]
+
+
+def test_duplicate_legacy_sheet_rows_become_an_issue_and_leads_still_deliver(
+    sessions: sessionmaker[Session],
+) -> None:
+    """Production 2026-09-11: two legacy rows sharing a phone raised a foreign-key
+    violation on every import, which aborted every delivery cycle."""
+    sheets = FakeSheetsPort()
+    sheets.locked_contacts = [
+        _legacy_sheet_row(name="Dana", phone="0501231234"),
+        _legacy_sheet_row(name="Dana Levi", phone="0501231234"),
+    ]
+    delivered: list[str] = []
+    with sessions() as session:
+        CrmService(session).capture_site_lead(
+            {"phone": "0509990000"},
+            conversation_id="website-88",
+            source_ref="site:88",
+            recipient_ids=("123",),
+        )
+        session.commit()
+    worker = CrmDeliveryWorker(
+        session_factory=sessions,
+        sheets=sheets,
+        allowed_telegram_recipient_ids=frozenset({"123"}),
+        telegram_handler=lambda payload, reconcile: (
+            delivered.append(str(payload["conversation_id"])) or "confirmed"
+        ),
+    )
+
+    run = worker.run_once(force_import=True, limit=10)
+
+    assert run.import_failed is False
+    assert delivered == ["website-88"]
+    with sessions() as session:
+        issue = session.scalars(
+            select(CrmIssueRow).where(CrmIssueRow.issue_type == "legacy_row_collision")
+        ).one()
+        assert session.get(CrmIssueContactRow, (issue.id, issue.contact_id)) is not None
+
+
+def test_new_issue_is_flushed_before_its_contact_link_is_added(
+    sessions: sessionmaker[Session],
+) -> None:
+    # Without an ORM relationship the flush order of these two inserts is arbitrary,
+    # so assert the ordering directly instead of hoping a flush happens to fail.
+    with sessions() as session:
+        service = CrmService(session)
+        created = service.capture({"phone": "0507070707"}, source_ref="fk:seed")
+        assert created.contact is not None
+        session.commit()
+        service._issue(contact_id=created.contact.id, issue_type="probe")
+        pending = {type(obj).__name__ for obj in session.new}
+        assert "CrmIssueRow" not in pending
+        assert "CrmIssueContactRow" in pending
+        session.commit()
+
+
+class _DatabaseErrorSheets(FakeSheetsPort):
+    def read_crm_contacts_chunk(self, *, start_row: int, limit: int = 100) -> list[list[str]]:
+        from sqlalchemy.exc import OperationalError
+
+        raise OperationalError("SELECT 1", {}, Exception("database unavailable"))
+
+
+def test_database_error_during_import_does_not_stop_telegram_delivery(
+    sessions: sessionmaker[Session],
+) -> None:
+    delivered: list[str] = []
+    with sessions() as session:
+        CrmService(session).capture_site_lead(
+            {"phone": "0508880000"},
+            conversation_id="website-89",
+            source_ref="site:89",
+            recipient_ids=("123",),
+        )
+        session.commit()
+    worker = CrmDeliveryWorker(
+        session_factory=sessions,
+        sheets=_DatabaseErrorSheets(),
+        allowed_telegram_recipient_ids=frozenset({"123"}),
+        telegram_handler=lambda payload, reconcile: (
+            delivered.append(str(payload["conversation_id"])) or "confirmed"
+        ),
+    )
+
+    run = worker.run_once(force_import=True, limit=5)
+
+    assert run.import_failed is True
+    assert delivered == ["website-89"]
+    with sessions() as session:
+        contact_job = session.scalars(
+            select(CrmOutboxRow).where(CrmOutboxRow.destination == "contacts")
+        ).one()
+        assert contact_job.status == "pending"
+
+
 def test_identity_conflict_resolution_cannot_take_another_contacts_identity(
     sessions: sessionmaker[Session],
 ) -> None:
@@ -854,6 +966,9 @@ def test_finish_rechecks_current_lease_owner(sessions: sessionmaker[Session]) ->
         job = session.get(CrmOutboxRow, job_id)
         assert job is not None
         job.lease_owner = "worker-b"
+        # Another worker's takeover arrives as committed database state; the fixture
+        # (like production) does not autoflush, so make the simulated change visible.
+        session.flush()
         with pytest.raises(RuntimeError, match="lease ownership changed"):
             worker._finish(session, job, "confirmed")
         session.rollback()
