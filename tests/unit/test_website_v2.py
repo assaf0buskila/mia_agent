@@ -768,6 +768,24 @@ def test_a_confirmation_carrying_no_number_still_captures_the_contact() -> None:
     assert result.get("phone") == "0501234567"
 
 
+@pytest.mark.parametrize("span", ["052-7654321", "0527654321", "052 765 4321", "ל-052-7654321"])
+def test_a_reformatted_contact_span_still_counts_as_consent(span: str) -> None:
+    """Models normalise phone formatting; byte-equality was losing real leads."""
+    from app.surfaces.site_v2 import _span_covers_contact
+
+    text = "אני רונית, הטלפון שלי 052-7654321"
+    assert _span_covers_contact(span, "052-7654321", text=text) is True
+
+
+@pytest.mark.parametrize("span", ["", "0509999999", "050-9999999", "someone@else.com"])
+def test_a_span_pointing_at_another_contact_is_rejected(span: str) -> None:
+    """Tolerating formatting must not tolerate the model substituting a different value."""
+    from app.surfaces.site_v2 import _span_covers_contact
+
+    text = "אני רונית, הטלפון שלי 052-7654321"
+    assert _span_covers_contact(span, "052-7654321", text=text) is False
+
+
 def test_a_bare_confirmation_without_a_readback_never_captures() -> None:
     """Without Mia quoting the contact back there is nothing the visitor agreed to."""
     from app.surfaces.site_v2 import SiteV2State, _actual_contact
