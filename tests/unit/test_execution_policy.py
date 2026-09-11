@@ -18,9 +18,8 @@ def test_identity_is_deterministic() -> None:
     assert policy.minimum_confidence == 1.0
 
 
-def test_sales_state_and_langgraph_are_deterministic() -> None:
+def test_sales_state_is_deterministic() -> None:
     assert policy_for(CapabilityId.SALES_STATE).execution_mode == ExecutionMode.DETERMINISTIC
-    assert policy_for(CapabilityId.LANGGRAPH).execution_mode == ExecutionMode.DETERMINISTIC
 
 
 def test_sales_reply_is_ai_automatic_fail_closed() -> None:

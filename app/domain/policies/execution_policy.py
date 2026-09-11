@@ -92,7 +92,6 @@ _REGISTRY: dict[str, ActionPolicy] = {
     CapabilityId.HUMANITY_LINTER.value: _det(
         CapabilityId.HUMANITY_LINTER, risk=RiskLevel.R0_READ
     ),
-    CapabilityId.LANGGRAPH.value: _det(CapabilityId.LANGGRAPH, risk=RiskLevel.R0_READ),
     CapabilityId.WEBSITE.value: _det(CapabilityId.WEBSITE, risk=RiskLevel.R1_LOW_WRITE),
     CapabilityId.TELEGRAM.value: _det(CapabilityId.TELEGRAM, risk=RiskLevel.R1_LOW_WRITE),
     CapabilityId.VOICE_STT.value: _ai_auto(CapabilityId.VOICE_STT, risk=RiskLevel.R0_READ),
