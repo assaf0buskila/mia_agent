@@ -11,6 +11,7 @@ import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from functools import wraps
 from hashlib import sha256
 from typing import Any, Literal
 from uuid import uuid4
@@ -211,6 +212,27 @@ def _bounded_fields(fields: Mapping[str, Any]) -> dict[str, str]:
     return bounded
 
 
+def _autoflushing(method: Callable[..., Any]) -> Callable[..., Any]:
+    """Run one CRM operation with autoflush on, restoring the caller's setting.
+
+    The application session factory disables autoflush, but CRM operations read rows
+    they have just added (issue links, pending projections) and are only correct when
+    those reads see them. Without this, production raised duplicate-link and
+    foreign-key errors that tests running with autoflush on could not reproduce.
+    """
+
+    @wraps(method)
+    def wrapper(self: CrmService, *args: Any, **kwargs: Any) -> Any:
+        previous = self.session.autoflush
+        self.session.autoflush = True
+        try:
+            return method(self, *args, **kwargs)
+        finally:
+            self.session.autoflush = previous
+
+    return wrapper
+
+
 class CrmService:
     """Transaction-scoped CRM API. The caller controls commit and rollback."""
 
@@ -238,6 +260,7 @@ class CrmService:
                 {"key": CRM_PROJECTION_LOCK_KEY},
             )
 
+    @_autoflushing
     def capture(
         self,
         fields: Mapping[str, Any],
@@ -362,6 +385,7 @@ class CrmService:
 
     upsert_contact = capture
 
+    @_autoflushing
     def capture_site_lead(
         self,
         fields: Mapping[str, Any],
@@ -399,6 +423,7 @@ class CrmService:
             destination_intents=intents,
         )
 
+    @_autoflushing
     def lookup(
         self,
         *,
@@ -422,6 +447,7 @@ class CrmService:
             )
         return [self._contact_view(row) for row in self.session.scalars(statement)]
 
+    @_autoflushing
     def lookup_for_conversation(self, conversation_id: str) -> ContactView | None:
         """Return only the contact explicitly linked to this public conversation."""
         conversation_id = conversation_id.strip()
@@ -437,6 +463,7 @@ class CrmService:
         ).one_or_none()
         return self._contact_view(row) if row is not None else None
 
+    @_autoflushing
     def list_contact_conversations(self, contact_id: str) -> list[ContactConversationView]:
         rows = self.session.scalars(
             select(CrmContactConversationRow)
@@ -453,6 +480,7 @@ class CrmService:
             for row in rows
         ]
 
+    @_autoflushing
     def snapshot_target(self, contact_id: str) -> TargetSnapshot:
         row = self.session.get(CrmContactRow, contact_id)
         if row is None:
@@ -461,6 +489,7 @@ class CrmService:
         digest = sha256(f"{row.id}:{row.revision}:{_json(fields)}".encode()).hexdigest()
         return TargetSnapshot(row.id, row.revision, digest, fields)
 
+    @_autoflushing
     def snapshot_identity(self, fields: Mapping[str, Any]) -> TargetSnapshot:
         """Bind a create proposal either to an existing contact or to observed absence."""
         bounded = _bounded_fields(fields)
@@ -477,6 +506,7 @@ class CrmService:
         digest = sha256(f"new:{_json(identity_fields)}".encode()).hexdigest()
         return TargetSnapshot("", 0, digest, identity_fields)
 
+    @_autoflushing
     def record_activity(
         self,
         contact_id: str,
@@ -496,6 +526,7 @@ class CrmService:
         self.session.flush()
         return view
 
+    @_autoflushing
     def list_conflicts(
         self, *, contact_id: str | None = None, unresolved_only: bool = True
     ) -> list[ConflictView]:
@@ -506,6 +537,7 @@ class CrmService:
             statement = statement.where(CrmIssueRow.status.in_(("open", "resolving")))
         return [self._conflict_view(row) for row in self.session.scalars(statement).all()]
 
+    @_autoflushing
     def resolve_conflict(
         self,
         conflict_id: str,
@@ -639,6 +671,7 @@ class CrmService:
         self.session.flush()
         return view
 
+    @_autoflushing
     def import_sheet_contact(self, cells: Sequence[Any], *, row_number: int) -> CaptureResult:
         self._lock_projection_effects()
         raw_values = [str(value or "") for value in cells[:15]]
@@ -720,6 +753,7 @@ class CrmService:
             return CaptureResult(contact=None, issue_ids=(issue_id,), status="conflict")
         return self._merge_sheet_row(contact, sheet_fields, row_number=row_number)
 
+    @_autoflushing
     def mark_contact_synced(self, contact_id: str, *, row_number: int = 0) -> None:
         contact = self.session.get(CrmContactRow, contact_id)
         if contact is None:
@@ -736,6 +770,7 @@ class CrmService:
             snapshot.synced_at = stamp
         self.session.flush()
 
+    @_autoflushing
     def mark_contact_snapshot(
         self,
         contact_id: str,
@@ -760,6 +795,7 @@ class CrmService:
             snapshot.synced_at = stamp
         self.session.flush()
 
+    @_autoflushing
     def note_missing_sheet_contacts(self, seen_contact_ids: set[str]) -> tuple[str, ...]:
         self._lock_projection_effects()
         issue_ids: list[str] = []
@@ -789,6 +825,7 @@ class CrmService:
         self.session.flush()
         return tuple(issue_ids)
 
+    @_autoflushing
     def record_projection_issue(
         self,
         contact_id: str,
@@ -1160,6 +1197,10 @@ class CrmService:
                 created_at=self._now(),
             )
         )
+        # No ORM relationship links CrmIssueContactRow to its issue, so the unit of
+        # work cannot order the inserts. Flush the parent first or PostgreSQL rejects
+        # the link with a foreign-key violation (this stopped every delivery cycle).
+        self.session.flush()
         self._link_issue_contact(issue_id, contact_id)
         return issue_id
 

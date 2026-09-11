@@ -110,9 +110,13 @@ def start_crm_runtime(
             if not settings.kill_switch:
                 try:
                     worker.run_once()
-                except Exception:  # noqa: BLE001 - keep durable jobs available after transient failures
-                    # Provider errors may contain credentials or visitor content.
-                    _LOG.warning("CRM delivery cycle failed; durable jobs retained")
+                except Exception as exc:  # noqa: BLE001 - keep durable jobs available
+                    # Provider errors may contain credentials or visitor content, so log
+                    # only the exception class.
+                    _LOG.warning(
+                        "CRM delivery cycle failed error=%s; durable jobs retained",
+                        type(exc).__name__,
+                    )
             stopped.wait(POLL_SECONDS)
 
     thread = Thread(target=run, name="mia-crm-delivery", daemon=True)
