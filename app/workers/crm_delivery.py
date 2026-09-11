@@ -381,6 +381,17 @@ class CrmDeliveryWorker:
                 outcome = "failed"
             except (AdapterHttpError, OSError, RuntimeError, TypeError):
                 outcome = "unknown"
+            except SQLAlchemyError:
+                # A DB-level error (a value one destination handler could not persist,
+                # a constraint violation) left this session's transaction aborted.
+                # Uncaught here it used to propagate past run_once entirely, so one
+                # poison job blocked every other job behind it, on every 5-second
+                # cycle, indefinitely - "durable jobs retained" became "nothing is
+                # ever delivered again." Roll back so this session is usable, and
+                # mark this one job failed (not the whole cycle) so it backs off and
+                # retries instead of wedging the queue.
+                session.rollback()
+                outcome = "failed"
             self._finish(session, job, outcome)
             session.commit()
             return outcome

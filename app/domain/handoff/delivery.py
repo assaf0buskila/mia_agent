@@ -21,6 +21,23 @@ WEBSITE_HANDOFF_DELIVERY_KINDS = (
 WEBSITE_PING_SCOPE_PREFIX = "site"
 
 
+MAX_LEAD_ID_CHARS = 40  # matches OwnerNotificationRecipientClaimRow.lead_id String(40)
+
+
 def website_ping_scope(session_id: str) -> tuple[str, str]:
-    """(lead_id, notification_key) identifying one website conversation's owner ping."""
-    return f"{WEBSITE_PING_SCOPE_PREFIX}:{session_id}", f"site-ping:{session_id}"
+    """(lead_id, notification_key) identifying one website conversation's owner ping.
+
+    lead_id is a primary-key column shared with every real owner-flow lead id and
+    capped at 40 characters. "site:" (5) plus a canonical UUID4 session id (36, with
+    dashes) is 41 - one character over, so every website Telegram ping deterministically
+    failed to claim its delivery row with a DataError, on every attempt, forever. The
+    dashes carry no entropy, so dropping them (32 hex chars) keeps the key unique per
+    session while fitting the column with room to spare.
+    """
+    compact_session_id = session_id.replace("-", "")
+    lead_id = f"{WEBSITE_PING_SCOPE_PREFIX}:{compact_session_id}"
+    assert len(lead_id) <= MAX_LEAD_ID_CHARS, (
+        f"website ping lead_id is {len(lead_id)} chars, over the {MAX_LEAD_ID_CHARS}-char "
+        "column - this used to fail silently as a DataError deep in CRM delivery"
+    )
+    return lead_id, f"site-ping:{session_id}"
