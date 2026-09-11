@@ -230,7 +230,11 @@ class _ConsentClient:
         return True
 
     def complete(self, **kwargs):  # noqa: ANN003
-        prompt = kwargs["messages"][0]["content"]
+        # The actual visitor data is a user message, separate from the system
+        # instructions - a system-only message list becomes an empty Responses
+        # `input` and the request 400s before any generation happens.
+        assert kwargs["messages"][-1]["role"] == "user"
+        prompt = kwargs["messages"][-1]["content"]
         self.prompts.append(prompt)
         text = "Please have Assaf get in touch with me at alex@example.com."
         return LlmResponse(

@@ -6,7 +6,13 @@ from app.db.models import CrmContactRow, CrmOutboxRow
 from app.db.session import get_session_factory
 from app.db.site_v2 import SiteV2SessionRow
 from app.db.store import LeadStore
-from app.integrations.llm_client import LlmError, LlmResponse, ToolCall
+from app.integrations.llm_client import (
+    OPENAI_RESPONSES_URL,
+    LlmClient,
+    LlmError,
+    LlmResponse,
+    ToolCall,
+)
 from app.integrations.transcribe import FakeTranscriptionPort
 from app.main import app
 from fastapi.testclient import TestClient
@@ -40,7 +46,13 @@ class _SiteClient:
             tool.get("function", {}).get("name") == "classify_contact_consent"
             for tool in tools
         ):
-            prompt = kwargs["messages"][0]["content"]
+            # The instructions are a separate system message from the actual data; the
+            # data (what a real classifier reads) is always the last message.
+            prompt = kwargs["messages"][-1]["content"]
+            assert kwargs["messages"][0]["role"] == "system"
+            assert kwargs["messages"][-1]["role"] == "user", (
+                "a system-only message list becomes an empty Responses `input` and 400s"
+            )
             self.consent_prompts.append(prompt)
             invitation = json.loads(prompt.split("PRIOR_INVITATION=", 1)[1].split("\n", 1)[0])
             current_raw = prompt.split("CURRENT_INPUT=", 1)[1].split("\n", 1)[0]
@@ -720,7 +732,8 @@ class _StagedConsent(_SiteClient):
     def complete(self, **kwargs):  # noqa: ANN003
         if not _has_tool(kwargs, "classify_contact_consent"):
             return super().complete(**kwargs)
-        prompt = kwargs["messages"][0]["content"]
+        assert kwargs["messages"][-1]["role"] == "user"
+        prompt = kwargs["messages"][-1]["content"]
         self.consent_prompts.append(prompt)
         current = json.loads(prompt.split("CURRENT_INPUT=", 1)[1].split("\n", 1)[0])
         contact = json.loads(prompt.split("SERVER_EXTRACTED_CONTACT=", 1)[1])
@@ -865,6 +878,68 @@ def test_a_span_quoting_the_spoken_words_still_covers_the_extracted_number() -> 
     heard = "My phone number is zero five two, one one one, two two three three."
     span = "zero five two, one one one, two two three three"
     assert _span_covers_contact(span, "0521112233", text=heard) is True
+
+
+@pytest.mark.parametrize("invitation", [
+    "השאירו טלפון או אימייל ונחזור אליכם",
+    "אם תרצי, אפשר גם להשאיר טלפון או אימייל ואסף יחזור אלייך.",
+    "אם תרצה, השאר טלפון או אימייל ואפשר יהיה להמשיך משם",
+])
+def test_the_invite_regex_matches_how_mia_actually_phrases_it(invitation: str) -> None:
+    """Verbatim invitations from live production testing.
+
+    The system prompt only tells the model to invite contact in one natural sentence;
+    it does not fix the wording. The original three fixed phrases matched none of
+    these, so prior_invitation was empty and a bare confirmation reply had to clear a
+    higher bar than a visitor who had just been invited should have to.
+    """
+    from app.surfaces.site_v2 import _CONTACT_INVITE
+
+    assert _CONTACT_INVITE.search(invitation)
+
+
+def test_the_consent_call_never_becomes_an_empty_responses_input() -> None:
+    """Root cause of every website lead being dropped in production.
+
+    `_classified_consent` sent one system-role message and nothing else. The
+    Responses adapter routes `role: "system"` content into `instructions` and never
+    into `input` (`app/integrations/llm_client.py:_responses_payload`), so that
+    request's `input` array was empty - which the Responses API rejects before any
+    generation happens. This is why raising the token budget in a prior fix attempt
+    changed nothing: the call never got far enough to run out of tokens. This test
+    builds the real payload through the real adapter method, not a fake, because a
+    hand-written fake client would happily accept a system-only message list and
+    hide exactly this bug - which is what let it ship in the first place.
+    """
+    from app.surfaces.site_v2 import SiteV2State, _actual_contact
+
+    captured: list[list[dict]] = []
+
+    class RecordingClient(_SiteClient):
+        def complete(self, **kwargs):  # noqa: ANN003
+            if _has_tool(kwargs, "classify_contact_consent"):
+                captured.append(kwargs["messages"])
+            return super().complete(**kwargs)
+
+    _actual_contact(
+        SiteV2State(), client=RecordingClient(), text="אני רונית, הטלפון שלי 052-7654321",
+        name="", phone="", email="", date="",
+    )
+    assert captured, "expected the consent classifier to be called"
+    messages = captured[0]
+    assert any(m.get("role") == "user" for m in messages), (
+        "a system-only message list becomes an empty Responses `input`"
+    )
+
+    adapter = LlmClient(
+        api_key="test-key", model="test-model", url=OPENAI_RESPONSES_URL,
+        reasoning_effort="low",
+    )
+    payload = adapter._responses_payload(  # noqa: SLF001 - the real request shape is the point
+        messages=messages, tools=None, tool_choice=None,
+        parallel_tool_calls=None, max_completion_tokens=None, response_format=None,
+    )
+    assert payload["input"], "the Responses API rejects an empty input array"
 
 
 def test_a_bare_confirmation_without_a_readback_never_captures() -> None:
