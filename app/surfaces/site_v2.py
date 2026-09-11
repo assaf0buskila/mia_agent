@@ -336,6 +336,7 @@ def _classified_consent(
     client: Any, *, text: str, contact_value: str, prior_invitation: str = ""
 ) -> str:
     if not client.enabled():
+        _LOG.warning("site consent unresolved reason=client_disabled")
         return "ambiguous"
     prompt = (
         "Classify consent for follow-up from the complete current visitor input below. "
@@ -360,21 +361,34 @@ def _classified_consent(
             parallel_tool_calls=False,
             max_completion_tokens=180,
         )
-    except LlmError:
+    except LlmError as exc:
+        # Includes the shared per-turn deadline in _SiteTurnClient. Silently returning
+        # "ambiguous" here drops a lead and leaves nothing to explain why.
+        _LOG.warning("site consent unresolved reason=llm_error error=%s", type(exc).__name__)
         return "ambiguous"
     if len(response.tool_calls) != 1:
+        _LOG.warning("site consent unresolved reason=tool_calls n=%d", len(response.tool_calls))
         return "ambiguous"
     call = response.tool_calls[0]
     if call.name != "classify_contact_consent":
+        _LOG.warning("site consent unresolved reason=wrong_tool")
         return "ambiguous"
     decision = call.arguments.get("decision")
     evidence = call.arguments.get("evidence")
     contact_span = call.arguments.get("contact_span")
     if decision not in {"affirmative", "refused", "quoted", "ambiguous"}:
+        _LOG.warning("site consent unresolved reason=invalid_decision")
         return "ambiguous"
     if not isinstance(evidence, str) or not isinstance(contact_span, str):
+        _LOG.warning("site consent unresolved reason=non_string_fields decision=%s", decision)
         return "ambiguous"
     if decision == "ambiguous":
+        # The model itself was unsure. Distinguishing this from the server rejecting a
+        # confident verdict is the whole point of these reason codes.
+        _LOG.warning(
+            "site consent unresolved reason=model_ambiguous had_invitation=%s",
+            bool(prior_invitation),
+        )
         return decision
     if not evidence or evidence not in text:
         # Log the reason, never the visitor's words: a silent downgrade here is
@@ -458,6 +472,8 @@ def _actual_contact(
     )
     contradicted = bool(_CONTACT_NEGATION.search(text) or _CONTACT_EXAMPLE.search(text))
     if contradicted:
+        if supplied_phone or supplied_email:
+            _LOG.warning("site contact skipped reason=negation_or_example_veto")
         return {}
     structured_contact = bool(phone.strip() or email.strip())
     # The widget's explicit contact form is already a consent action.  Free-form
@@ -486,9 +502,19 @@ def _actual_contact(
             return {}
     else:
         contact_value = supplied_phone or supplied_email
-        if not exact_form_operation and _classified_consent(
-            client, text=text, contact_value=contact_value, prior_invitation=prior_invitation
-        ) != "affirmative":
+        verdict = (
+            "affirmative"
+            if exact_form_operation
+            else _classified_consent(
+                client, text=text, contact_value=contact_value,
+                prior_invitation=prior_invitation,
+            )
+        )
+        if verdict != "affirmative":
+            _LOG.warning(
+                "site contact not captured verdict=%s had_invitation=%s kind=%s",
+                verdict, bool(prior_invitation), "phone" if supplied_phone else "email",
+            )
             # Remember it so an explicit confirmation on the next turn can complete the
             # capture instead of dead-ending.
             state.pending_contact = {
