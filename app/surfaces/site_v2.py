@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import logging
 import re
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
@@ -35,6 +36,8 @@ from app.integrations.llm_client import (
 from app.services.crm_v2 import CrmError, CrmService
 
 SITE_PROMPT_VERSION = "site_v2_v1"
+_LOG = logging.getLogger(__name__)
+
 SITE_V2_ACTIONS = frozenset({"answer", "contact_saved"})
 SESSION_CREDENTIAL_HEADER = "X-Mia-Session-Credential"
 MAX_HISTORY_TURNS = 24
@@ -374,14 +377,42 @@ def _classified_consent(
     if decision == "ambiguous":
         return decision
     if not evidence or evidence not in text:
+        # Log the reason, never the visitor's words: a silent downgrade here is
+        # indistinguishable from the model genuinely being unsure, and it costs a lead.
+        _LOG.warning("site consent downgraded decision=%s reason=evidence_not_verbatim", decision)
         return "ambiguous"
-    if decision == "affirmative" and (
-        not contact_span
-        or (contact_span not in text and contact_span != contact_value)
-        or contact_value not in contact_span
+    if decision == "affirmative" and not _span_covers_contact(
+        contact_span, contact_value, text=text
     ):
+        _LOG.warning("site consent downgraded decision=affirmative reason=span_mismatch")
         return "ambiguous"
     return decision
+
+
+def _span_covers_contact(span: str, value: str, *, text: str) -> bool:
+    """Does the model's claimed contact span refer to the contact the server extracted?
+
+    The guarantee worth keeping is that the model points at the same contact the server
+    found in the visitor's own words — not that it echoed the exact bytes. Models
+    routinely normalise a phone number (dropping the dash in ``052-7654321``), and the
+    original byte-equality check downgraded those to ambiguous, losing the lead.
+    Comparison therefore falls back to digits for phone numbers and to a case-insensitive
+    match for email, both of which still pin the span to the server's value.
+    """
+    if not span or not value:
+        return False
+    if span not in text and span != value and _digits(span) != _digits(value):
+        return False
+    if value in span:
+        return True
+    if "@" in value:
+        return value.casefold() in span.casefold()
+    value_digits = _digits(value)
+    return bool(value_digits) and value_digits in _digits(span)
+
+
+def _digits(value: str) -> str:
+    return re.sub(r"\D", "", value)
 
 
 def _contact_readback(state: SiteV2State) -> str:
