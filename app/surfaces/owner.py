@@ -39,8 +39,6 @@ from app.domain.owner.request_routing import (
 from app.domain.owner.tasks import OwnerTaskType
 from app.domain.tools import AdapterHttpError
 from app.integrations.base import MessagePort
-from app.integrations.gmail import GmailPort
-from app.surfaces.crm import ContactsCrm
 
 _log = logging.getLogger("mia.owner")
 
@@ -71,12 +69,9 @@ async def run_owner_loop(
     store: LeadStore,
     port: MessagePort,
     settings: Settings,
-    crm: ContactsCrm,
-    gmail_port: GmailPort | None = None,
     owner_ids: set[str],
     provider: str = "telegram",
     channel: Channel = Channel.TELEGRAM,
-    talk=None,
     deadline_at: float | None = None,
     delivery_state: dict[str, bool] | None = None,
 ) -> OwnerTurnResult:

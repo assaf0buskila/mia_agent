@@ -16,7 +16,6 @@ from app.db.store import LeadStore
 from app.domain.events import Channel
 from app.integrations.base import RecordingMessagePort
 from app.surfaces import owner as owner_surface
-from app.surfaces.crm import FakeContactsCrm
 from app.tools.registries.owner_tools import tool_names
 
 
@@ -41,7 +40,6 @@ async def main():
     for _ in range(3):
         with get_session_factory()() as db:
             port = RecordingMessagePort()
-            crm = FakeContactsCrm()
             store = LeadStore(db)
             event_id = "probe_inventory_" + uuid4().hex
             store.claim_webhook(provider="telegram", provider_event_id=event_id)
@@ -58,7 +56,6 @@ async def main():
                     store=store,
                     port=port,
                     settings=settings,
-                    crm=crm,
                     owner_ids=owners,
                 )
                 durations.append(round((perf_counter() - started) * 1000, 2))
@@ -66,7 +63,6 @@ async def main():
                 if port.sent:
                     passed = passed and all(name in port.sent[0].text for name in tool_names())
                     passed = passed and port.sent[0].reply_markup is None
-                passed = passed and not crm.contacts and not crm.activity
             finally:
                 db.rollback()
     passed = passed and not forbidden_calls

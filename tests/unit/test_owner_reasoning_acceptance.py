@@ -212,8 +212,6 @@ async def test_emergency_stop_precedes_every_active_surface_branch(monkeypatch, 
             store=store,
             port=port,
             settings=Settings(_env_file=None, kill_switch=True),
-            crm=crm,
-            gmail_port=object(),
             owner_ids={ACTOR},
         )
         assert result.processed

@@ -82,7 +82,6 @@ async def test_live_owner_surface_answers_inventory_without_history_model_or_lea
             store=store,
             port=port,
             settings=Settings(_env_file=None),
-            crm=DisabledContactsCrm(spreadsheet_id=""),
             owner_ids={OWNER_ID},
         )
         elapsed = perf_counter() - started
@@ -170,7 +169,6 @@ async def test_live_surface_uses_only_current_agent_approval_metadata(
             store=store,
             port=port,
             settings=Settings(_env_file=None),
-            crm=DisabledContactsCrm(spreadsheet_id=""),
             owner_ids={OWNER_ID},
         )
         db.commit()

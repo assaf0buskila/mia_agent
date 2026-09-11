@@ -20,7 +20,6 @@ from app.domain.approvals import (
 )
 from app.domain.events import Channel
 from app.integrations.base import OutboundMessage
-from app.surfaces.crm import DisabledContactsCrm
 from app.surfaces.owner import run_owner_loop
 
 OWNER = "12345"
@@ -48,9 +47,7 @@ def _run(text: str, store: LeadStore, port: CapturingPort):
             store=store,
             port=port,
             settings=_settings(),
-            crm=DisabledContactsCrm(spreadsheet_id=""),
             owner_ids={OWNER},
-            talk=lambda *, text, crm: ("ok", False),
         )
     )
 
