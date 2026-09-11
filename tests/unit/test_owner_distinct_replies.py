@@ -14,11 +14,6 @@ from app.db.store import LeadStore
 from app.domain.approvals import ACTION_PROPOSAL_HANDOFF, ACTION_WEBSITE_EDIT
 from app.domain.events import Channel
 from app.domain.memory import ROLE_MIA, ConversationTurn
-from app.domain.owner.followups import (
-    needs_data_anchor,
-    resolve_owner_reference,
-    routed_owner_text,
-)
 from app.domain.owner.reads import (
     format_pending_approvals_ack,
     format_website_conversations_ack,
@@ -171,71 +166,3 @@ def _mia(text: str) -> ConversationTurn:
 
 def _owner(text: str) -> ConversationTurn:
     return ConversationTurn(role="owner", text=text)
-
-
-def test_pronoun_instruction_binds_to_the_lead_from_the_previous_turn() -> None:
-    history = [_mia("סקירת ליד lead_abc123def456: workflow ידוע")]
-    routed = routed_owner_text("תפוס אותו", history=history)
-    assert routed.endswith("lead_abc123def456")
-
-
-def test_reference_is_not_resolved_without_history() -> None:
-    assert routed_owner_text("מה הכי מעניין?", history=[]) == "מה הכי מעניין?"
-    assert resolve_owner_reference("תפוס אותו", history=[]) is None
-
-
-def test_owner_text_is_never_read_for_a_lead_id_reference() -> None:
-    """Only Mia's own replies can anchor a reference, so a typo cannot invent one."""
-    history = [_owner("lead_abc123def456")]
-    assert resolve_owner_reference("מה הכי מעניין?", history=history) is None
-
-
-def test_approval_and_scope_instructions_are_never_resolved_from_memory() -> None:
-    history = [_mia("סקירת ליד lead_abc123def456: workflow ידוע")]
-    for text in ("אשר אותו", "approve it", "סמן אישי אותו", "never automate him"):
-        assert resolve_owner_reference(text, history=history) is None, text
-
-
-def test_an_explicit_id_is_left_alone() -> None:
-    history = [_mia("סקירת ליד lead_999888777666")]
-    text = "תספרי לי על הליד lead_abc123def456"
-    assert routed_owner_text(text, history=history) == text
-
-
-
-
-
-
-def test_a_drill_down_may_use_the_data_anchor_but_a_pronoun_may_not() -> None:
-    """Only "what's most interesting?" can be answered from the ranking.
-
-    "Check with him" names a person Mia has to have already mentioned. Letting it
-    fall back to whatever ranks highest would aim an instruction at a stranger.
-    """
-    assert (
-        resolve_owner_reference("מה הכי מעניין?", history=[], fallback_lead_id="lead_abc123def456")
-        == "lead_abc123def456"
-    )
-    assert (
-        resolve_owner_reference(
-            "תבדקי איתו את זה", history=[], fallback_lead_id="lead_abc123def456"
-        )
-        is None
-    )
-
-
-def test_only_a_drill_down_asks_for_the_data_anchor() -> None:
-    """Guards the lookup the inbound path skips when it cannot be used."""
-    assert needs_data_anchor("מה הכי מעניין?") is True
-    assert needs_data_anchor("תבדקי איתו את זה") is False
-    assert needs_data_anchor("מה קרה היום?") is False
-    assert needs_data_anchor("תספרי לי על הליד lead_abc123def456") is False
-    assert needs_data_anchor("אשר אותו") is False
-
-
-def test_the_transcript_beats_the_data_anchor() -> None:
-    history = [_mia("סקירת ליד lead_999888777666")]
-    resolved = resolve_owner_reference(
-        "מה הכי מעניין?", history=history, fallback_lead_id="lead_abc123def456"
-    )
-    assert resolved == "lead_999888777666"

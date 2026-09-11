@@ -37,10 +37,7 @@ from app.domain.events import (
 )
 from app.domain.tools import AdapterHttpError
 from app.integrations.base import MessagePort
-from app.integrations.gmail import build_gmail_port
-from app.integrations.sheets import build_sheets_port
 from app.integrations.transcribe import TranscriptionPort
-from app.surfaces.crm import build_contacts_crm
 from app.surfaces.owner import run_owner_loop
 from app.surfaces.turn_coalesce import (
     COALESCE_WAIT_S,
@@ -242,8 +239,6 @@ async def process_telegram_owner_update(
             if claimed is None:
                 return
         merged = merge_claimed_items(claimed)
-        sheets = build_sheets_port(settings)
-        crm = build_contacts_crm(settings, sheets)
         typing_stop = asyncio.Event()
         typing_task = asyncio.create_task(
             _renew_typing(
@@ -260,8 +255,6 @@ async def process_telegram_owner_update(
                     store=store,
                     port=port,
                     settings=settings,
-                    crm=crm,
-                    gmail_port=build_gmail_port(settings),
                     owner_ids=owner_ids,
                     deadline_at=deadline_at,
                     delivery_state=delivery_state,

@@ -14,7 +14,6 @@ class CapabilityId(StrEnum):
     SALES_STATE = "sales_state"
     SALES_REPLY = "sales_reply"
     HUMANITY_LINTER = "humanity_linter"
-    LANGGRAPH = "langgraph"
     WEBSITE = "website"
     VOICE_STT = "voice_stt"
     TELEGRAM = "telegram"
@@ -133,12 +132,6 @@ CAPABILITIES: tuple[Capability, ...] = (
         prd="§9 / playbook §25",
         status=WiringStatus.ALIVE,
         port="app.domain.humanity",
-    ),
-    Capability(
-        id=CapabilityId.LANGGRAPH,
-        prd="§25–27",
-        status=WiringStatus.ALIVE,
-        port="app.agents.owner.graph",
     ),
     Capability(
         id=CapabilityId.WEBSITE,

@@ -120,7 +120,6 @@ async def test_telegram_owner_loop_still_sends() -> None:
             store=store,
             port=port,
             settings=settings,
-            crm=crm,
             owner_ids={OWNER_ID},
         )
         db.commit()
@@ -151,7 +150,6 @@ async def test_owner_loop_honors_kill_switch_without_operations() -> None:
         store=store,
         port=port,
         settings=settings,
-        crm=FakeContactsCrm(),
         owner_ids={OWNER_ID},
     )
     assert result.sent is False

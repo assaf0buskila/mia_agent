@@ -32,32 +32,6 @@ class OwnerTelegramDelivery:
         return bool(self.rejected) and not self.delivered and not self.ambiguous
 
 
-def render_conversation_summary(summary: dict[str, str | None]) -> str:
-    """Format a website-final card. Missing fields are omitted, never invented."""
-    lines = ["New website conversation", ""]
-    labels = (
-        ("name", "Name"),
-        # Extracted only when the visitor typed an address or number themselves. Without
-        # it the owner reads a card about someone he has no way to reach.
-        ("contact", "Contact"),
-        ("business", "Business"),
-        ("need", "What they need"),
-        ("pain", "Main problem"),
-        ("relevant_service", "Service they appear interested in"),
-        ("timeline", "Timeline"),
-        ("budget", "Budget"),
-        ("qualification", "Qualification"),
-        ("meeting_status", "Meeting"),
-        ("recommended_next_step", "Recommended next step"),
-        ("conversation_id", "Conversation ID"),
-    )
-    for key, label in labels:
-        value = summary.get(key)
-        if value:
-            lines.append(f"{label}: {value}")
-    return "\n".join(lines).strip()
-
-
 def deliver_owner_telegram(
     *,
     text: str,
@@ -113,16 +87,6 @@ def deliver_owner_telegram(
     return OwnerTelegramDelivery(
         tuple(delivered), rejected=tuple(rejected), ambiguous=tuple(ambiguous)
     )
-
-
-def send_owner_telegram(
-    *,
-    text: str,
-    settings: Settings,
-    transport: Callable[[str, str], None] | None = None,
-) -> bool:
-    """Compatibility bool wrapper for callers that do not own a workflow claim."""
-    return bool(deliver_owner_telegram(text=text, settings=settings, transport=transport).delivered)
 
 
 def _telegram_delivery_status(response: httpx.Response) -> bool | None:
