@@ -30,7 +30,6 @@ from app.db.models import (
     MeetingDebriefRow,
     MeetingRow,
     OwnerBriefRow,
-    OwnerCorrectionRow,
     OwnerInstructionRow,
     OwnerNotificationClaimRow,
     OwnerNotificationRecipientClaimRow,
@@ -44,7 +43,6 @@ from app.db.models import (
     ToolRunRow,
     VoiceTranscriptRow,
     WebhookEventRow,
-    WebsiteSessionStateRow,
 )
 from app.domain.ai_runs import (
     MODEL_CANNED,
@@ -90,7 +88,6 @@ from app.domain.engine_health import AiRunAggregate
 from app.domain.events import (
     CanonicalEvent,
     Channel,
-    EventType,
     build_lead_created_event,
     sanitize_webhook_channel,
     sanitize_webhook_envelope_kind,
@@ -542,105 +539,6 @@ class LeadStore:
             )
             or 0
         )
-
-    def load_website_session_state(self, session_id: str) -> str:
-        """Serialized SiteSession state, or empty when this session is new."""
-        if not session_id:
-            return ""
-        row = self.session.get(WebsiteSessionStateRow, session_id)
-        return row.state_json if row is not None else ""
-
-    def save_website_session_state(self, session_id: str, state_json: str) -> None:
-        """Flush only. The caller's request transaction owns the commit — using a
-        second connection here rolls the live request back underneath itself.
-
-        Delivery/finalization flags are monotonic. Refresh the row under the write
-        lock and retain any true flag committed while this caller was doing slower
-        turn work, so a stale full snapshot cannot undo completed side effects.
-        """
-        if not session_id:
-            return
-        stamp = datetime.now(UTC).isoformat()
-        row = self.session.scalar(
-            select(WebsiteSessionStateRow)
-            .where(WebsiteSessionStateRow.session_id == session_id)
-            .execution_options(populate_existing=True)
-            .with_for_update()
-        )
-        if row is None:
-            self.session.add(
-                WebsiteSessionStateRow(
-                    session_id=session_id, state_json=state_json, updated_at=stamp
-                )
-            )
-        else:
-            merged_json = state_json
-            try:
-                current = json.loads(row.state_json)
-                incoming = json.loads(state_json)
-            except (TypeError, ValueError):
-                current = incoming = None
-            if isinstance(current, dict) and isinstance(incoming, dict):
-                for flag in (
-                    "pinged",
-                    "finalized",
-                    "crm_written",
-                    "confirmed",
-                    "contact_captured",
-                    "conversion_reported",
-                ):
-                    if current.get(flag) is True:
-                        incoming[flag] = True
-                cur_f = current.get("fields") or {}
-                inc_f = incoming.get("fields") or {}
-                if isinstance(cur_f, dict) and isinstance(inc_f, dict):
-                    for k in ("name", "phone", "email", "date", "business", "want"):
-                        if cur_f.get(k) and not inc_f.get(k):
-                            inc_f[k] = cur_f[k]
-                    incoming["fields"] = inc_f
-                for st in ("business_known", "friction_known", "value_shown", "need_seen"):
-                    if current.get(st) is True:
-                        incoming[st] = True
-                merged_json = json.dumps(incoming, ensure_ascii=False)
-            row.state_json = merged_json
-            row.updated_at = stamp
-        self.session.flush()
-
-    def merge_website_session_notification_flags(
-        self,
-        session_id: str,
-        *,
-        pinged: bool | None = None,
-        finalized: bool | None = None,
-        crm_written: bool | None = None,
-    ) -> str:
-        """Lock and update only delivery flags, preserving newer conversation state."""
-        if not session_id:
-            return ""
-        row = self.session.scalar(
-            select(WebsiteSessionStateRow)
-            .where(WebsiteSessionStateRow.session_id == session_id)
-            .execution_options(populate_existing=True)
-            .with_for_update()
-        )
-        if row is None:
-            return ""
-        try:
-            state = json.loads(row.state_json)
-        except (TypeError, ValueError):
-            return ""
-        if not isinstance(state, dict):
-            return ""
-        if pinged is not None:
-            state["pinged"] = bool(pinged)
-        if finalized is not None:
-            state["finalized"] = bool(finalized)
-        if crm_written is not None:
-            state["crm_written"] = bool(crm_written)
-        row.state_json = json.dumps(state, ensure_ascii=False)
-        row.updated_at = datetime.now(UTC).isoformat()
-        self.session.flush()
-        return row.state_json
 
     def count_open_reconciliation(self) -> int:
         return int(
@@ -2169,35 +2067,6 @@ class LeadStore:
         row.block_reason = block_reason
         self.session.flush()
 
-    def save_proposed_instruction(
-        self,
-        *,
-        provider: str,
-        provider_event_id: str,
-        kind: str,
-        body: str,
-        status: str = "proposed",
-    ) -> None:
-        existing = self.session.scalars(
-            select(OwnerInstructionRow).where(
-                OwnerInstructionRow.provider == provider,
-                OwnerInstructionRow.provider_event_id == provider_event_id,
-            )
-        ).one_or_none()
-        if existing is not None:
-            return
-        status = "proposed"
-        self.session.add(
-            OwnerInstructionRow(
-                provider=provider,
-                provider_event_id=provider_event_id,
-                kind=kind,
-                body=body,
-                status=status,
-            )
-        )
-        self.session.flush()
-
     def get_proposed_instruction(
         self, *, provider: str, provider_event_id: str
     ) -> OwnerInstructionRow | None:
@@ -2205,53 +2074,6 @@ class LeadStore:
             select(OwnerInstructionRow).where(
                 OwnerInstructionRow.provider == provider,
                 OwnerInstructionRow.provider_event_id == provider_event_id,
-            )
-        ).one_or_none()
-
-    def list_active_instructions(self) -> list[OwnerInstructionRow]:
-        return list(
-            self.session.scalars(
-                select(OwnerInstructionRow).where(OwnerInstructionRow.status == "active")
-            ).all()
-        )
-
-    def save_owner_correction(
-        self,
-        *,
-        provider: str,
-        provider_event_id: str,
-        scope: str,
-        body: str,
-        status: str = "logged",
-    ) -> bool:
-        existing = self.session.scalars(
-            select(OwnerCorrectionRow).where(
-                OwnerCorrectionRow.provider == provider,
-                OwnerCorrectionRow.provider_event_id == provider_event_id,
-            )
-        ).one_or_none()
-        if existing is not None:
-            return False
-        status = "logged"
-        self.session.add(
-            OwnerCorrectionRow(
-                provider=provider,
-                provider_event_id=provider_event_id,
-                scope=scope,
-                body=body,
-                status=status,
-            )
-        )
-        self.session.flush()
-        return True
-
-    def get_owner_correction(
-        self, *, provider: str, provider_event_id: str
-    ) -> OwnerCorrectionRow | None:
-        return self.session.scalars(
-            select(OwnerCorrectionRow).where(
-                OwnerCorrectionRow.provider == provider,
-                OwnerCorrectionRow.provider_event_id == provider_event_id,
             )
         ).one_or_none()
 
@@ -2548,65 +2370,6 @@ class LeadStore:
         return list(
             self.session.scalars(
                 select(WebhookEventRow).where(WebhookEventRow.status == status)
-            ).all()
-        )
-
-    def list_expired_unconsumed_handoffs(self, *, now_iso: str) -> list[HandoffTokenRow]:
-        if not now_iso:
-            return []
-        return list(
-            self.session.scalars(
-                select(HandoffTokenRow).where(
-                    HandoffTokenRow.consumed_at.is_(None),
-                    HandoffTokenRow.expires_at < now_iso,
-                )
-            ).all()
-        )
-
-    def upsert_reconciliation_finding(
-        self,
-        *,
-        kind: str,
-        subject_key: str,
-        reason: str,
-        open: bool = True,
-    ) -> None:
-        if kind not in RECONCILIATION_FINDING_KINDS or reason not in RECONCILIATION_FINDING_KINDS:
-            return
-        row = self.get_reconciliation_finding(kind=kind, subject_key=subject_key)
-        if row is None:
-            self.session.add(
-                ReconciliationFindingRow(
-                    kind=kind,
-                    subject_key=subject_key,
-                    reason=reason,
-                    open=open,
-                )
-            )
-        else:
-            row.reason = reason
-            row.open = open
-        self.session.flush()
-
-    def get_reconciliation_finding(
-        self, *, kind: str, subject_key: str
-    ) -> ReconciliationFindingRow | None:
-        if kind not in RECONCILIATION_FINDING_KINDS:
-            return None
-        return self.session.scalars(
-            select(ReconciliationFindingRow).where(
-                ReconciliationFindingRow.kind == kind,
-                ReconciliationFindingRow.subject_key == subject_key,
-            )
-        ).one_or_none()
-
-    def list_open_reconciliation_findings(self) -> list[ReconciliationFindingRow]:
-        return list(
-            self.session.scalars(
-                select(ReconciliationFindingRow).where(
-                    ReconciliationFindingRow.open.is_(True),
-                    ReconciliationFindingRow.kind.in_(RECONCILIATION_FINDING_KINDS),
-                )
             ).all()
         )
 
@@ -3376,11 +3139,6 @@ class LeadStore:
         self.session.flush()
         return True
 
-    def get_identity_link(self, identity_id: int) -> IdentityLinkRow | None:
-        return self.session.scalars(
-            select(IdentityLinkRow).where(IdentityLinkRow.identity_id == identity_id)
-        ).one_or_none()
-
     def get_website_lead_id(self, session_id: str) -> str | None:
         identity = self.session.scalars(
             select(ChannelIdentityRow).where(
@@ -3394,95 +3152,6 @@ class LeadStore:
             select(LeadRow).where(LeadRow.customer_id == identity.customer_id).order_by(LeadRow.id)
         ).first()
         return lead.id if lead is not None else None
-
-    def has_website_prospect_message(self, lead_id: str, conversation_id: str) -> bool:
-        """Whether this exact website conversation, not merely its lead, has started."""
-        if not lead_id or not conversation_id:
-            return False
-        row = self.session.scalars(
-            select(CanonicalEventRow)
-            .where(
-                CanonicalEventRow.lead_id == lead_id,
-                CanonicalEventRow.conversation_id == conversation_id,
-                CanonicalEventRow.provider == Channel.WEBSITE.value,
-                CanonicalEventRow.event_type == EventType.MESSAGE_IN.value,
-                CanonicalEventRow.actor_role == "prospect",
-            )
-            .limit(1)
-        ).first()
-        return row is not None
-
-    def list_inactive_website_conversations(
-        self,
-        *,
-        cutoff_iso: str,
-        skip_kinds: tuple[str, ...] = (),
-        skip_conversation_kinds: tuple[str, ...] = (),
-        limit: int = 50,
-    ) -> list[tuple[str, str]]:
-        """Website session_id + lead_id whose last visitor message is at or before cutoff.
-
-        `skip_kinds` drops every session of a lead that has retained delivery claim state
-        for that kind. It deliberately does not use the owner inbox row: a known failed
-        WhatsApp-click Telegram attempt remains eligible for later finalization.
-
-        `skip_conversation_kinds` drops only the sessions that were already claimed, so a
-        returning lead's next conversation is still scanned. Using the lead-scoped skip for
-        the finalization kind is what silently retired returning leads.
-        """
-        if not cutoff_iso or limit <= 0:
-            return []
-        last_in = (
-            select(
-                CanonicalEventRow.lead_id,
-                CanonicalEventRow.conversation_id,
-                func.max(CanonicalEventRow.occurred_at).label("last_at"),
-            )
-            .where(
-                CanonicalEventRow.provider == Channel.WEBSITE.value,
-                CanonicalEventRow.event_type == EventType.MESSAGE_IN.value,
-                CanonicalEventRow.actor_role == "prospect",
-            )
-            .group_by(CanonicalEventRow.lead_id, CanonicalEventRow.conversation_id)
-            .subquery()
-        )
-        query = (
-            select(ChannelIdentityRow.external_id, LeadRow.id)
-            .join(LeadRow, LeadRow.customer_id == ChannelIdentityRow.customer_id)
-            .join(last_in, last_in.c.lead_id == LeadRow.id)
-            .where(
-                ChannelIdentityRow.channel == Channel.WEBSITE.value,
-                last_in.c.conversation_id == ChannelIdentityRow.external_id,
-                last_in.c.last_at <= cutoff_iso,
-            )
-            .limit(limit)
-        )
-        if skip_kinds:
-            legacy_claimed = select(OwnerNotificationClaimRow.lead_id).where(
-                OwnerNotificationClaimRow.kind.in_(skip_kinds),
-                OwnerNotificationClaimRow.conversation_id == "",
-            )
-            recipient_claimed = select(OwnerNotificationRecipientClaimRow.lead_id).where(
-                OwnerNotificationRecipientClaimRow.kind.in_(skip_kinds),
-                OwnerNotificationRecipientClaimRow.notification_key == "",
-            )
-            query = query.where(
-                LeadRow.id.notin_(legacy_claimed),
-                LeadRow.id.notin_(recipient_claimed),
-            )
-        if skip_conversation_kinds:
-            claimed = (
-                select(OwnerNotificationClaimRow.kind)
-                .where(
-                    OwnerNotificationClaimRow.kind.in_(skip_conversation_kinds),
-                    OwnerNotificationClaimRow.lead_id == LeadRow.id,
-                    OwnerNotificationClaimRow.conversation_id == ChannelIdentityRow.external_id,
-                )
-                .exists()
-            )
-            query = query.where(~claimed)
-        rows = self.session.execute(query)
-        return [(str(session_id), str(lead_id)) for session_id, lead_id in rows]
 
     def issue_handoff_token(self, lead_id: str, website_session_id: str) -> tuple[str, str]:
         now = datetime.now(UTC)

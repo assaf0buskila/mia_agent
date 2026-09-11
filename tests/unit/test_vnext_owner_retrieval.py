@@ -1,13 +1,16 @@
-
 """One owner message costs exactly one retrieval pass.
 
-The defect this pins: `retrieve_owner_knowledge` ran `memory.search` + `knowledge.search`
-(two embeddings, two rankings), wrote the hits into graph state — and then `answer_owner`
-called `assemble_owner_context`, which ran the identical `retrieve_memories` /
-`retrieve_knowledge` a second time. The graph's copy was discarded. Every owner turn paid
-for retrieval twice, forever, and no test noticed because none of them counted.
+The defect this originally pinned: `retrieve_owner_knowledge` ran `memory.search` +
+`knowledge.search` (two embeddings, two rankings), wrote the hits into graph state — and
+then `answer_owner` called `assemble_owner_context`, which ran the identical
+`retrieve_memories` / `retrieve_knowledge` a second time. The graph's copy was discarded.
+Every owner turn paid for retrieval twice, forever, and no test noticed because none of
+them counted.
 
-So these tests count, and they assert **exactly** one, never `>= 1`.
+The v2 cleanup deleted the graph, so that *particular* double path cannot come back. What
+these tests still defend is the cost contract itself: one owner turn, one memory pass, one
+knowledge pass, two query embeddings — regardless of how many model steps the agent loop
+takes. They assert **exactly** one, never `>= 1`.
 """
 
 from __future__ import annotations
@@ -31,7 +34,7 @@ from app.core.config import get_settings
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
 from app.domain.memory import ConversationTurn
-from app.domain.owner.brain import answer_owner, run_owner_turn
+from app.domain.owner.brain import answer_owner
 from app.domain.owner.tasks import OwnerTaskType
 from app.integrations.llm_client import LlmClient
 
@@ -44,29 +47,54 @@ FALLBACK = "נרשם כמשימה. לא ביצעתי אותה."
 # ------------------------------------------------------------------------ harness
 
 
+def _assistant_text(text: str) -> dict:
+    return {
+        "choices": [
+            {"finish_reason": "stop", "message": {"role": "assistant", "content": text}}
+        ],
+        "usage": {"prompt_tokens": 5, "completion_tokens": 5},
+    }
+
+
+def _assistant_tool_call(call_id: str, name: str, arguments: dict[str, Any]) -> dict:
+    return {
+        "choices": [
+            {
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": call_id,
+                            "type": "function",
+                            "function": {"name": name, "arguments": json.dumps(arguments)},
+                        }
+                    ],
+                },
+            }
+        ],
+        "usage": {"prompt_tokens": 5, "completion_tokens": 5},
+    }
+
+
 class _Script(httpx.BaseTransport):
-    def __init__(self, body: str) -> None:
-        self._body = body
+    """Replays one response per model step and records every request payload."""
+
+    def __init__(self, responses: list[dict]) -> None:
+        self._responses = list(responses)
         self.requests: list[dict] = []
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(json.loads(request.content.decode("utf-8")))
-        return httpx.Response(
-            200,
-            json={
-                "choices": [
-                    {
-                        "finish_reason": "stop",
-                        "message": {"role": "assistant", "content": self._body},
-                    }
-                ],
-                "usage": {"prompt_tokens": 5, "completion_tokens": 5},
-            },
-        )
+        index = min(len(self.requests) - 1, len(self._responses) - 1)
+        return httpx.Response(200, json=self._responses[index])
 
 
-def _client(body: str) -> tuple[LlmClient, _Script]:
-    script = _Script(body)
+def _client(*bodies: str | dict) -> tuple[LlmClient, _Script]:
+    script = _Script(
+        [_assistant_text(body) if isinstance(body, str) else body for body in bodies]
+    )
     return (
         LlmClient(
             api_key="k",
@@ -129,8 +157,9 @@ def _count_retrievals(monkeypatch) -> dict[str, int]:
     """Count every path into the two retrieval functions, wherever it is imported from.
 
     `assemble_owner_context` calls them through `app.brain.context`; the capability
-    handlers hold their own module-level references. Both are counted, so the total is the
-    real number of retrieval passes this turn — 2 each before the fix, 1 each after.
+    handlers behind the `search_memory` / `search_knowledge` agent tools hold their own
+    module-level references. All of them are counted, so the total is the real number of
+    retrieval passes this turn, no matter which entry point ran it.
     """
     from app.brain import context as context_module
     from app.capabilities import knowledge as knowledge_module
@@ -155,33 +184,20 @@ def _count_retrievals(monkeypatch) -> dict[str, int]:
     return counts
 
 
-def _turn(brain, session, port, client, *, settings):
-    return run_owner_turn(
+def _answer(brain, session, port, client, *, settings, message: str = QUESTION):
+    return answer_owner(
         principal=Principal.owner(source="test"),
-        owner_id="111",
-        telegram_chat_id="111",
-        run_id="run_retrieval",
-        latest_message=QUESTION,
-        kill_switch=False,
-        fallback_text=FALLBACK,
+        store=LeadStore(session),
         brain=brain,
         settings=settings,
+        task_type=OwnerTaskType.NOTE,
+        owner_text=message,
+        history=(),
+        fallback_text=FALLBACK,
+        kill_switch=False,
+        demo_active=False,
         embedding_port=port,
-        produce=lambda state: answer_owner(
-        principal=Principal.owner(source="test"),
-            store=LeadStore(session),
-            brain=brain,
-            settings=settings,
-            task_type=OwnerTaskType.NOTE,
-            owner_text=QUESTION,
-            history=(),
-            fallback_text=FALLBACK,
-            kill_switch=False,
-            demo_active=False,
-            embedding_port=port,
-            client=client,
-            graph_state=state,
-        ),
+        client=client,
     )
 
 
@@ -199,7 +215,6 @@ def test_explicit_no_history_skips_retrieval_and_prior_context(monkeypatch, mess
         raise AssertionError("history retrieval must not run")
 
     monkeypatch.setattr(owner_brain, "assemble_owner_context", forbidden)
-    monkeypatch.setattr(owner_brain, "owner_context_from_state", forbidden)
     session, brain = _seeded_brain()
     embedding = FakeEmbeddingPort()
     client, script = _client("Current calendar result")
@@ -210,7 +225,6 @@ def test_explicit_no_history_skips_retrieval_and_prior_context(monkeypatch, mess
             history=(ConversationTurn(role="mia", text="STALE_HISTORY_SENTINEL"),),
             fallback_text=FALLBACK, kill_switch=False, demo_active=False,
             embedding_port=embedding, client=client,
-            graph_state={"retrieval_done": True, "memory_hits": [{"text": MEMORY_TEXT}]},
         )
     finally:
         session.close()
@@ -218,108 +232,63 @@ def test_explicit_no_history_skips_retrieval_and_prior_context(monkeypatch, mess
     assert embedding.calls == 0
     payload = json.dumps(script.requests)
     assert "STALE_HISTORY_SENTINEL" not in payload
+    # The seeded memory is in the brain; nothing retrieved it, so it is not in the prompt.
     assert MEMORY_TEXT not in payload
 
 
 def test_one_owner_turn_retrieves_exactly_once(monkeypatch) -> None:
+    """Retrieval is priced per owner turn, not per agent step.
+
+    HONEST NOTE ON WHAT THIS STILL PROVES. Before the v2 cleanup this counter spanned two
+    independent retrieval paths (the graph's `retrieve` node and `answer_owner`'s own
+    `assemble_owner_context`) and proved they did not both fire. The graph is gone, so a
+    mechanical port of the old test would only re-assert `1 == 1`.
+
+    What is re-derived here is the surviving half of the cost contract: the agent loop runs
+    **two** model steps below (a tool call, then prose), and context assembly must still
+    happen exactly once — before the loop, not once per step. The counter also spans the
+    `search_memory` / `search_knowledge` capability handlers, so a retrieval re-introduced
+    anywhere else in the turn is caught too. Two model steps with one retrieval pass is a
+    real assertion; it fails the moment assembly moves inside the loop or is repeated.
+    """
     session, brain = _seeded_brain()
     counts = _count_retrievals(monkeypatch)
     port = FakeEmbeddingPort()
-    client, script = _client("הכל בסדר עם zorblat.")
+    client, script = _client(
+        _assistant_tool_call("call_1", "definitely_not_a_registered_tool", {"q": "zorblat"}),
+        "הכל בסדר עם zorblat.",
+    )
     try:
-        result = _turn(brain, session, port, client, settings=_settings())
+        result = _answer(brain, session, port, client, settings=_settings())
     finally:
         session.close()
 
     assert result.used_agent is True
-    # The whole point. Exactly one, not "at least one".
+    # Guard the guard: if the loop stopped taking two steps this test would silently
+    # degrade back into the vacuous single-step version.
+    assert len(script.requests) == 2, "the agent loop did not take two model steps"
+    # The whole point. Exactly one, not "at least one", across two model steps.
     assert counts["memory"] == 1
     assert counts["knowledge"] == 1
-    # One query embedding per retrieval kind — four before the fix.
+    # One query embedding per retrieval kind — four before the original fix.
     assert port.calls == 2
 
 
-def test_the_answer_is_grounded_in_what_the_graph_retrieved(monkeypatch) -> None:
-    """Retrieving once is only correct if the surviving copy is the one the model sees."""
+def test_the_answer_is_grounded_in_what_was_retrieved(monkeypatch) -> None:
+    """Retrieving once is only correct if that one copy is the one the model sees.
+
+    This is the only remaining test proving that retrieved memory and knowledge text
+    actually reaches the system prompt.
+    """
     session, brain = _seeded_brain()
     _count_retrievals(monkeypatch)
     port = FakeEmbeddingPort()
     client, script = _client("הכל בסדר עם zorblat.")
     try:
-        _turn(brain, session, port, client, settings=_settings())
+        _answer(brain, session, port, client, settings=_settings())
     finally:
         session.close()
 
     system = script.requests[0]["messages"][0]["content"]
     assert MEMORY_TEXT in system
     assert KNOWLEDGE_TEXT in system
-
-
-def test_the_graph_hits_are_what_reach_the_prompt(monkeypatch) -> None:
-    """Poison the retrieve node's output: if it is really consumed, the prompt changes.
-
-    This is the test that cannot pass while `answer_owner` assembles its own context —
-    the planted line lives only in graph state, so a second retrieval can never find it.
-    """
-    from app.domain.owner import brain as owner_brain
-
-    planted = "PLANTED-BY-THE-RETRIEVE-NODE"
-    real_retrieve = owner_brain.retrieve_owner_context
-
-    def planting_retrieve(state, **kwargs):
-        update = real_retrieve(state, **kwargs)
-        update["memory_hits"] = [{"id": "planted", "label": "working", "text": planted}]
-        return update
-
-    monkeypatch.setattr(owner_brain, "retrieve_owner_context", planting_retrieve)
-    session, brain = _seeded_brain()
-    port = FakeEmbeddingPort()
-    client, script = _client("ok")
-    try:
-        _turn(brain, session, port, client, settings=_settings())
-    finally:
-        session.close()
-
-    system = script.requests[0]["messages"][0]["content"]
-    assert planted in system
-    # The node replaced the memory hits, so the real memory is no longer in the prompt.
-    assert MEMORY_TEXT not in system
-
-
-def test_without_a_wired_brain_the_responder_still_retrieves_once(monkeypatch) -> None:
-    """No graph retrieval available is not a licence to retrieve twice — or zero times."""
-    session, brain = _seeded_brain()
-    counts = _count_retrievals(monkeypatch)
-    port = FakeEmbeddingPort()
-    client, script = _client("ok")
-    settings = _settings()
-    try:
-        run_owner_turn(
-        principal=Principal.owner(source="test"),
-            owner_id="111",
-            telegram_chat_id="111",
-            run_id="run_no_brain",
-            latest_message=QUESTION,
-            kill_switch=False,
-            fallback_text=FALLBACK,
-            produce=lambda state: answer_owner(
-        principal=Principal.owner(source="test"),
-                store=LeadStore(session),
-                brain=brain,
-                settings=settings,
-                task_type=OwnerTaskType.NOTE,
-                owner_text=QUESTION,
-                history=(),
-                fallback_text=FALLBACK,
-                kill_switch=False,
-                demo_active=False,
-                embedding_port=port,
-                client=client,
-                graph_state=state,
-            ),
-        )
-    finally:
-        session.close()
-
-    assert counts["memory"] == 1
-    assert counts["knowledge"] == 1

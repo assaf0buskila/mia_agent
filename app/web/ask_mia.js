@@ -21,6 +21,9 @@
   var sessionId = null;
   var sessionCredential = '';
   var opened = false;
+  // Inline mode mounts the panel into a page container, always open and with no launcher.
+  // Resolved in mount() so the host element exists even if the script runs before it.
+  var inline = false;
   var busy = false;
   var recording = false;
   var mediaRecorder = null;
@@ -437,12 +440,12 @@
       to { opacity: 1; transform: translateY(0) scale(1); }
     }
     @media (max-width: 480px) {
-      #ask-mia-root {
+      #ask-mia-root:not(.ask-mia-inline) {
         inset-inline: 8px;
         bottom: max(8px, env(safe-area-inset-bottom, 0px));
         max-width: none;
       }
-      #ask-mia-root #ask-mia-panel {
+      #ask-mia-root:not(.ask-mia-inline) #ask-mia-panel {
         width: 100%;
         height: min(600px, calc(var(--ask-mia-viewport-height) - 80px));
         min-height: min(380px, calc(var(--ask-mia-viewport-height) - 80px));
@@ -451,6 +454,28 @@
       }
       #ask-mia-root #ask-mia-transcript { padding: 16px 12px; }
       #ask-mia-root .ask-mia-msg { max-width: 84%; }
+    }
+    /* Inline mode: fill the host container instead of the viewport. These selectors are
+       #id.class, so they outrank the base #id rules above without !important. The mobile
+       block is scoped with :not(.ask-mia-inline) for the same reason. */
+    #ask-mia-root.ask-mia-inline {
+      position: static;
+      inset: auto;
+      z-index: auto;
+      display: block;
+      width: 100%;
+      height: 100%;
+      max-width: none;
+    }
+    #ask-mia-root.ask-mia-inline #ask-mia-launcher,
+    #ask-mia-root.ask-mia-inline #ask-mia-close { display: none; }
+    #ask-mia-root.ask-mia-inline #ask-mia-panel {
+      width: 100%;
+      height: 100%;
+      min-height: 0;
+      max-height: none;
+      animation: none;
+      box-shadow: 0 18px 48px rgba(6, 27, 53, .14), 0 0 0 1px #2f5f9321;
     }
     @media (prefers-reduced-motion: reduce) {
       #ask-mia-root *, #ask-mia-root *::before, #ask-mia-root *::after {
@@ -1080,6 +1105,8 @@
   }
 
   function closePanel() {
+    // Inline mode has no launcher to reopen from, so closing would strand the visitor.
+    if (inline) return;
     if (recording) finishRecording(false);
     panel.hidden = true;
     launcher.setAttribute('aria-expanded', 'false');
@@ -1707,7 +1734,7 @@
     }
   });
   document.addEventListener('keydown', function (e) {
-    if (e.key === 'Escape' && !panel.hidden) {
+    if (e.key === 'Escape' && !panel.hidden && !inline) {
       e.preventDefault();
       closePanel();
     }
@@ -1725,24 +1752,49 @@
   panel.appendChild(status);
   root.appendChild(launcher);
   root.appendChild(panel);
+  function resolveInlineHost() {
+    var selector = script.getAttribute('data-mia-mount') || '[data-mia-inline]';
+    try {
+      return document.querySelector(selector);
+    } catch (err) {
+      return null;
+    }
+  }
+
   function mount() {
     if (!document.body) {
       setTimeout(mount, 0);
       return;
     }
     document.head.appendChild(style);
-    document.body.appendChild(root);
-    syncViewportHeight();
-    if (window.visualViewport) {
-      window.visualViewport.addEventListener('resize', syncViewportHeight);
-      window.visualViewport.addEventListener('scroll', syncViewportHeight);
+    var inlineHost = resolveInlineHost();
+    if (inlineHost) {
+      inline = true;
+      root.classList.add('ask-mia-inline');
+      // An always-open region, not a dialog.
+      panel.setAttribute('role', 'region');
+      panel.removeAttribute('aria-modal');
+      panel.hidden = false;
+      inlineHost.appendChild(root);
+      if (!opened) {
+        opened = true;
+        initSession();
+      }
     } else {
-      window.addEventListener('resize', syncViewportHeight);
+      document.body.appendChild(root);
+      // Viewport sizing only matters for the floating panel; inline sizes to its host.
+      syncViewportHeight();
+      if (window.visualViewport) {
+        window.visualViewport.addEventListener('resize', syncViewportHeight);
+        window.visualViewport.addEventListener('scroll', syncViewportHeight);
+      } else {
+        window.addEventListener('resize', syncViewportHeight);
+      }
     }
     setupFunnelTracking();
     fetchJson(api + '/v1/website/config')
       .then(function (cfg) {
-        if (cfg.demo === true) {
+        if (cfg.demo === true && !inline) {
           launchLabel.textContent = 'שאלו את מיה (דמו)';
           launcher.setAttribute('aria-label', 'שאלו את מיה (דמו)');
         }

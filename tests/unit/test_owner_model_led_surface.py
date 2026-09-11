@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 from contextlib import contextmanager
 from time import monotonic
-from types import SimpleNamespace
 
 import pytest
 from app.brain.embeddings import FakeEmbeddingPort
@@ -89,7 +88,7 @@ def _claim(event_id: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_kill_switch_worker_stops_before_voice_image_or_adapters(monkeypatch) -> None:
+async def test_kill_switch_worker_stops_before_voice_image_or_the_owner_loop(monkeypatch) -> None:
     event_id = "surface-stop-worker"
     _claim(event_id)
     settings = Settings(_env_file=None, kill_switch=True, telegram_owner_user_ids=ACTOR)
@@ -102,9 +101,11 @@ async def test_kill_switch_worker_stops_before_voice_image_or_adapters(monkeypat
     # runtime rather than an absent worker module attribute.
     monkeypatch.setattr("app.api.telegram._transcribe_telegram_voice", forbidden)
     monkeypatch.setattr(telegram_owner, "_see_telegram_photo", forbidden)
-    monkeypatch.setattr(telegram_owner, "build_sheets_port", forbidden)
-    monkeypatch.setattr(telegram_owner, "build_contacts_crm", forbidden)
-    monkeypatch.setattr(telegram_owner, "build_gmail_port", forbidden)
+    # The worker used to build Sheets/CRM/Gmail ports before the turn and this test
+    # forbade all three. run_owner_loop no longer takes them, so the worker builds no
+    # provider adapter at all. Guarding the owner loop itself is the surviving -- and
+    # stronger -- form of the same assertion: a global stop starts no owner work.
+    monkeypatch.setattr(telegram_owner, "run_owner_loop", forbidden)
     port = RecordingMessagePort()
 
     await telegram_owner.process_telegram_owner_update(
@@ -135,8 +136,6 @@ async def test_worker_drain_after_reply_does_not_send_second_timeout(monkeypatch
     )
     monkeypatch.setattr(telegram_owner, "get_settings", lambda: settings)
     monkeypatch.setattr(telegram_owner, "COALESCE_WAIT_S", 0)
-    monkeypatch.setattr(telegram_owner, "build_sheets_port", lambda _s: SimpleNamespace())
-    monkeypatch.setattr(telegram_owner, "build_contacts_crm", lambda _s, _p: SimpleNamespace())
     entered = asyncio.Event()
 
     async def slow_turn(**kwargs):
@@ -176,8 +175,6 @@ async def test_worker_learning_exception_after_reply_does_not_emit_failure(monke
     settings = Settings(_env_file=None, telegram_owner_user_ids=ACTOR)
     monkeypatch.setattr(telegram_owner, "get_settings", lambda: settings)
     monkeypatch.setattr(telegram_owner, "COALESCE_WAIT_S", 0)
-    monkeypatch.setattr(telegram_owner, "build_sheets_port", lambda _s: SimpleNamespace())
-    monkeypatch.setattr(telegram_owner, "build_contacts_crm", lambda _s, _p: SimpleNamespace())
     monkeypatch.setattr(owner, "_talk_with_optional_agent", lambda **_kwargs: ("accepted", False))
 
     def learning_error(**_kwargs):
@@ -303,10 +300,8 @@ async def test_accepted_send_survives_post_send_persistence_error(monkeypatch) -
             store=store,
             port=port,
             settings=Settings(_env_file=None, telegram_owner_user_ids=ACTOR),
-            crm=SimpleNamespace(),
             owner_ids={ACTOR},
             channel=Channel.TELEGRAM,
-            talk=lambda **_kwargs: ("accepted", False),
         )
     finally:
         db.close()
@@ -325,8 +320,6 @@ async def test_v2_owner_turn_never_starts_passive_learning(monkeypatch) -> None:
     )
     monkeypatch.setattr(telegram_owner, "get_settings", lambda: settings)
     monkeypatch.setattr(telegram_owner, "COALESCE_WAIT_S", 0)
-    monkeypatch.setattr(telegram_owner, "build_sheets_port", lambda _s: SimpleNamespace())
-    monkeypatch.setattr(telegram_owner, "build_contacts_crm", lambda _s, _p: SimpleNamespace())
     monkeypatch.setattr(owner, "_talk_with_optional_agent", lambda **_kwargs: ("accepted", False))
 
     def forbidden_learning(**_kwargs):
@@ -353,8 +346,6 @@ async def test_typing_cleanup_error_after_accepted_reply_does_not_send_failure(m
     settings = Settings(_env_file=None, telegram_owner_user_ids=ACTOR)
     monkeypatch.setattr(telegram_owner, "get_settings", lambda: settings)
     monkeypatch.setattr(telegram_owner, "COALESCE_WAIT_S", 0)
-    monkeypatch.setattr(telegram_owner, "build_sheets_port", lambda _s: SimpleNamespace())
-    monkeypatch.setattr(telegram_owner, "build_contacts_crm", lambda _s, _p: SimpleNamespace())
     monkeypatch.setattr(owner, "_talk_with_optional_agent", lambda **_kwargs: ("accepted", False))
 
     async def typing_error(**_kwargs):
@@ -382,10 +373,13 @@ async def test_preloop_adapter_builder_failure_sends_one_failure(monkeypatch) ->
     monkeypatch.setattr(telegram_owner, "get_settings", lambda: settings)
     monkeypatch.setattr(telegram_owner, "COALESCE_WAIT_S", 0)
 
-    def builder_failure(_settings):
-        raise RuntimeError("adapter construction failed")
+    # Was build_sheets_port, which the worker no longer calls. _renew_typing is the
+    # surviving pre-loop step: it is invoked after the burst claim and outside the
+    # owner-loop try, so it reaches the same outer handler by the same route.
+    def preloop_failure(**_kwargs):
+        raise RuntimeError("pre-loop setup failed")
 
-    monkeypatch.setattr(telegram_owner, "build_sheets_port", builder_failure)
+    monkeypatch.setattr(telegram_owner, "_renew_typing", preloop_failure)
     port = RecordingMessagePort()
     await telegram_owner.process_telegram_owner_update(
         item={"id": event_id, "from": ACTOR, "chat_id": ACTOR, "text": "check"},

@@ -710,6 +710,77 @@ def test_email_extraction_does_not_capture_partial_invalid_domain(email: str) ->
     assert fake.consent_prompts == []
 
 
+class _StagedConsent(_SiteClient):
+    """Consent classifier whose verdict is scripted turn by turn."""
+
+    def __init__(self, *decisions: str) -> None:
+        super().__init__()
+        self.decisions = list(decisions)
+
+    def complete(self, **kwargs):  # noqa: ANN003
+        if not _has_tool(kwargs, "classify_contact_consent"):
+            return super().complete(**kwargs)
+        prompt = kwargs["messages"][0]["content"]
+        self.consent_prompts.append(prompt)
+        current = json.loads(prompt.split("CURRENT_INPUT=", 1)[1].split("\n", 1)[0])
+        contact = json.loads(prompt.split("SERVER_EXTRACTED_CONTACT=", 1)[1])
+        decision = self.decisions.pop(0)
+        return LlmResponse(
+            "",
+            (
+                ToolCall(
+                    "consent-1",
+                    "classify_contact_consent",
+                    {
+                        "decision": decision,
+                        "evidence": current,
+                        "contact_span": contact if decision == "affirmative" else "",
+                    },
+                    "{}",
+                ),
+            ),
+            "stop", "", 0, 0, {"role": "assistant", "content": None},
+        )
+
+
+def test_a_confirmation_carrying_no_number_still_captures_the_contact() -> None:
+    """Mia reads the contact back and the visitor confirms.
+
+    Reproduces a production dead end: capture only ever inspected the current message,
+    so the confirmation Mia herself asked for could never complete it and the lead was
+    lost however clearly the visitor consented.
+    """
+    from app.surfaces.site_v2 import SiteV2State, _actual_contact
+
+    client = _StagedConsent("ambiguous", "affirmative")
+    state = SiteV2State()
+    assert _actual_contact(
+        state, client=client, text="המספר שלי 0501234567",
+        name="", phone="", email="", date="",
+    ) == {}
+    assert state.pending_contact == {"phone": "0501234567"}
+
+    state.turns.append({"role": "mia", "text": "לאשר יצירת קשר בטלפון 0501234567?"})
+    result = _actual_contact(
+        state, client=client, text="מאשר שיתקשרו אליי",
+        name="", phone="", email="", date="",
+    )
+    assert result.get("phone") == "0501234567"
+
+
+def test_a_bare_confirmation_without_a_readback_never_captures() -> None:
+    """Without Mia quoting the contact back there is nothing the visitor agreed to."""
+    from app.surfaces.site_v2 import SiteV2State, _actual_contact
+
+    client = _StagedConsent("affirmative")
+    state = SiteV2State(pending_contact={"phone": "0501234567"})
+    state.turns.append({"role": "mia", "text": "איך אפשר לעזור?"})
+    assert _actual_contact(
+        state, client=client, text="כן", name="", phone="", email="", date="",
+    ) == {}
+    assert client.consent_prompts == []
+
+
 @pytest.mark.parametrize("failure", [
     "uncertain", "no_call", "wrong_tool", "wrong_text", "extra_field",
     "nonempty_safe_evidence", "invalid_decision", "two_calls", "refusal", "provider_error",

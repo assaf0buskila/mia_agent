@@ -93,8 +93,6 @@ async def process_owner_item(
         store=store,
         port=port,
         settings=effective_settings,
-        crm=None,
-        gmail_port=None,
         owner_ids=owner_ids,
         provider=provider,
         channel=channel,
