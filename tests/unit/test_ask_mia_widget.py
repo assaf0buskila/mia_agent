@@ -49,8 +49,16 @@ def test_panel_is_created_hidden() -> None:
     assert "panel.hidden = true" in source
     assert source.index("panel.hidden = true") < source.index("function mount()")
     assert source.index("aria-expanded', 'false'") < source.index("function mount()")
-    assert source.count("panel.hidden = false") == 1
+    # Exactly two places may reveal the panel: openPanel, and the inline mount branch a
+    # page opts into with [data-mia-inline]. Nothing else may show it unprompted.
+    assert source.count("panel.hidden = false") == 2
     assert "panel.hidden = false" in _function_body(source, "openPanel")
+    mount_body = _function_body(source, "mount")
+    inline_branch = mount_body[
+        mount_body.index("if (inlineHost) {") : mount_body.index("} else {")
+    ]
+    assert "panel.hidden = false" in inline_branch
+    assert "panel.hidden = false" not in mount_body.replace(inline_branch, "")
 
 
 def test_configured_whatsapp_is_a_one_tap_action_not_a_model_phone_link() -> None:
@@ -95,7 +103,11 @@ def test_no_auto_open_timer_scroll_or_exit_intent() -> None:
     assert "flushBurst" in source
     mount_fn = _function_body(source, "mount")
     assert "openPanel" not in mount_fn
-    assert "initSession" not in mount_fn
+    # The floating widget must never start a session on mount. Inline mode is an explicit
+    # page opt-in ([data-mia-inline]) and is the only branch allowed to do so.
+    inline_branch = mount_fn[mount_fn.index("if (inlineHost) {") : mount_fn.index("} else {")]
+    assert "initSession" in inline_branch
+    assert "initSession" not in mount_fn.replace(inline_branch, "")
     assert "window.visualViewport.addEventListener('scroll', syncViewportHeight)" in mount_fn
     assert "openPanel" not in _function_body(source, "syncViewportHeight")
     observer = source[source.index("IntersectionObserver") :]

@@ -19,6 +19,7 @@ class Element {
   appendChild(c) {c.parentNode = this; this.children.push(c); return c;}
   removeChild(c) {this.children = this.children.filter(x => x !== c); c.parentNode = null; return c;}
   setAttribute(k,v) {this.attributes[k] = String(v); if (k === 'id') this.id = String(v);}
+  removeAttribute(k) {delete this.attributes[k];}
   getAttribute(k) {return this.attributes[k] ?? null;}
   hasAttribute(k) {return Object.hasOwn(this.attributes, k);}
   addEventListener(t,fn) {(this.listeners[t] ||= []).push(fn);}
@@ -43,10 +44,16 @@ class Element {
 }
 const allText = e => e.textContent + e.children.map(allText).join('');
 async function settle() {for (let i = 0; i < 5; i++) await new Promise(setImmediate);}
-function world({storage = new Map(), apple = false, rejectTimeslice = false, sessionResponse = null} = {}) {
+function world({storage = new Map(), apple = false, rejectTimeslice = false, sessionResponse = null, inlineHost = false} = {}) {
   const document = new Element('document');
   document.head = new Element('head'); document.body = new Element('body');
   document.appendChild(document.head); document.appendChild(document.body);
+  let inlineMount = null;
+  if (inlineHost) {
+    inlineMount = new Element('div');
+    inlineMount.setAttribute('data-mia-inline', '');
+    document.body.appendChild(inlineMount);
+  }
   document.createElement = tag => new Element(tag);
   document.createElementNS = (_,tag) => new Element(tag);
   document.getElementById = id => document.querySelector('#' + id);
@@ -56,7 +63,7 @@ function world({storage = new Map(), apple = false, rejectTimeslice = false, ses
   document.currentScript.setAttribute('data-mia-page-section', 'voice-agent');
   document.referrer = ''; document.visibilityState = 'visible';
   const window = new Element('window'); window.open = () => {};
-  const state = {document, window, storage, calls: [], recorders: [], streams: [], timers: new Map(),
+  const state = {document, window, storage, inlineMount, calls: [], recorders: [], streams: [], timers: new Map(),
     rejectContact: false, expireContact: false, sessionCount: 0, stopDeferred: false,
     contactUrl: 'https://wa.me/972501234567', deferHandoff: false, unauthorizedMessages: 0};
   class Recorder {
@@ -122,6 +129,28 @@ function world({storage = new Map(), apple = false, rejectTimeslice = false, ses
   return state;
 }
 async function main() {
+  // Floating mode stays the default: no inline host means launcher on body, panel closed.
+  const floating = world(); await settle();
+  assert.equal(floating.document.getElementById('ask-mia-root').parentNode, floating.document.body);
+  assert.equal(floating.el('panel').hidden, true, 'floating panel starts closed');
+  assert.equal(floating.sessionCount, 0, 'floating mode does not open a session before the launcher is clicked');
+
+  // Inline mode: mounts into the page container, always open, no launcher, cannot be closed.
+  const boxed = world({inlineHost: true}); await settle();
+  const boxedRoot = boxed.document.getElementById('ask-mia-root');
+  assert.equal(boxedRoot.parentNode, boxed.inlineMount, 'inline widget mounts into [data-mia-inline]');
+  assert.ok(boxedRoot.classList.contains('ask-mia-inline'));
+  assert.equal(boxed.el('panel').hidden, false, 'inline panel is open with no launcher click');
+  assert.equal(boxed.el('panel').getAttribute('role'), 'region');
+  assert.equal(boxed.el('panel').hasAttribute('aria-modal'), false, 'an always-open region is not a modal');
+  assert.equal(boxed.sessionCount, 1, 'inline mode starts its session on mount');
+  // Escape and the close button must not strand the visitor with no way to reopen.
+  boxed.document.dispatchEvent({type: 'keydown', key: 'Escape', preventDefault() {}});
+  await settle();
+  assert.equal(boxed.el('panel').hidden, false, 'Escape does not close the inline box');
+  boxed.el('close').click(); await settle();
+  assert.equal(boxed.el('panel').hidden, false, 'the close button does not close the inline box');
+
   const accessible = world(); await accessible.open();
   assert.equal(accessible.el('panel').getAttribute('role'), 'dialog');
   assert.equal(accessible.el('panel').getAttribute('aria-labelledby'), 'ask-mia-title');
