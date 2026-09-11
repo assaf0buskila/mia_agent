@@ -38,6 +38,15 @@ from app.services.crm_v2 import CrmError, CrmService
 SITE_PROMPT_VERSION = "site_v2_v1"
 _LOG = logging.getLogger(__name__)
 
+# The site client is the OpenAI Responses API with reasoning enabled, and there
+# max_output_tokens bounds reasoning and visible output together. The consent classifier
+# used to request 180: the model exhausted that while reasoning and returned no tool
+# call at all, which the adapter reports as a truncation rather than an error, so the
+# chain never fell back and every free-text lead silently read as "ambiguous". Hebrew
+# also tokenises at roughly twice the density of English, so replies need headroom too.
+_CONSENT_MAX_OUTPUT_TOKENS = 600
+_REPLY_MAX_OUTPUT_TOKENS = 900
+
 SITE_V2_ACTIONS = frozenset({"answer", "contact_saved"})
 SESSION_CREDENTIAL_HEADER = "X-Mia-Session-Credential"
 MAX_HISTORY_TURNS = 24
@@ -359,12 +368,19 @@ def _classified_consent(
             tools=[_CONTACT_CONSENT_TOOL],
             tool_choice="required",
             parallel_tool_calls=False,
-            max_completion_tokens=180,
+            max_completion_tokens=_CONSENT_MAX_OUTPUT_TOKENS,
         )
     except LlmError as exc:
         # Includes the shared per-turn deadline in _SiteTurnClient. Silently returning
         # "ambiguous" here drops a lead and leaves nothing to explain why.
         _LOG.warning("site consent unresolved reason=llm_error error=%s", type(exc).__name__)
+        return "ambiguous"
+    if response.finish_reason == "length":
+        # The adapter strips prose and calls from a truncated response on purpose, so
+        # this is the only place a budget exhausted by reasoning becomes visible.
+        _LOG.warning(
+            "site consent unresolved reason=truncated tokens_out=%s", response.tokens_out
+        )
         return "ambiguous"
     if len(response.tool_calls) != 1:
         _LOG.warning("site consent unresolved reason=tool_calls n=%d", len(response.tool_calls))
@@ -415,18 +431,51 @@ def _span_covers_contact(span: str, value: str, *, text: str) -> bool:
     """
     if not span or not value:
         return False
-    if span not in text and span != value and _digits(span) != _digits(value):
+    # The model may quote the number exactly as the visitor said it, in words.
+    span_digits = _digits(_spoken_digits_to_numerals(span))
+    if span not in text and span != value and span_digits != _digits(value):
         return False
     if value in span:
         return True
     if "@" in value:
         return value.casefold() in span.casefold()
     value_digits = _digits(value)
-    return bool(value_digits) and value_digits in _digits(span)
+    return bool(value_digits) and value_digits in span_digits
 
 
 def _digits(value: str) -> str:
     return re.sub(r"\D", "", value)
+
+
+_SPOKEN_DIGITS: dict[str, str] = {
+    # English, including the "oh" people say for zero when reading a number aloud.
+    "zero": "0", "oh": "0", "one": "1", "two": "2", "three": "3", "four": "4",
+    "five": "5", "six": "6", "seven": "7", "eight": "8", "nine": "9",
+    # Hebrew, both genders as they are actually spoken.
+    "אפס": "0", "אחת": "1", "אחד": "1", "שתיים": "2", "שניים": "2", "שתים": "2",
+    "שלוש": "3", "שלושה": "3", "ארבע": "4", "ארבעה": "4", "חמש": "5", "חמישה": "5",
+    "שש": "6", "שישה": "6", "שבע": "7", "שבעה": "7", "שמונה": "8", "תשע": "9", "תשעה": "9",
+}
+_SPOKEN_WORD = "|".join(sorted(map(re.escape, _SPOKEN_DIGITS), key=len, reverse=True))
+_SPOKEN_RUN = re.compile(
+    rf"(?<!\w)(?:(?:{_SPOKEN_WORD})(?:[\s,.\-]+|$)){{7,}}", re.IGNORECASE
+)
+
+
+def _spoken_digits_to_numerals(text: str) -> str:
+    """Rewrite a dictated phone number ("zero five two, one one …") as digits.
+
+    Transcription renders spoken numbers as words, which the phone regex can never
+    match, so a visitor who said their number aloud was invisible to capture. Only
+    runs of at least seven number-words are rewritten, so ordinary counts in prose
+    ("two options") are left alone.
+    """
+
+    def rewrite(match: re.Match[str]) -> str:
+        words = re.findall(_SPOKEN_WORD, match.group(0), flags=re.IGNORECASE)
+        return "".join(_SPOKEN_DIGITS[word.lower()] for word in words)
+
+    return _SPOKEN_RUN.sub(rewrite, text)
 
 
 def _contact_readback(state: SiteV2State) -> str:
@@ -441,9 +490,13 @@ def _contact_readback(state: SiteV2State) -> str:
     if last.get("role") != "mia":
         return ""
     text = str(last.get("text") or "")
-    for value in (state.pending_contact.get("phone", ""), state.pending_contact.get("email", "")):
-        if value and value in text:
-            return text
+    # Mia usually reads a number back with her own formatting, so compare on digits.
+    phone = state.pending_contact.get("phone", "")
+    if phone and (phone in text or _digits(phone) in _digits(text)):
+        return text
+    email = state.pending_contact.get("email", "")
+    if email and email.casefold() in text.casefold():
+        return text
     return ""
 
 
@@ -457,7 +510,8 @@ def _actual_contact(
     email: str,
     date: str,
 ) -> dict[str, str]:
-    phone_match = _PHONE.search(text)
+    # A dictated number arrives from transcription as words; try the numeral form too.
+    phone_match = _PHONE.search(text) or _PHONE.search(_spoken_digits_to_numerals(text))
     email_match = _EMAIL.search(text)
     supplied_phone = phone.strip() or (phone_match.group(0) if phone_match else "")
     supplied_email = email.strip() or (email_match.group(0) if email_match else "")
@@ -700,7 +754,7 @@ def _validated_narrative(
             ],
             tools=[],
             tool_choice="none",
-            max_completion_tokens=500,
+            max_completion_tokens=_REPLY_MAX_OUTPUT_TOKENS,
         )
     except LlmError:
         return ""
@@ -867,7 +921,7 @@ def run_site_v2_turn(
                 tools=[_SUBMIT_LEAD_TOOL],
                 tool_choice="auto",
                 parallel_tool_calls=False,
-                max_completion_tokens=500,
+                max_completion_tokens=_REPLY_MAX_OUTPUT_TOKENS,
             )
             if response.tool_calls:
                 messages.append(response.raw_message)
@@ -888,7 +942,11 @@ def run_site_v2_turn(
                             },
                         )
                     )
-                response = client.complete(messages=messages, max_completion_tokens=500)
+                response = client.complete(
+                    messages=messages, max_completion_tokens=_REPLY_MAX_OUTPUT_TOKENS
+                )
+            if response.finish_reason == "length" and not response.text.strip():
+                _LOG.warning("site reply truncated tokens_out=%s", response.tokens_out)
             reply = response.text.strip()
             reply = _validated_narrative(
                 client, reply=reply, visitor_text=text, messages=messages
@@ -903,6 +961,9 @@ def run_site_v2_turn(
             else authoritative
         )
     elif not reply:
+        # Typically the narrative validator rejected both the reply and its rewrite.
+        # Logged because on a contact turn this greeting reads as ignoring the visitor.
+        _LOG.warning("site reply empty fallback")
         reply = "איך אפשר לעזור?" if hebrew else "How can I help?"
     next_action = "contact_saved" if captured else "answer"
     whatsapp_url = None
