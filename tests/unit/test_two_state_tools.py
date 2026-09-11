@@ -47,7 +47,6 @@ from app.integrations.instagram_insights import (
 )
 from app.integrations.search_console import SearchAnalyticsRow, format_gsc_rows_block
 from app.integrations.sheets import FakeSheetsPort
-from app.surfaces.published_facts import asks_product_question, lookup_published_fact
 from app.tools.registries.owner_tools import ToolContext, execute_tool, get_tool, tool_names
 
 IL = ZoneInfo("Asia/Jerusalem")
@@ -61,7 +60,6 @@ def test_two_states_split_tools_and_never_sell_owner() -> None:
     assert may_run(state=MiaState.OWNER, tool="gmail_inbox") is True
     assert may_run(state=MiaState.OWNER, tool="gmail_send") is False
     assert may_run(state=MiaState.VISITOR, tool="gmail_inbox") is False
-    assert may_run(state=MiaState.VISITOR, tool="published_facts") is True
     assert identity_required_for("ping") is True
     assert identity_required_for("product_answer") is False
     assert "Never sell to the owner" in SYSTEM_PROMPT
@@ -285,18 +283,6 @@ def test_timeout_reports_stopped_work_and_seen_is_not_silent() -> None:
         assert "אין מיילים" in spoken
     finally:
         db.close()
-
-
-def test_published_facts_do_not_invent_prices() -> None:
-    assert asks_product_question("מה אתם בונים?")
-    assert not asks_product_question("צריכים אתר לעסק")
-    fact = lookup_published_fact("מה אתם בונים?")
-    assert "₪" not in fact
-    assert not any(ch.isdigit() for ch in fact)
-    assert "מחיר" in fact or "לא מפורסם" in fact or "לא כאן" in fact
-    voice = lookup_published_fact("אני צריך סוכן קולי לאתר שלי")
-    assert "סוכן קולי" in voice
-    assert "₪" not in voice
 
 
 def test_sheets_aliases_prefetch_locked_contacts_and_activity() -> None:

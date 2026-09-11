@@ -90,7 +90,6 @@ OWNER_HOUSE_TOOLS: frozenset[str] = frozenset(
 VISITOR_TOOLS: frozenset[str] = frozenset(
     {
         "search_knowledge",
-        "published_facts",
     }
 )
 
