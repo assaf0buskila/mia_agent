@@ -1,71 +1,85 @@
-# Mia v2
+# Mia
 
-Mia is Assaf's private Telegram assistant and the public sales demonstration on
-assafweb.com. Both experiences use model reasoning, public website knowledge and
-durable conversation history. Telegram additionally exposes owner-authorized tools
-and explicit lasting memory. Replies are text; Telegram accepts voice and images.
+Mia is two products sharing one FastAPI app:
 
-The current product contract and implementation evidence live in [MIA_V2.md](MIA_V2.md).
-[AGENTS.md](AGENTS.md) governs development; [TASKS.md](TASKS.md) tracks release work.
-These replace historical project instructions.
+- **Owner assistant** — Assaf's private Telegram bot. It reads and writes his connected
+  tools (Gmail, Sheets, Calendar through Composio), with an approval step for every write.
+- **Website sales chat** — the public widget on assafweb.com. It answers from public
+  knowledge only, and turns a volunteered phone or email into a CRM lead delivered to
+  Telegram.
+
+Hebrew by default, follows the visitor's language. Voice and images in, text out.
+
+## How a request flows
+
+**Owner (Telegram)**
+`app/api/telegram.py` → `app/workers/telegram_owner.py` → `app/surfaces/owner.py`
+→ `app/domain/owner/brain.py:answer_owner` → `app/graph/owner_agent.py`.
+Tools live in `app/tools/registries/owner_tools.py`. Writes become approval proposals;
+the Telegram buttons resolve in `app/api/telegram.py:_handle_callback`.
+
+**Website**
+`app/web/ask_mia.js` (served at `/v1/website/widget.js`) → `app/api/website.py`
+→ `app/surfaces/site_v2.py:run_site_v2_turn`.
+Contact capture: a server regex finds a phone/email in the visitor's own text, a consent
+classifier confirms it was volunteered for follow-up, then
+`app/services/crm_v2.py:capture_site_lead` writes the contact plus durable delivery jobs.
+`app/workers/crm_delivery.py` (5-second poll, started in-process by
+`app/workers/crm_runtime.py`) sends the Telegram lead brief and syncs Sheets.
 
 ## Code layout
 
-- `app/api/`: authenticated Telegram ingress and credential-bound website API.
-- `app/surfaces/`: owner and website reasoning entrypoints and shared CRM access.
-- `app/graph/`, `app/tools/`: owner reasoning loop, typed tools and capability registry.
-- `app/services/`: exact owner approvals, durable CRM and synchronization rules.
-- `app/integrations/`: provider, Composio, transcription and external adapters.
-- `app/brain/`: sourced knowledge, explicit owner memory and retrieval.
-- `app/db/`, `migrations/`: canonical history and durable application records.
-- `app/workers/`: Telegram turns, CRM delivery/import, owner reminders and maintenance.
-- `app/web/`: the website widget. `tests/` contains behavioral and isolation checks.
-- `deploy/`, `scripts/`: container, infrastructure examples and release/probe helpers.
+| Path | What it is |
+|---|---|
+| `app/api` | HTTP ingress: Telegram webhook, website API. `/health` is in `app/main.py` |
+| `app/surfaces` | One entry point per conversation surface: `owner`, `site_v2`, `crm` |
+| `app/domain` | Business rules. `app/domain/owner` is the owner brain |
+| `app/graph`, `app/tools` | Owner tool loop and typed tools |
+| `app/services` | CRM (`crm_v2`), approvals, notifications |
+| `app/integrations` | LLM providers, Composio, Sheets, Gmail, transcription |
+| `app/brain` | Knowledge retrieval and explicit owner memory |
+| `app/db`, `migrations` | SQLAlchemy models, `LeadStore`, SQL migrations |
+| `app/workers` | CRM delivery, due scan, migrate, knowledge ingest, webhook registration |
+| `app/web` | The widget |
+| `tests/unit` | The suite: pytest plus `widget_behavior.test.js` under node |
+| `deploy`, `scripts` | Dockerfile; `deploy_ecs_revision.py`, `assert_origin_bind.py`, probes |
 
-## Local development
+## Run it locally
 
-Use Python 3.12 and uv. Configure names from `.env.example`; never commit real keys.
-Tests ignore `.env` and use injected adapters. Production secrets stay in AWS Secrets
-Manager and are injected into Fargate.
-
-```powershell
+```bash
 uv sync --frozen --group dev
-$env:MIA_ENV = 'test'
-uv run pytest --basetemp=.cache/pytest-local
+MIA_ENV=test uv run pytest --basetemp=.cache/pytest-local
 uv run ruff check app tests
-node --check app/web/ask_mia.js
-uv run python scripts/assert_origin_bind.py
-uv run uvicorn app.main:app --reload
+node tests/unit/widget_behavior.test.js
+uv run uvicorn app.main:app --reload      # widget preview at /v1/website/preview
 ```
 
-For PostgreSQL checks, set `MIA_TEST_POSTGRES_URL` to an isolated disposable test
-database. Fixtures create isolated schemas; never point tests at production.
-Apply deployment migrations with `mia-migrate`; production startup never runs
-`create_all`. Refresh configured public sources with `mia-ingest-knowledge`.
+Settings are `MIA_*` environment variables (`app/core/config.py`); the names are in
+`.env.example`. Tests never read `.env`. PostgreSQL tests need `MIA_TEST_POSTGRES_URL`
+pointing at a disposable database; without it they skip (7 today). Apply migrations
+with `uv run mia-migrate`; production never runs `create_all`.
 
-## Runtime rules
+## Deploy
 
-Owner access uses numeric Telegram IDs. Verified reads run directly; permitted
-external writes require immutable, expiring approval and current-target validation.
-Unknown effects stay unavailable. Conversation history saves automatically; lasting
-memory requires an explicit request. Website visitors cannot access owner tools or
-private memory. Possessing a phone/email never grants conversation access.
+Production is ECS Fargate — cluster and service `mia`, region `eu-north-1`, images in
+ECR repository `mia`. Secrets come from Secrets Manager. Never copy `.env` anywhere.
 
-Contacts and Activity are durable database records with an editable Google Sheets
-view. Contact capture commits independent delivery jobs before acknowledging capture.
-The CRM worker handles delivery and Sheet imports; conflicting edits require owner
-resolution. The manual WhatsApp contact link remains available. Agent WhatsApp and
-Baileys transports are retired.
+1. Merge to `master` and wait for **Mia v2 checks** to pass on the exact SHA.
+2. From a clean checkout at that SHA:
+   ```bash
+   git archive $SHA | docker build -f deploy/Dockerfile \
+     --provenance=false --sbom=false --platform linux/amd64 \
+     --build-arg MIA_BUILD_SHA=$SHA -t <ecr>/mia:v2-$SHA -
+   ```
+   The flags matter: `deploy_ecs_revision.py` rejects OCI image indexes, which is what
+   a default Docker 29 build produces.
+3. Push, then read the digest from `aws ecr describe-images`.
+4. `uv run python scripts/deploy_ecs_revision.py --v2-release --image-uri <ecr>/mia@<digest> --sha $SHA`
+   It verifies the image label and env match `$SHA` through the ECR API (no local Docker
+   needed), requires `HEAD == $SHA` with a clean tree, and registers the next `mia:N`.
+5. `aws ecs update-service --cluster mia --service mia --task-definition mia:N`, wait stable.
+6. Re-pin scheduler `mia-due-scan` to `mia:N`. Leave `mia-reconcile` disabled.
+7. Confirm `https://mia.assafweb.com/health` reports `deployment.commit_sha == $SHA`.
 
-## Release and live acceptance
-
-The authorized release order is implementation and cleanup, mechanical checks,
-independent HEAVY review, exact-SHA CI/image verification, migration, rollout, then
-health and readiness verification. Keep the previous task/image for rollback. The
-release checklist and actual deployment evidence belong in TASKS.md and MIA_V2.md.
-Do not infer live model, media or delivery quality from mocked tests.
-
-Assaf tests natural Telegram conversation, Hebrew voice/image context, explicit memory,
-approval/rejection and multiple proposals; website exploratory/pricing/strong-intent
-conversations, voluntary contact capture and continued chat; then Telegram lead delivery,
-Contacts/Activity rows, Sheet edits and conflict resolution. Use identified test contacts.
+Rollback is `update-service` to the previous revision. Machine-specific gotchas
+(Docker Desktop, the credential helper, `aws login` expiry) are in `HANDOFF.md`.

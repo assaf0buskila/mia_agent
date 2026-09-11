@@ -52,6 +52,31 @@ before the model turn, so a recovered next step reaches the **next** brief — d
 capture, four other call sites depend on that order. The system prompt also never told Mia to
 invite contact details at all; it now does.
 
+### The actual root cause — found after those two fixes both failed live
+
+Neither fix above changed the live result, and no downgrade log ever appeared, because the
+classifier was failing **before** any of the checks that log. Chain, from the code:
+
+1. `build_site_client` is the OpenAI **Responses** API with `reasoning: {effort: "low"}`
+   sent on every call (`app/integrations/llm_client.py:_responses_payload`).
+2. `_classified_consent` requested `max_completion_tokens=180`, mapped to
+   `max_output_tokens: 180` — which on Responses bounds **reasoning and visible output
+   together**.
+3. The model spent the whole 180 reasoning and emitted nothing. The adapter deliberately
+   turns `status=incomplete / max_output_tokens` into `LlmResponse(text="", tool_calls=(),
+   finish_reason="length")` — no exception, so `LlmModelChain` never fell back to Gemini.
+4. `len(response.tool_calls) != 1` → `"ambiguous"`, silently, 100% of the time.
+
+The narrative validator uses 1200 and works; replies use 500 and mostly work — except the
+post-tool completion on the contact turn, which is why *that* turn blanked to the greeting.
+Same cause, both bugs. Fix: `_CONSENT_MAX_OUTPUT_TOKENS = 600`, `_REPLY_MAX_OUTPUT_TOKENS =
+900`, an explicit `reason=truncated` log, and a regression test that asserts the budget
+actually requested at the call boundary (≥ 512), since a constant alone proves nothing.
+
+Also on this branch: dictated numbers normalised to digits (`_spoken_digits_to_numerals`,
+English and Hebrew; the live voice transcript was `"zero five two, one one one…"`), and
+the owner surface returns `OWNER_UNAVAILABLE` instead of the greeting when the brain fails.
+
 ## 3. Cleanup — DONE
 
 Branch `claude/mia-v2-cleanup-final`, merged here. 1957 passed / 7 skipped (the 7 are the
