@@ -19,6 +19,7 @@ Telegram-documented one, and is worth eyeballing on a real client.
 
 from __future__ import annotations
 
+import re
 from datetime import date, datetime
 from html import escape
 from zoneinfo import ZoneInfo
@@ -56,6 +57,67 @@ def esc(value: object) -> str:
     `quote=False` produces exactly that set; `"` needs no escaping outside attributes.
     """
     return escape(str(value), quote=False)
+
+
+# render_owner_markdown: a small, safe subset of Markdown -> Telegram HTML for the owner
+# reply prose. None of `esc`, `<`, `>` or `&` are touched by HTML escaping, so these
+# regexes run *after* `esc()` and still see the model's own `**`, backticks, `#` and `-`
+# exactly as written.
+_FENCE_RE = re.compile(r"```(?:[^\n]*\n)?(.*?)```", re.DOTALL)
+_BOLD_INLINE_RE = re.compile(r"\*\*(?!\s)([^\n*]+?)(?<!\s)\*\*")
+_CODE_INLINE_RE = re.compile(r"`([^`\n]+)`")
+_HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
+_BULLET_RE = re.compile(r"^(\s*)[-*]\s+(.*)$")
+_PRE_FENCE_TOKEN = "\x00PRE{}\x00"
+
+
+def render_owner_markdown(text: str) -> str:
+    """Escape owner-reply prose, then re-apply a tiny allowlisted Markdown subset.
+
+    Escaping happens FIRST, over the whole text, so a literal `<b>` written by the
+    model (or echoed from a provider) can never become live HTML — it stays
+    `&lt;b&gt;`. Only after that do balanced `**bold**`, `` `code` ``, fenced ``` code
+    blocks ```, `#`/`##`/`###` headings and leading `-`/`* ` bullets turn into real
+    Telegram entities. An unmatched `**` (no closing pair on the same line) is left
+    exactly as typed. Nothing produced here spans a newline except `<pre>`, so
+    `split_message` never has to cut inside a tag other than a fenced block.
+    """
+    escaped = esc(text)
+
+    fences: list[str] = []
+
+    def _stash_fence(match: re.Match[str]) -> str:
+        body = match.group(1)
+        if body.startswith("\n"):
+            body = body[1:]
+        if body.endswith("\n"):
+            body = body[:-1]
+        fences.append(f"<pre>{body}</pre>")
+        return _PRE_FENCE_TOKEN.format(len(fences) - 1)
+
+    without_fences = _FENCE_RE.sub(_stash_fence, escaped)
+    rendered = "\n".join(_render_owner_line(line) for line in without_fences.split("\n"))
+    for index, block in enumerate(fences):
+        rendered = rendered.replace(_PRE_FENCE_TOKEN.format(index), block)
+    return rendered
+
+
+def _render_owner_line(line: str) -> str:
+    heading = _HEADING_RE.match(line)
+    if heading:
+        body = _apply_inline_markdown(heading.group(2).strip())
+        return f"<b>{body}</b>" if body else ""
+    bullet = _BULLET_RE.match(line)
+    if bullet:
+        indent, body = bullet.groups()
+        return f"{indent}• {_apply_inline_markdown(body)}"
+    return _apply_inline_markdown(line)
+
+
+def _apply_inline_markdown(text: str) -> str:
+    text = _BOLD_INLINE_RE.sub(lambda m: f"<b>{m.group(1)}</b>", text)
+    text = _CODE_INLINE_RE.sub(lambda m: f"<code>{m.group(1)}</code>", text)
+    return text
 
 
 def isolate(value: object) -> str:
@@ -216,11 +278,31 @@ def join_sections(*blocks: str) -> str:
     return "\n\n".join(block.strip() for block in blocks if block and block.strip())
 
 
+_PRE_BLOCK_RE = re.compile(r"<pre>.*?</pre>", re.DOTALL)
+
+
+def _clear_of_pre_blocks(text: str, cut: int) -> int:
+    """Nudge a candidate cut index outside any `<pre>...</pre>` span it falls inside.
+
+    Prefers deferring the whole block to the next chunk (cut right before it); only
+    cuts right after it when the block starts at the very beginning of `text`, since
+    deferring there would produce an empty chunk and stall the loop.
+    """
+    for match in _PRE_BLOCK_RE.finditer(text):
+        if match.start() < cut < match.end():
+            return match.start() if match.start() > 0 else match.end()
+    return cut
+
+
 def split_message(text: str, *, limit: int = _CHUNK_BUDGET) -> list[str]:
     """Chunk to stay under the 4096 limit, preferring paragraph then line boundaries.
 
-    Splitting never lands inside an HTML tag because it only cuts on newlines, and this
-    module never emits a tag containing one.
+    Splitting never lands inside an HTML tag other than `<pre>`, because it only cuts
+    on newlines and this module never emits any other tag containing one. A `<pre>`
+    block CAN contain newlines (that is the point of rendering a fenced code block
+    literally), so a candidate cut is nudged outside any `<pre>...</pre>` span it would
+    otherwise fall inside — even if that means one chunk runs past `limit` to keep the
+    block whole and every chunk independently valid HTML.
     """
     cleaned = text.strip()
     if not cleaned:
@@ -236,6 +318,7 @@ def split_message(text: str, *, limit: int = _CHUNK_BUDGET) -> list[str]:
             cut = window.rfind("\n")
         if cut < limit // 2:
             cut = limit
+        cut = _clear_of_pre_blocks(remaining, cut)
         chunks.append(remaining[:cut].strip())
         remaining = remaining[cut:].strip()
     if remaining:

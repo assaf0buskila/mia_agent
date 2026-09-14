@@ -80,6 +80,19 @@ def test_asked_toolkit_first_and_say_tool_before_numbers() -> None:
     )
 
 
+def test_asked_toolkit_explicit_platform_outranks_generic_word() -> None:
+    # A generic word ("פוסט"/"post") alone still resolves to today's default (instagram).
+    assert asked_toolkit("תכתבי פוסט") == "instagram"
+    # But an explicitly named platform wins even when a generic word for another
+    # toolkit ("פוסט") is also present in the sentence.
+    assert asked_toolkit("תכתבי לי פוסט ללינקדאין") == "linkedin"
+    assert asked_toolkit("post for LinkedIn") == "linkedin"
+    assert asked_toolkit("פוסט לאינסטגרם") == "instagram"
+    # Two platforms explicitly named at once: don't force either.
+    assert asked_toolkit("פוסט ללינקדאין ולאינסטגרם") == ""
+    assert asked_toolkit("instagram or linkedin post") == ""
+
+
 def test_ig_format_names_post_and_account_before_numbers() -> None:
     items = [
         ContentInsight(

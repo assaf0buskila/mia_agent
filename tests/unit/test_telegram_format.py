@@ -9,6 +9,7 @@ from app.domain.owner.callbacks import approval_token, resolve_owner_callback
 from app.integrations.telegram import ALLOWED_UPDATES, parse_telegram_callback
 from app.integrations.telegram_format import (
     MAX_CALLBACK_BYTES,
+    MAX_MESSAGE_CHARS,
     CallbackDataTooLong,
     approval_keyboard,
     blockquote,
@@ -25,6 +26,7 @@ from app.integrations.telegram_format import (
     parse_callback_token,
     plain_text_length,
     relative_hebrew_day,
+    render_owner_markdown,
     section,
     split_message,
 )
@@ -236,3 +238,94 @@ def test_split_prefers_paragraph_boundaries() -> None:
 
 def test_empty_message_yields_no_chunks() -> None:
     assert split_message("   ") == []
+
+
+# --------------------------------------------------------- render_owner_markdown
+
+
+def test_render_owner_markdown_bold_mixes_hebrew_and_english() -> None:
+    assert (
+        render_owner_markdown("רוצה **לתאם פגישה** ב-Zoom מחר")
+        == "רוצה <b>לתאם פגישה</b> ב-Zoom מחר"
+    )
+
+
+def test_render_owner_markdown_escapes_ampersand_and_angle_brackets() -> None:
+    assert render_owner_markdown("A & B < C > D") == "A &amp; B &lt; C &gt; D"
+
+
+def test_render_owner_markdown_never_passes_through_model_html() -> None:
+    """A literal <b>hi</b> written or echoed by the model must stay inert text."""
+    rendered = render_owner_markdown("<b>hi</b> and **actually bold**")
+    assert rendered == "&lt;b&gt;hi&lt;/b&gt; and <b>actually bold</b>"
+
+
+def test_render_owner_markdown_heading_and_bullets() -> None:
+    rendered = render_owner_markdown("### עדכונים\n- דבר אחד\n- דבר שני\n* דבר שלישי")
+    assert rendered == "<b>עדכונים</b>\n• דבר אחד\n• דבר שני\n• דבר שלישי"
+
+
+def test_render_owner_markdown_inline_code() -> None:
+    assert (
+        render_owner_markdown("תריץ `git status` ותגיד לי")
+        == "תריץ <code>git status</code> ותגיד לי"
+    )
+
+
+def test_render_owner_markdown_fenced_code_block_is_kept_literal() -> None:
+    raw = "לפני:\n```\nprint('<b>x</b>')\n**not bold**\n```\nאחרי"
+    rendered = render_owner_markdown(raw)
+    assert rendered == (
+        "לפני:\n<pre>print('&lt;b&gt;x&lt;/b&gt;')\n**not bold**</pre>\nאחרי"
+    )
+
+
+def test_render_owner_markdown_unbalanced_bold_stays_literal() -> None:
+    assert render_owner_markdown("זה **לא נסגר תקין") == "זה **לא נסגר תקין"
+
+
+def test_render_owner_markdown_two_pairs_on_one_line_both_convert() -> None:
+    assert (
+        render_owner_markdown("**א** וגם **ב**")
+        == "<b>א</b> וגם <b>ב</b>"
+    )
+
+
+def test_render_owner_markdown_existing_escape_test_still_matches() -> None:
+    """The pre-existing contract: plain text with no markdown is just escaped."""
+    assert render_owner_markdown("a & b < c") == "a &amp; b &lt; c"
+
+
+# ---------------------------------------------- split_message + <pre> safety
+
+
+def test_split_message_keeps_a_long_fenced_block_whole() -> None:
+    lead_in = "\n\n".join(f"פסקה {index} " + "x" * 150 for index in range(15))
+    code_block = "<pre>" + "\n".join(f"line {i}" for i in range(80)) + "</pre>"
+    tail = "\n\n".join(f"סיכום {index} " + "y" * 150 for index in range(15))
+    body = f"{lead_in}\n\n{code_block}\n\n{tail}"
+    assert len(body) > MAX_MESSAGE_CHARS
+    chunks = split_message(body)
+    assert len(chunks) > 1
+    pre_open = pre_close = 0
+    for chunk in chunks:
+        pre_open += chunk.count("<pre>")
+        pre_close += chunk.count("</pre>")
+        # Every chunk is independently valid: an equal, matched count of open/close.
+        assert chunk.count("<pre>") == chunk.count("</pre>")
+        assert not chunk.startswith("</pre>")
+        assert not chunk.endswith("<pre>")
+    assert pre_open == pre_close == 1
+    assert code_block in "".join(chunks)
+
+
+def test_render_then_split_produces_balanced_html_per_chunk() -> None:
+    paragraphs = [f"**כותרת {i}**\nשורה עם `code {i}` ועוד טקסט " + "מ" * 120 for i in range(60)]
+    raw = "\n\n".join(paragraphs)
+    rendered = render_owner_markdown(raw)
+    chunks = split_message(rendered)
+    assert len(chunks) > 1
+    for chunk in chunks:
+        assert chunk.count("<b>") == chunk.count("</b>")
+        assert chunk.count("<code>") == chunk.count("</code>")
+        assert chunk.count("<pre>") == chunk.count("</pre>")

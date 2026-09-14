@@ -138,6 +138,32 @@ _TOOLKIT_NEEDLES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("whatsapp", ("whatsapp", "וואטסאפ", "ווטסאפ")),
 )
 
+# The subset of each toolkit's needles that actually *name* the platform, rather than a
+# generic word ("פוסט"/"post", "agenda", "impressions"...) that several toolkits share.
+# `asked_toolkit` checks these first so an explicit name always outranks a generic word.
+_TOOLKIT_EXPLICIT_NEEDLES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("instagram", ("instagram", "אינסטגרם")),
+    ("gmail", ("gmail",)),
+    ("calendar", ("calendar", "יומן")),
+    ("gsc", ("search console", "gsc", "קונסולת חיפוש")),
+    ("ga4", ("ga4",)),
+    (
+        "sheets",
+        (
+            "google sheets",
+            "google sheet",
+            "גוגל שיטס",
+            "גוגל שיט",
+            "שיטס",
+            "שיט",
+            "sheets",
+            "sheet",
+        ),
+    ),
+    ("linkedin", ("linkedin", "לינקדאין")),
+    ("whatsapp", ("whatsapp", "וואטסאפ", "ווטסאפ")),
+)
+
 
 class MiaState(StrEnum):
     OWNER = "owner"
@@ -172,10 +198,28 @@ def identity_required_for(action: str) -> bool:
 
 
 def asked_toolkit(text: str) -> str:
-    """The toolkit he named. Empty if he did not name one."""
+    """The toolkit he named. Empty if he did not name one.
+
+    An explicitly named platform (instagram/אינסטגרם, linkedin/לינקדאין, ...) always
+    outranks a generic word a toolkit merely watches for ("פוסט" alone could be an
+    Instagram or a LinkedIn post). If two platforms are both explicitly named, neither
+    is forced — guessing which one he meant would be worse than asking.
+    """
     blob = f" {text.strip().lower()} "
+
+    def _matches(needles: tuple[str, ...]) -> bool:
+        return any(needle in blob or needle in text for needle in needles)
+
+    explicit_hits = [
+        toolkit for toolkit, needles in _TOOLKIT_EXPLICIT_NEEDLES if _matches(needles)
+    ]
+    if len(explicit_hits) == 1:
+        return explicit_hits[0]
+    if len(explicit_hits) > 1:
+        return ""
+
     for toolkit, needles in _TOOLKIT_NEEDLES:
-        if any(needle in blob or needle in text for needle in needles):
+        if _matches(needles):
             return toolkit
     return ""
 

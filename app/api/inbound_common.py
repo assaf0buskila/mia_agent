@@ -12,7 +12,7 @@ from app.domain.events import Channel
 from app.domain.owner.callbacks import approval_token
 from app.domain.owner.tasks import OwnerTaskType
 from app.integrations.base import OutboundMessage
-from app.integrations.telegram_format import approval_keyboard, esc
+from app.integrations.telegram_format import approval_keyboard, render_owner_markdown
 
 _MAX_STT_DURATION_MS = 86_400_000
 
@@ -54,7 +54,7 @@ def outbound_reply(
     if channel is Channel.TELEGRAM:
         return OutboundMessage(
             conversation_id=item.get("chat_id") or item["from"],
-            text=esc(text),
+            text=render_owner_markdown(text),
             channel=channel.value,
             idempotency_key=item["id"],
             reply_to_id=item.get("message_id") or "",
