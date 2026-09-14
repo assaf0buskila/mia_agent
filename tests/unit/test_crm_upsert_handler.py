@@ -13,11 +13,21 @@ from app.capabilities.types import Principal
 from app.core.config import Settings
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
+from app.domain.approvals import DECISION_APPROVED
+from app.integrations import sheets as sheets_integration
 from app.integrations.sheets import FakeSheetsPort
 from app.services.crm_v2 import CONTACT_FIELDS, CrmService
+from app.services.owner_actions import (
+    decide_owner_action,
+    execute_approved_owner_action_with_adapters,
+    read_owner_action,
+)
+from app.tools.owner.types import ToolSpec
+from app.tools.registries import owner_tools as owner_tools_module
 from app.tools.registries.owner_tools import ToolContext, execute_tool
 
 OWNER = "12345"
+EXPLICIT_INTENT_TEXT = "תרשמי את דנה לאנשי הקשר"
 ARGS = {
     "name": "דנה",
     "phone": "0501234567",
@@ -128,5 +138,186 @@ def test_current_crm_contact_capture_is_idempotent_in_the_durable_database() -> 
         db.commit()
         assert first.contact is not None and second.contact is not None
         assert second.contact.id == first.contact.id
+    finally:
+        db.close()
+
+
+def test_valid_owner_crm_upsert_creates_a_pending_proposal_and_writes_nothing() -> None:
+    """The C0-verified defect: `_crm_upsert` used to fall through and return None."""
+    init_db()
+    db = get_session_factory()()
+    try:
+        phone = "0509990001"
+        args = {**ARGS, "phone": phone}
+        out = execute_tool(
+            "crm_upsert",
+            args,
+            _ctx(
+                db,
+                FakeSheetsPort(),
+                source_ref="tg.crm.upsert.valid",
+                owner_text=EXPLICIT_INTENT_TEXT,
+            ),
+        )
+        assert out.ok is True
+        assert out.approval_id
+        assert "Nothing was written" in out.text
+        row = LeadStore(db).get_approval_by_approval_id(out.approval_id)
+        assert row is not None
+        envelope = read_owner_action(row)
+        assert envelope is not None
+        assert envelope["kind"] == "crm.upsert"
+        assert envelope["parameters"]["fields"]["phone"] == phone
+        assert envelope["parameters"]["fields"]["name"] == "דנה"
+        # Identity comes from `snapshot_identity`, never from a model-supplied row number.
+        assert "row" not in envelope["parameters"]
+        assert CrmService(db).lookup(query=phone) == []
+    finally:
+        db.close()
+
+
+def test_crm_upsert_without_phone_or_email_does_not_propose() -> None:
+    init_db()
+    db = get_session_factory()()
+    try:
+        args = dict(ARGS)
+        args["phone"] = ""
+        args["email"] = ""
+        out = execute_tool(
+            "crm_upsert",
+            args,
+            _ctx(
+                db,
+                FakeSheetsPort(),
+                source_ref="tg.crm.upsert.nokey",
+                owner_text=EXPLICIT_INTENT_TEXT,
+            ),
+        )
+        assert out.ok is True
+        assert out.approval_id == ""
+        assert "phone or email" in out.text
+    finally:
+        db.close()
+
+
+def test_crm_upsert_with_a_lead_id_in_the_fields_is_refused() -> None:
+    init_db()
+    db = get_session_factory()()
+    try:
+        phone = "0509990002"
+        args = {**ARGS, "phone": phone, "next_step": "lead_42 follow up"}
+        out = execute_tool(
+            "crm_upsert",
+            args,
+            _ctx(
+                db,
+                FakeSheetsPort(),
+                source_ref="tg.crm.upsert.leadid",
+                owner_text=EXPLICIT_INTENT_TEXT,
+            ),
+        )
+        assert out.ok is False
+        assert "lead ids are not used" in out.error
+        assert out.approval_id == ""
+        assert CrmService(db).lookup(query=phone) == []
+    finally:
+        db.close()
+
+
+def test_crm_upsert_replay_with_the_same_source_ref_does_not_duplicate() -> None:
+    """`propose_owner_action` binds the proposal id to source_ref; a replay reuses it."""
+    init_db()
+    db = get_session_factory()()
+    try:
+        phone = "0509990003"
+        args = {**ARGS, "phone": phone}
+        ctx = _ctx(
+            db,
+            FakeSheetsPort(),
+            source_ref="tg.crm.upsert.replay",
+            owner_text=EXPLICIT_INTENT_TEXT,
+        )
+        first = execute_tool("crm_upsert", args, ctx)
+        db.commit()
+        second = execute_tool("crm_upsert", args, ctx)
+        db.commit()
+        assert first.ok is True and second.ok is True
+        assert first.approval_id and first.approval_id == second.approval_id
+        assert CrmService(db).lookup(query=phone) == []
+    finally:
+        db.close()
+
+
+def test_execute_tool_turns_a_handler_returning_none_into_a_failure_result() -> None:
+    """A handler bug (falling through with no return) must not crash the owner turn."""
+    init_db()
+    db = get_session_factory()()
+    try:
+        spec = ToolSpec(
+            name="_test_forgetful_handler",
+            description="test-only handler that forgets to return a ToolResult",
+            parameters={
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": False,
+            },
+            handler=lambda _ctx, _args: None,
+        )
+        owner_tools_module._REGISTRY[spec.name] = spec
+        try:
+            out = execute_tool(
+                spec.name,
+                {},
+                _ctx(db, FakeSheetsPort(), source_ref="tg.none.1", owner_text=""),
+            )
+        finally:
+            del owner_tools_module._REGISTRY[spec.name]
+        assert out.ok is False
+        assert out.error
+    finally:
+        db.close()
+
+
+def test_approving_the_crm_upsert_proposal_writes_exactly_one_contact(monkeypatch) -> None:
+    init_db()
+    db = get_session_factory()()
+    try:
+        phone = "0509990004"
+        sheets = FakeSheetsPort()
+        ctx = _ctx(
+            db,
+            sheets,
+            source_ref="tg.crm.upsert.approve",
+            owner_text=EXPLICIT_INTENT_TEXT,
+        )
+        proposed = execute_tool("crm_upsert", {**ARGS, "phone": phone}, ctx)
+        assert proposed.ok is True and proposed.approval_id
+        db.commit()
+
+        store = LeadStore(db)
+        decision = decide_owner_action(
+            store,
+            principal=ctx.principal,
+            approval_id=proposed.approval_id,
+            decision=DECISION_APPROVED,
+        )
+        assert decision.status == "decided"
+        db.commit()
+
+        monkeypatch.setattr(sheets_integration, "build_sheets_port", lambda _settings: sheets)
+        settings = Settings(_env_file=None, telegram_owner_user_ids=OWNER)
+        row = store.get_approval_by_approval_id(proposed.approval_id)
+        assert row is not None
+
+        outcome = execute_approved_owner_action_with_adapters(
+            store,
+            settings=settings,
+            principal=ctx.principal,
+            proposal_id=row.resource_id,
+        )
+        assert outcome.status == "executed"
+        contacts = CrmService(db).lookup(query=phone)
+        assert len(contacts) == 1
     finally:
         db.close()

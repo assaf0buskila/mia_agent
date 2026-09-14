@@ -8,7 +8,7 @@ from typing import Any
 from app.domain.tools import AdapterHttpError
 from app.domain.two_state import is_sheets_health_ask
 from app.integrations.sheets import build_sheets_port
-from app.services.crm_v2 import CrmError, CrmService
+from app.services.crm_v2 import CONTACT_FIELDS, CrmError, CrmService
 from app.services.owner_actions import propose_owner_action, sync_owner_crm_sheet_in_session
 from app.surfaces.crm import (
     ACTIVITY_TAB,
@@ -98,9 +98,46 @@ def _crm_upsert(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     blob = " ".join(record.cells())
     if "lead_" in blob.lower():
         return ToolResult(ok=False, error="lead ids are not used")
+    fields = dict(zip(CONTACT_FIELDS, record.cells(), strict=True))
+    port = ctx.sheets or build_sheets_port(ctx.settings)
+    return _propose_crm_upsert(
+        ctx,
+        fields=fields,
+        port=port,
+        success_text="Prepared an exact CRM proposal. Nothing was written.",
+    )
 
 
+def _propose_crm_upsert(
+    ctx: ToolContext, *, fields: dict[str, str], port: object, success_text: str
+) -> ToolResult:
+    """Turn CRM contact fields into one exact, durable `crm.upsert` proposal.
 
+    Identity is never taken from the model: `snapshot_identity` binds the proposal to
+    either the existing contact matched by phone/email, or to observed absence for a
+    new one. Shared by the direct owner CRM tool and the Contacts-row Sheets grammar
+    in `app.tools.owner.sheets`, so both produce the exact same proposal shape.
+    """
+    problem = _sync_current_sheet_edits(ctx, port)
+    if problem:
+        return ToolResult(ok=False, error=problem)
+    try:
+        snapshot = CrmService(ctx.store.session).snapshot_identity(fields)
+        proposal = propose_owner_action(
+            ctx.store,
+            principal=ctx.principal,
+            source_ref=ctx.source_ref,
+            kind="crm.upsert",
+            parameters={
+                "fields": fields,
+                "contact_id": snapshot.contact_id,
+                "expected_revision": snapshot.revision,
+            },
+            target=asdict(snapshot),
+        )
+    except (CrmError, PermissionError, ValueError) as exc:
+        return ToolResult(ok=False, error=f"CRM proposal could not be bound: {exc}")
+    return ToolResult(ok=True, text=success_text, approval_id=proposal.approval_id)
 
 def _crm_record_activity(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     contact_id = str(args.get("contact_id") or "").strip()

@@ -992,6 +992,12 @@ def execute_tool(name: str, arguments: dict[str, Any], ctx: ToolContext) -> Tool
     if spec.writes_memory and not ctx.settings.memory_write_enabled:
         return ToolResult(ok=False, error="memory writing is disabled")
     try:
-        return spec.handler(ctx, arguments or {})
+        result = spec.handler(ctx, arguments or {})
     except Exception as exc:  # noqa: BLE001 - one bad tool must not kill the turn
         return ToolResult(ok=False, error=f"{type(exc).__name__}")
+    if not isinstance(result, ToolResult):
+        # A handler that falls through without a return is a bug, not a turn-ending
+        # crash: `ToolResult.outcome_label()` is called unconditionally downstream, so
+        # None must never reach the caller.
+        return ToolResult(ok=False, error="tool returned no result")
+    return result

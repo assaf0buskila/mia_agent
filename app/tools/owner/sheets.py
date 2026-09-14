@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import re
 import unicodedata
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from typing import Any
 
 from app.capabilities.policy import authorize, execute_capability
@@ -19,7 +19,7 @@ from app.capabilities.sheets import sheets_handlers, validate_sheets_write_args
 from app.core.errors import InvalidArguments, PermissionDenied
 from app.domain.tools import AdapterHttpError
 from app.integrations.sheets import DisabledSheetsPort, SheetsPort, build_sheets_port
-from app.services.crm_v2 import CONTACT_FIELDS, CrmError, CrmService
+from app.services.crm_v2 import CONTACT_FIELDS
 from app.services.owner_actions import propose_owner_action, typed_composio_binding
 from app.tools.owner.types import (
     _NOT_CONNECTED,
@@ -224,31 +224,15 @@ def _propose_contacts_write(
     if not row or len(row) > len(CONTACT_FIELDS):
         return ToolResult(ok=False, error="Contacts row shape is invalid")
     fields = dict(zip(CONTACT_FIELDS, row, strict=False))
-    from app.tools.owner.crm import _sync_current_sheet_edits
+    from app.tools.owner.crm import _propose_crm_upsert
 
-    problem = _sync_current_sheet_edits(ctx, port)
-    if problem:
-        return ToolResult(ok=False, error=problem)
-    try:
-        snapshot = CrmService(ctx.store.session).snapshot_identity(fields)
-        proposal = propose_owner_action(
-            ctx.store,
-            principal=ctx.principal,
-            source_ref=ctx.source_ref,
-            kind="crm.upsert",
-            parameters={
-                "fields": fields,
-                "contact_id": snapshot.contact_id,
-                "expected_revision": snapshot.revision,
-            },
-            target=asdict(snapshot),
-        )
-    except (CrmError, PermissionError, ValueError) as exc:
-        return ToolResult(ok=False, error=f"CRM proposal could not be bound: {exc}")
-    return ToolResult(
-        ok=True,
-        text="Translated the Contacts row into an exact CRM proposal. Nothing was written.",
-        approval_id=proposal.approval_id,
+    return _propose_crm_upsert(
+        ctx,
+        fields=fields,
+        port=port,
+        success_text=(
+            "Translated the Contacts row into an exact CRM proposal. Nothing was written."
+        ),
     )
 
 
