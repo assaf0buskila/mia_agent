@@ -63,12 +63,16 @@ def esc(value: object) -> str:
 # reply prose. None of `esc`, `<`, `>` or `&` are touched by HTML escaping, so these
 # regexes run *after* `esc()` and still see the model's own `**`, backticks, `#` and `-`
 # exactly as written.
-_FENCE_RE = re.compile(r"```(?:[^\n]*\n)?(.*?)```", re.DOTALL)
+_FENCE_RE = re.compile(r"```(.*?)```", re.DOTALL)
+# A fence's first line is a language tag ONLY when it is nothing but that tag — e.g.
+# ```python\n...``` — never when real code shares that line, e.g. ```echo hi\necho bye```.
+_FENCE_LANGUAGE_RE = re.compile(r"^([\w+-]+)\n")
 _BOLD_INLINE_RE = re.compile(r"\*\*(?!\s)([^\n*]+?)(?<!\s)\*\*")
 _CODE_INLINE_RE = re.compile(r"`([^`\n]+)`")
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
 _BULLET_RE = re.compile(r"^(\s*)[-*]\s+(.*)$")
 _PRE_FENCE_TOKEN = "\x00PRE{}\x00"
+_CODE_INLINE_TOKEN = "\x01CODE{}\x01"
 
 
 def render_owner_markdown(text: str) -> str:
@@ -88,7 +92,10 @@ def render_owner_markdown(text: str) -> str:
 
     def _stash_fence(match: re.Match[str]) -> str:
         body = match.group(1)
-        if body.startswith("\n"):
+        lang_match = _FENCE_LANGUAGE_RE.match(body)
+        if lang_match:
+            body = body[lang_match.end() :]
+        elif body.startswith("\n"):
             body = body[1:]
         if body.endswith("\n"):
             body = body[:-1]
@@ -105,7 +112,9 @@ def render_owner_markdown(text: str) -> str:
 def _render_owner_line(line: str) -> str:
     heading = _HEADING_RE.match(line)
     if heading:
-        body = _apply_inline_markdown(heading.group(2).strip())
+        # The whole line is about to be wrapped in <b>; converting an inner **marker**
+        # too would nest <b><b>...</b></b>, so collapse it to plain text instead.
+        body = _apply_inline_markdown(heading.group(2).strip(), allow_bold=False)
         return f"<b>{body}</b>" if body else ""
     bullet = _BULLET_RE.match(line)
     if bullet:
@@ -114,10 +123,31 @@ def _render_owner_line(line: str) -> str:
     return _apply_inline_markdown(line)
 
 
-def _apply_inline_markdown(text: str) -> str:
-    text = _BOLD_INLINE_RE.sub(lambda m: f"<b>{m.group(1)}</b>", text)
-    text = _CODE_INLINE_RE.sub(lambda m: f"<code>{m.group(1)}</code>", text)
-    return text
+def _apply_inline_markdown(text: str, *, allow_bold: bool = True) -> str:
+    """`code` first, THEN `**bold**` — never the other way round.
+
+    A run like `` **a`b**c` `` has a `**` pair whose content contains a backtick, and a
+    backtick pair whose content contains a `**`. Applying bold first lets its match
+    swallow half of what should be a code span (or vice versa), producing tags that
+    open inside one another and close in the wrong order — Telegram then rejects the
+    whole message. Extracting every code span to an inert placeholder before bold ever
+    runs means bold can only ever match within plain text or within another bold
+    region's edges, never straddle a code span's boundary.
+    """
+    codes: list[str] = []
+
+    def _stash_code(match: re.Match[str]) -> str:
+        codes.append(f"<code>{match.group(1)}</code>")
+        return _CODE_INLINE_TOKEN.format(len(codes) - 1)
+
+    without_code = _CODE_INLINE_RE.sub(_stash_code, text)
+    if allow_bold:
+        without_code = _BOLD_INLINE_RE.sub(lambda m: f"<b>{m.group(1)}</b>", without_code)
+    else:
+        without_code = _BOLD_INLINE_RE.sub(lambda m: m.group(1), without_code)
+    for index, block in enumerate(codes):
+        without_code = without_code.replace(_CODE_INLINE_TOKEN.format(index), block)
+    return without_code
 
 
 def isolate(value: object) -> str:
@@ -279,30 +309,68 @@ def join_sections(*blocks: str) -> str:
 
 
 _PRE_BLOCK_RE = re.compile(r"<pre>.*?</pre>", re.DOTALL)
+_PRE_OPEN = "<pre>"
+_PRE_CLOSE = "</pre>"
+# Any HTML tag this module emits, or an HTML entity (`&amp;`, `&lt;`, `&gt;`). Both are
+# parsed atomically by Telegram, so a hard cut must never land inside either.
+_TAG_OR_ENTITY_RE = re.compile(r"<[^<>]*>|&[a-zA-Z0-9#]+;")
 
 
-def _clear_of_pre_blocks(text: str, cut: int) -> int:
-    """Nudge a candidate cut index outside any `<pre>...</pre>` span it falls inside.
+def _resolve_pre_span(remaining: str, cut: int, limit: int) -> tuple[int, bool]:
+    """Adjust `cut` around any `<pre>...</pre>` span it falls inside.
 
-    Prefers deferring the whole block to the next chunk (cut right before it); only
-    cuts right after it when the block starts at the very beginning of `text`, since
-    deferring there would produce an empty chunk and stall the loop.
+    Returns `(new_cut, reopen)`. When the whole span fits under `limit`, it is
+    deferred to the next chunk whole (cut right before it) — or, if it already starts
+    the chunk, included whole (cut right after it) since deferring an already-leading
+    block would produce an empty chunk and stall the loop.
+
+    When the span ALONE is bigger than `limit`, it cannot be deferred or included
+    whole: `reopen=True` tells the caller to close `</pre>` at `new_cut` and reopen
+    `<pre>` at the start of the next chunk, splitting the fenced block itself across
+    chunks rather than ever shipping one oversized chunk.
     """
-    for match in _PRE_BLOCK_RE.finditer(text):
+    for match in _PRE_BLOCK_RE.finditer(remaining):
+        if not (match.start() < cut < match.end()):
+            continue
+        if match.end() - match.start() <= limit:
+            return (match.start() if match.start() > 0 else match.end()), False
+        content_start = match.start() + len(_PRE_OPEN)
+        content_end = match.end() - len(_PRE_CLOSE)
+        if not (content_start <= cut <= content_end):
+            cut = max(content_start, min(cut, content_end))
+        return cut, True
+    return cut, False
+
+
+def _safe_hard_cut(text: str, limit: int) -> int:
+    """A last-resort hard cut at `limit`, nudged off any tag/entity and toward a space.
+
+    `window.rfind` found no usable newline, so the cut is a raw character index. That
+    index must never land inside `<...>` or `&...;` — Telegram parses both atomically —
+    and a nearby space reads better than an arbitrary mid-word cut. Both nudges only
+    move the cut earlier and only when the result still leaves a reasonably sized
+    chunk, mirroring the `limit // 2` floor already used for the paragraph/line cuts.
+    """
+    cut = limit
+    for match in _TAG_OR_ENTITY_RE.finditer(text):
+        if match.start() >= cut:
+            break
         if match.start() < cut < match.end():
-            return match.start() if match.start() > 0 else match.end()
+            cut = match.start()
+            break
+    space = text.rfind(" ", 0, cut)
+    if space >= limit // 2:
+        cut = space
     return cut
 
 
 def split_message(text: str, *, limit: int = _CHUNK_BUDGET) -> list[str]:
     """Chunk to stay under the 4096 limit, preferring paragraph then line boundaries.
 
-    Splitting never lands inside an HTML tag other than `<pre>`, because it only cuts
-    on newlines and this module never emits any other tag containing one. A `<pre>`
-    block CAN contain newlines (that is the point of rendering a fenced code block
-    literally), so a candidate cut is nudged outside any `<pre>...</pre>` span it would
-    otherwise fall inside — even if that means one chunk runs past `limit` to keep the
-    block whole and every chunk independently valid HTML.
+    Splitting never lands inside an HTML tag other than `<pre>` (never mid-tag,
+    mid-entity, or — thanks to `_resolve_pre_span` — with a fenced block sliced
+    without being closed and reopened), so every chunk is independently valid
+    Telegram HTML, even when a fenced code block alone is bigger than `limit`.
     """
     cleaned = text.strip()
     if not cleaned:
@@ -317,8 +385,12 @@ def split_message(text: str, *, limit: int = _CHUNK_BUDGET) -> list[str]:
         if cut < limit // 2:
             cut = window.rfind("\n")
         if cut < limit // 2:
-            cut = limit
-        cut = _clear_of_pre_blocks(remaining, cut)
+            cut = _safe_hard_cut(remaining, limit)
+        cut, reopen_pre = _resolve_pre_span(remaining, cut, limit)
+        if reopen_pre:
+            chunks.append(remaining[:cut] + _PRE_CLOSE)
+            remaining = _PRE_OPEN + remaining[cut:]
+            continue
         chunks.append(remaining[:cut].strip())
         remaining = remaining[cut:].strip()
     if remaining:

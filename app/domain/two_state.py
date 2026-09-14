@@ -128,40 +128,32 @@ _SHEETS_NEEDLES: tuple[str, ...] = (
 )
 
 _TOOLKIT_NEEDLES: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("instagram", ("instagram", "אינסטגרם", "ig ", " ריל", "reel", "פוסט")),
+    (
+        "instagram",
+        ("instagram", "אינסטגרם", "אינסטה", "insta", "ig ", " ריל", "reel", "פוסט"),
+    ),
     ("gmail", ("gmail", "מייל", "inbox", "דואר")),
     ("calendar", ("יומן", "calendar", "פגישה", "agenda")),
     ("gsc", ("search console", "gsc", "קונסולת חיפוש", "impressions")),
     ("ga4", ("ga4", "analytics", "אנליטיקס", "traffic", "תנועה")),
     ("sheets", _SHEETS_NEEDLES),
-    ("linkedin", ("linkedin", "לינקדאין")),
+    ("linkedin", ("linkedin", "לינקדאין", "לינקדין", "לינקד אין", "linked in")),
     ("whatsapp", ("whatsapp", "וואטסאפ", "ווטסאפ")),
 )
 
-# The subset of each toolkit's needles that actually *name* the platform, rather than a
-# generic word ("פוסט"/"post", "agenda", "impressions"...) that several toolkits share.
-# `asked_toolkit` checks these first so an explicit name always outranks a generic word.
-_TOOLKIT_EXPLICIT_NEEDLES: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("instagram", ("instagram", "אינסטגרם")),
-    ("gmail", ("gmail",)),
-    ("calendar", ("calendar", "יומן")),
-    ("gsc", ("search console", "gsc", "קונסולת חיפוש")),
-    ("ga4", ("ga4",)),
-    (
-        "sheets",
-        (
-            "google sheets",
-            "google sheet",
-            "גוגל שיטס",
-            "גוגל שיט",
-            "שיטס",
-            "שיט",
-            "sheets",
-            "sheet",
-        ),
-    ),
-    ("linkedin", ("linkedin", "לינקדאין")),
-    ("whatsapp", ("whatsapp", "וואטסאפ", "ווטסאפ")),
+# Instagram and LinkedIn are the only two toolkits that share a generic trigger word
+# ("פוסט"/"post" — see the instagram entry above). Because `_TOOLKIT_NEEDLES` is scanned
+# in order and instagram comes first, a sentence that names LinkedIn explicitly while
+# also containing that generic word ("תכתבי לי פוסט ללינקדאין") would otherwise resolve
+# to instagram just by being scanned first. These two lists exist ONLY to break that
+# specific tie — no other toolkit has this collision, so no other toolkit needs one.
+_INSTAGRAM_EXPLICIT_NEEDLES: tuple[str, ...] = ("instagram", "אינסטגרם", "אינסטה", "insta")
+_LINKEDIN_EXPLICIT_NEEDLES: tuple[str, ...] = (
+    "linkedin",
+    "לינקדאין",
+    "לינקדין",
+    "לינקד אין",
+    "linked in",
 )
 
 
@@ -200,28 +192,35 @@ def identity_required_for(action: str) -> bool:
 def asked_toolkit(text: str) -> str:
     """The toolkit he named. Empty if he did not name one.
 
-    An explicitly named platform (instagram/אינסטגרם, linkedin/לינקדאין, ...) always
-    outranks a generic word a toolkit merely watches for ("פוסט" alone could be an
-    Instagram or a LinkedIn post). If two platforms are both explicitly named, neither
-    is forced — guessing which one he meant would be worse than asking.
+    Runs the plain ordered scan first — unchanged from before, so every toolkit that
+    has no shared generic word (gmail, calendar, sheets, ...) keeps its original
+    first-match behaviour exactly. Only when that scan's answer is "instagram" do we
+    check whether the sentence actually named a platform explicitly: an explicit
+    LinkedIn mention (with no explicit Instagram mention) overrides the generic-word
+    match, and naming both explicitly forces neither — guessing would be worse than
+    asking. A generic word alone ("פוסט" with no explicit name) still resolves to
+    instagram, exactly as before.
     """
     blob = f" {text.strip().lower()} "
 
     def _matches(needles: tuple[str, ...]) -> bool:
         return any(needle in blob or needle in text for needle in needles)
 
-    explicit_hits = [
-        toolkit for toolkit, needles in _TOOLKIT_EXPLICIT_NEEDLES if _matches(needles)
-    ]
-    if len(explicit_hits) == 1:
-        return explicit_hits[0]
-    if len(explicit_hits) > 1:
-        return ""
-
+    candidate = ""
     for toolkit, needles in _TOOLKIT_NEEDLES:
         if _matches(needles):
-            return toolkit
-    return ""
+            candidate = toolkit
+            break
+
+    if candidate == "instagram":
+        instagram_named = _matches(_INSTAGRAM_EXPLICIT_NEEDLES)
+        linkedin_named = _matches(_LINKEDIN_EXPLICIT_NEEDLES)
+        if linkedin_named and instagram_named:
+            return ""
+        if linkedin_named:
+            return "linkedin"
+
+    return candidate
 
 
 def is_sheets_alias(text: str) -> bool:

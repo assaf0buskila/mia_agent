@@ -91,6 +91,34 @@ def test_asked_toolkit_explicit_platform_outranks_generic_word() -> None:
     # Two platforms explicitly named at once: don't force either.
     assert asked_toolkit("פוסט ללינקדאין ולאינסטגרם") == ""
     assert asked_toolkit("instagram or linkedin post") == ""
+    # More linkedin/instagram spellings (P3).
+    assert asked_toolkit("תכתבי פוסט ללינקדין") == "linkedin"
+    assert asked_toolkit("פוסט ללינקד אין בבקשה") == "linkedin"
+    assert asked_toolkit("write a post for linked in") == "linkedin"
+    assert asked_toolkit("תעלי לי סטורי לאינסטה") == "instagram"
+    assert asked_toolkit("post it on insta") == "instagram"
+
+
+def test_asked_toolkit_tie_rule_stays_scoped_to_instagram_and_linkedin() -> None:
+    """The instagram/linkedin tie-break must not leak into unrelated toolkits.
+
+    A loose substring in another toolkit's needles (e.g. "שיט" inside "שיטה"/"שיטת",
+    a plain Hebrew word for "method") must never manufacture a false tie, and must
+    never preempt a toolkit the plain ordered scan would have picked first.
+    """
+    # Calendar named first, instagram second: the ordered scan hits instagram's own
+    # needle ("פוסט"/"אינסטגרם") before ever reaching calendar's "יומן" — unaffected
+    # by the instagram/linkedin override, which never triggers without a linkedin name.
+    assert asked_toolkit("תבדוק את היומן ותכין פוסט לאינסטגרם") == "instagram"
+    # "שיטה" (method) contains "שיט" (the sheets abbreviation) only as a substring;
+    # it must not manufacture a false instagram/sheets tie.
+    assert asked_toolkit("פוסט לאינסטגרם בשיטה חדשה") == "instagram"
+    # The ordered scan reaches "sheets" (via "sheet" in "cheat sheet") before it ever
+    # considers instagram, so naming LinkedIn later in the sentence must not steal it.
+    assert asked_toolkit("cheat sheet for a linkedin post") == "sheets"
+    # "שיטת" (method-of) again collides on "שיט"; the generic "פוסט" default (today's
+    # behaviour, no platform named explicitly) must win, not the sheets substring.
+    assert asked_toolkit("שיטת עבודה לפוסט") == "instagram"
 
 
 def test_ig_format_names_post_and_account_before_numbers() -> None:

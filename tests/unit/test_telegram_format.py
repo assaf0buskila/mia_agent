@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, date, datetime
 
 import pytest
@@ -329,3 +330,106 @@ def test_render_then_split_produces_balanced_html_per_chunk() -> None:
         assert chunk.count("<b>") == chunk.count("</b>")
         assert chunk.count("<code>") == chunk.count("</code>")
         assert chunk.count("<pre>") == chunk.count("</pre>")
+
+
+def test_split_message_splits_a_single_oversized_fence_with_reopen() -> None:
+    """A fence bigger than the limit alone must never ship as one oversized chunk."""
+    code_block = "<pre>" + "\n".join(f"line {i:04d} " + "z" * 40 for i in range(200)) + "</pre>"
+    assert len(code_block) > MAX_MESSAGE_CHARS
+    chunks = split_message(code_block)
+    assert len(chunks) > 1
+    for chunk in chunks:
+        assert len(chunk) <= MAX_MESSAGE_CHARS
+        assert chunk.count("<pre>") == chunk.count("</pre>")
+        assert not chunk.startswith("</pre>")
+        assert not chunk.endswith("<pre>")
+    # The close/reopen seam is the only thing inserted; nothing else was lost or added.
+    rejoined = "".join(chunks).replace("</pre><pre>", "")
+    assert rejoined == code_block
+
+
+def test_split_message_splits_two_oversized_fences_independently() -> None:
+    fence_1 = "<pre>" + "\n".join(f"a-line {i:04d} " + "p" * 40 for i in range(150)) + "</pre>"
+    fence_2 = "<pre>" + "\n".join(f"b-line {i:04d} " + "q" * 40 for i in range(150)) + "</pre>"
+    body = f"{fence_1}\n\nmiddle text\n\n{fence_2}"
+    assert len(body) > MAX_MESSAGE_CHARS * 2
+    chunks = split_message(body)
+    assert len(chunks) > 2
+    for chunk in chunks:
+        assert len(chunk) <= MAX_MESSAGE_CHARS
+        assert chunk.count("<pre>") == chunk.count("</pre>")
+        assert not chunk.startswith("</pre>")
+        assert not chunk.endswith("<pre>")
+    assert "middle text" in "".join(chunks)
+    assert "a-line 0000" in "".join(chunks)
+    assert "b-line 0149" in "".join(chunks)
+
+
+# ------------------------------------- bold/code must never interleave (P1-b)
+
+
+def test_render_owner_markdown_bold_then_code_stays_balanced() -> None:
+    rendered = render_owner_markdown("**a`b**c`")
+    assert rendered == "**a<code>b**c</code>"
+    assert rendered.count("<code>") == rendered.count("</code>")
+    assert "<b>" not in rendered
+    assert "<b><code>" not in rendered
+    assert "<code></b>" not in rendered
+
+
+def test_render_owner_markdown_code_then_bold_stays_balanced() -> None:
+    rendered = render_owner_markdown("**`a**`")
+    assert rendered == "**<code>a**</code>"
+    assert rendered.count("<code>") == rendered.count("</code>")
+    assert "<b>" not in rendered
+    assert "<b><code>" not in rendered
+    assert "<code></b>" not in rendered
+
+
+# ------------------------------------------- hard-cut tag/entity safety (P2)
+
+
+def test_split_message_hard_cut_avoids_breaking_tags_and_entities() -> None:
+    """400x 'word **bold** ' on one line forces the raw hard-cut fallback."""
+    rendered = render_owner_markdown("word **bold** " * 400)
+    chunks = split_message(rendered)
+    assert len(chunks) > 1
+    entity_re = re.compile(r"&[a-zA-Z0-9#]+;")
+    for chunk in chunks:
+        assert len(chunk) <= MAX_MESSAGE_CHARS
+        assert chunk.count("<b>") == chunk.count("</b>")
+        assert chunk.count("<") == chunk.count(">")
+        # No stray "&" left over from a bisected entity.
+        assert "&" not in entity_re.sub("", chunk)
+
+
+def test_split_message_hard_cut_avoids_breaking_an_entity() -> None:
+    """A run of escaped '&' with no spaces or newlines still cuts outside an entity."""
+    raw = "&".join("x" * 8 for _ in range(600))  # esc() turns every "&" into "&amp;"
+    rendered = render_owner_markdown(raw)
+    chunks = split_message(rendered)
+    assert len(chunks) > 1
+    entity_re = re.compile(r"&[a-zA-Z0-9#]+;")
+    for chunk in chunks:
+        assert len(chunk) <= MAX_MESSAGE_CHARS
+        assert "&" not in entity_re.sub("", chunk)
+    assert "".join(chunks) == rendered
+
+
+# --------------------------------------------------- fence language tag (P3)
+
+
+def test_render_owner_markdown_fence_first_code_line_is_not_dropped_as_a_language() -> None:
+    """A first line is a language tag only when it is nothing else - "echo hi" is code."""
+    rendered = render_owner_markdown("```echo hi\necho bye```")
+    assert rendered == "<pre>echo hi\necho bye</pre>"
+
+
+def test_render_owner_markdown_fence_language_tag_is_still_dropped() -> None:
+    rendered = render_owner_markdown("```python\nprint(1)\n```")
+    assert rendered == "<pre>print(1)</pre>"
+
+
+def test_render_owner_markdown_heading_does_not_double_bold() -> None:
+    assert render_owner_markdown("# **h**") == "<b>h</b>"
+    assert render_owner_markdown("## **שלום** עולם") == "<b>שלום עולם</b>"
