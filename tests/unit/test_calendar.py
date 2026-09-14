@@ -6,11 +6,12 @@ import httpx
 import pytest
 from app.core.config import Settings
 from app.domain.sales import FitLevel, NextAction, PainLevel, SalesState
-from app.domain.tools import AdapterHttpError
+from app.domain.tools import AdapterHttpError, AdapterResponseError, AdapterSchemaError
 from app.integrations.calendar import (
     COMPOSIO_FIND_FREE_SLOTS_TOOL,
     COMPOSIO_GOOGLECALENDAR_VERSION,
     CalendarPort,
+    ComposioCalendarAgendaPort,
     ComposioCalendarPort,
     DisabledCalendarPort,
     FakeCalendarPort,
@@ -19,6 +20,7 @@ from app.integrations.calendar import (
     enrich_meeting_offer,
     format_slot_time,
     prepare_meeting_offer,
+    window_free_excluding_self,
 )
 
 LEAD_EMAIL = "cal.offer.1@example.com"
@@ -399,3 +401,129 @@ def test_composio_calendar_port_protocol_is_read_only() -> None:
             continue
         lowered = name.lower()
         assert not any(token in lowered for token in forbidden)
+
+
+
+# ------------------------------------------------------------- window_free_excluding_self
+
+
+def test_window_free_excluding_self_ignores_the_events_own_current_span() -> None:
+    """The event being moved is still "busy" at its old time until the move
+    executes; that busy block must not be read as a conflict with the event's
+    own destination time (the C5 reschedule-into-self-overlap defect).
+    """
+    self_start = FIXED_NOW
+    self_end = FIXED_NOW + timedelta(minutes=30)
+    window_start = FIXED_NOW + timedelta(minutes=15)
+    window_end = window_start + timedelta(minutes=30)
+    # The provider only reports the remainder past the self span as free.
+    calendar = FakeCalendarPort(
+        [TimeSlot(start=self_end, end=self_end + timedelta(minutes=15))]
+    )
+    assert (
+        window_free_excluding_self(
+            calendar,
+            window_start=window_start,
+            window_end=window_end,
+            self_start=self_start,
+            self_end=self_end,
+        )
+        is True
+    )
+
+
+def test_window_free_excluding_self_still_refuses_another_events_slot() -> None:
+    """Excluding the event's own span must not swallow a genuine conflict with
+    a different event sitting in the destination window.
+    """
+    self_start = FIXED_NOW
+    self_end = FIXED_NOW + timedelta(minutes=30)
+    other_start = FIXED_NOW + timedelta(hours=1)
+    other_end = other_start + timedelta(minutes=30)
+    window_start = other_start + timedelta(minutes=15)
+    window_end = window_start + timedelta(minutes=30)
+    calendar = FakeCalendarPort(
+        [
+            TimeSlot(start=self_end, end=other_start),
+            TimeSlot(start=other_end, end=other_end + timedelta(minutes=15)),
+        ]
+    )
+    assert (
+        window_free_excluding_self(
+            calendar,
+            window_start=window_start,
+            window_end=window_end,
+            self_start=self_start,
+            self_end=self_end,
+        )
+        is False
+    )
+
+
+def test_window_free_excluding_self_with_no_self_falls_back_to_plain_free_check() -> None:
+    slot = _slot_at(day_offset=1, hour=10, minutes=30)
+    calendar = FakeCalendarPort([slot])
+    assert (
+        window_free_excluding_self(
+            calendar,
+            window_start=slot.start,
+            window_end=slot.end,
+            self_start=None,
+            self_end=None,
+        )
+        is True
+    )
+
+
+# --------------------------------------------------------- ComposioCalendarAgendaPort errors
+
+
+def test_composio_calendar_agenda_port_unsuccessful_response_raises_response_error() -> None:
+    """`successful: false` is a real provider failure, never a silently empty day."""
+    transport = httpx.MockTransport(
+        lambda _request: httpx.Response(
+            200,
+            json={"data": {}, "error": "tool failed", "successful": False},
+        )
+    )
+    client = httpx.Client(transport=transport)
+    port = ComposioCalendarAgendaPort(api_key="cmp-test", user_id="user-123", client=client)
+    with pytest.raises(AdapterResponseError):
+        port.list_events(start=FIXED_NOW, end=FIXED_NOW + timedelta(days=1))
+
+
+def test_composio_calendar_agenda_port_missing_successful_key_raises_schema_error() -> None:
+    transport = httpx.MockTransport(
+        lambda _request: httpx.Response(200, json={"data": {"items": []}})
+    )
+    client = httpx.Client(transport=transport)
+    port = ComposioCalendarAgendaPort(api_key="cmp-test", user_id="user-123", client=client)
+    with pytest.raises(AdapterSchemaError):
+        port.list_events(start=FIXED_NOW, end=FIXED_NOW + timedelta(days=1))
+
+
+def test_composio_calendar_agenda_port_successful_but_missing_items_raises_schema_error() -> None:
+    """`successful: true` with no usable `items` list is a shape this adapter does
+    not understand -- it must never be read back as "nothing scheduled".
+    """
+    transport = httpx.MockTransport(
+        lambda _request: httpx.Response(
+            200, json={"data": {"response_data": {}}, "successful": True}
+        )
+    )
+    client = httpx.Client(transport=transport)
+    port = ComposioCalendarAgendaPort(api_key="cmp-test", user_id="user-123", client=client)
+    with pytest.raises(AdapterSchemaError):
+        port.list_events(start=FIXED_NOW, end=FIXED_NOW + timedelta(days=1))
+
+
+def test_composio_calendar_agenda_port_genuinely_empty_day_returns_empty_list() -> None:
+    """The one case that must NOT raise: a real, successful, empty agenda."""
+    transport = httpx.MockTransport(
+        lambda _request: httpx.Response(
+            200, json={"data": {"response_data": {"items": []}}, "successful": True}
+        )
+    )
+    client = httpx.Client(transport=transport)
+    port = ComposioCalendarAgendaPort(api_key="cmp-test", user_id="user-123", client=client)
+    assert port.list_events(start=FIXED_NOW, end=FIXED_NOW + timedelta(days=1)) == []

@@ -32,7 +32,7 @@ from app.domain.ai_runs import elapsed_ms
 from app.domain.meetings.availability import carve_policy_slots
 from app.domain.policies.freshness import overlay_stale, stamp_freshness
 from app.domain.sales import NextAction
-from app.domain.tools import AdapterHttpError, ToolOutcome
+from app.domain.tools import AdapterHttpError, AdapterResponseError, AdapterSchemaError, ToolOutcome
 
 COMPOSIO_GOOGLECALENDAR_VERSION = "20260812_00"
 COMPOSIO_FIND_FREE_SLOTS_TOOL = "GOOGLECALENDAR_FIND_FREE_SLOTS"
@@ -533,6 +533,77 @@ def build_calendar_port(settings: Settings) -> CalendarPort:
     return DisabledCalendarPort()
 
 
+def _merge_time_intervals(
+    intervals: list[tuple[datetime, datetime]],
+) -> list[tuple[datetime, datetime]]:
+    if not intervals:
+        return []
+    ordered = sorted(intervals, key=lambda item: item[0])
+    merged = [ordered[0]]
+    for start, end in ordered[1:]:
+        last_start, last_end = merged[-1]
+        if start <= last_end:
+            merged[-1] = (last_start, max(last_end, end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def window_free_excluding_self(
+    calendar: CalendarPort,
+    *,
+    window_start: datetime,
+    window_end: datetime,
+    self_start: datetime | None,
+    self_end: datetime | None,
+    timezone: str = "Asia/Jerusalem",
+) -> bool:
+    """True when [window_start, window_end) is free, without counting the busy
+    time of the event being moved as a conflict with itself.
+
+    A reschedule target must still be refused if it overlaps any *other*
+    event, but the event's own current span [self_start, self_end) -- still
+    on the calendar until the move actually executes -- must not count
+    against its own new time. `find_free_slots` only ever returns gaps, never
+    raw busy blocks, so this widens the query to cover both the destination
+    window and the event's current span, then treats the current span as free
+    (on top of whatever the provider already reports as free) before checking
+    whether the destination window is fully covered. Pass self_start/self_end
+    as None for a plain free check (a create has no self event to exclude).
+    """
+    window_start = _ensure_aware(window_start)
+    window_end = _ensure_aware(window_end)
+    if self_start is None or self_end is None:
+        duration = max(1, int((window_end - window_start).total_seconds() // 60))
+        slots = calendar.find_free_slots(
+            time_min=window_start,
+            time_max=window_end,
+            duration_minutes=duration,
+            timezone=timezone,
+        )
+        return any(slot.start <= window_start and slot.end >= window_end for slot in slots)
+
+    self_start = _ensure_aware(self_start)
+    self_end = _ensure_aware(self_end)
+    query_min = min(window_start, self_start)
+    query_max = max(window_end, self_end)
+    slots = calendar.find_free_slots(
+        time_min=query_min,
+        time_max=query_max,
+        duration_minutes=1,
+        timezone=timezone,
+    )
+    intervals = [(_ensure_aware(slot.start), _ensure_aware(slot.end)) for slot in slots]
+    clipped_self_start = max(self_start, query_min)
+    clipped_self_end = min(self_end, query_max)
+    if clipped_self_start < clipped_self_end:
+        intervals.append((clipped_self_start, clipped_self_end))
+    for start, end in _merge_time_intervals(intervals):
+        if start <= window_start and end >= window_end:
+            return True
+    return False
+
+
 # --- Read-only agenda listing (owner "what's on my calendar" reads) -----------------
 #
 # Separate from CalendarPort above: FIND_FREE_SLOTS answers "when am I free", this
@@ -560,9 +631,14 @@ class CalendarAgendaPort(Protocol):
 
 class ComposioCalendarAgendaPort:
     """Live Composio adapter over GOOGLECALENDAR_EVENTS_LIST. Read-only: lists events
-    in [start, end); never creates, patches, or deletes. Raises AdapterHttpError on
-    HTTP/transport failure; a malformed or partial event in the payload is skipped,
-    never raised.
+    in [start, end); never creates, patches, or deletes.
+
+    Raises AdapterHttpError on HTTP/transport failure, AdapterResponseError when
+    Composio accepted the call but reported `successful: false`, and
+    AdapterSchemaError when the payload does not have the shape this adapter
+    understands (so a provider failure is never read back as "no events" --
+    a genuinely empty day still returns `[]`). One malformed or partial event
+    inside an otherwise well-shaped `items` list is skipped, never raised.
     """
 
     def __init__(
@@ -619,8 +695,10 @@ class ComposioCalendarAgendaPort:
             raise AdapterHttpError(response.status_code)
         try:
             body = response.json()
-            if not isinstance(body, dict) or body.get("successful") is not True:
-                return []
+            if not isinstance(body, dict) or not isinstance(body.get("successful"), bool):
+                raise AdapterSchemaError()
+            if body["successful"] is False:
+                raise AdapterResponseError()
             return _parse_agenda_events(body, limit=cap)
         except (
             ValueError,
@@ -629,7 +707,7 @@ class ComposioCalendarAgendaPort:
             AttributeError,
             IndexError,
         ):
-            return []
+            raise AdapterSchemaError() from None
 
 
 class FakeCalendarAgendaPort:
@@ -696,12 +774,17 @@ def _unwrap_agenda_response_data(body: dict[str, Any]) -> Any:
 
 
 def _parse_agenda_events(body: dict[str, Any], *, limit: int) -> list[CalendarEvent]:
+    """Raises AdapterSchemaError when the top-level payload shape is not one this
+    adapter understands, so callers never read a malformed response back as a
+    genuinely empty agenda. An individual malformed event inside a well-shaped
+    `items` list is still just skipped (see `_parse_agenda_event`).
+    """
     data = _unwrap_agenda_response_data(body)
     if not isinstance(data, dict):
-        return []
+        raise AdapterSchemaError()
     items = data.get("items")
     if not isinstance(items, list):
-        return []
+        raise AdapterSchemaError()
     events: list[CalendarEvent] = []
     for item in items:
         event = _parse_agenda_event(item)
