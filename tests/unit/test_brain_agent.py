@@ -14,7 +14,7 @@ from app.capabilities.types import Principal
 from app.core.config import get_settings
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
-from app.graph.owner_agent import build_messages, run_owner_agent
+from app.graph.owner_agent import OwnerUsage, _looks_empty, build_messages, run_owner_agent
 from app.integrations.llm_client import LlmClient
 from app.tools.registries.owner_tools import (
     ToolContext,
@@ -533,6 +533,90 @@ def test_repeated_empty_result_stops_offering_that_tool(
     third_request = transport.requests[2]
     offered = [t["function"]["name"] for t in third_request.get("tools", [])]
     assert "search_memory" not in offered
+
+
+def test_looks_empty_only_counts_a_genuine_no_data_success() -> None:
+    """Length was never a signal of "no data". Only a blank text or an explicit
+
+    no-results marker counts, and only for a successful call -- a failed or
+    timed out result is never "empty", it is unavailable.
+    """
+    from app.tools.registries.owner_tools import OUTCOME_TIMEOUT, ToolResult
+
+    assert _looks_empty(ToolResult(ok=True, text="Contact crm_x rev 3: Dana | 050")) is False
+    assert _looks_empty(ToolResult(ok=True, text="No stored memory matches that.")) is True
+    assert _looks_empty(ToolResult(ok=True, text="")) is True
+    assert _looks_empty(ToolResult(ok=False, error="boom")) is False
+    assert (
+        _looks_empty(ToolResult(ok=False, text="stopped", outcome=OUTCOME_TIMEOUT)) is False
+    )
+
+
+def test_short_real_result_does_not_trip_the_empty_counter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A short but real answer ("Contact crm_x rev 3: Dana | 050...") is not empty.
+
+    The old heuristic treated any successful result <=60 chars as empty
+    regardless of content, so a genuinely short real CRM hit could silently
+    blackhole a tool after two calls even though every call found something.
+    """
+    from app.graph import owner_agent as owner_agent_module
+    from app.tools.registries.owner_tools import ToolResult
+
+    monkeypatch.setattr(owner_agent_module, "EMPTY_RESULT_REPEAT_LIMIT", 1)
+    real_execute_tool = owner_agent_module.execute_tool
+
+    def fake_execute_tool(name, arguments, ctx):
+        if name == "crm_search":
+            return ToolResult(ok=True, text="Contact crm_x rev 3: Dana | 050")
+        return real_execute_tool(name, arguments, ctx)
+
+    monkeypatch.setattr(owner_agent_module, "execute_tool", fake_execute_tool)
+
+    session = _session()
+    session.commit()
+    client, transport = _client(
+        [
+            _assistant_tool_call("c1", "crm_search", {"query": "Dana"}),
+            _assistant_tool_call("c2", "crm_search", {"query": "Dana2"}),
+            _assistant_text("מצאתי את דנה."),
+        ]
+    )
+    outcome = run_owner_agent(client=client, ctx=_ctx(session), owner_message="?", max_steps=5)
+    assert outcome.completed is True
+    third_request = transport.requests[2]
+    offered = [t["function"]["name"] for t in third_request.get("tools", [])]
+    assert "crm_search" in offered
+
+
+def test_owner_usage_keeps_tokens_from_a_completed_call_when_the_loop_later_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bug that escapes the loop as a bare exception used to lose every token
+
+    the turn had already spent. `OwnerUsage`, passed in by the caller, must still
+    carry the real accumulated totals from the completed first model response.
+    """
+    from app.graph import owner_agent as owner_agent_module
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("unexpected bug mid tool execution")
+
+    monkeypatch.setattr(owner_agent_module, "_run_tool_with_timeout", boom)
+
+    session = _session()
+    client, _transport = _client(
+        [_assistant_tool_call("c1", "crm_search", {"query": "Dana"})]
+    )
+    usage = OwnerUsage()
+    with pytest.raises(RuntimeError):
+        run_owner_agent(
+            client=client, ctx=_ctx(session), owner_message="בדוק CRM", usage=usage
+        )
+    assert usage.attempted is True
+    assert usage.tokens_in == 10
+    assert usage.tokens_out == 5
 
 
 def test_budget_exhaustion_still_yields_a_tools_free_turn_with_prose() -> None:

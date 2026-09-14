@@ -58,8 +58,11 @@ from app.integrations.llm_client import (
     tool_result_message,
 )
 from app.tools.registries.owner_tools import (
+    OUTCOME_PARTIAL,
+    OUTCOME_SUCCESS,
     OUTCOME_TIMEOUT,
     ToolContext,
+    ToolResult,
     execute_tool,
     tool_definitions,
 )
@@ -116,7 +119,6 @@ _EMPTY_RESULT_MARKERS = (
     "אין מיילים",
     "לא נמצא",
 )
-_EMPTY_RESULT_MAX_CHARS = 60
 _APPLICABLE_LINKEDIN_PROFILE_SLUGS = frozenset(
     {
         "LINKEDIN_GET_MY_INFO",
@@ -178,13 +180,33 @@ def _run_tool_with_timeout(
     return box[0]
 
 
+# A bare greeting stays "silent" even dressed with trailing punctuation or an emoji
+# ("hey!", "היי :)", "hey 👋"); anything else appended makes it a real answer that
+# must never be overwritten by the raw-tool-report fallback below. Matching with
+# `startswith` used to treat a useful reply that merely opened with the greeting
+# word ("היי אסף, יש לך 3 מיילים שדורשים תגובה...") as silent too.
+_TRAILING_DECORATION_RE = re.compile(
+    "["
+    r"\s!?.,:;~\-–—'\"`"
+    " -⁯"
+    "\U0001f300-\U0001faff"
+    "☀-➿"
+    "←-⇿"
+    "⬀-⯿"
+    "]+$"
+)
+
+
 def _looks_silent(text: str) -> bool:
     stripped = text.strip()
     if not stripped:
         return True
-    lowered = stripped.casefold()
+    trimmed = _TRAILING_DECORATION_RE.sub("", stripped).strip()
+    if not trimmed:
+        return True
+    lowered = trimmed.casefold()
     greetings = ("פה. מה צריך", "here. what do you need", "hey", "היי")
-    return any(lowered == greet or lowered.startswith(greet) for greet in greetings)
+    return lowered in greetings
 
 
 def _refuse_seen_and_silent(text: str, steps: list[AgentStep], reports: list[str]) -> str:
@@ -194,11 +216,23 @@ def _refuse_seen_and_silent(text: str, steps: list[AgentStep], reports: list[str
     return text
 
 
-def _looks_empty(text: str) -> bool:
-    stripped = text.strip()
+def _looks_empty(result: ToolResult) -> bool:
+    """True only for a genuine "no data" outcome, never a short real answer.
+
+    Length was never a signal of "no data": a short real answer ("Contact crm_x
+    rev 3: Dana | 050...") is not empty, and a genuine "no match" reply is not
+    always short either. Only a blank text or one of the deliberate no-results
+    marker phrases counts. A failed, timed out, or otherwise unsuccessful call is
+    never "empty" -- unavailable and empty are different facts and must not share
+    a counter, so this checks the tool's own outcome instead of trusting the
+    caller to gate on `ok` first.
+    """
+    if not result.ok:
+        return False
+    if result.outcome_label() not in (OUTCOME_SUCCESS, OUTCOME_PARTIAL):
+        return False
+    stripped = result.text.strip()
     if not stripped:
-        return True
-    if len(stripped) <= _EMPTY_RESULT_MAX_CHARS:
         return True
     lowered = stripped.lower()
     return any(marker in lowered for marker in _EMPTY_RESULT_MARKERS)
@@ -260,6 +294,33 @@ class AgentOutcome(NamedTuple):
         return bool(self.tools_used)
 
 
+class OwnerUsage:
+    """Mutable token counters the caller can read after `run_owner_agent` raises.
+
+    The loop already returns tokens_in/tokens_out inside a normal `AgentOutcome`,
+    but a bug that escapes the loop as an exception skips that return entirely --
+    and the caller (`app/surfaces/owner.py`) had no other way to learn whether the
+    turn actually spent real provider tokens before it broke, so that spend simply
+    vanished from `ai_runs`. Pass one of these in and `run_owner_agent` keeps it
+    updated with whatever completed model calls have accumulated so far; if it
+    raises, the caller reads the last known totals here instead of losing them.
+
+    `attempted` marks whether the loop actually started (so `tokens_in`/`tokens_out`
+    are known accumulated values from completed model calls, even if still 0)
+    versus never having been reached at all. Callers that cannot distinguish an
+    "unmeasured" zero from a "measured" one in their own storage may still choose
+    to just record 0 in that case; `attempted` is what lets a future caller do
+    better than that without re-deriving it.
+    """
+
+    __slots__ = ("tokens_in", "tokens_out", "attempted")
+
+    def __init__(self) -> None:
+        self.tokens_in = 0
+        self.tokens_out = 0
+        self.attempted = False
+
+
 def build_messages(
     *,
     owner_message: str,
@@ -315,11 +376,16 @@ def run_owner_agent(
     now_line: str = "",
     deadline_at: float | None = None,
     input_source: str = "text",
+    usage: OwnerUsage | None = None,
 ) -> AgentOutcome:
     """Run the tool loop and return the final owner-facing message.
 
     Any provider failure returns `completed=False` with an empty text, so the caller can
     fall back to the deterministic classifier instead of showing Assaf an error.
+
+    `usage`, if given, is kept up to date with tokens actually consumed as the loop runs,
+    so a caller that has to catch an unexpected exception here can still record real
+    provider spend for the turn instead of losing it (see `OwnerUsage`).
     """
     if not owner_message.strip():
         return AgentOutcome("", (), 0, 0, (), False, "empty message", 0, (), "empty_reply")
@@ -330,6 +396,7 @@ def run_owner_agent(
             "", (), 0, 0, (), False, "deadline exceeded", 0, (), "deadline_exceeded"
         )
 
+    usage = usage if usage is not None else OwnerUsage()
     steps: list[AgentStep] = []
     tools_used: list[str] = []
     tools_failed: list[str] = []
@@ -390,6 +457,9 @@ def run_owner_agent(
         )
 
     max_steps = max(1, max_steps)
+    # Everything past this point is a real attempt: `usage` below now reflects
+    # actually-known consumption (zero or more), never an unrelated "we never tried".
+    usage.attempted = True
     for step_index in range(max_steps):
         if deadline_at is not None and monotonic() >= deadline_at:
             return finish(
@@ -433,6 +503,8 @@ def run_owner_agent(
             )
         tokens_in += response.tokens_in
         tokens_out += response.tokens_out
+        usage.tokens_in = tokens_in
+        usage.tokens_out = tokens_out
 
         if response.refused():
             return finish(
@@ -594,7 +666,7 @@ def run_owner_agent(
                     tool_reports.append(f"{call.name}: {snippet[:400]}")
                 if result.approval_id and result.approval_id not in approval_ids:
                     approval_ids.append(result.approval_id)
-                if _looks_empty(result.text):
+                if _looks_empty(result):
                     empty_counts[call.name] = empty_counts.get(call.name, 0) + 1
                     if empty_counts[call.name] > EMPTY_RESULT_REPEAT_LIMIT:
                         blocked_tools.add(call.name)

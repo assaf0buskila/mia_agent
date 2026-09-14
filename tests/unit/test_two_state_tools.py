@@ -36,6 +36,7 @@ from app.graph.owner_agent import (
     SYSTEM_PROMPT,
     TOOL_DEADLINE_REPLY,
     AgentStep,
+    _looks_silent,
     _refuse_seen_and_silent,
     _run_tool_with_timeout,
 )
@@ -283,6 +284,45 @@ def test_timeout_reports_stopped_work_and_seen_is_not_silent() -> None:
         assert "אין מיילים" in spoken
     finally:
         db.close()
+
+
+def test_looks_silent_only_matches_a_bare_greeting() -> None:
+    """Only an empty reply or a bare greeting (dressed with trailing punctuation
+
+    or an emoji) counts as silent. `startswith` used to also catch a real answer
+    that merely opened with the greeting word.
+    """
+    bare_greetings = (
+        "היי",
+        "hey",
+        "hey!",
+        "פה. מה צריך?",
+        "here. what do you need?",
+        "  Hey  ",
+        "hey 👋",
+    )
+    for bare in bare_greetings:
+        assert _looks_silent(bare) is True, bare
+    assert _looks_silent("") is True
+    assert _looks_silent("   ") is True
+
+
+def test_looks_silent_preserves_a_greeting_prefixed_real_answer() -> None:
+    assert _looks_silent("היי אסף, יש לך 3 מיילים שדורשים תגובה") is False
+    assert _looks_silent("hey, here is what I found: 3 pending approvals") is False
+
+
+def test_refuse_seen_and_silent_preserves_a_useful_greeting_prefixed_reply() -> None:
+    """The raw-tool-report fallback must never overwrite a real answer just
+
+    because it happens to open with the greeting word.
+    """
+    spoken = _refuse_seen_and_silent(
+        "היי אסף, יש לך 3 מיילים שדורשים תגובה",
+        [AgentStep(tool="gmail_inbox", ok=True, detail="ok")],
+        ["gmail_inbox: 3 מיילים חדשים"],
+    )
+    assert spoken == "היי אסף, יש לך 3 מיילים שדורשים תגובה"
 
 
 def test_sheets_aliases_prefetch_locked_contacts_and_activity() -> None:

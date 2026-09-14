@@ -452,6 +452,7 @@ async def test_a_failed_brain_never_answers_a_real_question_with_the_greeting(
 
 @pytest.mark.asyncio
 async def test_a_crashing_brain_answers_unavailable_not_the_greeting(monkeypatch) -> None:
+    from app.domain.ai_runs import OWNER_REPLY_FAILED_ACTION
     from app.domain.events import Channel
     from app.domain.owner import brain
 
@@ -460,6 +461,7 @@ async def test_a_crashing_brain_answers_unavailable_not_the_greeting(monkeypatch
 
     monkeypatch.setattr(brain, "answer_owner", boom)
     monkeypatch.setattr(Settings, "owner_agent_ready", lambda self: True)
+    monkeypatch.setattr(owner, "new_correlation_id", lambda: "surface-brain-crash-run")
     event_id = "surface-brain-crash"
     _claim(event_id)
     db = get_session_factory()()
@@ -476,6 +478,65 @@ async def test_a_crashing_brain_answers_unavailable_not_the_greeting(monkeypatch
             owner_ids={ACTOR},
             channel=Channel.TELEGRAM,
         )
+        # The failed turn used to vanish from ai_runs entirely -- boom() never even
+        # reaches `run_owner_agent`, so real usage is unknown; the existing
+        # contract's "no usage" value (0) is recorded rather than invented, but the
+        # row exists and is marked failed instead of disappearing.
+        run = store.get_ai_run("surface-brain-crash-run")
+        assert run is not None
+        assert run.next_action == OWNER_REPLY_FAILED_ACTION
+        assert run.tokens_in == 0
+        assert run.tokens_out == 0
+    finally:
+        db.close()
+    assert [message.text for message in port.sent] == [owner.OWNER_UNAVAILABLE]
+
+
+@pytest.mark.asyncio
+async def test_a_crash_after_one_model_response_persists_the_recorded_tokens(
+    monkeypatch,
+) -> None:
+    """The loop can raise after already spending real provider tokens (a bug in
+
+    tool execution, say). Those tokens are known, not invented, and must reach
+    ai_runs on a failed turn instead of being lost with the rest of the outcome.
+    """
+    from app.domain.ai_runs import OWNER_REPLY_FAILED_ACTION
+    from app.domain.events import Channel
+    from app.domain.owner import brain
+    from app.graph.owner_agent import OwnerUsage
+
+    def crash_after_one_response(*, usage: OwnerUsage | None = None, **_kwargs):  # noqa: ANN003
+        if usage is not None:
+            usage.attempted = True
+            usage.tokens_in = 12
+            usage.tokens_out = 7
+        raise RuntimeError("bug in tool execution after one model response")
+
+    monkeypatch.setattr(brain, "answer_owner", crash_after_one_response)
+    monkeypatch.setattr(Settings, "owner_agent_ready", lambda self: True)
+    monkeypatch.setattr(owner, "new_correlation_id", lambda: "surface-brain-crash-tokens-run")
+    event_id = "surface-brain-crash-tokens"
+    _claim(event_id)
+    db = get_session_factory()()
+    store = LeadStore(db)
+    port = RecordingMessagePort()
+    try:
+        await owner.run_owner_loop(
+            item={
+                "id": event_id, "from": ACTOR, "chat_id": ACTOR, "text": "מה מצב הלידים היום?"
+            },
+            store=store,
+            port=port,
+            settings=Settings(_env_file=None, telegram_owner_user_ids=ACTOR),
+            owner_ids={ACTOR},
+            channel=Channel.TELEGRAM,
+        )
+        run = store.get_ai_run("surface-brain-crash-tokens-run")
+        assert run is not None
+        assert run.next_action == OWNER_REPLY_FAILED_ACTION
+        assert run.tokens_in == 12
+        assert run.tokens_out == 7
     finally:
         db.close()
     assert [message.text for message in port.sent] == [owner.OWNER_UNAVAILABLE]

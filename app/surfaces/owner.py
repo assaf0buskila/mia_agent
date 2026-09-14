@@ -22,7 +22,12 @@ from app.core.errors import MiaError
 from app.core.logging import log_owner_agent
 from app.core.owner_timing import owner_stage
 from app.db.store import LeadStore
-from app.domain.ai_runs import OWNER_REPLY_ACTION, elapsed_ms, persist_ai_run
+from app.domain.ai_runs import (
+    OWNER_REPLY_ACTION,
+    OWNER_REPLY_FAILED_ACTION,
+    elapsed_ms,
+    persist_ai_run,
+)
 from app.domain.events import (
     Channel,
     build_message_in_event,
@@ -38,6 +43,7 @@ from app.domain.owner.request_routing import (
 )
 from app.domain.owner.tasks import OwnerTaskType
 from app.domain.tools import AdapterHttpError
+from app.graph.owner_agent import OwnerUsage
 from app.integrations.base import MessagePort
 
 _log = logging.getLogger("mia.owner")
@@ -221,6 +227,10 @@ def _talk_with_optional_agent(
     if not settings.owner_agent_ready():
         return OWNER_UNAVAILABLE, False
     started = perf_counter()
+    # Kept up to date by `run_owner_agent` as it runs, so the except clause below
+    # can still record real provider spend for the turn even when the loop raises
+    # before returning a normal `AgentOutcome` (see `OwnerUsage`).
+    usage = OwnerUsage()
     try:
         no_history = requests_no_history(text)
         history = (
@@ -247,6 +257,7 @@ def _talk_with_optional_agent(
             now=datetime.now(UTC),
             deadline_at=deadline_at,
             input_source=item.get("source") or "text",
+            usage=usage,
         )
         # Everything below used to be thrown away: only `.text` was read, so the live
         # Telegram turn recorded no model, no latency, no tokens, no steps, no failed
@@ -300,4 +311,31 @@ def _talk_with_optional_agent(
         # "פה. מה צריך?". Logging was added first; the reply itself still lied until
         # this returned the honest unavailable message instead.
         _log.warning("owner agent turn failed error=%s", type(exc).__name__)
+        # The turn used to vanish from ai_runs entirely here: any tokens the loop
+        # had already spent before it broke were simply lost, so the audit table
+        # looked like the turn never happened. Persist a row for it too, marked
+        # failed via next_action, with whatever `usage` the loop reached before
+        # raising. `usage.tokens_in/out` are real accumulated values once the
+        # loop has taken at least one completed model turn; if it never got that
+        # far they are still 0 -- the same "no usage" value `persist_ai_run`
+        # already defaults to for every other caller. The schema has no separate
+        # column to mark that zero as "unmeasured" rather than "measured"; that
+        # is a known limitation of this fix, not a new one it introduces.
+        persist_ai_run(
+            store,
+            run_id=correlation_id,
+            lead_id=None,
+            channel=Channel.TELEGRAM.value,
+            next_action=OWNER_REPLY_FAILED_ACTION,
+            kill_switch=settings.kill_switch,
+            sales_model=settings.owner_agent_model,
+            openai_api_key=settings.openai_api_key,
+            sales_fallback_model=settings.owner_agent_fallback_model,
+            gemini_api_key=settings.gemini_api_key,
+            sales_gemini_model=settings.owner_agent_gemini_model,
+            latency_ms=elapsed_ms(started),
+            tokens_in=usage.tokens_in,
+            tokens_out=usage.tokens_out,
+            automation_mode=settings.automation_mode.value,
+        )
         return OWNER_UNAVAILABLE, wrote
