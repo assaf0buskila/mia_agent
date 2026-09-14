@@ -321,3 +321,120 @@ def test_approving_the_crm_upsert_proposal_writes_exactly_one_contact(monkeypatc
         assert len(contacts) == 1
     finally:
         db.close()
+
+
+def _seed_contact(db, sheets: FakeSheetsPort, fields: dict[str, str]) -> str:
+    created = CrmService(db).capture(fields, source_ref=f"seed:{fields['phone']}")
+    assert created.contact is not None
+    contact = created.contact
+    sheets.locked_contacts.append(
+        [contact.fields.get(name, "") for name in CONTACT_FIELDS] + [contact.id]
+    )
+    db.commit()
+    return contact.id
+
+
+def _approve_and_execute(db, ctx: ToolContext, approval_id: str, sheets, monkeypatch):
+    store = LeadStore(db)
+    decision = decide_owner_action(
+        store,
+        principal=ctx.principal,
+        approval_id=approval_id,
+        decision=DECISION_APPROVED,
+    )
+    assert decision.status == "decided"
+    db.commit()
+    monkeypatch.setattr(sheets_integration, "build_sheets_port", lambda _settings: sheets)
+    row = store.get_approval_by_approval_id(approval_id)
+    assert row is not None
+    return execute_approved_owner_action_with_adapters(
+        store,
+        settings=Settings(_env_file=None, telegram_owner_user_ids=OWNER),
+        principal=ctx.principal,
+        proposal_id=row.resource_id,
+    )
+
+
+def test_crm_upsert_on_an_existing_contact_keeps_its_source_and_summary(monkeypatch) -> None:
+    init_db()
+    db = get_session_factory()()
+    try:
+        phone = "0509990005"
+        sheets = FakeSheetsPort()
+        _seed_contact(
+            db,
+            sheets,
+            {"name": "דנה", "phone": phone, "source": "website", "summary": "סיכום מקורי"},
+        )
+        ctx = _ctx(db, sheets, source_ref="tg.crm.upsert.existing", owner_text=EXPLICIT_INTENT_TEXT)
+        proposed = execute_tool(
+            "crm_upsert",
+            {**ARGS, "phone": phone, "source": "", "summary": "", "want": "אתר חדש"},
+            ctx,
+        )
+        assert proposed.ok is True and proposed.approval_id
+        db.commit()
+
+        outcome = _approve_and_execute(db, ctx, proposed.approval_id, sheets, monkeypatch)
+
+        assert outcome.status == "executed"
+        [contact] = CrmService(db).lookup(query=phone)
+        assert contact.fields["source"] == "website"
+        assert contact.fields["summary"] == "סיכום מקורי"
+        assert contact.fields["want"] == "אתר חדש"
+    finally:
+        db.close()
+
+
+def test_crm_upsert_for_a_new_contact_fills_source_and_summary_defaults(monkeypatch) -> None:
+    init_db()
+    db = get_session_factory()()
+    try:
+        phone = "0509990006"
+        sheets = FakeSheetsPort()
+        ctx = _ctx(db, sheets, source_ref="tg.crm.upsert.new", owner_text=EXPLICIT_INTENT_TEXT)
+        proposed = execute_tool(
+            "crm_upsert", {**ARGS, "phone": phone, "source": "", "summary": ""}, ctx
+        )
+        assert proposed.ok is True and proposed.approval_id
+        db.commit()
+
+        outcome = _approve_and_execute(db, ctx, proposed.approval_id, sheets, monkeypatch)
+
+        assert outcome.status == "executed"
+        [contact] = CrmService(db).lookup(query=phone)
+        assert contact.fields["source"] == "telegram"
+        assert contact.fields["summary"] == EXPLICIT_INTENT_TEXT
+    finally:
+        db.close()
+
+
+def test_crm_upsert_is_rejected_when_the_contact_changed_before_approval(monkeypatch) -> None:
+    init_db()
+    db = get_session_factory()()
+    try:
+        phone = "0509990007"
+        sheets = FakeSheetsPort()
+        contact_id = _seed_contact(db, sheets, {"name": "דנה", "phone": phone})
+        ctx = _ctx(db, sheets, source_ref="tg.crm.upsert.changed", owner_text=EXPLICIT_INTENT_TEXT)
+        proposed = execute_tool("crm_upsert", {**ARGS, "phone": phone, "want": "אתר"}, ctx)
+        assert proposed.ok is True and proposed.approval_id
+        db.commit()
+
+        service = CrmService(db)
+        [current] = service.lookup(query=phone)
+        service.capture(
+            {"phone": phone, "business": "שונה בינתיים"},
+            source_ref="seed:changed-after-proposal",
+            contact_id=contact_id,
+            expected_revision=current.revision,
+        )
+        db.commit()
+
+        outcome = _approve_and_execute(db, ctx, proposed.approval_id, sheets, monkeypatch)
+
+        assert outcome.status == "target_changed"
+        [contact] = CrmService(db).lookup(query=phone)
+        assert contact.fields.get("want", "") != "אתר"
+    finally:
+        db.close()
