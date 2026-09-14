@@ -1,6 +1,6 @@
 # MIA_V2.md — what Mia is, from the code
 
-Updated 2026-09-11. Production: ECS `mia:61`, commit `fb6cc8d`, `eu-north-1`.
+Updated 2026-09-11. Production (`/health`, 2026-09-14): commit `4b80f31`, `eu-north-1`.
 
 ## Two loops, one app
 

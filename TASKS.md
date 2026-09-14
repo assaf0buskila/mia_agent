@@ -1,6 +1,32 @@
 # TASKS.md
 
-Updated 2026-09-11. Production: `mia:61`, commit `fb6cc8d`. Detail in `HANDOFF.md`.
+Updated 2026-09-14. Production `/health` reports commit `4b80f31` (#60). Detail in `HANDOFF.md`.
+
+## Campaign finish (plan: `docs/MIA_CAMPAIGN_FINISH_PLAN.md`)
+
+C0 audit done 2026-09-14 at `4b80f31`: 2005 passed / 7 skipped, ruff clean, widget passed.
+One chunk per stacked branch + PR, independent review each. No merge/deploy without Assaf.
+
+Defaults taken where C0 left a fork (reverse any of them):
+reports read CRM v2 tables; first-brief fix stays inside the capture transaction (no capture
+reorder); Instagram writes stay excluded; LinkedIn publishing is not a campaign claim until
+a live test; Calendar = own events without guests. Open: live Sheet audit (PII, needs
+approval), meetings module retired or not.
+
+- [ ] C1a — `_crm_upsert` returns None on valid input → owner turn crashes (`crm.py:77`).
+      `execute_tool` must reject a non-ToolResult.
+- [ ] C1b — `_looks_silent` greeting-prefix, `_looks_empty` ≤60 chars, usage lost on crash.
+- [ ] C2a — LinkedIn vs `פוסט` hint order; owner prose Markdown shows literally.
+- [ ] C2b — approval cards from the stored envelope (Gmail has no CC/BCC); callback
+      `sent: True` after an edit failure.
+- [ ] C5 — reschedule conflicts with itself; agenda `successful != True` reads as empty day.
+- [ ] C3a — `business_context` latches on a greeting; summary is raw fragments; first brief
+      misses same-turn `next_step`.
+- [ ] C3b — v2 leads invisible to owner reports; lead card has no contact ref; nominal CRM
+      reads import/write.
+- [ ] C4 — live Gmail brief routing; send card fields; stuck `pending_review` has no exit.
+- [ ] C6a — social planning with honest capability labels.
+- [ ] C7b — remove proven-dead code, reconcile docs; then release readiness (Prompt 4).
 
 ## Done today
 
