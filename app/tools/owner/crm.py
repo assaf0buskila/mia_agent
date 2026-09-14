@@ -8,7 +8,7 @@ from typing import Any
 from app.domain.tools import AdapterHttpError
 from app.domain.two_state import is_sheets_health_ask
 from app.integrations.sheets import build_sheets_port
-from app.services.crm_v2 import CrmError, CrmService
+from app.services.crm_v2 import CONTACT_FIELDS, CrmError, CrmService
 from app.services.owner_actions import propose_owner_action, sync_owner_crm_sheet_in_session
 from app.surfaces.crm import (
     ACTIVITY_TAB,
@@ -86,11 +86,11 @@ def _crm_upsert(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
         email=str(args.get("email") or "").strip(),
         date=str(args.get("date") or "").strip(),
         business=str(args.get("business") or "").strip(),
-        source=str(args.get("source") or "telegram").strip() or "telegram",
+        source=str(args.get("source") or "").strip(),
         language=str(args.get("language") or "").strip(),
         want=str(args.get("want") or "").strip(),
         status=str(args.get("status") or "").strip(),
-        summary=str(args.get("summary") or ctx.owner_text or "").strip()[:500],
+        summary=str(args.get("summary") or "").strip()[:500],
         next_step=str(args.get("next_step") or "").strip(),
     )
     if not record.has_contact_key():
@@ -98,8 +98,69 @@ def _crm_upsert(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     blob = " ".join(record.cells())
     if "lead_" in blob.lower():
         return ToolResult(ok=False, error="lead ids are not used")
+    fields = dict(zip(CONTACT_FIELDS, record.cells(), strict=True))
+    port = ctx.sheets or build_sheets_port(ctx.settings)
+    return _propose_crm_upsert(
+        ctx,
+        fields=fields,
+        port=port,
+        success_text="Prepared an exact CRM proposal. Nothing was written.",
+        new_contact_defaults={
+            "source": "telegram",
+            "summary": str(ctx.owner_text or "").strip()[:500],
+        },
+    )
 
 
+def _propose_crm_upsert(
+    ctx: ToolContext,
+    *,
+    fields: dict[str, str],
+    port: object,
+    success_text: str,
+    new_contact_defaults: dict[str, str] | None = None,
+) -> ToolResult:
+    """Turn CRM contact fields into one exact, durable `crm.upsert` proposal.
+
+    Identity is never taken from the model: `snapshot_identity` binds the proposal to
+    either the existing contact matched by phone/email, or to observed absence for a
+    new one. Shared by the direct owner CRM tool and the Contacts-row Sheets grammar
+    in `app.tools.owner.sheets`, so both produce the exact same proposal shape.
+
+    `new_contact_defaults` fill empty fields only when no contact matched. `capture`
+    merges every non-empty value, so a default applied to an existing contact would
+    overwrite its real source or summary on approval. A new contact's snapshot hashes
+    only phone/email, so filling defaults after it leaves the bound target unchanged.
+    """
+    problem = _sync_current_sheet_edits(ctx, port)
+    if problem:
+        return ToolResult(ok=False, error=problem)
+    try:
+        snapshot = CrmService(ctx.store.session).snapshot_identity(fields)
+        if not snapshot.contact_id and new_contact_defaults:
+            fields = {
+                **fields,
+                **{
+                    key: value
+                    for key, value in new_contact_defaults.items()
+                    if value and not fields.get(key)
+                },
+            }
+        proposal = propose_owner_action(
+            ctx.store,
+            principal=ctx.principal,
+            source_ref=ctx.source_ref,
+            kind="crm.upsert",
+            parameters={
+                "fields": fields,
+                "contact_id": snapshot.contact_id,
+                "expected_revision": snapshot.revision,
+            },
+            target=asdict(snapshot),
+        )
+    except (CrmError, PermissionError, ValueError) as exc:
+        return ToolResult(ok=False, error=f"CRM proposal could not be bound: {exc}")
+    return ToolResult(ok=True, text=success_text, approval_id=proposal.approval_id)
 
 
 def _crm_record_activity(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
