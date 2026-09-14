@@ -10,10 +10,12 @@ from app.domain.tools import AdapterHttpError, AdapterResponseError, AdapterSche
 from app.integrations.calendar import (
     COMPOSIO_FIND_FREE_SLOTS_TOOL,
     COMPOSIO_GOOGLECALENDAR_VERSION,
+    CalendarEvent,
     CalendarPort,
     ComposioCalendarAgendaPort,
     ComposioCalendarPort,
     DisabledCalendarPort,
+    FakeCalendarAgendaPort,
     FakeCalendarPort,
     TimeSlot,
     build_calendar_port,
@@ -407,26 +409,39 @@ def test_composio_calendar_port_protocol_is_read_only() -> None:
 # ------------------------------------------------------------- window_free_excluding_self
 
 
+class _RaisingCalendarPort:
+    """Proves the destination-overlaps-self branch never consults merged
+    free/busy -- it cannot tell the event's own busy block apart from a
+    different meeting that happens to overlap it (see the scenario B/C/D
+    tests below), so it must go through the per-event agenda read instead.
+    """
+
+    def find_free_slots(self, **_kwargs: object) -> list[TimeSlot]:
+        raise AssertionError("free/busy must not be queried when self overlaps the destination")
+
+
 def test_window_free_excluding_self_ignores_the_events_own_current_span() -> None:
     """The event being moved is still "busy" at its old time until the move
     executes; that busy block must not be read as a conflict with the event's
-    own destination time (the C5 reschedule-into-self-overlap defect).
+    own destination time (the C5 reschedule-into-self-overlap defect) -- as
+    long as no *other* event also overlaps the destination.
     """
     self_start = FIXED_NOW
     self_end = FIXED_NOW + timedelta(minutes=30)
     window_start = FIXED_NOW + timedelta(minutes=15)
     window_end = window_start + timedelta(minutes=30)
-    # The provider only reports the remainder past the self span as free.
-    calendar = FakeCalendarPort(
-        [TimeSlot(start=self_end, end=self_end + timedelta(minutes=15))]
+    agenda = FakeCalendarAgendaPort(
+        [CalendarEvent(event_id="self-evt", summary="Self", start=self_start, end=self_end)]
     )
     assert (
         window_free_excluding_self(
-            calendar,
+            _RaisingCalendarPort(),
             window_start=window_start,
             window_end=window_end,
             self_start=self_start,
             self_end=self_end,
+            self_event_id="self-evt",
+            agenda=agenda,
         )
         is True
     )
@@ -455,6 +470,147 @@ def test_window_free_excluding_self_still_refuses_another_events_slot() -> None:
             window_end=window_end,
             self_start=self_start,
             self_end=self_end,
+        )
+        is False
+    )
+
+
+def test_window_free_excluding_self_scenario_b_other_meeting_overlapping_self_span() -> None:
+    """Reviewer counterexample B: other 10:00-11:00, event(self) 10:30-11:30,
+    move to 10:45-11:15. Must be refused -- "other" occupies 10:45-11:00 of
+    the destination -- even though the destination also overlaps self's own
+    current span.
+    """
+    other_start = FIXED_NOW
+    other_end = other_start + timedelta(hours=1)
+    self_start = FIXED_NOW + timedelta(minutes=30)
+    self_end = self_start + timedelta(hours=1)
+    window_start = FIXED_NOW + timedelta(minutes=45)
+    window_end = window_start + timedelta(minutes=30)
+    agenda = FakeCalendarAgendaPort(
+        [
+            CalendarEvent(event_id="self-evt", summary="Self", start=self_start, end=self_end),
+            CalendarEvent(event_id="other-evt", summary="Other", start=other_start, end=other_end),
+        ]
+    )
+    assert (
+        window_free_excluding_self(
+            _RaisingCalendarPort(),
+            window_start=window_start,
+            window_end=window_end,
+            self_start=self_start,
+            self_end=self_end,
+            self_event_id="self-evt",
+            agenda=agenda,
+        )
+        is False
+    )
+
+
+def test_window_free_excluding_self_scenario_c_other_meeting_inside_self_span() -> None:
+    """Reviewer counterexample C: event(self) 10:00-11:00, other 10:15-10:45
+    sits entirely inside self's own span, move to 10:30-11:30. Must be
+    refused -- "other" occupies 10:30-10:45 of the destination.
+    """
+    self_start = FIXED_NOW
+    self_end = self_start + timedelta(hours=1)
+    other_start = FIXED_NOW + timedelta(minutes=15)
+    other_end = FIXED_NOW + timedelta(minutes=45)
+    window_start = FIXED_NOW + timedelta(minutes=30)
+    window_end = window_start + timedelta(hours=1)
+    agenda = FakeCalendarAgendaPort(
+        [
+            CalendarEvent(event_id="self-evt", summary="Self", start=self_start, end=self_end),
+            CalendarEvent(event_id="other-evt", summary="Other", start=other_start, end=other_end),
+        ]
+    )
+    assert (
+        window_free_excluding_self(
+            _RaisingCalendarPort(),
+            window_start=window_start,
+            window_end=window_end,
+            self_start=self_start,
+            self_end=self_end,
+            self_event_id="self-evt",
+            agenda=agenda,
+        )
+        is False
+    )
+
+
+def test_window_free_excluding_self_scenario_d_destination_equals_current_slot() -> None:
+    """Reviewer counterexample D: destination equals the event's own current
+    slot 10:00-11:00, with another meeting at 10:30-11:00 inside it. Must be
+    refused even though the destination is exactly the self span.
+    """
+    self_start = FIXED_NOW
+    self_end = self_start + timedelta(hours=1)
+    other_start = FIXED_NOW + timedelta(minutes=30)
+    other_end = self_end
+    agenda = FakeCalendarAgendaPort(
+        [
+            CalendarEvent(event_id="self-evt", summary="Self", start=self_start, end=self_end),
+            CalendarEvent(event_id="other-evt", summary="Other", start=other_start, end=other_end),
+        ]
+    )
+    assert (
+        window_free_excluding_self(
+            _RaisingCalendarPort(),
+            window_start=self_start,
+            window_end=self_end,
+            self_start=self_start,
+            self_end=self_end,
+            self_event_id="self-evt",
+            agenda=agenda,
+        )
+        is False
+    )
+
+
+def test_window_free_excluding_self_refuses_when_the_agenda_read_fails() -> None:
+    """If the destination overlaps self and the per-event agenda read fails,
+    the reschedule must be refused (fail closed), never silently allowed.
+    """
+
+    class _RaisingAgenda:
+        def list_events(self, **_kwargs: object) -> list[CalendarEvent]:
+            raise AdapterResponseError()
+
+    self_start = FIXED_NOW
+    self_end = self_start + timedelta(minutes=30)
+    window_start = FIXED_NOW + timedelta(minutes=15)
+    window_end = window_start + timedelta(minutes=30)
+    assert (
+        window_free_excluding_self(
+            _RaisingCalendarPort(),
+            window_start=window_start,
+            window_end=window_end,
+            self_start=self_start,
+            self_end=self_end,
+            self_event_id="self-evt",
+            agenda=_RaisingAgenda(),
+        )
+        is False
+    )
+
+
+def test_window_free_excluding_self_refuses_when_agenda_is_unavailable() -> None:
+    """No agenda port at all (house not connected) must also fail closed when
+    the destination overlaps self, rather than defaulting to "free".
+    """
+    self_start = FIXED_NOW
+    self_end = self_start + timedelta(minutes=30)
+    window_start = FIXED_NOW + timedelta(minutes=15)
+    window_end = window_start + timedelta(minutes=30)
+    assert (
+        window_free_excluding_self(
+            _RaisingCalendarPort(),
+            window_start=window_start,
+            window_end=window_end,
+            self_start=self_start,
+            self_end=self_end,
+            self_event_id="self-evt",
+            agenda=None,
         )
         is False
     )

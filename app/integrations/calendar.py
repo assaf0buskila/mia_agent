@@ -533,77 +533,6 @@ def build_calendar_port(settings: Settings) -> CalendarPort:
     return DisabledCalendarPort()
 
 
-def _merge_time_intervals(
-    intervals: list[tuple[datetime, datetime]],
-) -> list[tuple[datetime, datetime]]:
-    if not intervals:
-        return []
-    ordered = sorted(intervals, key=lambda item: item[0])
-    merged = [ordered[0]]
-    for start, end in ordered[1:]:
-        last_start, last_end = merged[-1]
-        if start <= last_end:
-            merged[-1] = (last_start, max(last_end, end))
-        else:
-            merged.append((start, end))
-    return merged
-
-
-def window_free_excluding_self(
-    calendar: CalendarPort,
-    *,
-    window_start: datetime,
-    window_end: datetime,
-    self_start: datetime | None,
-    self_end: datetime | None,
-    timezone: str = "Asia/Jerusalem",
-) -> bool:
-    """True when [window_start, window_end) is free, without counting the busy
-    time of the event being moved as a conflict with itself.
-
-    A reschedule target must still be refused if it overlaps any *other*
-    event, but the event's own current span [self_start, self_end) -- still
-    on the calendar until the move actually executes -- must not count
-    against its own new time. `find_free_slots` only ever returns gaps, never
-    raw busy blocks, so this widens the query to cover both the destination
-    window and the event's current span, then treats the current span as free
-    (on top of whatever the provider already reports as free) before checking
-    whether the destination window is fully covered. Pass self_start/self_end
-    as None for a plain free check (a create has no self event to exclude).
-    """
-    window_start = _ensure_aware(window_start)
-    window_end = _ensure_aware(window_end)
-    if self_start is None or self_end is None:
-        duration = max(1, int((window_end - window_start).total_seconds() // 60))
-        slots = calendar.find_free_slots(
-            time_min=window_start,
-            time_max=window_end,
-            duration_minutes=duration,
-            timezone=timezone,
-        )
-        return any(slot.start <= window_start and slot.end >= window_end for slot in slots)
-
-    self_start = _ensure_aware(self_start)
-    self_end = _ensure_aware(self_end)
-    query_min = min(window_start, self_start)
-    query_max = max(window_end, self_end)
-    slots = calendar.find_free_slots(
-        time_min=query_min,
-        time_max=query_max,
-        duration_minutes=1,
-        timezone=timezone,
-    )
-    intervals = [(_ensure_aware(slot.start), _ensure_aware(slot.end)) for slot in slots]
-    clipped_self_start = max(self_start, query_min)
-    clipped_self_end = min(self_end, query_max)
-    if clipped_self_start < clipped_self_end:
-        intervals.append((clipped_self_start, clipped_self_end))
-    for start, end in _merge_time_intervals(intervals):
-        if start <= window_start and end >= window_end:
-            return True
-    return False
-
-
 # --- Read-only agenda listing (owner "what's on my calendar" reads) -----------------
 #
 # Separate from CalendarPort above: FIND_FREE_SLOTS answers "when am I free", this
@@ -742,6 +671,78 @@ def build_calendar_agenda_port(settings: Settings) -> CalendarAgendaPort | None:
     if api_key and user_id:
         return ComposioCalendarAgendaPort(api_key=api_key, user_id=user_id)
     return None
+
+
+def window_free_excluding_self(
+    calendar: CalendarPort,
+    *,
+    window_start: datetime,
+    window_end: datetime,
+    self_start: datetime | None,
+    self_end: datetime | None,
+    self_event_id: str | None = None,
+    agenda: CalendarAgendaPort | None = None,
+    timezone: str = "Asia/Jerusalem",
+) -> bool:
+    """True when [window_start, window_end) is free, without counting the
+    event being moved as a conflict with itself.
+
+    `find_free_slots` reports merged free/busy: another meeting that happens
+    to overlap the moved event's own current span is indistinguishable, in
+    that merged view, from the event's own busy block. So this only ever
+    "forgives" self-conflict when it is actually safe to:
+
+    - The destination does not overlap the event's current span at all: the
+      event cannot possibly be the thing making the destination busy, so a
+      plain provider free/busy check on the destination alone is exact.
+    - The destination DOES overlap the event's current span: free/busy alone
+      cannot tell self-busy from another-event-busy, so this reads the actual
+      events in the destination window through `agenda` (CalendarAgendaPort,
+      the same read used for "what's on my calendar"), drops only the exact
+      event being moved (by `self_event_id`), and refuses if any remaining
+      event still overlaps the destination -- every returned event counts as
+      busy, all-day included; provider `transparency` is not parsed. Refuses
+      (fails closed) if `agenda` is unavailable or the read fails.
+
+    Pass self_start/self_end as None for a plain free check (a create has no
+    self event to exclude).
+    """
+    window_start = _ensure_aware(window_start)
+    window_end = _ensure_aware(window_end)
+
+    def _plain_free_check(period_start: datetime, period_end: datetime) -> bool:
+        duration = max(1, int((period_end - period_start).total_seconds() // 60))
+        slots = calendar.find_free_slots(
+            time_min=period_start,
+            time_max=period_end,
+            duration_minutes=duration,
+            timezone=timezone,
+        )
+        return any(slot.start <= period_start and slot.end >= period_end for slot in slots)
+
+    if self_start is None or self_end is None:
+        return _plain_free_check(window_start, window_end)
+
+    self_start = _ensure_aware(self_start)
+    self_end = _ensure_aware(self_end)
+    overlaps_self = window_start < self_end and self_start < window_end
+    if not overlaps_self:
+        return _plain_free_check(window_start, window_end)
+
+    if agenda is None:
+        return False
+    try:
+        events = agenda.list_events(start=window_start, end=window_end)
+    except AdapterHttpError:
+        return False
+    for event in events:
+        if self_event_id is not None and event.event_id == self_event_id:
+            continue
+        event_start = _ensure_aware(event.start)
+        event_end = _ensure_aware(event.end)
+        if window_start < event_end and event_start < window_end:
+            return False
+    return True
 
 
 def _cap_agenda_limit(limit: int) -> int:

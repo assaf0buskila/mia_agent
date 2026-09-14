@@ -270,12 +270,18 @@ def test_calendar_agenda_tool_reports_ok_false_when_provider_reports_failure() -
     """A failed agenda read must never look like a free day: `successful: false`
     at the provider must surface as ok=False, not as an empty "nothing
     scheduled" agenda the model (and Assaf) would read as a genuinely free day.
+
+    Asserts the specific error the AdapterHttpError handler in _calendar_agenda
+    produces (not just ok=False), so this fails if that try/except is ever
+    reverted -- execute_tool's own generic exception handling would otherwise
+    also produce ok=False and hide the regression.
     """
     session = _session()
     try:
         ctx = _ctx(session, calendar_agenda=_RaisingCalendarAgendaPort(AdapterResponseError()))
         result = execute_tool("calendar_agenda", {"range": "today"}, ctx)
         assert result.ok is False
+        assert result.error.startswith("Calendar read failed (")
         assert "no events scheduled" not in (result.text or "")
     finally:
         session.close()
@@ -287,6 +293,7 @@ def test_calendar_agenda_tool_reports_ok_false_on_malformed_provider_payload() -
         ctx = _ctx(session, calendar_agenda=_RaisingCalendarAgendaPort(AdapterSchemaError()))
         result = execute_tool("calendar_agenda", {"range": "today"}, ctx)
         assert result.ok is False
+        assert result.error.startswith("Calendar read failed (")
         assert "no events scheduled" not in (result.text or "")
     finally:
         session.close()

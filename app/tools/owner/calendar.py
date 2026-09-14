@@ -129,12 +129,17 @@ def _calendar_reschedule(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     event = current.event
     end = start + timedelta(minutes=minutes)
     calendar = ctx.calendar or build_calendar_port(ctx.settings)
+    agenda = ctx.calendar_agenda
+    if agenda is None and ctx.settings.composio_ready():
+        agenda = build_calendar_agenda_port(ctx.settings)
     destination_free = window_free_excluding_self(
         calendar,
         window_start=start,
         window_end=end,
         self_start=event.start,
         self_end=event.end,
+        self_event_id=event.event_id,
+        agenda=agenda,
         timezone=ctx.timezone(),
     )
     if not destination_free:

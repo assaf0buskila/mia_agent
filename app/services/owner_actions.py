@@ -362,6 +362,7 @@ def execute_approved_owner_action_with_adapters(
     from app.integrations.calendar import (
         ComposioCalendarPort,
         DisabledCalendarPort,
+        build_calendar_agenda_port,
         window_free_excluding_self,
     )
     from app.integrations.calendar_booking import (
@@ -569,6 +570,9 @@ def execute_approved_owner_action_with_adapters(
             )
             ports["calendar"] = calendar
             ports["booking"] = booking
+            # Only used by the calendar.reschedule self-conflict re-check below;
+            # harmless (and unused) for calendar.create.
+            ports["agenda"] = build_calendar_agenda_port(settings)
             return not isinstance(calendar, DisabledCalendarPort) and not isinstance(
                 booking, DisabledCalendarBookingPort
             )
@@ -656,6 +660,8 @@ def execute_approved_owner_action_with_adapters(
                 window_end=end,
                 self_start=event.start,
                 self_end=event.end,
+                self_event_id=event.event_id,
+                agenda=ports.get("agenda"),
                 timezone=str(parameters["timezone"]),
             )
             return {
