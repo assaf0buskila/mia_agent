@@ -118,7 +118,10 @@ def test_only_explicit_pending_request_gets_an_existing_approval_keyboard() -> N
 
         pending_port = CapturingPort()
         _run("מה מחכה לאישור?", store, pending_port)
-        assert pending_port.sent
-        assert pending_port.sent[0].reply_markup is not None
+        # sent[0] is always the digest (no keyboard); this row, just inserted, is
+        # the newest pending proposal and so is always the first card after it.
+        assert len(pending_port.sent) >= 2
+        assert pending_port.sent[0].reply_markup is None
+        assert pending_port.sent[1].reply_markup is not None
     finally:
         db.close()

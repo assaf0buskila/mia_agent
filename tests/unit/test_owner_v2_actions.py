@@ -7,7 +7,6 @@ from uuid import uuid4
 
 import httpx
 import pytest
-from app.api.inbound_common import owner_telegram_reply_markup
 from app.brain.embeddings import FakeEmbeddingPort
 from app.brain.store import BrainStore
 from app.capabilities.types import Principal
@@ -16,8 +15,7 @@ from app.db.models import CrmIssueRow
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
 from app.domain.approvals import DECISION_APPROVED
-from app.domain.events import Channel
-from app.domain.owner.tasks import OwnerTaskType
+from app.domain.owner.callbacks import approval_token
 from app.domain.tools import AdapterResponseError
 from app.integrations.calendar import (
     CalendarEvent,
@@ -38,6 +36,7 @@ from app.integrations.composio_catalog import (
     ComposioCatalog,
 )
 from app.integrations.sheets import FakeSheetsPort
+from app.integrations.telegram_format import approval_keyboard
 from app.services.crm_v2 import CrmService
 from app.services.owner_actions import (
     decide_owner_action,
@@ -341,14 +340,17 @@ def test_concurrent_owner_proposals_keep_distinct_exact_bindings() -> None:
         assert first.proposal_id != second.proposal_id
         assert replay.approval_id == first.approval_id
         assert replay.created is False
-        markup = owner_telegram_reply_markup(
-            store,
-            channel=Channel.TELEGRAM,
-            task_type=OwnerTaskType.NOTE,
-            turn_approval_ids=(first.approval_id, second.approval_id),
-        )
+        # Each concurrently proposed approval id still binds its own independent
+        # approve/reject callback pair -- one card, one keyboard, per proposal id
+        # (see app.surfaces.owner._turn_approval_card_messages).
+        first_keyboard = approval_keyboard(approval_token(first.approval_id))
+        second_keyboard = approval_keyboard(approval_token(second.approval_id))
+        assert first_keyboard != second_keyboard
         callback_values = {
-            button["callback_data"] for row in markup["inline_keyboard"] for button in row
+            button["callback_data"]
+            for keyboard in (first_keyboard, second_keyboard)
+            for row in keyboard["inline_keyboard"]
+            for button in row
         }
         assert callback_values == {
             f"ok:{first.approval_id}",

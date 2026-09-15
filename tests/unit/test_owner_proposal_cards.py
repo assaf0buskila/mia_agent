@@ -385,3 +385,37 @@ def test_render_owner_approval_card_renders_legacy_website_edit_before_after() -
     assert "שינוי באתר" in card
     assert "מחיר ישן" in card
     assert "מחיר &lt;new&gt;" in card
+
+
+def test_crm_upsert_never_shows_system_owned_created_updated_fields() -> None:
+    """`created`/`updated` are computed from row timestamps, never from a proposal --
+    mutation coverage for the `SYSTEM_OWNED_FIELDS` skip in `_card_crm_upsert`: if
+    that `continue` were removed, the injected 2099 values below would leak onto
+    the card under a raw "created"/"updated" label (neither word appears anywhere
+    else in this card's Hebrew template).
+    """
+    envelope = {
+        "kind": "crm.upsert",
+        "version": 1,
+        "parameters": {
+            "fields": {
+                "name": "עדי",
+                "created": "2099-12-31T00:00:00Z",
+                "updated": "2099-12-31T00:00:00Z",
+            },
+            "contact_id": "c_9",
+            "expected_revision": 1,
+        },
+        "target": {
+            "contact_id": "c_9",
+            "revision": 1,
+            "snapshot_hash": "hx",
+            "fields": {"name": "", "created": "2000-01-01", "updated": "2000-01-01"},
+        },
+    }
+    card = render_owner_proposal_card(envelope)
+    assert "עדי" in card
+    assert "2099-12-31" not in card
+    assert "2000-01-01" not in card
+    assert "created" not in card
+    assert "updated" not in card

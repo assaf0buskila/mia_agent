@@ -147,7 +147,7 @@ async def run_owner_loop(
     # command is the sole path allowed to surface an existing pending row; a failed
     # draft/calendar turn must not attach an old one.
     if channel is Channel.TELEGRAM and task_type is OwnerTaskType.PENDING_APPROVALS:
-        outbound = _pending_approvals_messages(store, item=item, empty_reply=reply)
+        outbound = _pending_approvals_messages(store, item=item, digest_text=reply)
     else:
         prose = outbound_reply(item, text=reply, channel=channel, reply_markup=None)
         outbound = [(prose, "")]
@@ -157,33 +157,42 @@ async def run_owner_loop(
             )
 
     sent = False
-    with owner_stage("send", source_ref=item.get("id", ""), tool="telegram"):
-        for index, (message, label) in enumerate(outbound):
-            try:
+    # A label groups every chunk of one card (or is "" for the digest/prose, which
+    # is never grouped). Once one chunk of a card has failed to send, every later
+    # chunk sharing its label is skipped -- including the keyboard-bearing last
+    # chunk -- so a partially-shown card can never still hand out a live approve
+    # button. The card's approval row is untouched: still pending, unretried.
+    failed_labels: set[str] = set()
+    for index, (message, label) in enumerate(outbound):
+        if label and label in failed_labels:
+            continue
+        try:
+            with owner_stage("send", source_ref=item.get("id", ""), tool="telegram"):
                 await port.send(message)
-                if index == 0:
-                    sent = True
-                    if delivery_state is not None:
-                        delivery_state["sent"] = True
-            except (RuntimeError, MiaError, AdapterHttpError) as exc:
-                # TelegramPort.send raises TelegramSendError (a MiaError) and
-                # AdapterHttpError. `except RuntimeError` only caught the
-                # not-configured DisabledMessagePort, so a Telegram 429 — likely on a
-                # split 4096-char reply — threw away an answer the owner had already
-                # waited and paid for, and left the webhook row `received`.
-                if index == 0:
-                    sent = False
-                else:
-                    # A card is a follow-up to the primary reply, not the reply
-                    # itself: its own send failure is logged (never the proposal's
-                    # content) and the underlying approval row is left exactly as
-                    # it was -- still pending, never retried or re-executed here.
-                    _log.warning(
-                        "owner proposal card send failed reason=%s error=%s label=%s",
-                        "card_send_failed",
-                        type(exc).__name__,
-                        label,
-                    )
+            if index == 0:
+                sent = True
+                if delivery_state is not None:
+                    delivery_state["sent"] = True
+        except (RuntimeError, MiaError, AdapterHttpError) as exc:
+            # TelegramPort.send raises TelegramSendError (a MiaError) and
+            # AdapterHttpError. `except RuntimeError` only caught the
+            # not-configured DisabledMessagePort, so a Telegram 429 — likely on a
+            # split 4096-char reply — threw away an answer the owner had already
+            # waited and paid for, and left the webhook row `received`.
+            if index == 0:
+                sent = False
+            else:
+                # A card is a follow-up to the primary reply, not the reply
+                # itself: its own send failure is logged (never the proposal's
+                # content) and the underlying approval row is left exactly as
+                # it was -- still pending, never retried or re-executed here.
+                failed_labels.add(label)
+                _log.warning(
+                    "owner proposal card send failed reason=%s error=%s label=%s",
+                    "card_send_failed",
+                    type(exc).__name__,
+                    label,
+                )
     try:
         store.mark_webhook(
             provider=provider,
@@ -270,14 +279,20 @@ def _turn_approval_card_messages(
 
 
 def _pending_approvals_messages(
-    store: LeadStore, *, item: dict[str, str], empty_reply: str
+    store: LeadStore, *, item: dict[str, str], digest_text: str
 ) -> list[tuple[OutboundMessage, str]]:
-    """The explicit "what's pending?" view: a card per proposal, newest first, capped."""
+    """The explicit "what's pending?" view: the digest, then a card per proposal.
+
+    `digest_text` (`format_pending_approvals_ack`'s output) is always sent as message
+    index 0, without a keyboard -- the same text `run_owner_loop` persists as the
+    canonical outbound event and returns as `last_reply`, so the audit trail and the
+    API can never claim a message the owner did not actually receive.
+    """
+    digest = outbound_reply(item, text=digest_text, channel=Channel.TELEGRAM, reply_markup=None)
     cards, remaining = pending_approval_cards(store, limit=_MAX_PENDING_CARDS)
     if not cards:
-        prose = outbound_reply(item, text=empty_reply, channel=Channel.TELEGRAM, reply_markup=None)
-        return [(prose, "")]
-    messages: list[tuple[OutboundMessage, str]] = []
+        return [(digest, "")]
+    messages: list[tuple[OutboundMessage, str]] = [(digest, "")]
     for approval_id, card_text in cards:
         keyboard = approval_keyboard(approval_token(approval_id))
         messages.extend(

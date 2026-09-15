@@ -184,9 +184,12 @@ def _card_composio_write(parameters: Mapping[str, Any], target: Mapping[str, Any
         return _card("שליחת מייל", fields, note="המייל יישלח.")
 
     if toolkit == "LINKEDIN":
-        # Full text, never bounded: this is the actual post the owner is publishing.
+        # A string argument (post text, visibility, ...) shows in full, never
+        # bounded: this is the actual post the owner is publishing. A non-string
+        # argument (nested media, lists, ...) has no natural "full" rendering, so
+        # it gets the same formatted-and-bounded treatment as any other tool.
         fields = "\n".join(
-            f"{bold(key)}: {esc(str(value))}"
+            f"{bold(key)}: {esc(value if isinstance(value, str) else _bounded(value))}"
             for key, value in arguments.items()
             if str(value or "").strip()
         )
