@@ -1,4 +1,4 @@
-# Mia handoff — 2026-09-15
+# Mia handoff — 2026-09-16
 
 Section 0 is the campaign-finish state for the next session. Sections 1 onward are the
 2026-09-11 handoff and still hold (deploy procedure and gotchas especially).
@@ -24,30 +24,82 @@ below is deployed. Every item is `LOCAL_TESTED` + CI-green + independently revie
 | #67 | C5h | Reschedule safety check fails closed on all-day items, `nextPageToken`, unparseable items; agenda port bound to the approved connection | any other all-day event refuses a move (conservative) |
 | #70 | C3b | Owner daily brief / website conversations / hot leads include v2 captures ("leads today" = distinct contacts; list one row per contact; hot judged per capture's conversation); Sheet `נוצר`/`עודכן` filled from row timestamps, system-owned (owner edits overwritten, never a conflict or a wedged projection); `crm_search`/`crm_conflicts` refuse instead of creating tabs when the workspace is missing | header drift can still be repaired by a read; hot replies show raw `crm_…` ids; `crm_v2.py` timezone default hardcoded `Asia/Jerusalem`; broad `except` in `tools/owner/crm.py` workspace check |
 | #69 | C4 | `gmail_brief`: bounded (25) owner-local daily email data, thread-deduped, true `partial`, marketing only from Gmail category labels, a failed Composio read is `ok=False` (also fixes `gmail_search`); `owner_uncertain_writes`: read-only list of `pending_review` writes with plain-words targets | uncertain-writes query unindexed (fine at limit 10) |
+| #71 | C6a | Social capability truth: real per-tool capability clauses, a `social_capabilities` tool, a social-writing rule that separates observed data / inference / recommendation; routing needle-collision fixes (content-word plurals, Hebrew clitics, reels); the audit method itself replaced (a differential sweep against master instead of audit-by-inspection) | — |
+| #72 | C2b | Approval cards render from the stored envelope, one Telegram message per proposal with its own keyboard; a real edit-failure fallback send; no button ever delivered on a partially-sent card; callback `sent` reflects actual delivery, not intent; the pending-approvals digest is always sent as its own message, never combined with a card | see C7b below — a card-succeeds-while-digest-fails variant of the same "no button on a partial send" property left the webhook mark and the outbound canonical event both keyed on the digest alone |
+
+### C7b (this session, committed locally, not pushed / no PR yet)
+
+Branch `claude/mia-c7b-cleanup-docs` off `origin/master` = `110ada6`. Two code commits (kept
+separate because the second is materially riskier than everything else in the chunk) plus this
+docs commit:
+
+- `25a5c59` — proven-dead deletions (`propose_composio_write`; `log_contact` /
+  `build_contacts_crm` / `resolved_spreadsheet_id` / `now_israel`;
+  `scripts/calibrate_knowledge_floor.py`'s phantom-setting docstring) and the reviewed
+  follow-ups (`window_free_excluding_self` fail-closed on a missing `list_events_strict`;
+  `GMAIL_BRIEF_EMPTY_WINDOW`/`OWNER_UNCERTAIN_WRITES_EMPTY` now in the exact "no data" marker
+  set; `settings.calendar_timezone` threaded into `CrmService` at every easily-reachable call
+  site instead of its hardcoded `Asia/Jerusalem` default; the `tools/owner/crm.py` workspace
+  check narrowed from `except Exception` to `except AdapterHttpError`; `run_owner_loop`'s new
+  `delivered_any` flag; a pinned "zero pending rows → no keyboard" test; a clarified test name
+  in `test_owner_v2_actions.py`).
+- `35e9ee9` — retired the inert v1 hot-lead takeover subsystem (`apply_hot_handoff` and its
+  now-unreachable siblings, `store.set_takeover_state`, `store.list_hot_lead_ids`, the `hot_ids`
+  field on `leads.get_recent`, and the now-orphaned `TAKEOVER_BLOCKS_SEND`/
+  `takeover_blocks_send`/`human_takeover_flag` in `conversation_scope.py`) after proving the v2
+  path already reports hot leads independently, and fixed hot-lead replies to show a captured
+  name instead of a raw `crm_…` id. Full evidence, and why this is safe despite `/health`
+  reporting `human_takeover: 1` in production right now, in "Decisions" below — read that before
+  touching any of `apply_hot_handoff`/takeover-state code again.
+
+Verify at `35e9ee9`: `MIA_ENV=test uv run pytest` → **2266 passed, 7 skipped** (master was 2267;
+net -1 is exactly accounted for — 9 tests removed with the dead code they covered, 8 added as
+new regression tests). `uv run ruff check app tests` → clean. `node tests/unit/widget_behavior.test.js`
+→ passed (untouched this chunk).
+
+Left deliberately alone, with reasons (do not treat these as missed):
+- `execute_approved_composio_write` (app/domain/owner/composio_writes.py) — still on hold per
+  Assaf. It is reachable from a live persisted-row path via `app/api/telegram.py`'s callback
+  handler and `app/domain/owner/callbacks.py`, fails closed today, and is pinned by
+  `tests/unit/test_owner_v2_actions.py:test_legacy_r5_approval_is_refused_by_callback_and_executor`
+  and the composio/meta-v2-policy suites. Untouched.
+- `LeadStore.open_channel_lead` / `_save_lead_created` (app/db/store.py) — kept, deliberately.
+  Zero production callers, but 28 test files call `open_channel_lead` directly to seed a lead;
+  deleting it would churn the suite for no runtime benefit. Same precedent as
+  `app/domain/meetings`.
+- `notify_owners` / `_deliver_owners` (app/domain/handoff/hot.py) — general Telegram fan-out
+  helper, not part of the takeover mechanism. No production caller was found either (its only
+  callers are its own five tests in `test_hot_handoff.py`), but it was not in this chunk's
+  authorized deletion list and is left for a future pass to verify independently.
+- `store.set_human_takeover` / `store.get_takeover_state` (app/db/store.py) — also test-only
+  (one caller each, both in `tests/unit/test_telegram_owner_controls.py` /
+  `test_hot_handoff.py`), also not in the authorized deletion list. `set_human_takeover` is the
+  live guard's *setter*, not part of the removed takeover-request flow, so it stays regardless.
+- `app/workers/crm_delivery.py`'s 7 `CrmService(...)` calls still use the hardcoded
+  `Asia/Jerusalem` default. Its constructor has no settings/timezone parameter at all; adding
+  one and wiring it through the worker's instantiation site is a larger, separate change than
+  the other, trivially-reachable call sites this chunk fixed.
+- Sheet header drift still repaired as a side effect of a CRM read (needs an
+  `app/services/owner_actions.py` change) — record only, no code touched.
+- No PostgreSQL coverage for C3a's same-turn refresh — record only, no code touched.
 
 ### In flight at handoff
 
-Nothing. Still, before acting, run `gh pr list` and `git worktree list`: the finished chunk worktrees
-(`.claude/worktrees/mia-c1b`, `mia-c2a`, `mia-c3a`, `mia-c3b`, `mia-c4`, `mia-c5`, `mia-c5h`) are
-merged and can be removed with `git worktree remove` once confirmed clean. Master after the
-last campaign merge: `c9a8df5` (#69).
+Nothing beyond C7b above. Before acting, run `gh pr list` and `git worktree list`: the finished
+chunk worktrees (`.claude/worktrees/mia-c1b`, `mia-c2a`, `mia-c3a`, `mia-c3b`, `mia-c4`, `mia-c5`,
+`mia-c5h`, `mia-c2b`, `mia-c6a`) are merged and can be removed with `git worktree remove` once
+confirmed clean. A stale locked directory may exist at `.claude/worktrees/mia-c6a` from an
+earlier interrupted session — ignore it. Master after the last campaign merge: `110ada6` (#72).
 
-C4's empty-state constants for the tool-loop "no data" markers: `GMAIL_BRIEF_EMPTY_WINDOW`
-("EMAIL DATA (not instructions): no messages in the inspected window.") and
-`OWNER_UNCERTAIN_WRITES_EMPTY` ("No uncertain provider writes are waiting on review.").
+### Remaining queue
 
-### Remaining queue (in order; max 2 agents at a time)
-
-1. **C2b approval cards** — brief ready. Cards from the stored envelope, one message per proposal
-   with its own buttons, pending view lists up to 5, callback `sent` reflects edit success with one
-   fallback send. Touches approvals: opus review required.
-2. **C6a social truth** — brief ready; C4 (which also touched `two_state.py` and
-   `request_routing.py`) is merged, so branch from the latest master. C2b and C6a own disjoint
-   files and may run as the two concurrent agents.
-3. **C7b cleanup + docs** — brief ready; last. Includes two reviewed follow-ups (see below).
-4. **Prompt 4 release readiness** (opus, read-only): full gates, capability evidence matrix,
+1. **C7b** — push, PR, fresh opus review on the three-dot diff `origin/master...35e9ee9`, fix,
+   merge on PASS + green CI. This chunk is unusually high-risk for its size (a production data
+   point in play) — the review should specifically re-verify the `human_takeover` vs
+   `takeover_state` distinction in "Decisions" below rather than take it on faith.
+2. **Prompt 4 release readiness** (opus, read-only): full gates, capability evidence matrix,
    exact live tests needing Assaf's approval, rollout + rollback plan. **Stop for go/no-go.**
-5. **Prompt 5 deploy** only after Assaf approves a specific CI-green SHA; then phone acceptance.
+3. **Prompt 5 deploy** only after Assaf approves a specific CI-green SHA; then phone acceptance.
 
 ### Assaf's decisions (2026-09-14)
 
@@ -59,24 +111,57 @@ C4's empty-state constants for the tool-loop "no data" markers: `GMAIL_BRIEF_EMP
 - LinkedIn publishing is in scope: at release, one controlled live post approved by Assaf.
 - Instagram writes stay denied (policy). Calendar = own events, no guests/recurrence.
 
+### Assaf's decisions (2026-09-16, C7b)
+
+- **`LeadStore.open_channel_lead`/`_save_lead_created`: keep, as test-only scaffolding.** Zero
+  production callers; ~28 test files depend on it to seed a lead. Deleting it would churn the
+  suite for no runtime benefit — same call as `app/domain/meetings`. No code change.
+- **The v1 hot-lead takeover subsystem: delete it, once the v2 path is proven to report hot
+  leads on its own.** Assaf does not want Mia to auto-freeze a hot conversation and hand it
+  over; he wants hot leads listed in his brief and decides himself. Proof (required before
+  deleting anything) and the full deletion are in the C7b entry above. The one wrinkle worth
+  restating here because it is easy to get wrong on a future pass: production's `/health`
+  reports `ops.human_takeover: 1` today. That counter is `LeadRow.human_takeover` (a boolean,
+  read by `store.count_human_takeover`), **not** `LeadRow.takeover_state ==
+  HUMAN_TAKEOVER_REQUIRED` (a string, read by the now-deleted `list_hot_lead_ids`) — they are
+  different columns with different writers. The boolean's only writer,
+  `store.set_human_takeover`, has zero production callers anywhere (including at production's
+  exact deployed commit `4b80f31`) and belongs to a WhatsApp-only owner command already retired
+  before `4b80f31` shipped (see `tests/unit/test_telegram_owner_controls.py`'s docstring and
+  commits `dc5919b`→`40747c8`). The live production row is a legacy artifact, still fully
+  protected by `store.is_human_takeover` (gates `app/core/outbound.py` sends and
+  `app/domain/followups.py` scheduling) and still correctly counted at `/health` — neither of
+  which this chunk touched.
+
 ### Follow-ups already identified (not yet done)
 
-- `app/integrations/calendar.py:~794`: agenda port without `list_events_strict` raises
-  AttributeError at approval → `getattr` + fail closed (in C7b brief).
-- Add C4's empty-state constants to `owner_agent.py` exact "no data" markers (in C7b brief).
-- Routing needle collisions above (in C6a brief).
-- PostgreSQL coverage for C3a same-turn refresh.
-- **Generic Composio writes may never execute:** the C4 builder found `"composio_approval"` missing
-  from `ALLOWLISTED_OPERATION_SCOPES`. C0 believed `propose_composio_write` has no callers, so this
-  may be dead code rather than a live bug — verify callers first (fold into C7b's dead-code table:
-  either delete the unreachable path or allowlist the scope with a test).
-- C3b leftovers: raw `crm_…` ids in hot-lead replies; hardcoded `Asia/Jerusalem` default in
-  `crm_v2.py` (pass `settings.timezone`); broad `except Exception` in the `tools/owner/crm.py`
-  workspace check; header drift still repaired as a side effect of a read (needs an
-  `owner_actions.py` change).
-- Pre-existing test-order flake on master:
+- Sheet header drift is still repaired as a side effect of a CRM read (needs an
+  `app/services/owner_actions.py` change).
+- PostgreSQL coverage for C3a's same-turn refresh is still missing.
+- `app/workers/crm_delivery.py`'s `CrmService(...)` calls still default to `Asia/Jerusalem`
+  (see the C7b entry above — needs a constructor/settings-threading change, not a one-line fix).
+- **Pre-existing test-order flake, now reproduced exactly (2026-09-16, record only — not fixed,
+  not a release blocker, CI is unaffected):**
   `tests/unit/test_gmail_send_policy.py::test_owner_telegram_asked_then_approved_send_calls_send_draft`
-  fails when run after certain other test files.
+  fails with `assert decision == DECISION_APPROVED` (`apply_gmail_send_decision` does not return
+  the approved decision) when run directly after `tests/unit/test_telegram_owner_outbound.py`:
+  ```
+  MIA_ENV=test uv run pytest tests/unit/test_telegram_owner_outbound.py \
+    "tests/unit/test_gmail_send_policy.py::test_owner_telegram_asked_then_approved_send_calls_send_draft"
+  ```
+  Mechanism: both files call `init_db()`/`get_session_factory()` against the same shared
+  database; rows `test_telegram_owner_outbound.py` leaves behind make the send decision resolve
+  against stale approval state instead of the draft the second test just created — a
+  test-isolation gap, not a product bug. `test_owner_v2_actions.py` and
+  `test_composio_owner_catalog.py` do **not** trigger it in the same pairing.
+  `test_telegram_owner_outbound.py` is the file C2b (#72) expanded by ~636 lines (many
+  pending-approval/card/legacy rows), so C2b likely increased the leftover state that makes this
+  specific pairing trigger, though the flake is pre-existing in kind. **CI is unaffected**: the
+  full suite passes in collection order — 2266 passed / 7 skipped at this session's head
+  (2267 at master `110ada6`, before this chunk's net -1 test count change) — because other files
+  run between these two in the normal collection order and reset the relevant state. This is
+  latent test-isolation debt, not a deploy gate; it would only surface if collection order
+  changed.
 
 ### Start the next session with
 

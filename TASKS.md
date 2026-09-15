@@ -1,6 +1,6 @@
 # TASKS.md
 
-Updated 2026-09-15. Production `/health` last reported commit `4b80f31` (#60) — nothing from the
+Updated 2026-09-16. Production `/health` last reported commit `4b80f31` (#60) — nothing from the
 campaign is deployed. Detail and next-session instructions in `HANDOFF.md` section 0.
 
 ## Campaign finish (plan: `docs/MIA_CAMPAIGN_FINISH_PLAN.md`)
@@ -18,9 +18,11 @@ Deploy is a separate go. Max 2 agents at once (session usage limit).
 - [x] C3b — owner reports count v2 leads; Sheet created/updated system-owned; CRM reads stop
       creating tabs (#70)
 - [x] C4 — `gmail_brief` daily email data; `owner_uncertain_writes` (#69)
-- [ ] C2b — approval cards from the stored envelope; callback `sent` truth (brief ready)
-- [ ] C6a — social capability truth + routing collisions (brief ready; after C4)
-- [ ] C7b — proven-dead code, reviewed follow-ups, docs (brief ready; last)
+- [x] C2b — approval cards from the stored envelope; callback `sent` truth (#72)
+- [x] C6a — social capability truth + routing collisions (#71)
+- [x] C7b — proven-dead code, v1 hot-lead takeover retired, reviewed follow-ups, docs.
+      Committed locally on `claude/mia-c7b-cleanup-docs`, not yet pushed/PR'd. See
+      `HANDOFF.md` section 0 for the SHAs, evidence and what was deliberately left alone.
 - [ ] Prompt 4 — release readiness, go/no-go → **stop for Assaf**
 - [ ] Prompt 5 — approved deploy + phone acceptance (live LinkedIn post, email send, calendar
       event, website lead — each approved individually)
@@ -57,9 +59,11 @@ Deploy is a separate go. Max 2 agents at once (session usage limit).
       demo) once capture is proven. Merging auto-deploys to Vercel.
 - [ ] Product decision: is meeting booking (`app/domain/meetings`) retired, or waiting to
       be re-wired? It has no callers and ~100 tests.
-- [ ] Small: `build_contacts_crm` is an orphan; `scripts/calibrate_knowledge_floor.py`
-      tunes a setting that no longer exists; the main checkout still has stale uncommitted
-      `crm_v2.py` edits superseded by #55.
+- [x] `build_contacts_crm` (with `log_contact`/`resolved_spreadsheet_id`/`now_israel`) and
+      the `scripts/calibrate_knowledge_floor.py` phantom-setting docstring — both fixed
+      in C7b.
+- [ ] The main checkout still has stale uncommitted `crm_v2.py` edits superseded by #55
+      (unverified from this worktree).
 
 ## Live acceptance (Assaf)
 
