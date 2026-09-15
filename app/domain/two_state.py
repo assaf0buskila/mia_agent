@@ -135,7 +135,24 @@ _SHEETS_NEEDLES: tuple[str, ...] = (
 _TOOLKIT_NEEDLES: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
         "instagram",
-        ("instagram", "אינסטגרם", "אינסטה", "ig ", " ריל", "reel", "reels", "פוסט"),
+        (
+            "instagram",
+            "אינסטגרם",
+            "אינסטה",
+            "ig ",
+            " ריל",
+            "reel",
+            "reels",
+            # Full words, not the bare "ריל" root: "ריל" is a substring of an
+            # unrelated real word ("גריל" = grill), and a bare needle would
+            # collide the way "excel"/"ig " used to before whole-word matching.
+            # " ריל" above already covers a space-preceded "ריל"/"רילים"/"רילס";
+            # these two cover the glued form ("הרילים"/"הרילס", the definite
+            # article "ה" attached directly with no space) that " ריל" cannot.
+            "רילים",
+            "רילס",
+            "פוסט",
+        ),
     ),
     ("gmail", ("gmail", "מייל", "inbox", "דואר")),
     ("calendar", ("יומן", "calendar", "פגישה", "agenda")),
@@ -179,7 +196,21 @@ _SHEETS_WEAK_NEEDLES = frozenset({"crm"})
 # mention is at least as often a CRM *write* that merely mentions LinkedIn as
 # context ("add the linkedin lead to crm") as it is a content topic. Requiring one
 # of these content words keeps the override scoped to what it was built for.
-_SOCIAL_CONTENT_WORDS: tuple[str, ...] = ("post", "פוסט", "comment", "caption")
+# Plurals and the gerund are included up front (unlike the audit below, which
+# found most inflected forms not worth adding): the override already requires a
+# bare "crm" plus an explicit LinkedIn mention before this list is even
+# consulted, so a wider list here carries no false-positive risk the way a wider
+# _TOOLKIT_NEEDLES entry would.
+_SOCIAL_CONTENT_WORDS: tuple[str, ...] = (
+    "post",
+    "posts",
+    "posting",
+    "פוסט",
+    "comment",
+    "comments",
+    "caption",
+    "captions",
+)
 
 # Whole-word matching (below) is stricter than the old substring check, so it can
 # silently lose an inflected form the old check caught only by accident (e.g.
@@ -206,21 +237,34 @@ _SOCIAL_CONTENT_WORDS: tuple[str, ...] = ("post", "פוסט", "comment", "captio
 #     since the needle is longer than it, so there is nothing to lose here.
 #   - A possessive ("LinkedIn's", "Instagram's") is unaffected either way: `'` is
 #     not a word character, so it already reads as a boundary on its own.
+#   - The audit above covered only the ASCII needles this fix touches; a
+#     parallel gap in the pre-existing Hebrew " ריל" needle (glued to the
+#     definite article, "הרילים"/"הרילס") was found on a later pass and fixed
+#     the same way -- see "רילים"/"רילס" in the instagram tuple above.
 
 
 @cache
 def _latin_word_pattern(needle: str) -> re.Pattern[str]:
-    # A boundary defined only against a Latin/Hebrew *letter* on either side --
-    # not Python's `\w` (letters + digits + underscore). `\w` made
-    # "instagram_insights" and "gmail_brief" fail to match their own toolkit name
-    # (no transition between two `\w` characters at the underscore) and made a
-    # spreadsheet tab name like "Sheet2" fail the same way (no transition between
-    # a letter and a digit). `[^\W\d_]` is "a `\w` character that is not a digit
-    # and not `_`", i.e. a letter -- so both a digit and an underscore now read as
-    # a boundary, while an adjacent *letter* ("excellent", "spreadsheet") still
-    # correctly blocks the match.
+    # A boundary defined only against an ASCII Latin letter on either side. Two
+    # earlier, broader classes were tried and rejected:
+    #   - Python's own `\w` (letters + digits + underscore) made
+    #     "instagram_insights"/"gmail_brief" fail to match their own toolkit name
+    #     (no transition between two `\w` characters at the underscore), and a
+    #     spreadsheet tab name like "Sheet2" fail the same way (no transition
+    #     between a letter and a digit).
+    #   - `[^\W\d_]` ("a `\w` character that is not a digit and not `_`", i.e.
+    #     any Unicode letter) fixed both of those, but is Unicode-wide: it
+    #     counts a Hebrew letter as blocking too, so an ASCII needle glued
+    #     directly to a Hebrew clitic with no space -- "הCRM" (definite article
+    #     "ה" + "CRM"), "בinstagram" ("in instagram") -- stayed unmatched even
+    #     though nothing English is actually adjacent.
+    # `[A-Za-z]` is a strict subset of `[^\W\d_]`, so this can only ever ADD
+    # matches relative to it, never remove one: every P1 false positive
+    # ("excellent", "big ", "config ") is still blocked by its adjacent ASCII
+    # letter, while a digit, an underscore, a space, punctuation, AND a Hebrew
+    # letter all now read as a boundary.
     esc = re.escape(needle.strip())
-    return re.compile(rf"(?<![^\W\d_]){esc}(?![^\W\d_])")
+    return re.compile(rf"(?<![A-Za-z]){esc}(?![A-Za-z])")
 
 
 def _needle_hit(needle: str, *, blob: str, text: str) -> bool:
@@ -229,15 +273,16 @@ def _needle_hit(needle: str, *, blob: str, text: str) -> bool:
     A loose substring match let "excel" (sheets) fire inside "excellent" and "ig "
     (instagram, meant as the standalone abbreviation) fire inside "big " or
     "config " -- the trailing space was meant as a boundary but a substring check
-    still finds it as a suffix of a larger word. The letter-only boundary above
-    fixes every one of those without touching intentional matches, an inflected
-    form the old substring check happened to catch (see the audit above), or a
-    needle glued to a digit or underscore ("Sheet2", "gmail_brief").
-    Hebrew needles keep the old substring behaviour: the same boundary treats
-    Hebrew letters as letters too, so it cannot separate one Hebrew word glued to
-    another ("שיט" inside "שיטה") any better than a plain substring check does --
-    the sheets/linkedin tie-break in `asked_toolkit` is what actually guards that
-    one Hebrew collision on record, not this function.
+    still finds it as a suffix of a larger word. The ASCII-letter-only boundary
+    above fixes every one of those without touching intentional matches, an
+    inflected form the old substring check happened to catch (see the audit
+    above), a needle glued to a digit or underscore ("Sheet2", "gmail_brief"),
+    or one glued directly to a Hebrew clitic with no space ("הCRM", "בinstagram").
+    Hebrew needles keep the old plain-substring behaviour and never reach the
+    boundary check above at all, so a Hebrew word glued to another ("שיט" inside
+    "שיטה") is exactly as unguarded as before -- the sheets/linkedin tie-break in
+    `asked_toolkit` is what actually guards that one Hebrew collision on record,
+    not this function.
     """
     if needle.strip().isascii():
         pattern = _latin_word_pattern(needle)

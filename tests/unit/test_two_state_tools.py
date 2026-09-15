@@ -218,6 +218,72 @@ def test_asked_toolkit_linkedin_topic_outranks_weak_crm_needle() -> None:
     assert asked_toolkit("update the crm sheet, also a linkedin post") == "sheets"
 
 
+def test_asked_toolkit_crm_linkedin_content_word_gate_covers_plurals_and_gerund() -> None:
+    """F1 regression: the content-word gate (P2-2) was itself narrowed by the
+
+    exact inflection-loss class the P2-1 audit was built to catch, just applied
+    to the new `_SOCIAL_CONTENT_WORDS` tuple instead of `_TOOLKIT_NEEDLES`. A
+    plural ("posts", "comments", "captions") or the gerund ("posting") must gate
+    the override exactly like the singular "post"/"comment"/"caption" already do.
+    """
+    assert asked_toolkit("linkedin posts about crm") == "linkedin"
+    assert asked_toolkit("linkedin comments about crm") == "linkedin"
+    assert asked_toolkit("linkedin captions about crm") == "linkedin"
+    assert asked_toolkit("posting about crm on linkedin") == "linkedin"
+
+
+def test_asked_toolkit_ascii_needle_after_a_glued_hebrew_clitic_still_matches() -> None:
+    """F2 regression: the letter-only boundary from P3-1 (`[^\\W\\d_]`) still
+
+    counted a Hebrew letter as a blocking "letter", so an ASCII needle glued
+    directly to a Hebrew clitic with no space -- the definite article "ה" ("the"),
+    or a bare preposition like "ב" ("in/on") -- matched nothing, even though the
+    hyphenated spelling of the same thing already worked. The boundary is now
+    ASCII-Latin-letter-only, so a Hebrew letter reads as a boundary; every P1/
+    P3-1 example (English word-adjacency, digit- and underscore-glued names)
+    stays exactly as before since none of those involve a Hebrew letter.
+    """
+    assert asked_toolkit("תעדכני את הCRM") == "sheets"
+    assert asked_toolkit("בinstagram שלי") == "instagram"
+    # The already-working hyphenated spelling is unaffected.
+    assert asked_toolkit("תעדכני את ה-CRM") == "sheets"
+    # P1/P3-1 examples, re-run against the new boundary class.
+    assert asked_toolkit("excellent work") == ""
+    assert asked_toolkit("she excels at her job") == ""
+    assert asked_toolkit("a spreadsheet is not a sheet") == "sheets"
+    assert asked_toolkit("a big meeting tomorrow") == ""
+    assert asked_toolkit("update the config file") == ""
+    assert asked_toolkit("install the calendar integration") == "calendar"
+    assert asked_toolkit("check my calendar for an instant meeting") == "calendar"
+    assert asked_toolkit("open the gmail instance") == "gmail"
+    assert asked_toolkit("constant instability in traffic") == "ga4"
+    assert asked_toolkit("check instagram_insights") == "instagram"
+    assert asked_toolkit("run gmail_brief for today") == "gmail"
+    assert asked_toolkit("what's in Sheet2") == "sheets"
+
+
+def test_asked_toolkit_hebrew_reels_glued_to_the_definite_article_still_matches() -> None:
+    """F3 regression: the Hebrew "reel" needle (" ריל", leading space required)
+
+    only ever matched a space-preceded occurrence, so the definite article "ה"
+    ("the") attached directly with no space -- "הרילים"/"הרילס", the form Assaf
+    actually types -- matched nothing, while the unprefixed form already worked.
+    "רילים"/"רילס" are added as their own needles to cover the glued form; the
+    bare root "ריל" is deliberately NOT added, since it is a substring of the
+    unrelated real word "גריל" (grill) and would reintroduce the exact
+    substring-collision class whole-word matching removed for the ASCII needles.
+    """
+    assert asked_toolkit("איך הרילים שלי עובדים") == "instagram"
+    assert asked_toolkit("הרילס שלי") == "instagram"
+    # Already worked before this fix (space-preceded); must keep working.
+    assert asked_toolkit("רילים שלי") == "instagram"
+    assert asked_toolkit("תעלי לי ריל") == "instagram"
+    # Guard: the unrelated real word containing "ריל" as a substring must not
+    # collide, with or without the definite article.
+    assert asked_toolkit("ארוחת גריל") == ""
+    assert asked_toolkit("הגריל מוכן") == ""
+
+
 def test_is_social_writing_turn_matches_linkedin_instagram_and_content_only() -> None:
     for text in (
         "LinkedIn post about crm",
