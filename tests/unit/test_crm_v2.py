@@ -18,6 +18,7 @@ from app.db.models import (
     CrmIssueContactRow,
     CrmIssueRow,
     CrmOutboxRow,
+    CrmSyncSnapshotRow,
 )
 from app.integrations.sheets import FakeSheetsPort
 from app.services.crm_v2 import ActivityInput, CrmError, CrmRevisionConflict, CrmService
@@ -1272,3 +1273,186 @@ def test_refresh_pending_site_brief_refuses_non_pending_or_foreign_jobs(
         # job_b belongs to a different contact than the one passed in, even though
         # it is pending, and must never be modified.
         assert json.loads(refreshed_b.payload_json)["text"] == "original b"
+
+
+def test_contact_view_fills_created_and_updated_in_owner_local_iso(
+    sessions: sessionmaker[Session],
+) -> None:
+    with sessions() as session:
+        fixed_now = datetime(2026, 9, 6, 13, 16, 47, tzinfo=UTC)
+        service = CrmService(session, now=fixed_now, timezone="Asia/Jerusalem")
+        created = service.capture({"phone": "0509999001", "name": "Dana"}, source_ref="seed:ts")
+        session.commit()
+        assert created.contact is not None
+        # Asia/Jerusalem is UTC+3 in September (DST).
+        assert created.contact.fields["created"] == "2026-09-06T16:16:47+03:00"
+        assert created.contact.fields["updated"] == "2026-09-06T16:16:47+03:00"
+
+        later = datetime(2026, 9, 7, 6, 0, 0, tzinfo=UTC)
+        updater = CrmService(session, now=later, timezone="Asia/Jerusalem")
+        updated = updater.capture(
+            {"phone": "0509999001", "business": "Studio"}, source_ref="seed:ts:2"
+        )
+        session.commit()
+        assert updated.contact is not None
+        # created_at never moves after the row exists; updated_at tracks the edit.
+        assert updated.contact.fields["created"] == "2026-09-06T16:16:47+03:00"
+        assert updated.contact.fields["updated"] == "2026-09-07T09:00:00+03:00"
+
+
+def test_owner_edit_to_other_field_produces_no_conflict_from_timestamp_columns(
+    sessions: sessionmaker[Session],
+) -> None:
+    with sessions() as session:
+        service = CrmService(session, now=datetime(2026, 9, 6, 13, 0, 0, tzinfo=UTC))
+        created = service.capture(
+            {"phone": "0509999002", "name": "Base", "business": "Old"}, source_ref="seed"
+        )
+        assert created.contact is not None
+        service.mark_contact_synced(created.contact.id, row_number=2)
+        session.commit()
+
+        # The live Sheet shows real, non-empty text in the created/updated cells
+        # (written there by a prior projection), while the owner edits only "business".
+        displayed_created = created.contact.fields["created"]
+        displayed_updated = created.contact.fields["updated"]
+        sheet = [
+            "Base",
+            "0509999002",
+            "",
+            "",
+            "New Business",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            displayed_created,
+            displayed_updated,
+            "",
+        ]
+        sheet.append(created.contact.id)
+        assert len(sheet) == 15
+        merged = service.import_sheet_contact(sheet, row_number=2)
+        session.commit()
+
+        assert merged.status != "conflict"
+        assert merged.contact is not None
+        assert merged.contact.fields["business"] == "New Business"
+        conflicts = service.list_conflicts(contact_id=merged.contact.id)
+        assert all(item.field_name not in {"created", "updated"} for item in conflicts)
+
+
+def test_owner_typed_timestamp_does_not_overwrite_db_timestamps(
+    sessions: sessionmaker[Session],
+) -> None:
+    with sessions() as session:
+        service = CrmService(session, now=datetime(2026, 9, 6, 13, 0, 0, tzinfo=UTC))
+        created = service.capture(
+            {"phone": "0509999003", "name": "Base"}, source_ref="seed"
+        )
+        assert created.contact is not None
+        service.mark_contact_synced(created.contact.id, row_number=2)
+        session.commit()
+        real_created = created.contact.fields["created"]
+        real_updated = created.contact.fields["updated"]
+
+        # The owner types garbage into the created/updated cells directly.
+        sheet = ["Base", "0509999003"] + [""] * 9
+        sheet.extend(["2001-01-01T00:00:00+00:00", "2001-01-01T00:00:00+00:00", ""])
+        sheet.append(created.contact.id)
+        assert len(sheet) == 15
+        merged = service.import_sheet_contact(sheet, row_number=2)
+        session.commit()
+
+        assert merged.contact is not None
+        # System timestamps are untouched -- the owner's typed value never lands in
+        # fields_json and never reaches the projected view.
+        assert merged.contact.fields["created"] == real_created
+        assert merged.contact.fields["updated"] == real_updated
+        raw_row = session.get(CrmContactRow, created.contact.id)
+        stored = json.loads(raw_row.fields_json)
+        assert stored.get("created", "") == ""
+        assert stored.get("updated", "") == ""
+
+
+def test_owner_edit_to_updated_cell_self_heals_and_later_field_still_delivers(
+    sessions: sessionmaker[Session],
+) -> None:
+    """Regression: an owner edit to the system-owned 'updated' cell must not wedge
+    this contact's projection forever. Before the fix, `destination_changed`
+    compared indices 11/12 like any other column, so the owner's typed text never
+    matched `cells` (the system's fresh value) and the job conflicted every cycle
+    with no self-correcting re-enqueue.
+    """
+    sheets = FakeSheetsPort()
+    with sessions() as session:
+        service = CrmService(session)
+        created = service.capture({"phone": "0509991234", "name": "Dana"}, source_ref="seed")
+        assert created.contact is not None
+        contact_id = created.contact.id
+        session.commit()
+
+    worker = CrmDeliveryWorker(session_factory=sessions, sheets=sheets)
+    first = worker.run_once()
+    assert (first.claimed, first.confirmed) == (1, 1)
+
+    row = next(r for r in sheets.locked_contacts if r[14] == contact_id)
+    row[12] = "owner typed this"  # owner edits the "updated" cell directly
+
+    reimport = worker.run_once(force_import=True)
+    assert reimport.conflicts == 0  # the merge ignores the owner's edit here, no issue
+
+    with sessions() as session:
+        CrmService(session).capture(
+            {"phone": "0509991234", "want": "more clients"}, source_ref="later"
+        )
+        session.commit()
+
+    total_confirmed = 0
+    for _ in range(3):
+        run = worker.run_once(force_import=True)
+        total_confirmed += run.confirmed
+    assert total_confirmed == 1
+    row = next(r for r in sheets.locked_contacts if r[14] == contact_id)
+    assert row[7] == "more clients"  # "want" actually landed
+    assert row[12] != "owner typed this"  # system value won, not stuck on the edit
+
+
+def test_delivery_projects_cleanly_despite_mismatched_timestamp_snapshot_base(
+    sessions: sessionmaker[Session],
+) -> None:
+    """A live-style row whose CrmSyncSnapshotRow base for created/updated differs
+    from what is currently on the destination (e.g. a legacy UTC '+00:00' base vs a
+    freshly-computed local '+03:00' cell) must never block an unrelated field write.
+    """
+    sheets = FakeSheetsPort()
+    with sessions() as session:
+        service = CrmService(session)
+        created = service.capture({"phone": "0509995678", "name": "Yossi"}, source_ref="seed2")
+        assert created.contact is not None
+        contact_id = created.contact.id
+        session.commit()
+
+    worker = CrmDeliveryWorker(session_factory=sessions, sheets=sheets)
+    first = worker.run_once()
+    assert (first.claimed, first.confirmed) == (1, 1)
+
+    with sessions() as session:
+        for name in ("created", "updated"):
+            snapshot = session.get(CrmSyncSnapshotRow, (contact_id, name))
+            assert snapshot is not None
+            snapshot.value = "2020-01-01T00:00:00+00:00"  # stale/mismatched base
+        session.commit()
+
+    with sessions() as session:
+        CrmService(session).capture(
+            {"phone": "0509995678", "business": "Studio"}, source_ref="seed2:2"
+        )
+        session.commit()
+
+    run = worker.run_once(force_import=True)
+    assert (run.claimed, run.confirmed, run.conflicts) == (1, 1, 0)
+    row = next(r for r in sheets.locked_contacts if r[14] == contact_id)
+    assert row[4] == "Studio"

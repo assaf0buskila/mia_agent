@@ -12,15 +12,38 @@ from app.services.crm_v2 import CONTACT_FIELDS, CrmError, CrmService
 from app.services.owner_actions import propose_owner_action, sync_owner_crm_sheet_in_session
 from app.surfaces.crm import (
     ACTIVITY_TAB,
+    CONTACTS_TAB,
     ContactRecord,
 )
 from app.surfaces.owner_crm_intent import is_explicit_owner_crm_write_intent
 from app.tools.owner.types import ToolContext, ToolResult, _crm_spreadsheet_id
 
 
+def _crm_workspace_missing(ctx: ToolContext, port: object) -> bool:
+    """True only when the CRM tabs are positively confirmed absent.
+
+    Read-only: uses ``list_sheet_names`` (a plain values GET), never
+    ``ensure_crm_workspace`` (which creates/repairs tabs and headers) -- a read must
+    not provision the destination it is about to read from. When the check itself
+    cannot be answered (no lister, or the call fails), this says "not missing" so a
+    transient read problem is reported by the sync step that follows, not swallowed
+    here as a false "not set up".
+    """
+    lister = getattr(port, "list_sheet_names", None)
+    if not callable(lister):
+        return False
+    try:
+        existing = set(lister(spreadsheet_id=_crm_spreadsheet_id(ctx)))
+    except Exception:
+        return False
+    return CONTACTS_TAB not in existing or ACTIVITY_TAB not in existing
+
+
 def _crm_search(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     query = str(args.get("query") or ctx.owner_text or "").strip()
     port = ctx.sheets or build_sheets_port(ctx.settings)
+    if _crm_workspace_missing(ctx, port):
+        return ToolResult(ok=False, error="the CRM sheet is not set up")
     problem = _sync_current_sheet_edits(ctx, port)
     if problem:
         return ToolResult(ok=False, error=problem)
@@ -194,6 +217,8 @@ def _crm_record_activity(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
 
 def _crm_conflicts(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     port = ctx.sheets or build_sheets_port(ctx.settings)
+    if _crm_workspace_missing(ctx, port):
+        return ToolResult(ok=False, error="the CRM sheet is not set up")
     problem = _sync_current_sheet_edits(ctx, port)
     if problem:
         return ToolResult(ok=False, error=problem)

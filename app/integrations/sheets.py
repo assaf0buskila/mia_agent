@@ -808,7 +808,12 @@ class FakeSheetsPort:
     def __init__(self) -> None:
         self.owner_values: dict[tuple[str, str], list[list[str]]] = {}
         self.owner_operations: list[tuple[str, str, str, list[list[str]]]] = []
-        self.sheet_names: dict[str, list[str]] = {}
+        # Default to an already-provisioned workspace: virtually every test double
+        # here exercises normal CRM reads/writes, not first-time bootstrap. A test
+        # for the missing-workspace path clears this explicitly.
+        self.sheet_names: dict[str, list[str]] = {
+            LOCKED_SPREADSHEET_ID: [CONTACTS_TAB, CONTACTS_ACTIVITY_TAB]
+        }
         self.locked_contacts: list[list[str]] = []
         self.locked_activity: list[list[str]] = []
         self.crm_workspace_ensures = 0

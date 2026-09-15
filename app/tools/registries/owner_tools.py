@@ -652,8 +652,9 @@ _register(
     ToolSpec(
         name="crm_search",
         description=(
-            "Search Assaf's Contacts CRM. Always uses the locked spreadsheet. "
-            "Never ask for a URL. No lead ids. No 01 Leads."
+            "Search Assaf's Contacts CRM. Syncs Assaf's Sheet edits into the CRM "
+            "before reading. Always uses the locked spreadsheet. Never ask for a "
+            "URL. No lead ids. No 01 Leads."
         ),
         parameters=_string_arg("query", "Name, phone, email, or what they want."),
         handler=_crm_search,
@@ -723,8 +724,9 @@ _register(
     ToolSpec(
         name="crm_conflicts",
         description=(
-            "List unresolved CRM conflicts after importing current Contacts sheet edits. "
-            "Optionally filter by an exact durable contact id. Read only."
+            "List unresolved CRM conflicts. Syncs Assaf's Sheet edits into the CRM "
+            "before reading. Optionally filter by an exact durable contact id. "
+            "Read only."
         ),
         parameters={
             "type": "object",

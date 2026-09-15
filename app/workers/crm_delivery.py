@@ -24,10 +24,20 @@ from app.db.models import (
 )
 from app.domain.tools import AdapterHttpError, AdapterResponseError
 from app.services.crm_v2 import (
+    CONTACT_FIELDS,
     CRM_PROJECTION_LOCK_KEY,
+    SYSTEM_OWNED_FIELDS,
     CrmService,
     normalize_email,
     normalize_phone,
+)
+
+# "created"/"updated" cell indices within the 14 CONTACT_FIELDS columns. They are
+# system-computed and legitimately differ from any prior snapshot on every
+# delivery (time passes), so they must never trip the destination-changed
+# conflict check below -- and the system's own value always wins when writing.
+_SYSTEM_OWNED_COLUMN_INDICES = frozenset(
+    CONTACT_FIELDS.index(name) for name in SYSTEM_OWNED_FIELDS
 )
 
 POLL_SECONDS = 5
@@ -554,6 +564,7 @@ class CrmDeliveryWorker:
         destination_changed = any(
             current[index] != base[index] and current[index] != cells[index]
             for index in range(14)
+            if index not in _SYSTEM_OWNED_COLUMN_INDICES
         )
         if destination_changed:
             CrmService(session, now=self._clock).import_sheet_contact(
@@ -576,7 +587,12 @@ class CrmDeliveryWorker:
         updates = {
             index: cells[index]
             for index in range(14)
-            if current[index] == base[index] and current[index] != cells[index]
+            if current[index] != cells[index]
+            and (
+                index in _SYSTEM_OWNED_COLUMN_INDICES
+                # System value always wins for created/updated -- no base check.
+                or current[index] == base[index]
+            )
         }
         if updates:
             self._sheets.update_crm_contact_fields(row_number=row_number, fields=updates)

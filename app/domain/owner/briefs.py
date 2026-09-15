@@ -40,6 +40,38 @@ def _format_brief_date(brief_date: str) -> str:
     return f"{day}.{month}.{year}"
 
 
+def _count_leads_today(
+    store: LeadStore, *, legacy_leads: int, occurred_from: str, occurred_to: str
+) -> int:
+    """Legacy ``lead_created`` events plus v2 CRM captures, never double counted.
+
+    "Leads today" is distinct contacts/customers captured, not capture events: a
+    returning visitor captured twice in the same window is one lead
+    (``count_captured_website_leads`` already dedupes per contact). The two systems
+    are disjoint in production today (the legacy website path has no live caller),
+    but a lead that somehow exists in both -- same website session -- must still
+    count once. Dedup keys on every conversation id that captured a v2 contact in
+    the window (``CrmContactConversationRow``, never overwritten by a later
+    session), not ``CrmContactRow.conversation_id``, which a returning visitor's
+    later session does overwrite.
+    """
+    v2_count = store.count_captured_website_leads(
+        occurred_from=occurred_from, occurred_to=occurred_to
+    )
+    v2_conversation_ids = store.list_captured_website_conversation_ids(
+        occurred_from=occurred_from, occurred_to=occurred_to
+    )
+    legacy_website = store.list_legacy_website_lead_created(
+        occurred_from=occurred_from, occurred_to=occurred_to
+    )
+    overlap = sum(
+        1
+        for _lead_id, conversation_id in legacy_website
+        if conversation_id and conversation_id in v2_conversation_ids
+    )
+    return legacy_leads - overlap + v2_count
+
+
 def compute_daily_brief(
     store: LeadStore,
     *,
@@ -71,9 +103,15 @@ def compute_daily_brief(
         )
         for key in OWNER_BRIEF_EVENT_TYPES
     }
+    leads = _count_leads_today(
+        store,
+        legacy_leads=counts["lead_created"],
+        occurred_from=occurred_from,
+        occurred_to=occurred_to,
+    )
     return DailyBriefSnapshot(
         brief_date=brief_date,
-        leads=counts["lead_created"],
+        leads=leads,
         meetings_offered=counts["meeting_offered"],
         handoffs=counts["handoff"],
         messages_in=counts["message_in"],

@@ -49,7 +49,7 @@ from app.services.owner_actions import (
 from app.tools.owner.brain import _remember
 from app.tools.owner.calendar import _calendar_reschedule
 from app.tools.owner.composio import _composio_propose_side_effect
-from app.tools.owner.crm import _crm_conflicts, _crm_resolve_conflict
+from app.tools.owner.crm import _crm_conflicts, _crm_resolve_conflict, _crm_search
 from app.tools.owner.types import ToolContext
 
 
@@ -2268,5 +2268,75 @@ def test_preexisting_unsupported_composio_approval_is_denied_at_execution() -> N
             store, settings=settings, principal=_owner(), proposal_id=proposal.proposal_id
         )
         assert outcome.status == "policy_denied"
+    finally:
+        session.close()
+
+
+def test_crm_search_refuses_when_workspace_missing() -> None:
+    store, session = _store()
+    try:
+        sheets = FakeSheetsPort()
+        sheets.sheet_names = {}  # no tabs discoverable: workspace not provisioned
+        ctx = ToolContext(
+            store=store,
+            brain=BrainStore(session),
+            settings=Settings(_env_file=None),
+            principal=_owner(),
+            embedding_port=FakeEmbeddingPort(),
+            source_ref=f"tg:{uuid4().hex}",
+            owner_text="find dana in contacts",
+            sheets=sheets,
+        )
+        result = _crm_search(ctx, {"query": "dana"})
+        assert result.ok is False
+        assert "not set up" in (result.error or "")
+        # The read must never have created/repaired tabs.
+        assert sheets.crm_workspace_ensures == 0
+    finally:
+        session.close()
+
+
+def test_crm_conflicts_refuses_when_workspace_missing() -> None:
+    store, session = _store()
+    try:
+        sheets = FakeSheetsPort()
+        sheets.sheet_names = {}
+        ctx = ToolContext(
+            store=store,
+            brain=BrainStore(session),
+            settings=Settings(_env_file=None),
+            principal=_owner(),
+            embedding_port=FakeEmbeddingPort(),
+            source_ref=f"tg:{uuid4().hex}",
+            owner_text="any CRM conflicts?",
+            sheets=sheets,
+        )
+        result = _crm_conflicts(ctx, {"contact_id": None})
+        assert result.ok is False
+        assert "not set up" in (result.error or "")
+        assert sheets.crm_workspace_ensures == 0
+    finally:
+        session.close()
+
+
+def test_crm_search_succeeds_when_workspace_already_provisioned() -> None:
+    store, session = _store()
+    try:
+        service = CrmService(session)
+        service.capture({"phone": "0509990001", "name": "Dana Test"}, source_ref="seed:search")
+        session.commit()
+        ctx = ToolContext(
+            store=store,
+            brain=BrainStore(session),
+            settings=Settings(_env_file=None),
+            principal=_owner(),
+            embedding_port=FakeEmbeddingPort(),
+            source_ref=f"tg:{uuid4().hex}",
+            owner_text="find dana in contacts",
+            sheets=FakeSheetsPort(),
+        )
+        result = _crm_search(ctx, {"query": "Dana Test"})
+        assert result.ok is True
+        assert "Dana Test" in (result.text or "")
     finally:
         session.close()

@@ -1,6 +1,7 @@
 import json
 import re
 from datetime import UTC, datetime, timedelta
+from typing import NamedTuple
 from uuid import uuid4
 
 from sqlalchemy import func, or_, select
@@ -17,6 +18,10 @@ from app.db.models import (
     ContentIdeaRow,
     ContentInsightRow,
     ConversationControlRow,
+    CrmActivityRow,
+    CrmContactConversationRow,
+    CrmContactRow,
+    CrmOutboxRow,
     CustomerRow,
     DealRow,
     FollowUpRow,
@@ -240,6 +245,19 @@ def sales_from_row(row: SalesStateRow) -> SalesState:
         display_name=row.display_name or "",
         meeting_exit_offered=bool(row.meeting_exit_offered),
     )
+
+
+class CapturedWebsiteLead(NamedTuple):
+    """One v2 CRM contact capture: the durable signal counted as a website lead.
+
+    Keyed by the ``contact_captured`` Activity row -- see
+    ``LeadStore.list_captured_website_leads`` for why.
+    """
+
+    contact_id: str
+    conversation_id: str
+    occurred_at: str
+    fields: dict[str, str]
 
 
 class LeadStore:
@@ -484,6 +502,173 @@ class LeadStore:
             .limit(limit)
         ).all()
         return [sales_from_row(row) for row in rows]
+
+    def _captured_contact_activity_window(
+        self, *, occurred_from: str, occurred_to: str
+    ):
+        """Subquery: one row per contact with a capture in the window, latest occurred_at.
+
+        A returning visitor's second session captures the *same* contact again (a
+        second ``contact_captured`` Activity on the same ``CrmContactRow``) -- grouping
+        by contact here is what turns that back into one lead, not two.
+        """
+        statement = select(
+            CrmActivityRow.contact_id.label("contact_id"),
+            func.max(CrmActivityRow.occurred_at).label("latest_occurred_at"),
+        ).where(CrmActivityRow.action == "contact_captured")
+        if occurred_from:
+            statement = statement.where(CrmActivityRow.occurred_at >= occurred_from)
+        if occurred_to:
+            statement = statement.where(CrmActivityRow.occurred_at < occurred_to)
+        return statement.group_by(CrmActivityRow.contact_id).subquery()
+
+    def list_captured_website_leads(
+        self, *, occurred_from: str = "", occurred_to: str = "", limit: int = 200
+    ) -> list[CapturedWebsiteLead]:
+        """Distinct v2 website leads (CRM contacts with a capture), newest first.
+
+        One row per contact, not per capture: a returning visitor who was captured
+        twice is one lead, shown with its current (latest) fields. Pass
+        ``occurred_from``/``occurred_to`` (a half-open UTC ISO window) to scope to one
+        day; leave both empty for "most recent, unbounded by date".
+        """
+        if limit <= 0:
+            return []
+        latest = self._captured_contact_activity_window(
+            occurred_from=occurred_from, occurred_to=occurred_to
+        )
+        statement = (
+            select(
+                latest.c.latest_occurred_at,
+                CrmContactRow.id,
+                CrmContactRow.conversation_id,
+                CrmContactRow.fields_json,
+            )
+            .join(CrmContactRow, CrmContactRow.id == latest.c.contact_id)
+            .order_by(latest.c.latest_occurred_at.desc())
+            .limit(limit)
+        )
+        rows = self.session.execute(statement).all()
+        leads: list[CapturedWebsiteLead] = []
+        for occurred_at, contact_id, conversation_id, fields_json in rows:
+            try:
+                raw = json.loads(fields_json or "{}")
+            except (TypeError, ValueError):
+                raw = {}
+            fields = (
+                {str(key): str(value) for key, value in raw.items() if value is not None}
+                if isinstance(raw, dict)
+                else {}
+            )
+            leads.append(
+                CapturedWebsiteLead(
+                    contact_id=contact_id,
+                    conversation_id=conversation_id or "",
+                    occurred_at=occurred_at,
+                    fields=fields,
+                )
+            )
+        return leads
+
+    def count_captured_website_leads(
+        self, *, occurred_from: str = "", occurred_to: str = ""
+    ) -> int:
+        """Distinct contacts captured in the window -- a returning visitor is one lead."""
+        statement = select(func.count(func.distinct(CrmActivityRow.contact_id))).where(
+            CrmActivityRow.action == "contact_captured"
+        )
+        if occurred_from:
+            statement = statement.where(CrmActivityRow.occurred_at >= occurred_from)
+        if occurred_to:
+            statement = statement.where(CrmActivityRow.occurred_at < occurred_to)
+        return int(self.session.scalar(statement) or 0)
+
+    def list_captured_website_conversation_ids(
+        self, *, occurred_from: str, occurred_to: str
+    ) -> set[str]:
+        """Every conversation id that captured a website contact in the window.
+
+        Sourced from ``CrmContactConversationRow`` -- one durable row per conversation
+        that is never overwritten by a later session -- not
+        ``CrmContactRow.conversation_id``, which a returning visitor's later session
+        does overwrite. Used only to dedupe against legacy ``lead_created`` events for
+        the same website session; a contact captured by several conversations
+        contributes several ids here on purpose, since each is a distinct legacy
+        collision candidate.
+        """
+        rows = self.session.execute(
+            select(CrmContactConversationRow.conversation_id).where(
+                CrmContactConversationRow.created_at >= occurred_from,
+                CrmContactConversationRow.created_at < occurred_to,
+            )
+        ).all()
+        return {str(conversation_id) for (conversation_id,) in rows if conversation_id}
+
+    def list_legacy_website_lead_created(
+        self, *, occurred_from: str, occurred_to: str
+    ) -> list[tuple[str, str]]:
+        """(lead_id, conversation_id) for legacy website ``lead_created`` events in window.
+
+        Scoped to the website channel: only a website session id can collide with a v2
+        ``conversation_id``, so WhatsApp/Gmail legacy leads never need this dedup.
+        """
+        rows = self.session.execute(
+            select(CanonicalEventRow.lead_id, CanonicalEventRow.conversation_id).where(
+                CanonicalEventRow.event_type == "lead_created",
+                CanonicalEventRow.channel == Channel.WEBSITE.value,
+                CanonicalEventRow.occurred_at >= occurred_from,
+                CanonicalEventRow.occurred_at < occurred_to,
+            )
+        ).all()
+        return [
+            (str(lead_id or ""), str(conversation_id or ""))
+            for lead_id, conversation_id in rows
+        ]
+
+    def list_undelivered_captured_website_leads(self, *, limit: int = 12) -> list[str]:
+        """Contact ids whose website capture's own Telegram ping never confirmed.
+
+        v2 has no sales-workflow state (fit/pain/takeover) to rank "hot" by. This
+        uses a real, already-tracked signal instead of inventing one: a capture whose
+        outbox job never reached ``confirmed`` is unambiguously something Assaf has
+        not yet reliably been told about.
+
+        Matched per *capturing conversation* (the outbox dedupe key's
+        ``telegram:crm:{conversation_id}:`` prefix -- see
+        ``CrmService.capture_site_lead``), not per contact: a returning visitor's
+        earlier confirmed session must never hide a later session's genuinely
+        undelivered ping for the same contact. ``CrmContactConversationRow`` (unique
+        per conversation) is the per-capture record; ``CrmContactRow.conversation_id``
+        is not, since a later session overwrites it. A capture with no Telegram
+        recipients at all -- no job was ever queued -- is not "hot": there is
+        nothing pending to catch up on.
+        """
+        if limit <= 0:
+            return []
+        links = self.session.execute(
+            select(
+                CrmContactConversationRow.contact_id,
+                CrmContactConversationRow.conversation_id,
+            )
+            .order_by(CrmContactConversationRow.created_at.desc())
+            .limit(max(limit * 4, limit))
+        ).all()
+        ids: list[str] = []
+        for contact_id, conversation_id in links:
+            prefix = f"telegram:crm:{conversation_id}:"
+            statuses = self.session.scalars(
+                select(CrmOutboxRow.status).where(
+                    CrmOutboxRow.destination == "telegram",
+                    CrmOutboxRow.dedupe_key.startswith(prefix),
+                )
+            ).all()
+            if not statuses:
+                continue
+            if "confirmed" not in statuses:
+                ids.append(contact_id)
+            if len(ids) >= limit:
+                break
+        return ids
 
     def find_leads(self, query: str, *, limit: int = 8) -> list[SalesState]:
         """Match a lead by id, stated name, or headline. No fuzzy guessing."""

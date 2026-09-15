@@ -57,10 +57,17 @@ def format_hot_leads_ack(store, *, principal: Principal) -> str:
         handlers=leads_handlers(store),
     )
     ids = [str(item) for item in (result.get("hot_ids") or []) if item]
-    if not ids:
+    # v2 has no sales-workflow "hot" state (no fit/pain/takeover). Rather than invent
+    # one, an unconfirmed Telegram ping is a real signal already tracked on the
+    # outbox: it means Assaf has not reliably been told about this capture yet.
+    v2_ids = [
+        str(item) for item in store.list_undelivered_captured_website_leads(limit=12) if item
+    ]
+    combined = list(dict.fromkeys([*ids, *v2_ids]))
+    if not combined:
         return "אין לידים חמים שמחכים לתפיסה."
-    listed = ", ".join(ids[:12])
-    extra = "" if len(ids) <= 12 else f" (+{len(ids) - 12})"
+    listed = ", ".join(combined[:12])
+    extra = "" if len(combined) <= 12 else f" (+{len(combined) - 12})"
     return f"לידים חמים: {listed}{extra}"
 
 
