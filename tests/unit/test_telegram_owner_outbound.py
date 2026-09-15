@@ -233,6 +233,55 @@ async def test_pending_approvals_owner_turn_sends_digest_then_its_own_card(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_pending_approvals_zero_rows_sends_only_digest_with_no_keyboard(
+    tmp_path,
+) -> None:
+    """Zero pending rows -> exactly one message (the digest), no keyboard at all.
+
+    Coverage that `test_pending_approvals_markup_skips_empty_and_non_telegram`
+    used to pin before it was deleted in the C2b rework: the behaviour
+    (`pending_approval_cards` returning no cards short-circuits
+    `_pending_approvals_messages` to just the digest) is correct today, but
+    nothing asserted it -- an isolated, genuinely empty database, unlike the
+    shared test database other tests may have already populated.
+    """
+    from app.db.base import Base
+    from app.db.session import make_engine
+    from sqlalchemy.orm import sessionmaker
+
+    engine = make_engine(f"sqlite:///{tmp_path / 'pending-empty.db'}")
+    Base.metadata.create_all(engine)
+    session_factory = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+    db = session_factory()
+    try:
+        store = LeadStore(db)
+        assert store.count_pending_approvals() == 0
+        port = RecordingMessagePort()
+        await process_inbound_texts(
+            provider="telegram",
+            channel=Channel.TELEGRAM,
+            items=[
+                {
+                    "id": "evt.owner.apr.empty",
+                    "from": _OWNER_ID,
+                    "text": "מה מחכה לאישור?",
+                }
+            ],
+            store=store,
+            port=port,
+            kill_switch=False,
+            owner_ids={_OWNER_ID},
+        )
+        assert len(port.sent) == 1
+        digest = port.sent[0]
+        assert digest.reply_markup is None
+        assert "אין כרגע" in digest.text
+    finally:
+        db.close()
+        engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_file_sqlite_crm_callback_syncs_before_decision_and_executes_once(
     monkeypatch, tmp_path
 ) -> None:
@@ -1086,6 +1135,61 @@ async def test_middle_chunk_failure_never_delivers_the_approve_button(monkeypatc
         row = store.get_approval_by_approval_id(proposal.approval_id)
         assert row is not None
         assert row.decision == DECISION_PENDING
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_card_delivered_when_prose_fails_still_marks_webhook_sent(monkeypatch) -> None:
+    """C2b review follow-up: when message index 0 (the prose/digest) fails but a
+    later card fully sends, the webhook must be marked `sent` (not `processed`)
+    and the MESSAGE_OUT canonical event must still be recorded -- the card is
+    complete, so nothing is approved unseen, but the audit trail must reflect
+    that Assaf did receive something this turn. Before this fix, both were
+    gated on `sent`, which only ever tracked index 0.
+    """
+    init_db()
+    db = get_session_factory()()
+    try:
+        store = LeadStore(db)
+        proposal = propose_owner_action(
+            store,
+            principal=Principal.owner(source="telegram", actor_id=_OWNER_ID),
+            source_ref="tg:prose-fails-card-sends",
+            kind="gmail.create_draft",
+            parameters={"to": "x@example.com", "subject": "Hi", "body": "short body"},
+            target={"recipient": "x@example.com", "provider_binding": {}},
+        )
+        db.commit()
+
+        def fake_talk(*, approval_ids_out, **_kwargs):
+            approval_ids_out.append(proposal.approval_id)
+            return "הכנתי טיוטה.", False
+
+        monkeypatch.setattr("app.surfaces.owner._talk_with_optional_agent", fake_talk)
+        # Attempt 0 is the prose (fails); attempt 1 is the card's only chunk (sends).
+        port = _FlakyPort(fail_at_attempt=0)
+        item_id = "evt.prose-fails-card-sends"
+
+        await process_inbound_texts(
+            provider="telegram",
+            channel=Channel.TELEGRAM,
+            items=[{"id": item_id, "from": _OWNER_ID, "text": "prepare a draft"}],
+            store=store,
+            port=port,
+            kill_switch=False,
+            owner_ids={_OWNER_ID},
+        )
+
+        target_keyboard = approval_keyboard(approval_token(proposal.approval_id))
+        assert any(message.reply_markup == target_keyboard for message in port.sent)
+        webhook = store.get_webhook(provider="telegram", provider_event_id=item_id)
+        assert webhook is not None
+        assert webhook.status == "sent"
+        outgoing = store.get_canonical_event(
+            provider="telegram", provider_event_id=f"{item_id}:out"
+        )
+        assert outgoing is not None
     finally:
         db.close()
 

@@ -199,7 +199,9 @@ async def _handle_callback(
             else:
                 try:
                     sync_owner_crm_sheet_in_session(
-                        store, sheets=build_sheets_port(settings)
+                        store,
+                        sheets=build_sheets_port(settings),
+                        timezone=settings.calendar_timezone,
                     )
                     crm_pre_synced = True
                 except Exception:

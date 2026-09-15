@@ -157,6 +157,15 @@ async def run_owner_loop(
             )
 
     sent = False
+    # True the moment any chunk of anything (prose/digest or a card) is actually
+    # handed to Telegram -- unlike `sent`, which stays scoped to message index 0
+    # (the prose/digest) for its own established meaning (`delivery_state["sent"]`,
+    # the returned `OwnerTurnResult.sent`). Index 0 failing while a later card
+    # chunk succeeds must still mark the webhook `sent` and record the outbound
+    # canonical event: safety is intact either way (a card is only ever sent whole,
+    # so nothing is approved unseen), but leaving both gated on `sent` alone made
+    # the audit trail claim nothing went out when a card in fact did.
+    delivered_any = False
     # A label groups every chunk of one card (or is "" for the digest/prose, which
     # is never grouped). Once one chunk of a card has failed to send, every later
     # chunk sharing its label is skipped -- including the keyboard-bearing last
@@ -169,6 +178,7 @@ async def run_owner_loop(
         try:
             with owner_stage("send", source_ref=item.get("id", ""), tool="telegram"):
                 await port.send(message)
+            delivered_any = True
             if index == 0:
                 sent = True
                 if delivery_state is not None:
@@ -197,16 +207,16 @@ async def run_owner_loop(
         store.mark_webhook(
             provider=provider,
             provider_event_id=item["id"],
-            status="sent" if sent else "processed",
+            status="sent" if delivered_any else "processed",
         )
     except Exception as exc:  # noqa: BLE001 - accepted delivery must not be re-noticed
-        if not sent:
+        if not delivered_any:
             raise
         _log.warning(
             "owner webhook status update failed after delivery error=%s",
             type(exc).__name__,
         )
-    if sent:
+    if delivered_any:
         outgoing = build_message_out_event(
             provider=provider,
             channel=channel,

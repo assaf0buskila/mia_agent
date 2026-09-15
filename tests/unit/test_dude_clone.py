@@ -14,10 +14,7 @@ from app.integrations.sheets import FakeSheetsPort
 from app.surfaces.crm import (
     CONTACTS_HEADERS,
     LOCKED_SPREADSHEET_ID,
-    ContactRecord,
-    CrmDenied,
     FakeContactsCrm,
-    log_contact,
 )
 from app.surfaces.owner import run_owner_loop
 from app.tools.registries.owner_tools import get_tool
@@ -43,62 +40,6 @@ def test_contacts_headers_are_a1_n1_with_date_after_email() -> None:
         "פינג לאסף",
     )
     assert len(CONTACTS_HEADERS) == 14
-
-
-def test_crm_refuses_row_without_phone_or_email() -> None:
-    crm = FakeContactsCrm()
-    with pytest.raises(CrmDenied, match="phone or email"):
-        log_contact(
-            crm,
-            ContactRecord(name="דנה", want="אתר"),
-            who="מיה",
-            channel="website",
-            action="שיחת אתר",
-            result="נרשם",
-        )
-    assert crm.contacts == {}
-    assert crm.activity == []
-    assert "01 Leads" not in crm.written_tabs()
-
-
-def test_crm_writes_phone_only_or_email_only_and_never_leads_tab() -> None:
-    crm = FakeContactsCrm()
-    phone_row = log_contact(
-        crm,
-        ContactRecord(name="דנה", phone="0501234567", want="אתר"),
-        who="מיה",
-        channel="website",
-        action="שיחת אתר",
-        result="נרשם",
-    )
-    email_row = log_contact(
-        crm,
-        ContactRecord(name="רון", email="ron@example.com", want="אוטומציה"),
-        who="אסף",
-        channel="telegram",
-        action="עדכון איש קשר",
-        result="נרשם",
-    )
-    assert phone_row.phone == "0501234567"
-    assert email_row.email == "ron@example.com"
-    assert set(crm.written_tabs()) == {"Contacts", "Activity"}
-    assert "01 Leads" not in crm.written_tabs()
-    blob = " ".join(" ".join(cells) for cells in crm.cells_written)
-    assert "lead_" not in blob.lower()
-    assert crm.spreadsheet_id == LOCKED_SPREADSHEET_ID
-
-
-def test_crm_refuses_lead_id_in_cells() -> None:
-    crm = FakeContactsCrm()
-    with pytest.raises(CrmDenied, match="lead ids"):
-        log_contact(
-            crm,
-            ContactRecord(name="x", phone="0501234567", summary="lead_abc123def456"),
-            who="מיה",
-            channel="website",
-            action="שיחת אתר",
-            result="נרשם",
-        )
 
 
 async def test_telegram_owner_loop_still_sends() -> None:

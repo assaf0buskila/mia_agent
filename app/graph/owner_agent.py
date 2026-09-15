@@ -53,6 +53,7 @@ from app.core.owner_timing import owner_stage
 # importing them here directly adds no new cycle (verified).
 from app.domain.content_ideas import _EMPTY_LINE as _CONTENT_IDEAS_EMPTY_LINE
 from app.domain.content_ideas import _HEADER_LINE as _CONTENT_IDEAS_HEADER_LINE
+from app.domain.gmail.brief import GMAIL_BRIEF_EMPTY_WINDOW
 from app.domain.gmail.summaries import _NOT_FOUND_ACK as _GMAIL_THREAD_NOT_FOUND_ACK
 from app.domain.lead_reviews import (
     _LEAD_MATCH_NO_NAME_LINE,
@@ -63,6 +64,7 @@ from app.domain.meetings.briefs import _BRIEF_NOT_FOUND_ACK
 from app.domain.memory import ConversationTurn, render_transcript
 from app.domain.owner.calendar import _EMPTY_ACK as _CALENDAR_FREE_SLOTS_EMPTY_ACK
 from app.domain.owner.notifications import _EMPTY_ACK as _MEETING_NOTIFICATIONS_EMPTY_ACK
+from app.domain.owner.uncertain_writes import OWNER_UNCERTAIN_WRITES_EMPTY
 from app.domain.two_state import (
     SLOW_HOUSE_TOOLS,
     TOOL_RECOVERY_SECONDS,
@@ -191,6 +193,8 @@ _EMPTY_RESULT_EXACT_MARKERS = frozenset(
         _LEAD_MATCH_NOT_FOUND_ACK,  # app/domain/lead_reviews.py:263
         _CALENDAR_FREE_SLOTS_EMPTY_ACK,  # app/domain/owner/calendar.py:26
         _MEETING_NOTIFICATIONS_EMPTY_ACK,  # app/domain/owner/notifications.py:32
+        GMAIL_BRIEF_EMPTY_WINDOW,  # app/domain/gmail/brief.py:29
+        OWNER_UNCERTAIN_WRITES_EMPTY,  # app/domain/owner/uncertain_writes.py:51
     }
 )
 _EMPTY_RESULT_PREFIX_MARKERS = (

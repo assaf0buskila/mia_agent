@@ -759,9 +759,10 @@ def window_free_excluding_self(
       start/end against the destination window -- a bare `YYYY-MM-DD` means
       the provider's local calendar day, not literal UTC midnight, so that
       comparison cannot be trusted either way; provider `transparency` is not
-      parsed. Refuses (fails closed) if `agenda` is unavailable, the read
-      fails, the response was paginated, or any returned item could not be
-      parsed (see `list_events_strict`).
+      parsed. Refuses (fails closed) if `agenda` is unavailable, does not
+      implement `list_events_strict`, the read fails, the response was
+      paginated, or any returned item could not be parsed (see
+      `list_events_strict`).
 
     Pass self_start/self_end as None for a plain free check (a create has no
     self event to exclude).
@@ -788,10 +789,11 @@ def window_free_excluding_self(
     if not overlaps_self:
         return _plain_free_check(window_start, window_end)
 
-    if agenda is None:
+    strict_reader = getattr(agenda, "list_events_strict", None)
+    if agenda is None or not callable(strict_reader):
         return False
     try:
-        events = agenda.list_events_strict(start=window_start, end=window_end)
+        events = strict_reader(start=window_start, end=window_end)
     except (AdapterHttpError, AdapterResponseError, AdapterSchemaError):
         return False
     for event in events:
