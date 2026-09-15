@@ -1161,7 +1161,6 @@ def test_refresh_pending_site_brief_updates_pending_job_activity_and_fields(
             ).all()
         ]
         assert len(telegram_job_ids) == 1
-        before_job_count = len(session.scalars(select(CrmOutboxRow)).all())
 
         new_summary = (
             "פנייה חדשה מהאתר\n"
@@ -1188,7 +1187,34 @@ def test_refresh_pending_site_brief_updates_pending_job_activity_and_fields(
         fields = json.loads(contact.fields_json)
         assert fields["next_step"] == "לתאם שיחה"
         assert fields["name"] == "נועה"
-        assert len(session.scalars(select(CrmOutboxRow)).all()) == before_job_count
+        # Review fix (P1): the earlier version of this test asserted the total
+        # outbox row count never changed, which encoded a bug -- refreshing
+        # next_step/name bumps the contact's revision, and the Contacts Sheet
+        # projection is keyed by revision, so a fresh `contacts` sync job at the
+        # new revision is required or the Sheet worker sees a payload/row
+        # revision mismatch and permanently conflicts the projection. Only the
+        # Telegram job must never duplicate.
+        telegram_jobs_after = list(
+            session.scalars(
+                select(CrmOutboxRow).where(
+                    CrmOutboxRow.aggregate_id == contact_id,
+                    CrmOutboxRow.destination == "telegram",
+                )
+            ).all()
+        )
+        assert len(telegram_jobs_after) == 1
+        assert contact.revision == 2
+        contacts_job = session.scalars(
+            select(CrmOutboxRow).where(
+                CrmOutboxRow.aggregate_id == contact_id,
+                CrmOutboxRow.destination == "contacts",
+                CrmOutboxRow.dedupe_key == f"contacts:{contact_id}:{contact.revision}",
+            )
+        ).one()
+        contacts_payload = json.loads(contacts_job.payload_json)
+        assert contacts_payload["revision"] == contact.revision
+        assert contacts_payload["cells"][0] == "נועה"  # name
+        assert contacts_payload["cells"][10] == "לתאם שיחה"  # next_step
 
 
 def test_refresh_pending_site_brief_refuses_non_pending_or_foreign_jobs(

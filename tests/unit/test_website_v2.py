@@ -1231,6 +1231,21 @@ def test_submit_lead_same_turn_reaches_the_single_pending_job(monkeypatch) -> No
             )
             assert activity is not None
             assert activity.result == payload_text
+            # Review fix (P1): refreshing next_step/name bumps the contact's
+            # revision, so a fresh Contacts Sheet sync job must exist at that new
+            # revision, or the Sheet worker permanently conflicts the projection.
+            assert contact.revision == 2
+            contacts_job = db.scalar(
+                select(CrmOutboxRow).where(
+                    CrmOutboxRow.aggregate_id == contact.id,
+                    CrmOutboxRow.destination == "contacts",
+                    CrmOutboxRow.dedupe_key == f"contacts:{contact.id}:{contact.revision}",
+                )
+            )
+            assert contacts_job is not None
+            assert contacts_job.status == "pending"
+            contacts_payload = json.loads(contacts_job.payload_json)
+            assert contacts_payload["revision"] == contact.revision
 
 
 def test_submit_lead_name_not_in_visitor_text_is_not_applied(monkeypatch) -> None:
@@ -1316,3 +1331,75 @@ def test_model_error_after_capture_leaves_original_job_and_contact_unchanged(
             assert job.status == "pending"
             payload_text = json.loads(job.payload_json)["text"]
             assert "השלב הבא המומלץ: לחזור לפונה" in payload_text
+
+
+def test_greeting_detector_is_immune_to_redos_on_long_fused_input() -> None:
+    """Chunk C3a review P0: the fused single-letter/word greeting tokens made the
+    repeated-group regex ambiguous, and long adversarial input triggered catastrophic
+    backtracking. Real greetings are short; anything long must return quickly and be
+    treated as informative rather than hang the request under the session row lock."""
+    from time import perf_counter
+
+    from app.surfaces.site_v2 import _is_uninformative_business_text
+
+    fused = "מהקורה" * 660 + "X"
+    start = perf_counter()
+    assert _is_uninformative_business_text(fused) is False
+    assert perf_counter() - start < 0.5
+
+    spaced = "היי מה " * 600
+    start = perf_counter()
+    assert _is_uninformative_business_text(spaced) is False
+    assert perf_counter() - start < 0.5
+
+    # Existing short greeting cases must still be classified correctly.
+    assert _is_uninformative_business_text("היי מהקורה") is True
+    assert _is_uninformative_business_text("בוקר טוב!") is True
+    assert _is_uninformative_business_text("מה נשמע?") is True
+
+
+@pytest.mark.parametrize("text", ("SEO", "אתר"))
+def test_short_business_words_are_not_treated_as_uninformative(text: str) -> None:
+    """Chunk C3a review P3: a real 3-letter business word is not a greeting."""
+    from app.surfaces.site_v2 import _is_uninformative_business_text
+
+    assert _is_uninformative_business_text(text) is False
+
+
+@pytest.mark.parametrize("text", ("מה", "היי", "הי"))
+def test_bare_short_greetings_are_still_caught_by_the_greeting_regex(text: str) -> None:
+    """Lowering the fallback length threshold must not stop the regex from catching
+    the short greeting words it is built for."""
+    from app.surfaces.site_v2 import _is_uninformative_business_text
+
+    assert _is_uninformative_business_text(text) is True
+
+
+def test_absorb_submit_lead_rejects_single_letter_and_fragment_names() -> None:
+    """Chunk C3a review P2: a name must be a whole word, at least two characters,
+    verbatim in the visitor's own text -- not a single letter or a word fragment."""
+    from app.surfaces.site_v2 import SiteV2State, _absorb_submit_lead
+
+    class _Call:
+        def __init__(self, arguments):
+            self.arguments = arguments
+
+    visitor_text = "קוראים לי דנה"
+
+    state = SiteV2State()
+    _absorb_submit_lead(
+        state, _Call({"name": "ד", "next_step": None}), visitor_text=visitor_text
+    )
+    assert state.pending_name == ""
+
+    state = SiteV2State()
+    _absorb_submit_lead(
+        state, _Call({"name": "נה", "next_step": None}), visitor_text=visitor_text
+    )
+    assert state.pending_name == ""
+
+    state = SiteV2State()
+    _absorb_submit_lead(
+        state, _Call({"name": "דנה", "next_step": None}), visitor_text=visitor_text
+    )
+    assert state.pending_name == "דנה"

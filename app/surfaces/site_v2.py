@@ -83,6 +83,12 @@ _GREETING_ONLY = re.compile(
     rf"^(?:{_GREETING_TOKEN}[\s!.,?~\u05be-]*)+$",
     re.I,
 )
+# The fused single-letter/word tokens above (e.g. "מה" is also the first half of
+# "מהקורה") make the repeated group ambiguous, and on a long run of
+# near-matches (e.g. "מהקורה" repeated hundreds of times) the regex engine's
+# backtracking is exponential. Real greetings are short, so the regex only ever runs
+# on short input; anything longer is informative by construction and skips the match.
+_GREETING_MAX_CHARS = 60
 
 
 def _is_uninformative_business_text(text: str) -> bool:
@@ -95,10 +101,10 @@ def _is_uninformative_business_text(text: str) -> bool:
     stripped = text.strip()
     if not stripped:
         return True
-    if _GREETING_ONLY.fullmatch(stripped):
+    if len(stripped) <= _GREETING_MAX_CHARS and _GREETING_ONLY.fullmatch(stripped):
         return True
     letters_and_digits = re.sub(r"[^\w\u0590-\u05ff]", "", stripped)
-    return len(letters_and_digits) < 4
+    return len(letters_and_digits) < 3
 
 
 # The system prompt only tells the model to invite contact in one natural sentence, so
@@ -845,7 +851,11 @@ def _absorb_submit_lead(state: SiteV2State, call: Any, *, visitor_text: str) -> 
     never assigned and every lead brief fell back to the default suggested step.
 
     The server remains the only authority on contact validation: a name is accepted only
-    when it appears verbatim in the visitor's own message, so the model cannot invent one.
+    when it is a whole word (at least two characters) that appears verbatim in the
+    visitor's own message, so the model cannot invent one, echo a single letter, or
+    match a fragment of a longer word. It can still be a name the visitor used for
+    someone else (e.g. "המתחרה שלי דנה") -- a known limitation, since the
+    server has no way to tell whose name it is.
     Contact capture runs before this turn's model call, so a next step recovered here
     reaches the next brief rather than the current one; that lag is deliberate, because
     reordering capture would disturb the saved-status prompt, the tool result, the
@@ -860,7 +870,9 @@ def _absorb_submit_lead(state: SiteV2State, call: Any, *, visitor_text: str) -> 
     name = arguments.get("name")
     if isinstance(name, str) and name.strip() and not state.pending_name:
         candidate = name.strip()
-        if candidate in visitor_text:
+        if len(candidate) >= 2 and re.search(
+            rf"(?<!\w){re.escape(candidate)}(?!\w)", visitor_text
+        ):
             state.pending_name = candidate[:80]
 
 

@@ -442,8 +442,12 @@ class CrmService:
         never reached that already-built text. Only ``job_ids`` produced by this
         capture are touched, and only while still ``status == "pending"``; a job
         already claimed, sent, failed or otherwise no longer pending is left exactly
-        as it is. This never enqueues a new outbox row: it rewrites the payload of an
-        existing one, so it can never create a second job or a second ping.
+        as it is. The Telegram job is only ever rewritten in place: this never
+        creates a second job or a second ping. The Contacts Sheet projection is
+        different -- it is keyed by revision, so a fields change here that bumps
+        the contact's revision must also enqueue a fresh ``contacts`` sync job at
+        that new revision, mirroring ``capture``, or the Sheet worker sees a
+        payload/row revision mismatch and permanently conflicts the projection.
         """
         contact_id = contact_id.strip()
         safe_summary = summary.strip()[:MAX_FIELD_CHARS]
@@ -499,6 +503,9 @@ class CrmService:
         )
         if result.rowcount == 1:
             self.session.expire(row)
+            self._lock_projection_effects()
+            self._enqueue_contact(self._contact_view(row))
+            self.session.flush()
 
     @_autoflushing
     def lookup(
