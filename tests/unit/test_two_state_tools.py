@@ -28,6 +28,7 @@ from app.domain.two_state import (
     MiaState,
     asked_toolkit,
     identity_required_for,
+    is_social_writing_turn,
     may_run,
     say_tool_before_numbers,
     tools_for,
@@ -141,6 +142,57 @@ def test_asked_toolkit_tie_rule_stays_scoped_to_instagram_and_linkedin() -> None
     # "שיטת" (method-of) again collides on "שיט"; the generic "פוסט" default (today's
     # behaviour, no platform named explicitly) must win, not the sheets substring.
     assert asked_toolkit("שיטת עבודה לפוסט") == "instagram"
+
+
+def test_asked_toolkit_whole_word_latin_needles_avoid_false_positives() -> None:
+    """A plain substring match let "excel" (sheets) fire inside "excellent" and
+
+    "ig " (instagram, meant as the standalone abbreviation, with a trailing space
+    as an improvised boundary) fire inside "big " or "config " -- the space is
+    also the last letter of the previous word. Real word-boundary matching fixes
+    every one of these without touching a genuine standalone occurrence.
+    """
+    assert asked_toolkit("a big meeting tomorrow") == ""
+    assert asked_toolkit("update the config file") == ""
+    assert asked_toolkit("excellent work") == ""
+    # The abbreviation and the word, each on its own, still resolve correctly.
+    assert asked_toolkit("check my ig") == "instagram"
+    assert asked_toolkit("that was an excel formula") == "sheets"
+
+
+def test_asked_toolkit_linkedin_topic_outranks_weak_crm_needle() -> None:
+    """"crm" alone names the topic ("a LinkedIn post about crm") as often as it
+
+    names the Contacts sheet, unlike every other sheets needle. An explicitly
+    named LinkedIn wins when "crm" is the only sheets needle that matched; a real
+    sheets needle in the same sentence still wins normally.
+    """
+    assert asked_toolkit("LinkedIn post about crm") == "linkedin"
+    # Regression guards: a bare "crm", and a real sheets needle even alongside an
+    # explicit LinkedIn mention, are unaffected by the override above.
+    assert asked_toolkit("CRM") == "sheets"
+    assert asked_toolkit("cheat sheet for a linkedin post") == "sheets"
+    assert asked_toolkit("update the crm sheet, also a linkedin post") == "sheets"
+
+
+def test_is_social_writing_turn_matches_linkedin_instagram_and_content_only() -> None:
+    for text in (
+        "LinkedIn post about crm",
+        "post for LinkedIn",
+        "תבדקי את האינסטגרם",
+        "give me content ideas",
+        "רעיונות לתוכן",
+        "what to post this week",
+    ):
+        assert is_social_writing_turn(text) is True, text
+    for text in (
+        "מה יש לי היום ביומן?",
+        "what's on my calendar today",
+        "check gmail",
+        "היי",
+        "",
+    ):
+        assert is_social_writing_turn(text) is False, text
 
 
 def test_ig_format_names_post_and_account_before_numbers() -> None:

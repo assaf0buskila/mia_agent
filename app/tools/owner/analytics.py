@@ -1,4 +1,5 @@
-"""Owner analytics tools: SEO/GSC/GA4, LinkedIn and Instagram Insights reads."""
+"""Owner analytics tools: SEO/GSC/GA4, LinkedIn and Instagram Insights reads, and
+the read-only social capability summary."""
 
 from __future__ import annotations
 
@@ -9,16 +10,22 @@ from app.capabilities.analytics import analytics_handlers
 from app.capabilities.policy import execute_capability
 from app.capabilities.search_console import search_console_handlers
 from app.core.errors import PermissionDenied
+from app.domain.owner.social_capabilities import SocialCapabilities, format_social_capabilities
 from app.domain.seo import enrich_seo_ack
 from app.domain.tools import AdapterHttpError
 from app.integrations.ga4 import build_ga4_port, normalize_ga4_property_id
 from app.integrations.instagram_insights import (
     _DEFAULT_OWNER_IG_LIMIT,
     _MAX_IG_INSIGHTS_LIMIT,
+    DisabledInstagramInsightsPort,
     build_instagram_insights_port,
     enrich_content_insights_ack,
 )
-from app.integrations.linkedin import build_linkedin_port, enrich_linkedin_ack
+from app.integrations.linkedin import (
+    DisabledLinkedInPort,
+    build_linkedin_port,
+    enrich_linkedin_ack,
+)
 from app.integrations.search_console import build_search_console_port, resolve_gsc_site_url
 from app.integrations.seo_audit import build_seo_audit_port
 from app.tools.owner.types import ToolContext, ToolResult, _empty, _house_unavailable
@@ -208,3 +215,30 @@ def _instagram_insights(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
             error=f"Instagram insights status: {outcome.status}.",
         )
     return _empty(text, "Instagram insights returned nothing.")
+
+
+def _social_capabilities(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
+    """Capability truth from configuration only -- no provider call.
+
+    Resolves the same port each read tool would use (falling back to the exact
+    house builder when the context does not already carry one, mirroring
+    `app/domain/owner/brain.py::bind_owner_house_ports`) and checks it against the
+    builder's own "disabled" sentinel. Both builders only branch on settings and
+    construct a port object; neither one makes a network call.
+    """
+    del args
+    linkedin_port = ctx.linkedin
+    if linkedin_port is None:
+        linkedin_port = build_linkedin_port(ctx.settings)
+    linkedin_configured = not isinstance(linkedin_port, DisabledLinkedInPort)
+
+    instagram_port = ctx.instagram_insights
+    if instagram_port is None:
+        instagram_port = build_instagram_insights_port(ctx.settings)
+    instagram_configured = not isinstance(instagram_port, DisabledInstagramInsightsPort)
+
+    caps = SocialCapabilities(
+        linkedin_configured=linkedin_configured,
+        instagram_configured=instagram_configured,
+    )
+    return ToolResult(ok=True, text=format_social_capabilities(caps))

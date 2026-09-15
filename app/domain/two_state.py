@@ -6,7 +6,9 @@ Visitor = seller, few tools, identity before ping — not before product answers
 
 from __future__ import annotations
 
+import re
 from enum import StrEnum
+from functools import cache
 
 from app.capabilities.types import Principal
 
@@ -71,6 +73,7 @@ OWNER_HOUSE_TOOLS: frozenset[str] = frozenset(
         "seo_snapshot",
         "website_kpis",
         "linkedin_snapshot",
+        "social_capabilities",
         "crm_search",
         "crm_upsert",
         "crm_record_activity",
@@ -165,6 +168,39 @@ _LINKEDIN_EXPLICIT_NEEDLES: tuple[str, ...] = (
     "לינקד אין",
 )
 
+# "crm" alone names the topic ("a LinkedIn post about crm") at least as often as it
+# names the Contacts/Activity sheet -- unlike every other sheets needle ("sheet",
+# "excel", "contacts", "google sheets", ...), which never means anything else. This
+# is the one sheets needle weak enough to yield to an explicitly named platform; see
+# its use in `asked_toolkit` below.
+_SHEETS_WEAK_NEEDLES = frozenset({"crm"})
+
+
+@cache
+def _latin_word_pattern(needle: str) -> re.Pattern[str]:
+    return re.compile(r"\b" + re.escape(needle.strip()) + r"\b")
+
+
+def _needle_hit(needle: str, *, blob: str, text: str) -> bool:
+    """Whole-word match for a pure-ASCII needle; substring match otherwise.
+
+    A loose substring match let "excel" (sheets) fire inside "excellent" and "ig "
+    (instagram, meant as the standalone abbreviation) fire inside "big " or
+    "config " -- the trailing space was meant as a boundary but a substring check
+    still finds it as a suffix of a larger word. `\\b` fixes every one of those
+    without touching intentional matches, because it requires an actual transition
+    between a word and a non-word character on both sides.
+    Hebrew needles keep the old substring behaviour: Python's `\\b` treats Hebrew
+    letters as word characters too, so it cannot separate one Hebrew word glued to
+    another ("שיט" inside "שיטה") any better than a plain substring check does --
+    the sheets/linkedin tie-break in `asked_toolkit` is what actually guards that
+    one Hebrew collision on record, not this function.
+    """
+    if needle.strip().isascii():
+        pattern = _latin_word_pattern(needle)
+        return pattern.search(blob) is not None or pattern.search(text) is not None
+    return needle in blob or needle in text
+
 
 class MiaState(StrEnum):
     OWNER = "owner"
@@ -209,11 +245,18 @@ def asked_toolkit(text: str) -> str:
     match, and naming both explicitly forces neither — guessing would be worse than
     asking. A generic word alone ("פוסט" with no explicit name) still resolves to
     instagram, exactly as before.
+
+    The same kind of override applies when the scan's answer is "sheets" but the
+    only reason it matched is the weak "crm" needle (`_SHEETS_WEAK_NEEDLES`): an
+    explicitly named LinkedIn wins there too, since "LinkedIn post about crm" is
+    about the topic, not the Contacts sheet. A stronger sheets needle in the same
+    sentence ("cheat sheet for a linkedin post") still wins normally — only a
+    bare "crm" match yields.
     """
     blob = f" {text.strip().lower()} "
 
     def _matches(needles: tuple[str, ...]) -> bool:
-        return any(needle in blob or needle in text for needle in needles)
+        return any(_needle_hit(needle, blob=blob, text=text) for needle in needles)
 
     candidate = ""
     for toolkit, needles in _TOOLKIT_NEEDLES:
@@ -229,7 +272,45 @@ def asked_toolkit(text: str) -> str:
         if linkedin_named:
             return "linkedin"
 
+    if candidate == "sheets":
+        matched_sheets = frozenset(
+            needle for needle in _SHEETS_NEEDLES if _needle_hit(needle, blob=blob, text=text)
+        )
+        if (
+            matched_sheets
+            and matched_sheets <= _SHEETS_WEAK_NEEDLES
+            and _matches(_LINKEDIN_EXPLICIT_NEEDLES)
+        ):
+            return "linkedin"
+
     return candidate
+
+
+_CONTENT_IDEA_NEEDLES: tuple[str, ...] = (
+    "content idea",
+    "content ideas",
+    "content plan",
+    "what to post",
+    "post ideas",
+    "רעיון לתוכן",
+    "רעיונות לתוכן",
+    "רעיונות לפוסט",
+    "מה לפרסם",
+    "מה כדאי לפרסם",
+)
+
+
+def is_social_writing_turn(text: str) -> bool:
+    """LinkedIn, Instagram, or content-ideas turn.
+
+    These are the turns where a model can slide from an observed fact into an
+    invented metric or a written draft into a claimed publish; `build_messages`
+    injects the social-writing rule only here, never on an unrelated turn.
+    """
+    if asked_toolkit(text) in {"linkedin", "instagram"}:
+        return True
+    blob = f" {text.strip().lower()} "
+    return any(_needle_hit(needle, blob=blob, text=text) for needle in _CONTENT_IDEA_NEEDLES)
 
 
 def is_sheets_alias(text: str) -> bool:
