@@ -135,7 +135,7 @@ _SHEETS_NEEDLES: tuple[str, ...] = (
 _TOOLKIT_NEEDLES: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
         "instagram",
-        ("instagram", "אינסטגרם", "אינסטה", "ig ", " ריל", "reel", "פוסט"),
+        ("instagram", "אינסטגרם", "אינסטה", "ig ", " ריל", "reel", "reels", "פוסט"),
     ),
     ("gmail", ("gmail", "מייל", "inbox", "דואר")),
     ("calendar", ("יומן", "calendar", "פגישה", "agenda")),
@@ -175,10 +175,52 @@ _LINKEDIN_EXPLICIT_NEEDLES: tuple[str, ...] = (
 # its use in `asked_toolkit` below.
 _SHEETS_WEAK_NEEDLES = frozenset({"crm"})
 
+# Gates the crm/linkedin override above: a bare "crm" plus an explicit LinkedIn
+# mention is at least as often a CRM *write* that merely mentions LinkedIn as
+# context ("add the linkedin lead to crm") as it is a content topic. Requiring one
+# of these content words keeps the override scoped to what it was built for.
+_SOCIAL_CONTENT_WORDS: tuple[str, ...] = ("post", "פוסט", "comment", "caption")
+
+# Whole-word matching (below) is stricter than the old substring check, so it can
+# silently lose an inflected form the old check caught only by accident (e.g.
+# "reel" used to match "reels" as a substring). Audited every ASCII needle above
+# for this when whole-word matching was introduced:
+#   - "reel" -> added "reels" to the instagram tuple: "how are my reels doing" is
+#     the single commonest Instagram-performance question.
+#   - "excel" -> deliberately NOT widened to match "excels": that is the ordinary
+#     verb ("she excels at her job"), not the spreadsheet -- widening it would
+#     reintroduce the exact "excellent" false-positive class this fix removed.
+#   - "contacts" -> deliberately NOT widened to also match bare "contact": that
+#     word is far too generic ("let's contact him") and was never caught by the
+#     old substring check either (the needle is longer than the singular form),
+#     so this is a pre-existing scope choice, not a regression.
+#   - "inbox", "calendar", "agenda" -> plural forms ("inboxes", "calendars",
+#     "agendas") are vanishingly rare for Assaf's single Gmail inbox and single
+#     calendar; left narrow rather than adding needles nothing will ever use.
+#   - "sheet"/"sheets", "google sheet"/"google sheets", "content idea"/
+#     "content ideas" -> already registered as separate singular/plural needles,
+#     so neither form was ever at risk.
+#   - "impressions", "analytics", "traffic" -> already the only natural form used
+#     in this context (mass nouns, or a metric name that is not used in the
+#     singular); the old substring check never caught a shorter singular either,
+#     since the needle is longer than it, so there is nothing to lose here.
+#   - A possessive ("LinkedIn's", "Instagram's") is unaffected either way: `'` is
+#     not a word character, so it already reads as a boundary on its own.
+
 
 @cache
 def _latin_word_pattern(needle: str) -> re.Pattern[str]:
-    return re.compile(r"\b" + re.escape(needle.strip()) + r"\b")
+    # A boundary defined only against a Latin/Hebrew *letter* on either side --
+    # not Python's `\w` (letters + digits + underscore). `\w` made
+    # "instagram_insights" and "gmail_brief" fail to match their own toolkit name
+    # (no transition between two `\w` characters at the underscore) and made a
+    # spreadsheet tab name like "Sheet2" fail the same way (no transition between
+    # a letter and a digit). `[^\W\d_]` is "a `\w` character that is not a digit
+    # and not `_`", i.e. a letter -- so both a digit and an underscore now read as
+    # a boundary, while an adjacent *letter* ("excellent", "spreadsheet") still
+    # correctly blocks the match.
+    esc = re.escape(needle.strip())
+    return re.compile(rf"(?<![^\W\d_]){esc}(?![^\W\d_])")
 
 
 def _needle_hit(needle: str, *, blob: str, text: str) -> bool:
@@ -187,11 +229,12 @@ def _needle_hit(needle: str, *, blob: str, text: str) -> bool:
     A loose substring match let "excel" (sheets) fire inside "excellent" and "ig "
     (instagram, meant as the standalone abbreviation) fire inside "big " or
     "config " -- the trailing space was meant as a boundary but a substring check
-    still finds it as a suffix of a larger word. `\\b` fixes every one of those
-    without touching intentional matches, because it requires an actual transition
-    between a word and a non-word character on both sides.
-    Hebrew needles keep the old substring behaviour: Python's `\\b` treats Hebrew
-    letters as word characters too, so it cannot separate one Hebrew word glued to
+    still finds it as a suffix of a larger word. The letter-only boundary above
+    fixes every one of those without touching intentional matches, an inflected
+    form the old substring check happened to catch (see the audit above), or a
+    needle glued to a digit or underscore ("Sheet2", "gmail_brief").
+    Hebrew needles keep the old substring behaviour: the same boundary treats
+    Hebrew letters as letters too, so it cannot separate one Hebrew word glued to
     another ("שיט" inside "שיטה") any better than a plain substring check does --
     the sheets/linkedin tie-break in `asked_toolkit` is what actually guards that
     one Hebrew collision on record, not this function.
@@ -247,11 +290,16 @@ def asked_toolkit(text: str) -> str:
     instagram, exactly as before.
 
     The same kind of override applies when the scan's answer is "sheets" but the
-    only reason it matched is the weak "crm" needle (`_SHEETS_WEAK_NEEDLES`): an
-    explicitly named LinkedIn wins there too, since "LinkedIn post about crm" is
-    about the topic, not the Contacts sheet. A stronger sheets needle in the same
-    sentence ("cheat sheet for a linkedin post") still wins normally — only a
-    bare "crm" match yields.
+    only reason it matched is the weak "crm" needle (`_SHEETS_WEAK_NEEDLES`), an
+    explicit LinkedIn is named, AND a content word (`_SOCIAL_CONTENT_WORDS`,
+    e.g. "post") is also present: "LinkedIn post about crm" is about the topic,
+    not the Contacts sheet. The content-word requirement matters because "crm" +
+    an explicit LinkedIn without one is normally a CRM *write* mentioning
+    LinkedIn as context ("add the linkedin lead to crm", "update crm after the
+    linkedin call") — that must still go to sheets, not be told to answer
+    LinkedIn first. A stronger sheets needle in the same sentence ("cheat sheet
+    for a linkedin post") still wins normally regardless — only a bare "crm"
+    match ever yields.
     """
     blob = f" {text.strip().lower()} "
 
@@ -280,6 +328,7 @@ def asked_toolkit(text: str) -> str:
             matched_sheets
             and matched_sheets <= _SHEETS_WEAK_NEEDLES
             and _matches(_LINKEDIN_EXPLICIT_NEEDLES)
+            and _matches(_SOCIAL_CONTENT_WORDS)
         ):
             return "linkedin"
 

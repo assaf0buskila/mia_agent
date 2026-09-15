@@ -220,22 +220,32 @@ def _instagram_insights(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
 def _social_capabilities(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     """Capability truth from configuration only -- no provider call.
 
-    Resolves the same port each read tool would use (falling back to the exact
-    house builder when the context does not already carry one, mirroring
-    `app/domain/owner/brain.py::bind_owner_house_ports`) and checks it against the
-    builder's own "disabled" sentinel. Both builders only branch on settings and
-    construct a port object; neither one makes a network call.
+    Resolves each port with the exact same condition its own read tool uses
+    (`_linkedin_snapshot` / `_instagram_insights` above: fall back to the house
+    builder only when `ctx.settings.composio_ready()`, never unconditionally) and
+    checks the result against that builder's own "disabled" sentinel. Matching the
+    condition, not just the builder call, matters for Instagram specifically:
+    `build_instagram_insights_port` also has a direct-Graph-token path that
+    `_instagram_insights` never reaches when the context has no port and Composio
+    is not ready -- an unconditional fallback here would report "available" in
+    that exact case while the real read tool reports "not connected". Neither
+    builder makes a network call; both only branch on settings and construct a
+    port object.
     """
     del args
     linkedin_port = ctx.linkedin
-    if linkedin_port is None:
+    if linkedin_port is None and ctx.settings.composio_ready():
         linkedin_port = build_linkedin_port(ctx.settings)
-    linkedin_configured = not isinstance(linkedin_port, DisabledLinkedInPort)
+    linkedin_configured = linkedin_port is not None and not isinstance(
+        linkedin_port, DisabledLinkedInPort
+    )
 
     instagram_port = ctx.instagram_insights
-    if instagram_port is None:
+    if instagram_port is None and ctx.settings.composio_ready():
         instagram_port = build_instagram_insights_port(ctx.settings)
-    instagram_configured = not isinstance(instagram_port, DisabledInstagramInsightsPort)
+    instagram_configured = instagram_port is not None and not isinstance(
+        instagram_port, DisabledInstagramInsightsPort
+    )
 
     caps = SocialCapabilities(
         linkedin_configured=linkedin_configured,

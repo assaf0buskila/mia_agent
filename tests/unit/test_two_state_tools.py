@@ -160,14 +160,57 @@ def test_asked_toolkit_whole_word_latin_needles_avoid_false_positives() -> None:
     assert asked_toolkit("that was an excel formula") == "sheets"
 
 
+def test_asked_toolkit_whole_word_matching_keeps_common_inflected_forms() -> None:
+    """Whole-word matching is stricter than the old substring check, so it can
+
+    silently lose a plural/inflected form the old check caught only by accident.
+    "reel" -> "reels" is the one real regression found by audit (the commonest
+    Instagram-performance question); every other ASCII needle was audited and
+    either already covers both forms or is deliberately left narrow (see the
+    comment above `_SOCIAL_CONTENT_WORDS` in two_state.py).
+    """
+    assert asked_toolkit("how are my reels doing") == "instagram"
+    assert asked_toolkit("post a reel today") == "instagram"
+    assert asked_toolkit("check my reel") == "instagram"
+    # Deliberately still narrow: "excels" is the ordinary verb, not the
+    # spreadsheet, and widening it would reintroduce the "excellent" bug class.
+    assert asked_toolkit("she excels at her job") == ""
+
+
+def test_asked_toolkit_underscore_and_digit_glued_names_still_match() -> None:
+    """Python's `\\w` (and therefore the old `\\b`) treats digits and
+
+    underscore as word characters, so a needle glued directly to either one
+    (a tool name like "instagram_insights", a tab name like "Sheet2") could
+    never satisfy a boundary on that side. The boundary is redefined against a
+    letter only, so both now read as a boundary; an adjacent letter
+    ("spreadsheet", "excellent") still correctly blocks the match.
+    """
+    assert asked_toolkit("check instagram_insights") == "instagram"
+    assert asked_toolkit("run gmail_brief for today") == "gmail"
+    assert asked_toolkit("what's in sheet1") == "sheets"
+    assert asked_toolkit("what's in Sheet2") == "sheets"
+    assert asked_toolkit("a spreadsheet is not a sheet") == "sheets"
+
+
 def test_asked_toolkit_linkedin_topic_outranks_weak_crm_needle() -> None:
     """"crm" alone names the topic ("a LinkedIn post about crm") as often as it
 
     names the Contacts sheet, unlike every other sheets needle. An explicitly
-    named LinkedIn wins when "crm" is the only sheets needle that matched; a real
-    sheets needle in the same sentence still wins normally.
+    named LinkedIn wins when "crm" is the only sheets needle that matched AND a
+    content word ("post"/"פוסט"/"comment"/"caption") is also present; without one,
+    "crm" plus an explicit LinkedIn is a CRM *write* that merely mentions
+    LinkedIn as context, and must still go to sheets. A real sheets needle in the
+    same sentence still wins normally either way.
     """
     assert asked_toolkit("LinkedIn post about crm") == "linkedin"
+    assert asked_toolkit("write a linkedin comment about crm") == "linkedin"
+    # The content-word gate (P2-2): a CRM write that only mentions LinkedIn as
+    # context, with no content word, must not be told to answer LinkedIn first.
+    assert asked_toolkit("add the linkedin lead to crm") == "sheets"
+    assert asked_toolkit("update crm after the linkedin call") == "sheets"
+    assert asked_toolkit("תעדכני crm אחרי השיחה בלינקדאין") == "sheets"
+    assert asked_toolkit("תוסיפי את הליד מלינקדאין ל-crm") == "sheets"
     # Regression guards: a bare "crm", and a real sheets needle even alongside an
     # explicit LinkedIn mention, are unaffected by the override above.
     assert asked_toolkit("CRM") == "sheets"

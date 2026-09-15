@@ -24,13 +24,23 @@ def format_social_capabilities(caps: SocialCapabilities) -> str:
     """One factual line per capability -- never a blanket "connected" verdict."""
     linkedin_read = "available" if caps.linkedin_configured else "not configured"
     instagram_read = "available" if caps.instagram_configured else "not configured"
+    # Proposing a LinkedIn action needs an active LinkedIn connection to validate
+    # the schema against (`propose_linkedin_write`); with none configured, the
+    # honest answer is "not available", not a description of the approval flow
+    # as if it were currently usable.
+    linkedin_write_line = (
+        "- LinkedIn post or comment: exact approval only, then execution -- not "
+        "yet verified live; whether it is actually visible on LinkedIn afterward "
+        "is not independently re-checked."
+        if caps.linkedin_configured
+        else "- LinkedIn post or comment: not available -- no active LinkedIn "
+        "connection to propose against."
+    )
     lines = [
         "Social capabilities (from configuration; not a live provider check):",
         f"- LinkedIn profile read: {linkedin_read}. Own profile only -- no reach, "
         "follower, or post analytics on any path.",
-        "- LinkedIn post or comment: exact approval only, then execution -- not "
-        "yet verified live; whether it is actually visible on LinkedIn afterward "
-        "is not independently re-checked.",
+        linkedin_write_line,
         f"- Instagram insights read: {instagram_read}. Per-post metrics only; a "
         "missing metric comes back unavailable, never zero or invented.",
         "- Instagram publishing: not available -- denied by policy, regardless "

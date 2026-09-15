@@ -69,7 +69,39 @@ def test_social_capabilities_reports_not_configured_by_default() -> None:
         # These facts hold regardless of configuration.
         assert "Instagram publishing: not available" in result.text
         assert "No scheduling on either platform." in result.text
+    finally:
+        session.close()
+
+
+def test_social_capabilities_unconfigured_linkedin_does_not_promise_the_write_path() -> None:
+    """P3-2 regression: an unconfigured install must not describe the
+
+    approval-then-execution flow as if it were currently usable -- there is no
+    active LinkedIn connection to propose an action against.
+    """
+    session = _session()
+    try:
+        result = execute_tool("social_capabilities", {}, _ctx(session))
+        assert "LinkedIn profile read: not configured" in result.text
+        assert "LinkedIn post or comment: not available" in result.text
+        assert "no active LinkedIn connection to propose against" in result.text
+        assert "not yet verified live" not in result.text
+    finally:
+        session.close()
+
+
+def test_social_capabilities_configured_linkedin_states_the_write_path() -> None:
+    """The write-path line only appears once LinkedIn is actually configured --
+
+    proves the P3-2 gate branches both ways, not just to "not available".
+    """
+    session = _session()
+    try:
+        ctx = _ctx(session, linkedin=FakeLinkedInPort(LinkedInProfile(name="Assaf Web")))
+        result = execute_tool("social_capabilities", {}, ctx)
+        assert "LinkedIn profile read: available" in result.text
         assert "not yet verified live" in result.text
+        assert "LinkedIn post or comment: not available" not in result.text
     finally:
         session.close()
 
@@ -129,6 +161,38 @@ def test_social_capabilities_treats_an_explicit_disabled_port_as_not_configured(
         result = execute_tool("social_capabilities", {}, ctx)
         assert "LinkedIn profile read: not configured" in result.text
         assert "Instagram insights read: not configured" in result.text
+    finally:
+        session.close()
+
+
+def test_social_capabilities_agrees_with_instagram_insights_on_a_direct_graph_only_config() -> (
+    None
+):
+    """P3-3 regression: a direct-Graph-token config with no bound port and no
+
+    Composio must be read the same way by both tools. `build_instagram_insights_port`
+    has a direct-Graph-token path that returns a real (non-Disabled) port even
+    when Composio is not ready, but `_instagram_insights` only calls that builder
+    when `composio_ready()` -- so with no pre-bound port and Composio unready, the
+    real read tool reports "not connected" even though direct-Graph settings are
+    present. `social_capabilities` must report the same "not configured", not
+    "available" from unconditionally trying the builder's other path.
+    """
+    session = _session()
+    try:
+        settings = Settings(_env_file=None)
+        settings.instagram_access_token = "token"
+        settings.instagram_account_id = "123"
+        assert settings.composio_ready() is False
+        ctx = _ctx(session, settings=settings)
+
+        read_result = execute_tool("instagram_insights", {}, ctx)
+        assert read_result.ok is True
+        assert "Not connected" in read_result.text
+
+        caps_result = execute_tool("social_capabilities", {}, ctx)
+        assert "Instagram insights read: not configured" in caps_result.text
+        assert "Instagram insights read: available" not in caps_result.text
     finally:
         session.close()
 
