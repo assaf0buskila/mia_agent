@@ -571,8 +571,11 @@ def execute_approved_owner_action_with_adapters(
             ports["calendar"] = calendar
             ports["booking"] = booking
             # Only used by the calendar.reschedule self-conflict re-check below;
-            # harmless (and unused) for calendar.create.
-            ports["agenda"] = build_calendar_agenda_port(settings)
+            # harmless (and unused) for calendar.create. Bound to the same
+            # approved connection as calendar/booking above -- otherwise the
+            # re-check could read a different (e.g. switched) calendar account
+            # than the one the owner actually approved.
+            ports["agenda"] = build_calendar_agenda_port(settings, connected_account_id=binding[1])
             return not isinstance(calendar, DisabledCalendarPort) and not isinstance(
                 booking, DisabledCalendarBookingPort
             )

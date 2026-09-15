@@ -576,6 +576,9 @@ def test_window_free_excluding_self_refuses_when_the_agenda_read_fails() -> None
         def list_events(self, **_kwargs: object) -> list[CalendarEvent]:
             raise AdapterResponseError()
 
+        def list_events_strict(self, **_kwargs: object) -> list[CalendarEvent]:
+            raise AdapterResponseError()
+
     self_start = FIXED_NOW
     self_end = self_start + timedelta(minutes=30)
     window_start = FIXED_NOW + timedelta(minutes=15)
@@ -683,3 +686,301 @@ def test_composio_calendar_agenda_port_genuinely_empty_day_returns_empty_list() 
     client = httpx.Client(transport=transport)
     port = ComposioCalendarAgendaPort(api_key="cmp-test", user_id="user-123", client=client)
     assert port.list_events(start=FIXED_NOW, end=FIXED_NOW + timedelta(days=1)) == []
+
+
+
+# ---------------------------------------- C5-hardening: fail-closed P3 follow-ups
+
+
+class _FixedAgenda:
+    """Test double whose list_events_strict returns a fixed, pre-resolved
+    event list regardless of the requested window -- stands in for a
+    provider (Google) that has already resolved the true overlap (including
+    a correctly-interpreted all-day local calendar day), which our own
+    parsed CalendarEvent fields cannot always reproduce with plain UTC math.
+    """
+
+    def __init__(self, events: list[CalendarEvent]) -> None:
+        self._events = events
+
+    def list_events_strict(self, **_kwargs: object) -> list[CalendarEvent]:
+        return self._events
+
+
+class _StrictRaisingAgenda:
+    def list_events_strict(self, **_kwargs: object) -> list[CalendarEvent]:
+        raise AdapterSchemaError()
+
+
+def test_window_free_excluding_self_refuses_all_day_event_near_local_midnight() -> None:
+    """P3 #1: an all-day event's date-only start/end is the provider's local
+    calendar day, not UTC midnight (see _parse_agenda_date) -- comparing it
+    against the destination window with plain UTC math can wrongly say
+    "free" for a move that lands inside that local day (e.g. 00:30-01:00
+    Asia/Jerusalem on the same date the all-day event covers). Any other
+    all-day item the agenda read returns is now busy outright, without
+    re-doing that unreliable comparison.
+    """
+    self_start = FIXED_NOW
+    self_end = self_start + timedelta(minutes=30)
+    window_start = self_start + timedelta(minutes=15)
+    window_end = window_start + timedelta(minutes=30)
+    all_day_event = CalendarEvent(
+        event_id="all-day-evt",
+        summary="Conference",
+        start=datetime(2026, 9, 21, tzinfo=UTC),
+        end=datetime(2026, 9, 22, tzinfo=UTC),
+        all_day=True,
+    )
+    agenda = _FixedAgenda([all_day_event])
+    assert (
+        window_free_excluding_self(
+            _RaisingCalendarPort(),
+            window_start=window_start,
+            window_end=window_end,
+            self_start=self_start,
+            self_end=self_end,
+            self_event_id="self-evt",
+            agenda=agenda,
+        )
+        is False
+    )
+
+
+def test_window_free_excluding_self_still_ignores_the_self_event_even_if_all_day() -> None:
+    """The moved event itself may be all-day; excluding it by id must still
+    work even though the new all-day handling would otherwise treat any
+    *other* returned all-day item as busy outright.
+    """
+    self_start = datetime(2026, 9, 21, tzinfo=UTC)
+    self_end = datetime(2026, 9, 22, tzinfo=UTC)
+    window_start = self_start
+    window_end = self_start + timedelta(hours=1)
+    self_event = CalendarEvent(
+        event_id="self-evt",
+        summary="Self all-day",
+        start=self_start,
+        end=self_end,
+        all_day=True,
+    )
+    agenda = _FixedAgenda([self_event])
+    assert (
+        window_free_excluding_self(
+            _RaisingCalendarPort(),
+            window_start=window_start,
+            window_end=window_end,
+            self_start=self_start,
+            self_end=self_end,
+            self_event_id="self-evt",
+            agenda=agenda,
+        )
+        is True
+    )
+
+
+def test_window_free_excluding_self_refuses_on_strict_pagination_or_skip() -> None:
+    """P3 #2/#3: window_free_excluding_self must call the strict read and
+    fail closed on whatever it raises (pagination or an unparseable item),
+    not just a transport-level AdapterHttpError.
+    """
+    self_start = FIXED_NOW
+    self_end = self_start + timedelta(minutes=30)
+    window_start = self_start + timedelta(minutes=15)
+    window_end = window_start + timedelta(minutes=30)
+    assert (
+        window_free_excluding_self(
+            _RaisingCalendarPort(),
+            window_start=window_start,
+            window_end=window_end,
+            self_start=self_start,
+            self_end=self_end,
+            self_event_id="self-evt",
+            agenda=_StrictRaisingAgenda(),
+        )
+        is False
+    )
+
+
+def _agenda_item(event_id: str, *, start_iso: str, end_iso: str) -> dict[str, object]:
+    return {
+        "id": event_id,
+        "status": "confirmed",
+        "start": {"dateTime": start_iso},
+        "end": {"dateTime": end_iso},
+    }
+
+
+def test_composio_calendar_agenda_port_list_events_strict_raises_on_next_page_token() -> None:
+    """P3 #2: a page with items plus a nextPageToken means more results exist
+    beyond what was fetched -- the strict read must refuse rather than let
+    the safety check reason from a partial page.
+    """
+    transport = httpx.MockTransport(
+        lambda _request: httpx.Response(
+            200,
+            json={
+                "data": {
+                    "response_data": {
+                        "items": [
+                            _agenda_item(
+                                "evt-1",
+                                start_iso=FIXED_NOW.isoformat(),
+                                end_iso=(FIXED_NOW + timedelta(minutes=30)).isoformat(),
+                            )
+                        ],
+                        "nextPageToken": "page-2",
+                    }
+                },
+                "successful": True,
+            },
+        )
+    )
+    client = httpx.Client(transport=transport)
+    port = ComposioCalendarAgendaPort(api_key="cmp-test", user_id="user-123", client=client)
+    with pytest.raises(AdapterSchemaError):
+        port.list_events_strict(start=FIXED_NOW, end=FIXED_NOW + timedelta(hours=1))
+
+
+def test_composio_calendar_agenda_port_list_events_strict_raises_on_empty_page_with_token() -> None:
+    """Reviewer probe: `items: []` plus a `nextPageToken` must not read as a
+    genuinely free window.
+    """
+    transport = httpx.MockTransport(
+        lambda _request: httpx.Response(
+            200,
+            json={
+                "data": {"response_data": {"items": [], "nextPageToken": "page-2"}},
+                "successful": True,
+            },
+        )
+    )
+    client = httpx.Client(transport=transport)
+    port = ComposioCalendarAgendaPort(api_key="cmp-test", user_id="user-123", client=client)
+    with pytest.raises(AdapterSchemaError):
+        port.list_events_strict(start=FIXED_NOW, end=FIXED_NOW + timedelta(hours=1))
+
+
+def test_composio_calendar_agenda_port_list_events_strict_raises_on_unparseable_item() -> None:
+    """P3 #3: an item missing `end` cannot be parsed and is silently dropped
+    by `_parse_agenda_event` for display -- but the safety check must refuse
+    rather than treat the window as if that event did not exist.
+    """
+    transport = httpx.MockTransport(
+        lambda _request: httpx.Response(
+            200,
+            json={
+                "data": {
+                    "response_data": {
+                        "items": [
+                            _agenda_item(
+                                "evt-1",
+                                start_iso=FIXED_NOW.isoformat(),
+                                end_iso=(FIXED_NOW + timedelta(minutes=30)).isoformat(),
+                            ),
+                            {
+                                "id": "evt-2",
+                                "status": "confirmed",
+                                "start": {"dateTime": FIXED_NOW.isoformat()},
+                                "end": {},
+                            },
+                        ]
+                    }
+                },
+                "successful": True,
+            },
+        )
+    )
+    client = httpx.Client(transport=transport)
+    port = ComposioCalendarAgendaPort(api_key="cmp-test", user_id="user-123", client=client)
+    with pytest.raises(AdapterSchemaError):
+        port.list_events_strict(start=FIXED_NOW, end=FIXED_NOW + timedelta(hours=1))
+
+
+def test_composio_calendar_agenda_port_list_events_strict_ignores_cancelled_items() -> None:
+    """A cancelled event is legitimately absent, not a parse failure -- it
+    must not trip the strict skipped-item refusal.
+    """
+    transport = httpx.MockTransport(
+        lambda _request: httpx.Response(
+            200,
+            json={
+                "data": {
+                    "response_data": {
+                        "items": [
+                            _agenda_item(
+                                "evt-1",
+                                start_iso=FIXED_NOW.isoformat(),
+                                end_iso=(FIXED_NOW + timedelta(minutes=30)).isoformat(),
+                            ),
+                            {"id": "evt-2", "status": "cancelled"},
+                        ]
+                    }
+                },
+                "successful": True,
+            },
+        )
+    )
+    client = httpx.Client(transport=transport)
+    port = ComposioCalendarAgendaPort(api_key="cmp-test", user_id="user-123", client=client)
+    events = port.list_events_strict(start=FIXED_NOW, end=FIXED_NOW + timedelta(hours=1))
+    assert [event.event_id for event in events] == ["evt-1"]
+
+
+def test_composio_calendar_agenda_port_list_events_tolerates_pagination_and_skips() -> None:
+    """Display (`list_events`) is unaffected by the strict hardening -- it
+    still truncates/skips silently rather than raising.
+    """
+    transport = httpx.MockTransport(
+        lambda _request: httpx.Response(
+            200,
+            json={
+                "data": {
+                    "response_data": {
+                        "items": [
+                            _agenda_item(
+                                "evt-1",
+                                start_iso=FIXED_NOW.isoformat(),
+                                end_iso=(FIXED_NOW + timedelta(minutes=30)).isoformat(),
+                            ),
+                            {
+                                "id": "evt-2",
+                                "start": {"dateTime": FIXED_NOW.isoformat()},
+                                "end": {},
+                            },
+                        ],
+                        "nextPageToken": "page-2",
+                    }
+                },
+                "successful": True,
+            },
+        )
+    )
+    client = httpx.Client(transport=transport)
+    port = ComposioCalendarAgendaPort(api_key="cmp-test", user_id="user-123", client=client)
+    events = port.list_events(start=FIXED_NOW, end=FIXED_NOW + timedelta(hours=1))
+    assert [event.event_id for event in events] == ["evt-1"]
+
+
+def test_composio_calendar_agenda_port_sends_connected_account_id_when_bound() -> None:
+    """C5-hardening #4: the agenda adapter must be able to bind to one
+    specific provider connection, the same as ComposioCalendarPort and
+    ComposioCalendarBookingPort, so the approval re-check can pin it to the
+    approved connection.
+    """
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(
+            200, json={"data": {"response_data": {"items": []}}, "successful": True}
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    port = ComposioCalendarAgendaPort(
+        api_key="cmp-test",
+        user_id="user-123",
+        connected_account_id="conn-abc",
+        client=client,
+    )
+    port.list_events(start=FIXED_NOW, end=FIXED_NOW + timedelta(hours=1))
+    assert captured.get("connected_account_id") == "conn-abc"
