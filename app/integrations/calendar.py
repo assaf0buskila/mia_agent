@@ -557,6 +557,18 @@ class CalendarAgendaPort(Protocol):
         self, *, start: datetime, end: datetime, limit: int = 20
     ) -> list[CalendarEvent]: ...
 
+    def list_events_strict(
+        self, *, start: datetime, end: datetime, limit: int = 20
+    ) -> list[CalendarEvent]:
+        """Same read as `list_events`, but for safety checks only: fails closed
+        (raises `AdapterSchemaError`) when the response was paginated (more
+        results exist beyond this page) or contained any item this adapter
+        could not parse, instead of silently treating the window as if those
+        events did not exist. `list_events` (display) is unaffected and keeps
+        truncating/skipping silently.
+        """
+        ...
+
 
 class ComposioCalendarAgendaPort:
     """Live Composio adapter over GOOGLECALENDAR_EVENTS_LIST. Read-only: lists events
@@ -575,19 +587,23 @@ class ComposioCalendarAgendaPort:
         *,
         api_key: str,
         user_id: str,
+        connected_account_id: str = "",
         client: httpx.Client | None = None,
     ) -> None:
         self._api_key = api_key
         self._user_id = user_id
+        self._connected_account_id = connected_account_id.strip()
         self._client = client
 
-    def list_events(
-        self, *, start: datetime, end: datetime, limit: int = 20
-    ) -> list[CalendarEvent]:
+    def _fetch_response(self, *, start: datetime, end: datetime, cap: int) -> dict[str, Any]:
+        """Shared HTTP call for list_events / list_events_strict: validates HTTP
+        transport and the top-level `successful` envelope, and returns the raw
+        body for the caller to parse (loosely for display, strictly for the
+        reschedule safety check).
+        """
         window_start = _ensure_aware(start)
         window_end = _ensure_aware(end)
-        cap = _cap_agenda_limit(limit)
-        payload = {
+        payload: dict[str, Any] = {
             "user_id": self._user_id,
             "version": COMPOSIO_GOOGLECALENDAR_VERSION,
             "arguments": {
@@ -600,6 +616,8 @@ class ComposioCalendarAgendaPort:
                 "showDeleted": False,
             },
         }
+        if self._connected_account_id:
+            payload["connected_account_id"] = self._connected_account_id
         headers = {
             "x-api-key": self._api_key,
             "Content-Type": "application/json",
@@ -628,7 +646,7 @@ class ComposioCalendarAgendaPort:
                 raise AdapterSchemaError()
             if body["successful"] is False:
                 raise AdapterResponseError()
-            return _parse_agenda_events(body, limit=cap)
+            return body
         except (
             ValueError,
             KeyError,
@@ -637,6 +655,23 @@ class ComposioCalendarAgendaPort:
             IndexError,
         ):
             raise AdapterSchemaError() from None
+
+    def list_events(
+        self, *, start: datetime, end: datetime, limit: int = 20
+    ) -> list[CalendarEvent]:
+        cap = _cap_agenda_limit(limit)
+        body = self._fetch_response(start=start, end=end, cap=cap)
+        return _parse_agenda_events(body, limit=cap)
+
+    def list_events_strict(
+        self, *, start: datetime, end: datetime, limit: int = 20
+    ) -> list[CalendarEvent]:
+        cap = _cap_agenda_limit(limit)
+        body = self._fetch_response(start=start, end=end, cap=cap)
+        events, skipped, paginated = _parse_agenda_events_detailed(body, limit=cap)
+        if skipped or paginated:
+            raise AdapterSchemaError()
+        return events
 
 
 class FakeCalendarAgendaPort:
@@ -660,16 +695,35 @@ class FakeCalendarAgendaPort:
         matches.sort(key=lambda event: _ensure_aware(event.start))
         return matches[: _cap_agenda_limit(limit)]
 
+    def list_events_strict(
+        self, *, start: datetime, end: datetime, limit: int = 20
+    ) -> list[CalendarEvent]:
+        """The fake does not simulate pagination or unparseable items (there is
+        no raw provider payload to malform), so this is the same read as
+        list_events -- tests that need the strict path to fail closed inject a
+        double that raises, or drive the real ComposioCalendarAgendaPort.
+        """
+        return self.list_events(start=start, end=end, limit=limit)
 
-def build_calendar_agenda_port(settings: Settings) -> CalendarAgendaPort | None:
+
+def build_calendar_agenda_port(
+    settings: Settings, *, connected_account_id: str = ""
+) -> CalendarAgendaPort | None:
     """Mirrors build_calendar_port's credential check; returns None (not a Disabled
     port) so callers can tell "not configured" apart from "configured, came back
     empty" without adding a new settings field.
+
+    `connected_account_id` binds the read to one specific provider connection --
+    pass the proposal's approved connection at the approval-time re-check so the
+    agenda read cannot silently consult a different (e.g. newer/switched)
+    calendar account than the one the owner approved.
     """
     api_key = settings.composio_api_key.strip()
     user_id = settings.composio_user_id.strip()
     if api_key and user_id:
-        return ComposioCalendarAgendaPort(api_key=api_key, user_id=user_id)
+        return ComposioCalendarAgendaPort(
+            api_key=api_key, user_id=user_id, connected_account_id=connected_account_id
+        )
     return None
 
 
@@ -698,11 +752,16 @@ def window_free_excluding_self(
     - The destination DOES overlap the event's current span: free/busy alone
       cannot tell self-busy from another-event-busy, so this reads the actual
       events in the destination window through `agenda` (CalendarAgendaPort,
-      the same read used for "what's on my calendar"), drops only the exact
-      event being moved (by `self_event_id`), and refuses if any remaining
-      event still overlaps the destination -- every returned event counts as
-      busy, all-day included; provider `transparency` is not parsed. Refuses
-      (fails closed) if `agenda` is unavailable or the read fails.
+      the same read used for "what's on my calendar") via `list_events_strict`,
+      drops only the exact event being moved (by `self_event_id`), and refuses
+      if any remaining event still overlaps the destination. Any other all-day
+      item counts as busy outright, without comparing its (UTC-midnight)
+      start/end against the destination window -- a bare `YYYY-MM-DD` means
+      the provider's local calendar day, not literal UTC midnight, so that
+      comparison cannot be trusted either way; provider `transparency` is not
+      parsed. Refuses (fails closed) if `agenda` is unavailable, the read
+      fails, the response was paginated, or any returned item could not be
+      parsed (see `list_events_strict`).
 
     Pass self_start/self_end as None for a plain free check (a create has no
     self event to exclude).
@@ -732,12 +791,19 @@ def window_free_excluding_self(
     if agenda is None:
         return False
     try:
-        events = agenda.list_events(start=window_start, end=window_end)
-    except AdapterHttpError:
+        events = agenda.list_events_strict(start=window_start, end=window_end)
+    except (AdapterHttpError, AdapterResponseError, AdapterSchemaError):
         return False
     for event in events:
         if self_event_id is not None and event.event_id == self_event_id:
             continue
+        if event.all_day:
+            # Date-only start/end means the provider's local calendar day, not
+            # UTC midnight (see CalendarEvent/_parse_agenda_date); comparing it
+            # against the destination window is not reliable in either
+            # direction, so any other all-day item in the read is treated as
+            # busy outright rather than risk missing a real conflict.
+            return False
         event_start = _ensure_aware(event.start)
         event_end = _ensure_aware(event.end)
         if window_start < event_end and event_start < window_end:
@@ -778,7 +844,25 @@ def _parse_agenda_events(body: dict[str, Any], *, limit: int) -> list[CalendarEv
     """Raises AdapterSchemaError when the top-level payload shape is not one this
     adapter understands, so callers never read a malformed response back as a
     genuinely empty agenda. An individual malformed event inside a well-shaped
-    `items` list is still just skipped (see `_parse_agenda_event`).
+    `items` list is still just skipped (see `_parse_agenda_event`). Used by
+    display (`list_events`); the reschedule safety check uses the detailed,
+    stricter variant below instead.
+    """
+    events, _skipped, _paginated = _parse_agenda_events_detailed(body, limit=limit)
+    return events
+
+
+def _parse_agenda_events_detailed(
+    body: dict[str, Any], *, limit: int
+) -> tuple[list[CalendarEvent], bool, bool]:
+    """Same parse as `_parse_agenda_events`, plus the two facts the reschedule
+    safety check needs and display does not: whether any item in an
+    otherwise well-shaped `items` list was cancelled-and-thus-skipped is NOT
+    counted here as a skip (a cancelled event is legitimately absent, not a
+    parse failure); only a genuinely unparseable item sets `skipped`. Google
+    may return a short (even empty) page with more results still available,
+    so `paginated` reflects a `nextPageToken` on the response regardless of
+    whether `items` filled the requested page.
     """
     data = _unwrap_agenda_response_data(body)
     if not isinstance(data, dict):
@@ -787,20 +871,29 @@ def _parse_agenda_events(body: dict[str, Any], *, limit: int) -> list[CalendarEv
     if not isinstance(items, list):
         raise AdapterSchemaError()
     events: list[CalendarEvent] = []
+    skipped = False
     for item in items:
+        if _is_cancelled_agenda_item(item):
+            continue
         event = _parse_agenda_event(item)
         if event is None:
+            skipped = True
             continue
         events.append(event)
         if len(events) >= limit:
             break
-    return events
+    paginated = bool(str(data.get("nextPageToken") or "").strip())
+    return events, skipped, paginated
+
+
+def _is_cancelled_agenda_item(item: Any) -> bool:
+    return isinstance(item, dict) and item.get("status") == "cancelled"
 
 
 def _parse_agenda_event(item: Any) -> CalendarEvent | None:
     if not isinstance(item, dict):
         return None
-    if item.get("status") == "cancelled":
+    if _is_cancelled_agenda_item(item):
         return None
     raw_id = item.get("id")
     if not isinstance(raw_id, str) or not raw_id.strip():
