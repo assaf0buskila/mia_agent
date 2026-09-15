@@ -3,11 +3,13 @@
 `claim_provider_write` + `mark_provider_write_pending_review` (`app/db/store.py`)
 deliberately leave a handful of write paths -- calendar create/reschedule
 (`app/domain/owner/calendar_writes.py`), Gmail send (`app/domain/gmail/drafts.py`),
-LinkedIn Composio actions (`app/domain/owner/linkedin_writes.py`), and the generic
-`propose_owner_action` execute step (`app/services/owner_actions.py`) -- parked in
-``provider_claimed`` or ``pending_review`` forever once the outcome is uncertain:
-an unconfirmed write must never be auto-retried. Until now nothing surfaced those
-rows to Assaf; `claim_provider_write` just refused silently on any retry.
+LinkedIn Composio actions (`app/domain/owner/linkedin_writes.py`), any other
+approved Composio tool write (`app/domain/owner/composio_writes.py`), and the
+generic `propose_owner_action` execute step (`app/services/owner_actions.py`) --
+parked in ``provider_claimed`` or ``pending_review`` forever once the outcome is
+uncertain: an unconfirmed write must never be auto-retried. Until now nothing
+surfaced those rows to Assaf; `claim_provider_write` just refused silently on
+any retry.
 
 This module only *describes* a stuck row for display: what kind of write, roughly
 when, and a short plain-words target. It never dumps a raw payload, a connection
@@ -25,9 +27,11 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from app.domain.approvals import (
     ACTION_CALENDAR_CREATE,
     ACTION_CALENDAR_RESCHEDULE,
+    ACTION_COMPOSIO_WRITE,
     ACTION_GMAIL_SEND,
     ACTION_LINKEDIN_COMPOSIO_WRITE,
     RESOURCE_CALENDAR,
+    RESOURCE_COMPOSIO_TOOL,
     RESOURCE_LINKEDIN_TOOL,
 )
 from app.services.owner_actions import (
@@ -127,10 +131,13 @@ def _calendar_target(store, resource_id: str, action: str) -> str:
     return f"{title} · {start}" if start else title
 
 
-def _linkedin_target(store, resource_id: str) -> str:
-    row = store.get_approval_by_resource(
-        RESOURCE_LINKEDIN_TOOL, resource_id, ACTION_LINKEDIN_COMPOSIO_WRITE
-    )
+def _slug_target(store, *, resource_type: str, action: str, resource_id: str) -> str:
+    """Plain tool-slug target shared by LinkedIn and generic Composio writes --
+    both persist `{"arguments": ..., "slug": ...}` (see `_parameters` in
+    `linkedin_writes.py` / `composio_writes.py`). Only the slug is surfaced;
+    `arguments` may hold arbitrary provider payload and is never read here.
+    """
+    row = store.get_approval_by_resource(resource_type, resource_id, action)
     if row is None:
         return ""
     try:
@@ -172,7 +179,21 @@ def describe_stuck_write(store, *, scope: str, key: str) -> tuple[str, str]:
     ):
         return "Gmail send", f"draft {resource_id[:16]}" if resource_id else ""
     if scope == "linkedin_approval":
-        return "LinkedIn action", _linkedin_target(store, resource_id)
+        target = _slug_target(
+            store,
+            resource_type=RESOURCE_LINKEDIN_TOOL,
+            action=ACTION_LINKEDIN_COMPOSIO_WRITE,
+            resource_id=resource_id,
+        )
+        return "LinkedIn action", target
+    if scope == "composio_approval" and len(parts) == 2 and parts[1] == "execute":
+        target = _slug_target(
+            store,
+            resource_type=RESOURCE_COMPOSIO_TOOL,
+            action=ACTION_COMPOSIO_WRITE,
+            resource_id=resource_id,
+        )
+        return "Composio action", target
     return f"{scope} write", ""
 
 
@@ -207,7 +228,8 @@ def format_uncertain_writes(items: list[UncertainWrite]) -> str:
         return OWNER_UNCERTAIN_WRITES_EMPTY
     lines = [
         "These may or may not have happened. Mia will not retry them automatically "
-        "-- check the provider (Gmail/Calendar/LinkedIn) before redoing any of them.",
+        "-- check the provider (Gmail/Calendar/LinkedIn/Composio) before redoing any "
+        "of them.",
     ]
     for index, item in enumerate(items, start=1):
         target_part = f" -- {item.target}" if item.target else ""

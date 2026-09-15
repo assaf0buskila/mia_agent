@@ -17,6 +17,7 @@ from app.domain.gmail.drafts import (
     parse_gmail_draft_request,
     parse_gmail_send_intent,
 )
+from app.domain.tools import AdapterHttpError
 from app.integrations.gmail import (
     COMPOSIO_CREATE_DRAFT_TOOL,
     COMPOSIO_FETCH_EMAILS_TOOL,
@@ -116,6 +117,39 @@ def test_disconnected_gmail_inbox_does_not_raise() -> None:
         result = execute_tool("gmail_inbox", {}, ctx)
         assert result.ok is True
         assert "Not connected" in result.text
+    finally:
+        session.close()
+
+
+class _RaisingSearchGmailPort:
+    """Not a `DisabledGmailPort` -- `_gmail_port` treats that subclass as
+    disconnected, which would mask the failure this test exists to catch."""
+
+    def fetch_message(self, message_id: str):
+        return None
+
+    def list_recent(self, *, limit: int = 8) -> list[InboxRow]:
+        del limit
+        return []
+
+    def search(self, query: str, *, limit: int = 8) -> list[InboxRow]:
+        del query, limit
+        raise AdapterHttpError(None)
+
+    def create_draft(self, *, to: str, subject: str, body: str):
+        return None
+
+    def send_draft(self, draft_id: str) -> bool:
+        return False
+
+
+def test_gmail_search_adapter_failure_is_ok_false_not_empty() -> None:
+    session = _session()
+    try:
+        ctx = _ctx(session, gmail=_RaisingSearchGmailPort())
+        result = execute_tool("gmail_search", {"query": "invoice"}, ctx)
+        assert result.ok is False
+        assert result.error
     finally:
         session.close()
 

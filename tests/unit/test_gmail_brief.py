@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
+import httpx
 import pytest
 from app.brain.embeddings import FakeEmbeddingPort
 from app.brain.store import BrainStore
@@ -20,7 +21,12 @@ from app.domain.gmail.brief import (
     resolve_gmail_brief_window,
 )
 from app.domain.tools import AdapterHttpError
-from app.integrations.gmail import MAX_INBOX_ROWS, InboxRow
+from app.integrations.gmail import (
+    MAX_GMAIL_BRIEF_ROWS,
+    MAX_INBOX_ROWS,
+    ComposioGmailPort,
+    InboxRow,
+)
 from app.tools.registries.owner_tools import ToolContext, execute_tool, get_tool, tool_names
 
 IL = ZoneInfo("Asia/Jerusalem")
@@ -64,18 +70,26 @@ class _CapturingGmailPort:
     ):
         self._rows = rows or []
         self.last_query: str | None = None
+        self.last_limit: int | None = None
         self._raise = raise_on_search
+        # Mirrors ComposioGmailPort: True when the underlying data had at least
+        # `limit` rows available, computed fresh on each call like the real port.
+        self.last_page_truncated = False
 
     def fetch_message(self, message_id: str):
         return None
 
     def list_recent(self, *, limit: int = MAX_INBOX_ROWS) -> list[InboxRow]:
+        self.last_limit = limit
+        self.last_page_truncated = len(self._rows) >= limit
         return self._rows[:limit]
 
     def search(self, query: str, *, limit: int = MAX_INBOX_ROWS) -> list[InboxRow]:
         self.last_query = query
+        self.last_limit = limit
         if self._raise is not None:
             raise self._raise
+        self.last_page_truncated = len(self._rows) >= limit
         return self._rows[:limit]
 
     def create_draft(self, *, to: str, subject: str, body: str):
@@ -310,13 +324,81 @@ def test_gmail_brief_partial_flag_at_page_limit() -> None:
         now = datetime(2026, 9, 15, 10, 0, tzinfo=IL)
         rows = [
             _row(f"m{i}", thread_id=f"t{i}", when=datetime(2026, 9, 15, 9, 0, tzinfo=IL))
-            for i in range(MAX_INBOX_ROWS)
+            for i in range(MAX_GMAIL_BRIEF_ROWS)
         ]
         port = _CapturingGmailPort(rows)
         ctx = _ctx(session, gmail=port, now=now)
         result = execute_tool("gmail_brief", {}, ctx)
         assert result.ok is True
         assert "partial: true" in result.text
+    finally:
+        session.close()
+
+
+def test_gmail_brief_requests_its_own_wider_row_cap() -> None:
+    """gmail_brief must ask the port for MAX_GMAIL_BRIEF_ROWS (25), not the 8-row
+    default gmail_inbox/gmail_search use -- otherwise a normal day of mail (more
+    than 8, fewer than 25 messages) reads as partial when it is not."""
+    session = _session()
+    try:
+        now = datetime(2026, 9, 15, 10, 0, tzinfo=IL)
+        rows = [
+            _row(f"m{i}", thread_id=f"t{i}", when=datetime(2026, 9, 15, 9, 0, tzinfo=IL))
+            for i in range(12)
+        ]
+        port = _CapturingGmailPort(rows)
+        ctx = _ctx(session, gmail=port, now=now)
+        result = execute_tool("gmail_brief", {}, ctx)
+        assert result.ok is True
+        assert port.last_limit == MAX_GMAIL_BRIEF_ROWS
+        assert "messages: 12" in result.text
+        assert "partial: true" not in result.text
+    finally:
+        session.close()
+
+
+def test_gmail_brief_partial_reflects_the_raw_page_not_the_mapped_rows() -> None:
+    """A raw page at the cap with one message missing an id must still read as
+    partial -- `_map_inbox_rows` dropping that row must not make the page look
+    short. Exercised through the real ComposioGmailPort, not a test double, since
+    this is the adapter's own row-mapping behaviour under test."""
+    session = _session()
+    try:
+        raw_messages = [
+            {
+                "messageId": f"raw_{i}",
+                "sender": "a@x.com",
+                "subject": f"Subject {i}",
+                "snippet": "hi",
+                "messageTimestamp": "1789419600000",
+            }
+            for i in range(MAX_GMAIL_BRIEF_ROWS)
+        ]
+        # Drop the id on one entry: the adapter must skip it, not stop counting.
+        del raw_messages[3]["messageId"]
+        transport = httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                json={
+                    "data": {"messages": raw_messages},
+                    "error": None,
+                    "successful": True,
+                },
+            )
+        )
+        port = ComposioGmailPort(
+            api_key="cmp-test", user_id="user-abc", client=httpx.Client(transport=transport)
+        )
+        rows = port.search("after:1 before:2", limit=MAX_GMAIL_BRIEF_ROWS)
+        assert len(rows) == MAX_GMAIL_BRIEF_ROWS - 1
+        assert port.last_page_truncated is True
+
+        now = datetime(2026, 9, 15, 10, 0, tzinfo=IL)
+        ctx = _ctx(session, gmail=port, now=now)
+        result = execute_tool("gmail_brief", {}, ctx)
+        assert result.ok is True
+        assert "partial: true" in result.text
+        assert f"messages: {MAX_GMAIL_BRIEF_ROWS - 1}" in result.text
     finally:
         session.close()
 
@@ -344,6 +426,46 @@ def test_gmail_brief_adapter_failure_is_not_an_empty_brief() -> None:
         assert result.ok is False
         assert result.text != GMAIL_BRIEF_EMPTY_WINDOW
         assert result.error
+    finally:
+        session.close()
+
+
+def test_gmail_brief_real_port_unsuccessful_response_is_ok_false() -> None:
+    """An expired connection or rejected query (HTTP 200, successful:false) must
+    read as a failed brief, never as "no messages today"."""
+    session = _session()
+    try:
+        transport = httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200, json={"data": None, "error": "expired", "successful": False}
+            )
+        )
+        port = ComposioGmailPort(
+            api_key="cmp-test", user_id="user-abc", client=httpx.Client(transport=transport)
+        )
+        ctx = _ctx(session, gmail=port, now=datetime(2026, 9, 15, 10, 0, tzinfo=IL))
+        result = execute_tool("gmail_brief", {}, ctx)
+        assert result.ok is False
+        assert result.text != GMAIL_BRIEF_EMPTY_WINDOW
+    finally:
+        session.close()
+
+
+def test_gmail_brief_real_port_genuinely_empty_response_is_the_constant() -> None:
+    session = _session()
+    try:
+        transport = httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200, json={"data": {"messages": []}, "error": None, "successful": True}
+            )
+        )
+        port = ComposioGmailPort(
+            api_key="cmp-test", user_id="user-abc", client=httpx.Client(transport=transport)
+        )
+        ctx = _ctx(session, gmail=port, now=datetime(2026, 9, 15, 10, 0, tzinfo=IL))
+        result = execute_tool("gmail_brief", {}, ctx)
+        assert result.ok is True
+        assert result.text == GMAIL_BRIEF_EMPTY_WINDOW
     finally:
         session.close()
 

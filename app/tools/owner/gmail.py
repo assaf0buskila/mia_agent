@@ -19,7 +19,7 @@ from app.domain.gmail.query import normalize_gmail_query
 from app.domain.gmail.summaries import apply_owner_gmail_summary
 from app.domain.tools import AdapterHttpError
 from app.integrations.gmail import (
-    MAX_INBOX_ROWS,
+    MAX_GMAIL_BRIEF_ROWS,
     DisabledGmailPort,
     GmailPort,
     InboundEmail,
@@ -80,6 +80,8 @@ def _gmail_search(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
         )
     except PermissionDenied:
         return ToolResult(ok=False, error="mail read denied")
+    except AdapterHttpError as exc:
+        return ToolResult(ok=False, error=f"Gmail read failed ({exc.tool_status()})")
     rows = payload.get("rows") or []
     text = format_inbox_rows(rows, timezone=ctx.timezone(), now=ctx.now)
     if not rows and normalized.changed:
@@ -109,7 +111,7 @@ def _gmail_brief(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
         payload = execute_capability(
             "mail.search",
             principal=ctx.principal,
-            args={"query": query},
+            args={"query": query, "limit": MAX_GMAIL_BRIEF_ROWS},
             handlers=mail_handlers(port),
             kill_switch=ctx.kill_switch,
         )
@@ -118,7 +120,10 @@ def _gmail_brief(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     except AdapterHttpError as exc:
         return ToolResult(ok=False, error=f"Gmail read failed ({exc.tool_status()})")
     rows = payload.get("rows") or []
-    partial = len(rows) >= MAX_INBOX_ROWS
+    # From the port's own truncation signal (raw page size vs the requested
+    # cap), not from len(rows) -- a row dropped for a missing message id must
+    # not make a full page look short. See _map_inbox_rows.
+    partial = bool(payload.get("truncated"))
     threads = dedupe_by_thread(rows)
     text = format_gmail_brief(
         threads,

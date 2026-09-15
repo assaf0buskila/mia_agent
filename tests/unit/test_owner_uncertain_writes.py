@@ -14,6 +14,7 @@ from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
 from app.domain.approvals import (
     ACTION_CALENDAR_CREATE,
+    ACTION_COMPOSIO_WRITE,
     ACTION_GMAIL_SEND,
     ACTION_LINKEDIN_COMPOSIO_WRITE,
     DECISION_PENDING,
@@ -310,6 +311,53 @@ def test_linkedin_target_reads_slug_not_arguments() -> None:
         assert kind == "LinkedIn action"
         assert target == "LINKEDIN_CREATE_POST"
         assert "sensitive draft copy" not in target
+    finally:
+        session.close()
+
+
+def test_composio_target_reads_slug_not_arguments() -> None:
+    # NOTE: "composio_approval" is not (yet) in ALLOWLISTED_OPERATION_SCOPES
+    # (app/domain/idempotency.py), so claim_provider_write/mark_provider_write_
+    # pending_review currently refuse it -- a separate, pre-existing bug outside
+    # this chunk's scope (flagged separately). This test exercises only the
+    # display-resolution logic this chunk owns, via a directly-inserted row, so
+    # it stays meaningful once that gap is fixed.
+    session = _session()
+    try:
+        store = LeadStore(session)
+        resource_id = "cp_test_resource_1"
+        parameters = json.dumps(
+            {"arguments": {"values": ["row1", "row2"]}, "slug": "GOOGLESHEETS_APPEND_ROW"},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        store.upsert_composio_approval(
+            channel="telegram",
+            action=ACTION_COMPOSIO_WRITE,
+            risk=RISK_R3,
+            payload_hash="irrelevant-for-display",
+            decision=DECISION_PENDING,
+            resource_id=resource_id,
+            expires_at=approval_expires_at(now=datetime.now(UTC)),
+            proposed_parameters=parameters,
+        )
+        key = f"{resource_id}:execute"
+        session.add(
+            IdempotencyRow(
+                scope="composio_approval",
+                key=key,
+                created_at=datetime.now(UTC).isoformat(),
+                status="pending_review",
+                expires_at="",
+                result_json="{}",
+            )
+        )
+        session.commit()
+
+        kind, target = describe_stuck_write(store, scope="composio_approval", key=key)
+        assert kind == "Composio action"
+        assert target == "GOOGLESHEETS_APPEND_ROW"
+        assert "row1" not in target
     finally:
         session.close()
 

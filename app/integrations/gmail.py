@@ -39,6 +39,10 @@ _COMPOSIO_EXECUTE_BASE = "https://backend.composio.dev/api/v3.1/tools/execute"
 _COMPOSIO_EXECUTE_URL = f"{_COMPOSIO_EXECUTE_BASE}/{COMPOSIO_FETCH_MESSAGE_TOOL}"
 
 MAX_INBOX_ROWS = 8
+# gmail_brief's own bounded page size. gmail_inbox/gmail_search never pass an
+# explicit limit, so this only raises the ceiling `_cap_limit` allows a caller
+# to request -- their own default stays MAX_INBOX_ROWS.
+MAX_GMAIL_BRIEF_ROWS = 25
 MAX_SNIPPET_CHARS = 180
 MAX_BODY_CHARS = 2000
 
@@ -72,6 +76,11 @@ class GmailDraft(BaseModel):
 
 
 class GmailPort(Protocol):
+    # True when the last list_recent/search call's underlying page was at (or
+    # over) its requested cap -- i.e. more results may exist beyond this page.
+    # Best-effort: a port that cannot tell stays False rather than guessing True.
+    last_page_truncated: bool
+
     def fetch_message(self, message_id: str) -> InboundEmail | None: ...
 
     def list_recent(self, *, limit: int = MAX_INBOX_ROWS) -> list[InboxRow]: ...
@@ -84,6 +93,8 @@ class GmailPort(Protocol):
 
 
 class DisabledGmailPort:
+    last_page_truncated = False
+
     def fetch_message(self, message_id: str) -> InboundEmail | None:
         return None
 
@@ -119,6 +130,7 @@ class ComposioGmailPort:
         self._user_id = user_id
         self._connected_account_id = connected_account_id.strip()
         self._client = client
+        self.last_page_truncated = False
 
     def fetch_message(self, message_id: str) -> InboundEmail | None:
         data = self._execute(
@@ -141,8 +153,11 @@ class ComposioGmailPort:
             },
         )
         if data is None:
+            self.last_page_truncated = False
             return []
-        return _map_inbox_rows(data, limit=cap)
+        rows, raw_count = _map_inbox_rows(data, limit=cap)
+        self.last_page_truncated = raw_count >= cap
+        return rows
 
     def search(self, query: str, *, limit: int = MAX_INBOX_ROWS) -> list[InboxRow]:
         cleaned = query.strip()
@@ -159,8 +174,14 @@ class ComposioGmailPort:
             },
         )
         if data is None:
-            return []
-        return _map_inbox_rows(data, limit=cap)
+            # `_execute` returns None both for `successful: false` (an expired
+            # connection, a rejected query) and for a malformed response shape.
+            # Either way this is not "no matching mail" -- gmail_brief and
+            # gmail_search must report a failed read, not an empty inbox.
+            raise AdapterHttpError(None)
+        rows, raw_count = _map_inbox_rows(data, limit=cap)
+        self.last_page_truncated = raw_count >= cap
+        return rows
 
     def create_draft(self, *, to: str, subject: str, body: str) -> GmailDraft | None:
         recipient = to.strip()
@@ -244,6 +265,7 @@ class FakeGmailPort:
         self._inbox = list(inbox or [])
         self.created_drafts: list[GmailDraft] = []
         self.sent_drafts: list[str] = []
+        self.last_page_truncated = False
 
     def fetch_message(self, message_id: str) -> InboundEmail | None:
         return self._messages.get(message_id)
@@ -252,18 +274,23 @@ class FakeGmailPort:
         return "fake-gmail-account"
 
     def list_recent(self, *, limit: int = MAX_INBOX_ROWS) -> list[InboxRow]:
-        return self._inbox[: _cap_limit(limit)]
+        cap = _cap_limit(limit)
+        self.last_page_truncated = len(self._inbox) >= cap
+        return self._inbox[:cap]
 
     def search(self, query: str, *, limit: int = MAX_INBOX_ROWS) -> list[InboxRow]:
         needle = query.strip().casefold()
         if not needle:
+            self.last_page_truncated = False
             return []
+        cap = _cap_limit(limit)
         hits = [
             row
             for row in self._inbox
             if needle in " ".join([row.sender, row.subject, row.snippet]).casefold()
         ]
-        return hits[: _cap_limit(limit)]
+        self.last_page_truncated = len(hits) >= cap
+        return hits[:cap]
 
     def create_draft(self, *, to: str, subject: str, body: str) -> GmailDraft | None:
         del body
@@ -462,7 +489,10 @@ def _format_row_date(raw_timestamp: str, *, timezone: str, now: datetime) -> str
 
 
 def _cap_limit(limit: int) -> int:
-    return max(1, min(int(limit or MAX_INBOX_ROWS), MAX_INBOX_ROWS))
+    # Ceiling is MAX_GMAIL_BRIEF_ROWS, not MAX_INBOX_ROWS: gmail_inbox/gmail_search
+    # never pass an explicit `limit`, so they still fall back to MAX_INBOX_ROWS
+    # unchanged; only an explicit higher request (gmail_brief) can reach past it.
+    return max(1, min(int(limit or MAX_INBOX_ROWS), MAX_GMAIL_BRIEF_ROWS))
 
 
 def _non_empty_str(value: object) -> str | None:
@@ -508,10 +538,18 @@ def _map_fetch_data(data: dict[str, Any], *, message_id: str) -> InboundEmail:
     )
 
 
-def _map_inbox_rows(data: dict[str, Any], *, limit: int) -> list[InboxRow]:
+def _map_inbox_rows(data: dict[str, Any], *, limit: int) -> tuple[list[InboxRow], int]:
+    """Mapped rows plus the raw message count the provider actually returned.
+
+    The raw count -- not `len(rows)` -- is what tells a caller whether the page
+    was full (more may exist beyond it): a message missing a usable id is
+    dropped from `rows` but was still part of the provider's page, so basing
+    "partial" on the mapped count alone would under-report truncation.
+    """
     messages = data.get("messages")
     if not isinstance(messages, list):
-        return []
+        return [], 0
+    raw_count = len(messages)
     rows: list[InboxRow] = []
     for item in messages:
         if not isinstance(item, dict):
@@ -536,7 +574,7 @@ def _map_inbox_rows(data: dict[str, Any], *, limit: int) -> list[InboxRow]:
         )
         if len(rows) >= limit:
             break
-    return rows
+    return rows, raw_count
 
 
 def _extract_label_ids(item: dict[str, Any]) -> list[str]:
