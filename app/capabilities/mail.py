@@ -32,10 +32,21 @@ def mail_search(port: GmailPort, args: dict[str, Any]) -> dict[str, Any]:
     `mail.search` has been a registered capability with no handler, so the two owner
     tools that need it (`gmail_inbox`, `gmail_search`) called the port directly and
     were gated only by registry membership. This is the missing half.
+
+    An optional integer `limit` in `args` is passed straight to the port -- only
+    `gmail_brief` supplies one (its own wider MAX_GMAIL_BRIEF_ROWS cap);
+    `gmail_inbox`/`gmail_search` never do, so they keep the port's own default.
+    `truncated`, read from the port's `last_page_truncated` after the call,
+    tells the caller whether more results may exist beyond this page.
     """
     query = str(args.get("query") or "").strip()
-    rows = port.search(query) if query else port.list_recent()
-    return {"query": query, "rows": list(rows)}
+    raw_limit = args.get("limit")
+    kwargs: dict[str, Any] = {}
+    if isinstance(raw_limit, int) and not isinstance(raw_limit, bool) and raw_limit > 0:
+        kwargs["limit"] = raw_limit
+    rows = port.search(query, **kwargs) if query else port.list_recent(**kwargs)
+    truncated = bool(getattr(port, "last_page_truncated", False))
+    return {"query": query, "rows": list(rows), "truncated": truncated}
 
 
 def mail_handlers(port: GmailPort) -> dict[str, Any]:

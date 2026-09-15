@@ -49,6 +49,7 @@ _TOOL_GROUPS: tuple[tuple[str, frozenset[str]], ...] = (
                 "weekly_brief",
                 "hot_leads",
                 "pending_approvals",
+                "owner_uncertain_writes",
                 "website_conversations",
                 "operator_snapshot",
                 "owner_status",
@@ -72,6 +73,7 @@ _TOOL_GROUPS: tuple[tuple[str, frozenset[str]], ...] = (
                 "gmail_summary",
                 "gmail_inbox",
                 "gmail_search",
+                "gmail_brief",
                 "gmail_read",
                 "gmail_create_draft",
             }

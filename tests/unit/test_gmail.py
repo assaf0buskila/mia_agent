@@ -12,6 +12,7 @@ from app.domain.tools import AdapterHttpError
 from app.integrations.gmail import (
     COMPOSIO_FETCH_MESSAGE_TOOL,
     COMPOSIO_GMAIL_VERSION,
+    MAX_INBOX_ROWS,
     ComposioGmailPort,
     DisabledGmailPort,
     FakeGmailPort,
@@ -223,6 +224,71 @@ def test_composio_gmail_fetch_request_shape() -> None:
     assert "DELETE" not in serialized.upper()
 
 
+def test_composio_gmail_search_raises_on_unsuccessful_response() -> None:
+    """An expired connection or rejected query (HTTP 200, successful:false) must
+    never look like "no matching mail" -- search has to raise, not return []."""
+    transport = httpx.MockTransport(
+        lambda _request: httpx.Response(
+            200, json={"data": None, "error": "connection expired", "successful": False}
+        )
+    )
+    client = httpx.Client(transport=transport)
+    port = ComposioGmailPort(api_key="cmp-test", user_id="user-abc", client=client)
+    with pytest.raises(AdapterHttpError):
+        port.search("after:1 before:2")
+
+
+def test_composio_gmail_search_genuinely_empty_response_returns_empty_list() -> None:
+    """A real successful-but-empty page is still a valid, non-error result."""
+    transport = httpx.MockTransport(
+        lambda _request: httpx.Response(
+            200, json={"data": {"messages": []}, "error": None, "successful": True}
+        )
+    )
+    client = httpx.Client(transport=transport)
+    port = ComposioGmailPort(api_key="cmp-test", user_id="user-abc", client=client)
+    assert port.search("after:1 before:2") == []
+    assert port.last_page_truncated is False
+
+
+def test_composio_gmail_search_not_truncated_when_raw_page_is_short() -> None:
+    """Fewer raw messages than the requested cap means this really is the last
+    page, even though gmail_inbox/gmail_search never request more than the
+    default 8-row cap."""
+    raw_messages = [
+        {"messageId": f"short_{i}", "sender": "a@x.com", "subject": "s"} for i in range(3)
+    ]
+    transport = httpx.MockTransport(
+        lambda _request: httpx.Response(
+            200, json={"data": {"messages": raw_messages}, "error": None, "successful": True}
+        )
+    )
+    client = httpx.Client(transport=transport)
+    port = ComposioGmailPort(api_key="cmp-test", user_id="user-abc", client=client)
+    rows = port.search("from:a@x.com")
+    assert len(rows) == 3
+    assert port.last_page_truncated is False
+
+
+def test_composio_gmail_search_default_limit_is_unchanged_at_eight() -> None:
+    """gmail_inbox/gmail_search never pass an explicit limit; that default must
+    stay MAX_INBOX_ROWS regardless of gmail_brief's own wider request cap."""
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["json"] = json.loads(request.content)
+        return httpx.Response(
+            200, json={"data": {"messages": []}, "error": None, "successful": True}
+        )
+
+    transport = httpx.MockTransport(handler)
+    client = httpx.Client(transport=transport)
+    port = ComposioGmailPort(api_key="cmp-test", user_id="user-abc", client=client)
+    port.search("from:a@x.com")
+    arguments = captured["json"]["arguments"]  # type: ignore[index]
+    assert arguments["max_results"] == MAX_INBOX_ROWS
+
+
 def test_build_gmail_port_disabled_without_credentials() -> None:
     from app.core.config import Settings
 
@@ -246,3 +312,47 @@ def test_fake_gmail_port_returns_configured_message_or_none() -> None:
     assert message is not None
     assert message.sender == "lead@example.com"
     assert port.fetch_message("missing") is None
+
+
+class _LimitCapturingPort:
+    """Records the limit it was called with and reports a settable truncation flag."""
+
+    def __init__(self, *, truncated: bool = False) -> None:
+        self.last_search_limit: int | None = None
+        self.last_recent_limit: int | None = None
+        self.last_page_truncated = truncated
+
+    def fetch_message(self, message_id: str):
+        return None
+
+    def list_recent(self, *, limit: int = 8):
+        self.last_recent_limit = limit
+        return []
+
+    def search(self, query: str, *, limit: int = 8):
+        self.last_search_limit = limit
+        return []
+
+    def create_draft(self, *, to: str, subject: str, body: str):
+        return None
+
+    def send_draft(self, draft_id: str) -> bool:
+        return False
+
+
+def test_mail_search_capability_passes_limit_through_and_reports_truncated() -> None:
+    from app.capabilities.mail import mail_search
+
+    port = _LimitCapturingPort(truncated=True)
+    payload = mail_search(port, {"query": "invoice", "limit": 25})
+    assert port.last_search_limit == 25
+    assert payload["truncated"] is True
+
+
+def test_mail_search_capability_without_limit_leaves_the_port_default_alone() -> None:
+    from app.capabilities.mail import mail_search
+
+    port = _LimitCapturingPort()
+    payload = mail_search(port, {})
+    assert port.last_recent_limit == 8  # the port's own default, never overridden
+    assert payload["truncated"] is False

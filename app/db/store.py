@@ -2459,6 +2459,27 @@ class LeadStore:
         ).one_or_none()
         return existing.status if existing is not None else ""
 
+    def list_stuck_provider_writes(
+        self, *, older_than: datetime, limit: int = 10
+    ) -> list[IdempotencyRow]:
+        """Provider writes left mid-air: claimed or flagged for review, older than
+        a grace cutoff. Read-only -- nothing here retries, completes or mutates a
+        row. Powers the owner-facing `owner_uncertain_writes` read only.
+        """
+        cutoff = older_than.astimezone(UTC) if older_than.tzinfo else older_than.replace(tzinfo=UTC)
+        bounded = max(1, min(int(limit or 10), 10))
+        return list(
+            self.session.scalars(
+                select(IdempotencyRow)
+                .where(
+                    IdempotencyRow.status.in_(("pending_review", "provider_claimed")),
+                    IdempotencyRow.created_at < cutoff.isoformat(),
+                )
+                .order_by(IdempotencyRow.created_at.desc())
+                .limit(bounded)
+            ).all()
+        )
+
     def _fill_webhook_envelope_if_empty(
         self,
         row: WebhookEventRow,

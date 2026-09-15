@@ -20,8 +20,9 @@ from app.domain.owner.notifications import apply_owner_notify
 from app.domain.owner.reads import format_pending_approvals_ack, format_website_conversations_ack
 from app.domain.owner.snapshot import format_operator_snapshot_ack
 from app.domain.owner.status import format_owner_status_ack
+from app.domain.owner.uncertain_writes import format_uncertain_writes, list_uncertain_writes
 from app.domain.owner.weeklies import apply_owner_weekly
-from app.tools.owner.types import ToolContext, ToolResult, _empty
+from app.tools.owner.types import ToolContext, ToolResult, _empty, utc_now
 
 # ----------------------------------------------------------------- owner reads
 
@@ -65,6 +66,14 @@ def _hot_leads(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
 def _pending_approvals(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     del args
     return _empty(format_pending_approvals_ack(ctx.store), "Nothing is waiting for approval.")
+
+
+def _owner_uncertain_writes(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
+    del args
+    items = list_uncertain_writes(ctx.store, now=ctx.now or utc_now(), timezone=ctx.timezone())
+    # `format_uncertain_writes` already returns OWNER_UNCERTAIN_WRITES_EMPTY for an
+    # empty list; no separate `_empty(...)` fallback needed here.
+    return ToolResult(ok=True, text=format_uncertain_writes(items))
 
 
 def _website_conversations(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:

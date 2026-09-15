@@ -90,7 +90,7 @@ async def test_live_owner_surface_answers_inventory_without_history_model_or_lea
         db.close()
 
     assert result.sent is True
-    assert port.sent and "46 כלים רשומים" in port.sent[0].text
+    assert port.sent and "48 כלים רשומים" in port.sent[0].text
     assert calls == {"talk": 0, "history": 0, "learn": 0}
     assert elapsed < 1.0
 
