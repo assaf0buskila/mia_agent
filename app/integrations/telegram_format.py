@@ -134,7 +134,9 @@ def _render_owner_line(line: str) -> str:
     if _FENCE_TOKEN_RE.search(line):
         heading = _HEADING_RE.match(line)
         if heading:
-            return _apply_inline_markdown(heading.group(2).strip(), allow_bold=False)
+            return _apply_inline_markdown(
+                heading.group(2).strip(), allow_bold=False, allow_code=False
+            )
         bullet = _BULLET_RE.match(line)
         if bullet:
             indent, body = bullet.groups()
@@ -143,8 +145,12 @@ def _render_owner_line(line: str) -> str:
     heading = _HEADING_RE.match(line)
     if heading:
         # The whole line is about to be wrapped in <b>; converting an inner **marker**
-        # too would nest <b><b>...</b></b>, so collapse it to plain text instead.
-        body = _apply_inline_markdown(heading.group(2).strip(), allow_bold=False)
+        # too would nest <b><b>...</b></b>, so collapse it to plain text instead. Inline
+        # `code` also stays OFF: a nested <code> would make this <b>...</b> span not
+        # "plain" (`_UNSPLITTABLE_SPAN_RE`'s <b> alternative requires no inner `<`), so
+        # it would go unprotected and a hard cut could land inside it unclosed. A
+        # heading is always exactly one plain <b>...</b> span — backticks stay literal.
+        body = _apply_inline_markdown(heading.group(2).strip(), allow_bold=False, allow_code=False)
         return f"<b>{body}</b>" if body else ""
     bullet = _BULLET_RE.match(line)
     if bullet:
@@ -153,7 +159,9 @@ def _render_owner_line(line: str) -> str:
     return _apply_inline_markdown(line)
 
 
-def _apply_inline_markdown(text: str, *, allow_bold: bool = True) -> str:
+def _apply_inline_markdown(
+    text: str, *, allow_bold: bool = True, allow_code: bool = True
+) -> str:
     """`code` first, THEN `**bold**` — never the other way round.
 
     A run like `` **a`b**c` `` has a `**` pair whose content contains a backtick, and a
@@ -163,14 +171,20 @@ def _apply_inline_markdown(text: str, *, allow_bold: bool = True) -> str:
     whole message. Extracting every code span to an inert placeholder before bold ever
     runs means bold can only ever match within plain text or within another bold
     region's edges, never straddle a code span's boundary.
+
+    `allow_code=False` (headings only) leaves backticks untouched instead.
     """
     codes: list[str] = []
 
-    def _stash_code(match: re.Match[str]) -> str:
-        codes.append(f"<code>{match.group(1)}</code>")
-        return _CODE_INLINE_TOKEN.format(len(codes) - 1)
+    if allow_code:
 
-    without_code = _CODE_INLINE_RE.sub(_stash_code, text)
+        def _stash_code(match: re.Match[str]) -> str:
+            codes.append(f"<code>{match.group(1)}</code>")
+            return _CODE_INLINE_TOKEN.format(len(codes) - 1)
+
+        without_code = _CODE_INLINE_RE.sub(_stash_code, text)
+    else:
+        without_code = text
     if allow_bold:
         without_code = _BOLD_INLINE_RE.sub(lambda m: f"<b>{m.group(1)}</b>", without_code)
     else:
@@ -374,8 +388,15 @@ def _resolve_unsplittable_span(remaining: str, cut: int, limit: int) -> tuple[in
     whole: `reopen=True` tells the caller to close `close_tag` at `new_cut` and reopen
     `open_tag` at the start of the next chunk, splitting the span itself across chunks
     rather than ever shipping one oversized chunk or cutting the span in half unclosed.
-    A cut that would land exactly at the span's end is folded into this chunk instead
-    (`reopen=False`) so the next chunk never opens with an empty `<tag></tag>` pair.
+    The cut is kept clear of both ends of the content:
+    - at the near end, room is reserved for `close_tag` so `remaining[:cut] +
+      close_tag` never runs past `limit`; if that leaves no content at all, the whole
+      span is deferred to the next chunk instead of opening it just to close it empty
+      (or, when the span already starts this chunk and deferring is not possible,
+      one content character is kept so the loop still makes forward progress);
+    - at the far end, a cut landing at-or-past the span's actual end is folded into
+      this chunk instead (`reopen=False`) so the next chunk never opens with an empty
+      `<tag></tag>` pair.
     """
     for match in _UNSPLITTABLE_SPAN_RE.finditer(remaining):
         if not (match.start() < cut < match.end()):
@@ -385,8 +406,16 @@ def _resolve_unsplittable_span(remaining: str, cut: int, limit: int) -> tuple[in
             return (match.start() if match.start() > 0 else match.end()), False, "", ""
         content_start = match.start() + len(open_tag)
         content_end = match.end() - len(close_tag)
-        if not (content_start <= cut <= content_end):
-            cut = max(content_start, min(cut, content_end))
+        cut = min(cut, content_end, limit - len(close_tag))
+        cut = max(cut, content_start)
+        if cut <= content_start:
+            if match.start() > 0:
+                # Nothing of this span fits in the chunk yet — defer it whole rather
+                # than opening it just to close it immediately.
+                return match.start(), False, "", ""
+            # The span already starts the chunk, so there is nothing left to defer
+            # to: keep one content character to guarantee the loop still progresses.
+            cut = content_start + 1
         if cut >= content_end:
             return match.end(), False, "", ""
         return cut, True, open_tag, close_tag
@@ -428,7 +457,13 @@ def split_message(text: str, *, limit: int = _CHUNK_BUDGET) -> list[str]:
     mid-entity, and — thanks to `_resolve_unsplittable_span` — never with one of these
     three sliced without being closed and reopened), so every chunk is independently
     valid Telegram HTML, even when a single such span alone is bigger than `limit`.
+
+    `limit` is floored at 64: production always calls with the default (3900), so this
+    only ever affects a caller passing something pathologically small, and it exists
+    purely to keep the reopen path's per-iteration progress well clear of the few
+    bytes a `<pre>`/`<code>` open+close tag pair costs on its own.
     """
+    limit = max(limit, 64)
     cleaned = text.strip()
     if not cleaned:
         return []

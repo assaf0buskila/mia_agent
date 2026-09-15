@@ -485,8 +485,11 @@ def test_split_message_reopens_a_bold_span_bigger_than_the_limit() -> None:
 def test_split_message_avoids_an_empty_pre_pair_when_the_close_lands_at_the_limit() -> None:
     """A span oversized by only a few chars, whose content ends exactly at `limit`.
 
-    Without folding this into the current chunk, the naive close/reopen produces a
-    second, useless "<pre></pre>" chunk instead of one clean chunk.
+    Without folding a cut landing at the span's end into the current chunk, the naive
+    close/reopen produces a second, useless "<pre></pre>" chunk. Every chunk must
+    still be non-empty, balanced, and within the limit (the exact chunk count is not
+    load-bearing — the close-tag budget reservation can legitimately split this into
+    more than one non-empty chunk).
     """
     from app.integrations.telegram_format import _CHUNK_BUDGET
 
@@ -494,8 +497,12 @@ def test_split_message_avoids_an_empty_pre_pair_when_the_close_lands_at_the_limi
     rendered = "<pre>" + "c" * content_len + "</pre>"
     assert len(rendered) > _CHUNK_BUDGET
     chunks = split_message(rendered)
-    assert chunks == [rendered]
     assert "<pre></pre>" not in chunks
+    for chunk in chunks:
+        assert chunk.count("<pre>") == chunk.count("</pre>") == 1
+        assert len(chunk) <= MAX_MESSAGE_CHARS
+    rejoined = "".join(chunks).replace("</pre><pre>", "")
+    assert rejoined == rendered
 
 
 # --------------------------------------------------- fence language tag (P3)
@@ -568,3 +575,87 @@ def test_render_owner_markdown_strips_literal_code_placeholder_bytes() -> None:
     rendered = render_owner_markdown("\x01CODE0\x01 and `real code`")
     assert "\x01" not in rendered
     assert rendered == "CODE0 and <code>real code</code>"
+
+
+# ------------------------------------ heading + inline code stays plain (P2)
+
+
+def test_render_owner_markdown_heading_with_inline_code_is_a_plain_bold_span() -> None:
+    """A heading is always exactly one plain <b>...</b> span - never <b>...<code>...
+
+    `_UNSPLITTABLE_SPAN_RE`'s <b> alternative requires no inner "<", so a <code> nested
+    inside it would go unprotected and a hard cut could land inside it, unclosed.
+    Backticks inside a heading stay literal instead of becoming <code>.
+    """
+    raw = "# " + "title " * 700 + "`code here` " + "more " * 200
+    rendered = render_owner_markdown(raw)
+    assert "<code>" not in rendered
+    assert rendered.count("<b>") == 1
+    assert rendered.startswith("<b>") and rendered.endswith("</b>")
+    for limit in (3900, 4096, 50):
+        chunks = split_message(rendered, limit=limit)
+        assert len(chunks) > 1
+        for chunk in chunks:
+            assert chunk.count("<b>") == chunk.count("</b>")
+            assert not chunk.startswith("</b>")
+            assert not chunk.endswith("<b>")
+
+
+# --------------------------- span opening exactly at the cut is deferred (P3)
+
+
+def test_split_message_defers_an_oversized_pre_that_opens_at_the_cut() -> None:
+    raw = "w" * 3895 + "```\n" + "m" * 5000 + "\n```"
+    rendered = render_owner_markdown(raw)
+    chunks = split_message(rendered)
+    assert len(chunks) > 1
+    for chunk in chunks:
+        assert len(chunk) <= MAX_MESSAGE_CHARS
+        assert chunk.count("<pre>") == chunk.count("</pre>")
+        assert not chunk.startswith("</pre>")
+        assert not chunk.endswith("<pre>")
+        assert "<pre></pre>" not in chunk
+
+
+def test_split_message_defers_an_oversized_bold_span_that_opens_at_the_cut() -> None:
+    rendered = "w" * 3897 + "<b>" + "m" * 5000 + "</b>"
+    chunks = split_message(rendered)
+    assert len(chunks) > 1
+    for chunk in chunks:
+        assert len(chunk) <= MAX_MESSAGE_CHARS
+        assert chunk.count("<b>") == chunk.count("</b>")
+        assert not chunk.startswith("</b>")
+        assert not chunk.endswith("<b>")
+        assert "<b></b>" not in chunk
+
+
+def test_split_message_defers_an_oversized_code_span_that_opens_at_the_cut() -> None:
+    rendered = "w" * 3894 + "<code>" + "m" * 5000 + "</code>"
+    chunks = split_message(rendered)
+    assert len(chunks) > 1
+    for chunk in chunks:
+        assert len(chunk) <= MAX_MESSAGE_CHARS
+        assert chunk.count("<code>") == chunk.count("</code>")
+        assert not chunk.startswith("</code>")
+        assert not chunk.endswith("<code>")
+        assert "<code></code>" not in chunk
+
+
+# ------------------------------- minimum-limit guard against zero progress (P3)
+
+
+def test_split_message_terminates_when_limit_is_smaller_than_a_tag_pair() -> None:
+    """limit 10-13 is smaller than <pre>'s open+close (11 chars) combined.
+
+    Without a floor, the reopen path's per-iteration progress could hit zero and spin
+    forever. `chunks` returning at all (rather than the test hanging) is the point.
+    """
+    rendered = "<pre>" + "m" * 500 + "</pre>"
+    for limit in (10, 11, 12, 13):
+        chunks = split_message(rendered, limit=limit)
+        assert chunks
+        for chunk in chunks:
+            assert chunk.count("<pre>") == chunk.count("</pre>")
+            assert "<pre></pre>" not in chunk
+        rejoined = "".join(chunks).replace("</pre><pre>", "")
+        assert rejoined == rendered
