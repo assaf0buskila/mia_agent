@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 import pytest
 from app.capabilities.types import Principal
 from app.db.base import Base
+from app.db.models import CrmOutboxRow
 from app.db.store import LeadStore
 from app.domain.events import Channel
 from app.domain.handoff.hot import format_hot_leads_ack
@@ -22,7 +23,7 @@ from app.domain.owner.reads import format_website_conversations_ack
 from app.domain.owner.snapshot import format_operator_snapshot_ack
 from app.domain.owner.status import format_owner_status_ack
 from app.services.crm_v2 import CrmService
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -172,3 +173,71 @@ def test_empty_state_strings_unchanged_when_no_leads(sessions: sessionmaker[Sess
             format_hot_leads_ack(store, principal=Principal.owner(source="test"))
             == "אין לידים חמים שמחכים לתפיסה."
         )
+
+
+def test_returning_visitor_second_session_shown_hot_despite_first_confirmed(
+    sessions: sessionmaker[Session],
+) -> None:
+    """Regression: 'undelivered' must be judged per capturing conversation, not per
+    contact -- a first session's confirmed Telegram ping must never hide a second
+    session's genuinely undelivered one for the same returning visitor.
+    """
+    with sessions() as session:
+        store = LeadStore(session)
+        service = CrmService(session)
+        first = service.capture_site_lead(
+            {"name": "Dana", "phone": "0501112222", "business": "Studio"},
+            conversation_id="return-sess-1",
+            source_ref="site:return-sess-1:m1",
+            summary="x",
+            recipient_ids=("999",),
+        )
+        second = service.capture_site_lead(
+            {"name": "Dana", "phone": "0501112222", "want": "more clients"},
+            conversation_id="return-sess-2",
+            source_ref="site:return-sess-2:m1",
+            summary="y",
+            recipient_ids=("999",),
+        )
+        assert first.contact is not None and second.contact is not None
+        assert first.contact.id == second.contact.id  # same contact, returning visitor
+        session.commit()
+
+        jobs = session.scalars(
+            select(CrmOutboxRow).where(CrmOutboxRow.destination == "telegram")
+        ).all()
+        first_job = next(j for j in jobs if j.dedupe_key.startswith("telegram:crm:return-sess-1:"))
+        second_job = next(
+            j for j in jobs if j.dedupe_key.startswith("telegram:crm:return-sess-2:")
+        )
+        first_job.status = "confirmed"
+        second_job.status = "failed"
+        session.commit()
+
+        hot = format_hot_leads_ack(store, principal=Principal.owner(source="test"))
+        assert first.contact.id in hot
+
+
+def test_returning_visitor_same_day_counts_as_one_lead_and_one_line(
+    sessions: sessionmaker[Session],
+) -> None:
+    with sessions() as session:
+        store = LeadStore(session)
+        service = CrmService(session)
+        for conversation_id, want in (("dup-sess-1", "w-1"), ("dup-sess-2", "w-2")):
+            result = service.capture_site_lead(
+                {"name": "Dana", "phone": "0503334444", "business": "Barbershop", "want": want},
+                conversation_id=conversation_id,
+                source_ref=f"site:{conversation_id}:m1",
+                summary="x",
+                recipient_ids=("999",),
+            )
+            assert result.contact is not None
+        session.commit()
+
+        brief = compute_daily_brief(store, timezone=_TZ)
+        assert brief is not None
+        assert brief.leads == 1  # one returning visitor, not two
+
+        ack = format_website_conversations_ack(store)
+        assert ack.count("Barbershop") == 1
