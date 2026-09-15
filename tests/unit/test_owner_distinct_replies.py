@@ -104,6 +104,22 @@ class _StubStore:
     def count_sales_snapshots(self) -> int:
         return len(self._snapshots)
 
+    def list_captured_website_leads(
+        self, *, occurred_from: str = "", occurred_to: str = "", limit: int = 200
+    ):
+        del occurred_from, occurred_to, limit
+        return []
+
+    def count_captured_website_leads(
+        self, *, occurred_from: str = "", occurred_to: str = ""
+    ) -> int:
+        del occurred_from, occurred_to
+        return 0
+
+    def list_undelivered_captured_website_leads(self, *, limit: int = 12) -> list[str]:
+        del limit
+        return []
+
 
 def test_pending_approvals_read_is_empty_when_nothing_waits() -> None:
     assert "אין כרגע" in format_pending_approvals_ack(_StubStore())

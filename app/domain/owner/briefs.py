@@ -40,6 +40,30 @@ def _format_brief_date(brief_date: str) -> str:
     return f"{day}.{month}.{year}"
 
 
+def _count_leads_today(
+    store: LeadStore, *, legacy_leads: int, occurred_from: str, occurred_to: str
+) -> int:
+    """Legacy ``lead_created`` events plus v2 CRM captures, never double counted.
+
+    The two systems are disjoint in production today (the legacy website path has no
+    live caller), but a lead that somehow exists in both -- same website session --
+    must still count once, keyed by conversation id.
+    """
+    v2_leads = store.list_captured_website_leads(
+        occurred_from=occurred_from, occurred_to=occurred_to, limit=500
+    )
+    v2_conversation_ids = {lead.conversation_id for lead in v2_leads if lead.conversation_id}
+    legacy_website = store.list_legacy_website_lead_created(
+        occurred_from=occurred_from, occurred_to=occurred_to
+    )
+    overlap = sum(
+        1
+        for _lead_id, conversation_id in legacy_website
+        if conversation_id and conversation_id in v2_conversation_ids
+    )
+    return legacy_leads - overlap + len(v2_leads)
+
+
 def compute_daily_brief(
     store: LeadStore,
     *,
@@ -71,9 +95,15 @@ def compute_daily_brief(
         )
         for key in OWNER_BRIEF_EVENT_TYPES
     }
+    leads = _count_leads_today(
+        store,
+        legacy_leads=counts["lead_created"],
+        occurred_from=occurred_from,
+        occurred_to=occurred_to,
+    )
     return DailyBriefSnapshot(
         brief_date=brief_date,
-        leads=counts["lead_created"],
+        leads=leads,
         meetings_offered=counts["meeting_offered"],
         handoffs=counts["handoff"],
         messages_in=counts["message_in"],

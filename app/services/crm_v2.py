@@ -15,6 +15,7 @@ from functools import wraps
 from hashlib import sha256
 from typing import Any, Literal
 from uuid import uuid4
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sqlalchemy import delete, or_, select, text, update
 from sqlalchemy.orm import Session
@@ -47,6 +48,12 @@ CONTACT_FIELDS = (
     "pinged",
 )
 MAX_FIELD_CHARS = 2_000
+# System-owned Sheet columns: only ``CrmContactRow.created_at``/``updated_at`` may set
+# these, never a model, an owner Sheet edit, or a legacy row import. They are
+# excluded from ``_bounded_fields`` at the single choke point every incoming field
+# mapping passes through (capture, Sheet import, conflict resolution), so they can
+# never enter ``fields_json`` and can never trigger a three-way-merge conflict.
+SYSTEM_OWNED_FIELDS = frozenset({"created", "updated"})
 OUTBOX_STATUSES = frozenset(
     {"pending", "in_flight", "confirmed", "failed", "unknown", "conflict"}
 )
@@ -192,6 +199,11 @@ def _load_fields(raw: str) -> dict[str, str]:
 def _bounded_fields(fields: Mapping[str, Any]) -> dict[str, str]:
     bounded: dict[str, str] = {}
     for key in CONTACT_FIELDS:
+        if key in SYSTEM_OWNED_FIELDS:
+            # Never accept a "created"/"updated" value from any incoming source --
+            # capture, Sheet import, owner edit, or conflict resolution. They are
+            # computed from the row's own timestamps at read time instead.
+            continue
         raw = fields.get(key)
         if raw is None:
             continue
@@ -241,9 +253,11 @@ class CrmService:
         session: Session,
         *,
         now: Callable[[], datetime] | datetime | None = None,
+        timezone: str = "Asia/Jerusalem",
     ) -> None:
         self.session = session
         self._clock = now
+        self._timezone = timezone
 
     def _now(self) -> str:
         moment = self._clock() if callable(self._clock) else self._clock
@@ -251,6 +265,27 @@ class CrmService:
         if moment.tzinfo is None:
             moment = moment.replace(tzinfo=UTC)
         return moment.astimezone(UTC).isoformat()
+
+    def _format_local_timestamp(self, value: str) -> str:
+        """Render a stored UTC ISO timestamp in the owner's local offset.
+
+        Used only for the system-owned "created"/"updated" Sheet cells -- never for
+        anything stored back into ``fields_json``. Falls back to the raw stored value
+        rather than raising: a display cell must never break a read.
+        """
+        if not value:
+            return ""
+        try:
+            moment = datetime.fromisoformat(value)
+        except ValueError:
+            return value
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=UTC)
+        try:
+            tz = ZoneInfo(self._timezone)
+        except (ValueError, OSError, KeyError, ZoneInfoNotFoundError):
+            return moment.isoformat()
+        return moment.astimezone(tz).isoformat()
 
     def _lock_projection_effects(self) -> None:
         """Serialize issue state changes with the final Contacts Sheet write."""
@@ -863,10 +898,25 @@ class CrmService:
         revision: int,
         row_number: int = 0,
     ) -> None:
-        """Record exactly the revision the destination acknowledged."""
+        """Record exactly the revision the destination acknowledged.
+
+        Unlike every other write path, this one is allowed to record real
+        "created"/"updated" values: it is not accepting owner/model input, it is
+        recording what the delivery worker actually just wrote to the Sheet (the
+        confirmed payload's own cells), so the destination-conflict check in
+        `crm_delivery.py` compares against the true last-delivered state instead of
+        a permanently empty placeholder.
+        """
         if self.session.get(CrmContactRow, contact_id) is None:
             raise CrmNotFound(contact_id)
         delivered = _bounded_fields(fields)
+        for name in SYSTEM_OWNED_FIELDS:
+            raw = fields.get(name)
+            if raw is None:
+                continue
+            value = str(raw).strip()
+            if len(value) <= MAX_FIELD_CHARS:
+                delivered[name] = value
         stamp = self._now()
         for name in CONTACT_FIELDS:
             snapshot = self.session.get(CrmSyncSnapshotRow, (contact_id, name))
@@ -940,6 +990,14 @@ class CrmService:
         issue_ids: list[str] = []
         accepted_from_sheet: list[str] = []
         for name in CONTACT_FIELDS:
+            if name in SYSTEM_OWNED_FIELDS:
+                # Never compare, accept, or re-snapshot these here: they are always
+                # "" in fields_json and db_value/sheet_value would trivially agree,
+                # which would otherwise mark them "accepted from sheet" below and
+                # snapshot a fresh computed timestamp before it was ever actually
+                # written to the Sheet -- a mismatch the delivery worker's
+                # destination-conflict check would then wrongly trip on.
+                continue
             sheet_value = _bounded_fields({name: sheet_fields.get(name, "")}).get(name, "")
             snapshot = self.session.get(CrmSyncSnapshotRow, (contact.id, name))
             base = snapshot.value if snapshot is not None else db_fields[name]
@@ -1474,12 +1532,16 @@ class CrmService:
         ).all()
         return [self._contact_view(row) for row in rows]
 
-    @staticmethod
-    def _contact_view(row: CrmContactRow) -> ContactView:
+    def _contact_view(self, row: CrmContactRow) -> ContactView:
+        fields = _load_fields(row.fields_json)
+        # "created"/"updated" are never stored in fields_json (see SYSTEM_OWNED_FIELDS):
+        # they are computed here, from the row itself, every time a view is built.
+        fields["created"] = self._format_local_timestamp(row.created_at)
+        fields["updated"] = self._format_local_timestamp(row.updated_at)
         return ContactView(
             id=row.id,
             revision=row.revision,
-            fields=_load_fields(row.fields_json),
+            fields=fields,
             source_ref=row.source_ref,
             conversation_id=row.conversation_id,
         )

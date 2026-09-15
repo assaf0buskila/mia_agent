@@ -14,7 +14,7 @@ from app.domain.lead_label import lead_display
 from app.domain.sales import FitLevel, PainLevel, SalesState, manual_step_established
 
 if TYPE_CHECKING:
-    from app.db.store import LeadStore
+    from app.db.store import CapturedWebsiteLead, LeadStore
 
 _MAX_LISTED = 8
 
@@ -104,36 +104,68 @@ def top_website_lead_id(store: LeadStore) -> str | None:
     return ranked[0].lead_id if ranked else None
 
 
+def _captured_lead_line(lead: CapturedWebsiteLead) -> str:
+    """v2 has no sales-workflow state to render; show the fields C3a fills instead."""
+    fields = lead.fields
+    name = fields.get("name", "").strip()
+    business = fields.get("business", "").strip()
+    want = fields.get("want", "").strip()
+    next_step = fields.get("next_step", "").strip()
+    label = name or business or lead.contact_id
+    parts = [label]
+    if business and business != label:
+        parts.append(business[:60])
+    if want:
+        parts.append(f"צריך: {want[:60]}")
+    if next_step:
+        parts.append(f"הבא: {next_step[:60]}")
+    return " · ".join(parts)
+
+
 def format_website_conversations_ack(store: LeadStore) -> str:
     """What the website conversations actually produced, ranked by depth.
 
     The counts describe the sample that was read, and the total is reported
-    separately so a capped read never looks like the whole book.
+    separately so a capped read never looks like the whole book. Legacy
+    ``SalesState`` conversations and v2 CRM website captures are two disjoint data
+    sources today (the legacy website path has no live caller), so they are listed
+    in separate sections rather than force-ranked together.
     """
     snapshots = store.list_sales_snapshots()
-    if not snapshots:
+    v2_leads = store.list_captured_website_leads(limit=_MAX_LISTED)
+    if not snapshots and not v2_leads:
         return "אין עדיין שיחות מהאתר לנתח."
-    total = store.count_sales_snapshots()
-    engaged = [item for item in snapshots if _discovery_depth(item) >= 2]
-    offered = [item for item in snapshots if item.whatsapp_handoff_offered]
-    waiting = [item for item in snapshots if item.owner_required]
-    header = f"שיחות מהאתר: {total}"
-    if total > len(snapshots):
-        header += f" (בדקתי {len(snapshots)} אחרונות)"
-    lines = [
-        f"{header} · "
-        f"discovery משמעותי {len(engaged)} · "
-        f"הוצע וואטסאפ {len(offered)} · "
-        f"מחכות לך {len(waiting)}"
-    ]
-    ranked = _ranked_snapshots(snapshots)
-    interesting = [item for item in ranked if _discovery_depth(item) >= 1][:_MAX_LISTED]
-    if interesting:
-        lines.append("הכי מעניינות:")
-        lines.extend(_lead_line(item) for item in interesting)
+    total_legacy = store.count_sales_snapshots()
+    total_v2 = store.count_captured_website_leads()
+    lines: list[str] = []
+    if snapshots:
+        engaged = [item for item in snapshots if _discovery_depth(item) >= 2]
+        offered = [item for item in snapshots if item.whatsapp_handoff_offered]
+        waiting = [item for item in snapshots if item.owner_required]
+        header = f"שיחות מהאתר: {total_legacy + total_v2}"
+        if total_legacy > len(snapshots):
+            header += f" (בדקתי {len(snapshots)} אחרונות)"
+        lines.append(
+            f"{header} · "
+            f"discovery משמעותי {len(engaged)} · "
+            f"הוצע וואטסאפ {len(offered)} · "
+            f"מחכות לך {len(waiting)}"
+        )
+        ranked = _ranked_snapshots(snapshots)
+        interesting = [item for item in ranked if _discovery_depth(item) >= 1][:_MAX_LISTED]
+        if interesting:
+            lines.append("הכי מעניינות:")
+            lines.extend(_lead_line(item) for item in interesting)
+        else:
+            lines.append("אף שיחה עוד לא עברה את השלב הראשון.")
+        poor = [item for item in snapshots if item.fit == FitLevel.POOR]
+        if poor:
+            lines.append(f"לא מתאימות: {len(poor)}")
     else:
-        lines.append("אף שיחה עוד לא עברה את השלב הראשון.")
-    poor = [item for item in snapshots if item.fit == FitLevel.POOR]
-    if poor:
-        lines.append(f"לא מתאימות: {len(poor)}")
+        lines.append(f"שיחות מהאתר: {total_legacy + total_v2}")
+    if v2_leads:
+        lines.append("לידים חדשים מהאתר:")
+        lines.extend(_captured_lead_line(lead) for lead in v2_leads)
+        if total_v2 > len(v2_leads):
+            lines.append(f"ועוד {total_v2 - len(v2_leads)}")
     return "\n".join(lines)
