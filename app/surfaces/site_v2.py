@@ -79,15 +79,17 @@ _GREETING_TOKEN = (
     r"העניינים|חדש|"
     r"מהקורה|מהנשמע|מהמצב|מהעניינים)"
 )
+# The fused single-letter/word tokens above (e.g. "מה" is also the first half of
+# "מהקורה") make the repeated group ambiguous: on a near-match run just
+# under the length cap below, the regex engine's backtracking was still exponential
+# (~0.5s at 60 chars) even though it never affects the eventual answer. Both the
+# greeting-token group and the separator run are made atomic/possessive so a
+# rejected attempt is never retried with a different split, which is the actual
+# fix; the length cap below is kept only as a cheap second guard.
 _GREETING_ONLY = re.compile(
-    rf"^(?:{_GREETING_TOKEN}[\s!.,?~\u05be-]*)+$",
+    rf"^(?:(?>{_GREETING_TOKEN})[\s!.,?~\u05be-]*+)+$",
     re.I,
 )
-# The fused single-letter/word tokens above (e.g. "מה" is also the first half of
-# "מהקורה") make the repeated group ambiguous, and on a long run of
-# near-matches (e.g. "מהקורה" repeated hundreds of times) the regex engine's
-# backtracking is exponential. Real greetings are short, so the regex only ever runs
-# on short input; anything longer is informative by construction and skips the match.
 _GREETING_MAX_CHARS = 60
 
 

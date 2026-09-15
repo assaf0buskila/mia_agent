@@ -1333,29 +1333,57 @@ def test_model_error_after_capture_leaves_original_job_and_contact_unchanged(
             assert "השלב הבא המומלץ: לחזור לפונה" in payload_text
 
 
-def test_greeting_detector_is_immune_to_redos_on_long_fused_input() -> None:
-    """Chunk C3a review P0: the fused single-letter/word greeting tokens made the
-    repeated-group regex ambiguous, and long adversarial input triggered catastrophic
-    backtracking. Real greetings are short; anything long must return quickly and be
-    treated as informative rather than hang the request under the session row lock."""
+def test_greeting_regex_worst_case_input_stays_fast() -> None:
+    """Chunk C3a review P0 round 2: the 60-char length cap alone still left input
+    just under it exponential (measured ~0.5s at 60 chars on the prior commit)
+    because the repeated greeting-token group could still backtrack across a
+    near-match run. The token group and the separator run are now atomic/
+    possessive, so even the adversarial worst case returns immediately; the cap
+    is kept only as a cheap second guard, not the actual fix."""
     from time import perf_counter
 
+    from app.surfaces.site_v2 import _GREETING_ONLY, _is_uninformative_business_text
+
+    worst_59 = ("היי" * 20)[:59] + "ה"
+    worst_59_x = ("היי" * 20)[:59] + "X"
+    for text in (worst_59, worst_59_x):
+        start = perf_counter()
+        assert _is_uninformative_business_text(text) is False
+        assert perf_counter() - start < 0.05
+
+    # 4000 chars is well past the length cap, so call the compiled regex
+    # directly -- this exercises the atomic/possessive fix itself, not the cap.
+    long_text = "היי" * 1333 + "X"
+    start = perf_counter()
+    assert _GREETING_ONLY.fullmatch(long_text) is None
+    assert perf_counter() - start < 0.05
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    (
+        ("היי מהקורה", True),
+        ("מה נשמע?", True),
+        ("שלום!", True),
+        ("בוקר טוב!", True),
+        ("מה", True),
+        ("היי", True),
+        ("ה", True),
+        ("hello!", True),
+        ("good morning", True),
+        ("SEO", False),
+        ("אתר", False),
+        ("CRM", False),
+        ("יש לי סטודיו פילאטיס בתל אביב", False),
+    ),
+)
+def test_greeting_classification_is_unaffected_by_the_atomic_group_fix(
+    text: str, expected: bool
+) -> None:
+    """The atomic/possessive rewrite must not change any classification outcome."""
     from app.surfaces.site_v2 import _is_uninformative_business_text
 
-    fused = "מהקורה" * 660 + "X"
-    start = perf_counter()
-    assert _is_uninformative_business_text(fused) is False
-    assert perf_counter() - start < 0.5
-
-    spaced = "היי מה " * 600
-    start = perf_counter()
-    assert _is_uninformative_business_text(spaced) is False
-    assert perf_counter() - start < 0.5
-
-    # Existing short greeting cases must still be classified correctly.
-    assert _is_uninformative_business_text("היי מהקורה") is True
-    assert _is_uninformative_business_text("בוקר טוב!") is True
-    assert _is_uninformative_business_text("מה נשמע?") is True
+    assert _is_uninformative_business_text(text) is expected
 
 
 @pytest.mark.parametrize("text", ("SEO", "אתר"))
