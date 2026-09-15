@@ -36,13 +36,34 @@ start a parallel doc hierarchy.
 
 ## Subagents
 
-- Read-only fan-out: at most 4 in parallel (AGENTS.md), disjoint areas, background.
+- **At most 2 agents running at once** (builders + reviewers together). AGENTS.md allows 4,
+  but 3–4 concurrent agents exhausted Assaf's Claude session limit four times on
+  2026-09-15 and killed every agent mid-edit. Usage, not concurrency, is the constraint.
 - Write agents: only after the interface is frozen, each owns disjoint files in its own
-  worktree. Default is one builder.
+  worktree (`.claude/worktrees/mia-<chunk>`), branched from the latest `origin/master`.
 - No subagent for a small edit, or when the main session already has the context.
-- Every subagent prompt carries: chunk ID + goal, owned files, invariants, out-of-scope,
-  stop conditions (no provider writes / .env / deploy / merge), and exact return format.
+- Every subagent prompt carries: chunk ID + goal, owned files, files it must not touch,
+  invariants, stop conditions (no provider writes / .env / deploy / merge), exact return format.
+- Builders run every command in the foreground with output redirected to a file. A background
+  test run is stranded when the agent is stopped.
+- A stopped agent (rate limit, restart) is resumed with `SendMessage` to its id, not respawned.
+  Check `git status` in its worktree first; the real state is often uncommitted.
+- The main session cannot edit files in another worktree (harness guard). Send the exact fix to
+  the builder that owns that worktree.
 - A subagent's "done" is a claim. The main session spot-checks the load-bearing evidence.
+
+## Review and merge (Assaf's standing approval, 2026-09-14)
+
+- Reviewer = a fresh `opus` subagent, read-only, given the requirement, the diff and the author's
+  test report as claims to verify. Codex review is optional; it timed out after 74 minutes once.
+- Give reviewers the three-dot diff `origin/master...<sha>`. A two-dot diff against a moved master
+  shows other merged PRs reversed.
+- Fixes go back to the author; re-review at the final SHA. After round 2, when the remaining
+  fixes are narrow and the reviewer specified them, the main session may verify by running the
+  reviewer's failing inputs instead of a third full round.
+- Merge each chunk when the review is PASS **and** CI (`checks`, `postgres`, `container`) is green
+  on that exact head: `gh pr checks <n> --watch` in the background, then `gh pr merge --merge`.
+- Deploy is never part of this. It is a separate go from Assaf.
 
 ## Chunk protocol
 

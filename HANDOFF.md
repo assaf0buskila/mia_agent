@@ -1,3 +1,99 @@
+# Mia handoff — 2026-09-15
+
+Section 0 is the campaign-finish state for the next session. Sections 1 onward are the
+2026-09-11 handoff and still hold (deploy procedure and gotchas especially).
+
+## 0. Campaign finish — where it stands and how to continue
+
+Plan: `docs/MIA_CAMPAIGN_FINISH_PLAN.md`. Chunk briefs: `docs/MIA_CLAUDE_CODE_PROMPTS.md`
+(the "Ready briefs" section at the end is copy-paste ready). Session rules: `CLAUDE.md`.
+
+**Production is unchanged.** `/health` last reported commit `4b80f31` (2026-09-14). Nothing
+below is deployed. Every item is `LOCAL_TESTED` + CI-green + independently reviewed at most.
+
+### Merged to master (each: failing test → fix → fresh opus review → fixes → green CI)
+
+| PR | Chunk | What it fixed | Known limits recorded |
+|---|---|---|---|
+| #61 | C0 | Plan, prompts, `CLAUDE.md`, audit checklist | — |
+| #62 | C1a | `crm_upsert` returned None on valid input → owner turn crashed; now an exact `crm.upsert` proposal; `execute_tool` rejects non-ToolResult; source/summary defaults only for new contacts | no test for a contact created by someone else between proposal and approval (code rejects it) |
+| #63 | C2a | Explicit LinkedIn beats generic "פוסט"; owner replies render a safe Markdown subset; `split_message` never splits a tag, entity, `<b>`/`<code>`/`<pre>` span | pre-existing needle collisions: "ig " in "big"/"config", "excel" in "excellent", "LinkedIn post about crm" → sheets |
+| #64 | C5 | Reschedule no longer conflicts with itself (events-list check when the destination overlaps the event's own span, fail-closed); a failed agenda read is not a free day; scope text | legacy `calendar_writes.py:426` still plain free/busy (refuses self-overlap, never double-books) |
+| #65 | C1b | Greeting-prefixed useful replies kept; "no data" detection by exact/prefix formatter constants (not length, not substring); failed turns persist usage marked `owner_reply_failed` | a turn failing before any model call records 0 tokens (NOT NULL columns; no migration) |
+| #66 | C3a | Website `business_context` never latches a greeting; deterministic de-duplicated lead brief; same-turn `submit_lead` next step/name refresh the still-pending brief and re-enqueue the contacts job at the new revision; greeting regex atomic (was ReDoS) | Activity Sheet job keeps the capture-time summary (lags one turn); PostgreSQL test doesn't exercise the refresh path |
+| #67 | C5h | Reschedule safety check fails closed on all-day items, `nextPageToken`, unparseable items; agenda port bound to the approved connection | any other all-day event refuses a move (conservative) |
+
+### In flight at handoff (check `git worktree list` and the PR list before doing anything)
+
+- **C3b** — worktree `.claude/worktrees/mia-c3b`, branch `claude/mia-c3b-v2-reports`: owner reports
+  count v2 website leads, Sheet `נוצר`/`עודכן` filled from row timestamps, CRM reads stop
+  creating tabs. **C4** — worktree `.claude/worktrees/mia-c4`, branch `claude/mia-c4-gmail-brief`:
+  `gmail_brief` (bounded live daily email data) + `owner_uncertain_writes` (read-only list of
+  `pending_review` writes). Both edit `app/db/store.py`; whichever merges second may need a rebase.
+  Their final state is recorded in `TASKS.md` when this handoff PR was updated.
+
+### Remaining queue (in order; max 2 agents at a time)
+
+1. **C2b approval cards** — brief ready. Cards from the stored envelope, one message per proposal
+   with its own buttons, pending view lists up to 5, callback `sent` reflects edit success with one
+   fallback send. Touches approvals: opus review required.
+2. **C6a social truth** — brief ready; start after C4 merges (both touch `two_state.py`).
+3. **C7b cleanup + docs** — brief ready; last. Includes two reviewed follow-ups (see below).
+4. **Prompt 4 release readiness** (opus, read-only): full gates, capability evidence matrix,
+   exact live tests needing Assaf's approval, rollout + rollback plan. **Stop for go/no-go.**
+5. **Prompt 5 deploy** only after Assaf approves a specific CI-green SHA; then phone acceptance.
+
+### Assaf's decisions (2026-09-14)
+
+- Merge each chunk when review PASS + CI green; deploy is a separate go.
+- Live Sheet audited read-only, structure only (done): Contacts 16 cols (O = Mia ID, P = marker
+  `mia-contacts-v2`); 2 legacy rows lack a Mia ID and their phones lost the leading 0 (stored as
+  numbers) — owner review, never a guessed repair; 5 test/fixture rows — classify, don't delete.
+- `app/domain/meetings` stays as is (Calendar imports `meetings.slots`; tests patch it by dotted string).
+- LinkedIn publishing is in scope: at release, one controlled live post approved by Assaf.
+- Instagram writes stay denied (policy). Calendar = own events, no guests/recurrence.
+
+### Follow-ups already identified (not yet done)
+
+- `app/integrations/calendar.py:~794`: agenda port without `list_events_strict` raises
+  AttributeError at approval → `getattr` + fail closed (in C7b brief).
+- Add C4's empty-state constants to `owner_agent.py` exact "no data" markers (in C7b brief).
+- Routing needle collisions above (in C6a brief).
+- PostgreSQL coverage for C3a same-turn refresh.
+
+### Start the next session with
+
+```text
+Read CLAUDE.md, HANDOFF.md section 0 and TASKS.md "Campaign finish". Do not re-audit.
+Verify: git fetch; origin/master SHA; open PRs (gh pr list); `git worktree list` and
+`git status` in mia-c3b / mia-c4. Report the state of C3b and C4 in five lines.
+Then continue the queue in HANDOFF section 0: finish C3b and C4 (PR → opus review → fixes →
+merge on green), then C2b, C6a, C7b using the Ready briefs in docs/MIA_CLAUDE_CODE_PROMPTS.md.
+Max 2 agents at once. Stop before Prompt 4's go/no-go and before any deploy.
+```
+
+### Commands the loop uses
+
+```bash
+git -C "<repo>" fetch origin
+git -C "<repo>" worktree add "<repo>/.claude/worktrees/mia-<chunk>" -b claude/mia-<chunk>-<slug> origin/master
+uv sync --frozen --group dev
+MIA_ENV=test uv run pytest --basetemp=.cache/<chunk>-full -p no:cacheprovider > .cache/<chunk>-full.txt 2>&1
+uv run ruff check app tests
+node tests/unit/widget_behavior.test.js
+git commit -F <message file outside the repo>
+gh pr create --base master --head <branch> --title "<chunk>: …" --body "…"
+gh pr checks <n> --watch --interval 30
+gh pr merge <n> --merge --subject "Merge pull request #<n> from assaf0buskila/<branch>"
+```
+
+In Claude Code: `/model` to confirm the main session is on `opus`; subagents are launched with the
+Agent tool (`general-purpose`, `model: sonnet` for builders, `model: opus` for reviewers,
+`run_in_background: true`) and resumed with `SendMessage` to their id. Use `/compact` at a chunk
+boundary rather than carrying review transcripts forward.
+
+---
+
 # Mia handoff — 2026-09-11
 
 Supersedes every earlier HANDOFF.md. Verified against AWS, GitHub, the code and live
