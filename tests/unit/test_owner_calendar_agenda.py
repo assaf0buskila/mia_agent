@@ -24,6 +24,7 @@ from app.domain.owner.calendar import (
     format_calendar_agenda,
     resolve_agenda_window,
 )
+from app.domain.tools import AdapterResponseError, AdapterSchemaError
 from app.integrations.calendar import CalendarEvent, FakeCalendarAgendaPort
 from app.tools.registries.owner_tools import ToolContext, execute_tool, get_tool
 
@@ -248,3 +249,106 @@ def test_calendar_agenda_is_registered_read_only() -> None:
     spec = get_tool("calendar_agenda")
     assert spec is not None
     assert spec.writes_memory is False
+
+
+
+# ----------------------------------------------------------------- provider failure honesty
+
+
+class _RaisingCalendarAgendaPort:
+    """Test double for a provider read that fails outright."""
+
+    def __init__(self, exc: Exception) -> None:
+        self._exc = exc
+
+    def list_events(self, *, start, end, limit=20):
+        del start, end, limit
+        raise self._exc
+
+
+def test_calendar_agenda_tool_reports_ok_false_when_provider_reports_failure() -> None:
+    """A failed agenda read must never look like a free day: `successful: false`
+    at the provider must surface as ok=False, not as an empty "nothing
+    scheduled" agenda the model (and Assaf) would read as a genuinely free day.
+
+    Asserts the specific error the AdapterHttpError handler in _calendar_agenda
+    produces (not just ok=False), so this fails if that try/except is ever
+    reverted -- execute_tool's own generic exception handling would otherwise
+    also produce ok=False and hide the regression.
+    """
+    session = _session()
+    try:
+        ctx = _ctx(session, calendar_agenda=_RaisingCalendarAgendaPort(AdapterResponseError()))
+        result = execute_tool("calendar_agenda", {"range": "today"}, ctx)
+        assert result.ok is False
+        assert result.error.startswith("Calendar read failed (")
+        assert "no events scheduled" not in (result.text or "")
+    finally:
+        session.close()
+
+
+def test_calendar_agenda_tool_reports_ok_false_on_malformed_provider_payload() -> None:
+    session = _session()
+    try:
+        ctx = _ctx(session, calendar_agenda=_RaisingCalendarAgendaPort(AdapterSchemaError()))
+        result = execute_tool("calendar_agenda", {"range": "today"}, ctx)
+        assert result.ok is False
+        assert result.error.startswith("Calendar read failed (")
+        assert "no events scheduled" not in (result.text or "")
+    finally:
+        session.close()
+
+
+# --------------------------------------------------------------------------- day boundary
+
+
+def test_a_late_night_local_event_lands_on_the_correct_local_day() -> None:
+    """Day-boundary regression guard: an event at 23:30 owner-local time on
+    2026-08-19 must land in "today"'s agenda and never leak into "tomorrow",
+    proving `resolve_agenda_window`'s local midnight boundary (not a UTC one)
+    is what actually governs which day `list_events` filters events into.
+    """
+    session = _session()
+    try:
+        late_local = datetime(2026, 8, 19, 23, 30, tzinfo=IL)
+        event = CalendarEvent(
+            event_id="e20",
+            summary="Late call",
+            start=late_local.astimezone(UTC),
+            end=(late_local + timedelta(minutes=30)).astimezone(UTC),
+        )
+        port = FakeCalendarAgendaPort([event])
+        ctx = _ctx(session, calendar_agenda=port)
+        today = execute_tool("calendar_agenda", {"range": "today"}, ctx)
+        tomorrow = execute_tool("calendar_agenda", {"range": "tomorrow"}, ctx)
+        assert today.ok is True
+        assert "Late call" in today.text
+        assert tomorrow.ok is True
+        assert "Late call" not in tomorrow.text
+    finally:
+        session.close()
+
+
+# ------------------------------------------------------------------------ honest scope note
+
+
+def test_agenda_text_states_primary_calendar_scope() -> None:
+    """The typed calendar tools only ever read the `primary` calendar; the
+    agenda text must say so, on both the populated and empty-window paths.
+    """
+    session = _session()
+    try:
+        event = CalendarEvent(
+            event_id="e21",
+            summary="Scoped",
+            start=NOW_UTC + timedelta(hours=1),
+            end=NOW_UTC + timedelta(hours=2),
+        )
+        populated_ctx = _ctx(session, calendar_agenda=FakeCalendarAgendaPort([event]))
+        empty_ctx = _ctx(session, calendar_agenda=FakeCalendarAgendaPort([]))
+        populated = execute_tool("calendar_agenda", {"range": "today"}, populated_ctx)
+        empty = execute_tool("calendar_agenda", {"range": "today"}, empty_ctx)
+        assert "primary calendar" in populated.text.lower()
+        assert "primary calendar" in empty.text.lower()
+    finally:
+        session.close()

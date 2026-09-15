@@ -359,7 +359,12 @@ def execute_approved_owner_action_with_adapters(
         _generic_write_denial,
         generic_composio_effect_supported,
     )
-    from app.integrations.calendar import ComposioCalendarPort, DisabledCalendarPort
+    from app.integrations.calendar import (
+        ComposioCalendarPort,
+        DisabledCalendarPort,
+        build_calendar_agenda_port,
+        window_free_excluding_self,
+    )
     from app.integrations.calendar_booking import (
         ComposioCalendarBookingPort,
         DisabledCalendarBookingPort,
@@ -565,6 +570,9 @@ def execute_approved_owner_action_with_adapters(
             )
             ports["calendar"] = calendar
             ports["booking"] = booking
+            # Only used by the calendar.reschedule self-conflict re-check below;
+            # harmless (and unused) for calendar.create.
+            ports["agenda"] = build_calendar_agenda_port(settings)
             return not isinstance(calendar, DisabledCalendarPort) and not isinstance(
                 booking, DisabledCalendarBookingPort
             )
@@ -646,18 +654,21 @@ def execute_approved_owner_action_with_adapters(
                 return {}
             start = datetime.fromisoformat(str(parameters["start"]))
             end = datetime.fromisoformat(str(parameters["end"]))
-            duration = max(1, int((end - start).total_seconds() // 60))
-            slots = ports["calendar"].find_free_slots(
-                time_min=start,
-                time_max=end,
-                duration_minutes=duration,
+            destination_free = window_free_excluding_self(
+                ports["calendar"],
+                window_start=start,
+                window_end=end,
+                self_start=event.start,
+                self_end=event.end,
+                self_event_id=event.event_id,
+                agenda=ports.get("agenda"),
                 timezone=str(parameters["timezone"]),
             )
             return {
                 "event_id": event.event_id,
                 "start": event.start.isoformat() if event.start else "",
                 "end": event.end.isoformat() if event.end else "",
-                "destination_free": any(slot.start <= start and slot.end >= end for slot in slots),
+                "destination_free": destination_free,
                 "provider_binding": envelope["target"]["provider_binding"],
             }
         if kind == "composio.write":

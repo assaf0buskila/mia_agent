@@ -18,7 +18,13 @@ from app.db.store import LeadStore
 from app.domain.approvals import DECISION_APPROVED
 from app.domain.events import Channel
 from app.domain.owner.tasks import OwnerTaskType
-from app.integrations.calendar import FakeCalendarPort, TimeSlot
+from app.domain.tools import AdapterResponseError
+from app.integrations.calendar import (
+    CalendarEvent,
+    FakeCalendarAgendaPort,
+    FakeCalendarPort,
+    TimeSlot,
+)
 from app.integrations.calendar_booking import (
     BookingLookupStatus,
     CalendarBookingEvent,
@@ -534,6 +540,583 @@ def test_calendar_reschedule_proposes_exact_current_event_without_patching(
         assert booking.patched is False
     finally:
         session.rollback()
+        session.close()
+
+
+def test_calendar_reschedule_proposal_ignores_conflict_with_its_own_current_slot(
+    monkeypatch,
+) -> None:
+    """C5 defect: the event being moved is still on the calendar at its old time
+    while the move is only being proposed. Moving it into overlap with that old
+    time must not be refused as "not free" -- it would only ever conflict with
+    itself.
+    """
+    store, session = _store()
+    old_start = datetime(2026, 9, 10, 9, 0, tzinfo=UTC)
+    old_end = old_start + timedelta(minutes=30)
+    new_start = old_start + timedelta(minutes=15)  # overlaps [9:00, 9:30)
+
+    class Booking:
+        def approval_connected_account_id(self):
+            return "fake-calendar-account"
+
+        def get_event(self, *, event_id, **_kwargs):
+            return EventLookupResult(
+                status=BookingLookupStatus.FOUND,
+                event=CalendarBookingEvent(event_id=event_id, start=old_start, end=old_end),
+            )
+
+    monkeypatch.setattr(
+        "app.tools.owner.calendar.build_calendar_booking_port", lambda _settings: Booking()
+    )
+    try:
+        settings = Settings(_env_file=None)
+        ctx = ToolContext(
+            store=store,
+            brain=BrainStore(session),
+            settings=settings,
+            principal=_owner(),
+            embedding_port=FakeEmbeddingPort(),
+            source_ref=f"tg:{uuid4().hex}",
+            owner_text="Move it 15 minutes later",
+            # The destination overlaps the event's own current span, so the
+            # fix reads actual events instead of free/busy; only the event
+            # itself is on the calendar in that window, nothing else.
+            calendar=FakeCalendarPort([]),
+            calendar_agenda=FakeCalendarAgendaPort(
+                [CalendarEvent(event_id="event_3", summary="Self", start=old_start, end=old_end)]
+            ),
+        )
+        result = _calendar_reschedule(
+            ctx,
+            {"event_id": "event_3", "start": new_start.isoformat(), "minutes": 30},
+        )
+        assert result.ok is True, result.error
+        assert result.approval_id
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_calendar_reschedule_proposal_still_refuses_another_events_slot(
+    monkeypatch,
+) -> None:
+    """Excluding the event's own span must not swallow a genuine conflict with a
+    different event sitting in the destination window.
+    """
+    store, session = _store()
+    old_start = datetime(2026, 9, 10, 9, 0, tzinfo=UTC)
+    old_end = old_start + timedelta(minutes=30)
+    # An unrelated event occupies 10:00-10:30; moving into 10:15-10:45 must
+    # still be refused even though the self-exclusion now applies.
+    new_start = datetime(2026, 9, 10, 10, 15, tzinfo=UTC)
+    other_start = datetime(2026, 9, 10, 10, 0, tzinfo=UTC)
+    other_end = datetime(2026, 9, 10, 10, 30, tzinfo=UTC)
+
+    class Booking:
+        def approval_connected_account_id(self):
+            return "fake-calendar-account"
+
+        def get_event(self, *, event_id, **_kwargs):
+            return EventLookupResult(
+                status=BookingLookupStatus.FOUND,
+                event=CalendarBookingEvent(event_id=event_id, start=old_start, end=old_end),
+            )
+
+    monkeypatch.setattr(
+        "app.tools.owner.calendar.build_calendar_booking_port", lambda _settings: Booking()
+    )
+    try:
+        settings = Settings(_env_file=None)
+        ctx = ToolContext(
+            store=store,
+            brain=BrainStore(session),
+            settings=settings,
+            principal=_owner(),
+            embedding_port=FakeEmbeddingPort(),
+            source_ref=f"tg:{uuid4().hex}",
+            owner_text="Move it to 10:15",
+            # Free everywhere except the self span [9:00,9:30) and the other
+            # event's [10:00,10:30).
+            calendar=FakeCalendarPort(
+                [
+                    TimeSlot(start=old_end, end=other_start),
+                    TimeSlot(start=other_end, end=other_end + timedelta(minutes=15)),
+                ]
+            ),
+        )
+        result = _calendar_reschedule(
+            ctx,
+            {"event_id": "event_4", "start": new_start.isoformat(), "minutes": 30},
+        )
+        assert result.ok is False
+        assert result.error == "the requested new calendar time is not free"
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_calendar_reschedule_execution_recheck_ignores_self_conflict(monkeypatch) -> None:
+    """The approval-time re-check (`current_target` for kind calendar.reschedule
+    in app.services.owner_actions) must apply the same self-exclusion as the
+    proposal-time check, or a legitimate move would be refused at execution
+    even after being correctly proposed.
+    """
+    store, session = _store()
+    old_start = datetime(2026, 9, 20, 9, 0, tzinfo=UTC)
+    old_end = old_start + timedelta(minutes=30)
+    new_start = old_start + timedelta(minutes=15)
+    new_end = new_start + timedelta(minutes=30)
+    binding = {
+        "toolkit": "GOOGLECALENDAR",
+        "account_hash": sha256(b"account-a").hexdigest(),
+        "connection": {
+            "connected_account_id": "calendar-connection-a",
+            "toolkit": "GOOGLECALENDAR",
+        },
+    }
+    proposal = propose_owner_action(
+        store,
+        principal=_owner(),
+        source_ref=f"tg:{uuid4().hex}",
+        kind="calendar.reschedule",
+        parameters={
+            "event_id": "event_5",
+            "start": new_start.isoformat(),
+            "end": new_end.isoformat(),
+            "timezone": "Asia/Jerusalem",
+        },
+        target={
+            "event_id": "event_5",
+            "start": old_start.isoformat(),
+            "end": old_end.isoformat(),
+            "destination_free": True,
+            "provider_binding": binding,
+        },
+    )
+    decide_owner_action(
+        store,
+        principal=_owner(),
+        approval_id=proposal.approval_id,
+        decision=DECISION_APPROVED,
+    )
+    patch_requests: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if "EVENTS_GET" in str(request.url):
+            return httpx.Response(
+                200,
+                json={
+                    "successful": True,
+                    "data": {
+                        "response_data": {
+                            "id": "event_5",
+                            "start": {"dateTime": old_start.isoformat()},
+                            "end": {"dateTime": old_end.isoformat()},
+                        }
+                    },
+                },
+            )
+        patch_requests.append(body)
+        return httpx.Response(
+            200,
+            json={
+                "successful": True,
+                "data": {
+                    "response_data": {
+                        "id": "event_5",
+                        "start": {"dateTime": new_start.isoformat()},
+                        "end": {"dateTime": new_end.isoformat()},
+                    }
+                },
+            },
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    booking = ComposioCalendarBookingPort(
+        api_key="key",
+        user_id="account-a",
+        connected_account_id="calendar-connection-a",
+        client=client,
+    )
+    monkeypatch.setattr(
+        "app.services.owner_actions.typed_composio_binding", lambda *_a, **_k: binding
+    )
+    monkeypatch.setattr(
+        "app.integrations.calendar.ComposioCalendarPort",
+        lambda **_kwargs: FakeCalendarPort([]),
+    )
+    monkeypatch.setattr(
+        "app.integrations.calendar.ComposioCalendarAgendaPort",
+        lambda **_kwargs: FakeCalendarAgendaPort(
+            [CalendarEvent(event_id="event_5", summary="Self", start=old_start, end=old_end)]
+        ),
+    )
+    monkeypatch.setattr(
+        "app.integrations.calendar_booking.ComposioCalendarBookingPort",
+        lambda **_kwargs: booking,
+    )
+    settings = Settings(
+        _env_file=None,
+        telegram_owner_user_ids=_owner().actor_id,
+        composio_api_key="key",
+        composio_user_id="account-a",
+        calendar_write=True,
+    )
+    try:
+        outcome = execute_approved_owner_action_with_adapters(
+            store,
+            settings=settings,
+            principal=_owner(),
+            proposal_id=proposal.proposal_id,
+        )
+        assert outcome.status == "executed"
+        assert len(patch_requests) == 1
+    finally:
+        client.close()
+        session.close()
+
+
+def test_calendar_reschedule_execution_recheck_rejects_event_changed_after_proposal(
+    monkeypatch,
+) -> None:
+    """If the event itself moved (elsewhere, e.g. directly in Google Calendar)
+    between proposal and approval, the re-check must still reject it as
+    target_changed -- the self-exclusion fix must not weaken this invariant.
+    """
+    store, session = _store()
+    proposed_self_start = datetime(2026, 9, 20, 9, 0, tzinfo=UTC)
+    proposed_self_end = proposed_self_start + timedelta(minutes=30)
+    new_start = datetime(2026, 9, 20, 12, 0, tzinfo=UTC)
+    new_end = new_start + timedelta(minutes=30)
+    changed_self_start = proposed_self_start + timedelta(minutes=5)
+    changed_self_end = changed_self_start + timedelta(minutes=30)
+    binding = {
+        "toolkit": "GOOGLECALENDAR",
+        "account_hash": sha256(b"account-a").hexdigest(),
+        "connection": {
+            "connected_account_id": "calendar-connection-a",
+            "toolkit": "GOOGLECALENDAR",
+        },
+    }
+    proposal = propose_owner_action(
+        store,
+        principal=_owner(),
+        source_ref=f"tg:{uuid4().hex}",
+        kind="calendar.reschedule",
+        parameters={
+            "event_id": "event_6",
+            "start": new_start.isoformat(),
+            "end": new_end.isoformat(),
+            "timezone": "Asia/Jerusalem",
+        },
+        target={
+            "event_id": "event_6",
+            "start": proposed_self_start.isoformat(),
+            "end": proposed_self_end.isoformat(),
+            "destination_free": True,
+            "provider_binding": binding,
+        },
+    )
+    decide_owner_action(
+        store,
+        principal=_owner(),
+        approval_id=proposal.approval_id,
+        decision=DECISION_APPROVED,
+    )
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "successful": True,
+                "data": {
+                    "response_data": {
+                        "id": "event_6",
+                        "start": {"dateTime": changed_self_start.isoformat()},
+                        "end": {"dateTime": changed_self_end.isoformat()},
+                    }
+                },
+            },
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    booking = ComposioCalendarBookingPort(
+        api_key="key",
+        user_id="account-a",
+        connected_account_id="calendar-connection-a",
+        client=client,
+    )
+    monkeypatch.setattr(
+        "app.services.owner_actions.typed_composio_binding", lambda *_a, **_k: binding
+    )
+    monkeypatch.setattr(
+        "app.integrations.calendar.ComposioCalendarPort",
+        lambda **_kwargs: FakeCalendarPort([TimeSlot(start=new_start, end=new_end)]),
+    )
+    monkeypatch.setattr(
+        "app.integrations.calendar_booking.ComposioCalendarBookingPort",
+        lambda **_kwargs: booking,
+    )
+    settings = Settings(
+        _env_file=None,
+        telegram_owner_user_ids=_owner().actor_id,
+        composio_api_key="key",
+        composio_user_id="account-a",
+        calendar_write=True,
+    )
+    try:
+        outcome = execute_approved_owner_action_with_adapters(
+            store,
+            settings=settings,
+            principal=_owner(),
+            proposal_id=proposal.proposal_id,
+        )
+        assert outcome.status == "target_changed"
+    finally:
+        client.close()
+        session.close()
+
+
+def test_calendar_reschedule_proposal_refuses_scenario_b_other_meeting_overlapping_self(
+    monkeypatch,
+) -> None:
+    """Reviewer counterexample B, at proposal time: another meeting (10:00-11:00)
+    overlaps the moved event's own current span (10:30-11:30); moving into
+    10:45-11:15 must still be refused -- the other meeting occupies
+    10:45-11:00 of the destination. Merged free/busy cannot tell that meeting
+    apart from the event's own busy block, so the tool must fall back to the
+    agenda read the same way `window_free_excluding_self` does; a raising
+    calendar port proves free/busy is never even consulted for this case.
+    """
+    store, session = _store()
+    other_start = datetime(2026, 9, 10, 10, 0, tzinfo=UTC)
+    other_end = datetime(2026, 9, 10, 11, 0, tzinfo=UTC)
+    self_start = datetime(2026, 9, 10, 10, 30, tzinfo=UTC)
+    self_end = datetime(2026, 9, 10, 11, 30, tzinfo=UTC)
+    new_start = datetime(2026, 9, 10, 10, 45, tzinfo=UTC)
+
+    class Booking:
+        def approval_connected_account_id(self):
+            return "fake-calendar-account"
+
+        def get_event(self, *, event_id, **_kwargs):
+            return EventLookupResult(
+                status=BookingLookupStatus.FOUND,
+                event=CalendarBookingEvent(event_id=event_id, start=self_start, end=self_end),
+            )
+
+    class _RaisingCalendar:
+        def find_free_slots(self, **_kwargs):
+            raise AssertionError("free/busy must not be queried when self overlaps destination")
+
+    monkeypatch.setattr(
+        "app.tools.owner.calendar.build_calendar_booking_port", lambda _settings: Booking()
+    )
+    try:
+        settings = Settings(_env_file=None)
+        ctx = ToolContext(
+            store=store,
+            brain=BrainStore(session),
+            settings=settings,
+            principal=_owner(),
+            embedding_port=FakeEmbeddingPort(),
+            source_ref=f"tg:{uuid4().hex}",
+            owner_text="Move it to 10:45",
+            calendar=_RaisingCalendar(),
+            calendar_agenda=FakeCalendarAgendaPort(
+                [
+                    CalendarEvent(
+                        event_id="event_9", summary="Self", start=self_start, end=self_end
+                    ),
+                    CalendarEvent(
+                        event_id="other-evt", summary="Other", start=other_start, end=other_end
+                    ),
+                ]
+            ),
+        )
+        result = _calendar_reschedule(
+            ctx,
+            {"event_id": "event_9", "start": new_start.isoformat(), "minutes": 30},
+        )
+        assert result.ok is False
+        assert result.error == "the requested new calendar time is not free"
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_calendar_reschedule_proposal_refuses_when_agenda_read_fails(monkeypatch) -> None:
+    """A destination that overlaps the event's own current span must be
+    refused, not silently allowed, when the per-event agenda read itself
+    fails -- there is no free/busy fallback here (see P1 fix).
+    """
+    store, session = _store()
+    old_start = datetime(2026, 9, 10, 9, 0, tzinfo=UTC)
+    old_end = old_start + timedelta(minutes=30)
+    new_start = old_start + timedelta(minutes=15)  # overlaps [9:00, 9:30)
+
+    class Booking:
+        def approval_connected_account_id(self):
+            return "fake-calendar-account"
+
+        def get_event(self, *, event_id, **_kwargs):
+            return EventLookupResult(
+                status=BookingLookupStatus.FOUND,
+                event=CalendarBookingEvent(event_id=event_id, start=old_start, end=old_end),
+            )
+
+    class _RaisingAgenda:
+        def list_events(self, **_kwargs):
+            raise AdapterResponseError()
+
+    monkeypatch.setattr(
+        "app.tools.owner.calendar.build_calendar_booking_port", lambda _settings: Booking()
+    )
+    try:
+        settings = Settings(_env_file=None)
+        ctx = ToolContext(
+            store=store,
+            brain=BrainStore(session),
+            settings=settings,
+            principal=_owner(),
+            embedding_port=FakeEmbeddingPort(),
+            source_ref=f"tg:{uuid4().hex}",
+            owner_text="Move it 15 minutes later",
+            calendar=FakeCalendarPort([]),
+            calendar_agenda=_RaisingAgenda(),
+        )
+        result = _calendar_reschedule(
+            ctx,
+            {"event_id": "event_10", "start": new_start.isoformat(), "minutes": 30},
+        )
+        assert result.ok is False
+        assert result.error == "the requested new calendar time is not free"
+    finally:
+        session.rollback()
+        session.close()
+
+
+def test_calendar_reschedule_execution_recheck_catches_scenario_b_other_meeting(
+    monkeypatch,
+) -> None:
+    """Reviewer counterexample B, at approval-time re-check: the recorded
+    target optimistically says destination_free=True, but a fresh read finds
+    another meeting overlapping both the event's own span and the
+    destination. The re-check must recompute destination_free=False and
+    reject as target_changed, proving `ports["agenda"]` is actually wired
+    into `current_target` for calendar.reschedule.
+    """
+    store, session = _store()
+    other_start = datetime(2026, 9, 20, 10, 0, tzinfo=UTC)
+    other_end = datetime(2026, 9, 20, 11, 0, tzinfo=UTC)
+    self_start = datetime(2026, 9, 20, 10, 30, tzinfo=UTC)
+    self_end = datetime(2026, 9, 20, 11, 30, tzinfo=UTC)
+    new_start = datetime(2026, 9, 20, 10, 45, tzinfo=UTC)
+    new_end = new_start + timedelta(minutes=30)
+    binding = {
+        "toolkit": "GOOGLECALENDAR",
+        "account_hash": sha256(b"account-a").hexdigest(),
+        "connection": {
+            "connected_account_id": "calendar-connection-a",
+            "toolkit": "GOOGLECALENDAR",
+        },
+    }
+    proposal = propose_owner_action(
+        store,
+        principal=_owner(),
+        source_ref=f"tg:{uuid4().hex}",
+        kind="calendar.reschedule",
+        parameters={
+            "event_id": "event_11",
+            "start": new_start.isoformat(),
+            "end": new_end.isoformat(),
+            "timezone": "Asia/Jerusalem",
+        },
+        # Recorded as if it had been (wrongly) approved as free.
+        target={
+            "event_id": "event_11",
+            "start": self_start.isoformat(),
+            "end": self_end.isoformat(),
+            "destination_free": True,
+            "provider_binding": binding,
+        },
+    )
+    decide_owner_action(
+        store,
+        principal=_owner(),
+        approval_id=proposal.approval_id,
+        decision=DECISION_APPROVED,
+    )
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "successful": True,
+                "data": {
+                    "response_data": {
+                        "id": "event_11",
+                        "start": {"dateTime": self_start.isoformat()},
+                        "end": {"dateTime": self_end.isoformat()},
+                    }
+                },
+            },
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    booking = ComposioCalendarBookingPort(
+        api_key="key",
+        user_id="account-a",
+        connected_account_id="calendar-connection-a",
+        client=client,
+    )
+
+    class _RaisingCalendar:
+        def find_free_slots(self, **_kwargs):
+            raise AssertionError("free/busy must not be queried when self overlaps destination")
+
+    monkeypatch.setattr(
+        "app.services.owner_actions.typed_composio_binding", lambda *_a, **_k: binding
+    )
+    monkeypatch.setattr(
+        "app.integrations.calendar.ComposioCalendarPort", lambda **_kwargs: _RaisingCalendar()
+    )
+    monkeypatch.setattr(
+        "app.integrations.calendar.ComposioCalendarAgendaPort",
+        lambda **_kwargs: FakeCalendarAgendaPort(
+            [
+                CalendarEvent(
+                    event_id="event_11", summary="Self", start=self_start, end=self_end
+                ),
+                CalendarEvent(
+                    event_id="other-evt", summary="Other", start=other_start, end=other_end
+                ),
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        "app.integrations.calendar_booking.ComposioCalendarBookingPort",
+        lambda **_kwargs: booking,
+    )
+    settings = Settings(
+        _env_file=None,
+        telegram_owner_user_ids=_owner().actor_id,
+        composio_api_key="key",
+        composio_user_id="account-a",
+        calendar_write=True,
+    )
+    try:
+        outcome = execute_approved_owner_action_with_adapters(
+            store,
+            settings=settings,
+            principal=_owner(),
+            proposal_id=proposal.proposal_id,
+        )
+        assert outcome.status == "target_changed"
+    finally:
+        client.close()
         session.close()
 
 

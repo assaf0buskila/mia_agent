@@ -32,7 +32,7 @@ from app.domain.ai_runs import elapsed_ms
 from app.domain.meetings.availability import carve_policy_slots
 from app.domain.policies.freshness import overlay_stale, stamp_freshness
 from app.domain.sales import NextAction
-from app.domain.tools import AdapterHttpError, ToolOutcome
+from app.domain.tools import AdapterHttpError, AdapterResponseError, AdapterSchemaError, ToolOutcome
 
 COMPOSIO_GOOGLECALENDAR_VERSION = "20260812_00"
 COMPOSIO_FIND_FREE_SLOTS_TOOL = "GOOGLECALENDAR_FIND_FREE_SLOTS"
@@ -560,9 +560,14 @@ class CalendarAgendaPort(Protocol):
 
 class ComposioCalendarAgendaPort:
     """Live Composio adapter over GOOGLECALENDAR_EVENTS_LIST. Read-only: lists events
-    in [start, end); never creates, patches, or deletes. Raises AdapterHttpError on
-    HTTP/transport failure; a malformed or partial event in the payload is skipped,
-    never raised.
+    in [start, end); never creates, patches, or deletes.
+
+    Raises AdapterHttpError on HTTP/transport failure, AdapterResponseError when
+    Composio accepted the call but reported `successful: false`, and
+    AdapterSchemaError when the payload does not have the shape this adapter
+    understands (so a provider failure is never read back as "no events" --
+    a genuinely empty day still returns `[]`). One malformed or partial event
+    inside an otherwise well-shaped `items` list is skipped, never raised.
     """
 
     def __init__(
@@ -619,8 +624,10 @@ class ComposioCalendarAgendaPort:
             raise AdapterHttpError(response.status_code)
         try:
             body = response.json()
-            if not isinstance(body, dict) or body.get("successful") is not True:
-                return []
+            if not isinstance(body, dict) or not isinstance(body.get("successful"), bool):
+                raise AdapterSchemaError()
+            if body["successful"] is False:
+                raise AdapterResponseError()
             return _parse_agenda_events(body, limit=cap)
         except (
             ValueError,
@@ -629,7 +636,7 @@ class ComposioCalendarAgendaPort:
             AttributeError,
             IndexError,
         ):
-            return []
+            raise AdapterSchemaError() from None
 
 
 class FakeCalendarAgendaPort:
@@ -666,6 +673,78 @@ def build_calendar_agenda_port(settings: Settings) -> CalendarAgendaPort | None:
     return None
 
 
+def window_free_excluding_self(
+    calendar: CalendarPort,
+    *,
+    window_start: datetime,
+    window_end: datetime,
+    self_start: datetime | None,
+    self_end: datetime | None,
+    self_event_id: str | None = None,
+    agenda: CalendarAgendaPort | None = None,
+    timezone: str = "Asia/Jerusalem",
+) -> bool:
+    """True when [window_start, window_end) is free, without counting the
+    event being moved as a conflict with itself.
+
+    `find_free_slots` reports merged free/busy: another meeting that happens
+    to overlap the moved event's own current span is indistinguishable, in
+    that merged view, from the event's own busy block. So this only ever
+    "forgives" self-conflict when it is actually safe to:
+
+    - The destination does not overlap the event's current span at all: the
+      event cannot possibly be the thing making the destination busy, so a
+      plain provider free/busy check on the destination alone is exact.
+    - The destination DOES overlap the event's current span: free/busy alone
+      cannot tell self-busy from another-event-busy, so this reads the actual
+      events in the destination window through `agenda` (CalendarAgendaPort,
+      the same read used for "what's on my calendar"), drops only the exact
+      event being moved (by `self_event_id`), and refuses if any remaining
+      event still overlaps the destination -- every returned event counts as
+      busy, all-day included; provider `transparency` is not parsed. Refuses
+      (fails closed) if `agenda` is unavailable or the read fails.
+
+    Pass self_start/self_end as None for a plain free check (a create has no
+    self event to exclude).
+    """
+    window_start = _ensure_aware(window_start)
+    window_end = _ensure_aware(window_end)
+
+    def _plain_free_check(period_start: datetime, period_end: datetime) -> bool:
+        duration = max(1, int((period_end - period_start).total_seconds() // 60))
+        slots = calendar.find_free_slots(
+            time_min=period_start,
+            time_max=period_end,
+            duration_minutes=duration,
+            timezone=timezone,
+        )
+        return any(slot.start <= period_start and slot.end >= period_end for slot in slots)
+
+    if self_start is None or self_end is None:
+        return _plain_free_check(window_start, window_end)
+
+    self_start = _ensure_aware(self_start)
+    self_end = _ensure_aware(self_end)
+    overlaps_self = window_start < self_end and self_start < window_end
+    if not overlaps_self:
+        return _plain_free_check(window_start, window_end)
+
+    if agenda is None:
+        return False
+    try:
+        events = agenda.list_events(start=window_start, end=window_end)
+    except AdapterHttpError:
+        return False
+    for event in events:
+        if self_event_id is not None and event.event_id == self_event_id:
+            continue
+        event_start = _ensure_aware(event.start)
+        event_end = _ensure_aware(event.end)
+        if window_start < event_end and event_start < window_end:
+            return False
+    return True
+
+
 def _cap_agenda_limit(limit: int) -> int:
     return max(1, min(int(limit or _MAX_AGENDA_EVENTS), _MAX_AGENDA_EVENTS))
 
@@ -696,12 +775,17 @@ def _unwrap_agenda_response_data(body: dict[str, Any]) -> Any:
 
 
 def _parse_agenda_events(body: dict[str, Any], *, limit: int) -> list[CalendarEvent]:
+    """Raises AdapterSchemaError when the top-level payload shape is not one this
+    adapter understands, so callers never read a malformed response back as a
+    genuinely empty agenda. An individual malformed event inside a well-shaped
+    `items` list is still just skipped (see `_parse_agenda_event`).
+    """
     data = _unwrap_agenda_response_data(body)
     if not isinstance(data, dict):
-        return []
+        raise AdapterSchemaError()
     items = data.get("items")
     if not isinstance(items, list):
-        return []
+        raise AdapterSchemaError()
     events: list[CalendarEvent] = []
     for item in items:
         event = _parse_agenda_event(item)

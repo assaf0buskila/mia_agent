@@ -12,7 +12,12 @@ from app.domain.owner.calendar import (
     format_calendar_agenda,
     resolve_agenda_window,
 )
-from app.integrations.calendar import build_calendar_agenda_port, build_calendar_port
+from app.domain.tools import AdapterHttpError
+from app.integrations.calendar import (
+    build_calendar_agenda_port,
+    build_calendar_port,
+    window_free_excluding_self,
+)
 from app.integrations.calendar_booking import (
     BookingLookupStatus,
     DisabledCalendarBookingPort,
@@ -92,7 +97,10 @@ def _calendar_create_meeting(ctx: ToolContext, args: dict[str, Any]) -> ToolResu
         return ToolResult(ok=False, error=f"calendar proposal could not be bound: {exc}")
     return ToolResult(
         ok=True,
-        text="Prepared an exact calendar proposal. Nothing was created.",
+        text=(
+            "Prepared an exact calendar proposal. Nothing was created. "
+            "Guests are not notified of this change."
+        ),
         approval_id=proposal.approval_id,
     )
 
@@ -121,13 +129,19 @@ def _calendar_reschedule(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     event = current.event
     end = start + timedelta(minutes=minutes)
     calendar = ctx.calendar or build_calendar_port(ctx.settings)
-    slots = calendar.find_free_slots(
-        time_min=start,
-        time_max=end,
-        duration_minutes=minutes,
+    agenda = ctx.calendar_agenda
+    if agenda is None and ctx.settings.composio_ready():
+        agenda = build_calendar_agenda_port(ctx.settings)
+    destination_free = window_free_excluding_self(
+        calendar,
+        window_start=start,
+        window_end=end,
+        self_start=event.start,
+        self_end=event.end,
+        self_event_id=event.event_id,
+        agenda=agenda,
         timezone=ctx.timezone(),
     )
-    destination_free = any(slot.start <= start and slot.end >= end for slot in slots)
     if not destination_free:
         return ToolResult(ok=False, error="the requested new calendar time is not free")
     try:
@@ -159,7 +173,10 @@ def _calendar_reschedule(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
         return ToolResult(ok=False, error=f"calendar proposal could not be bound: {exc}")
     return ToolResult(
         ok=True,
-        text="Prepared an exact calendar move proposal. Nothing was changed.",
+        text=(
+            "Prepared an exact calendar move proposal. Nothing was changed. "
+            "Guests are not notified of this change."
+        ),
         approval_id=proposal.approval_id,
     )
 
@@ -176,6 +193,9 @@ def _calendar_agenda(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     range_key = str(args.get("range") or "").strip()
     moment = ctx.now or datetime.now(UTC)
     start, end = resolve_agenda_window(range_key, now=moment, timezone=ctx.timezone())
-    events = agenda.list_events(start=start, end=end)
+    try:
+        events = agenda.list_events(start=start, end=end)
+    except AdapterHttpError as exc:
+        return ToolResult(ok=False, error=f"Calendar read failed ({exc.tool_status()})")
     text = format_calendar_agenda(events, range_key=range_key, timezone=ctx.timezone(), now=moment)
     return ToolResult(ok=True, text=text)
