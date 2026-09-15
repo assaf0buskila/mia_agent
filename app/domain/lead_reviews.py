@@ -73,6 +73,14 @@ _DEAL_STAGE_HE: dict[str, str] = {
 }
 _DATE_ISO = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
 
+# Promoted so app/graph/owner_agent.py's empty-result markers can import
+# the real text instead of holding a copy that can drift out of sync.
+_LEAD_REVIEW_NOT_FOUND_ACK = (
+    "מה שהבנתי: סקירת ליד. לא מצאתי את הליד. אני לא מבצעת כלום."
+)
+_LEAD_MATCH_NOT_FOUND_ACK = "לא מצאתי את הליד. אני לא מבצעת כלום."
+_LEAD_MATCH_NO_NAME_LINE = "לא מצאתי ליד בשם הזה. לא ניחשתי."
+
 
 class LeadReviewSnapshot(BaseModel):
     lead_id: str
@@ -241,9 +249,7 @@ def apply_owner_lead_review(
         lead_id = hits[0].lead_id
     snapshot = build_lead_review_snapshot(store, lead_id=lead_id)
     if snapshot is None:
-        return (
-            "מה שהבנתי: סקירת ליד. לא מצאתי את הליד. אני לא מבצעת כלום."
-        )
+        return _LEAD_REVIEW_NOT_FOUND_ACK
     apply_lead_review_policy(
         store,
         snapshot=snapshot,
@@ -260,12 +266,12 @@ def format_lead_matches(store: LeadStore, query: str) -> str:
     if len(hits) == 1:
         snapshot = build_lead_review_snapshot(store, lead_id=hits[0].lead_id)
         if snapshot is None:
-            return "לא מצאתי את הליד. אני לא מבצעת כלום."
+            return _LEAD_MATCH_NOT_FOUND_ACK
         return format_lead_review(snapshot)
     recent = store.list_sales_snapshots(limit=5)
     if not hits:
         lines = [
-            "לא מצאתי ליד בשם הזה. לא ניחשתי.",
+            _LEAD_MATCH_NO_NAME_LINE,
         ]
         if recent:
             lines.append("אחרונים:")

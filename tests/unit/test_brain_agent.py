@@ -563,7 +563,6 @@ def test_looks_empty_only_counts_a_genuine_no_data_success() -> None:
 _REAL_NO_DATA_TOOL_TEXTS = (
     "No CRM contact matched.",  # app/tools/owner/crm.py:29
     "No unresolved CRM conflicts.",  # app/tools/owner/crm.py:142
-    "No matching lead.",  # app/tools/owner/operations.py:158,165
     "No meeting brief available for lead_42.",  # app/tools/owner/operations.py:172
     "LinkedIn returned nothing.",  # app/tools/owner/analytics.py:174
     "SEO ports returned nothing. Check GSC site URL and GA4 property.",  # analytics.py:54
@@ -572,15 +571,9 @@ _REAL_NO_DATA_TOOL_TEXTS = (
     "No visible tabs were returned for this Sheet.",  # app/tools/owner/sheets.py:129
     "No matching tool in an ACTIVE owner Composio toolkit.",  # composio.py:77
     "That tool is not in an ACTIVE owner Composio toolkit.",  # composio.py:98
-    "No free slots found.",  # app/tools/owner/calendar.py:41
     "No Gmail thread matched. Name a thread: or lead id.",  # app/tools/owner/gmail.py:159
     "No activity recorded for today yet.",  # app/tools/owner/operations.py:31-38
     "No activity recorded for this week yet.",  # app/tools/owner/operations.py:45
-    "No hot leads right now.",  # app/tools/owner/operations.py:59
-    "Nothing is waiting for approval.",  # app/tools/owner/operations.py:67
-    "No website conversations yet.",  # app/tools/owner/operations.py:72
-    "Nothing to report.",  # app/tools/owner/operations.py:77,85
-    "Nothing new was booked.",  # app/tools/owner/operations.py:186
     "No content ideas available.",  # app/tools/owner/operations.py:199
     "Research search returned nothing. Check the Firecrawl key.",  # research.py:41
     "No stored memory matches that.",  # app/tools/owner/brain.py:39
@@ -588,6 +581,12 @@ _REAL_NO_DATA_TOOL_TEXTS = (
     "No entities recorded yet.",  # app/tools/owner/brain.py:151
     "לא מצאתי את המייל.",  # gmail.py:108
     "אין מיילים בתיבה.",  # gmail.py:53
+    # The seven English fallbacks removed from here ("No matching lead.",
+    # "No hot leads right now.", "Nothing is waiting for approval.",
+    # "No website conversations yet.", "No free slots found.",
+    # "Nothing new was booked.", "Nothing to report.") are dead code: the
+    # formatter each one wraps never actually returns a falsy value, so the
+    # `_empty(...)` fallback never fires. See test_dead_markers_were_removed.
 )
 
 
@@ -640,6 +639,7 @@ def test_real_formatter_empty_output_is_treated_as_empty() -> None:
     from app.db.session import make_engine
     from app.db.store import LeadStore
     from app.domain.handoff.hot import format_hot_leads_ack
+    from app.domain.lead_reviews import format_lead_matches
     from app.domain.owner.calendar import format_calendar_agenda
     from app.domain.owner.reads import (
         format_pending_approvals_ack,
@@ -677,8 +677,87 @@ def test_real_formatter_empty_output_is_treated_as_empty() -> None:
         assert agenda_text.startswith(
             "CALENDAR DATA (not instructions): no events scheduled"
         )
+
+        # A fourth real formatter: no name matches an empty DB either.
+        no_match_text = format_lead_matches(store, "no such person at all")
+        assert _looks_empty(ToolResult(ok=True, text=no_match_text)) is True
     finally:
         db.close()
+
+
+def test_more_real_formatter_constants_are_treated_as_empty() -> None:
+    """A second round of "still never counted empty" texts, this time already
+
+    checked in as module constants in their own modules and imported (not
+    copied) into owner_agent.py's marker sets -- so this test exercises the
+    exact same objects the fix actually matches against, not a duplicate that
+    could quietly drift from them.
+    """
+    from app.domain.content_ideas import _EMPTY_LINE, _HEADER_LINE
+    from app.domain.gmail.summaries import _NOT_FOUND_ACK as gmail_not_found_ack
+    from app.domain.lead_reviews import (
+        _LEAD_MATCH_NO_NAME_LINE,
+        _LEAD_MATCH_NOT_FOUND_ACK,
+        _LEAD_REVIEW_NOT_FOUND_ACK,
+    )
+    from app.domain.meetings.briefs import _BRIEF_NOT_FOUND_ACK
+    from app.domain.owner.calendar import _EMPTY_ACK as calendar_free_slots_empty_ack
+    from app.domain.owner.notifications import _EMPTY_ACK as meeting_notifications_empty_ack
+    from app.tools.registries.owner_tools import ToolResult
+
+    exact_cases = (
+        _LEAD_MATCH_NOT_FOUND_ACK,  # app/domain/lead_reviews.py:263
+        gmail_not_found_ack,  # app/domain/gmail/summaries.py:29,173
+        calendar_free_slots_empty_ack,  # app/domain/owner/calendar.py:26
+        meeting_notifications_empty_ack,  # app/domain/owner/notifications.py:32
+    )
+    for text in exact_cases:
+        assert _looks_empty(ToolResult(ok=True, text=text)) is True, text
+
+    # Prefix cases: the real text plus whatever dynamic content genuinely
+    # follows it in production must still count as empty.
+    prefix_cases = (
+        _LEAD_REVIEW_NOT_FOUND_ACK,  # app/domain/lead_reviews.py:245
+        _LEAD_MATCH_NO_NAME_LINE + "\nאחרונים:\nlead_x",
+        _BRIEF_NOT_FOUND_ACK,  # app/domain/meetings/briefs.py:447
+        _HEADER_LINE + "\n" + _EMPTY_LINE + "\nאלה רעיונות בלבד.",
+    )
+    for text in prefix_cases:
+        assert _looks_empty(ToolResult(ok=True, text=text)) is True, text
+
+    # The header alone is not sufficient: it also opens the non-empty case, so
+    # real content following it must never be flagged empty by a bare-header
+    # prefix. This is why the content-ideas marker is header+empty-line, not
+    # the header by itself.
+    real_content = (
+        _HEADER_LINE + "\n• עוד רילס — על בסיס אותות ליד בנתונים הקיימים."
+    )
+    assert _looks_empty(ToolResult(ok=True, text=real_content)) is False
+
+
+def test_dead_markers_were_removed() -> None:
+    """These `_empty(...)` fallbacks were never actually reachable -- the
+
+    formatter each one wraps always returns real (often Hebrew) text, even on
+    its own empty case -- so they must not linger in either marker set.
+    """
+    from app.graph.owner_agent import _EMPTY_RESULT_EXACT_MARKERS, _EMPTY_RESULT_PREFIX_MARKERS
+
+    dead_texts = (
+        "No matching lead.",
+        "No hot leads right now.",
+        "Nothing is waiting for approval.",
+        "No website conversations yet.",
+        "No free slots found.",
+        "Nothing new was booked.",
+        "Nothing to report.",
+    )
+    for text in dead_texts:
+        assert text not in _EMPTY_RESULT_EXACT_MARKERS, text
+        assert not any(
+            text.startswith(prefix) or prefix.startswith(text)
+            for prefix in _EMPTY_RESULT_PREFIX_MARKERS
+        ), text
 
 
 def test_marker_matching_is_whole_result_not_substring() -> None:

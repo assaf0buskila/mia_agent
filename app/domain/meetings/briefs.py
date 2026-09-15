@@ -30,6 +30,13 @@ OWNER_QUESTION_KEYS = ("decision_maker", "timeline", "metric")
 _MEETING_STATUS_BOOKED = "booked"
 _NEXT_ACTION = "offer_meeting"
 _MEETING_RESEARCH_TOOL = "meeting_research"
+
+# Promoted so app/graph/owner_agent.py's empty-result markers can import
+# the real text instead of holding a copy that can drift out of sync.
+_BRIEF_NOT_FOUND_ACK = (
+    "מה שהבנתי: תקציר פגישה. לא מצאתי תקציר לליד הזה. "
+    "אני לא מבצעת כלום."
+)
 _FIT_HE = {
     FitLevel.UNKNOWN.value: "לא ידועה",
     FitLevel.POOR.value: "חלשה",
@@ -444,9 +451,6 @@ def apply_owner_meeting_brief(
         return None
     row = store.get_meeting_brief(lead_id)
     if row is None or store.get_lead(lead_id) is None:
-        return (
-            "מה שהבנתי: תקציר פגישה. לא מצאתי תקציר לליד הזה. "
-            "אני לא מבצעת כלום."
-        )
+        return _BRIEF_NOT_FOUND_ACK
     payload = _parse_existing_brief_payload(row.payload_json)
     return format_owner_meeting_brief(payload, lead_id=lead_id, timezone=timezone)

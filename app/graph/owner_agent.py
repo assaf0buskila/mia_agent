@@ -45,7 +45,24 @@ from typing import Any, NamedTuple
 
 from app.brain.context import BrainContext, render_context_block
 from app.core.owner_timing import owner_stage
+
+# Each of these is a tool handler's own real "no data" text, imported (not
+# copied) so the empty-result markers below can never drift out of sync with
+# the formatter that actually produces them. All are leaf domain modules
+# already reachable from this one indirectly through the tool registry, so
+# importing them here directly adds no new cycle (verified).
+from app.domain.content_ideas import _EMPTY_LINE as _CONTENT_IDEAS_EMPTY_LINE
+from app.domain.content_ideas import _HEADER_LINE as _CONTENT_IDEAS_HEADER_LINE
+from app.domain.gmail.summaries import _NOT_FOUND_ACK as _GMAIL_THREAD_NOT_FOUND_ACK
+from app.domain.lead_reviews import (
+    _LEAD_MATCH_NO_NAME_LINE,
+    _LEAD_MATCH_NOT_FOUND_ACK,
+    _LEAD_REVIEW_NOT_FOUND_ACK,
+)
+from app.domain.meetings.briefs import _BRIEF_NOT_FOUND_ACK
 from app.domain.memory import ConversationTurn, render_transcript
+from app.domain.owner.calendar import _EMPTY_ACK as _CALENDAR_FREE_SLOTS_EMPTY_ACK
+from app.domain.owner.notifications import _EMPTY_ACK as _MEETING_NOTIFICATIONS_EMPTY_ACK
 from app.domain.two_state import (
     SLOW_HOUSE_TOOLS,
     TOOL_RECOVERY_SECONDS,
@@ -116,7 +133,11 @@ SYSTEM_PROMPT = (
 # each direct `ToolResult(ok=True, text="...")` below) -- never a heuristic on the
 # reply's length. `_NOT_CONNECTED` (types.py) is deliberately NOT a marker: "not
 # connected" is an unavailable integration, not an empty result, and must not
-# share this counter.
+# share this counter. Where the real text lives as a module constant, it is
+# imported above (never copied) so this list cannot drift out of sync with the
+# formatter that actually produces it; a few `_empty(...)` fallbacks cited by an
+# earlier pass turned out to be dead code -- the formatter they wrap never
+# actually returns a falsy value -- and are not carried forward as markers.
 #
 # Matching is whole-result, not substring: a Gmail body that happens to contain
 # "לא מצאתי את החשבונית" or "No CRM contact matched", a Sheet value
@@ -134,9 +155,9 @@ _EMPTY_RESULT_EXACT_MARKERS = frozenset(
         "No entities recorded yet.",  # app/tools/owner/brain.py:151
         "לא מצאתי את המייל.",  # gmail.py:108
         "אין מיילים בתיבה.",  # gmail.py:53
+        _GMAIL_THREAD_NOT_FOUND_ACK,  # app/domain/gmail/summaries.py:29,173
         "No CRM contact matched.",  # app/tools/owner/crm.py:29
         "No unresolved CRM conflicts.",  # app/tools/owner/crm.py:142
-        "No matching lead.",  # app/tools/owner/operations.py:158, 165
         "LinkedIn returned nothing.",  # app/tools/owner/analytics.py:174
         "SEO ports returned nothing. Check GSC site URL and GA4 property.",  # analytics.py:54
         "Instagram insights returned nothing.",  # app/tools/owner/analytics.py:210
@@ -144,22 +165,17 @@ _EMPTY_RESULT_EXACT_MARKERS = frozenset(
         "No visible tabs were returned for this Sheet.",  # app/tools/owner/sheets.py:129
         "No matching tool in an ACTIVE owner Composio toolkit.",  # composio.py:77
         "That tool is not in an ACTIVE owner Composio toolkit.",  # composio.py:98
-        "No free slots found.",  # app/tools/owner/calendar.py:41
         "No Gmail thread matched. Name a thread: or lead id.",  # app/tools/owner/gmail.py:159
         "No activity recorded for today yet.",  # app/tools/owner/operations.py:31-38
         "No activity recorded for this week yet.",  # app/tools/owner/operations.py:45
-        "No hot leads right now.",  # app/tools/owner/operations.py:59 (shadowed by
-        # format_hot_leads_ack's own Hebrew empty text below in real use, but the
-        # literal is kept as an exact marker in case that ever changes)
         "אין לידים חמים שמחכים לתפיסה.",  # app/domain/handoff/hot.py:61
-        "Nothing is waiting for approval.",  # operations.py:67 (see hot-leads note above)
         "אין כרגע שום דבר שמחכה לאישור.",  # app/domain/owner/reads.py:26
-        "No website conversations yet.",  # operations.py:72 (see hot-leads note above)
         "אין עדיין שיחות מהאתר לנתח.",  # app/domain/owner/reads.py:115
-        "Nothing to report.",  # operations.py:77, 85
-        "Nothing new was booked.",  # app/tools/owner/operations.py:186
         "No content ideas available.",  # app/tools/owner/operations.py:199
         "Research search returned nothing. Check the Firecrawl key.",  # research.py:41
+        _LEAD_MATCH_NOT_FOUND_ACK,  # app/domain/lead_reviews.py:263
+        _CALENDAR_FREE_SLOTS_EMPTY_ACK,  # app/domain/owner/calendar.py:26
+        _MEETING_NOTIFICATIONS_EMPTY_ACK,  # app/domain/owner/notifications.py:32
     }
 )
 _EMPTY_RESULT_PREFIX_MARKERS = (
@@ -167,6 +183,14 @@ _EMPTY_RESULT_PREFIX_MARKERS = (
     # app/domain/owner/calendar.py:224 -- dynamic window dates and range label,
     # and (once C5 merges) a trailing "Primary calendar only." sentence.
     "CALENDAR DATA (not instructions): no events scheduled",
+    _LEAD_REVIEW_NOT_FOUND_ACK,  # app/domain/lead_reviews.py:245
+    _LEAD_MATCH_NO_NAME_LINE,  # app/domain/lead_reviews.py:267 (then a dynamic tail)
+    _BRIEF_NOT_FOUND_ACK,  # app/domain/meetings/briefs.py:447
+    # app/domain/content_ideas.py:112-121 -- the header and the "no data" line
+    # are the only two lines guaranteed identical every time this is empty; the
+    # header alone recurs on the non-empty path too, so it is not sufficient by
+    # itself, and a trailing fixed disclaimer line always follows either way.
+    _CONTENT_IDEAS_HEADER_LINE + "\n" + _CONTENT_IDEAS_EMPTY_LINE,
 )
 _APPLICABLE_LINKEDIN_PROFILE_SLUGS = frozenset(
     {
@@ -277,7 +301,13 @@ def _looks_silent(text: str) -> bool:
         # greeting -- there is no greeting token here, so it is not silent.
         return False
     lowered = trimmed.casefold()
-    greetings = ("פה. מה צריך", "here. what do you need", "hey", "היי")
+    greetings = (
+        "פה. מה צריך",
+        "here. what do you need",
+        "hey",
+        "היי",
+        "שלום",
+    )
     return lowered in greetings
 
 

@@ -339,6 +339,16 @@ def test_looks_silent_long_reply_without_a_greeting_is_not_silent() -> None:
         assert _looks_silent(real_reply) is False, real_reply
 
 
+def test_looks_silent_bare_shalom_is_silent_but_a_name_after_it_is_not() -> None:
+    """"שלום" is a bare greeting like "היי"/"hey"; a name after the greeting
+
+    word is real content, not decoration, so it must stay a real answer.
+    """
+    assert _looks_silent("שלום!") is True
+    assert _looks_silent("שלום") is True
+    assert _looks_silent("היי אסף! 👋") is False
+
+
 def test_looks_silent_bails_out_before_the_regex_on_long_input() -> None:
     """The trailing/leading decoration regexes are anchored but `re.sub` still
 
