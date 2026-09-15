@@ -1,32 +1,29 @@
 # TASKS.md
 
-Updated 2026-09-14. Production `/health` reports commit `4b80f31` (#60). Detail in `HANDOFF.md`.
+Updated 2026-09-15. Production `/health` last reported commit `4b80f31` (#60) — nothing from the
+campaign is deployed. Detail and next-session instructions in `HANDOFF.md` section 0.
 
 ## Campaign finish (plan: `docs/MIA_CAMPAIGN_FINISH_PLAN.md`)
 
-C0 audit done 2026-09-14 at `4b80f31`: 2005 passed / 7 skipped, ruff clean, widget passed.
-One chunk per stacked branch + PR, independent review each. No merge/deploy without Assaf.
+Merge policy (Assaf): each chunk merges when independent review is PASS and CI is green.
+Deploy is a separate go. Max 2 agents at once (session usage limit).
 
-Defaults taken where C0 left a fork (reverse any of them):
-reports read CRM v2 tables; first-brief fix stays inside the capture transaction (no capture
-reorder); Instagram writes stay excluded; LinkedIn publishing is not a campaign claim until
-a live test; Calendar = own events without guests. Open: live Sheet audit (PII, needs
-approval), meetings module retired or not.
-
-- [ ] C1a — `_crm_upsert` returns None on valid input → owner turn crashes (`crm.py:77`).
-      `execute_tool` must reject a non-ToolResult.
-- [ ] C1b — `_looks_silent` greeting-prefix, `_looks_empty` ≤60 chars, usage lost on crash.
-- [ ] C2a — LinkedIn vs `פוסט` hint order; owner prose Markdown shows literally.
-- [ ] C2b — approval cards from the stored envelope (Gmail has no CC/BCC); callback
-      `sent: True` after an edit failure.
-- [ ] C5 — reschedule conflicts with itself; agenda `successful != True` reads as empty day.
-- [ ] C3a — `business_context` latches on a greeting; summary is raw fragments; first brief
-      misses same-turn `next_step`.
-- [ ] C3b — v2 leads invisible to owner reports; lead card has no contact ref; nominal CRM
-      reads import/write.
-- [ ] C4 — live Gmail brief routing; send card fields; stuck `pending_review` has no exit.
-- [ ] C6a — social planning with honest capability labels.
-- [ ] C7b — remove proven-dead code, reconcile docs; then release readiness (Prompt 4).
+- [x] C0 — audit + plan + rules (#61)
+- [x] C1a — `crm_upsert` crash → exact proposal; non-ToolResult guard (#62)
+- [x] C2a — explicit platform routing; safe owner Markdown + span-safe split (#63)
+- [x] C5 — reschedule self-conflict; failed agenda read ≠ free day (#64)
+- [x] C1b — greeting-prefixed replies kept; exact "no data" markers; usage on failed turns (#65)
+- [x] C3a — website lead brief: greeting latch, de-duplicated layout, same-turn refresh (#66)
+- [x] C5h — reschedule safety check fails closed (#67)
+- [x] C3b — owner reports count v2 leads; Sheet created/updated system-owned; CRM reads stop
+      creating tabs (#70)
+- [x] C4 — `gmail_brief` daily email data; `owner_uncertain_writes` (#69)
+- [ ] C2b — approval cards from the stored envelope; callback `sent` truth (brief ready)
+- [ ] C6a — social capability truth + routing collisions (brief ready; after C4)
+- [ ] C7b — proven-dead code, reviewed follow-ups, docs (brief ready; last)
+- [ ] Prompt 4 — release readiness, go/no-go → **stop for Assaf**
+- [ ] Prompt 5 — approved deploy + phone acceptance (live LinkedIn post, email send, calendar
+      event, website lead — each approved individually)
 
 ## Done today
 

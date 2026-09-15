@@ -194,3 +194,66 @@ If a safety/delivery regression occurs, stop and follow the approved rollback pr
 `requirement → regression/acceptance case → implementation → focused checks → fresh review → reviewed fixes → final evidence → status/commit checkpoint`
 
 The aim is verified completion with controlled cost—not maximum parallelism, endless planning or a single giant “build everything” session.
+
+## Ready briefs (handoff 2026-09-15)
+
+Copy one brief into an Agent call (`general-purpose`, `model: sonnet`, background). Each builder
+works in its own worktree off the latest `origin/master` and never pushes. After it returns: the
+main session pushes and opens the PR, then runs the reviewer template below with `model: opus`.
+
+### Common builder rules (prepend to every brief)
+
+```text
+SETUP: git -C "<repo>" fetch origin; git -C "<repo>" worktree add "<repo>/.claude/worktrees/mia-<chunk>" -b claude/mia-<chunk>-<slug> origin/master. Work only there (absolute paths). uv sync --frozen --group dev. Read AGENTS.md, CLAUDE.md and only the named plan section. Never bare git stash.
+Run EVERY command in the foreground with output redirected to a file — no background loops.
+HARD RULES: never read .env; no network/provider calls (fake ports); no push/merge/deploy; don't weaken or delete tests; no runtime model change; no unrelated cleanup; don't edit TASKS.md/HANDOFF.md or files named as owned by another open chunk. Two failed attempts → stop with a diagnosis.
+VERIFY: focused tests; MIA_ENV=test uv run pytest --basetemp=.cache/<chunk>-full -p no:cacheprovider > .cache/<chunk>-full.txt 2>&1 (read the summary line); uv run ruff check app tests; node tests/unit/widget_behavior.test.js.
+COMMIT (no push) via git commit -F <message file outside the repo>, repo prose style, ending "Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>".
+RETURN (≤400 words): worktree, SHA, changed files and why, tests added, exact summary lines, remaining risk, clean tree.
+```
+
+### C2b — exact approval cards (plan §4 "Three presentation types", §9)
+
+```text
+Presentation + callback flag only: do not change envelope format, proposal ids, hashing, expiry, actor checks or execution. Preserve legacy outstanding approvals. Keep C1b's failed-turn ai_run persistence in app/surfaces/owner.py and C2a's split_message.
+DEFECTS: (1) cards are model prose — owner tools return e.g. "Prepared an exact Gmail draft proposal." and the turn attaches buttons to that prose (app/surfaces/owner.py → owner_telegram_reply_markup in app/api/inbound_common.py). (2) app/api/telegram.py _handle_callback swallows edit_message_text failures and returns "sent": True.
+DESIGN: new app/domain/owner/proposal_cards.py render_owner_proposal_card(envelope) → escaped Telegram HTML from read_owner_action's stored envelope; Hebrew; "לאישור: …" title; explicit "עדיין לא בוצע". Per kind: gmail.create_draft (to, subject, full body, "תיווצר טיוטה — לא יישלח מייל"; no invented CC/BCC); composio.write (GMAIL_SEND_DRAFT → target.resource fields + "המייל יישלח"; LINKEDIN → full post text/visibility; others bounded args; never connection ids/account hashes); calendar.create (title, local date + time, duration, location, "לא נשלחות הזמנות"); calendar.reschedule (old → new local); crm.upsert (new vs existing, before → after only for changed non-empty fields); crm.activity; crm.resolve_conflict; sheets.update/append (range + bounded rows); unknown kind → generic safe card, never raw JSON.
+owner.py: prose WITHOUT keyboard, then one card message per turn approval id with its own approval_keyboard; long card → split_message, keyboard only on the last chunk; card send failure logged (reason code), proposal stays pending. Pending-approvals view: a card per pending proposal, newest first, max 5 + "ועוד N". _handle_callback: sent reflects edit success; on edit failure one fallback sendMessage with the result text; never re-run the action.
+TESTS: snapshot per kind (Hebrew, escaping, no secrets); two proposals → prose + two cards with their own tokens; long body split with keyboard last; pending view 7 → 5 + "ועוד 2"; edit fails → fallback, sent true/false correctly, action executed exactly once; legacy rows render and resolve.
+```
+
+### C6a — social capability truth (plan §5.4) — start after C4 merges
+
+```text
+No new write capability; Instagram deny (composio_effects.py) and LinkedIn approval/execution (linkedin_writes.py) unchanged; no scheduling/DMs/ads; no new LLM call.
+STATE: linkedin_snapshot = own profile only; instagram_insights = per-post metrics, missing → "unavailable" (_metric_value); composio_propose_linkedin_action = exact approval, live posting unverified; content_ideas = categories, not drafts. No guidance separating data/inference/recommendation.
+IMPLEMENT: (1) read-only social_capabilities tool computed from settings/readiness (no provider calls): LinkedIn profile read, post/comment via approval ("not yet verified live"), no analytics; Instagram insights read, publishing not available (policy), no DMs/ads; drafts are not scheduled or published. (2) One-clause "what this is NOT" in the descriptions of linkedin_snapshot, instagram_insights, content_ideas, composio_propose_linkedin_action. (3) A social-writing rule constant injected in owner_agent.py build_messages only for linkedin/instagram/content turns: label observed data vs inference vs recommendation; no reach/performance/follower/best-time claims without tool data; a draft is not published; at most one question. Do not touch _looks_empty/_looks_silent/markers/usage. (4) Routing (two_state.py; keep C4's additions and all existing tests): whole-word matching for Latin needles so "a big meeting tomorrow", "update the config file", "excellent work" don't route to instagram/sheets; "LinkedIn post about crm" → linkedin; keep C2a sentences (install/instant/instance/instability → base, "I linked in the doc, make a פוסט" → instagram).
+TESTS: capabilities for configured/unconfigured; description clauses; rule injected only on social turns; every routing sentence above.
+```
+
+### C7b — cleanup, reviewed follow-ups, docs (plan §11) — last
+
+```text
+Never delete app/domain/meetings/*, approval/reporting modules in bulk, or migrations. A "dead" symbol is a hypothesis: grep imports, dotted strings (monkeypatch.setattr("a.b.c")), capability port="…", pyproject entrypoints, workers/schedules, deploy/*.json, tests — and persisted approvals/jobs that could still route to it.
+PART 1 hypotheses → table symbol / evidence / delete-or-keep: app/domain/owner/composio_writes.py execute_approved_composio_write (propose has no callers — check outstanding composio_approval rows and callback dispatch); app/surfaces/crm.py log_contact / ActivityRecord (test-only) and build_contacts_crm; app/domain/handoff/hot.py apply_hot_handoff; LeadStore.open_channel_lead/_save_lead_created (only if C3b no longer needs them); scripts/calibrate_knowledge_floor.py (documents a removed setting).
+Also in the PART 1 table: "composio_approval" is missing from ALLOWLISTED_OPERATION_SCOPES, so approved generic Composio writes can never execute. First prove whether propose_composio_write has any live caller: if none, delete the unreachable propose/execute path (with its tests) instead of allowlisting; if one exists, allowlist the scope with a test that an approved write executes exactly once.
+PART 1b reviewed follow-ups with tests: calendar.py window_free_excluding_self — getattr(agenda, "list_events_strict", None), fail closed when missing; owner_agent.py exact "no data" markers — import GMAIL_BRIEF_EMPTY_WINDOW and OWNER_UNCERTAIN_WRITES_EMPTY from their modules (not copied strings); C3b leftovers — hot-lead replies show a name/label instead of raw crm_… ids, crm_v2.py timezone default taken from settings.timezone at the callers, narrow the bare except in the tools/owner/crm.py workspace check to adapter/schema errors.
+Record only (no code): header drift can still be repaired by a CRM read (needs owner_actions.py change); PostgreSQL test gap for C3a same-turn refresh; pre-existing test-order flake in tests/unit/test_gmail_send_policy.py.
+PART 2 docs (code is truth): TASKS.md checklist with PR numbers; HANDOFF.md section 0 current; MIA_V2.md/README.md only where behaviour changed; AGENTS.md only if a statement is false. No new doc files. Two commits: code, docs.
+```
+
+### Reviewer template (opus, read-only)
+
+```text
+Independent READ-ONLY review (you are not the author). Worktree <path>, branch <branch>, review `git diff origin/master...<sha>` (three dots). Do not edit, stash, switch or push; no network; never read .env.
+Goal and claims: <chunk goal + the author's claimed fixes, as claims to verify>.
+Check: correctness against the stated defects; invariants (server-only contact validation, visitor isolation, exact immutable approvals, no duplicate/uncertain side effects, no visitor text in logs); callers and persisted-data compatibility; adversarial inputs with throwaway `uv run python -c` probes (nothing left in the repo); tests exercise the real code and fail on revert (mutate a scratch copy outside the repo); nothing weakened.
+Run the focused test files to .cache/<chunk>-review.txt and read it.
+Return: findings (file:line, severity P0–P3, failing scenario, smallest fix), verified checks, verdict PASS / CHANGES_REQUIRED. ≤500 words.
+```
+
+### Resume a stopped agent
+
+```text
+Resume <chunk> after the interruption: you were <last step>. Continue in <worktree> from its current state (check git status --short / git diff --stat first). <remaining items>. Foreground commands only. Same verify/commit/return rules.
+```
