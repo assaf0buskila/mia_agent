@@ -22,7 +22,12 @@ from app.core.errors import MiaError
 from app.core.logging import log_owner_agent
 from app.core.owner_timing import owner_stage
 from app.db.store import LeadStore
-from app.domain.ai_runs import OWNER_REPLY_ACTION, elapsed_ms, persist_ai_run
+from app.domain.ai_runs import (
+    OWNER_REPLY_ACTION,
+    OWNER_REPLY_FAILED_ACTION,
+    elapsed_ms,
+    persist_ai_run,
+)
 from app.domain.events import (
     Channel,
     build_message_in_event,
@@ -38,6 +43,7 @@ from app.domain.owner.request_routing import (
 )
 from app.domain.owner.tasks import OwnerTaskType
 from app.domain.tools import AdapterHttpError
+from app.graph.owner_agent import OwnerUsage
 from app.integrations.base import MessagePort
 
 _log = logging.getLogger("mia.owner")
@@ -221,6 +227,10 @@ def _talk_with_optional_agent(
     if not settings.owner_agent_ready():
         return OWNER_UNAVAILABLE, False
     started = perf_counter()
+    # Kept up to date by `run_owner_agent` as it runs, so the except clause below
+    # can still record real provider spend for the turn even when the loop raises
+    # before returning a normal `AgentOutcome` (see `OwnerUsage`).
+    usage = OwnerUsage()
     try:
         no_history = requests_no_history(text)
         history = (
@@ -247,6 +257,7 @@ def _talk_with_optional_agent(
             now=datetime.now(UTC),
             deadline_at=deadline_at,
             input_source=item.get("source") or "text",
+            usage=usage,
         )
         # Everything below used to be thrown away: only `.text` was read, so the live
         # Telegram turn recorded no model, no latency, no tokens, no steps, no failed
@@ -263,12 +274,22 @@ def _talk_with_optional_agent(
             tools_failed=result.tools_failed,
             completion=result.completion,
         )
+        # `completion` is only ever set by a real `run_owner_agent` call (success
+        # as "answered", failure as "provider_error" / "budget_exhausted" /
+        # "refused" / ... ); the early-return paths that never touch the agent at
+        # all (kill switch, deterministic intent, no model configured) leave it
+        # empty. So "the agent ran and did not complete" -- far more common than
+        # an outright exception -- is exactly `not used_agent and completion`,
+        # and only that case is a genuine failed turn worth marking as such.
+        agent_ran_and_failed = not result.used_agent and bool(result.completion)
         persist_ai_run(
             store,
             run_id=correlation_id,
             lead_id=None,
             channel=Channel.TELEGRAM.value,
-            next_action=OWNER_REPLY_ACTION,
+            next_action=(
+                OWNER_REPLY_FAILED_ACTION if agent_ran_and_failed else OWNER_REPLY_ACTION
+            ),
             kill_switch=settings.kill_switch,
             sales_model=settings.owner_agent_model,
             openai_api_key=settings.openai_api_key,
@@ -300,4 +321,50 @@ def _talk_with_optional_agent(
         # "פה. מה צריך?". Logging was added first; the reply itself still lied until
         # this returned the honest unavailable message instead.
         _log.warning("owner agent turn failed error=%s", type(exc).__name__)
+        # The turn used to vanish from ai_runs entirely here: any tokens the loop
+        # had already spent before it broke were simply lost, so the audit table
+        # looked like the turn never happened. Persist a row for it too, marked
+        # failed via next_action, with whatever `usage` the loop reached before
+        # raising. `usage.tokens_in/out` are real accumulated values once the
+        # loop has taken at least one completed model turn; if it never got that
+        # far they are still 0 -- the same "no usage" value `persist_ai_run`
+        # already defaults to for every other caller. The schema has no separate
+        # column to mark that zero as "unmeasured" rather than "measured"; that
+        # is a known limitation of this fix, not a new one it introduces.
+        try:
+            persist_ai_run(
+                store,
+                run_id=correlation_id,
+                lead_id=None,
+                channel=Channel.TELEGRAM.value,
+                next_action=OWNER_REPLY_FAILED_ACTION,
+                kill_switch=settings.kill_switch,
+                sales_model=settings.owner_agent_model,
+                openai_api_key=settings.openai_api_key,
+                sales_fallback_model=settings.owner_agent_fallback_model,
+                gemini_api_key=settings.gemini_api_key,
+                sales_gemini_model=settings.owner_agent_gemini_model,
+                latency_ms=elapsed_ms(started),
+                tokens_in=usage.tokens_in,
+                tokens_out=usage.tokens_out,
+                automation_mode=settings.automation_mode.value,
+            )
+        except Exception as persist_exc:  # noqa: BLE001 - the audit write must never mask the original failure
+            # The original exception can leave `store.session` in a failed state
+            # (e.g. SQLAlchemy's PendingRollbackError once a prior statement in
+            # this session errored), which makes this INSERT raise too. The owner
+            # still gets the honest OWNER_UNAVAILABLE reply below either way, so
+            # this is only logged by reason code -- never a payload -- and never
+            # allowed to replace or hide the original failure's handling.
+            _log.warning(
+                "owner failed-turn ai_run persist failed error=%s",
+                type(persist_exc).__name__,
+            )
+            try:
+                # Best-effort recovery so the webhook-status and outbound-event
+                # writes still below this in `run_owner_loop` are not also lost
+                # to the same broken transaction.
+                store.session.rollback()
+            except Exception:  # noqa: BLE001 - recovery only, never worth surfacing
+                pass
         return OWNER_UNAVAILABLE, wrote

@@ -14,7 +14,7 @@ from app.capabilities.types import Principal
 from app.core.config import get_settings
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
-from app.graph.owner_agent import build_messages, run_owner_agent
+from app.graph.owner_agent import OwnerUsage, _looks_empty, build_messages, run_owner_agent
 from app.integrations.llm_client import LlmClient
 from app.tools.registries.owner_tools import (
     ToolContext,
@@ -533,6 +533,326 @@ def test_repeated_empty_result_stops_offering_that_tool(
     third_request = transport.requests[2]
     offered = [t["function"]["name"] for t in third_request.get("tools", [])]
     assert "search_memory" not in offered
+
+
+def test_looks_empty_only_counts_a_genuine_no_data_success() -> None:
+    """Length was never a signal of "no data". Only a blank text or an explicit
+
+    no-results marker counts, and only for a successful call -- a failed or
+    timed out result is never "empty", it is unavailable.
+    """
+    from app.tools.registries.owner_tools import OUTCOME_TIMEOUT, ToolResult
+
+    assert _looks_empty(ToolResult(ok=True, text="Contact crm_x rev 3: Dana | 050")) is False
+    assert _looks_empty(ToolResult(ok=True, text="No stored memory matches that.")) is True
+    assert _looks_empty(ToolResult(ok=True, text="")) is True
+    assert _looks_empty(ToolResult(ok=False, error="boom")) is False
+    assert (
+        _looks_empty(ToolResult(ok=False, text="stopped", outcome=OUTCOME_TIMEOUT)) is False
+    )
+
+
+# Every one of these is a real `ToolResult(ok=True, text=...)` (or `_empty(...)`
+# fallback) an owner tool handler returns -- literals copied here with a
+# file:line comment because crm.py/sheets.py/owner_tools.py are owned by
+# another open chunk and cannot be imported from or edited in this one.
+# Before precise markers existed, none of these tripped the empty-result
+# repeat limit at all (the old <=60-char rule was the only thing that caught
+# most of them), so a model could loop e.g. crm_search past the step cap
+# without the guard ever firing.
+_REAL_NO_DATA_TOOL_TEXTS = (
+    "No CRM contact matched.",  # app/tools/owner/crm.py:29
+    "No unresolved CRM conflicts.",  # app/tools/owner/crm.py:142
+    "No meeting brief available for lead_42.",  # app/tools/owner/operations.py:172
+    "LinkedIn returned nothing.",  # app/tools/owner/analytics.py:174
+    "SEO ports returned nothing. Check GSC site URL and GA4 property.",  # analytics.py:54
+    "Instagram insights returned nothing.",  # app/tools/owner/analytics.py:210
+    "The requested Sheet range is empty.",  # app/tools/owner/sheets.py:100
+    "No visible tabs were returned for this Sheet.",  # app/tools/owner/sheets.py:129
+    "No matching tool in an ACTIVE owner Composio toolkit.",  # composio.py:77
+    "That tool is not in an ACTIVE owner Composio toolkit.",  # composio.py:98
+    "No Gmail thread matched. Name a thread: or lead id.",  # app/tools/owner/gmail.py:159
+    "No activity recorded for today yet.",  # app/tools/owner/operations.py:31-38
+    "No activity recorded for this week yet.",  # app/tools/owner/operations.py:45
+    "No content ideas available.",  # app/tools/owner/operations.py:199
+    "Research search returned nothing. Check the Firecrawl key.",  # research.py:41
+    "No stored memory matches that.",  # app/tools/owner/brain.py:39
+    "Nothing in the website knowledge base matches that.",  # app/tools/owner/brain.py:66
+    "No entities recorded yet.",  # app/tools/owner/brain.py:151
+    "לא מצאתי את המייל.",  # gmail.py:108
+    "אין מיילים בתיבה.",  # gmail.py:53
+    # The seven English fallbacks removed from here ("No matching lead.",
+    # "No hot leads right now.", "Nothing is waiting for approval.",
+    # "No website conversations yet.", "No free slots found.",
+    # "Nothing new was booked.", "Nothing to report.") are dead code: the
+    # formatter each one wraps never actually returns a falsy value, so the
+    # `_empty(...)` fallback never fires. See test_dead_markers_were_removed.
+)
+
+
+@pytest.mark.parametrize("text", _REAL_NO_DATA_TOOL_TEXTS)
+def test_every_real_no_data_tool_text_is_treated_as_empty(text: str) -> None:
+    from app.tools.registries.owner_tools import ToolResult
+
+    assert _looks_empty(ToolResult(ok=True, text=text)) is True, text
+
+
+def test_not_connected_is_unavailable_not_empty() -> None:
+    """A deliberate decision, not an oversight: "not connected" means the
+
+    integration itself is unavailable, which is a different fact from "the
+    query returned no data" and must not share the same repeat-limit counter.
+    """
+    from app.tools.owner.types import _NOT_CONNECTED
+    from app.tools.registries.owner_tools import ToolResult
+
+    assert _looks_empty(ToolResult(ok=True, text=_NOT_CONNECTED)) is False
+
+
+def test_short_real_data_across_several_real_tool_shapes_stays_not_empty() -> None:
+    from app.tools.registries.owner_tools import ToolResult
+
+    real_short_texts = (
+        "Contact crm_x rev 3: Dana | 050",
+        "Sheet tabs: Contacts | Activity",
+        "Prepared an exact CRM activity proposal. Nothing was written.",
+    )
+    for text in real_short_texts:
+        assert _looks_empty(ToolResult(ok=True, text=text)) is False, text
+
+
+def test_real_formatter_empty_output_is_treated_as_empty() -> None:
+    """These four "no data" replies were missed by the marker list: their tool
+
+    handlers return the Hebrew formatter's own text, not the English `_empty(...)`
+    fallback the marker cited, because the formatter never returns a falsy value
+    -- so the fallback the marker matched against was never actually reachable.
+    Calling the real formatters here (rather than copying their literals) means
+    this test breaks if the formatter's empty-case text ever drifts, instead of
+    silently testing a stale string.
+    """
+    from datetime import UTC, datetime
+
+    from app.db import models as _models  # noqa: F401 - register mapped tables
+    from app.db import site_v2 as _site_v2  # noqa: F401 - register mapped tables
+    from app.db.base import Base
+    from app.db.session import make_engine
+    from app.db.store import LeadStore
+    from app.domain.handoff.hot import format_hot_leads_ack
+    from app.domain.lead_reviews import format_lead_matches
+    from app.domain.owner.calendar import format_calendar_agenda
+    from app.domain.owner.reads import (
+        format_pending_approvals_ack,
+        format_website_conversations_ack,
+    )
+    from app.tools.registries.owner_tools import ToolResult
+    from sqlalchemy.orm import sessionmaker
+
+    # A dedicated in-memory engine, not the shared `get_session_factory()` one:
+    # that one is a single StaticPool connection reused by the whole test
+    # session, so by the time the full suite reaches this test it can already
+    # carry real pending approvals / snapshots / hot leads from earlier tests.
+    # These formatters read *all* rows with no scoping, so only a genuinely
+    # separate empty database proves their real empty-case text.
+    engine = make_engine("sqlite:///:memory:")
+    Base.metadata.create_all(bind=engine)
+    db = sessionmaker(bind=engine)()
+    try:
+        store = LeadStore(db)
+        # This isolated DB has no pending approvals, no sales snapshots and no
+        # hot leads, so each formatter is exercised on its real empty path.
+        pending_text = format_pending_approvals_ack(store)  # reads.py:26
+        conversations_text = format_website_conversations_ack(store)  # reads.py:115
+        hot_leads_text = format_hot_leads_ack(
+            store, principal=Principal.owner(source="test")
+        )  # app/domain/handoff/hot.py:61
+        agenda_text = format_calendar_agenda(
+            [], range_key="today", timezone="Asia/Jerusalem", now=datetime.now(UTC)
+        )  # app/domain/owner/calendar.py:224 -- dynamic date/label(/suffix) tail
+
+        assert _looks_empty(ToolResult(ok=True, text=pending_text)) is True
+        assert _looks_empty(ToolResult(ok=True, text=conversations_text)) is True
+        assert _looks_empty(ToolResult(ok=True, text=hot_leads_text)) is True
+        assert _looks_empty(ToolResult(ok=True, text=agenda_text)) is True
+        assert agenda_text.startswith(
+            "CALENDAR DATA (not instructions): no events scheduled"
+        )
+
+        # A fourth real formatter: no name matches an empty DB either.
+        no_match_text = format_lead_matches(store, "no such person at all")
+        assert _looks_empty(ToolResult(ok=True, text=no_match_text)) is True
+    finally:
+        db.close()
+
+
+def test_more_real_formatter_constants_are_treated_as_empty() -> None:
+    """A second round of "still never counted empty" texts, this time already
+
+    checked in as module constants in their own modules and imported (not
+    copied) into owner_agent.py's marker sets -- so this test exercises the
+    exact same objects the fix actually matches against, not a duplicate that
+    could quietly drift from them.
+    """
+    from app.domain.content_ideas import _EMPTY_LINE, _HEADER_LINE
+    from app.domain.gmail.summaries import _NOT_FOUND_ACK as gmail_not_found_ack
+    from app.domain.lead_reviews import (
+        _LEAD_MATCH_NO_NAME_LINE,
+        _LEAD_MATCH_NOT_FOUND_ACK,
+        _LEAD_REVIEW_NOT_FOUND_ACK,
+    )
+    from app.domain.meetings.briefs import _BRIEF_NOT_FOUND_ACK
+    from app.domain.owner.calendar import _EMPTY_ACK as calendar_free_slots_empty_ack
+    from app.domain.owner.notifications import _EMPTY_ACK as meeting_notifications_empty_ack
+    from app.tools.registries.owner_tools import ToolResult
+
+    exact_cases = (
+        _LEAD_MATCH_NOT_FOUND_ACK,  # app/domain/lead_reviews.py:263
+        gmail_not_found_ack,  # app/domain/gmail/summaries.py:29,173
+        calendar_free_slots_empty_ack,  # app/domain/owner/calendar.py:26
+        meeting_notifications_empty_ack,  # app/domain/owner/notifications.py:32
+    )
+    for text in exact_cases:
+        assert _looks_empty(ToolResult(ok=True, text=text)) is True, text
+
+    # Prefix cases: the real text plus whatever dynamic content genuinely
+    # follows it in production must still count as empty.
+    prefix_cases = (
+        _LEAD_REVIEW_NOT_FOUND_ACK,  # app/domain/lead_reviews.py:245
+        _LEAD_MATCH_NO_NAME_LINE + "\nאחרונים:\nlead_x",
+        _BRIEF_NOT_FOUND_ACK,  # app/domain/meetings/briefs.py:447
+        _HEADER_LINE + "\n" + _EMPTY_LINE + "\nאלה רעיונות בלבד.",
+    )
+    for text in prefix_cases:
+        assert _looks_empty(ToolResult(ok=True, text=text)) is True, text
+
+    # The header alone is not sufficient: it also opens the non-empty case, so
+    # real content following it must never be flagged empty by a bare-header
+    # prefix. This is why the content-ideas marker is header+empty-line, not
+    # the header by itself.
+    real_content = (
+        _HEADER_LINE + "\n• עוד רילס — על בסיס אותות ליד בנתונים הקיימים."
+    )
+    assert _looks_empty(ToolResult(ok=True, text=real_content)) is False
+
+
+def test_dead_markers_were_removed() -> None:
+    """These `_empty(...)` fallbacks were never actually reachable -- the
+
+    formatter each one wraps always returns real (often Hebrew) text, even on
+    its own empty case -- so they must not linger in either marker set.
+    """
+    from app.graph.owner_agent import _EMPTY_RESULT_EXACT_MARKERS, _EMPTY_RESULT_PREFIX_MARKERS
+
+    dead_texts = (
+        "No matching lead.",
+        "No hot leads right now.",
+        "Nothing is waiting for approval.",
+        "No website conversations yet.",
+        "No free slots found.",
+        "Nothing new was booked.",
+        "Nothing to report.",
+    )
+    for text in dead_texts:
+        assert text not in _EMPTY_RESULT_EXACT_MARKERS, text
+        assert not any(
+            text.startswith(prefix) or prefix.startswith(text)
+            for prefix in _EMPTY_RESULT_PREFIX_MARKERS
+        ), text
+
+
+def test_marker_matching_is_whole_result_not_substring() -> None:
+    """A substring check here would let real, attacker-influenced data that
+
+    happens to quote one of the empty-result phrases get flagged empty and
+    silently blackhole a healthy tool. Email content especially is
+    attacker-controlled.
+    """
+    from app.tools.registries.owner_tools import ToolResult
+
+    data_containing_a_marker_phrase = (
+        # A Gmail body quoting the Hebrew "email not found" phrase as part of a
+        # much longer real message (gmail.py:108's marker: "לא מצאתי את המייל.").
+        "שלום, לא מצאתי את החשבונית שציינת, אפשר לשלוח שוב?",
+        # A CRM search result quoting the exact-match marker text as one line
+        # among other real matches (crm.py:29's marker: "No CRM contact matched.").
+        "No CRM contact matched. Did you mean: Dana Cohen (050-1234567)?",
+        # Sheet values containing the exact-match marker text as one cell
+        # (operations.py:158's marker: "No matching lead.").
+        "Sheet values:\nrow1: status=No matching lead. note=escalated\nrow2: Avi | closed",
+        # A connection-audit dump quoting a probe's own marker text verbatim
+        # (operations.py:59's marker: "No hot leads right now.").
+        "בדיקת מערכת מלאה: - Hot leads: נבדק: אין נתונים בטווח שנבדק. "
+        "No hot leads right now. פעולות כתיבה לא בוצעו.",
+    )
+    for text in data_containing_a_marker_phrase:
+        assert _looks_empty(ToolResult(ok=True, text=text)) is False, text
+
+
+def test_short_real_result_does_not_trip_the_empty_counter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A short but real answer ("Contact crm_x rev 3: Dana | 050...") is not empty.
+
+    The old heuristic treated any successful result <=60 chars as empty
+    regardless of content, so a genuinely short real CRM hit could silently
+    blackhole a tool after two calls even though every call found something.
+    """
+    from app.graph import owner_agent as owner_agent_module
+    from app.tools.registries.owner_tools import ToolResult
+
+    monkeypatch.setattr(owner_agent_module, "EMPTY_RESULT_REPEAT_LIMIT", 1)
+    real_execute_tool = owner_agent_module.execute_tool
+
+    def fake_execute_tool(name, arguments, ctx):
+        if name == "crm_search":
+            return ToolResult(ok=True, text="Contact crm_x rev 3: Dana | 050")
+        return real_execute_tool(name, arguments, ctx)
+
+    monkeypatch.setattr(owner_agent_module, "execute_tool", fake_execute_tool)
+
+    session = _session()
+    session.commit()
+    client, transport = _client(
+        [
+            _assistant_tool_call("c1", "crm_search", {"query": "Dana"}),
+            _assistant_tool_call("c2", "crm_search", {"query": "Dana2"}),
+            _assistant_text("מצאתי את דנה."),
+        ]
+    )
+    outcome = run_owner_agent(client=client, ctx=_ctx(session), owner_message="?", max_steps=5)
+    assert outcome.completed is True
+    third_request = transport.requests[2]
+    offered = [t["function"]["name"] for t in third_request.get("tools", [])]
+    assert "crm_search" in offered
+
+
+def test_owner_usage_keeps_tokens_from_a_completed_call_when_the_loop_later_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bug that escapes the loop as a bare exception used to lose every token
+
+    the turn had already spent. `OwnerUsage`, passed in by the caller, must still
+    carry the real accumulated totals from the completed first model response.
+    """
+    from app.graph import owner_agent as owner_agent_module
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("unexpected bug mid tool execution")
+
+    monkeypatch.setattr(owner_agent_module, "_run_tool_with_timeout", boom)
+
+    session = _session()
+    client, _transport = _client(
+        [_assistant_tool_call("c1", "crm_search", {"query": "Dana"})]
+    )
+    usage = OwnerUsage()
+    with pytest.raises(RuntimeError):
+        run_owner_agent(
+            client=client, ctx=_ctx(session), owner_message="בדוק CRM", usage=usage
+        )
+    assert usage.attempted is True
+    assert usage.tokens_in == 10
+    assert usage.tokens_out == 5
 
 
 def test_budget_exhaustion_still_yields_a_tools_free_turn_with_prose() -> None:

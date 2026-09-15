@@ -73,6 +73,11 @@ def sales_model_label(
 # The owner loop has no sales action at all -- it answers Assaf, it does not sell to
 # him -- so it needs a name of its own to be recordable.
 OWNER_REPLY_ACTION = "owner_reply"
+# A turn whose agent loop raised before it could finish. Kept distinct from
+# OWNER_REPLY_ACTION so a reader can tell "answered" from "failed, with
+# whatever usage it had already accumulated" without adding a separate
+# status column.
+OWNER_REPLY_FAILED_ACTION = "owner_reply_failed"
 
 # Historical website action vocabulary retained for existing AI-run records.
 # The v2 reasoning surface owns current response actions and prompt versions.
@@ -107,7 +112,7 @@ def _valid_next_action(value: str) -> bool:
     vocabulary a row is in, so keeping each surface's real action is lossless; mapping
     them onto NextAction would put wrong values in the funnel instead.
     """
-    if value == OWNER_REPLY_ACTION or value in WEBSITE_ACTIONS:
+    if value in (OWNER_REPLY_ACTION, OWNER_REPLY_FAILED_ACTION) or value in WEBSITE_ACTIONS:
         return True
     try:
         NextAction(value)

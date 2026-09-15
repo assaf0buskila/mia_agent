@@ -34,6 +34,10 @@ _KIND_HE: dict[str, str] = {
     "more_carousel_album": "עוד קרוסלה",
 }
 
+# Promoted so app/graph/owner_agent.py's empty-result markers can import
+# the real text instead of holding a copy that can drift out of sync.
+_HEADER_LINE = "רעיונות לתוכן (לא פוסטים מוכנים):"
+_EMPTY_LINE = "אין נתוני ביצועי תוכן. לא יצרתי רעיונות."
 _NO_PUBLISH_LINE = "אלה רעיונות בלבד. לא כתבתי פוסט ולא פרסמתי."
 _DATE_ISO = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -111,13 +115,13 @@ def compute_content_idea_snapshot(
 
 
 def format_content_ideas_ack(snapshot: ContentIdeaSnapshot) -> str:
-    lines = ["רעיונות לתוכן (לא פוסטים מוכנים):"]
+    lines = [_HEADER_LINE]
     if snapshot.kinds:
         for kind in snapshot.kinds:
             label = _KIND_HE.get(kind, kind)
             lines.append(f"• {label} — על בסיס אותות ליד בנתונים הקיימים.")
     else:
-        lines.append("אין נתוני ביצועי תוכן. לא יצרתי רעיונות.")
+        lines.append(_EMPTY_LINE)
     lines.append(_NO_PUBLISH_LINE)
     return "\n".join(lines)
 

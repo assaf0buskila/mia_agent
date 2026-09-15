@@ -36,6 +36,7 @@ from app.graph.owner_agent import (
     SYSTEM_PROMPT,
     TOOL_DEADLINE_REPLY,
     AgentStep,
+    _looks_silent,
     _refuse_seen_and_silent,
     _run_tool_with_timeout,
 )
@@ -345,6 +346,99 @@ def test_timeout_reports_stopped_work_and_seen_is_not_silent() -> None:
         assert "אין מיילים" in spoken
     finally:
         db.close()
+
+
+def test_looks_silent_only_matches_a_bare_greeting() -> None:
+    """Only an empty reply or a bare greeting (dressed with trailing punctuation
+
+    or an emoji) counts as silent. `startswith` used to also catch a real answer
+    that merely opened with the greeting word.
+    """
+    bare_greetings = (
+        "היי",
+        "hey",
+        "hey!",
+        "פה. מה צריך?",
+        "here. what do you need?",
+        "  Hey  ",
+        "hey 👋",
+    )
+    for bare in bare_greetings:
+        assert _looks_silent(bare) is True, bare
+    assert _looks_silent("") is True
+    assert _looks_silent("   ") is True
+
+
+def test_looks_silent_preserves_a_greeting_prefixed_real_answer() -> None:
+    assert _looks_silent("היי אסף, יש לך 3 מיילים שדורשים תגובה") is False
+    assert _looks_silent("hey, here is what I found: 3 pending approvals") is False
+
+
+def test_looks_silent_decoration_only_is_not_silent() -> None:
+    """No greeting token at all -- pure decoration, however minimal -- is a real
+
+    (if terse) reply, not silence.
+    """
+    for decoration_only in ("👍", "?", "…", "✅"):
+        assert _looks_silent(decoration_only) is False, decoration_only
+
+
+def test_looks_silent_strips_variation_selectors_skin_tones_and_emoticons() -> None:
+    """U+FE0F (emoji presentation), a skin tone modifier, and ASCII emoticon
+
+    punctuation (colon/semicolon/hyphen/parens) around a bare greeting must all
+    still read as a bare greeting.
+    """
+    for decorated_greeting in ("hey ❤️", "היי :)", "hey :-)", "hey 👋🏽"):
+        assert _looks_silent(decorated_greeting) is True, decorated_greeting
+
+
+def test_looks_silent_long_reply_without_a_greeting_is_not_silent() -> None:
+    for real_reply in (
+        "היי אסף, יש לך 3 מיילים שדורשים תגובה",
+        "heyyy there",
+    ):
+        assert _looks_silent(real_reply) is False, real_reply
+
+
+def test_looks_silent_bare_shalom_is_silent_but_a_name_after_it_is_not() -> None:
+    """"שלום" is a bare greeting like "היי"/"hey"; a name after the greeting
+
+    word is real content, not decoration, so it must stay a real answer.
+    """
+    assert _looks_silent("שלום!") is True
+    assert _looks_silent("שלום") is True
+    assert _looks_silent("היי אסף! 👋") is False
+
+
+def test_looks_silent_bails_out_before_the_regex_on_long_input() -> None:
+    """The trailing/leading decoration regexes are anchored but `re.sub` still
+
+    tries every position of a long non-matching string, measured quadratic on
+    this input shape (~1s at 16k chars, hung at 1e5). A reply this long is
+    never a bare greeting regardless, so the length check must short-circuit
+    before either regex runs.
+    """
+    from time import perf_counter
+
+    started = perf_counter()
+    result = _looks_silent("x" * 100_000)
+    elapsed = perf_counter() - started
+    assert result is False
+    assert elapsed < 0.5, elapsed
+
+
+def test_refuse_seen_and_silent_preserves_a_useful_greeting_prefixed_reply() -> None:
+    """The raw-tool-report fallback must never overwrite a real answer just
+
+    because it happens to open with the greeting word.
+    """
+    spoken = _refuse_seen_and_silent(
+        "היי אסף, יש לך 3 מיילים שדורשים תגובה",
+        [AgentStep(tool="gmail_inbox", ok=True, detail="ok")],
+        ["gmail_inbox: 3 מיילים חדשים"],
+    )
+    assert spoken == "היי אסף, יש לך 3 מיילים שדורשים תגובה"
 
 
 def test_sheets_aliases_prefetch_locked_contacts_and_activity() -> None:

@@ -45,7 +45,24 @@ from typing import Any, NamedTuple
 
 from app.brain.context import BrainContext, render_context_block
 from app.core.owner_timing import owner_stage
+
+# Each of these is a tool handler's own real "no data" text, imported (not
+# copied) so the empty-result markers below can never drift out of sync with
+# the formatter that actually produces them. All are leaf domain modules
+# already reachable from this one indirectly through the tool registry, so
+# importing them here directly adds no new cycle (verified).
+from app.domain.content_ideas import _EMPTY_LINE as _CONTENT_IDEAS_EMPTY_LINE
+from app.domain.content_ideas import _HEADER_LINE as _CONTENT_IDEAS_HEADER_LINE
+from app.domain.gmail.summaries import _NOT_FOUND_ACK as _GMAIL_THREAD_NOT_FOUND_ACK
+from app.domain.lead_reviews import (
+    _LEAD_MATCH_NO_NAME_LINE,
+    _LEAD_MATCH_NOT_FOUND_ACK,
+    _LEAD_REVIEW_NOT_FOUND_ACK,
+)
+from app.domain.meetings.briefs import _BRIEF_NOT_FOUND_ACK
 from app.domain.memory import ConversationTurn, render_transcript
+from app.domain.owner.calendar import _EMPTY_ACK as _CALENDAR_FREE_SLOTS_EMPTY_ACK
+from app.domain.owner.notifications import _EMPTY_ACK as _MEETING_NOTIFICATIONS_EMPTY_ACK
 from app.domain.two_state import (
     SLOW_HOUSE_TOOLS,
     TOOL_RECOVERY_SECONDS,
@@ -58,8 +75,11 @@ from app.integrations.llm_client import (
     tool_result_message,
 )
 from app.tools.registries.owner_tools import (
+    OUTCOME_PARTIAL,
+    OUTCOME_SUCCESS,
     OUTCOME_TIMEOUT,
     ToolContext,
+    ToolResult,
     execute_tool,
     tool_definitions,
 )
@@ -108,15 +128,70 @@ SYSTEM_PROMPT = (
     "or private owner data to another principal."
 )
 
-_EMPTY_RESULT_MARKERS = (
-    "no stored memory matches",
-    "nothing in the website knowledge base matches",
-    "no entities recorded yet",
-    "לא מצאתי",
-    "אין מיילים",
-    "לא נמצא",
+# Every literal here is a fallback the tool handler itself only returns when the
+# underlying value was genuinely empty (see `app/tools/owner/types.py::_empty` and
+# each direct `ToolResult(ok=True, text="...")` below) -- never a heuristic on the
+# reply's length. `_NOT_CONNECTED` (types.py) is deliberately NOT a marker: "not
+# connected" is an unavailable integration, not an empty result, and must not
+# share this counter. Where the real text lives as a module constant, it is
+# imported above (never copied) so this list cannot drift out of sync with the
+# formatter that actually produces it; a few `_empty(...)` fallbacks cited by an
+# earlier pass turned out to be dead code -- the formatter they wrap never
+# actually returns a falsy value -- and are not carried forward as markers.
+#
+# Matching is whole-result, not substring: a Gmail body that happens to contain
+# "לא מצאתי את החשבונית" or "No CRM contact matched", a Sheet value
+# containing "No matching lead", or an audit dump quoting one of these lines
+# verbatim, is real data around the phrase -- attacker-controlled email content
+# especially -- and must never be flagged empty just because the phrase is
+# in there somewhere. Genuinely dynamic fallbacks (a lead id, an agenda date
+# range) cannot match a fixed string at all, so they get a prefix marker
+# instead and are checked with `startswith`, still against the whole
+# stripped result, never a mid-string search.
+_EMPTY_RESULT_EXACT_MARKERS = frozenset(
+    {
+        "No stored memory matches that.",  # app/tools/owner/brain.py:39
+        "Nothing in the website knowledge base matches that.",  # brain.py:66
+        "No entities recorded yet.",  # app/tools/owner/brain.py:151
+        "לא מצאתי את המייל.",  # gmail.py:108
+        "אין מיילים בתיבה.",  # gmail.py:53
+        _GMAIL_THREAD_NOT_FOUND_ACK,  # app/domain/gmail/summaries.py:29,173
+        "No CRM contact matched.",  # app/tools/owner/crm.py:29
+        "No unresolved CRM conflicts.",  # app/tools/owner/crm.py:142
+        "LinkedIn returned nothing.",  # app/tools/owner/analytics.py:174
+        "SEO ports returned nothing. Check GSC site URL and GA4 property.",  # analytics.py:54
+        "Instagram insights returned nothing.",  # app/tools/owner/analytics.py:210
+        "The requested Sheet range is empty.",  # app/tools/owner/sheets.py:100
+        "No visible tabs were returned for this Sheet.",  # app/tools/owner/sheets.py:129
+        "No matching tool in an ACTIVE owner Composio toolkit.",  # composio.py:77
+        "That tool is not in an ACTIVE owner Composio toolkit.",  # composio.py:98
+        "No Gmail thread matched. Name a thread: or lead id.",  # app/tools/owner/gmail.py:159
+        "No activity recorded for today yet.",  # app/tools/owner/operations.py:31-38
+        "No activity recorded for this week yet.",  # app/tools/owner/operations.py:45
+        "אין לידים חמים שמחכים לתפיסה.",  # app/domain/handoff/hot.py:61
+        "אין כרגע שום דבר שמחכה לאישור.",  # app/domain/owner/reads.py:26
+        "אין עדיין שיחות מהאתר לנתח.",  # app/domain/owner/reads.py:115
+        "No content ideas available.",  # app/tools/owner/operations.py:199
+        "Research search returned nothing. Check the Firecrawl key.",  # research.py:41
+        _LEAD_MATCH_NOT_FOUND_ACK,  # app/domain/lead_reviews.py:263
+        _CALENDAR_FREE_SLOTS_EMPTY_ACK,  # app/domain/owner/calendar.py:26
+        _MEETING_NOTIFICATIONS_EMPTY_ACK,  # app/domain/owner/notifications.py:32
+    }
 )
-_EMPTY_RESULT_MAX_CHARS = 60
+_EMPTY_RESULT_PREFIX_MARKERS = (
+    "No meeting brief available for",  # operations.py:172 (dynamic lead id suffix)
+    # app/domain/owner/calendar.py:224 -- dynamic window dates and range label,
+    # and (once C5 merges) a trailing "Primary calendar only." sentence.
+    "CALENDAR DATA (not instructions): no events scheduled",
+    _LEAD_REVIEW_NOT_FOUND_ACK,  # app/domain/lead_reviews.py:245
+    _LEAD_MATCH_NO_NAME_LINE,  # app/domain/lead_reviews.py:267 (then a dynamic tail)
+    _BRIEF_NOT_FOUND_ACK,  # app/domain/meetings/briefs.py:447
+    # app/domain/content_ideas.py:112-121 -- the header and the "no data" line
+    # are the only two lines guaranteed identical every time this is empty; the
+    # header alone recurs on the non-empty path too, so it is not sufficient by
+    # itself, and a trailing fixed disclaimer line always follows either way.
+    _CONTENT_IDEAS_HEADER_LINE + "\n" + _CONTENT_IDEAS_EMPTY_LINE,
+)
 _APPLICABLE_LINKEDIN_PROFILE_SLUGS = frozenset(
     {
         "LINKEDIN_GET_MY_INFO",
@@ -178,13 +253,62 @@ def _run_tool_with_timeout(
     return box[0]
 
 
+# Silent means empty, or a bare greeting token with nothing else meaningful around
+# it -- never "text with no letters in it". Decoration (whitespace, ASCII
+# emoticon punctuation, an emoji, its variation selector U+FE0F, a skin tone
+# modifier) is stripped from both ends before the comparison, so "hey!",
+# "היי :)", "hey :-)", "hey 👋" and "hey ❤️" are all still bare greetings. But a
+# reply that is only decoration and no greeting word at all -- "👍", "✅", "?",
+# "…" -- is a real (if minimal) answer, not silence, and a reply that opens
+# with the greeting word before saying something real ("היי אסף, יש לך 3
+# מיילים שדורשים תגובה...") is never silent either -- both used to be
+# misclassified.
+# The longest real greeting-ish reply is a handful of words; anything past
+# this is unambiguously not a bare greeting and skips the regex entirely.
+_SILENT_MAX_CHARS = 64
+_DECORATION_CHARS = (
+    r"\s!?.,:;~()\-–—'\"`"
+    "  -⁯"
+    "\U0001f300-\U0001faff"
+    "☀-➿"
+    "←-⇿"
+    "⬀-⯿"
+    "\ufe00-\ufe0f"
+    "\U0001f3fb-\U0001f3ff"
+)
+_TRAILING_DECORATION_RE = re.compile("[" + _DECORATION_CHARS + "]+$")
+_LEADING_DECORATION_RE = re.compile("^[" + _DECORATION_CHARS + "]+")
+
+
 def _looks_silent(text: str) -> bool:
     stripped = text.strip()
     if not stripped:
         return True
-    lowered = stripped.casefold()
-    greetings = ("פה. מה צריך", "here. what do you need", "hey", "היי")
-    return any(lowered == greet or lowered.startswith(greet) for greet in greetings)
+    # A genuine greeting is always a handful of characters. The trailing/leading
+    # decoration regexes below are anchored (`^[...]`, `[...]+$`), and `re.sub`
+    # still has to attempt a match at every position of a long non-matching
+    # string before giving up -- measured quadratic on this input shape (~1s at
+    # 16k chars, hung at 1e5). Bailing out here before either regex runs keeps
+    # every real greeting check trivially fast and makes a pathological input
+    # length irrelevant rather than merely slower.
+    if len(stripped) > _SILENT_MAX_CHARS:
+        return False
+    trimmed = _LEADING_DECORATION_RE.sub(
+        "", _TRAILING_DECORATION_RE.sub("", stripped)
+    ).strip()
+    if not trimmed:
+        # Decoration-only ("👍", "?", "…") is a real minimal reply, not a
+        # greeting -- there is no greeting token here, so it is not silent.
+        return False
+    lowered = trimmed.casefold()
+    greetings = (
+        "פה. מה צריך",
+        "here. what do you need",
+        "hey",
+        "היי",
+        "שלום",
+    )
+    return lowered in greetings
 
 
 def _refuse_seen_and_silent(text: str, steps: list[AgentStep], reports: list[str]) -> str:
@@ -194,14 +318,33 @@ def _refuse_seen_and_silent(text: str, steps: list[AgentStep], reports: list[str
     return text
 
 
-def _looks_empty(text: str) -> bool:
-    stripped = text.strip()
+def _looks_empty(result: ToolResult) -> bool:
+    """True only for a genuine "no data" outcome, never a short real answer.
+
+    Length was never a signal of "no data": a short real answer ("Contact crm_x
+    rev 3: Dana | 050...") is not empty, and a genuine "no match" reply is not
+    always short either. Only a blank text, or the WHOLE stripped result being
+    exactly one of the deliberate no-results texts (or, for the few genuinely
+    dynamic ones, starting with their fixed prefix), counts. A substring check
+    here would let real data that happens to quote one of these phrases --
+    a Gmail body, a Sheet cell, an audit dump -- get flagged empty; email
+    content especially is attacker-controlled. A failed, timed out, or
+    otherwise unsuccessful call is never "empty" -- unavailable and empty are
+    different facts and must not share a counter, so this checks the tool's
+    own outcome instead of trusting the caller to gate on `ok` first.
+    """
+    if not result.ok:
+        return False
+    if result.outcome_label() not in (OUTCOME_SUCCESS, OUTCOME_PARTIAL):
+        return False
+    stripped = result.text.strip()
     if not stripped:
         return True
-    if len(stripped) <= _EMPTY_RESULT_MAX_CHARS:
+    if stripped in _EMPTY_RESULT_EXACT_MARKERS:
         return True
-    lowered = stripped.lower()
-    return any(marker in lowered for marker in _EMPTY_RESULT_MARKERS)
+    return any(stripped.startswith(prefix) for prefix in _EMPTY_RESULT_PREFIX_MARKERS)
+
+
 
 
 def _canonical_arguments(arguments: dict[str, Any]) -> str:
@@ -260,6 +403,33 @@ class AgentOutcome(NamedTuple):
         return bool(self.tools_used)
 
 
+class OwnerUsage:
+    """Mutable token counters the caller can read after `run_owner_agent` raises.
+
+    The loop already returns tokens_in/tokens_out inside a normal `AgentOutcome`,
+    but a bug that escapes the loop as an exception skips that return entirely --
+    and the caller (`app/surfaces/owner.py`) had no other way to learn whether the
+    turn actually spent real provider tokens before it broke, so that spend simply
+    vanished from `ai_runs`. Pass one of these in and `run_owner_agent` keeps it
+    updated with whatever completed model calls have accumulated so far; if it
+    raises, the caller reads the last known totals here instead of losing them.
+
+    `attempted` marks whether the loop actually started (so `tokens_in`/`tokens_out`
+    are known accumulated values from completed model calls, even if still 0)
+    versus never having been reached at all. Callers that cannot distinguish an
+    "unmeasured" zero from a "measured" one in their own storage may still choose
+    to just record 0 in that case; `attempted` is what lets a future caller do
+    better than that without re-deriving it.
+    """
+
+    __slots__ = ("tokens_in", "tokens_out", "attempted")
+
+    def __init__(self) -> None:
+        self.tokens_in = 0
+        self.tokens_out = 0
+        self.attempted = False
+
+
 def build_messages(
     *,
     owner_message: str,
@@ -315,11 +485,16 @@ def run_owner_agent(
     now_line: str = "",
     deadline_at: float | None = None,
     input_source: str = "text",
+    usage: OwnerUsage | None = None,
 ) -> AgentOutcome:
     """Run the tool loop and return the final owner-facing message.
 
     Any provider failure returns `completed=False` with an empty text, so the caller can
     fall back to the deterministic classifier instead of showing Assaf an error.
+
+    `usage`, if given, is kept up to date with tokens actually consumed as the loop runs,
+    so a caller that has to catch an unexpected exception here can still record real
+    provider spend for the turn instead of losing it (see `OwnerUsage`).
     """
     if not owner_message.strip():
         return AgentOutcome("", (), 0, 0, (), False, "empty message", 0, (), "empty_reply")
@@ -330,6 +505,7 @@ def run_owner_agent(
             "", (), 0, 0, (), False, "deadline exceeded", 0, (), "deadline_exceeded"
         )
 
+    usage = usage if usage is not None else OwnerUsage()
     steps: list[AgentStep] = []
     tools_used: list[str] = []
     tools_failed: list[str] = []
@@ -390,6 +566,9 @@ def run_owner_agent(
         )
 
     max_steps = max(1, max_steps)
+    # Everything past this point is a real attempt: `usage` below now reflects
+    # actually-known consumption (zero or more), never an unrelated "we never tried".
+    usage.attempted = True
     for step_index in range(max_steps):
         if deadline_at is not None and monotonic() >= deadline_at:
             return finish(
@@ -433,6 +612,8 @@ def run_owner_agent(
             )
         tokens_in += response.tokens_in
         tokens_out += response.tokens_out
+        usage.tokens_in = tokens_in
+        usage.tokens_out = tokens_out
 
         if response.refused():
             return finish(
@@ -594,7 +775,7 @@ def run_owner_agent(
                     tool_reports.append(f"{call.name}: {snippet[:400]}")
                 if result.approval_id and result.approval_id not in approval_ids:
                     approval_ids.append(result.approval_id)
-                if _looks_empty(result.text):
+                if _looks_empty(result):
                     empty_counts[call.name] = empty_counts.get(call.name, 0) + 1
                     if empty_counts[call.name] > EMPTY_RESULT_REPEAT_LIMIT:
                         blocked_tools.add(call.name)

@@ -25,7 +25,7 @@ from app.db.store import LeadStore
 from app.domain.memory import ConversationTurn
 from app.domain.owner.request_routing import requests_no_history
 from app.domain.owner.tasks import OwnerTaskType
-from app.graph.owner_agent import AgentOutcome, run_owner_agent
+from app.graph.owner_agent import AgentOutcome, OwnerUsage, run_owner_agent
 from app.integrations.calendar import (
     CalendarAgendaPort,
     CalendarPort,
@@ -229,6 +229,10 @@ def answer_owner(
     now: datetime | None = None,
     deadline_at: float | None = None,
     input_source: str = "text",
+    # Kept updated with tokens actually consumed while the loop runs, so a caller
+    # that must catch an unexpected exception from this call can still record real
+    # provider spend for the turn instead of losing it (see `OwnerUsage`).
+    usage: OwnerUsage | None = None,
 ) -> OwnerBrainResult:
     """Answer one owner message, preferring the agent and degrading to `fallback_text`."""
     if kill_switch or not settings.brain_ready():
@@ -293,6 +297,7 @@ def answer_owner(
         now_line=hebrew_datetime(moment, timezone=settings.calendar_timezone),
         deadline_at=deadline_at,
         input_source=input_source,
+        usage=usage,
     )
     model = getattr(agent_client, "last_model", "")
     if not outcome.completed or not outcome.text.strip():
@@ -319,6 +324,14 @@ def answer_owner(
             text,
             False,
             outcome.tools_used,
+            # The agent may have already spent real provider tokens across one or
+            # more completed model calls before it failed (provider error, budget
+            # exhausted, refusal, ...). Omitting these here used to silently
+            # report 0 for every failed-but-attempted turn -- far more common
+            # than an outright exception -- so the audit trail undercounted
+            # spend on exactly the turns worth auditing.
+            outcome.tokens_in,
+            outcome.tokens_out,
             fallback_reason=reason,
             model=model,
             steps=outcome.steps_used,
