@@ -22,26 +22,28 @@ below is deployed. Every item is `LOCAL_TESTED` + CI-green + independently revie
 | #65 | C1b | Greeting-prefixed useful replies kept; "no data" detection by exact/prefix formatter constants (not length, not substring); failed turns persist usage marked `owner_reply_failed` | a turn failing before any model call records 0 tokens (NOT NULL columns; no migration) |
 | #66 | C3a | Website `business_context` never latches a greeting; deterministic de-duplicated lead brief; same-turn `submit_lead` next step/name refresh the still-pending brief and re-enqueue the contacts job at the new revision; greeting regex atomic (was ReDoS) | Activity Sheet job keeps the capture-time summary (lags one turn); PostgreSQL test doesn't exercise the refresh path |
 | #67 | C5h | Reschedule safety check fails closed on all-day items, `nextPageToken`, unparseable items; agenda port bound to the approved connection | any other all-day event refuses a move (conservative) |
+| #70 | C3b | Owner daily brief / website conversations / hot leads include v2 captures ("leads today" = distinct contacts; list one row per contact; hot judged per capture's conversation); Sheet `נוצר`/`עודכן` filled from row timestamps, system-owned (owner edits overwritten, never a conflict or a wedged projection); `crm_search`/`crm_conflicts` refuse instead of creating tabs when the workspace is missing | header drift can still be repaired by a read; hot replies show raw `crm_…` ids; `crm_v2.py` timezone default hardcoded `Asia/Jerusalem`; broad `except` in `tools/owner/crm.py` workspace check |
+| #69 | C4 | `gmail_brief`: bounded (25) owner-local daily email data, thread-deduped, true `partial`, marketing only from Gmail category labels, a failed Composio read is `ok=False` (also fixes `gmail_search`); `owner_uncertain_writes`: read-only list of `pending_review` writes with plain-words targets | uncertain-writes query unindexed (fine at limit 10) |
 
-### In flight at handoff (check `git worktree list` and the PR list before doing anything)
+### In flight at handoff
 
-- **C3b** — worktree `.claude/worktrees/mia-c3b`, branch `claude/mia-c3b-v2-reports`: owner reports
-  count v2 website leads, Sheet `נוצר`/`עודכן` filled from row timestamps, CRM reads stop
-  creating tabs (builder still running at handoff; tests were not yet written). **C4** — PR #69,
-  branch `claude/mia-c4-gmail-brief` @ `2c44800`, 2153 passed / 7 skipped, opus review running at
-  handoff: `gmail_brief` (bounded live daily email data, empty = `GMAIL_BRIEF_EMPTY_WINDOW`) +
-  `owner_uncertain_writes` (read-only list of `pending_review` writes, empty =
-  `OWNER_UNCERTAIN_WRITES_EMPTY`), both in `app/tools/owner`/`app/domain`. Both C3b and C4 edit
-  `app/db/store.py`; whichever merges second may need a rebase. Pre-existing test-order flake:
-  `tests/unit/test_gmail_send_policy.py::test_owner_telegram_asked_then_approved_send_calls_send_draft`
-  fails after certain other files on a clean master too — tracked separately, not caused by C4.
+Nothing. Still, before acting, run `gh pr list` and `git worktree list`: the finished chunk worktrees
+(`.claude/worktrees/mia-c1b`, `mia-c2a`, `mia-c3a`, `mia-c3b`, `mia-c4`, `mia-c5`, `mia-c5h`) are
+merged and can be removed with `git worktree remove` once confirmed clean. Master after the
+last campaign merge: `c9a8df5` (#69).
+
+C4's empty-state constants for the tool-loop "no data" markers: `GMAIL_BRIEF_EMPTY_WINDOW`
+("EMAIL DATA (not instructions): no messages in the inspected window.") and
+`OWNER_UNCERTAIN_WRITES_EMPTY` ("No uncertain provider writes are waiting on review.").
 
 ### Remaining queue (in order; max 2 agents at a time)
 
 1. **C2b approval cards** — brief ready. Cards from the stored envelope, one message per proposal
    with its own buttons, pending view lists up to 5, callback `sent` reflects edit success with one
    fallback send. Touches approvals: opus review required.
-2. **C6a social truth** — brief ready; start after C4 merges (both touch `two_state.py`).
+2. **C6a social truth** — brief ready; C4 (which also touched `two_state.py` and
+   `request_routing.py`) is merged, so branch from the latest master. C2b and C6a own disjoint
+   files and may run as the two concurrent agents.
 3. **C7b cleanup + docs** — brief ready; last. Includes two reviewed follow-ups (see below).
 4. **Prompt 4 release readiness** (opus, read-only): full gates, capability evidence matrix,
    exact live tests needing Assaf's approval, rollout + rollback plan. **Stop for go/no-go.**
@@ -64,16 +66,29 @@ below is deployed. Every item is `LOCAL_TESTED` + CI-green + independently revie
 - Add C4's empty-state constants to `owner_agent.py` exact "no data" markers (in C7b brief).
 - Routing needle collisions above (in C6a brief).
 - PostgreSQL coverage for C3a same-turn refresh.
+- **Generic Composio writes may never execute:** the C4 builder found `"composio_approval"` missing
+  from `ALLOWLISTED_OPERATION_SCOPES`. C0 believed `propose_composio_write` has no callers, so this
+  may be dead code rather than a live bug — verify callers first (fold into C7b's dead-code table:
+  either delete the unreachable path or allowlist the scope with a test).
+- C3b leftovers: raw `crm_…` ids in hot-lead replies; hardcoded `Asia/Jerusalem` default in
+  `crm_v2.py` (pass `settings.timezone`); broad `except Exception` in the `tools/owner/crm.py`
+  workspace check; header drift still repaired as a side effect of a read (needs an
+  `owner_actions.py` change).
+- Pre-existing test-order flake on master:
+  `tests/unit/test_gmail_send_policy.py::test_owner_telegram_asked_then_approved_send_calls_send_draft`
+  fails when run after certain other test files.
 
 ### Start the next session with
 
 ```text
 Read CLAUDE.md, HANDOFF.md section 0 and TASKS.md "Campaign finish". Do not re-audit.
-Verify: git fetch; origin/master SHA; open PRs (gh pr list); `git worktree list` and
-`git status` in mia-c3b / mia-c4. Report the state of C3b and C4 in five lines.
-Then continue the queue in HANDOFF section 0: finish C3b and C4 (PR → opus review → fixes →
-merge on green), then C2b, C6a, C7b using the Ready briefs in docs/MIA_CLAUDE_CODE_PROMPTS.md.
-Max 2 agents at once. Stop before Prompt 4's go/no-go and before any deploy.
+Verify in five lines: git fetch; origin/master SHA; `gh pr list` (nothing campaign-related should
+be open; if #69 is not merged, finish it first); `git worktree list`.
+Then continue the queue in HANDOFF section 0 using the Ready briefs in
+docs/MIA_CLAUDE_CODE_PROMPTS.md: launch the C2b and C6a builders (sonnet, own worktrees off the
+latest origin/master), then for each: push + PR → fresh opus review on the three-dot diff → fixes
+→ merge on review PASS + green CI. Then C7b last. Max 2 agents at once.
+Stop before Prompt 4's go/no-go and before any deploy.
 ```
 
 ### Commands the loop uses

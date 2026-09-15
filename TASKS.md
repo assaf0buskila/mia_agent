@@ -15,10 +15,9 @@ Deploy is a separate go. Max 2 agents at once (session usage limit).
 - [x] C1b — greeting-prefixed replies kept; exact "no data" markers; usage on failed turns (#65)
 - [x] C3a — website lead brief: greeting latch, de-duplicated layout, same-turn refresh (#66)
 - [x] C5h — reschedule safety check fails closed (#67)
-- [ ] C3b — owner reports count v2 leads; Sheet created/updated; CRM reads stop creating tabs
-      (in flight: `mia-c3b`, `claude/mia-c3b-v2-reports`)
-- [ ] C4 — `gmail_brief` daily email data; `owner_uncertain_writes` (#69 @ `2c44800`, review
-      pending)
+- [x] C3b — owner reports count v2 leads; Sheet created/updated system-owned; CRM reads stop
+      creating tabs (#70)
+- [x] C4 — `gmail_brief` daily email data; `owner_uncertain_writes` (#69)
 - [ ] C2b — approval cards from the stored envelope; callback `sent` truth (brief ready)
 - [ ] C6a — social capability truth + routing collisions (brief ready; after C4)
 - [ ] C7b — proven-dead code, reviewed follow-ups, docs (brief ready; last)
