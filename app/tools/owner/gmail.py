@@ -7,10 +7,19 @@ from typing import Any
 from app.capabilities.mail import mail_handlers
 from app.capabilities.policy import execute_capability
 from app.core.errors import PermissionDenied
+from app.domain.gmail.brief import (
+    DEFAULT_GMAIL_BRIEF_PERIOD,
+    GMAIL_BRIEF_PERIODS,
+    dedupe_by_thread,
+    format_gmail_brief,
+    gmail_brief_query,
+    resolve_gmail_brief_window,
+)
 from app.domain.gmail.query import normalize_gmail_query
 from app.domain.gmail.summaries import apply_owner_gmail_summary
 from app.domain.tools import AdapterHttpError
 from app.integrations.gmail import (
+    MAX_INBOX_ROWS,
     DisabledGmailPort,
     GmailPort,
     InboundEmail,
@@ -19,7 +28,7 @@ from app.integrations.gmail import (
     format_inbox_rows,
 )
 from app.services.owner_actions import propose_owner_action, typed_composio_binding
-from app.tools.owner.types import ToolContext, ToolResult, _empty, _house_unavailable
+from app.tools.owner.types import ToolContext, ToolResult, _empty, _house_unavailable, utc_now
 
 
 def _gmail_port(ctx: ToolContext) -> GmailPort | None:
@@ -84,6 +93,40 @@ def _gmail_search(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
             "searching, and still found nothing. Try different wording, an operator "
             "like from:/subject:, or a wider time range.)"
         )
+    return ToolResult(ok=True, text=text)
+
+
+def _gmail_brief(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
+    raw_period = str(args.get("period") or "").strip().lower()
+    period = raw_period if raw_period in GMAIL_BRIEF_PERIODS else DEFAULT_GMAIL_BRIEF_PERIOD
+    port = _gmail_port(ctx)
+    if port is None:
+        return _house_unavailable(ctx, "Gmail")
+    now = ctx.now or utc_now()
+    window = resolve_gmail_brief_window(period, timezone=ctx.timezone(), now=now)
+    query = gmail_brief_query(window)
+    try:
+        payload = execute_capability(
+            "mail.search",
+            principal=ctx.principal,
+            args={"query": query},
+            handlers=mail_handlers(port),
+            kill_switch=ctx.kill_switch,
+        )
+    except PermissionDenied:
+        return ToolResult(ok=False, error="mail read denied")
+    except AdapterHttpError as exc:
+        return ToolResult(ok=False, error=f"Gmail read failed ({exc.tool_status()})")
+    rows = payload.get("rows") or []
+    partial = len(rows) >= MAX_INBOX_ROWS
+    threads = dedupe_by_thread(rows)
+    text = format_gmail_brief(
+        threads,
+        window=window,
+        total_messages=len(rows),
+        partial=partial,
+        now=now,
+    )
     return ToolResult(ok=True, text=text)
 
 

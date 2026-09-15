@@ -59,6 +59,10 @@ class InboxRow(BaseModel):
     subject: str = ""
     snippet: str = ""
     timestamp: str = ""
+    # Gmail label ids on this row (e.g. "CATEGORY_PROMOTIONS", "INBOX", "UNREAD"),
+    # when the adapter's payload carries them. Used only to classify marketing mail
+    # in `gmail_brief`; never rendered verbatim to the owner.
+    labels: list[str] = []
 
 
 class GmailDraft(BaseModel):
@@ -527,11 +531,35 @@ def _map_inbox_rows(data: dict[str, Any], *, limit: int) -> list[InboxRow]:
                 snippet=_extract_message_text(item)[:MAX_SNIPPET_CHARS],
                 timestamp=_non_empty_str(item.get("messageTimestamp") or item.get("internalDate"))
                 or "",
+                labels=_extract_label_ids(item),
             )
         )
         if len(rows) >= limit:
             break
     return rows
+
+
+def _extract_label_ids(item: dict[str, Any]) -> list[str]:
+    """Gmail label ids for one message row, when the adapter's payload carries them.
+
+    Composio's Gmail message rows have been observed with either camelCase
+    ``labelIds`` (matching the raw Gmail API resource) or a snake_case
+    ``label_ids``; accept both and never raise on an unexpected shape.
+    """
+    raw = item.get("labelIds") or item.get("label_ids")
+    if not isinstance(raw, list):
+        return []
+    return [value for value in raw if isinstance(value, str) and value.strip()]
+
+
+def format_local_timestamp(
+    raw_timestamp: str, *, timezone: str = "UTC", now: datetime
+) -> str | None:
+    """Public wrapper around the row-date renderer, reused outside this module
+    (e.g. by `gmail_brief`) so the "today/yesterday/Nd ago" formatting stays in
+    exactly one place.
+    """
+    return _format_row_date(raw_timestamp, timezone=timezone, now=now)
 
 
 def _map_draft(data: dict[str, Any], *, to: str, subject: str) -> GmailDraft | None:
