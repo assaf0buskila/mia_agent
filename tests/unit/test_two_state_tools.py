@@ -28,6 +28,7 @@ from app.domain.two_state import (
     MiaState,
     asked_toolkit,
     identity_required_for,
+    is_social_writing_turn,
     may_run,
     say_tool_before_numbers,
     tools_for,
@@ -141,6 +142,212 @@ def test_asked_toolkit_tie_rule_stays_scoped_to_instagram_and_linkedin() -> None
     # "שיטת" (method-of) again collides on "שיט"; the generic "פוסט" default (today's
     # behaviour, no platform named explicitly) must win, not the sheets substring.
     assert asked_toolkit("שיטת עבודה לפוסט") == "instagram"
+
+
+def test_asked_toolkit_whole_word_latin_needles_avoid_false_positives() -> None:
+    """A plain substring match let "excel" (sheets) fire inside "excellent" and
+
+    "ig " (instagram, meant as the standalone abbreviation, with a trailing space
+    as an improvised boundary) fire inside "big " or "config " -- the space is
+    also the last letter of the previous word. Real word-boundary matching fixes
+    every one of these without touching a genuine standalone occurrence.
+    """
+    assert asked_toolkit("a big meeting tomorrow") == ""
+    assert asked_toolkit("update the config file") == ""
+    assert asked_toolkit("excellent work") == ""
+    # The abbreviation and the word, each on its own, still resolve correctly.
+    assert asked_toolkit("check my ig") == "instagram"
+    assert asked_toolkit("that was an excel formula") == "sheets"
+
+
+def test_asked_toolkit_whole_word_matching_keeps_common_inflected_forms() -> None:
+    """Whole-word matching is stricter than the old substring check, so it can
+
+    silently lose a plural/inflected form the old check caught only by
+    accident. "reel" -> "reels" was the first regression found this way (the
+    commonest Instagram-performance question); see
+    `test_asked_toolkit_differential_sweep_against_master_findings` below for
+    the full, mechanically-found set -- inspecting the needle list by hand
+    missed real gaps three separate times, so a differential sweep against
+    master's implementation is what now decides what gets widened, not
+    inspection (see the comment above `_SOCIAL_CONTENT_WORDS` in two_state.py).
+    """
+    assert asked_toolkit("how are my reels doing") == "instagram"
+    assert asked_toolkit("post a reel today") == "instagram"
+    assert asked_toolkit("check my reel") == "instagram"
+    # Deliberately still narrow: "excels" is the ordinary verb, not the
+    # spreadsheet, and widening it would reintroduce the "excellent" bug class.
+    assert asked_toolkit("she excels at her job") == ""
+
+
+def test_asked_toolkit_differential_sweep_against_master_findings() -> None:
+    """Pins every needle-widening decided by the differential sweep against
+
+    master (d3eda92) run over a ~105-phrase realistic corpus: both directions
+    -- "master matched, this branch now matches too" (the genuine regressions
+    the sweep found and this fixes) and "master matched, this branch still
+    does not" (a word that merely contains a needle as a substring but names a
+    different thing, confirmed still correctly narrow) -- plus the P1 bug
+    class the sweep incidentally re-confirmed still fixed. The sweep itself
+    is not committed: it dynamically loads master's two_state.py from a SHA
+    extracted to an external file, which is a reasonable one-off comparison
+    but not something that should depend on that SHA staying reachable, or
+    on a network/git operation, inside the test suite.
+    """
+    # Genuine regressions the sweep found and this fixes: each of these
+    # unambiguously names the same thing as its base needle, with no
+    # "excel"/"excellent"-style false-positive risk.
+    assert asked_toolkit("the gmails are piling up") == "gmail"
+    assert asked_toolkit("check both of my inboxes") == "gmail"
+    assert asked_toolkit("my calendars are a mess") == "calendar"
+    assert asked_toolkit("calendaring the whole week") == "calendar"
+    assert asked_toolkit("compare the agendas for both meetings") == "calendar"
+    assert asked_toolkit("open the spreadsheet") == "sheets"
+    assert asked_toolkit("add it to the spreadsheet") == "sheets"
+    assert asked_toolkit("check the spreadsheets") == "sheets"
+    # Confirmed still correctly narrow: each contains "sheet" or "instagram"
+    # as a substring but names a genuinely different thing, so master's old
+    # substring match on these was itself a (smaller, unnoticed) false
+    # positive -- this branch not matching them is the desired behaviour.
+    assert asked_toolkit("update the worksheet") == ""
+    assert asked_toolkit("check the timesheet") == ""
+    assert asked_toolkit("the datasheet for this part") == ""
+    assert asked_toolkit("is the sheetrock installed") == ""
+    assert asked_toolkit("cheatsheet for the meeting") == ""
+    assert asked_toolkit("she has a very instagrammable cafe") == ""
+    assert asked_toolkit("that sunset is so instagrammable") == ""
+    # The sweep also re-confirmed the founding P1 false-positive fix on two
+    # examples not in the original two-word test: a real English word can
+    # embed "traffic" or "reel" as a substring too.
+    assert asked_toolkit("human trafficking is a serious crime") == ""
+    assert asked_toolkit("the team was reelected unanimously") == ""
+
+
+def test_asked_toolkit_underscore_and_digit_glued_names_still_match() -> None:
+    """Python's `\\w` (and therefore the old `\\b`) treats digits and
+
+    underscore as word characters, so a needle glued directly to either one
+    (a tool name like "instagram_insights", a tab name like "Sheet2") could
+    never satisfy a boundary on that side. The boundary is redefined against a
+    letter only, so both now read as a boundary; an adjacent letter
+    ("spreadsheet", "excellent") still correctly blocks the match.
+    """
+    assert asked_toolkit("check instagram_insights") == "instagram"
+    assert asked_toolkit("run gmail_brief for today") == "gmail"
+    assert asked_toolkit("what's in sheet1") == "sheets"
+    assert asked_toolkit("what's in Sheet2") == "sheets"
+    assert asked_toolkit("a spreadsheet is not a sheet") == "sheets"
+
+
+def test_asked_toolkit_linkedin_topic_outranks_weak_crm_needle() -> None:
+    """"crm" alone names the topic ("a LinkedIn post about crm") as often as it
+
+    names the Contacts sheet, unlike every other sheets needle. An explicitly
+    named LinkedIn wins when "crm" is the only sheets needle that matched AND a
+    content word ("post"/"פוסט"/"comment"/"caption") is also present; without one,
+    "crm" plus an explicit LinkedIn is a CRM *write* that merely mentions
+    LinkedIn as context, and must still go to sheets. A real sheets needle in the
+    same sentence still wins normally either way.
+    """
+    assert asked_toolkit("LinkedIn post about crm") == "linkedin"
+    assert asked_toolkit("write a linkedin comment about crm") == "linkedin"
+    # The content-word gate (P2-2): a CRM write that only mentions LinkedIn as
+    # context, with no content word, must not be told to answer LinkedIn first.
+    assert asked_toolkit("add the linkedin lead to crm") == "sheets"
+    assert asked_toolkit("update crm after the linkedin call") == "sheets"
+    assert asked_toolkit("תעדכני crm אחרי השיחה בלינקדאין") == "sheets"
+    assert asked_toolkit("תוסיפי את הליד מלינקדאין ל-crm") == "sheets"
+    # Regression guards: a bare "crm", and a real sheets needle even alongside an
+    # explicit LinkedIn mention, are unaffected by the override above.
+    assert asked_toolkit("CRM") == "sheets"
+    assert asked_toolkit("cheat sheet for a linkedin post") == "sheets"
+    assert asked_toolkit("update the crm sheet, also a linkedin post") == "sheets"
+
+
+def test_asked_toolkit_crm_linkedin_content_word_gate_covers_plurals_and_gerund() -> None:
+    """F1 regression: the content-word gate (P2-2) was itself narrowed by the
+
+    exact inflection-loss class the P2-1 audit was built to catch, just applied
+    to the new `_SOCIAL_CONTENT_WORDS` tuple instead of `_TOOLKIT_NEEDLES`. A
+    plural ("posts", "comments", "captions") or the gerund ("posting") must gate
+    the override exactly like the singular "post"/"comment"/"caption" already do.
+    """
+    assert asked_toolkit("linkedin posts about crm") == "linkedin"
+    assert asked_toolkit("linkedin comments about crm") == "linkedin"
+    assert asked_toolkit("linkedin captions about crm") == "linkedin"
+    assert asked_toolkit("posting about crm on linkedin") == "linkedin"
+
+
+def test_asked_toolkit_ascii_needle_after_a_glued_hebrew_clitic_still_matches() -> None:
+    """F2 regression: the letter-only boundary from P3-1 (`[^\\W\\d_]`) still
+
+    counted a Hebrew letter as a blocking "letter", so an ASCII needle glued
+    directly to a Hebrew clitic with no space -- the definite article "ה" ("the"),
+    or a bare preposition like "ב" ("in/on") -- matched nothing, even though the
+    hyphenated spelling of the same thing already worked. The boundary is now
+    ASCII-Latin-letter-only, so a Hebrew letter reads as a boundary; every P1/
+    P3-1 example (English word-adjacency, digit- and underscore-glued names)
+    stays exactly as before since none of those involve a Hebrew letter.
+    """
+    assert asked_toolkit("תעדכני את הCRM") == "sheets"
+    assert asked_toolkit("בinstagram שלי") == "instagram"
+    # The already-working hyphenated spelling is unaffected.
+    assert asked_toolkit("תעדכני את ה-CRM") == "sheets"
+    # P1/P3-1 examples, re-run against the new boundary class.
+    assert asked_toolkit("excellent work") == ""
+    assert asked_toolkit("she excels at her job") == ""
+    assert asked_toolkit("a spreadsheet is not a sheet") == "sheets"
+    assert asked_toolkit("a big meeting tomorrow") == ""
+    assert asked_toolkit("update the config file") == ""
+    assert asked_toolkit("install the calendar integration") == "calendar"
+    assert asked_toolkit("check my calendar for an instant meeting") == "calendar"
+    assert asked_toolkit("open the gmail instance") == "gmail"
+    assert asked_toolkit("constant instability in traffic") == "ga4"
+    assert asked_toolkit("check instagram_insights") == "instagram"
+    assert asked_toolkit("run gmail_brief for today") == "gmail"
+    assert asked_toolkit("what's in Sheet2") == "sheets"
+
+
+def test_asked_toolkit_hebrew_reels_glued_to_the_definite_article_still_matches() -> None:
+    """F3 regression: the Hebrew "reel" needle (" ריל", leading space required)
+
+    only ever matched a space-preceded occurrence, so the definite article "ה"
+    ("the") attached directly with no space -- "הרילים"/"הרילס", the form Assaf
+    actually types -- matched nothing, while the unprefixed form already worked.
+    "רילים"/"רילס" are added as their own needles to cover the glued form; the
+    bare root "ריל" is deliberately NOT added, since it is a substring of the
+    unrelated real word "גריל" (grill) and would reintroduce the exact
+    substring-collision class whole-word matching removed for the ASCII needles.
+    """
+    assert asked_toolkit("איך הרילים שלי עובדים") == "instagram"
+    assert asked_toolkit("הרילס שלי") == "instagram"
+    # Already worked before this fix (space-preceded); must keep working.
+    assert asked_toolkit("רילים שלי") == "instagram"
+    assert asked_toolkit("תעלי לי ריל") == "instagram"
+    # Guard: the unrelated real word containing "ריל" as a substring must not
+    # collide, with or without the definite article.
+    assert asked_toolkit("ארוחת גריל") == ""
+    assert asked_toolkit("הגריל מוכן") == ""
+
+
+def test_is_social_writing_turn_matches_linkedin_instagram_and_content_only() -> None:
+    for text in (
+        "LinkedIn post about crm",
+        "post for LinkedIn",
+        "תבדקי את האינסטגרם",
+        "give me content ideas",
+        "רעיונות לתוכן",
+        "what to post this week",
+    ):
+        assert is_social_writing_turn(text) is True, text
+    for text in (
+        "מה יש לי היום ביומן?",
+        "what's on my calendar today",
+        "check gmail",
+        "היי",
+        "",
+    ):
+        assert is_social_writing_turn(text) is False, text
 
 
 def test_ig_format_names_post_and_account_before_numbers() -> None:
