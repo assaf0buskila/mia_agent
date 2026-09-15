@@ -312,6 +312,50 @@ def test_looks_silent_preserves_a_greeting_prefixed_real_answer() -> None:
     assert _looks_silent("hey, here is what I found: 3 pending approvals") is False
 
 
+def test_looks_silent_decoration_only_is_not_silent() -> None:
+    """No greeting token at all -- pure decoration, however minimal -- is a real
+
+    (if terse) reply, not silence.
+    """
+    for decoration_only in ("👍", "?", "…", "✅"):
+        assert _looks_silent(decoration_only) is False, decoration_only
+
+
+def test_looks_silent_strips_variation_selectors_skin_tones_and_emoticons() -> None:
+    """U+FE0F (emoji presentation), a skin tone modifier, and ASCII emoticon
+
+    punctuation (colon/semicolon/hyphen/parens) around a bare greeting must all
+    still read as a bare greeting.
+    """
+    for decorated_greeting in ("hey ❤️", "היי :)", "hey :-)", "hey 👋🏽"):
+        assert _looks_silent(decorated_greeting) is True, decorated_greeting
+
+
+def test_looks_silent_long_reply_without_a_greeting_is_not_silent() -> None:
+    for real_reply in (
+        "היי אסף, יש לך 3 מיילים שדורשים תגובה",
+        "heyyy there",
+    ):
+        assert _looks_silent(real_reply) is False, real_reply
+
+
+def test_looks_silent_bails_out_before_the_regex_on_long_input() -> None:
+    """The trailing/leading decoration regexes are anchored but `re.sub` still
+
+    tries every position of a long non-matching string, measured quadratic on
+    this input shape (~1s at 16k chars, hung at 1e5). A reply this long is
+    never a bare greeting regardless, so the length check must short-circuit
+    before either regex runs.
+    """
+    from time import perf_counter
+
+    started = perf_counter()
+    result = _looks_silent("x" * 100_000)
+    elapsed = perf_counter() - started
+    assert result is False
+    assert elapsed < 0.5, elapsed
+
+
 def test_refuse_seen_and_silent_preserves_a_useful_greeting_prefixed_reply() -> None:
     """The raw-tool-report fallback must never overwrite a real answer just
 

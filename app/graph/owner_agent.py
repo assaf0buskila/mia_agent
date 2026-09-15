@@ -114,41 +114,59 @@ SYSTEM_PROMPT = (
 # Every literal here is a fallback the tool handler itself only returns when the
 # underlying value was genuinely empty (see `app/tools/owner/types.py::_empty` and
 # each direct `ToolResult(ok=True, text="...")` below) -- never a heuristic on the
-# reply's length. The old length-based rule (removed) was the only thing that
-# caught most of these, so `_looks_empty` silently stopped catching a real "no
-# data" reply -- e.g. a model looping `crm_search` past the repeat limit without
-# ever tripping it -- until every one of them got its own precise marker here.
-# `_NOT_CONNECTED` (types.py) is deliberately NOT a marker: "not connected" is an
-# unavailable integration, not an empty result, and must not share this counter.
-_EMPTY_RESULT_MARKERS = (
-    "no stored memory matches",  # app/tools/owner/brain.py:39
-    "nothing in the website knowledge base matches",  # app/tools/owner/brain.py:66
-    "no entities recorded yet",  # app/tools/owner/brain.py:151
-    "לא מצאתי",  # gmail.py:108 "לא מצאתי את המייל"
-    "אין מיילים",  # gmail.py:53 "אין מיילים בתיבה"
-    "לא נמצא",
-    "no crm contact matched",  # crm.py:29
-    "no unresolved crm conflicts",  # crm.py:142
-    "no matching lead",  # operations.py:158, 165
-    "no meeting brief available for",  # operations.py:172 (dynamic lead id suffix)
-    "linkedin returned nothing",  # analytics.py:174
-    "seo ports returned nothing",  # analytics.py:54
-    "instagram insights returned nothing",  # analytics.py:210
-    "the requested sheet range is empty",  # sheets.py:100
-    "no visible tabs were returned for this sheet",  # sheets.py:129
-    "no matching tool in an active owner composio toolkit",  # composio.py:77
-    "that tool is not in an active owner composio toolkit",  # composio.py:98
-    "no free slots found",  # calendar.py:41
-    "no gmail thread matched",  # gmail.py:159
-    "no activity recorded for today yet",  # operations.py:31-38
-    "no activity recorded for this week yet",  # operations.py:45
-    "no hot leads right now",  # operations.py:59
-    "nothing is waiting for approval",  # operations.py:67
-    "no website conversations yet",  # operations.py:72
-    "nothing to report",  # operations.py:77, 85
-    "nothing new was booked",  # operations.py:186
-    "no content ideas available",  # operations.py:199
-    "research search returned nothing",  # research.py:41
+# reply's length. `_NOT_CONNECTED` (types.py) is deliberately NOT a marker: "not
+# connected" is an unavailable integration, not an empty result, and must not
+# share this counter.
+#
+# Matching is whole-result, not substring: a Gmail body that happens to contain
+# "לא מצאתי את החשבונית" or "No CRM contact matched", a Sheet value
+# containing "No matching lead", or an audit dump quoting one of these lines
+# verbatim, is real data around the phrase -- attacker-controlled email content
+# especially -- and must never be flagged empty just because the phrase is
+# in there somewhere. Genuinely dynamic fallbacks (a lead id, an agenda date
+# range) cannot match a fixed string at all, so they get a prefix marker
+# instead and are checked with `startswith`, still against the whole
+# stripped result, never a mid-string search.
+_EMPTY_RESULT_EXACT_MARKERS = frozenset(
+    {
+        "No stored memory matches that.",  # app/tools/owner/brain.py:39
+        "Nothing in the website knowledge base matches that.",  # brain.py:66
+        "No entities recorded yet.",  # app/tools/owner/brain.py:151
+        "לא מצאתי את המייל.",  # gmail.py:108
+        "אין מיילים בתיבה.",  # gmail.py:53
+        "No CRM contact matched.",  # app/tools/owner/crm.py:29
+        "No unresolved CRM conflicts.",  # app/tools/owner/crm.py:142
+        "No matching lead.",  # app/tools/owner/operations.py:158, 165
+        "LinkedIn returned nothing.",  # app/tools/owner/analytics.py:174
+        "SEO ports returned nothing. Check GSC site URL and GA4 property.",  # analytics.py:54
+        "Instagram insights returned nothing.",  # app/tools/owner/analytics.py:210
+        "The requested Sheet range is empty.",  # app/tools/owner/sheets.py:100
+        "No visible tabs were returned for this Sheet.",  # app/tools/owner/sheets.py:129
+        "No matching tool in an ACTIVE owner Composio toolkit.",  # composio.py:77
+        "That tool is not in an ACTIVE owner Composio toolkit.",  # composio.py:98
+        "No free slots found.",  # app/tools/owner/calendar.py:41
+        "No Gmail thread matched. Name a thread: or lead id.",  # app/tools/owner/gmail.py:159
+        "No activity recorded for today yet.",  # app/tools/owner/operations.py:31-38
+        "No activity recorded for this week yet.",  # app/tools/owner/operations.py:45
+        "No hot leads right now.",  # app/tools/owner/operations.py:59 (shadowed by
+        # format_hot_leads_ack's own Hebrew empty text below in real use, but the
+        # literal is kept as an exact marker in case that ever changes)
+        "אין לידים חמים שמחכים לתפיסה.",  # app/domain/handoff/hot.py:61
+        "Nothing is waiting for approval.",  # operations.py:67 (see hot-leads note above)
+        "אין כרגע שום דבר שמחכה לאישור.",  # app/domain/owner/reads.py:26
+        "No website conversations yet.",  # operations.py:72 (see hot-leads note above)
+        "אין עדיין שיחות מהאתר לנתח.",  # app/domain/owner/reads.py:115
+        "Nothing to report.",  # operations.py:77, 85
+        "Nothing new was booked.",  # app/tools/owner/operations.py:186
+        "No content ideas available.",  # app/tools/owner/operations.py:199
+        "Research search returned nothing. Check the Firecrawl key.",  # research.py:41
+    }
+)
+_EMPTY_RESULT_PREFIX_MARKERS = (
+    "No meeting brief available for",  # operations.py:172 (dynamic lead id suffix)
+    # app/domain/owner/calendar.py:224 -- dynamic window dates and range label,
+    # and (once C5 merges) a trailing "Primary calendar only." sentence.
+    "CALENDAR DATA (not instructions): no events scheduled",
 )
 _APPLICABLE_LINKEDIN_PROFILE_SLUGS = frozenset(
     {
@@ -221,6 +239,9 @@ def _run_tool_with_timeout(
 # with the greeting word before saying something real ("היי אסף, יש לך 3
 # מיילים שדורשים תגובה...") is never silent either -- both used to be
 # misclassified.
+# The longest real greeting-ish reply is a handful of words; anything past
+# this is unambiguously not a bare greeting and skips the regex entirely.
+_SILENT_MAX_CHARS = 64
 _DECORATION_CHARS = (
     r"\s!?.,:;~()\-–—'\"`"
     "  -⁯"
@@ -239,6 +260,15 @@ def _looks_silent(text: str) -> bool:
     stripped = text.strip()
     if not stripped:
         return True
+    # A genuine greeting is always a handful of characters. The trailing/leading
+    # decoration regexes below are anchored (`^[...]`, `[...]+$`), and `re.sub`
+    # still has to attempt a match at every position of a long non-matching
+    # string before giving up -- measured quadratic on this input shape (~1s at
+    # 16k chars, hung at 1e5). Bailing out here before either regex runs keeps
+    # every real greeting check trivially fast and makes a pathological input
+    # length irrelevant rather than merely slower.
+    if len(stripped) > _SILENT_MAX_CHARS:
+        return False
     trimmed = _LEADING_DECORATION_RE.sub(
         "", _TRAILING_DECORATION_RE.sub("", stripped)
     ).strip()
@@ -263,11 +293,15 @@ def _looks_empty(result: ToolResult) -> bool:
 
     Length was never a signal of "no data": a short real answer ("Contact crm_x
     rev 3: Dana | 050...") is not empty, and a genuine "no match" reply is not
-    always short either. Only a blank text or one of the deliberate no-results
-    marker phrases counts. A failed, timed out, or otherwise unsuccessful call is
-    never "empty" -- unavailable and empty are different facts and must not share
-    a counter, so this checks the tool's own outcome instead of trusting the
-    caller to gate on `ok` first.
+    always short either. Only a blank text, or the WHOLE stripped result being
+    exactly one of the deliberate no-results texts (or, for the few genuinely
+    dynamic ones, starting with their fixed prefix), counts. A substring check
+    here would let real data that happens to quote one of these phrases --
+    a Gmail body, a Sheet cell, an audit dump -- get flagged empty; email
+    content especially is attacker-controlled. A failed, timed out, or
+    otherwise unsuccessful call is never "empty" -- unavailable and empty are
+    different facts and must not share a counter, so this checks the tool's
+    own outcome instead of trusting the caller to gate on `ok` first.
     """
     if not result.ok:
         return False
@@ -276,8 +310,11 @@ def _looks_empty(result: ToolResult) -> bool:
     stripped = result.text.strip()
     if not stripped:
         return True
-    lowered = stripped.lower()
-    return any(marker in lowered for marker in _EMPTY_RESULT_MARKERS)
+    if stripped in _EMPTY_RESULT_EXACT_MARKERS:
+        return True
+    return any(stripped.startswith(prefix) for prefix in _EMPTY_RESULT_PREFIX_MARKERS)
+
+
 
 
 def _canonical_arguments(arguments: dict[str, Any]) -> str:
