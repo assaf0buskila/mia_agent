@@ -61,6 +61,46 @@ _FOLLOW_UP = re.compile(
     r"רוצה שתיצרו קשר|נעבור לוואטסאפ|follow[ -]?up with me|contact me|call me|email me)",
     re.I,
 )
+# A bare greeting carries no business content. Production latched "היי מהקורה" (hi,
+# what's up, run together with no space) verbatim as the business context, so every
+# later lead brief quoted a greeting as "the business". The match is anchored to the
+# entire stripped message: a greeting followed by a real sentence does not match, and
+# that message is latched normally.
+# Individual greeting words/tokens, matched one or more in a row (with only
+# whitespace/punctuation between them) so a run-together greeting like "היי
+# מהקורה" (two words, no space before the second) and a spaced one like
+# "בוקר טוב" both match, while a greeting followed by any real word does not.
+_GREETING_TOKEN = (
+    r"(?:hi+|hello+|hey+|hiya|yo+|howdy|sup|greetings|"
+    r"good|morning|evening|afternoon|day|"
+    r"היי+|הי+|שלום|אהלן|אהלאן|הלו|"
+    r"בוקר|ערב|צהריים|טוב|טובים|"
+    r"מה|נשמע|קורה|המצב|שלומך|שלומכם|"
+    r"העניינים|חדש|"
+    r"מהקורה|מהנשמע|מהמצב|מהעניינים)"
+)
+_GREETING_ONLY = re.compile(
+    rf"^(?:{_GREETING_TOKEN}[\s!.,?~\u05be-]*)+$",
+    re.I,
+)
+
+
+def _is_uninformative_business_text(text: str) -> bool:
+    """A greeting or near-empty fragment says nothing about the visitor's business.
+
+    Used only to gate the one-time ``business_context`` latch and to keep a greeting
+    out of the deterministic lead summary's "need" section; it never affects contact
+    capture or consent.
+    """
+    stripped = text.strip()
+    if not stripped:
+        return True
+    if _GREETING_ONLY.fullmatch(stripped):
+        return True
+    letters_and_digits = re.sub(r"[^\w\u0590-\u05ff]", "", stripped)
+    return len(letters_and_digits) < 4
+
+
 # The system prompt only tells the model to invite contact in one natural sentence, so
 # the phrasing varies (imperative, infinitive, with filler words like "גם" in between).
 # The original fixed phrases matched none of three real invitations seen in live
@@ -824,22 +864,89 @@ def _absorb_submit_lead(state: SiteV2State, call: Any, *, visitor_text: str) -> 
             state.pending_name = candidate[:80]
 
 
-def _lead_summary(state: SiteV2State, contact: Mapping[str, str], latest: str) -> str:
-    parts = ["ליד חדש מאתר אסף"]
-    labels = (("name", "שם"), ("phone", "טלפון"), ("email", "אימייל"), ("date", "מועד"))
-    parts.extend(f"{label}: {contact[key]}" for key, label in labels if contact.get(key))
-    if state.business_context:
-        parts.append(f"הקשר עסקי: {state.business_context[:500]}")
-    recent = [
-        str(item.get("text") or "")[:300]
+def _informative_visitor_statements(
+    state: SiteV2State, latest: str, *, exclude: str
+) -> list[str]:
+    """The visitor's own distinct, substantive statements, most recent last.
+
+    Greetings, blanks and near-duplicates of ``exclude`` (the already-latched business
+    context) are dropped so the same sentence never appears in both the "העסק" and
+    "הצורך" sections of the brief.
+    """
+    seen: set[str] = set()
+    ordered: list[str] = []
+    candidates = [
+        str(item.get("text") or "").strip()
         for item in state.turns[-6:]
-        if item.get("role") == "visitor" and str(item.get("text") or "").strip()
+        if item.get("role") == "visitor"
     ]
-    if recent:
-        parts.append("מהשיחה: " + " | ".join(recent)[:700])
-    parts.append(f"בקשה אחרונה: {latest[:500]}")
-    parts.append(f"צעד מוצע: {state.next_step or 'לחזור לפונה ולברר את הצורך הבא'}")
-    return "\n".join(parts)[:2000]
+    candidates.append(latest.strip())
+    excluded_key = exclude.strip().casefold()
+    for candidate in candidates:
+        if not candidate or _is_uninformative_business_text(candidate):
+            continue
+        key = candidate.casefold()
+        if key == excluded_key or key in seen:
+            continue
+        seen.add(key)
+        ordered.append(candidate[:300])
+    return ordered
+
+
+def _lead_summary(state: SiteV2State, contact: Mapping[str, str], latest: str) -> str:
+    """Deterministic Hebrew brief: business, need, contact and recommendation kept apart.
+
+    Each section is written at most once and unknown sections are omitted entirely, so
+    a production row never again shows the same sentence three times over.
+    """
+    lines = ["פנייה חדשה מהאתר"]
+    if state.business_context:
+        lines.append(f"העסק: {state.business_context[:300]}")
+    need = _informative_visitor_statements(state, latest, exclude=state.business_context)
+    if need:
+        lines.append("הצורך: " + " | ".join(need)[:700])
+    labels = (("name", "שם"), ("phone", "טלפון"), ("email", "אימייל"), ("date", "מועד"))
+    contact_line = ", ".join(
+        f"{label}: {contact[key]}" for key, label in labels if contact.get(key)
+    )
+    if contact_line:
+        lines.append(f"יצירת קשר: {contact_line}")
+    lines.append(f"השלב הבא המומלץ: {state.next_step or 'לחזור לפונה ולברר את הצורך הבא'}")
+    return "\n".join(lines)[:2000]
+
+
+def _refresh_first_brief_with_submit_lead(
+    db: Session,
+    *,
+    state: SiteV2State,
+    contact: Mapping[str, str],
+    latest: str,
+    summary: str,
+    session_id: str,
+    client_message_id: str,
+) -> None:
+    """Fold a same-turn ``submit_lead`` call into the brief this turn already sent.
+
+    ``capture_site_lead`` builds the outbox payload and Activity before the model
+    call runs, so a ``next_step`` or verbatim name the model supplies on the *same*
+    turn as capture never reached that already-built text. Only called on the
+    capture turn itself; a later turn's ``submit_lead`` call still lands on the
+    *next* brief, per the documented lag in ``_absorb_submit_lead``.
+    """
+    refreshed_contact = dict(contact)
+    if state.pending_name and not refreshed_contact.get("name"):
+        refreshed_contact["name"] = state.pending_name
+    new_summary = _lead_summary(state, refreshed_contact, latest)
+    if new_summary == summary:
+        return
+    CrmService(db).refresh_pending_site_brief(
+        contact_id=state.contact_id,
+        job_ids=state.delivery_job_ids,
+        summary=new_summary,
+        next_step=state.next_step,
+        name=state.pending_name,
+        source_ref=f"site:{session_id}:{client_message_id}",
+    )
 
 
 def run_site_v2_turn(
@@ -859,7 +966,12 @@ def run_site_v2_turn(
     if row.active_message_id != client_message_id:
         raise HTTPException(status_code=409, detail="message claim lost")
     state = _load_state(row)
-    if not state.business_context and text.strip() and not _FOLLOW_UP.fullmatch(text.strip()):
+    if (
+        not state.business_context
+        and text.strip()
+        and not _FOLLOW_UP.fullmatch(text.strip())
+        and not _is_uninformative_business_text(text)
+    ):
         state.business_context = text.strip()[:1000]
     client = _SiteTurnClient(
         build_site_client(settings), timeout=settings.llm_request_timeout_seconds
@@ -942,11 +1054,13 @@ def run_site_v2_turn(
                 parallel_tool_calls=False,
                 max_completion_tokens=_REPLY_MAX_OUTPUT_TOKENS,
             )
+            had_submit_lead_call = False
             if response.tool_calls:
                 messages.append(response.raw_message)
                 for call in response.tool_calls:
                     if call.name == "submit_lead":
                         _absorb_submit_lead(state, call, visitor_text=text)
+                        had_submit_lead_call = True
                     messages.append(
                         tool_result_message(
                             call.call_id,
@@ -964,6 +1078,16 @@ def run_site_v2_turn(
                 response = client.complete(
                     messages=messages, max_completion_tokens=_REPLY_MAX_OUTPUT_TOKENS
                 )
+                if captured and had_submit_lead_call:
+                    _refresh_first_brief_with_submit_lead(
+                        db,
+                        state=state,
+                        contact=contact,
+                        latest=text,
+                        summary=summary,
+                        session_id=session_id,
+                        client_message_id=client_message_id,
+                    )
             if response.finish_reason == "length" and not response.text.strip():
                 _LOG.warning("site reply truncated tokens_out=%s", response.tokens_out)
             reply = response.text.strip()

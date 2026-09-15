@@ -424,6 +424,83 @@ class CrmService:
         )
 
     @_autoflushing
+    def refresh_pending_site_brief(
+        self,
+        *,
+        contact_id: str,
+        job_ids: Sequence[str],
+        summary: str,
+        source_ref: str,
+        next_step: str = "",
+        name: str = "",
+    ) -> None:
+        """Rewrite this turn's still-pending website brief after the model call.
+
+        ``capture_site_lead`` builds the Telegram outbox payload and the capture
+        Activity before the model turn runs, so a ``submit_lead`` tool call that
+        arrives in the *same* turn (setting ``next_step`` or a verbatim visitor name)
+        never reached that already-built text. Only ``job_ids`` produced by this
+        capture are touched, and only while still ``status == "pending"``; a job
+        already claimed, sent, failed or otherwise no longer pending is left exactly
+        as it is. This never enqueues a new outbox row: it rewrites the payload of an
+        existing one, so it can never create a second job or a second ping.
+        """
+        contact_id = contact_id.strip()
+        safe_summary = summary.strip()[:MAX_FIELD_CHARS]
+        if not contact_id or not safe_summary:
+            return
+        for job_id in job_ids:
+            job = self.session.get(CrmOutboxRow, job_id)
+            if (
+                job is None
+                or job.status != "pending"
+                or job.aggregate_id != contact_id
+                or job.destination != "telegram"
+            ):
+                continue
+            try:
+                payload = json.loads(job.payload_json)
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            payload["text"] = safe_summary
+            job.payload_json = _json(payload)
+        activity = self.session.scalars(
+            select(CrmActivityRow).where(CrmActivityRow.source_ref == f"{source_ref}:activity")
+        ).one_or_none()
+        if activity is not None:
+            activity.result = safe_summary
+        row = self.session.get(CrmContactRow, contact_id)
+        if row is None:
+            return
+        fields = _load_fields(row.fields_json)
+        updated = dict(fields)
+        changed = False
+        safe_next_step = next_step.strip()[:MAX_FIELD_CHARS]
+        if safe_next_step and updated.get("next_step") != safe_next_step:
+            updated["next_step"] = safe_next_step
+            changed = True
+        safe_name = name.strip()[:MAX_FIELD_CHARS]
+        if safe_name and not updated.get("name"):
+            updated["name"] = safe_name
+            changed = True
+        if not changed:
+            return
+        old_revision = row.revision
+        result = self.session.execute(
+            update(CrmContactRow)
+            .where(CrmContactRow.id == row.id, CrmContactRow.revision == old_revision)
+            .values(
+                fields_json=_json(updated),
+                revision=old_revision + 1,
+                updated_at=self._now(),
+            )
+        )
+        if result.rowcount == 1:
+            self.session.expire(row)
+
+    @_autoflushing
     def lookup(
         self,
         *,

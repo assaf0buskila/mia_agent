@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
@@ -1127,3 +1128,121 @@ def test_postgres_issue_creation_serializes_with_final_contact_effect() -> None:
         with admin.begin() as connection:
             connection.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
         admin.dispose()
+
+
+def test_refresh_pending_site_brief_updates_pending_job_activity_and_fields(
+    sessions: sessionmaker[Session],
+) -> None:
+    """Chunk C3a: a same-turn ``submit_lead`` call must reach the already-built brief.
+
+    ``capture_site_lead`` builds the Telegram outbox payload and the capture Activity
+    before the website surface's model turn runs. ``refresh_pending_site_brief`` is the
+    only path that may rewrite that still-pending text afterwards, and it must update
+    the job payload, the Activity result and the contact's next_step/name fields
+    together without ever enqueuing a second job.
+    """
+    with sessions() as session:
+        service = CrmService(session)
+        result = service.capture_site_lead(
+            {"phone": "0501112222", "business": "סטודיו"},
+            conversation_id="session-refresh-1",
+            source_ref="site:session-refresh-1:msg-1",
+            summary="פנייה חדשה מהאתר\nהשלב הבא המומלץ: לחזור לפונה",
+            recipient_ids=("123",),
+        )
+        contact_id = result.contact.id
+        telegram_job_ids = [
+            row.id
+            for row in session.scalars(
+                select(CrmOutboxRow).where(
+                    CrmOutboxRow.aggregate_id == contact_id,
+                    CrmOutboxRow.destination == "telegram",
+                )
+            ).all()
+        ]
+        assert len(telegram_job_ids) == 1
+        before_job_count = len(session.scalars(select(CrmOutboxRow)).all())
+
+        new_summary = (
+            "פנייה חדשה מהאתר\n"
+            "השלב הבא המומלץ: לתאם שיחה"
+        )
+        service.refresh_pending_site_brief(
+            contact_id=contact_id,
+            job_ids=telegram_job_ids,
+            summary=new_summary,
+            next_step="לתאם שיחה",
+            name="נועה",
+            source_ref="site:session-refresh-1:msg-1",
+        )
+
+        job = session.get(CrmOutboxRow, telegram_job_ids[0])
+        assert json.loads(job.payload_json)["text"] == new_summary
+        activity = session.scalars(
+            select(CrmActivityRow).where(
+                CrmActivityRow.source_ref == "site:session-refresh-1:msg-1:activity"
+            )
+        ).one()
+        assert activity.result == new_summary
+        contact = session.get(CrmContactRow, contact_id)
+        fields = json.loads(contact.fields_json)
+        assert fields["next_step"] == "לתאם שיחה"
+        assert fields["name"] == "נועה"
+        assert len(session.scalars(select(CrmOutboxRow)).all()) == before_job_count
+
+
+def test_refresh_pending_site_brief_refuses_non_pending_or_foreign_jobs(
+    sessions: sessionmaker[Session],
+) -> None:
+    """A job already sent (or belonging to a different contact) is never touched."""
+    with sessions() as session:
+        service = CrmService(session)
+        result_a = service.capture_site_lead(
+            {"phone": "0503334444"},
+            conversation_id="session-refresh-2",
+            source_ref="site:session-refresh-2:msg-1",
+            summary="original a",
+            recipient_ids=("123",),
+        )
+        result_b = service.capture_site_lead(
+            {"phone": "0505556666"},
+            conversation_id="session-refresh-3",
+            source_ref="site:session-refresh-3:msg-1",
+            summary="original b",
+            recipient_ids=("123",),
+        )
+        contact_a = result_a.contact.id
+        contact_b = result_b.contact.id
+        job_a = session.scalars(
+            select(CrmOutboxRow).where(
+                CrmOutboxRow.aggregate_id == contact_a,
+                CrmOutboxRow.destination == "telegram",
+            )
+        ).one()
+        job_b = session.scalars(
+            select(CrmOutboxRow).where(
+                CrmOutboxRow.aggregate_id == contact_b,
+                CrmOutboxRow.destination == "telegram",
+            )
+        ).one()
+        # Simulate a prior turn's job that has already gone out.
+        job_a.status = "confirmed"
+        session.flush()
+
+        service.refresh_pending_site_brief(
+            contact_id=contact_a,
+            job_ids=[job_a.id, job_b.id],
+            summary="rewritten",
+            next_step="new step",
+            name="",
+            source_ref="site:session-refresh-2:msg-1",
+        )
+
+        session.expire_all()
+        refreshed_a = session.get(CrmOutboxRow, job_a.id)
+        refreshed_b = session.get(CrmOutboxRow, job_b.id)
+        assert json.loads(refreshed_a.payload_json)["text"] == "original a"
+        assert refreshed_a.status == "confirmed"
+        # job_b belongs to a different contact than the one passed in, even though
+        # it is pending, and must never be modified.
+        assert json.loads(refreshed_b.payload_json)["text"] == "original b"

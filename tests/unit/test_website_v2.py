@@ -2,7 +2,7 @@ import json
 
 import pytest
 from app.api.deps import get_transcription_port
-from app.db.models import CrmContactRow, CrmOutboxRow
+from app.db.models import CrmActivityRow, CrmContactRow, CrmOutboxRow
 from app.db.session import get_session_factory
 from app.db.site_v2 import SiteV2SessionRow
 from app.db.store import LeadStore
@@ -1044,3 +1044,275 @@ def test_model_budget_is_shared_across_validation_and_regeneration(monkeypatch) 
     with pytest.raises(LlmError, match="deadline"):
         client.complete(messages=[])
     assert observed == [10.0, 3.0]
+
+
+def test_greeting_first_then_real_need_populates_business_and_need_separately(
+    monkeypatch,
+) -> None:
+    """Chunk C3a defect 1+2: a bare greeting is never latched as the business, and the
+    brief's business/need sections come from the visitor's real statements."""
+    monkeypatch.setenv("MIA_WEBSITE_V2_ENABLED", "true")
+    monkeypatch.setenv("MIA_CRM_V2_ENABLED", "true")
+    monkeypatch.setenv("MIA_TELEGRAM_OWNER_USER_IDS", "123")
+    fake = _SiteClient()
+    monkeypatch.setattr("app.surfaces.site_v2.build_site_client", lambda _settings: fake)
+    with TestClient(app) as client:
+        session_id, credential = _new(client)
+        greeting = client.post(
+            f"/v1/website/sessions/{session_id}/messages",
+            json={"text": "היי מהקורה", "client_message_id": "greet-1"},
+            headers=_headers(credential),
+        )
+        assert greeting.status_code == 200
+        with get_session_factory()() as db:
+            state = json.loads(db.get(SiteV2SessionRow, session_id).state_json)
+            assert state["business_context"] == ""
+
+        business = client.post(
+            f"/v1/website/sessions/{session_id}/messages",
+            json={"text": "יש לי סטודיו פילאטיס בתל אביב", "client_message_id": "biz-1"},
+            headers=_headers(credential),
+        )
+        assert business.status_code == 200
+        with get_session_factory()() as db:
+            state = json.loads(db.get(SiteV2SessionRow, session_id).state_json)
+            assert state["business_context"] == "יש לי סטודיו פילאטיס בתל אביב"
+
+        captured = client.post(
+            f"/v1/website/sessions/{session_id}/messages",
+            json={
+                "text": "אני צריך עזרה בניהול לוח זמנים ותורים, תחזרו אליי בבקשה",
+                "phone": "052-1112222",
+                "client_message_id": "need-1",
+            },
+            headers=_headers(credential),
+        )
+        assert captured.status_code == 200, captured.text
+        assert captured.json()["next_action"] == "contact_saved"
+
+        with get_session_factory()() as db:
+            contact = db.scalar(
+                select(CrmContactRow).where(CrmContactRow.conversation_id == session_id)
+            )
+            assert contact is not None
+            job = db.scalar(
+                select(CrmOutboxRow).where(
+                    CrmOutboxRow.aggregate_id == contact.id,
+                    CrmOutboxRow.destination == "telegram",
+                )
+            )
+            assert job is not None
+            summary_text = json.loads(job.payload_json)["text"]
+            assert "העסק: יש לי סטודיו פילאטיס בתל אביב" in summary_text
+            assert "הצורך:" in summary_text
+            assert "לוח זמנים" in summary_text
+            assert "היי מהקורה" not in summary_text
+            assert summary_text.count("יש לי סטודיו פילאטיס בתל אביב") == 1
+
+
+def test_lead_summary_never_repeats_a_sentence_and_omits_the_need_when_unknown(
+    monkeypatch,
+) -> None:
+    """Chunk C3a defect 2: production showed the same sentence three times over."""
+    monkeypatch.setenv("MIA_WEBSITE_V2_ENABLED", "true")
+    monkeypatch.setenv("MIA_CRM_V2_ENABLED", "true")
+    monkeypatch.setenv("MIA_TELEGRAM_OWNER_USER_IDS", "123")
+    fake = _SiteClient()
+    monkeypatch.setattr("app.surfaces.site_v2.build_site_client", lambda _settings: fake)
+    text = "יש לי סטודיו פילאטיס בתל אביב"
+    with TestClient(app) as client:
+        session_id, credential = _new(client)
+        first = client.post(
+            f"/v1/website/sessions/{session_id}/messages",
+            json={"text": text, "client_message_id": "first-1"},
+            headers=_headers(credential),
+        )
+        assert first.status_code == 200
+
+        captured = client.post(
+            f"/v1/website/sessions/{session_id}/messages",
+            json={"text": text, "phone": "052-3334444", "client_message_id": "second-1"},
+            headers=_headers(credential),
+        )
+        assert captured.status_code == 200, captured.text
+        assert captured.json()["next_action"] == "contact_saved"
+
+        with get_session_factory()() as db:
+            contact = db.scalar(
+                select(CrmContactRow).where(CrmContactRow.conversation_id == session_id)
+            )
+            job = db.scalar(
+                select(CrmOutboxRow).where(
+                    CrmOutboxRow.aggregate_id == contact.id,
+                    CrmOutboxRow.destination == "telegram",
+                )
+            )
+            summary_text = json.loads(job.payload_json)["text"]
+            assert summary_text.count("יש לי סטודיו פילאטיס בתל אביב") == 1
+            assert "הצורך:" not in summary_text
+            assert "השלב הבא המומלץ:" in summary_text
+
+
+class _SubmitLeadClient(_SiteClient):
+    """Returns a ``submit_lead`` tool call on the first reply-generation turn."""
+
+    def __init__(self, *, next_step: str, name) -> None:
+        super().__init__()
+        self._next_step = next_step
+        self._name = name
+        self._returned = False
+
+    def complete(self, **kwargs):  # noqa: ANN003
+        if not self._returned and _has_tool(kwargs, "submit_lead"):
+            self._returned = True
+            self.calls += 1
+            self.prompts.append(kwargs["messages"])
+            arguments = {
+                "name": self._name,
+                "phone": None,
+                "email": None,
+                "next_step": self._next_step,
+            }
+            return LlmResponse(
+                "",
+                (ToolCall("lead-1", "submit_lead", arguments, "{}"),),
+                "stop",
+                "",
+                0,
+                0,
+                {"role": "assistant", "content": None},
+            )
+        return super().complete(**kwargs)
+
+
+def test_submit_lead_same_turn_reaches_the_single_pending_job(monkeypatch) -> None:
+    """Chunk C3a defect 3: a same-turn submit_lead call must reach the built brief."""
+    monkeypatch.setenv("MIA_WEBSITE_V2_ENABLED", "true")
+    monkeypatch.setenv("MIA_CRM_V2_ENABLED", "true")
+    monkeypatch.setenv("MIA_TELEGRAM_OWNER_USER_IDS", "123")
+    fake = _SubmitLeadClient(next_step="לתאם שיחת ייעוץ", name="דנה")
+    monkeypatch.setattr("app.surfaces.site_v2.build_site_client", lambda _settings: fake)
+    with TestClient(app) as client:
+        session_id, credential = _new(client)
+        captured = client.post(
+            f"/v1/website/sessions/{session_id}/messages",
+            json={
+                "text": "קוראים לי דנה, תחזרו אליי בבקשה",
+                "phone": "052-5556666",
+                "client_message_id": "lead-1",
+            },
+            headers=_headers(credential),
+        )
+        assert captured.status_code == 200, captured.text
+        assert captured.json()["next_action"] == "contact_saved"
+
+        with get_session_factory()() as db:
+            contact = db.scalar(
+                select(CrmContactRow).where(CrmContactRow.conversation_id == session_id)
+            )
+            assert contact is not None
+            jobs = list(
+                db.scalars(
+                    select(CrmOutboxRow).where(
+                        CrmOutboxRow.aggregate_id == contact.id,
+                        CrmOutboxRow.destination == "telegram",
+                    )
+                ).all()
+            )
+            assert len(jobs) == 1
+            payload_text = json.loads(jobs[0].payload_json)["text"]
+            assert "לתאם שיחת ייעוץ" in payload_text
+            assert "דנה" in payload_text
+            fields = json.loads(contact.fields_json)
+            assert fields.get("next_step") == "לתאם שיחת ייעוץ"
+            assert fields.get("name") == "דנה"
+            activity = db.scalar(
+                select(CrmActivityRow).where(CrmActivityRow.contact_id == contact.id)
+            )
+            assert activity is not None
+            assert activity.result == payload_text
+
+
+def test_submit_lead_name_not_in_visitor_text_is_not_applied(monkeypatch) -> None:
+    """A model-supplied name absent from the visitor's own words is never saved."""
+    monkeypatch.setenv("MIA_WEBSITE_V2_ENABLED", "true")
+    monkeypatch.setenv("MIA_CRM_V2_ENABLED", "true")
+    monkeypatch.setenv("MIA_TELEGRAM_OWNER_USER_IDS", "123")
+    fake = _SubmitLeadClient(next_step="לתאם שיחת ייעוץ", name="דנה")
+    monkeypatch.setattr("app.surfaces.site_v2.build_site_client", lambda _settings: fake)
+    with TestClient(app) as client:
+        session_id, credential = _new(client)
+        captured = client.post(
+            f"/v1/website/sessions/{session_id}/messages",
+            json={
+                "text": "תחזרו אליי בבקשה",
+                "phone": "052-7778888",
+                "client_message_id": "lead-1",
+            },
+            headers=_headers(credential),
+        )
+        assert captured.status_code == 200, captured.text
+        with get_session_factory()() as db:
+            contact = db.scalar(
+                select(CrmContactRow).where(CrmContactRow.conversation_id == session_id)
+            )
+            fields = json.loads(contact.fields_json)
+            assert fields.get("name") == ""
+            assert fields.get("next_step") == "לתאם שיחת ייעוץ"
+            job = db.scalar(
+                select(CrmOutboxRow).where(
+                    CrmOutboxRow.aggregate_id == contact.id,
+                    CrmOutboxRow.destination == "telegram",
+                )
+            )
+            payload_text = json.loads(job.payload_json)["text"]
+            assert "דנה" not in payload_text
+            assert "לתאם שיחת ייעוץ" in payload_text
+
+
+def test_model_error_after_capture_leaves_original_job_and_contact_unchanged(
+    monkeypatch,
+) -> None:
+    """A model failure after capture must not disturb the already-committed brief."""
+    monkeypatch.setenv("MIA_WEBSITE_V2_ENABLED", "true")
+    monkeypatch.setenv("MIA_CRM_V2_ENABLED", "true")
+    monkeypatch.setenv("MIA_TELEGRAM_OWNER_USER_IDS", "123")
+
+    class RaisingClient(_SiteClient):
+        def complete(self, **kwargs):  # noqa: ANN003
+            if _has_tool(kwargs, "submit_lead"):
+                raise LlmError("synthetic failure after capture")
+            return super().complete(**kwargs)
+
+    fake = RaisingClient()
+    monkeypatch.setattr("app.surfaces.site_v2.build_site_client", lambda _settings: fake)
+    with TestClient(app) as client:
+        session_id, credential = _new(client)
+        captured = client.post(
+            f"/v1/website/sessions/{session_id}/messages",
+            json={
+                "text": "תחזרו אליי בבקשה",
+                "phone": "052-9990000",
+                "client_message_id": "lead-1",
+            },
+            headers=_headers(credential),
+        )
+        assert captured.status_code == 200, captured.text
+        assert captured.json()["next_action"] == "contact_saved"
+        with get_session_factory()() as db:
+            contact = db.scalar(
+                select(CrmContactRow).where(CrmContactRow.conversation_id == session_id)
+            )
+            assert contact is not None
+            fields = json.loads(contact.fields_json)
+            assert fields.get("next_step") == "לחזור לפונה"
+            job = db.scalar(
+                select(CrmOutboxRow).where(
+                    CrmOutboxRow.aggregate_id == contact.id,
+                    CrmOutboxRow.destination == "telegram",
+                )
+            )
+            assert job is not None
+            assert job.status == "pending"
+            payload_text = json.loads(job.payload_json)["text"]
+            assert "השלב הבא המומלץ: לחזור לפונה" in payload_text
