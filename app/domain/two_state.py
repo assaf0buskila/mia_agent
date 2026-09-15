@@ -130,6 +130,13 @@ _SHEETS_NEEDLES: tuple[str, ...] = (
     "שיט",
     "sheets",
     "sheet",
+    # "spreadsheet(s)" carries none of the "excel"/"excellent" risk: unlike a
+    # word that only happens to contain "sheet" as a substring, "spreadsheet"
+    # unambiguously names the same kind of document as "sheet"/"sheets" -- see
+    # the differential-sweep note below for the words that stay excluded
+    # because they name a genuinely different thing.
+    "spreadsheet",
+    "spreadsheets",
 )
 
 _TOOLKIT_NEEDLES: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -154,8 +161,11 @@ _TOOLKIT_NEEDLES: tuple[tuple[str, tuple[str, ...]], ...] = (
             "פוסט",
         ),
     ),
-    ("gmail", ("gmail", "מייל", "inbox", "דואר")),
-    ("calendar", ("יומן", "calendar", "פגישה", "agenda")),
+    ("gmail", ("gmail", "gmails", "מייל", "inbox", "inboxes", "דואר")),
+    (
+        "calendar",
+        ("יומן", "calendar", "calendars", "calendaring", "פגישה", "agenda", "agendas"),
+    ),
     ("gsc", ("search console", "gsc", "קונסולת חיפוש", "impressions")),
     ("ga4", ("ga4", "analytics", "אנליטיקס", "traffic", "תנועה")),
     ("sheets", _SHEETS_NEEDLES),
@@ -213,11 +223,27 @@ _SOCIAL_CONTENT_WORDS: tuple[str, ...] = (
 )
 
 # Whole-word matching (below) is stricter than the old substring check, so it can
-# silently lose an inflected form the old check caught only by accident (e.g.
-# "reel" used to match "reels" as a substring). Audited every ASCII needle above
-# for this when whole-word matching was introduced:
-#   - "reel" -> added "reels" to the instagram tuple: "how are my reels doing" is
-#     the single commonest Instagram-performance question.
+# silently lose an inflected or compound form the old check caught only by
+# accident (e.g. "reel" used to match "reels" as a substring, and "sheet" used
+# to match "spreadsheet"). Inspecting the needle list by hand for this MISSED
+# real gaps three separate times ("reels" in round 1, the plural/gerund forms
+# of `_SOCIAL_CONTENT_WORDS` in round 2, "spreadsheet" here) -- a global,
+# stricter matching change can drop a case anywhere in the corpus of real
+# owner phrasings, and inspection cannot reliably enumerate every compound a
+# short needle happens to sit inside of. The reliable check is mechanical: a
+# differential sweep that runs `asked_toolkit` over a realistic corpus under
+# both master's implementation and this one, and reports every input where
+# master resolved a toolkit and this branch resolves nothing (the corpus and
+# both directions of its output are in the PR/commit description; it is not
+# committed as-is since it depends on extracting master's file by SHA, but
+# every needle it justified adding is pinned by a real test below). Verdicts,
+# by needle:
+#   - "reel"/"reels", "gmail"/"gmails", "calendar"/"calendars"/"calendaring",
+#     "agenda"/"agendas", "inbox"/"inboxes", "sheet"/"sheets"/"spreadsheet"/
+#     "spreadsheets" -> added (or already present as separate needles). None
+#     of these carry the "excel"/"excellent" false-positive risk: every one
+#     unambiguously names the same thing the base needle does, in every real
+#     sentence the sweep or prior rounds found.
 #   - "excel" -> deliberately NOT widened to match "excels": that is the ordinary
 #     verb ("she excels at her job"), not the spreadsheet -- widening it would
 #     reintroduce the exact "excellent" false-positive class this fix removed.
@@ -225,20 +251,29 @@ _SOCIAL_CONTENT_WORDS: tuple[str, ...] = (
 #     word is far too generic ("let's contact him") and was never caught by the
 #     old substring check either (the needle is longer than the singular form),
 #     so this is a pre-existing scope choice, not a regression.
-#   - "inbox", "calendar", "agenda" -> plural forms ("inboxes", "calendars",
-#     "agendas") are vanishingly rare for Assaf's single Gmail inbox and single
-#     calendar; left narrow rather than adding needles nothing will ever use.
+#   - "worksheet", "timesheet", "datasheet", "sheetrock" -> deliberately NOT
+#     added as sheets needles even though each contains "sheet": each names a
+#     genuinely different artifact (an exercise/planning sheet, a payroll time
+#     log, a technical spec sheet, a drywall brand) that has nothing to do with
+#     Assaf's Sheets/CRM workbook. "cheatsheet" (one word) is the same call --
+#     a quick-reference document, not the tabular/spreadsheet artifact type
+#     "spreadsheet" unambiguously is.
+#   - "instagram" -> deliberately NOT widened to match "instagrammable": that
+#     is a descriptive adjective used about a place or photo ("this cafe is so
+#     instagrammable"), not a request to use the Instagram toolkit, and is
+#     common enough in ordinary conversation that widening it risks the same
+#     false-positive class as "excel"/"ig ".
+#   - "impressions", "analytics", "traffic" -> already the only natural form used
+#     in this context (mass nouns, or a metric name that is not used in the
+#     singular); the sweep found no realistic sentence where the singular or a
+#     compound (e.g. "trafficking", correctly still blocked) should match.
 #   - "sheet"/"sheets", "google sheet"/"google sheets", "content idea"/
 #     "content ideas" -> already registered as separate singular/plural needles,
 #     so neither form was ever at risk.
-#   - "impressions", "analytics", "traffic" -> already the only natural form used
-#     in this context (mass nouns, or a metric name that is not used in the
-#     singular); the old substring check never caught a shorter singular either,
-#     since the needle is longer than it, so there is nothing to lose here.
 #   - A possessive ("LinkedIn's", "Instagram's") is unaffected either way: `'` is
 #     not a word character, so it already reads as a boundary on its own.
-#   - The audit above covered only the ASCII needles this fix touches; a
-#     parallel gap in the pre-existing Hebrew " ריל" needle (glued to the
+#   - The original audit above covered only the ASCII needles this fix touches;
+#     a parallel gap in the pre-existing Hebrew " ריל" needle (glued to the
 #     definite article, "הרילים"/"הרילס") was found on a later pass and fixed
 #     the same way -- see "רילים"/"רילס" in the instagram tuple above.
 

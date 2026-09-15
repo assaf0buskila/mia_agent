@@ -163,11 +163,14 @@ def test_asked_toolkit_whole_word_latin_needles_avoid_false_positives() -> None:
 def test_asked_toolkit_whole_word_matching_keeps_common_inflected_forms() -> None:
     """Whole-word matching is stricter than the old substring check, so it can
 
-    silently lose a plural/inflected form the old check caught only by accident.
-    "reel" -> "reels" is the one real regression found by audit (the commonest
-    Instagram-performance question); every other ASCII needle was audited and
-    either already covers both forms or is deliberately left narrow (see the
-    comment above `_SOCIAL_CONTENT_WORDS` in two_state.py).
+    silently lose a plural/inflected form the old check caught only by
+    accident. "reel" -> "reels" was the first regression found this way (the
+    commonest Instagram-performance question); see
+    `test_asked_toolkit_differential_sweep_against_master_findings` below for
+    the full, mechanically-found set -- inspecting the needle list by hand
+    missed real gaps three separate times, so a differential sweep against
+    master's implementation is what now decides what gets widened, not
+    inspection (see the comment above `_SOCIAL_CONTENT_WORDS` in two_state.py).
     """
     assert asked_toolkit("how are my reels doing") == "instagram"
     assert asked_toolkit("post a reel today") == "instagram"
@@ -175,6 +178,49 @@ def test_asked_toolkit_whole_word_matching_keeps_common_inflected_forms() -> Non
     # Deliberately still narrow: "excels" is the ordinary verb, not the
     # spreadsheet, and widening it would reintroduce the "excellent" bug class.
     assert asked_toolkit("she excels at her job") == ""
+
+
+def test_asked_toolkit_differential_sweep_against_master_findings() -> None:
+    """Pins every needle-widening decided by the differential sweep against
+
+    master (d3eda92) run over a ~105-phrase realistic corpus: both directions
+    -- "master matched, this branch now matches too" (the genuine regressions
+    the sweep found and this fixes) and "master matched, this branch still
+    does not" (a word that merely contains a needle as a substring but names a
+    different thing, confirmed still correctly narrow) -- plus the P1 bug
+    class the sweep incidentally re-confirmed still fixed. The sweep itself
+    is not committed: it dynamically loads master's two_state.py from a SHA
+    extracted to an external file, which is a reasonable one-off comparison
+    but not something that should depend on that SHA staying reachable, or
+    on a network/git operation, inside the test suite.
+    """
+    # Genuine regressions the sweep found and this fixes: each of these
+    # unambiguously names the same thing as its base needle, with no
+    # "excel"/"excellent"-style false-positive risk.
+    assert asked_toolkit("the gmails are piling up") == "gmail"
+    assert asked_toolkit("check both of my inboxes") == "gmail"
+    assert asked_toolkit("my calendars are a mess") == "calendar"
+    assert asked_toolkit("calendaring the whole week") == "calendar"
+    assert asked_toolkit("compare the agendas for both meetings") == "calendar"
+    assert asked_toolkit("open the spreadsheet") == "sheets"
+    assert asked_toolkit("add it to the spreadsheet") == "sheets"
+    assert asked_toolkit("check the spreadsheets") == "sheets"
+    # Confirmed still correctly narrow: each contains "sheet" or "instagram"
+    # as a substring but names a genuinely different thing, so master's old
+    # substring match on these was itself a (smaller, unnoticed) false
+    # positive -- this branch not matching them is the desired behaviour.
+    assert asked_toolkit("update the worksheet") == ""
+    assert asked_toolkit("check the timesheet") == ""
+    assert asked_toolkit("the datasheet for this part") == ""
+    assert asked_toolkit("is the sheetrock installed") == ""
+    assert asked_toolkit("cheatsheet for the meeting") == ""
+    assert asked_toolkit("she has a very instagrammable cafe") == ""
+    assert asked_toolkit("that sunset is so instagrammable") == ""
+    # The sweep also re-confirmed the founding P1 false-positive fix on two
+    # examples not in the original two-word test: a real English word can
+    # embed "traffic" or "reel" as a substring too.
+    assert asked_toolkit("human trafficking is a serious crime") == ""
+    assert asked_toolkit("the team was reelected unanimously") == ""
 
 
 def test_asked_toolkit_underscore_and_digit_glued_names_still_match() -> None:
