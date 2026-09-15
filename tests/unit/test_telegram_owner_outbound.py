@@ -1,16 +1,11 @@
 """Owner Telegram replies are HTML and attach one-tap approval buttons."""
 
 from datetime import UTC, datetime
-from types import SimpleNamespace
 
 import pytest
-from app.api.inbound_common import (
-    outbound_reply as _outbound_reply,
-)
-from app.api.inbound_common import (
-    owner_telegram_reply_markup as _owner_telegram_reply_markup,
-)
+from app.api.inbound_common import outbound_reply as _outbound_reply
 from app.api.owner import process_owner_texts as process_inbound_texts
+from app.capabilities.types import Principal
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
 from app.domain.approvals import (
@@ -26,10 +21,10 @@ from app.domain.approvals import (
 )
 from app.domain.events import Channel
 from app.domain.owner.callbacks import approval_token
-from app.domain.owner.tasks import OwnerTaskType
 from app.integrations.base import RecordingMessagePort
 from app.integrations.gmail import FakeGmailPort
 from app.integrations.telegram_format import approval_keyboard
+from app.services.owner_actions import propose_owner_action
 
 _OWNER_ID = "700100240"
 
@@ -54,31 +49,6 @@ def test_whatsapp_prospect_reply_stays_plain_text() -> None:
     assert message.parse_mode is None
     assert message.reply_markup is None
     assert message.text == "a & b"
-
-
-def test_pending_approvals_markup_uses_first_approval_id() -> None:
-    store = SimpleNamespace(
-        list_all_pending_approvals=lambda: [
-            SimpleNamespace(approval_id="apr_abc123def456"),
-            SimpleNamespace(approval_id="apr_fff000111222"),
-        ]
-    )
-    markup = _owner_telegram_reply_markup(
-        store,  # type: ignore[arg-type]
-        channel=Channel.TELEGRAM,
-        task_type=OwnerTaskType.PENDING_APPROVALS,
-    )
-    assert markup == approval_keyboard(approval_token("apr_abc123def456"))
-
-
-def test_linkedin_proposal_markup_binds_the_exact_new_approval_id() -> None:
-    markup = _owner_telegram_reply_markup(
-        SimpleNamespace(),  # type: ignore[arg-type]
-        channel=Channel.TELEGRAM,
-        task_type=OwnerTaskType.NOTE,
-        turn_approval_id="apr_linkedin_exact",
-    )
-    assert markup == approval_keyboard(approval_token("apr_linkedin_exact"))
 
 
 def test_store_keeps_long_linkedin_payload_exact() -> None:
@@ -178,42 +148,42 @@ async def test_proposal_turn_keyboard_ignores_an_unrelated_newer_approval(
             owner_ids={_OWNER_ID},
         )
 
-        assert len(port.sent) == 1
-        assert port.sent[0].reply_markup == (
-            approval_keyboard(approval_token(exact.approval_id)) if has_turn_approval else None
-        )
-        assert port.sent[0].reply_markup != approval_keyboard(approval_token(unrelated.approval_id))
+        # The prose reply never carries a keyboard; a turn-created proposal gets its
+        # own follow-up card message with its own button instead (C2b).
+        if has_turn_approval:
+            assert len(port.sent) == 2
+            assert port.sent[0].reply_markup is None
+            assert port.sent[-1].reply_markup == approval_keyboard(
+                approval_token(exact.approval_id)
+            )
+        else:
+            assert len(port.sent) == 1
+            assert port.sent[0].reply_markup is None
+        for message in port.sent:
+            assert message.reply_markup != approval_keyboard(approval_token(unrelated.approval_id))
     finally:
         db.close()
 
 
-def test_pending_approvals_markup_skips_empty_and_non_telegram() -> None:
-    empty = SimpleNamespace(list_all_pending_approvals=lambda: [])
-    assert (
-        _owner_telegram_reply_markup(
-            empty,  # type: ignore[arg-type]
-            channel=Channel.TELEGRAM,
-            task_type=OwnerTaskType.PENDING_APPROVALS,
-        )
-        is None
-    )
-    pending = SimpleNamespace(
-        list_all_pending_approvals=lambda: [SimpleNamespace(approval_id="apr_abc123def456")]
-    )
-    assert (
-        _owner_telegram_reply_markup(
-            pending,  # type: ignore[arg-type]
-            channel=Channel.TELEGRAM,
-            task_type=OwnerTaskType.DAILY_BRIEF,
-        )
-        is None
-    )
-
-
 @pytest.mark.asyncio
-async def test_pending_approvals_owner_turn_attaches_keyboard() -> None:
-    init_db()
-    db = get_session_factory()()
+async def test_pending_approvals_owner_turn_sends_digest_then_its_own_card(tmp_path) -> None:
+    """The digest is message 0 with no keyboard; the row's own card, WITH its
+    keyboard, is message 1 -- an isolated database, so there is exactly one
+    pending row and exactly one card. This is the one property that actually
+    distinguishes the C2b design from the pre-C2b one, where a single combined
+    message carried the digest text and the keyboard together: reverting
+    app/surfaces/owner.py (and app/api/inbound_common.py) to their pre-C2b
+    content sends exactly one message here, so `len(port.sent) == 2` below
+    fails against that revert instead of passing by accident.
+    """
+    from app.db.base import Base
+    from app.db.session import make_engine
+    from sqlalchemy.orm import sessionmaker
+
+    engine = make_engine(f"sqlite:///{tmp_path / 'pending-single.db'}")
+    Base.metadata.create_all(engine)
+    session_factory = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+    db = session_factory()
     try:
         store = LeadStore(db)
         _, lead_id = store.open_channel_lead(
@@ -249,13 +219,17 @@ async def test_pending_approvals_owner_turn_attaches_keyboard() -> None:
             kill_switch=False,
             owner_ids={_OWNER_ID},
         )
-        assert len(port.sent) == 1
-        sent = port.sent[0]
-        assert sent.parse_mode == "HTML"
-        assert sent.reply_markup == approval_keyboard(approval_token(row.approval_id))
-        assert "מחכים לאישור" in sent.text
+        assert len(port.sent) == 2
+        digest, card = port.sent
+        assert digest.parse_mode == "HTML"
+        assert digest.reply_markup is None
+        assert "מחכים לאישור: 1" in digest.text
+        assert card.reply_markup == approval_keyboard(approval_token(row.approval_id))
+        assert lead_id in card.text
+        assert digest.text != card.text
     finally:
         db.close()
+        engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -692,3 +666,527 @@ def test_approval_keyboard_callback_rejects_misbinding(field: str, value: str) -
         assert row.decision == DECISION_PENDING
     finally:
         db.close()
+
+
+@pytest.mark.asyncio
+async def test_two_turn_proposals_get_prose_then_own_cards(monkeypatch) -> None:
+    """Each proposal created this turn gets its own follow-up card and keyboard (C2b)."""
+    init_db()
+    db = get_session_factory()()
+    try:
+        store = LeadStore(db)
+        first = propose_owner_action(
+            store,
+            principal=Principal.owner(source="telegram", actor_id=_OWNER_ID),
+            source_ref="tg:two-cards:1",
+            kind="gmail.create_draft",
+            parameters={"to": "one@example.com", "subject": "First", "body": "First body"},
+            target={"recipient": "one@example.com", "provider_binding": {}},
+        )
+        second = propose_owner_action(
+            store,
+            principal=Principal.owner(source="telegram", actor_id=_OWNER_ID),
+            source_ref="tg:two-cards:2",
+            kind="gmail.create_draft",
+            parameters={"to": "two@example.com", "subject": "Second", "body": "Second body"},
+            target={"recipient": "two@example.com", "provider_binding": {}},
+        )
+        db.commit()
+
+        def fake_talk(*, approval_ids_out, **_kwargs):
+            approval_ids_out.extend([first.approval_id, second.approval_id])
+            return "הכנתי שתי טיוטות מייל.", False
+
+        monkeypatch.setattr("app.surfaces.owner._talk_with_optional_agent", fake_talk)
+        port = RecordingMessagePort()
+
+        await process_inbound_texts(
+            provider="telegram",
+            channel=Channel.TELEGRAM,
+            items=[{"id": "evt.two.cards", "from": _OWNER_ID, "text": "prepare two drafts"}],
+            store=store,
+            port=port,
+            kill_switch=False,
+            owner_ids={_OWNER_ID},
+        )
+
+        assert len(port.sent) == 3
+        assert port.sent[0].reply_markup is None
+        assert "הכנתי שתי טיוטות" in port.sent[0].text
+        assert port.sent[1].reply_markup == approval_keyboard(approval_token(first.approval_id))
+        assert "one@example.com" in port.sent[1].text
+        assert port.sent[2].reply_markup == approval_keyboard(approval_token(second.approval_id))
+        assert "two@example.com" in port.sent[2].text
+        assert port.sent[1].text != port.sent[2].text
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_long_card_splits_with_keyboard_only_on_last_chunk(monkeypatch) -> None:
+    init_db()
+    db = get_session_factory()()
+    try:
+        store = LeadStore(db)
+        long_body = "פסקה ארוכה מאוד. " * 500  # far past the ~3900-char chunk budget
+        proposal = propose_owner_action(
+            store,
+            principal=Principal.owner(source="telegram", actor_id=_OWNER_ID),
+            source_ref="tg:long-card",
+            kind="gmail.create_draft",
+            parameters={"to": "long@example.com", "subject": "Long", "body": long_body},
+            target={"recipient": "long@example.com", "provider_binding": {}},
+        )
+        db.commit()
+
+        def fake_talk(*, approval_ids_out, **_kwargs):
+            approval_ids_out.append(proposal.approval_id)
+            return "הכנתי טיוטה ארוכה.", False
+
+        monkeypatch.setattr("app.surfaces.owner._talk_with_optional_agent", fake_talk)
+        port = RecordingMessagePort()
+
+        await process_inbound_texts(
+            provider="telegram",
+            channel=Channel.TELEGRAM,
+            items=[{"id": "evt.long.card", "from": _OWNER_ID, "text": "prepare a long draft"}],
+            store=store,
+            port=port,
+            kill_switch=False,
+            owner_ids={_OWNER_ID},
+        )
+
+        # prose, then the card split across at least two chunks.
+        assert len(port.sent) >= 3
+        card_chunks = port.sent[1:]
+        assert len(card_chunks) >= 2
+        for chunk in card_chunks[:-1]:
+            assert chunk.reply_markup is None
+        assert card_chunks[-1].reply_markup == approval_keyboard(
+            approval_token(proposal.approval_id)
+        )
+        for message in port.sent:
+            assert len(message.text) <= 4096
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_pending_view_caps_at_five_with_more_notice(tmp_path) -> None:
+    from app.db.base import Base
+    from app.db.session import make_engine
+    from sqlalchemy.orm import sessionmaker
+
+    engine = make_engine(f"sqlite:///{tmp_path / 'pending-cap.db'}")
+    Base.metadata.create_all(engine)
+    session_factory = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+    db = session_factory()
+    try:
+        store = LeadStore(db)
+        approval_ids = []
+        for index in range(7):
+            proposal = propose_owner_action(
+                store,
+                principal=Principal.owner(source="telegram", actor_id=_OWNER_ID),
+                source_ref=f"tg:pending-cap:{index}",
+                kind="gmail.create_draft",
+                parameters={
+                    "to": f"contact{index}@example.com",
+                    "subject": f"Draft {index}",
+                    "body": "body",
+                },
+                target={
+                    "recipient": f"contact{index}@example.com",
+                    "provider_binding": {},
+                },
+            )
+            approval_ids.append(proposal.approval_id)
+        db.commit()
+
+        port = RecordingMessagePort()
+        await process_inbound_texts(
+            provider="telegram",
+            channel=Channel.TELEGRAM,
+            items=[{"id": "evt.pending.cap", "from": _OWNER_ID, "text": "מה מחכה לאישור?"}],
+            store=store,
+            port=port,
+            kill_switch=False,
+            owner_ids={_OWNER_ID},
+        )
+
+        # The digest, then 5 proposal cards newest first, then one "ועוד 2" notice --
+        # neither the digest nor the trailing notice carries a keyboard.
+        assert len(port.sent) == 7
+        assert port.sent[0].reply_markup is None
+        assert "מחכים לאישור: 7" in port.sent[0].text
+        for message in port.sent[1:6]:
+            assert message.reply_markup is not None
+        assert port.sent[6].reply_markup is None
+        assert "ועוד 2" in port.sent[6].text
+        assert port.sent[1].reply_markup == approval_keyboard(approval_token(approval_ids[-1]))
+    finally:
+        db.close()
+        engine.dispose()
+
+
+class _FailingEditPort(RecordingMessagePort):
+    """An edit that always fails, so every callback must fall back to sendMessage."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.edit_attempts = 0
+
+    async def answer_callback_query(self, callback_query_id: str, *, text: str = "") -> None:
+        del callback_query_id, text
+
+    async def edit_message_text(self, **kwargs) -> None:  # noqa: ANN003
+        del kwargs
+        self.edit_attempts += 1
+        from app.integrations.telegram import TelegramSendError
+
+        raise TelegramSendError("edit failed")
+
+
+@pytest.mark.asyncio
+async def test_callback_edit_failure_falls_back_and_never_reruns_the_action(
+    monkeypatch,
+) -> None:
+    from app.api import telegram as telegram_api
+    from app.core.config import Settings
+    from app.integrations.sheets import FakeSheetsPort
+    from app.services.crm_v2 import CrmService
+
+    init_db()
+    db = get_session_factory()()
+    try:
+        settings = Settings(telegram_owner_user_ids=_OWNER_ID, crm_v2_enabled=True)
+        store = LeadStore(db)
+        fields = {"name": "Fallback Contact", "email": "fallback@example.com"}
+        snapshot = CrmService(db).snapshot_identity(fields)
+        proposal = propose_owner_action(
+            store,
+            principal=Principal.owner(source="telegram", actor_id=_OWNER_ID),
+            source_ref="telegram:edit-fallback",
+            kind="crm.upsert",
+            parameters={
+                "fields": fields,
+                "contact_id": snapshot.contact_id,
+                "expected_revision": snapshot.revision,
+            },
+            target={
+                "contact_id": snapshot.contact_id,
+                "revision": snapshot.revision,
+                "snapshot_hash": snapshot.snapshot_hash,
+                "fields": snapshot.fields,
+            },
+        )
+        db.commit()
+        sheets_port = FakeSheetsPort()
+        monkeypatch.setattr(telegram_api, "build_sheets_port", lambda _settings: sheets_port)
+        port = _FailingEditPort()
+        callback = {
+            "callback_query_id": "q-edit-fail",
+            "from": _OWNER_ID,
+            "data": f"ok:{approval_token(proposal.approval_id)}",
+            "chat_id": _OWNER_ID,
+            "message_id": "77",
+        }
+
+        result = await telegram_api._handle_callback(
+            callback=callback,
+            port=port,
+            owner_ids={_OWNER_ID},
+            db=db,
+            settings=settings,
+        )
+        db.commit()
+
+        assert result["sent"] is False
+        assert port.edit_attempts == 1
+        assert len(port.sent) == 1
+        assert "CRM contact" in port.sent[0].text
+        assert port.sent[0].parse_mode == "HTML"
+        contacts = CrmService(db).lookup(query="fallback@example.com")
+        assert len(contacts) == 1
+        assert contacts[0].revision == 1
+
+        # A replay (edit still failing) must not execute the write a second time.
+        replay = await telegram_api._handle_callback(
+            callback={**callback, "callback_query_id": "q-edit-fail-replay"},
+            port=port,
+            owner_ids={_OWNER_ID},
+            db=db,
+            settings=settings,
+        )
+        db.commit()
+
+        assert replay["sent"] is False
+        assert len(port.sent) == 2
+        contacts_after = CrmService(db).lookup(query="fallback@example.com")
+        assert len(contacts_after) == 1
+        assert contacts_after[0].revision == 1
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_legacy_pending_row_renders_as_a_card_and_still_resolves(monkeypatch) -> None:
+    from app.api.deps import get_telegram_port
+    from app.main import app
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("MIA_TELEGRAM_WEBHOOK_SECRET", "tg-secret")
+    monkeypatch.setenv("MIA_TELEGRAM_OWNER_USER_IDS", _OWNER_ID)
+    monkeypatch.setenv("MIA_TELEGRAM_BOT_TOKEN", "bot-token")
+    init_db()
+    db = get_session_factory()()
+    try:
+        store = LeadStore(db)
+        _, lead_id = store.open_channel_lead(
+            channel=Channel.WEBSITE, external_id="web_legacy_card_resolve"
+        )
+        store.upsert_approval(
+            lead_id=lead_id,
+            channel=Channel.WEBSITE.value,
+            action=ACTION_PROPOSAL_HANDOFF,
+            risk=RISK_R3,
+            payload_hash=payload_hash(
+                action=ACTION_PROPOSAL_HANDOFF,
+                risk=RISK_R3,
+                channel=Channel.WEBSITE.value,
+                resource_type=RESOURCE_LEAD,
+                resource_id=lead_id,
+            ),
+            decision=DECISION_PENDING,
+            resource_type=RESOURCE_LEAD,
+            resource_id=lead_id,
+            expires_at=approval_expires_at(now=datetime.now(UTC)),
+        )
+        db.commit()
+        row = store.get_approval(lead_id, ACTION_PROPOSAL_HANDOFF)
+        assert row is not None
+
+        # Render: the pending view surfaces this pre-v2 row as its own card.
+        pending_port = RecordingMessagePort()
+        await process_inbound_texts(
+            provider="telegram",
+            channel=Channel.TELEGRAM,
+            items=[{"id": "evt.legacy.render", "from": _OWNER_ID, "text": "מה מחכה לאישור?"}],
+            store=store,
+            port=pending_port,
+            kill_switch=False,
+            owner_ids={_OWNER_ID},
+        )
+        # sent[0] is always the digest (no keyboard); this row, just created, is
+        # the newest pending proposal and so is always the first card after it,
+        # regardless of any other pending row left over elsewhere.
+        assert len(pending_port.sent) >= 2
+        assert pending_port.sent[0].reply_markup is None
+        card = pending_port.sent[1]
+        assert card.reply_markup == approval_keyboard(approval_token(row.approval_id))
+        assert lead_id in card.text
+        assert "העברת ליד" in card.text
+
+        # Resolve: the same exact row still decides through the callback path.
+        callback_port = _CallbackPort()
+        app.dependency_overrides[get_telegram_port] = lambda: callback_port
+        try:
+            with TestClient(app) as client:
+                response = client.post(
+                    "/v1/telegram/webhook",
+                    json={
+                        "update_id": 501,
+                        "callback_query": {
+                            "id": "q-legacy-resolve",
+                            "from": {"id": int(_OWNER_ID)},
+                            "data": f"ok:{approval_token(row.approval_id)}",
+                            "message": {"message_id": 44, "chat": {"id": int(_OWNER_ID)}},
+                        },
+                    },
+                    headers={"X-Telegram-Bot-Api-Secret-Token": "tg-secret"},
+                )
+            assert response.status_code == 200
+            assert response.json()["processed"] == 1
+        finally:
+            app.dependency_overrides.pop(get_telegram_port, None)
+        db.expire_all()
+        refreshed = store.get_approval(lead_id, ACTION_PROPOSAL_HANDOFF)
+        assert refreshed is not None
+        assert refreshed.decision == DECISION_APPROVED
+    finally:
+        db.close()
+
+
+class _FlakyPort(RecordingMessagePort):
+    """Fails exactly one send, by overall attempt order; every other send records."""
+
+    def __init__(self, *, fail_at_attempt: int) -> None:
+        super().__init__()
+        self._fail_at_attempt = fail_at_attempt
+        self._attempts = 0
+
+    async def send(self, message) -> None:
+        attempt = self._attempts
+        self._attempts += 1
+        if attempt == self._fail_at_attempt:
+            from app.integrations.telegram import TelegramSendError
+
+            raise TelegramSendError("simulated mid-card failure")
+        await super().send(message)
+
+
+@pytest.mark.asyncio
+async def test_middle_chunk_failure_never_delivers_the_approve_button(monkeypatch) -> None:
+    """A long card that fails partway through must never still hand out its approve
+    button on a chunk that did make it out (P1 in the C2b review: a `FlakyPort`
+    failing message index 1 on a multi-chunk gmail draft used to still deliver the
+    keyboard-bearing final chunk).
+    """
+    init_db()
+    db = get_session_factory()()
+    try:
+        store = LeadStore(db)
+        long_body = "פסקה ארוכה מאוד. " * 500  # far past the ~3900-char chunk budget
+        proposal = propose_owner_action(
+            store,
+            principal=Principal.owner(source="telegram", actor_id=_OWNER_ID),
+            source_ref="tg:flaky-middle-chunk",
+            kind="gmail.create_draft",
+            parameters={"to": "flaky@example.com", "subject": "Flaky", "body": long_body},
+            target={"recipient": "flaky@example.com", "provider_binding": {}},
+        )
+        db.commit()
+
+        def fake_talk(*, approval_ids_out, **_kwargs):
+            approval_ids_out.append(proposal.approval_id)
+            return "הכנתי טיוטה.", False
+
+        monkeypatch.setattr("app.surfaces.owner._talk_with_optional_agent", fake_talk)
+        # Attempt 0 is the prose (must succeed); attempt 1 is the card's first,
+        # non-final chunk -- the same "message index 1" the reviewer's probe used.
+        port = _FlakyPort(fail_at_attempt=1)
+
+        await process_inbound_texts(
+            provider="telegram",
+            channel=Channel.TELEGRAM,
+            items=[
+                {"id": "evt.flaky.middle", "from": _OWNER_ID, "text": "prepare a flaky draft"}
+            ],
+            store=store,
+            port=port,
+            kill_switch=False,
+            owner_ids={_OWNER_ID},
+        )
+
+        # No delivered message carries a live approve button for this proposal:
+        # a partially-shown card must never still hand out its keyboard, even
+        # though a later chunk of that same card would otherwise have sent fine.
+        target_keyboard = approval_keyboard(approval_token(proposal.approval_id))
+        assert not any(message.reply_markup == target_keyboard for message in port.sent)
+        row = store.get_approval_by_approval_id(proposal.approval_id)
+        assert row is not None
+        assert row.decision == DECISION_PENDING
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("should_fail", [False, True])
+async def test_send_stage_outcome_reflects_actual_delivery(caplog, should_fail: bool) -> None:
+    """`owner_stage("send", ...)` must see a send failure, not just log it as ok
+    (P2 in the C2b review: moving the try/except inside the `with` block let a
+    swallowed exception exit the stage successfully).
+    """
+    import logging as logging_module
+
+    class _Port(RecordingMessagePort):
+        async def send(self, message) -> None:
+            if should_fail:
+                from app.integrations.telegram import TelegramSendError
+
+                raise TelegramSendError("simulated failure")
+            await super().send(message)
+
+    init_db()
+    db = get_session_factory()()
+    try:
+        store = LeadStore(db)
+        with caplog.at_level(logging_module.INFO, logger="mia.owner_timing"):
+            await process_inbound_texts(
+                provider="telegram",
+                channel=Channel.TELEGRAM,
+                items=[
+                    {
+                        "id": f"evt.stage.outcome.{should_fail}",
+                        "from": _OWNER_ID,
+                        "text": "מה קורה היום?",
+                    }
+                ],
+                store=store,
+                port=_Port(),
+                kill_switch=False,
+                owner_ids={_OWNER_ID},
+            )
+        stage_records = [
+            record.getMessage()
+            for record in caplog.records
+            if "owner_stage stage=send" in record.getMessage()
+        ]
+        assert stage_records
+        expected = "outcome=error" if should_fail else "outcome=ok"
+        unexpected = "outcome=ok" if should_fail else "outcome=error"
+        assert all(expected in message for message in stage_records)
+        assert not any(unexpected in message for message in stage_records)
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_pending_digest_persisted_and_returned_matches_what_was_sent(tmp_path) -> None:
+    """`OwnerTurnResult.last_reply` must equal the text of the message actually
+    delivered as index 0 -- never a stale digest the owner did not receive (P2 in
+    the C2b review: the digest used to be computed but only ever sent when there
+    were zero pending cards, while still being persisted/returned unconditionally).
+    """
+    from app.core.config import Settings
+    from app.db.base import Base
+    from app.db.session import make_engine
+    from app.integrations.telegram_format import render_owner_markdown
+    from app.surfaces.owner import run_owner_loop
+    from sqlalchemy.orm import sessionmaker
+
+    engine = make_engine(f"sqlite:///{tmp_path / 'pending-digest-match.db'}")
+    Base.metadata.create_all(engine)
+    session_factory = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+    db = session_factory()
+    try:
+        store = LeadStore(db)
+        propose_owner_action(
+            store,
+            principal=Principal.owner(source="telegram", actor_id=_OWNER_ID),
+            source_ref="tg:digest-match",
+            kind="gmail.create_draft",
+            parameters={"to": "match@example.com", "subject": "S", "body": "B"},
+            target={"recipient": "match@example.com", "provider_binding": {}},
+        )
+        db.commit()
+        item = {"id": "evt.digest.match", "from": _OWNER_ID, "text": "מה מחכה לאישור?"}
+        store.claim_webhook(provider="telegram", provider_event_id=item["id"])
+        port = RecordingMessagePort()
+        settings = Settings(telegram_owner_user_ids=_OWNER_ID)
+
+        result = await run_owner_loop(
+            item=item,
+            store=store,
+            port=port,
+            settings=settings,
+            owner_ids={_OWNER_ID},
+        )
+        db.commit()
+
+        assert result.sent is True
+        assert len(port.sent) == 2  # digest, then the one card
+        assert render_owner_markdown(result.last_reply) == port.sent[0].text
+    finally:
+        db.close()
+        engine.dispose()

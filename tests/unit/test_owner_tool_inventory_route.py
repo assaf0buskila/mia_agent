@@ -175,6 +175,17 @@ async def test_live_surface_uses_only_current_agent_approval_metadata(
     finally:
         db.close()
 
-    expected = approval_keyboard(approval_token("apr_exact_turn")) if approval_ids else None
-    assert port.sent[0].reply_markup == expected
-    assert port.sent[0].reply_markup != approval_keyboard(approval_token("apr_old_unrelated"))
+    # The prose reply never carries a keyboard; a turn-created approval id gets its
+    # own follow-up card message with its own button instead (C2b). "apr_exact_turn"
+    # has no backing row here, so its card renders the generic fallback text -- the
+    # button still binds to the exact id the turn returned, which is what this test
+    # actually pins.
+    if approval_ids:
+        assert len(port.sent) == 2
+        assert port.sent[0].reply_markup is None
+        assert port.sent[-1].reply_markup == approval_keyboard(approval_token("apr_exact_turn"))
+    else:
+        assert len(port.sent) == 1
+        assert port.sent[0].reply_markup is None
+    for message in port.sent:
+        assert message.reply_markup != approval_keyboard(approval_token("apr_old_unrelated"))
