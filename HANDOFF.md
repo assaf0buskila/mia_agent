@@ -27,10 +27,14 @@ below is deployed. Every item is `LOCAL_TESTED` + CI-green + independently revie
 
 - **C3b** — worktree `.claude/worktrees/mia-c3b`, branch `claude/mia-c3b-v2-reports`: owner reports
   count v2 website leads, Sheet `נוצר`/`עודכן` filled from row timestamps, CRM reads stop
-  creating tabs. **C4** — worktree `.claude/worktrees/mia-c4`, branch `claude/mia-c4-gmail-brief`:
-  `gmail_brief` (bounded live daily email data) + `owner_uncertain_writes` (read-only list of
-  `pending_review` writes). Both edit `app/db/store.py`; whichever merges second may need a rebase.
-  Their final state is recorded in `TASKS.md` when this handoff PR was updated.
+  creating tabs (builder still running at handoff; tests were not yet written). **C4** — PR #69,
+  branch `claude/mia-c4-gmail-brief` @ `2c44800`, 2153 passed / 7 skipped, opus review running at
+  handoff: `gmail_brief` (bounded live daily email data, empty = `GMAIL_BRIEF_EMPTY_WINDOW`) +
+  `owner_uncertain_writes` (read-only list of `pending_review` writes, empty =
+  `OWNER_UNCERTAIN_WRITES_EMPTY`), both in `app/tools/owner`/`app/domain`. Both C3b and C4 edit
+  `app/db/store.py`; whichever merges second may need a rebase. Pre-existing test-order flake:
+  `tests/unit/test_gmail_send_policy.py::test_owner_telegram_asked_then_approved_send_calls_send_draft`
+  fails after certain other files on a clean master too — tracked separately, not caused by C4.
 
 ### Remaining queue (in order; max 2 agents at a time)
 
