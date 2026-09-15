@@ -8,11 +8,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from time import monotonic, perf_counter
 
-from app.api.inbound_common import (
-    event_conversation_id,
-    outbound_reply,
-    owner_telegram_reply_markup,
-)
+from app.api.inbound_common import event_conversation_id, outbound_reply
 from app.api.owner import OwnerTurnResult, _is_authorized_owner
 from app.brain.store import BrainStore
 from app.capabilities.types import Principal
@@ -35,6 +31,8 @@ from app.domain.events import (
     new_correlation_id,
     stamp_correlation,
 )
+from app.domain.owner.callbacks import approval_token
+from app.domain.owner.proposal_cards import pending_approval_cards, render_owner_approval_card
 from app.domain.owner.request_routing import (
     is_pending_approvals_request,
     is_tool_inventory_request,
@@ -44,7 +42,8 @@ from app.domain.owner.request_routing import (
 from app.domain.owner.tasks import OwnerTaskType
 from app.domain.tools import AdapterHttpError
 from app.graph.owner_agent import OwnerUsage
-from app.integrations.base import MessagePort
+from app.integrations.base import MessagePort, OutboundMessage
+from app.integrations.telegram_format import approval_keyboard, split_message
 
 _log = logging.getLogger("mia.owner")
 
@@ -143,33 +142,48 @@ async def run_owner_loop(
     if deadline_at is not None and monotonic() >= deadline_at:
         return OwnerTurnResult(processed=True, sent=False, last_reply=None)
 
-    # Bind a proposal button only to approval metadata created by this turn. The
-    # explicit pending-approvals command is the sole path allowed to select an
-    # existing pending row; a failed draft/calendar turn must not attach an old one.
-    markup_task_type = (
-        OwnerTaskType.PENDING_APPROVALS
-        if task_type is OwnerTaskType.PENDING_APPROVALS
-        else OwnerTaskType.NOTE
-    )
-    markup = owner_telegram_reply_markup(
-        store,
-        channel=channel,
-        task_type=markup_task_type,
-        turn_approval_ids=tuple(turn_approval_ids),
-    )
-    message = outbound_reply(item, text=reply, channel=channel, reply_markup=markup)
-    try:
-        with owner_stage("send", source_ref=item.get("id", ""), tool="telegram"):
-            await port.send(message)
-        sent = True
-        if delivery_state is not None:
-            delivery_state["sent"] = True
-    except (RuntimeError, MiaError, AdapterHttpError):
-        # TelegramPort.send raises TelegramSendError (a MiaError) and AdapterHttpError.
-        # `except RuntimeError` only caught the not-configured DisabledMessagePort, so a
-        # Telegram 429 — likely on a split 4096-char reply — threw away an answer the
-        # owner had already waited and paid for, and left the webhook row `received`.
-        sent = False
+    # The prose reply never carries a keyboard: a button bound to a real, reviewable
+    # card is the only thing an approve tap may execute. The explicit pending-approvals
+    # command is the sole path allowed to surface an existing pending row; a failed
+    # draft/calendar turn must not attach an old one.
+    if channel is Channel.TELEGRAM and task_type is OwnerTaskType.PENDING_APPROVALS:
+        outbound = _pending_approvals_messages(store, item=item, empty_reply=reply)
+    else:
+        prose = outbound_reply(item, text=reply, channel=channel, reply_markup=None)
+        outbound = [(prose, "")]
+        if channel is Channel.TELEGRAM and turn_approval_ids:
+            outbound.extend(
+                _turn_approval_card_messages(store, item=item, approval_ids=turn_approval_ids)
+            )
+
+    sent = False
+    with owner_stage("send", source_ref=item.get("id", ""), tool="telegram"):
+        for index, (message, label) in enumerate(outbound):
+            try:
+                await port.send(message)
+                if index == 0:
+                    sent = True
+                    if delivery_state is not None:
+                        delivery_state["sent"] = True
+            except (RuntimeError, MiaError, AdapterHttpError) as exc:
+                # TelegramPort.send raises TelegramSendError (a MiaError) and
+                # AdapterHttpError. `except RuntimeError` only caught the
+                # not-configured DisabledMessagePort, so a Telegram 429 — likely on a
+                # split 4096-char reply — threw away an answer the owner had already
+                # waited and paid for, and left the webhook row `received`.
+                if index == 0:
+                    sent = False
+                else:
+                    # A card is a follow-up to the primary reply, not the reply
+                    # itself: its own send failure is logged (never the proposal's
+                    # content) and the underlying approval row is left exactly as
+                    # it was -- still pending, never retried or re-executed here.
+                    _log.warning(
+                        "owner proposal card send failed reason=%s error=%s label=%s",
+                        "card_send_failed",
+                        type(exc).__name__,
+                        label,
+                    )
     try:
         store.mark_webhook(
             provider=provider,
@@ -202,6 +216,90 @@ async def run_owner_loop(
             )
     del crm_wrote
     return OwnerTurnResult(processed=True, sent=sent, last_reply=reply)
+
+
+_MAX_PENDING_CARDS = 5
+
+
+def _card_chunks(
+    item: dict[str, str], *, text: str, keyboard: dict, label: str
+) -> list[tuple[OutboundMessage, str]]:
+    """One proposal card as one or more `OutboundMessage`s, its keyboard on the last.
+
+    A card can render longer than Telegram's message limit (a full Gmail body, a long
+    CRM summary); `split_message` chunks it exactly like every other long owner reply.
+    Every chunk here is already under that limit, so `TelegramPort.send`'s own
+    splitting is a no-op per chunk and the keyboard placed on the last one lands on
+    the last physical Telegram message, never a mid-card one.
+    """
+    chunks = split_message(text) or [text]
+    last = len(chunks) - 1
+    conversation_id = item.get("chat_id") or item["from"]
+    return [
+        (
+            OutboundMessage(
+                conversation_id=conversation_id,
+                text=chunk,
+                channel=Channel.TELEGRAM.value,
+                idempotency_key=f"{item['id']}:{label}:{index}",
+                parse_mode="HTML",
+                reply_markup=keyboard if index == last else None,
+            ),
+            label,
+        )
+        for index, chunk in enumerate(chunks)
+    ]
+
+
+def _turn_approval_card_messages(
+    store: LeadStore, *, item: dict[str, str], approval_ids: list[str]
+) -> list[tuple[OutboundMessage, str]]:
+    """One card per approval id created by this turn, its own keyboard, tool-call order."""
+    ordered_ids = tuple(
+        dict.fromkeys(value.strip() for value in approval_ids if value and value.strip())
+    )
+    messages: list[tuple[OutboundMessage, str]] = []
+    for approval_id in ordered_ids:
+        row = store.get_approval_by_approval_id(approval_id)
+        card_text = render_owner_approval_card(row)
+        keyboard = approval_keyboard(approval_token(approval_id))
+        messages.extend(
+            _card_chunks(item, text=card_text, keyboard=keyboard, label=f"turn:{approval_id}")
+        )
+    return messages
+
+
+def _pending_approvals_messages(
+    store: LeadStore, *, item: dict[str, str], empty_reply: str
+) -> list[tuple[OutboundMessage, str]]:
+    """The explicit "what's pending?" view: a card per proposal, newest first, capped."""
+    cards, remaining = pending_approval_cards(store, limit=_MAX_PENDING_CARDS)
+    if not cards:
+        prose = outbound_reply(item, text=empty_reply, channel=Channel.TELEGRAM, reply_markup=None)
+        return [(prose, "")]
+    messages: list[tuple[OutboundMessage, str]] = []
+    for approval_id, card_text in cards:
+        keyboard = approval_keyboard(approval_token(approval_id))
+        messages.extend(
+            _card_chunks(
+                item, text=card_text, keyboard=keyboard, label=f"pending:{approval_id}"
+            )
+        )
+    if remaining > 0:
+        word = "ממתין" if remaining == 1 else "ממתינים"
+        messages.append(
+            (
+                OutboundMessage(
+                    conversation_id=item.get("chat_id") or item["from"],
+                    text=f"ועוד {remaining} {word} לאישור.",
+                    channel=Channel.TELEGRAM.value,
+                    idempotency_key=f"{item['id']}:pending:more",
+                    parse_mode="HTML",
+                ),
+                "pending:more",
+            )
+        )
+    return messages
 
 
 def _talk_with_optional_agent(

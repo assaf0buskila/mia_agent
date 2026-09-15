@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from time import perf_counter
 from typing import Literal
 
@@ -26,7 +27,7 @@ from app.domain.owner.callbacks import resolve_owner_callback_result
 from app.domain.owner.composio_writes import execute_approved_composio_write
 from app.domain.owner.linkedin_writes import execute_approved_linkedin_write
 from app.domain.tools import AdapterHttpError
-from app.integrations.base import MessagePort
+from app.integrations.base import MessagePort, OutboundMessage
 from app.integrations.calendar import build_calendar_port
 from app.integrations.calendar_booking import build_calendar_booking_port
 from app.integrations.gmail import build_gmail_port
@@ -43,6 +44,7 @@ from app.integrations.transcribe import TranscriptionError, TranscriptionPort
 from app.workers.telegram_owner import process_telegram_owner_update
 
 router = APIRouter(prefix="/v1/telegram", tags=["telegram"])
+_log = logging.getLogger("mia.telegram")
 
 # This is deliberately fixed text: a transcription provider failure must be visible to
 # the owner, but no provider response, audio bytes, transcript, or configuration detail
@@ -267,7 +269,12 @@ async def _handle_callback(
             "unknown": "תוצאת הפעולה אינה ודאית וממתינה לבדיקה. לא ביצעתי שוב.",
             "expired": "האישור פג. צריך להכין בקשת אישור חדשה.",
         }.get(outcome.status, "הפעולה לא בוצעה.")
+    # `sent` reflects whether the edit itself landed -- never re-run the decided
+    # action just because the owner's console failed to update. A failed edit still
+    # leaves the result unreported, so one fallback sendMessage carries the same
+    # `reply_text` as a new message instead of silently dropping it.
     edit = getattr(port, "edit_message_text", None)
+    sent = False
     if callable(edit) and callback.get("message_id"):
         try:
             await edit(
@@ -276,9 +283,29 @@ async def _handle_callback(
                 text=reply_text,
                 parse_mode="HTML",
             )
+            sent = True
         except (TelegramSendError, AdapterHttpError, RuntimeError):
-            pass
-    return {"processed": 1, "decision": decision, "sent": True}
+            sent = False
+    if not sent:
+        send = getattr(port, "send", None)
+        if callable(send):
+            try:
+                await send(
+                    OutboundMessage(
+                        conversation_id=callback["chat_id"],
+                        text=reply_text,
+                        channel=Channel.TELEGRAM.value,
+                        idempotency_key=f"tg-cb-fallback:{callback.get('callback_query_id', '')}",
+                        parse_mode="HTML",
+                    )
+                )
+            except (TelegramSendError, AdapterHttpError, RuntimeError) as exc:
+                _log.warning(
+                    "owner callback fallback send failed reason=%s error=%s",
+                    "callback_fallback_send_failed",
+                    type(exc).__name__,
+                )
+    return {"processed": 1, "decision": decision, "sent": sent}
 
 
 def _webhook_accepted(*, duplicate: bool, voice: bool = False) -> dict:
