@@ -19,6 +19,7 @@ Telegram-documented one, and is worth eyeballing on a real client.
 
 from __future__ import annotations
 
+import re
 from datetime import date, datetime
 from html import escape
 from zoneinfo import ZoneInfo
@@ -56,6 +57,141 @@ def esc(value: object) -> str:
     `quote=False` produces exactly that set; `"` needs no escaping outside attributes.
     """
     return escape(str(value), quote=False)
+
+
+# render_owner_markdown: a small, safe subset of Markdown -> Telegram HTML for the owner
+# reply prose. None of `esc`, `<`, `>` or `&` are touched by HTML escaping, so these
+# regexes run *after* `esc()` and still see the model's own `**`, backticks, `#` and `-`
+# exactly as written.
+_FENCE_RE = re.compile(r"```(.*?)```", re.DOTALL)
+# A fence's first line is a language tag ONLY when it is nothing but that tag — e.g.
+# ```python\n...``` — never when real code shares that line, e.g. ```echo hi\necho bye```.
+# \r?\n so a fence sent with Windows line endings is recognised the same way.
+_FENCE_LANGUAGE_RE = re.compile(r"^([\w+-]+)\r?\n")
+# \x00/\x01 (below) are internal-only sentinels, so the content class excludes them:
+# bold/code can never match *through* a fence or code placeholder token — see
+# `_stash_fence`/`_stash_code` and the render_owner_markdown docstring.
+_BOLD_INLINE_RE = re.compile(r"\*\*(?!\s)([^\n*\x00\x01]+?)(?<!\s)\*\*")
+_CODE_INLINE_RE = re.compile(r"`([^`\n\x00\x01]+)`")
+_HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
+_BULLET_RE = re.compile(r"^(\s*)[-*]\s+(.*)$")
+_PRE_FENCE_TOKEN = "\x00PRE{}\x00"
+_CODE_INLINE_TOKEN = "\x01CODE{}\x01"
+_FENCE_TOKEN_RE = re.compile(r"\x00PRE\d+\x00")
+
+
+def render_owner_markdown(text: str) -> str:
+    """Escape owner-reply prose, then re-apply a tiny allowlisted Markdown subset.
+
+    Escaping happens FIRST, over the whole text, so a literal `<b>` written by the
+    model (or echoed from a provider) can never become live HTML — it stays
+    `&lt;b&gt;`. Only after that do balanced `**bold**`, `` `code` ``, fenced ``` code
+    blocks ```, `#`/`##`/`###` headings and leading `-`/`* ` bullets turn into real
+    Telegram entities. An unmatched `**` (no closing pair on the same line) is left
+    exactly as typed. Nothing produced here spans a newline except `<pre>`, so
+    `split_message` never has to cut inside a tag other than a fenced block.
+
+    `\\x00`/`\\x01` are stripped from the input FIRST: they are this function's own
+    internal placeholder sentinels (see `_stash_fence`/`_stash_code`), and control
+    characters have no legitimate reason to appear in owner prose. Without this, model
+    text that happened to contain a literal `\\x00PRE0\\x00` would collide with a real
+    placeholder and get substituted a second time (e.g. `<code><pre>foo</pre></code>`).
+    """
+    text = text.replace("\x00", "").replace("\x01", "")
+    escaped = esc(text)
+
+    fences: list[str] = []
+
+    def _stash_fence(match: re.Match[str]) -> str:
+        body = match.group(1)
+        lang_match = _FENCE_LANGUAGE_RE.match(body)
+        if lang_match:
+            body = body[lang_match.end() :]
+        elif body.startswith("\r\n"):
+            body = body[2:]
+        elif body.startswith("\n"):
+            body = body[1:]
+        if body.endswith("\r\n"):
+            body = body[:-2]
+        elif body.endswith("\n"):
+            body = body[:-1]
+        fences.append(f"<pre>{body}</pre>")
+        return _PRE_FENCE_TOKEN.format(len(fences) - 1)
+
+    without_fences = _FENCE_RE.sub(_stash_fence, escaped)
+    rendered = "\n".join(_render_owner_line(line) for line in without_fences.split("\n"))
+    for index, block in enumerate(fences):
+        rendered = rendered.replace(_PRE_FENCE_TOKEN.format(index), block)
+    return rendered
+
+
+def _render_owner_line(line: str) -> str:
+    # A fence placeholder expands to a <pre>...</pre> block later, and Telegram
+    # disallows <pre> nested inside any other entity. A heading's own <b>...</b> wrap
+    # (or, for a bare line, an inline **marker** that happened to straddle the
+    # placeholder) would produce exactly that nesting, so a line carrying one is never
+    # bolded at all — heading markup is dropped and the line passed through as-is.
+    if _FENCE_TOKEN_RE.search(line):
+        heading = _HEADING_RE.match(line)
+        if heading:
+            return _apply_inline_markdown(
+                heading.group(2).strip(), allow_bold=False, allow_code=False
+            )
+        bullet = _BULLET_RE.match(line)
+        if bullet:
+            indent, body = bullet.groups()
+            return f"{indent}• {_apply_inline_markdown(body, allow_bold=False)}"
+        return _apply_inline_markdown(line, allow_bold=False)
+    heading = _HEADING_RE.match(line)
+    if heading:
+        # The whole line is about to be wrapped in <b>; converting an inner **marker**
+        # too would nest <b><b>...</b></b>, so collapse it to plain text instead. Inline
+        # `code` also stays OFF: a nested <code> would make this <b>...</b> span not
+        # "plain" (`_UNSPLITTABLE_SPAN_RE`'s <b> alternative requires no inner `<`), so
+        # it would go unprotected and a hard cut could land inside it unclosed. A
+        # heading is always exactly one plain <b>...</b> span — backticks stay literal.
+        body = _apply_inline_markdown(heading.group(2).strip(), allow_bold=False, allow_code=False)
+        return f"<b>{body}</b>" if body else ""
+    bullet = _BULLET_RE.match(line)
+    if bullet:
+        indent, body = bullet.groups()
+        return f"{indent}• {_apply_inline_markdown(body)}"
+    return _apply_inline_markdown(line)
+
+
+def _apply_inline_markdown(
+    text: str, *, allow_bold: bool = True, allow_code: bool = True
+) -> str:
+    """`code` first, THEN `**bold**` — never the other way round.
+
+    A run like `` **a`b**c` `` has a `**` pair whose content contains a backtick, and a
+    backtick pair whose content contains a `**`. Applying bold first lets its match
+    swallow half of what should be a code span (or vice versa), producing tags that
+    open inside one another and close in the wrong order — Telegram then rejects the
+    whole message. Extracting every code span to an inert placeholder before bold ever
+    runs means bold can only ever match within plain text or within another bold
+    region's edges, never straddle a code span's boundary.
+
+    `allow_code=False` (headings only) leaves backticks untouched instead.
+    """
+    codes: list[str] = []
+
+    if allow_code:
+
+        def _stash_code(match: re.Match[str]) -> str:
+            codes.append(f"<code>{match.group(1)}</code>")
+            return _CODE_INLINE_TOKEN.format(len(codes) - 1)
+
+        without_code = _CODE_INLINE_RE.sub(_stash_code, text)
+    else:
+        without_code = text
+    if allow_bold:
+        without_code = _BOLD_INLINE_RE.sub(lambda m: f"<b>{m.group(1)}</b>", without_code)
+    else:
+        without_code = _BOLD_INLINE_RE.sub(lambda m: m.group(1), without_code)
+    for index, block in enumerate(codes):
+        without_code = without_code.replace(_CODE_INLINE_TOKEN.format(index), block)
+    return without_code
 
 
 def isolate(value: object) -> str:
@@ -216,12 +352,118 @@ def join_sections(*blocks: str) -> str:
     return "\n\n".join(block.strip() for block in blocks if block and block.strip())
 
 
+# Every span this module ever emits that cannot be safely cut in half: a fenced block
+# (which spans newlines by design) and a bold/code span (which never spans a newline,
+# but a raw hard-cut has no newline to respect in the first place). All three are
+# mutually exclusive/non-nesting in our own output, so one regex and one resolver
+# handles all of them identically.
+_UNSPLITTABLE_SPAN_RE = re.compile(
+    r"<pre>.*?</pre>|<b>[^<]*?</b>|<code>[^<]*?</code>", re.DOTALL
+)
+_PRE_OPEN = "<pre>"
+_PRE_CLOSE = "</pre>"
+# Any HTML tag this module emits, or an HTML entity (`&amp;`, `&lt;`, `&gt;`). Both are
+# parsed atomically by Telegram, so a hard cut must never land inside either.
+_TAG_OR_ENTITY_RE = re.compile(r"<[^<>]*>|&[a-zA-Z0-9#]+;")
+
+
+def _span_tags(span_text: str) -> tuple[str, str]:
+    """The (open, close) tag pair for one `_UNSPLITTABLE_SPAN_RE` match."""
+    if span_text.startswith(_PRE_OPEN):
+        return _PRE_OPEN, _PRE_CLOSE
+    if span_text.startswith("<b>"):
+        return "<b>", "</b>"
+    return "<code>", "</code>"
+
+
+def _resolve_unsplittable_span(remaining: str, cut: int, limit: int) -> tuple[int, bool, str, str]:
+    """Adjust `cut` around any `<pre>`/`<b>`/`<code>` span it falls inside.
+
+    Returns `(new_cut, reopen, open_tag, close_tag)`. When the whole span fits under
+    `limit`, it is deferred to the next chunk whole (cut right before it) — or, if it
+    already starts the chunk, included whole (cut right after it) since deferring an
+    already-leading span would produce an empty chunk and stall the loop.
+
+    When the span ALONE is bigger than `limit`, it cannot be deferred or included
+    whole: `reopen=True` tells the caller to close `close_tag` at `new_cut` and reopen
+    `open_tag` at the start of the next chunk, splitting the span itself across chunks
+    rather than ever shipping one oversized chunk or cutting the span in half unclosed.
+    The cut is kept clear of both ends of the content:
+    - at the near end, room is reserved for `close_tag` so `remaining[:cut] +
+      close_tag` never runs past `limit`; if that leaves no content at all, the whole
+      span is deferred to the next chunk instead of opening it just to close it empty
+      (or, when the span already starts this chunk and deferring is not possible,
+      one content character is kept so the loop still makes forward progress);
+    - at the far end, a cut landing at-or-past the span's actual end is folded into
+      this chunk instead (`reopen=False`) so the next chunk never opens with an empty
+      `<tag></tag>` pair.
+    """
+    for match in _UNSPLITTABLE_SPAN_RE.finditer(remaining):
+        if not (match.start() < cut < match.end()):
+            continue
+        open_tag, close_tag = _span_tags(match.group())
+        if match.end() - match.start() <= limit:
+            return (match.start() if match.start() > 0 else match.end()), False, "", ""
+        content_start = match.start() + len(open_tag)
+        content_end = match.end() - len(close_tag)
+        cut = min(cut, content_end, limit - len(close_tag))
+        cut = max(cut, content_start)
+        if cut <= content_start:
+            if match.start() > 0:
+                # Nothing of this span fits in the chunk yet — defer it whole rather
+                # than opening it just to close it immediately.
+                return match.start(), False, "", ""
+            # The span already starts the chunk, so there is nothing left to defer
+            # to: keep one content character to guarantee the loop still progresses.
+            cut = content_start + 1
+        if cut >= content_end:
+            return match.end(), False, "", ""
+        return cut, True, open_tag, close_tag
+    return cut, False, "", ""
+
+
+def _safe_hard_cut(text: str, limit: int) -> int:
+    """A last-resort hard cut at `limit`, nudged off any tag/entity and toward a space.
+
+    `window.rfind` found no usable newline, so the cut is a raw character index. That
+    index must never land inside `<...>` or `&...;` — Telegram parses both atomically —
+    and a nearby space reads better than an arbitrary mid-word cut. Both nudges only
+    move the cut earlier and only when the result still leaves a reasonably sized
+    chunk, mirroring the `limit // 2` floor already used for the paragraph/line cuts.
+
+    Neither nudge is span-aware: the space this finds can still sit inside a `<b>` or
+    `<code>` span's content (a tag/entity match only covers the 3-7 literal characters
+    of the tag itself, not everything between an opening and closing tag). That is
+    `split_message`'s job via `_resolve_unsplittable_span`, applied to every cut —
+    newline-based or hard — right after this returns.
+    """
+    cut = limit
+    for match in _TAG_OR_ENTITY_RE.finditer(text):
+        if match.start() >= cut:
+            break
+        if match.start() < cut < match.end():
+            cut = match.start()
+            break
+    space = text.rfind(" ", 0, cut)
+    if space >= limit // 2:
+        cut = space
+    return cut
+
+
 def split_message(text: str, *, limit: int = _CHUNK_BUDGET) -> list[str]:
     """Chunk to stay under the 4096 limit, preferring paragraph then line boundaries.
 
-    Splitting never lands inside an HTML tag because it only cuts on newlines, and this
-    module never emits a tag containing one.
+    Splitting never lands inside a `<pre>`, `<b>` or `<code>` span (never mid-tag,
+    mid-entity, and — thanks to `_resolve_unsplittable_span` — never with one of these
+    three sliced without being closed and reopened), so every chunk is independently
+    valid Telegram HTML, even when a single such span alone is bigger than `limit`.
+
+    `limit` is floored at 64: production always calls with the default (3900), so this
+    only ever affects a caller passing something pathologically small, and it exists
+    purely to keep the reopen path's per-iteration progress well clear of the few
+    bytes a `<pre>`/`<code>` open+close tag pair costs on its own.
     """
+    limit = max(limit, 64)
     cleaned = text.strip()
     if not cleaned:
         return []
@@ -235,7 +477,12 @@ def split_message(text: str, *, limit: int = _CHUNK_BUDGET) -> list[str]:
         if cut < limit // 2:
             cut = window.rfind("\n")
         if cut < limit // 2:
-            cut = limit
+            cut = _safe_hard_cut(remaining, limit)
+        cut, reopen_span, open_tag, close_tag = _resolve_unsplittable_span(remaining, cut, limit)
+        if reopen_span:
+            chunks.append(remaining[:cut] + close_tag)
+            remaining = open_tag + remaining[cut:]
+            continue
         chunks.append(remaining[:cut].strip())
         remaining = remaining[cut:].strip()
     if remaining:

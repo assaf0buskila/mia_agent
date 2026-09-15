@@ -128,14 +128,39 @@ _SHEETS_NEEDLES: tuple[str, ...] = (
 )
 
 _TOOLKIT_NEEDLES: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("instagram", ("instagram", "אינסטגרם", "ig ", " ריל", "reel", "פוסט")),
+    (
+        "instagram",
+        ("instagram", "אינסטגרם", "אינסטה", "ig ", " ריל", "reel", "פוסט"),
+    ),
     ("gmail", ("gmail", "מייל", "inbox", "דואר")),
     ("calendar", ("יומן", "calendar", "פגישה", "agenda")),
     ("gsc", ("search console", "gsc", "קונסולת חיפוש", "impressions")),
     ("ga4", ("ga4", "analytics", "אנליטיקס", "traffic", "תנועה")),
     ("sheets", _SHEETS_NEEDLES),
-    ("linkedin", ("linkedin", "לינקדאין")),
+    ("linkedin", ("linkedin", "לינקדאין", "לינקדין", "לינקד אין")),
     ("whatsapp", ("whatsapp", "וואטסאפ", "ווטסאפ")),
+)
+
+# Instagram and LinkedIn are the only two toolkits that share a generic trigger word
+# ("פוסט"/"post" — see the instagram entry above). Because `_TOOLKIT_NEEDLES` is scanned
+# in order and instagram comes first, a sentence that names LinkedIn explicitly while
+# also containing that generic word ("תכתבי לי פוסט ללינקדאין") would otherwise resolve
+# to instagram just by being scanned first. These two lists exist ONLY to break that
+# specific tie — no other toolkit has this collision, so no other toolkit needs one.
+#
+# Bare Latin "insta" and "linked in" are deliberately NOT registered anywhere, even
+# though they are real colloquial spellings: "insta" is a substring of ordinary English
+# words ("install", "instant", "instance", "instability") and would hijack them, and
+# "linked in" reads as an ordinary two-word phrase ("I linked in the doc") far more
+# often than as the platform name — a word-boundary check cannot tell those apart since
+# "in" already ends on a natural boundary either way. The Hebrew spellings (אינסטה,
+# לינקדין, לינקד אין) have no such collision risk and stay.
+_INSTAGRAM_EXPLICIT_NEEDLES: tuple[str, ...] = ("instagram", "אינסטגרם", "אינסטה")
+_LINKEDIN_EXPLICIT_NEEDLES: tuple[str, ...] = (
+    "linkedin",
+    "לינקדאין",
+    "לינקדין",
+    "לינקד אין",
 )
 
 
@@ -172,12 +197,37 @@ def identity_required_for(action: str) -> bool:
 
 
 def asked_toolkit(text: str) -> str:
-    """The toolkit he named. Empty if he did not name one."""
+    """The toolkit he named. Empty if he did not name one.
+
+    Runs the plain ordered scan first — unchanged from before, so every toolkit that
+    has no shared generic word (gmail, calendar, sheets, ...) keeps its original
+    first-match behaviour exactly. Only when that scan's answer is "instagram" do we
+    check whether the sentence actually named a platform explicitly: an explicit
+    LinkedIn mention (with no explicit Instagram mention) overrides the generic-word
+    match, and naming both explicitly forces neither — guessing would be worse than
+    asking. A generic word alone ("פוסט" with no explicit name) still resolves to
+    instagram, exactly as before.
+    """
     blob = f" {text.strip().lower()} "
+
+    def _matches(needles: tuple[str, ...]) -> bool:
+        return any(needle in blob or needle in text for needle in needles)
+
+    candidate = ""
     for toolkit, needles in _TOOLKIT_NEEDLES:
-        if any(needle in blob or needle in text for needle in needles):
-            return toolkit
-    return ""
+        if _matches(needles):
+            candidate = toolkit
+            break
+
+    if candidate == "instagram":
+        instagram_named = _matches(_INSTAGRAM_EXPLICIT_NEEDLES)
+        linkedin_named = _matches(_LINKEDIN_EXPLICIT_NEEDLES)
+        if linkedin_named and instagram_named:
+            return ""
+        if linkedin_named:
+            return "linkedin"
+
+    return candidate
 
 
 def is_sheets_alias(text: str) -> bool:

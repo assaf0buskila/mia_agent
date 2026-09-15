@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, date, datetime
 
 import pytest
@@ -9,6 +10,7 @@ from app.domain.owner.callbacks import approval_token, resolve_owner_callback
 from app.integrations.telegram import ALLOWED_UPDATES, parse_telegram_callback
 from app.integrations.telegram_format import (
     MAX_CALLBACK_BYTES,
+    MAX_MESSAGE_CHARS,
     CallbackDataTooLong,
     approval_keyboard,
     blockquote,
@@ -25,6 +27,7 @@ from app.integrations.telegram_format import (
     parse_callback_token,
     plain_text_length,
     relative_hebrew_day,
+    render_owner_markdown,
     section,
     split_message,
 )
@@ -236,3 +239,423 @@ def test_split_prefers_paragraph_boundaries() -> None:
 
 def test_empty_message_yields_no_chunks() -> None:
     assert split_message("   ") == []
+
+
+# --------------------------------------------------------- render_owner_markdown
+
+
+def test_render_owner_markdown_bold_mixes_hebrew_and_english() -> None:
+    assert (
+        render_owner_markdown("רוצה **לתאם פגישה** ב-Zoom מחר")
+        == "רוצה <b>לתאם פגישה</b> ב-Zoom מחר"
+    )
+
+
+def test_render_owner_markdown_escapes_ampersand_and_angle_brackets() -> None:
+    assert render_owner_markdown("A & B < C > D") == "A &amp; B &lt; C &gt; D"
+
+
+def test_render_owner_markdown_never_passes_through_model_html() -> None:
+    """A literal <b>hi</b> written or echoed by the model must stay inert text."""
+    rendered = render_owner_markdown("<b>hi</b> and **actually bold**")
+    assert rendered == "&lt;b&gt;hi&lt;/b&gt; and <b>actually bold</b>"
+
+
+def test_render_owner_markdown_heading_and_bullets() -> None:
+    rendered = render_owner_markdown("### עדכונים\n- דבר אחד\n- דבר שני\n* דבר שלישי")
+    assert rendered == "<b>עדכונים</b>\n• דבר אחד\n• דבר שני\n• דבר שלישי"
+
+
+def test_render_owner_markdown_inline_code() -> None:
+    assert (
+        render_owner_markdown("תריץ `git status` ותגיד לי")
+        == "תריץ <code>git status</code> ותגיד לי"
+    )
+
+
+def test_render_owner_markdown_fenced_code_block_is_kept_literal() -> None:
+    raw = "לפני:\n```\nprint('<b>x</b>')\n**not bold**\n```\nאחרי"
+    rendered = render_owner_markdown(raw)
+    assert rendered == (
+        "לפני:\n<pre>print('&lt;b&gt;x&lt;/b&gt;')\n**not bold**</pre>\nאחרי"
+    )
+
+
+def test_render_owner_markdown_unbalanced_bold_stays_literal() -> None:
+    assert render_owner_markdown("זה **לא נסגר תקין") == "זה **לא נסגר תקין"
+
+
+def test_render_owner_markdown_two_pairs_on_one_line_both_convert() -> None:
+    assert (
+        render_owner_markdown("**א** וגם **ב**")
+        == "<b>א</b> וגם <b>ב</b>"
+    )
+
+
+def test_render_owner_markdown_existing_escape_test_still_matches() -> None:
+    """The pre-existing contract: plain text with no markdown is just escaped."""
+    assert render_owner_markdown("a & b < c") == "a &amp; b &lt; c"
+
+
+# ---------------------------------------------- split_message + <pre> safety
+
+
+def test_split_message_keeps_a_long_fenced_block_whole() -> None:
+    lead_in = "\n\n".join(f"פסקה {index} " + "x" * 150 for index in range(15))
+    code_block = "<pre>" + "\n".join(f"line {i}" for i in range(80)) + "</pre>"
+    tail = "\n\n".join(f"סיכום {index} " + "y" * 150 for index in range(15))
+    body = f"{lead_in}\n\n{code_block}\n\n{tail}"
+    assert len(body) > MAX_MESSAGE_CHARS
+    chunks = split_message(body)
+    assert len(chunks) > 1
+    pre_open = pre_close = 0
+    for chunk in chunks:
+        pre_open += chunk.count("<pre>")
+        pre_close += chunk.count("</pre>")
+        # Every chunk is independently valid: an equal, matched count of open/close.
+        assert chunk.count("<pre>") == chunk.count("</pre>")
+        assert not chunk.startswith("</pre>")
+        assert not chunk.endswith("<pre>")
+    assert pre_open == pre_close == 1
+    assert code_block in "".join(chunks)
+
+
+def test_render_then_split_produces_balanced_html_per_chunk() -> None:
+    paragraphs = [f"**כותרת {i}**\nשורה עם `code {i}` ועוד טקסט " + "מ" * 120 for i in range(60)]
+    raw = "\n\n".join(paragraphs)
+    rendered = render_owner_markdown(raw)
+    chunks = split_message(rendered)
+    assert len(chunks) > 1
+    for chunk in chunks:
+        assert chunk.count("<b>") == chunk.count("</b>")
+        assert chunk.count("<code>") == chunk.count("</code>")
+        assert chunk.count("<pre>") == chunk.count("</pre>")
+
+
+def test_split_message_splits_a_single_oversized_fence_with_reopen() -> None:
+    """A fence bigger than the limit alone must never ship as one oversized chunk."""
+    code_block = "<pre>" + "\n".join(f"line {i:04d} " + "z" * 40 for i in range(200)) + "</pre>"
+    assert len(code_block) > MAX_MESSAGE_CHARS
+    chunks = split_message(code_block)
+    assert len(chunks) > 1
+    for chunk in chunks:
+        assert len(chunk) <= MAX_MESSAGE_CHARS
+        assert chunk.count("<pre>") == chunk.count("</pre>")
+        assert not chunk.startswith("</pre>")
+        assert not chunk.endswith("<pre>")
+    # The close/reopen seam is the only thing inserted; nothing else was lost or added.
+    rejoined = "".join(chunks).replace("</pre><pre>", "")
+    assert rejoined == code_block
+
+
+def test_split_message_splits_two_oversized_fences_independently() -> None:
+    fence_1 = "<pre>" + "\n".join(f"a-line {i:04d} " + "p" * 40 for i in range(150)) + "</pre>"
+    fence_2 = "<pre>" + "\n".join(f"b-line {i:04d} " + "q" * 40 for i in range(150)) + "</pre>"
+    body = f"{fence_1}\n\nmiddle text\n\n{fence_2}"
+    assert len(body) > MAX_MESSAGE_CHARS * 2
+    chunks = split_message(body)
+    assert len(chunks) > 2
+    for chunk in chunks:
+        assert len(chunk) <= MAX_MESSAGE_CHARS
+        assert chunk.count("<pre>") == chunk.count("</pre>")
+        assert not chunk.startswith("</pre>")
+        assert not chunk.endswith("<pre>")
+    assert "middle text" in "".join(chunks)
+    assert "a-line 0000" in "".join(chunks)
+    assert "b-line 0149" in "".join(chunks)
+
+
+# ------------------------------------- bold/code must never interleave (P1-b)
+
+
+def test_render_owner_markdown_bold_then_code_stays_balanced() -> None:
+    rendered = render_owner_markdown("**a`b**c`")
+    assert rendered == "**a<code>b**c</code>"
+    assert rendered.count("<code>") == rendered.count("</code>")
+    assert "<b>" not in rendered
+    assert "<b><code>" not in rendered
+    assert "<code></b>" not in rendered
+
+
+def test_render_owner_markdown_code_then_bold_stays_balanced() -> None:
+    rendered = render_owner_markdown("**`a**`")
+    assert rendered == "**<code>a**</code>"
+    assert rendered.count("<code>") == rendered.count("</code>")
+    assert "<b>" not in rendered
+    assert "<b><code>" not in rendered
+    assert "<code></b>" not in rendered
+
+
+# ------------------------------------------- hard-cut tag/entity safety (P2)
+
+
+def test_split_message_hard_cut_avoids_breaking_tags_and_entities() -> None:
+    """400x 'word **bold** ' on one line forces the raw hard-cut fallback."""
+    rendered = render_owner_markdown("word **bold** " * 400)
+    chunks = split_message(rendered)
+    assert len(chunks) > 1
+    entity_re = re.compile(r"&[a-zA-Z0-9#]+;")
+    for chunk in chunks:
+        assert len(chunk) <= MAX_MESSAGE_CHARS
+        assert chunk.count("<b>") == chunk.count("</b>")
+        assert chunk.count("<") == chunk.count(">")
+        # No stray "&" left over from a bisected entity.
+        assert "&" not in entity_re.sub("", chunk)
+
+
+def test_split_message_hard_cut_avoids_breaking_an_entity() -> None:
+    """The naive `cut = limit` fallback is constructed to land INSIDE `&amp;`.
+
+    `_CHUNK_BUDGET` is 3900. Placing the raw "&" at index 3898 puts the escaped
+    "&amp;" at chars [3898, 3903) - so index 3900 (the "m") sits strictly inside it.
+    Without `_safe_hard_cut` this test fails: `remaining[:3900]` ends in a bare "&a"
+    with no closing ";" (so `entity_re` can't match and strip it), proving the fix is
+    load-bearing rather than accidentally satisfied by an aligned repeating pattern.
+    """
+    raw = "x" * 3898 + "&" + "x" * 200
+    rendered = render_owner_markdown(raw)
+    assert rendered[3898:3903] == "&amp;"
+    chunks = split_message(rendered)
+    assert len(chunks) > 1
+    entity_re = re.compile(r"&[a-zA-Z0-9#]+;")
+    for chunk in chunks:
+        assert len(chunk) <= MAX_MESSAGE_CHARS
+        assert "&" not in entity_re.sub("", chunk)
+    assert "".join(chunks) == rendered
+
+
+# ---------------------------------- hard-cut must never split <b>/<code> (P2)
+
+
+def test_split_message_hard_cut_never_splits_a_bold_span() -> None:
+    rendered = render_owner_markdown("x" * 3000 + " **" + "word " * 300 + "end**")
+    chunks = split_message(rendered)
+    assert len(chunks) > 1
+    for chunk in chunks:
+        assert len(chunk) <= MAX_MESSAGE_CHARS
+        assert chunk.count("<b>") == chunk.count("</b>")
+        assert not chunk.startswith("</b>")
+        assert not chunk.endswith("<b>")
+    joined = "".join(chunks)
+    assert "<b>" in joined and "end</b>" in joined
+    assert "x" * 3000 in joined
+
+
+def test_split_message_hard_cut_never_splits_a_bold_span_hebrew() -> None:
+    rendered = render_owner_markdown("שלום " * 700 + "**" + "מודגש bold " * 200 + "סוף**")
+    chunks = split_message(rendered)
+    assert len(chunks) > 1
+    for chunk in chunks:
+        assert len(chunk) <= MAX_MESSAGE_CHARS
+        assert chunk.count("<b>") == chunk.count("</b>")
+        assert not chunk.startswith("</b>")
+        assert not chunk.endswith("<b>")
+    joined = "".join(chunks)
+    assert "<b>" in joined and "סוף</b>" in joined
+
+
+def test_split_message_hard_cut_never_splits_a_code_span() -> None:
+    rendered = render_owner_markdown("a " * 1900 + "`" + "c " * 300 + "`")
+    chunks = split_message(rendered)
+    assert len(chunks) > 1
+    for chunk in chunks:
+        assert len(chunk) <= MAX_MESSAGE_CHARS
+        assert chunk.count("<code>") == chunk.count("</code>")
+        assert not chunk.startswith("</code>")
+        assert not chunk.endswith("<code>")
+    joined = "".join(chunks)
+    assert "<code>" in joined and "</code>" in joined
+
+
+def test_split_message_reopens_a_bold_span_bigger_than_the_limit() -> None:
+    """Like an oversized <pre>, an oversized <b>/<code> is closed and reopened."""
+    rendered = "<b>" + ("word " * 900) + "</b>"
+    assert len(rendered) > MAX_MESSAGE_CHARS
+    chunks = split_message(rendered)
+    assert len(chunks) > 1
+    for chunk in chunks:
+        assert len(chunk) <= MAX_MESSAGE_CHARS
+        assert chunk.count("<b>") == chunk.count("</b>")
+        assert not chunk.startswith("</b>")
+        assert not chunk.endswith("<b>")
+    rejoined = "".join(chunks).replace("</b><b>", "")
+    assert rejoined == rendered
+
+
+def test_split_message_avoids_an_empty_pre_pair_when_the_close_lands_at_the_limit() -> None:
+    """A span oversized by only a few chars, whose content ends exactly at `limit`.
+
+    Without folding a cut landing at the span's end into the current chunk, the naive
+    close/reopen produces a second, useless "<pre></pre>" chunk. Every chunk must
+    still be non-empty, balanced, and within the limit (the exact chunk count is not
+    load-bearing — the close-tag budget reservation can legitimately split this into
+    more than one non-empty chunk).
+    """
+    from app.integrations.telegram_format import _CHUNK_BUDGET
+
+    content_len = _CHUNK_BUDGET - len("<pre>")
+    rendered = "<pre>" + "c" * content_len + "</pre>"
+    assert len(rendered) > _CHUNK_BUDGET
+    chunks = split_message(rendered)
+    assert "<pre></pre>" not in chunks
+    for chunk in chunks:
+        assert chunk.count("<pre>") == chunk.count("</pre>") == 1
+        assert len(chunk) <= MAX_MESSAGE_CHARS
+    rejoined = "".join(chunks).replace("</pre><pre>", "")
+    assert rejoined == rendered
+
+
+# --------------------------------------------------- fence language tag (P3)
+
+
+def test_render_owner_markdown_fence_first_code_line_is_not_dropped_as_a_language() -> None:
+    """A first line is a language tag only when it is nothing else - "echo hi" is code."""
+    rendered = render_owner_markdown("```echo hi\necho bye```")
+    assert rendered == "<pre>echo hi\necho bye</pre>"
+
+
+def test_render_owner_markdown_fence_language_tag_is_still_dropped() -> None:
+    rendered = render_owner_markdown("```python\nprint(1)\n```")
+    assert rendered == "<pre>print(1)</pre>"
+
+
+def test_render_owner_markdown_heading_does_not_double_bold() -> None:
+    assert render_owner_markdown("# **h**") == "<b>h</b>"
+    assert render_owner_markdown("## **שלום** עולם") == "<b>שלום עולם</b>"
+
+
+def test_render_owner_markdown_fence_language_tag_accepts_crlf() -> None:
+    rendered = render_owner_markdown("```python\r\nprint(1)\r\n```")
+    assert rendered == "<pre>print(1)</pre>"
+
+
+# --------------------------------------------- bold must never wrap a fence (P3)
+
+
+def test_render_owner_markdown_bold_around_a_fence_stays_literal() -> None:
+    """Telegram disallows <pre> nested inside another entity (e.g. <b>).
+
+    "**```x```**" must never become "<b><pre>x</pre></b>" - the "**" markers around a
+    fence placeholder are left as literal asterisks instead of being converted, since
+    converting them would force exactly that illegal nesting.
+    """
+    rendered = render_owner_markdown("**```x```**")
+    assert rendered == "**<pre>x</pre>**"
+    assert "<b>" not in rendered
+
+
+def test_render_owner_markdown_heading_with_a_fence_drops_the_bold_wrapper() -> None:
+    rendered = render_owner_markdown("### ```x```")
+    assert rendered == "<pre>x</pre>"
+    assert "<b>" not in rendered
+
+
+def test_render_owner_markdown_multiline_fence_inside_bold_stays_literal() -> None:
+    rendered = render_owner_markdown("**```\nline1\nline2\n```**")
+    assert rendered == "**<pre>line1\nline2</pre>**"
+    assert "<b>" not in rendered
+
+
+# ------------------------------------------- placeholder collision guard (P3)
+
+
+def test_render_owner_markdown_strips_literal_placeholder_bytes_from_input() -> None:
+    """Model text containing our own internal sentinel must not collide with it.
+
+    Without stripping \\x00/\\x01 first, a literal "\\x00PRE0\\x00" in the input would
+    be replaced a second time when the real fence's placeholder is restored.
+    """
+    rendered = render_owner_markdown("\x00PRE0\x00 and ```real fence```")
+    assert "\x00" not in rendered
+    assert "\x01" not in rendered
+    assert rendered == "PRE0 and <pre>real fence</pre>"
+
+
+def test_render_owner_markdown_strips_literal_code_placeholder_bytes() -> None:
+    rendered = render_owner_markdown("\x01CODE0\x01 and `real code`")
+    assert "\x01" not in rendered
+    assert rendered == "CODE0 and <code>real code</code>"
+
+
+# ------------------------------------ heading + inline code stays plain (P2)
+
+
+def test_render_owner_markdown_heading_with_inline_code_is_a_plain_bold_span() -> None:
+    """A heading is always exactly one plain <b>...</b> span - never <b>...<code>...
+
+    `_UNSPLITTABLE_SPAN_RE`'s <b> alternative requires no inner "<", so a <code> nested
+    inside it would go unprotected and a hard cut could land inside it, unclosed.
+    Backticks inside a heading stay literal instead of becoming <code>.
+    """
+    raw = "# " + "title " * 700 + "`code here` " + "more " * 200
+    rendered = render_owner_markdown(raw)
+    assert "<code>" not in rendered
+    assert rendered.count("<b>") == 1
+    assert rendered.startswith("<b>") and rendered.endswith("</b>")
+    for limit in (3900, 4096, 50):
+        chunks = split_message(rendered, limit=limit)
+        assert len(chunks) > 1
+        for chunk in chunks:
+            assert chunk.count("<b>") == chunk.count("</b>")
+            assert not chunk.startswith("</b>")
+            assert not chunk.endswith("<b>")
+
+
+# --------------------------- span opening exactly at the cut is deferred (P3)
+
+
+def test_split_message_defers_an_oversized_pre_that_opens_at_the_cut() -> None:
+    raw = "w" * 3895 + "```\n" + "m" * 5000 + "\n```"
+    rendered = render_owner_markdown(raw)
+    chunks = split_message(rendered)
+    assert len(chunks) > 1
+    for chunk in chunks:
+        assert len(chunk) <= MAX_MESSAGE_CHARS
+        assert chunk.count("<pre>") == chunk.count("</pre>")
+        assert not chunk.startswith("</pre>")
+        assert not chunk.endswith("<pre>")
+        assert "<pre></pre>" not in chunk
+
+
+def test_split_message_defers_an_oversized_bold_span_that_opens_at_the_cut() -> None:
+    rendered = "w" * 3897 + "<b>" + "m" * 5000 + "</b>"
+    chunks = split_message(rendered)
+    assert len(chunks) > 1
+    for chunk in chunks:
+        assert len(chunk) <= MAX_MESSAGE_CHARS
+        assert chunk.count("<b>") == chunk.count("</b>")
+        assert not chunk.startswith("</b>")
+        assert not chunk.endswith("<b>")
+        assert "<b></b>" not in chunk
+
+
+def test_split_message_defers_an_oversized_code_span_that_opens_at_the_cut() -> None:
+    rendered = "w" * 3894 + "<code>" + "m" * 5000 + "</code>"
+    chunks = split_message(rendered)
+    assert len(chunks) > 1
+    for chunk in chunks:
+        assert len(chunk) <= MAX_MESSAGE_CHARS
+        assert chunk.count("<code>") == chunk.count("</code>")
+        assert not chunk.startswith("</code>")
+        assert not chunk.endswith("<code>")
+        assert "<code></code>" not in chunk
+
+
+# ------------------------------- minimum-limit guard against zero progress (P3)
+
+
+def test_split_message_terminates_when_limit_is_smaller_than_a_tag_pair() -> None:
+    """limit 10-13 is smaller than <pre>'s open+close (11 chars) combined.
+
+    Without a floor, the reopen path's per-iteration progress could hit zero and spin
+    forever. `chunks` returning at all (rather than the test hanging) is the point.
+    """
+    rendered = "<pre>" + "m" * 500 + "</pre>"
+    for limit in (10, 11, 12, 13):
+        chunks = split_message(rendered, limit=limit)
+        assert chunks
+        for chunk in chunks:
+            assert chunk.count("<pre>") == chunk.count("</pre>")
+            assert "<pre></pre>" not in chunk
+        rejoined = "".join(chunks).replace("</pre><pre>", "")
+        assert rejoined == rendered

@@ -80,6 +80,68 @@ def test_asked_toolkit_first_and_say_tool_before_numbers() -> None:
     )
 
 
+def test_asked_toolkit_explicit_platform_outranks_generic_word() -> None:
+    # A generic word ("פוסט"/"post") alone still resolves to today's default (instagram).
+    assert asked_toolkit("תכתבי פוסט") == "instagram"
+    # But an explicitly named platform wins even when a generic word for another
+    # toolkit ("פוסט") is also present in the sentence.
+    assert asked_toolkit("תכתבי לי פוסט ללינקדאין") == "linkedin"
+    assert asked_toolkit("post for LinkedIn") == "linkedin"
+    assert asked_toolkit("פוסט לאינסטגרם") == "instagram"
+    # Two platforms explicitly named at once: don't force either.
+    assert asked_toolkit("פוסט ללינקדאין ולאינסטגרם") == ""
+    assert asked_toolkit("instagram or linkedin post") == ""
+    # More linkedin/instagram spellings (P3) - Hebrew only; see
+    # test_asked_toolkit_drops_ambiguous_latin_spellings for why the Latin colloquial
+    # spellings ("insta", "linked in") are deliberately not registered.
+    assert asked_toolkit("תכתבי פוסט ללינקדין") == "linkedin"
+    assert asked_toolkit("פוסט ללינקד אין בבקשה") == "linkedin"
+    assert asked_toolkit("תעלי לי סטורי לאינסטה") == "instagram"
+
+
+def test_asked_toolkit_drops_ambiguous_latin_spellings() -> None:
+    """Bare "insta" and "linked in" are real spellings but ordinary-English magnets.
+
+    Base a04a6d8 routed all four of these correctly; a prior fix that registered bare
+    "insta" as an instagram needle broke every one of them because "insta" is a
+    substring of common English words and instagram is scanned first. "insta" and
+    "linked in" must stay unregistered (the Hebrew spellings אינסטה/לינקדין/לינקד אין
+    have no such collision and are covered elsewhere).
+    """
+    assert asked_toolkit("install the calendar integration") == "calendar"
+    assert asked_toolkit("check my calendar for an instant meeting") == "calendar"
+    assert asked_toolkit("open the gmail instance") == "gmail"
+    assert asked_toolkit("constant instability in traffic") == "ga4"
+    # A two-word English phrase reading as ordinary prose, not the platform name.
+    assert asked_toolkit("I linked in the doc, make a פוסט") == "instagram"
+    # The bare Latin spellings genuinely used for the platforms now match nothing -
+    # an accepted, documented tradeoff for not hijacking the sentences above.
+    assert asked_toolkit("post it on insta") == ""
+    assert asked_toolkit("write a post for linked in") == ""
+
+
+def test_asked_toolkit_tie_rule_stays_scoped_to_instagram_and_linkedin() -> None:
+    """The instagram/linkedin tie-break must not leak into unrelated toolkits.
+
+    A loose substring in another toolkit's needles (e.g. "שיט" inside "שיטה"/"שיטת",
+    a plain Hebrew word for "method") must never manufacture a false tie, and must
+    never preempt a toolkit the plain ordered scan would have picked first.
+    """
+    # Calendar named first, instagram second: the ordered scan hits instagram's own
+    # needle ("פוסט"/"אינסטגרם") before ever reaching calendar's "יומן" — unaffected
+    # by the instagram/linkedin override, which never triggers without a linkedin name.
+    assert asked_toolkit("תבדוק את היומן ותכין פוסט לאינסטגרם") == "instagram"
+    # "שיטה" (method) contains "שיט" (the sheets abbreviation) only as a substring;
+    # it must not manufacture a false instagram/sheets tie.
+    assert asked_toolkit("פוסט לאינסטגרם בשיטה חדשה") == "instagram"
+    # The ordered scan reaches "sheets" (via "sheet" in "cheat sheet") before it ever
+    # considers instagram, so naming LinkedIn later in the sentence must not steal it.
+    assert asked_toolkit("cheat sheet for a linkedin post") == "sheets"
+    # "שיטת" (method-of) again collides on "שיט"; the generic "פוסט" default (today's
+    # behaviour, no platform named explicitly) must win, not the sheets substring.
+    assert asked_toolkit("שיטת עבודה לפוסט") == "instagram"
+
+
 def test_ig_format_names_post_and_account_before_numbers() -> None:
     items = [
         ContentInsight(
