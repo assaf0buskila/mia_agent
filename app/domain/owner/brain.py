@@ -324,6 +324,14 @@ def answer_owner(
             text,
             False,
             outcome.tools_used,
+            # The agent may have already spent real provider tokens across one or
+            # more completed model calls before it failed (provider error, budget
+            # exhausted, refusal, ...). Omitting these here used to silently
+            # report 0 for every failed-but-attempted turn -- far more common
+            # than an outright exception -- so the audit trail undercounted
+            # spend on exactly the turns worth auditing.
+            outcome.tokens_in,
+            outcome.tokens_out,
             fallback_reason=reason,
             model=model,
             steps=outcome.steps_used,

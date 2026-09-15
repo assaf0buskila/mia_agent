@@ -552,6 +552,76 @@ def test_looks_empty_only_counts_a_genuine_no_data_success() -> None:
     )
 
 
+# Every one of these is a real `ToolResult(ok=True, text=...)` (or `_empty(...)`
+# fallback) an owner tool handler returns -- literals copied here with a
+# file:line comment because crm.py/sheets.py/owner_tools.py are owned by
+# another open chunk and cannot be imported from or edited in this one.
+# Before precise markers existed, none of these tripped the empty-result
+# repeat limit at all (the old <=60-char rule was the only thing that caught
+# most of them), so a model could loop e.g. crm_search past the step cap
+# without the guard ever firing.
+_REAL_NO_DATA_TOOL_TEXTS = (
+    "No CRM contact matched.",  # app/tools/owner/crm.py:29
+    "No unresolved CRM conflicts.",  # app/tools/owner/crm.py:142
+    "No matching lead.",  # app/tools/owner/operations.py:158,165
+    "No meeting brief available for lead_42.",  # app/tools/owner/operations.py:172
+    "LinkedIn returned nothing.",  # app/tools/owner/analytics.py:174
+    "SEO ports returned nothing. Check GSC site URL and GA4 property.",  # analytics.py:54
+    "Instagram insights returned nothing.",  # app/tools/owner/analytics.py:210
+    "The requested Sheet range is empty.",  # app/tools/owner/sheets.py:100
+    "No visible tabs were returned for this Sheet.",  # app/tools/owner/sheets.py:129
+    "No matching tool in an ACTIVE owner Composio toolkit.",  # composio.py:77
+    "That tool is not in an ACTIVE owner Composio toolkit.",  # composio.py:98
+    "No free slots found.",  # app/tools/owner/calendar.py:41
+    "No Gmail thread matched. Name a thread: or lead id.",  # app/tools/owner/gmail.py:159
+    "No activity recorded for today yet.",  # app/tools/owner/operations.py:31-38
+    "No activity recorded for this week yet.",  # app/tools/owner/operations.py:45
+    "No hot leads right now.",  # app/tools/owner/operations.py:59
+    "Nothing is waiting for approval.",  # app/tools/owner/operations.py:67
+    "No website conversations yet.",  # app/tools/owner/operations.py:72
+    "Nothing to report.",  # app/tools/owner/operations.py:77,85
+    "Nothing new was booked.",  # app/tools/owner/operations.py:186
+    "No content ideas available.",  # app/tools/owner/operations.py:199
+    "Research search returned nothing. Check the Firecrawl key.",  # research.py:41
+    "No stored memory matches that.",  # app/tools/owner/brain.py:39
+    "Nothing in the website knowledge base matches that.",  # app/tools/owner/brain.py:66
+    "No entities recorded yet.",  # app/tools/owner/brain.py:151
+    "לא מצאתי את המייל.",  # gmail.py:108
+    "אין מיילים בתיבה.",  # gmail.py:53
+)
+
+
+@pytest.mark.parametrize("text", _REAL_NO_DATA_TOOL_TEXTS)
+def test_every_real_no_data_tool_text_is_treated_as_empty(text: str) -> None:
+    from app.tools.registries.owner_tools import ToolResult
+
+    assert _looks_empty(ToolResult(ok=True, text=text)) is True, text
+
+
+def test_not_connected_is_unavailable_not_empty() -> None:
+    """A deliberate decision, not an oversight: "not connected" means the
+
+    integration itself is unavailable, which is a different fact from "the
+    query returned no data" and must not share the same repeat-limit counter.
+    """
+    from app.tools.owner.types import _NOT_CONNECTED
+    from app.tools.registries.owner_tools import ToolResult
+
+    assert _looks_empty(ToolResult(ok=True, text=_NOT_CONNECTED)) is False
+
+
+def test_short_real_data_across_several_real_tool_shapes_stays_not_empty() -> None:
+    from app.tools.registries.owner_tools import ToolResult
+
+    real_short_texts = (
+        "Contact crm_x rev 3: Dana | 050",
+        "Sheet tabs: Contacts | Activity",
+        "Prepared an exact CRM activity proposal. Nothing was written.",
+    )
+    for text in real_short_texts:
+        assert _looks_empty(ToolResult(ok=True, text=text)) is False, text
+
+
 def test_short_real_result_does_not_trip_the_empty_counter(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

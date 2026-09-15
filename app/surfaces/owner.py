@@ -274,12 +274,22 @@ def _talk_with_optional_agent(
             tools_failed=result.tools_failed,
             completion=result.completion,
         )
+        # `completion` is only ever set by a real `run_owner_agent` call (success
+        # as "answered", failure as "provider_error" / "budget_exhausted" /
+        # "refused" / ... ); the early-return paths that never touch the agent at
+        # all (kill switch, deterministic intent, no model configured) leave it
+        # empty. So "the agent ran and did not complete" -- far more common than
+        # an outright exception -- is exactly `not used_agent and completion`,
+        # and only that case is a genuine failed turn worth marking as such.
+        agent_ran_and_failed = not result.used_agent and bool(result.completion)
         persist_ai_run(
             store,
             run_id=correlation_id,
             lead_id=None,
             channel=Channel.TELEGRAM.value,
-            next_action=OWNER_REPLY_ACTION,
+            next_action=(
+                OWNER_REPLY_FAILED_ACTION if agent_ran_and_failed else OWNER_REPLY_ACTION
+            ),
             kill_switch=settings.kill_switch,
             sales_model=settings.owner_agent_model,
             openai_api_key=settings.openai_api_key,
@@ -321,21 +331,40 @@ def _talk_with_optional_agent(
         # already defaults to for every other caller. The schema has no separate
         # column to mark that zero as "unmeasured" rather than "measured"; that
         # is a known limitation of this fix, not a new one it introduces.
-        persist_ai_run(
-            store,
-            run_id=correlation_id,
-            lead_id=None,
-            channel=Channel.TELEGRAM.value,
-            next_action=OWNER_REPLY_FAILED_ACTION,
-            kill_switch=settings.kill_switch,
-            sales_model=settings.owner_agent_model,
-            openai_api_key=settings.openai_api_key,
-            sales_fallback_model=settings.owner_agent_fallback_model,
-            gemini_api_key=settings.gemini_api_key,
-            sales_gemini_model=settings.owner_agent_gemini_model,
-            latency_ms=elapsed_ms(started),
-            tokens_in=usage.tokens_in,
-            tokens_out=usage.tokens_out,
-            automation_mode=settings.automation_mode.value,
-        )
+        try:
+            persist_ai_run(
+                store,
+                run_id=correlation_id,
+                lead_id=None,
+                channel=Channel.TELEGRAM.value,
+                next_action=OWNER_REPLY_FAILED_ACTION,
+                kill_switch=settings.kill_switch,
+                sales_model=settings.owner_agent_model,
+                openai_api_key=settings.openai_api_key,
+                sales_fallback_model=settings.owner_agent_fallback_model,
+                gemini_api_key=settings.gemini_api_key,
+                sales_gemini_model=settings.owner_agent_gemini_model,
+                latency_ms=elapsed_ms(started),
+                tokens_in=usage.tokens_in,
+                tokens_out=usage.tokens_out,
+                automation_mode=settings.automation_mode.value,
+            )
+        except Exception as persist_exc:  # noqa: BLE001 - the audit write must never mask the original failure
+            # The original exception can leave `store.session` in a failed state
+            # (e.g. SQLAlchemy's PendingRollbackError once a prior statement in
+            # this session errored), which makes this INSERT raise too. The owner
+            # still gets the honest OWNER_UNAVAILABLE reply below either way, so
+            # this is only logged by reason code -- never a payload -- and never
+            # allowed to replace or hide the original failure's handling.
+            _log.warning(
+                "owner failed-turn ai_run persist failed error=%s",
+                type(persist_exc).__name__,
+            )
+            try:
+                # Best-effort recovery so the webhook-status and outbound-event
+                # writes still below this in `run_owner_loop` are not also lost
+                # to the same broken transaction.
+                store.session.rollback()
+            except Exception:  # noqa: BLE001 - recovery only, never worth surfacing
+                pass
         return OWNER_UNAVAILABLE, wrote

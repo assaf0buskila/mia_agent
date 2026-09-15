@@ -111,13 +111,44 @@ SYSTEM_PROMPT = (
     "or private owner data to another principal."
 )
 
+# Every literal here is a fallback the tool handler itself only returns when the
+# underlying value was genuinely empty (see `app/tools/owner/types.py::_empty` and
+# each direct `ToolResult(ok=True, text="...")` below) -- never a heuristic on the
+# reply's length. The old length-based rule (removed) was the only thing that
+# caught most of these, so `_looks_empty` silently stopped catching a real "no
+# data" reply -- e.g. a model looping `crm_search` past the repeat limit without
+# ever tripping it -- until every one of them got its own precise marker here.
+# `_NOT_CONNECTED` (types.py) is deliberately NOT a marker: "not connected" is an
+# unavailable integration, not an empty result, and must not share this counter.
 _EMPTY_RESULT_MARKERS = (
-    "no stored memory matches",
-    "nothing in the website knowledge base matches",
-    "no entities recorded yet",
-    "לא מצאתי",
-    "אין מיילים",
+    "no stored memory matches",  # app/tools/owner/brain.py:39
+    "nothing in the website knowledge base matches",  # app/tools/owner/brain.py:66
+    "no entities recorded yet",  # app/tools/owner/brain.py:151
+    "לא מצאתי",  # gmail.py:108 "לא מצאתי את המייל"
+    "אין מיילים",  # gmail.py:53 "אין מיילים בתיבה"
     "לא נמצא",
+    "no crm contact matched",  # crm.py:29
+    "no unresolved crm conflicts",  # crm.py:142
+    "no matching lead",  # operations.py:158, 165
+    "no meeting brief available for",  # operations.py:172 (dynamic lead id suffix)
+    "linkedin returned nothing",  # analytics.py:174
+    "seo ports returned nothing",  # analytics.py:54
+    "instagram insights returned nothing",  # analytics.py:210
+    "the requested sheet range is empty",  # sheets.py:100
+    "no visible tabs were returned for this sheet",  # sheets.py:129
+    "no matching tool in an active owner composio toolkit",  # composio.py:77
+    "that tool is not in an active owner composio toolkit",  # composio.py:98
+    "no free slots found",  # calendar.py:41
+    "no gmail thread matched",  # gmail.py:159
+    "no activity recorded for today yet",  # operations.py:31-38
+    "no activity recorded for this week yet",  # operations.py:45
+    "no hot leads right now",  # operations.py:59
+    "nothing is waiting for approval",  # operations.py:67
+    "no website conversations yet",  # operations.py:72
+    "nothing to report",  # operations.py:77, 85
+    "nothing new was booked",  # operations.py:186
+    "no content ideas available",  # operations.py:199
+    "research search returned nothing",  # research.py:41
 )
 _APPLICABLE_LINKEDIN_PROFILE_SLUGS = frozenset(
     {
@@ -180,30 +211,41 @@ def _run_tool_with_timeout(
     return box[0]
 
 
-# A bare greeting stays "silent" even dressed with trailing punctuation or an emoji
-# ("hey!", "היי :)", "hey 👋"); anything else appended makes it a real answer that
-# must never be overwritten by the raw-tool-report fallback below. Matching with
-# `startswith` used to treat a useful reply that merely opened with the greeting
-# word ("היי אסף, יש לך 3 מיילים שדורשים תגובה...") as silent too.
-_TRAILING_DECORATION_RE = re.compile(
-    "["
-    r"\s!?.,:;~\-–—'\"`"
-    " -⁯"
+# Silent means empty, or a bare greeting token with nothing else meaningful around
+# it -- never "text with no letters in it". Decoration (whitespace, ASCII
+# emoticon punctuation, an emoji, its variation selector U+FE0F, a skin tone
+# modifier) is stripped from both ends before the comparison, so "hey!",
+# "היי :)", "hey :-)", "hey 👋" and "hey ❤️" are all still bare greetings. But a
+# reply that is only decoration and no greeting word at all -- "👍", "✅", "?",
+# "…" -- is a real (if minimal) answer, not silence, and a reply that opens
+# with the greeting word before saying something real ("היי אסף, יש לך 3
+# מיילים שדורשים תגובה...") is never silent either -- both used to be
+# misclassified.
+_DECORATION_CHARS = (
+    r"\s!?.,:;~()\-–—'\"`"
+    "  -⁯"
     "\U0001f300-\U0001faff"
     "☀-➿"
     "←-⇿"
     "⬀-⯿"
-    "]+$"
+    "\ufe00-\ufe0f"
+    "\U0001f3fb-\U0001f3ff"
 )
+_TRAILING_DECORATION_RE = re.compile("[" + _DECORATION_CHARS + "]+$")
+_LEADING_DECORATION_RE = re.compile("^[" + _DECORATION_CHARS + "]+")
 
 
 def _looks_silent(text: str) -> bool:
     stripped = text.strip()
     if not stripped:
         return True
-    trimmed = _TRAILING_DECORATION_RE.sub("", stripped).strip()
+    trimmed = _LEADING_DECORATION_RE.sub(
+        "", _TRAILING_DECORATION_RE.sub("", stripped)
+    ).strip()
     if not trimmed:
-        return True
+        # Decoration-only ("👍", "?", "…") is a real minimal reply, not a
+        # greeting -- there is no greeting token here, so it is not silent.
+        return False
     lowered = trimmed.casefold()
     greetings = ("פה. מה צריך", "here. what do you need", "hey", "היי")
     return lowered in greetings
