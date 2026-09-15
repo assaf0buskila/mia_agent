@@ -31,7 +31,6 @@ def leads_get_recent(store: LeadStore, args: dict[str, Any]) -> dict[str, Any]:
             }
             for sales in snapshots
         ],
-        "hot_ids": store.list_hot_lead_ids()[:limit],
     }
 
 

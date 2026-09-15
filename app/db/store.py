@@ -380,16 +380,6 @@ class LeadStore:
         )
         self.session.flush()
 
-    def set_takeover_state(self, lead_id: str, state: str) -> None:
-        from app.domain.conversation_scope import human_takeover_flag
-
-        row = self.session.get(LeadRow, lead_id)
-        if row is None:
-            return
-        row.takeover_state = state
-        row.human_takeover = human_takeover_flag(state)
-        self.session.flush()
-
     def get_takeover_state(self, lead_id: str) -> str:
         from app.domain.conversation_scope import TakeoverState
 
@@ -467,16 +457,6 @@ class LeadStore:
         if identity is None:
             return None
         return identity.external_id
-
-    def list_hot_lead_ids(self) -> list[str]:
-        from app.domain.conversation_scope import TakeoverState
-
-        rows = self.session.scalars(
-            select(LeadRow.id).where(
-                LeadRow.takeover_state == TakeoverState.HUMAN_TAKEOVER_REQUIRED.value
-            )
-        ).all()
-        return list(rows)
 
     def list_all_pending_approvals(self) -> list[ApprovalRow]:
         """Every pending approval, newest first. Read-only; deciding stays typed."""
@@ -625,8 +605,13 @@ class LeadStore:
             for lead_id, conversation_id in rows
         ]
 
-    def list_undelivered_captured_website_leads(self, *, limit: int = 12) -> list[str]:
-        """Contact ids whose website capture's own Telegram ping never confirmed.
+    def list_undelivered_captured_website_leads(
+        self, *, limit: int = 12
+    ) -> list[tuple[str, str]]:
+        """(contact_id, display_name) for captures whose Telegram ping never confirmed.
+
+        ``display_name`` is the contact's recorded ``name`` field, or ``""`` when none
+        was ever captured -- callers fall back to the id in that case.
 
         v2 has no sales-workflow state (fit/pain/takeover) to rank "hot" by. This
         uses a real, already-tracked signal instead of inventing one: a capture whose
@@ -668,7 +653,27 @@ class LeadStore:
                 ids.append(contact_id)
             if len(ids) >= limit:
                 break
-        return ids
+        names = self._contact_display_names(ids)
+        return [(contact_id, names.get(contact_id, "")) for contact_id in ids]
+
+    def _contact_display_names(self, contact_ids: list[str]) -> dict[str, str]:
+        """Best-effort ``name`` field per contact id; "" when absent or unparseable."""
+        if not contact_ids:
+            return {}
+        rows = self.session.execute(
+            select(CrmContactRow.id, CrmContactRow.fields_json).where(
+                CrmContactRow.id.in_(contact_ids)
+            )
+        ).all()
+        names: dict[str, str] = {}
+        for contact_id, fields_json in rows:
+            try:
+                raw = json.loads(fields_json or "{}")
+            except (TypeError, ValueError):
+                raw = {}
+            name = raw.get("name") if isinstance(raw, dict) else None
+            names[contact_id] = str(name).strip() if name else ""
+        return names
 
     def find_leads(self, query: str, *, limit: int = 8) -> list[SalesState]:
         """Match a lead by id, stated name, or headline. No fuzzy guessing."""

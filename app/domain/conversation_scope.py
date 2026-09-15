@@ -40,23 +40,6 @@ DENY_SCOPES = frozenset(
     }
 )
 
-TAKEOVER_BLOCKS_SEND = frozenset(
-    {
-        TakeoverState.HUMAN_TAKEOVER_REQUIRED,
-        TakeoverState.HUMAN_ACTIVE,
-        TakeoverState.MIA_PAUSED,
-    }
-)
-
-
-def takeover_blocks_send(state: str) -> bool:
-    return state in {item.value for item in TAKEOVER_BLOCKS_SEND}
-
-
-def human_takeover_flag(state: str) -> bool:
-    return takeover_blocks_send(state)
-
-
 def extract_digits_id(text: str) -> str | None:
     match = _PHONE_RE.search(text.replace(" ", "").replace("-", ""))
     return match.group(0) if match else None

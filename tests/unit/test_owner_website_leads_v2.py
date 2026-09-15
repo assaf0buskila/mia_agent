@@ -98,6 +98,26 @@ def test_v2_capture_is_included_in_hot_leads_and_status(
         # now surfaces for v2.
         hot = format_hot_leads_ack(store, principal=Principal.owner(source="test"))
         assert result.contact.id in hot
+        # The reply leads with the captured name, not a bare crm_... id.
+        assert "יוסי" in hot
+
+
+def test_hot_lead_with_no_name_falls_back_to_the_bare_contact_id(
+    sessions: sessionmaker[Session],
+) -> None:
+    with sessions() as session:
+        store = LeadStore(session)
+        result = CrmService(session).capture_site_lead(
+            {"phone": "0507654322", "business": "מוסך"},
+            conversation_id="v2-hot-noname",
+            source_ref="site:v2-hot-noname:m1",
+            summary="רוצה שיחה",
+            recipient_ids=("999",),
+        )
+        assert result.contact is not None
+        session.commit()
+        hot = format_hot_leads_ack(store, principal=Principal.owner(source="test"))
+        assert result.contact.id in hot
 
         status = format_owner_status_ack(
             store, principal=Principal.owner(source="test"), timezone=_TZ
