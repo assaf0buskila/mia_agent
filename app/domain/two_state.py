@@ -130,14 +130,14 @@ _SHEETS_NEEDLES: tuple[str, ...] = (
 _TOOLKIT_NEEDLES: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
         "instagram",
-        ("instagram", "אינסטגרם", "אינסטה", "insta", "ig ", " ריל", "reel", "פוסט"),
+        ("instagram", "אינסטגרם", "אינסטה", "ig ", " ריל", "reel", "פוסט"),
     ),
     ("gmail", ("gmail", "מייל", "inbox", "דואר")),
     ("calendar", ("יומן", "calendar", "פגישה", "agenda")),
     ("gsc", ("search console", "gsc", "קונסולת חיפוש", "impressions")),
     ("ga4", ("ga4", "analytics", "אנליטיקס", "traffic", "תנועה")),
     ("sheets", _SHEETS_NEEDLES),
-    ("linkedin", ("linkedin", "לינקדאין", "לינקדין", "לינקד אין", "linked in")),
+    ("linkedin", ("linkedin", "לינקדאין", "לינקדין", "לינקד אין")),
     ("whatsapp", ("whatsapp", "וואטסאפ", "ווטסאפ")),
 )
 
@@ -147,13 +147,20 @@ _TOOLKIT_NEEDLES: tuple[tuple[str, tuple[str, ...]], ...] = (
 # also containing that generic word ("תכתבי לי פוסט ללינקדאין") would otherwise resolve
 # to instagram just by being scanned first. These two lists exist ONLY to break that
 # specific tie — no other toolkit has this collision, so no other toolkit needs one.
-_INSTAGRAM_EXPLICIT_NEEDLES: tuple[str, ...] = ("instagram", "אינסטגרם", "אינסטה", "insta")
+#
+# Bare Latin "insta" and "linked in" are deliberately NOT registered anywhere, even
+# though they are real colloquial spellings: "insta" is a substring of ordinary English
+# words ("install", "instant", "instance", "instability") and would hijack them, and
+# "linked in" reads as an ordinary two-word phrase ("I linked in the doc") far more
+# often than as the platform name — a word-boundary check cannot tell those apart since
+# "in" already ends on a natural boundary either way. The Hebrew spellings (אינסטה,
+# לינקדין, לינקד אין) have no such collision risk and stay.
+_INSTAGRAM_EXPLICIT_NEEDLES: tuple[str, ...] = ("instagram", "אינסטגרם", "אינסטה")
 _LINKEDIN_EXPLICIT_NEEDLES: tuple[str, ...] = (
     "linkedin",
     "לינקדאין",
     "לינקדין",
     "לינקד אין",
-    "linked in",
 )
 
 
