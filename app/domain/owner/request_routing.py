@@ -103,6 +103,7 @@ _TOOL_GROUPS: tuple[tuple[str, frozenset[str]], ...] = (
                 "website_kpis",
                 "linkedin_snapshot",
                 "instagram_insights",
+                "social_capabilities",
             }
         ),
     ),

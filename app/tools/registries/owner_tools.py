@@ -30,6 +30,7 @@ from app.tools.owner.analytics import (
     _instagram_insights,
     _linkedin_snapshot,
     _seo_snapshot,
+    _social_capabilities,
     _website_kpis,
 )
 from app.tools.owner.brain import _list_known_entities, _remember, _search_knowledge, _search_memory
@@ -528,9 +529,9 @@ _register(
         name="content_ideas",
         description=(
             "Content ideas derived from real lead-conversation and performance signals "
-            "already in Mia's data -- categories of content worth making, not finished "
-            "posts or drafts, and nothing is published. Use when Assaf asks for content "
-            "ideas or what to post about. Takes no input."
+            "already in Mia's data -- categories of content worth making. This is NOT "
+            "a finished post, NOT a draft, and nothing here is published. Use when "
+            "Assaf asks for content ideas or what to post about. Takes no input."
         ),
         parameters=_NO_ARGS,
         handler=_content_ideas,
@@ -682,9 +683,9 @@ _register(
         description=(
             "Fresh read of Assaf's own LinkedIn profile. Set full_profile=true for all "
             "supported profile sections and an explicit list of fields not returned. "
-            "his account only, not company or competitor data. Use when Assaf asks what "
-            "his LinkedIn profile says. Profile only: this returns no post, follower or "
-            "impression analytics. Takes no input. Never posts or DMs."
+            "Use when Assaf asks what his LinkedIn profile says. This is NOT company or "
+            "competitor data, NOT post/follower/impression analytics, and NOT a posting "
+            "or DM tool. Takes no input."
         ),
         parameters={
             "type": "object",
@@ -693,6 +694,21 @@ _register(
             "additionalProperties": False,
         },
         handler=_linkedin_snapshot,
+    )
+)
+_register(
+    ToolSpec(
+        name="social_capabilities",
+        description=(
+            "What Mia can actually do on LinkedIn and Instagram right now, computed "
+            "only from configuration -- it makes no live provider call and does not "
+            "check whether an account is actually reachable. Use before promising a "
+            "social action, or when Assaf asks what she can or cannot do on either "
+            "platform. Takes no input. Never posts, comments, messages, schedules, "
+            "or publishes."
+        ),
+        parameters=_NO_ARGS,
+        handler=_social_capabilities,
     )
 )
 _register(
@@ -846,9 +862,10 @@ _register(
         name="instagram_insights",
         description=(
             "Performance of Assaf's recent organic Instagram posts: views, reach, "
-            "likes, comments and saves for each post returned. Use when Assaf asks "
+            "likes, comments and saves for each post returned; a missing metric comes "
+            "back unavailable, never invented or shown as zero. Use when Assaf asks "
             "how his Instagram content is doing. Optional limit (default 20, max 25). "
-            "Never replies or publishes."
+            "This is NOT a publishing, comment, DM, or ads tool -- read only."
         ),
         parameters={
             "type": "object",
@@ -959,7 +976,10 @@ _register(
             "Prepares one exact non-destructive LinkedIn post, comment, upload, or other "
             "side-effect action from an ACTIVE LinkedIn connection. It validates the current "
             "schema and creates a Telegram approval; it never executes the action itself. "
-            "Use after composio_get_tool_schema. Direct messages and deletes are denied."
+            "Use after composio_get_tool_schema. This is NOT a verified publish: direct "
+            "messages and deletes are denied, and even after approval and execution, "
+            "whether the content is actually live on LinkedIn is not independently "
+            "re-checked."
         ),
         parameters={
             "type": "object",
