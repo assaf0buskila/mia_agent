@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -235,15 +236,25 @@ def _bounded_fields(fields: Mapping[str, Any]) -> dict[str, str]:
 # exact literal "contact_captured" -- only the outgoing Sheet cell is translated.
 # Historical rows (pre-2026-09-11) already read "שיחת אתר"; match that vocabulary
 # so old and new rows read the same way. An action outside this map is either a
-# owner's own Hebrew text (the free-text `kind` typed through the
-# `crm_record_activity` tool, see app/tools/owner/crm.py) or a genuinely unknown
-# value -- see ``_activity_action_cell`` for how those two are told apart.
+# genuinely internal value this map hasn't caught up with yet, or an owner's own
+# freeform `kind` typed through the `crm_record_activity` tool (see
+# app/tools/owner/crm.py, unconstrained -- any language, case or punctuation) --
+# see ``_activity_action_cell`` for how those two are told apart. They are *not*
+# told apart by language: an owner's own words can be plain English ("call"),
+# and a future internal action could in principle be anything -- only its
+# snake_case *shape* is a reliable tell.
 _ACTIVITY_ACTION_LABELS_HE: dict[str, str] = {
     "contact_captured": "שיחת אתר",
     "contact_updated": "עדכון פרטים",
 }
 _ACTIVITY_ACTION_FALLBACK_HE = "פעילות"
-_HEBREW_CHAR_RE = re.compile(r"[֐-׿]")
+# Matches only lowercase, underscore-joined tokens (``contact_captured``,
+# ``some_future_action_kind``) -- the shape every internal action enum in this
+# codebase actually has. An owner typing a `kind` through `crm_record_activity`
+# essentially never produces this exact shape by accident, so it is a safe
+# (not perfect, but honest) way to catch a future enum this map hasn't caught
+# up with yet without also catching -- and erasing -- an owner's own words.
+_INTERNAL_ENUM_SHAPE_RE = re.compile(r"[a-z0-9]+(_[a-z0-9]+)+")
 
 # Short, fixed outcomes for the `תוצאה` column, keyed by the same action enum.
 # The full text (e.g. the model-written lead brief behind "contact_captured")
@@ -257,32 +268,43 @@ _ACTIVITY_CELL_MAX_CHARS = 120
 
 
 def _cap_activity_cell(text: str) -> str:
-    """Trim a Sheet cell to a short, scannable length. Pure; never raises."""
+    """Trim a Sheet cell to a short, scannable length. Pure; never raises.
+
+    Strips trailing whitespace *and* trailing Unicode format controls (a
+    zero-width joiner, a right-to-left mark, ...) before appending the
+    ellipsis, so a cut that lands right after one of those never leaves it
+    dangling in front of the "…".
+    """
     if len(text) <= _ACTIVITY_CELL_MAX_CHARS:
         return text
-    return text[: _ACTIVITY_CELL_MAX_CHARS - 1].rstrip() + "…"
+    head = text[: _ACTIVITY_CELL_MAX_CHARS - 1]
+    while head and (head[-1].isspace() or unicodedata.category(head[-1]) == "Cf"):
+        head = head[:-1]
+    return head + "…"
 
 
 def _activity_action_cell(action: str) -> str:
     """Hebrew label for the Sheet's `מה עשתה` column. Pure; never raises.
 
-    Checked in this order so a future enum can never be mistaken for owner
-    text: (1) the known internal enum -- its fixed Hebrew label; (2) anything
-    else that already contains a Hebrew character is an owner's own words,
-    typed through the `crm_record_activity` tool's freeform `kind` -- pass it
-    through verbatim (capped like the outcome cell), translating it would
-    erase information the owner deliberately entered, not add any; (3)
-    anything else -- unmapped and non-Hebrew, e.g. a future English enum --
-    falls back to the honest, generic "פעילות": there is nothing readable to
-    show, and a raw English enum in this column is the defect being fixed.
+    (1) A known internal enum gets its fixed Hebrew label. (2) Empty, or
+    shaped like an internal enum this map hasn't caught up with yet (plain
+    lowercase, underscore-joined -- see ``_INTERNAL_ENUM_SHAPE_RE``), falls
+    back to the honest, generic "פעילות": there is nothing readable to show,
+    and a raw snake_case token in this column is the defect being fixed. (3)
+    Anything else -- an owner's own freeform `kind` typed through the
+    `crm_record_activity` tool, in whatever language, case or punctuation
+    ("call", "Quote sent", "פגישה") -- passes through verbatim, capped like
+    the outcome cell. Translating or genericizing an owner's own words would
+    erase information he deliberately entered and diverge from what an
+    approved proposal showed him -- worse than the raw-enum bug this fixes.
     """
-    label = _ACTIVITY_ACTION_LABELS_HE.get(action)
+    trimmed = action.strip()
+    label = _ACTIVITY_ACTION_LABELS_HE.get(trimmed)
     if label is not None:
         return label
-    trimmed = action.strip()
-    if _HEBREW_CHAR_RE.search(trimmed):
-        return _cap_activity_cell(trimmed)
-    return _ACTIVITY_ACTION_FALLBACK_HE
+    if not trimmed or _INTERNAL_ENUM_SHAPE_RE.fullmatch(trimmed):
+        return _ACTIVITY_ACTION_FALLBACK_HE
+    return _cap_activity_cell(trimmed)
 
 
 def _activity_outcome_cell(action: str, result: str) -> str:

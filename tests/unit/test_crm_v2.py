@@ -1549,18 +1549,27 @@ def test_activity_sheet_cell_falls_back_safely_for_an_unmapped_action(
         assert cells[5] == activity.id
         assert cells[3] == "פעילות"  # honest generic fallback
         assert "some_future_action_kind" not in cells[3]  # never a raw enum
-        assert len(cells[4]) <= 121  # truncated, not the full 5000-char note
+        assert len(cells[4]) <= 120  # truncated, not the full 5000-char note
         assert very_long_owner_note not in cells[4]
         session.rollback()
 
 
-def test_activity_sheet_action_cell_passes_owner_hebrew_kind_through_verbatim(
+def test_activity_sheet_action_cell_passes_owner_freeform_kind_through_verbatim(
     sessions: sessionmaker[Session],
 ) -> None:
-    """An owner's own Hebrew words -- the freeform `kind` typed through the
-    `crm_record_activity` tool -- must survive untranslated. Collapsing them to
-    the generic fallback would erase information the owner deliberately
-    entered, which is worse than the original bug.
+    """An owner's own words -- the freeform `kind` typed through the
+    `crm_record_activity` tool -- must survive untranslated, in *any* language.
+
+    This pins the P2 review fix specifically: the first cut of this rule
+    special-cased "contains a Hebrew character", which happened to let
+    "פגישה" through but would still have collapsed a plain-English `kind`
+    like "call" (a real case -- Assaf can approve a `crm.activity` proposal
+    whose `kind` is English) to the generic fallback, silently diverging from
+    what the approved proposal showed him. A test using only a Hebrew kind
+    can't tell that flawed rule apart from the corrected one -- both pass
+    "פגישה" through unchanged -- so this one also asserts the English case,
+    which only survives under the corrected ("looks like an internal enum"
+    vs. everything else) rule.
     """
     with sessions() as session:
         service = CrmService(session)
@@ -1569,24 +1578,44 @@ def test_activity_sheet_action_cell_passes_owner_hebrew_kind_through_verbatim(
         contact_id = seed.contact.id
         session.flush()
 
-        activity = service.record_activity(
+        hebrew_activity = service.record_activity(
             contact_id,
             source_ref="owner:c11:activity-he-1",
             kind="פגישה",
             summary="נקבעה פגישה ליום שלישי",
         )
-        assert activity.action == "פגישה"  # stored value untouched
+        assert hebrew_activity.action == "פגישה"  # stored value untouched
 
-        outbox = session.scalars(
-            select(CrmOutboxRow).where(
-                CrmOutboxRow.destination == "activity",
-                CrmOutboxRow.aggregate_id == activity.id,
-            )
-        ).one()
-        cells = json.loads(outbox.payload_json)["cells"]
-        assert len(cells) == 6
-        assert cells[5] == activity.id
-        assert cells[3] == "פגישה"  # the owner's own word, untranslated
+        english_activity = service.record_activity(
+            contact_id,
+            source_ref="owner:c11:activity-en-1",
+            kind="call",
+            summary="follow-up call scheduled",
+        )
+        assert english_activity.action == "call"  # stored value untouched
+
+        mixed_activity = service.record_activity(
+            contact_id,
+            source_ref="owner:c11:activity-mixed-1",
+            kind="Quote sent",
+            summary="quote emailed",
+        )
+
+        for activity, expected_cell in (
+            (hebrew_activity, "פגישה"),
+            (english_activity, "call"),
+            (mixed_activity, "Quote sent"),
+        ):
+            outbox = session.scalars(
+                select(CrmOutboxRow).where(
+                    CrmOutboxRow.destination == "activity",
+                    CrmOutboxRow.aggregate_id == activity.id,
+                )
+            ).one()
+            cells = json.loads(outbox.payload_json)["cells"]
+            assert len(cells) == 6
+            assert cells[5] == activity.id
+            assert cells[3] == expected_cell  # the owner's own words, untranslated
         session.rollback()
 
 
@@ -1625,6 +1654,27 @@ def test_activity_sheet_action_cell_caps_a_long_owner_hebrew_kind(
         # the ellipsis is an exact, uncut prefix of the original text.
         assert long_hebrew_kind.strip().startswith(cells[3][:-1])
         session.rollback()
+
+
+def test_cap_activity_cell_strips_dangling_format_controls_before_ellipsis() -> None:
+    """A cut that lands right after a zero-width joiner or a right-to-left
+    mark must not leave that invisible control dangling in front of the
+    ellipsis -- a bare ``.rstrip()`` (whitespace only) would miss it, since
+    format controls are not whitespace.
+    """
+    from app.services.crm_v2 import _ACTIVITY_CELL_MAX_CHARS, _cap_activity_cell
+
+    prefix = "א" * (_ACTIVITY_CELL_MAX_CHARS - 2)
+
+    zwj_text = prefix + "‍" + "בבבבב"  # ZWJ lands as the last kept char
+    zwj_result = _cap_activity_cell(zwj_text)
+    assert zwj_result == prefix + "…"
+    assert "‍" not in zwj_result
+
+    rlm_text = prefix + "‏" + "גגגגג"  # RLM lands as the last kept char
+    rlm_result = _cap_activity_cell(rlm_text)
+    assert rlm_result == prefix + "…"
+    assert "‏" not in rlm_result
 
 
 def test_store_contact_captured_queries_still_match_after_hebrew_translation(
