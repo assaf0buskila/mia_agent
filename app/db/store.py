@@ -380,6 +380,16 @@ class LeadStore:
         )
         self.session.flush()
 
+    def set_takeover_state(self, lead_id: str, state: str) -> None:
+        from app.domain.conversation_scope import human_takeover_flag
+
+        row = self.session.get(LeadRow, lead_id)
+        if row is None:
+            return
+        row.takeover_state = state
+        row.human_takeover = human_takeover_flag(state)
+        self.session.flush()
+
     def get_takeover_state(self, lead_id: str) -> str:
         from app.domain.conversation_scope import TakeoverState
 
@@ -457,6 +467,16 @@ class LeadStore:
         if identity is None:
             return None
         return identity.external_id
+
+    def list_hot_lead_ids(self) -> list[str]:
+        from app.domain.conversation_scope import TakeoverState
+
+        rows = self.session.scalars(
+            select(LeadRow.id).where(
+                LeadRow.takeover_state == TakeoverState.HUMAN_TAKEOVER_REQUIRED.value
+            )
+        ).all()
+        return list(rows)
 
     def list_all_pending_approvals(self) -> list[ApprovalRow]:
         """Every pending approval, newest first. Read-only; deciding stays typed."""

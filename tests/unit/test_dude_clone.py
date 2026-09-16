@@ -14,7 +14,10 @@ from app.integrations.sheets import FakeSheetsPort
 from app.surfaces.crm import (
     CONTACTS_HEADERS,
     LOCKED_SPREADSHEET_ID,
+    ContactRecord,
+    CrmDenied,
     FakeContactsCrm,
+    assert_allowed_contact,
 )
 from app.surfaces.owner import run_owner_loop
 from app.tools.registries.owner_tools import get_tool
@@ -40,6 +43,23 @@ def test_contacts_headers_are_a1_n1_with_date_after_email() -> None:
         "פינג לאסף",
     )
     assert len(CONTACTS_HEADERS) == 14
+
+
+def test_crm_refuses_a_contact_with_no_phone_or_email() -> None:
+    """`assert_allowed_contact` is the shared guard behind every live Contacts write path
+    (the same has_contact_key/lead_-id checks are re-applied inline in the owner
+    `_crm_upsert` tool, app/tools/owner/crm.py) -- a row with neither key must never
+    be written under any caller.
+    """
+    with pytest.raises(CrmDenied, match="phone or email"):
+        assert_allowed_contact(ContactRecord(name="דנה", want="אתר"))
+
+
+def test_crm_refuses_a_lead_id_in_any_field() -> None:
+    with pytest.raises(CrmDenied, match="lead ids"):
+        assert_allowed_contact(
+            ContactRecord(name="x", phone="0501234567", summary="lead_abc123def456")
+        )
 
 
 async def test_telegram_owner_loop_still_sends() -> None:

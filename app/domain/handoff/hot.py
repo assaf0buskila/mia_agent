@@ -2,30 +2,66 @@
 
 from __future__ import annotations
 
+from app.capabilities.leads import leads_handlers
+from app.capabilities.policy import execute_capability
 from app.capabilities.types import Principal
 from app.core.config import Settings
 
 _NO_HOT_LEADS_ACK = "אין לידים חמים שמחכים לתפיסה."
 
 
-def format_hot_leads_ack(store, *, principal: Principal) -> str:
-    """v2-only: an unconfirmed Telegram ping on a website capture.
+def _v1_hot_labels(store, ids: list[str]) -> list[str]:
+    """Best-effort sales headline per v1 lead id; falls back to the bare id.
 
-    v1's sales-workflow "hot" state (fit/pain/takeover, set only by the now-removed
-    ``apply_hot_handoff``) is retired -- nothing in production ever set
-    ``LeadRow.takeover_state`` outside that function, and it had no production
-    caller (2026-09-16; see HANDOFF section 0 for the evidence). v2 has no
-    equivalent workflow state either; an unconfirmed Telegram ping is a real signal
-    already tracked on the outbox instead: it means Assaf has not reliably been
-    told about this capture yet.
+    v1 leads have no name field anywhere (`LeadRow`/`CustomerRow` are pure
+    identity rows) -- `SalesState.headline` is the closest thing to a label,
+    and it is not always present.
     """
-    del principal  # kept for call-site compatibility; the v2 source needs no capability check
-    leads = list(dict.fromkeys(store.list_undelivered_captured_website_leads(limit=12)))
-    if not leads:
+    labels: list[str] = []
+    for lead_id in ids:
+        headline = ""
+        try:
+            headline = (store.get_sales(lead_id).headline or "").strip()
+        except KeyError:
+            headline = ""
+        labels.append(f"{headline} ({lead_id})" if headline else lead_id)
+    return labels
+
+
+def format_hot_leads_ack(store, *, principal: Principal) -> str:
+    """Union of two "hot" sources: v1's takeover-state leads and v2's unconfirmed pings.
+
+    v1: `leads.get_recent`'s `hot_ids` -- `store.list_hot_lead_ids()`, i.e.
+    `LeadRow.takeover_state == HUMAN_TAKEOVER_REQUIRED`, set by
+    `store.set_takeover_state`. The auto-freeze *writer* (`apply_hot_handoff`)
+    was removed 2026-09-16 per Assaf's decision that Mia must not freeze a
+    conversation and hand it over automatically -- he wants hot leads listed so
+    he can decide. The *read* stays: a row already in that state (production
+    has one right now; see HANDOFF section 0) must keep surfacing here, and any
+    future explicit `set_takeover_state` call is honoured too.
+
+    v2: `store.list_undelivered_captured_website_leads` -- a website capture
+    whose own Telegram ping never reached `confirmed`. v2 has no takeover-state
+    equivalent; this is the real, already-tracked "Assaf was not reliably told"
+    signal for that path instead.
+    """
+    result = execute_capability(
+        "leads.get_recent",
+        principal=principal,
+        args={"limit": 12},
+        handlers=leads_handlers(store),
+    )
+    v1_ids = [str(item) for item in (result.get("hot_ids") or []) if item]
+    v2_leads = store.list_undelivered_captured_website_leads(limit=12)
+    v1_labels = _v1_hot_labels(store, v1_ids)
+    v2_labels = [
+        f"{name} ({contact_id})" if name else contact_id for contact_id, name in v2_leads
+    ]
+    combined = list(dict.fromkeys([*v1_labels, *v2_labels]))
+    if not combined:
         return _NO_HOT_LEADS_ACK
-    labels = [f"{name} ({contact_id})" if name else contact_id for contact_id, name in leads[:12]]
-    listed = ", ".join(labels)
-    extra = "" if len(leads) <= 12 else f" (+{len(leads) - 12})"
+    listed = ", ".join(combined[:12])
+    extra = "" if len(combined) <= 12 else f" (+{len(combined) - 12})"
     return f"לידים חמים: {listed}{extra}"
 
 

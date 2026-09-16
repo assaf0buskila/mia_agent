@@ -69,6 +69,9 @@ class _LeadStore:
             )
         ]
 
+    def list_hot_lead_ids(self) -> list[str]:
+        return ["lead_abc123def456"]
+
 
 def test_owner_leads_recent_goes_through_capability_policy() -> None:
     out = execute_capability(
@@ -78,7 +81,7 @@ def test_owner_leads_recent_goes_through_capability_policy() -> None:
         handlers=leads_handlers(_LeadStore()),  # type: ignore[arg-type]
     )
     assert out["leads"][0]["lead_id"] == "lead_abc123def456"
-    assert "hot_ids" not in out
+    assert out["hot_ids"] == ["lead_abc123def456"]
     assert "transcript" not in str(out).lower()
 
 
