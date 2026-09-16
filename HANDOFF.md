@@ -253,9 +253,93 @@ Left deliberately alone, with reasons (do not treat these as missed):
   `app/services/owner_actions.py` change) — record only, no code touched.
 - No PostgreSQL coverage for C3a's same-turn refresh — record only, no code touched.
 
+### C12 — live knowledge (this session, committed locally, not pushed / no PR yet)
+
+Two independent staleness gaps, both previously invisible, per the CURRENT STATE note above.
+
+1. **Mia lags the *files*.** `mia-ingest-knowledge` ran weekly
+   (`cron(20 4 ? * MON *)`), so a Tuesday site edit sat unseen until the next Monday.
+   `deploy/eventbridge-ingest-knowledge.example.json` now says `rate(1 hour)`. Confirmed
+   safe first: `ingest_source` (`app/brain/knowledge.py:254`) already skips re-embedding on
+   an unchanged content hash — `tests/unit/test_brain_voice_knowledge.py`'s
+   `test_ingest_is_idempotent_on_content_hash` and
+   `test_changed_content_retires_old_chunks_and_writes_new` already existed and pin exactly
+   this (an unchanged source costs one GET and zero embedding spend; a real change still
+   re-ingests) — nothing here weakens or duplicates them.
+
+   **The live AWS schedule is NOT updated by this commit — no script does it.** The only
+   automation in this repo for an EventBridge Scheduler resource is none: re-pointing
+   `mia-due-scan` after a deploy is a manual `aws` CLI step (`README.md` step 6), and
+   `mia-ingest-knowledge` has the identical gap. Until someone manually updates (or
+   recreates) the live `mia-ingest-knowledge` schedule to match the new `rate(1 hour)`
+   expression, production keeps running the old weekly cron regardless of what this file
+   says. Do not assume the schedule change is live just because the example JSON changed.
+
+2. **The *files* lag the *site*.** New module `app/brain/site_freshness.py`. During the
+   scheduled ingest only (never per visitor request, never from `/health`), one `HEAD`
+   against the site root and one per configured source compares `Last-Modified` headers
+   (`compare_staleness`). Either header missing/unparsable, or the request failing, is
+   always `"unknown"` — never a false `"fresh"`. `"stale"` only when the site is more than
+   `MATERIAL_STALENESS` (6h) newer than a source's own header. Wired into
+   `app/workers/ingest_knowledge.py`'s `main()` right after the real ingest, in the same
+   transaction, best-effort (a freshness-check failure never aborts or rolls back a
+   successful ingest). Persisted per source on `brain_knowledge_sources`
+   (`migrations/20260916_brain_knowledge_site_freshness.sql`, additive): `site_last_modified`,
+   `source_last_modified`, `site_checked_at`, `site_stale`.
+
+   Surfaced in two places:
+   - `/health`'s new `brain.knowledge_freshness`: one entry per *configured* source
+     (`source_id`, `ingested`, `last_ingested_at`, `content_hash_prefix` — 12 hex chars, not
+     the full sha256 — `site_stale`), including a source never ingested at all. DB read
+     only, same cost as the existing `brain.corpus` counts — no network call from `/health`.
+   - The owner daily brief: `app/domain/owner/briefs.py::apply_owner_brief` takes new
+     optional `brain`/`knowledge_sources` params (every existing caller/test is unaffected),
+     wired from `app/tools/owner/operations.py::_daily_brief` via `ToolContext.brain` +
+     `ctx.settings.knowledge_source_list()`. Appends one Hebrew line — `owner_text()`-safe,
+     no dash, filename(s) and date isolated automatically — **only** when at least one
+     configured source is `"stale"`; silent when fresh **and** silent when merely
+     `"unknown"` (a missing header is not evidence of staleness). Never more than one line
+     regardless of how many sources are stale.
+
+Branch `claude/mia-c12-live-knowledge` off `origin/master` (rebased onto `011ee92` after the
+handoff-refresh session pushed ahead of this chunk's original `8ed912e` base — docs-only,
+zero file overlap with this chunk's diff, confirmed by `git diff --stat 8ed912e origin/master`
+before merging).
+
+Verify: `MIA_ENV=test uv run pytest` → **2411 passed, 7 skipped** (16 new tests across
+`test_brain_site_freshness.py` (new), `test_brain_voice_knowledge.py`,
+`test_health.py`, `test_owner_briefs.py`). `uv run ruff check app tests` → clean.
+`node tests/unit/widget_behavior.test.js` → passed (untouched this chunk).
+
+One real bug caught by the test suite itself, not by review: the migration file's own
+top comment originally contained a semicolon inside a `--` line, which
+`app/db/migrate.py::_split_statements`' naive `sql.split(";")` does not treat as a comment
+boundary — it silently mangled the migration into invalid SQL and failed every migration
+test (`test_migrate.py`, `test_release_readiness.py`) with `OperationalError`. Fixed by
+rewording the comment; `test_migration_sql_comments_do_not_contain_semicolons` exists
+specifically to catch this class of bug and does.
+
+Left deliberately alone, with reasons:
+- The comparison window (`MATERIAL_STALENESS = 6h`) is a judgement call, not a measured
+  constant — chosen because the ingest itself now runs hourly, so ordinary clock/CDN skew
+  is minutes, not hours. Revisit if it proves noisy or insensitive in production.
+- No crawl of page content anywhere, and no fetched body or header value is ever logged —
+  only the verdict (`fresh`/`stale`/`unknown`) reaches stdout, matching the reason-codes-only
+  logging rule. `/health` and the brief only ever read what the scheduled ingest already
+  persisted.
+- `knowledge_refresh.py`'s owner-triggered manual refresh tool is untouched: it still calls
+  `ingest_website` directly, without the site-freshness check. That check is deliberately
+  scoped to the *scheduled* run per the brief; the owner tool already gets an explicit,
+  on-demand human decision, which is a different problem than an unattended weekly gap.
+- Regenerating `llms.txt`/`llms-full.txt`/`pricing.md` on the site's own build (Vercel) so
+  their `Last-Modified` tracks real content changes is Assaf's side, not this chunk's — this
+  chunk only makes the drift *visible*, per the brief's explicit scope.
+
 ### In flight at handoff
 
-Nothing beyond C7b above. Before acting, run `gh pr list` and `git worktree list`: the finished
+C12 above (committed locally on `claude/mia-c12-live-knowledge`, not pushed / no PR yet — push,
+PR, fresh review on the three-dot diff, fix, merge on PASS + green CI, same as every other
+chunk). Before acting, run `gh pr list` and `git worktree list`: the finished
 chunk worktrees (`.claude/worktrees/mia-c1b`, `mia-c2a`, `mia-c3a`, `mia-c3b`, `mia-c4`, `mia-c5`,
 `mia-c5h`, `mia-c2b`, `mia-c6a`) are merged and can be removed with `git worktree remove` once
 confirmed clean. A stale locked directory may exist at `.claude/worktrees/mia-c6a` from an
@@ -263,10 +347,9 @@ earlier interrupted session — ignore it. Master after the last campaign merge:
 
 ### Remaining queue
 
-1. **C12 live knowledge** — worktree `.claude/worktrees/mia-c12`, branch
-   `claude/mia-c12-live-knowledge`. Hourly ingest instead of weekly (safe: the ingest already
-   skips unchanged sources via `content_hash`), per-source freshness in `/health`, and a warning
-   when Assaf's site is newer than the knowledge files he maintains.
+1. **C12 live knowledge — done this session, needs push/PR/review/merge.** See the `### C12`
+   entry above for what shipped and what is deliberately left for the deploy step (the live
+   EventBridge schedule is not re-pointed by this commit — no script does that).
 2. **Social pass** — the capability text in `social_capabilities.py` is English while every other
    owner surface is Hebrew; verify C6a's routing fixes behave in production; LinkedIn publishing
    is still `CODE_CHECKED` only, never verified live.

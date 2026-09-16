@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 
+from app.brain.site_freshness import parse_http_date
 from app.core.errors import PolicyDenied
 from app.core.risk import RiskAction, RiskLevel, assert_allowed
 from app.domain.engine_health import compute_engine_health, format_engine_health
@@ -16,6 +17,7 @@ from app.domain.kpis import KPI_EVENT_TYPES, OWNER_BRIEF_EVENT_TYPES
 from app.integrations.telegram_format import dotted_date
 
 if TYPE_CHECKING:
+    from app.brain.store import BrainStore
     from app.db.store import LeadStore
 
 
@@ -129,6 +131,70 @@ def format_daily_brief(snapshot: DailyBriefSnapshot) -> str:
     return "\n".join(lines)
 
 
+# The brief runs daily, so one cycle plus a couple of hours of slack. A site change
+# is reported by the next brief and by no later one, unless the site changes again.
+_STALENESS_NOTICE_WINDOW = timedelta(hours=26)
+
+
+def _knowledge_staleness_line(
+    brain: BrainStore, *, knowledge_sources: list[str], now: datetime | None = None
+) -> str | None:
+    """One short Hebrew line iff the site has RECENTLY drifted ahead of a file.
+
+    Silent whenever everything is fresh AND whenever the signal is merely
+    "unknown" (a missing/unparsable `Last-Modified` header is not evidence of
+    staleness). `compare_staleness` only ever returns "stale" when both headers
+    parsed, so `dotted_date` below always has a real date to render.
+
+    **Edge-triggered, not level-triggered.** Staleness is a standing condition:
+    production is already site 09-16 / files 09-14, and regenerating those files is
+    Assaf's job on the Vercel side, so a plain "is it stale" test would print this
+    line in every brief from now until he acts -- and a line that shows up every
+    day is one he stops reading, which costs the warning its whole value.
+
+    The edge is the site changing, and `site_last_modified` is exactly when that
+    happened, so no extra column and no write from this read path are needed to
+    detect it (these columns stay owned solely by the scheduled ingest run).
+    A source is reported only while its `site_last_modified` is inside
+    `_STALENESS_NOTICE_WINDOW`, which means:
+      - the brief after a site change reports it;
+      - every later brief stays silent while the site is unchanged, however long
+        the files stay behind;
+      - a further site change reports again, which is right: that is new content
+        he is missing, not a repeat of the old warning.
+    The trade-off, stated honestly: if briefs run more than once inside the window
+    the same change can be named more than once (bounded by the window, never
+    forever), and a site change with no brief inside the window is not reported
+    until the site next changes.
+    """
+    if not knowledge_sources:
+        return None
+    cutoff = (now or datetime.now(UTC)) - _STALENESS_NOTICE_WINDOW
+    stale = []
+    for status in brain.list_knowledge_source_statuses(knowledge_sources):
+        if status.site_stale != "stale":
+            continue
+        changed_at = parse_http_date(status.site_last_modified)
+        # A "stale" verdict always carries a parsable, tz-aware site header
+        # (`compare_staleness`), so `None` here means data written by something
+        # other than the freshness check; treat it as not-recent rather than
+        # guessing, and stay silent.
+        if changed_at is None or changed_at < cutoff:
+            continue
+        stale.append(status)
+    if not stale:
+        return None
+    names = ", ".join(status.source_id for status in stale)
+    site_dt = parse_http_date(stale[0].site_last_modified)
+    site_date = dotted_date(site_dt.date().isoformat()) if site_dt is not None else ""
+    if not site_date:
+        return f"קבצי הידע ({names}) ישנים מהאתר עצמו. כדאי להריץ עדכון ידע."
+    return (
+        f"קבצי הידע ({names}) ישנים מהאתר עצמו. "
+        f"עדכון אחרון באתר: {site_date}. כדאי להריץ עדכון ידע."
+    )
+
+
 def apply_owner_brief_policy(
     store: LeadStore,
     *,
@@ -164,8 +230,16 @@ def apply_owner_brief(
     kill_switch: bool,
     demo_active: bool,
     now: datetime | None = None,
+    brain: BrainStore | None = None,
+    knowledge_sources: list[str] | None = None,
 ) -> str | None:
-    """Compute daily brief, optionally persist, return Hebrew scorecard or None."""
+    """Compute daily brief, optionally persist, return Hebrew scorecard or None.
+
+    `brain`/`knowledge_sources` are optional so every existing caller (and test)
+    keeps working unchanged; only a caller that has a `BrainStore` and configured
+    sources on hand (the owner tool loop does, via `ToolContext`) gets the C12
+    site-staleness line.
+    """
     if demo_active:
         return None
     snapshot = compute_daily_brief(store, timezone=timezone, now=now)
@@ -191,4 +265,10 @@ def apply_owner_brief(
     engine = compute_engine_health(store, timezone=timezone, now=now)
     if engine is not None and engine.total_runs:
         lines.append(format_engine_health(engine))
+    if brain is not None:
+        staleness = _knowledge_staleness_line(
+            brain, knowledge_sources=knowledge_sources or [], now=now
+        )
+        if staleness is not None:
+            lines.append(staleness)
     return "\n".join(lines)

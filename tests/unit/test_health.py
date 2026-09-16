@@ -1,5 +1,9 @@
+from app.brain.embeddings import FakeEmbeddingPort
+from app.brain.knowledge import FakeDocumentFetcher, ingest_source
+from app.brain.store import BrainStore
 from app.core.config import MiaEnv, Settings
-from app.main import app, brain_health, openapi_surface, owner_integrations
+from app.db.session import get_session_factory, init_db
+from app.main import app, brain_health, knowledge_freshness, openapi_surface, owner_integrations
 from fastapi.testclient import TestClient
 
 
@@ -332,3 +336,119 @@ def test_cors_allows_assafweb_origin() -> None:
     response = client.get("/health", headers={"Origin": "https://www.assafweb.com"})
     assert response.status_code == 200
     assert response.headers.get("access-control-allow-origin") == "https://www.assafweb.com"
+
+
+# --------------------------------------------------------- knowledge freshness (C12)
+
+
+def _settings_with_sources(*sources: str) -> Settings:
+    return Settings(_env_file=None, knowledge_sources=",".join(sources))
+
+
+def test_knowledge_freshness_empty_when_no_sources_configured() -> None:
+    assert knowledge_freshness(_settings_with_sources()) == []
+
+
+def test_knowledge_freshness_lists_never_ingested_source_honestly() -> None:
+    init_db()
+    settings = _settings_with_sources("never-ingested.txt")
+    result = knowledge_freshness(settings)
+    assert result == [
+        {
+            "source_id": "never-ingested.txt",
+            "ingested": False,
+            "last_ingested_at": "",
+            "content_hash_prefix": "",
+            "site_stale": "unknown",
+        }
+    ]
+
+
+def test_knowledge_freshness_reports_recency_hash_and_site_stale_after_ingest() -> None:
+    init_db()
+    session = get_session_factory()()
+    brain = BrainStore(session)
+    # A source id and body unique to this test. Ingesting "llms.txt" with the same
+    # body as tests/unit/test_brain_voice_knowledge.py minted identical chunk_ids in
+    # the shared DB, so that file failed on UNIQUE brain_knowledge_chunks.chunk_id
+    # and this pair passed only by alphabetical collection order.
+    url = "https://www.assafweb.com/health-freshness.txt"
+    ingest_source(
+        brain,
+        source_id="health-freshness.txt",
+        url=url,
+        fetcher=FakeDocumentFetcher(
+            {
+                url: "# Health freshness fixture\n\n"
+                "## Services\nA description long enough to chunk.\n"
+            }
+        ),
+        embedding_port=FakeEmbeddingPort(),
+    )
+    brain.record_site_freshness(
+        source_id="health-freshness.txt",
+        site_last_modified="Wed, 16 Sep 2026 09:00:00 GMT",
+        source_last_modified="Mon, 14 Sep 2026 19:14:00 GMT",
+        stale="stale",
+    )
+    session.commit()
+    session.close()
+
+    settings = _settings_with_sources("health-freshness.txt")
+    result = knowledge_freshness(settings)
+    assert len(result) == 1
+    entry = result[0]
+    assert entry["source_id"] == "health-freshness.txt"
+    assert entry["ingested"] is True
+    assert entry["last_ingested_at"] != ""
+    assert entry["content_hash_prefix"] != ""
+    assert len(entry["content_hash_prefix"]) < 64  # a prefix, never the full sha256
+    assert entry["site_stale"] == "stale"
+
+
+def test_knowledge_freshness_preserves_configured_order_and_lists_every_source() -> None:
+    init_db()
+    settings = _settings_with_sources("pricing.md", "llms.txt", "llms-full.txt")
+    result = knowledge_freshness(settings)
+    assert [entry["source_id"] for entry in result] == [
+        "pricing.md",
+        "llms.txt",
+        "llms-full.txt",
+    ]
+
+
+def test_knowledge_freshness_degrades_honestly_when_database_is_unreachable(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr("app.main.database_ready", lambda: False)
+    settings = _settings_with_sources("llms.txt")
+    result = knowledge_freshness(settings)
+    assert result == [
+        {
+            "source_id": "llms.txt",
+            "ingested": None,
+            "last_ingested_at": None,
+            "content_hash_prefix": None,
+            "site_stale": None,
+        }
+    ]
+
+
+def test_health_endpoint_exposes_knowledge_freshness_per_source() -> None:
+    with TestClient(app) as client:
+        response = client.get("/health")
+    assert response.status_code == 200
+    body = response.json()
+    freshness = body["brain"]["knowledge_freshness"]
+    assert isinstance(freshness, list)
+    assert freshness  # the default MIA_KNOWLEDGE_SOURCES is non-empty
+    source_ids = {entry["source_id"] for entry in freshness}
+    assert "llms.txt" in source_ids
+    for entry in freshness:
+        assert set(entry.keys()) == {
+            "source_id",
+            "ingested",
+            "last_ingested_at",
+            "content_hash_prefix",
+            "site_stale",
+        }

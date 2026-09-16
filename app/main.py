@@ -190,6 +190,55 @@ def brain_counts() -> dict[str, int | None]:
         return {"memories": None, "knowledge_chunks": None}
 
 
+def _degraded_knowledge_freshness(sources: list[str]) -> list[dict[str, object]]:
+    """DB unreachable: every configured source stays listed, every field unknown."""
+    return [
+        {
+            "source_id": source_id,
+            "ingested": None,
+            "last_ingested_at": None,
+            "content_hash_prefix": None,
+            "site_stale": None,
+        }
+        for source_id in sources
+    ]
+
+
+def knowledge_freshness(settings) -> list[dict[str, object]]:
+    """Per-source ingest recency + content hash + site-vs-files staleness.
+
+    A DB read only -- the site/source `HEAD` checks run once during the scheduled
+    ingest (`app/brain/site_freshness.py`) and are only ever read back here, so this
+    never makes a network call, even though this endpoint is hit constantly.
+    Answers "is Mia's knowledge current?" for every *configured* source, including
+    one that has never been ingested at all.
+    """
+    sources = settings.knowledge_source_list()
+    if not sources:
+        return []
+    if not database_ready():
+        return _degraded_knowledge_freshness(sources)
+    try:
+        session = get_session_factory()()
+        try:
+            brain = BrainStore(session)
+            statuses = brain.list_knowledge_source_statuses(sources)
+        finally:
+            session.close()
+    except SQLAlchemyError:
+        return _degraded_knowledge_freshness(sources)
+    return [
+        {
+            "source_id": status.source_id,
+            "ingested": status.ingested,
+            "last_ingested_at": status.last_ingested_at,
+            "content_hash_prefix": status.content_hash_prefix,
+            "site_stale": status.site_stale,
+        }
+        for status in statuses
+    ]
+
+
 def openapi_surface(*, env: MiaEnv) -> dict[str, str | None]:
     if env is MiaEnv.PROD:
         return {"docs_url": None, "redoc_url": None, "openapi_url": None}
@@ -315,7 +364,11 @@ def health() -> dict:
         "email_send_policy": live.email_send_policy_label(),
         "automation_mode": live.automation_mode.value,
         "ops": _health_ops(),
-        "brain": {**brain_health(live), "corpus": brain_counts()},
+        "brain": {
+            **brain_health(live),
+            "corpus": brain_counts(),
+            "knowledge_freshness": knowledge_freshness(live),
+        },
         "v2": {
             "owner_enabled": True,
             "website_enabled": True,

@@ -44,6 +44,12 @@ Deploy is a separate go. Max 2 agents at once (session usage limit).
       turned a successful run into a failure under throttling), added log group, DLQ and an
       `Errors` alarm. Before deploy: create the Lambda, role and EventBridge rule, and verify
       the event pattern against one real rotation.
+- [ ] C12 — live knowledge: hourly ingest instead of weekly (safe: `content_hash` already
+      skips unchanged sources); `/health`'s `brain.knowledge_freshness` reports per-source
+      recency + hash prefix + site-vs-files staleness; owner brief gets one Hebrew line only
+      when a source is stale. Committed locally on `claude/mia-c12-live-knowledge`, not
+      pushed/PR'd yet; see `HANDOFF.md` section 0 for detail. The live EventBridge schedule is
+      NOT re-pointed by this commit — no script does that, same manual step as `mia-due-scan`.
 - [ ] Prompt 4 — release readiness, go/no-go → **stop for Assaf**
 - [ ] Prompt 5 — approved deploy + phone acceptance (live LinkedIn post, email send, calendar
       event, website lead — each approved individually)

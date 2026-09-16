@@ -24,6 +24,7 @@ from app.brain.schemas import (
     KnowledgeChunk,
     KnowledgeEntity,
     KnowledgeGap,
+    KnowledgeSourceStatus,
     MemoryCategory,
     MemoryKind,
     MemoryRecord,
@@ -45,6 +46,9 @@ from app.db.models import (
 MAX_MEMORY_TEXT = 1200
 MAX_CHUNK_TEXT = 4000
 MAX_ENTITY_NAME = 160
+# /health reports a prefix, not the full sha256: enough to eyeball "did this change"
+# across two calls without publishing the whole digest for no operational reason.
+_CONTENT_HASH_PREFIX_LEN = 12
 # Ceiling on rows pulled into the in-process similarity scan. Exact search over a few
 # thousand vectors is ~170ms; this bounds the worst case if the corpus ever grows.
 MAX_SCAN_ROWS = 5000
@@ -330,6 +334,76 @@ class BrainStore:
             select(KnowledgeSourceRow).where(KnowledgeSourceRow.source_id == source_id)
         ).first()
         return row.content_hash if row is not None else ""
+
+    def record_site_freshness(
+        self,
+        *,
+        source_id: str,
+        site_last_modified: str,
+        source_last_modified: str,
+        stale: str,
+        checked_at: str | None = None,
+    ) -> None:
+        """Persist gap-2 staleness (`app/brain/site_freshness.py`) for one source.
+
+        Written only by the scheduled ingest run. Upserts on `source_id` like
+        `upsert_knowledge_source`, so calling this for a source that has never been
+        ingested still records the check rather than silently dropping it.
+        """
+        row = self.session.scalars(
+            select(KnowledgeSourceRow).where(KnowledgeSourceRow.source_id == source_id)
+        ).first()
+        if row is None:
+            row = KnowledgeSourceRow(source_id=source_id)
+            self.session.add(row)
+        row.site_last_modified = site_last_modified[:64]
+        row.source_last_modified = source_last_modified[:64]
+        row.site_stale = stale[:16]
+        row.site_checked_at = checked_at or now_iso()
+        self.session.flush()
+
+    def list_knowledge_source_statuses(
+        self, source_ids: list[str]
+    ) -> list[KnowledgeSourceStatus]:
+        """Freshness for each requested source, in the same order, one query.
+
+        A source with no row yet (never ingested, never checked) still gets a
+        `KnowledgeSourceStatus` back -- `ingested=False`, `site_stale="unknown"` --
+        so `/health` and the owner brief can always answer for every *configured*
+        source, not just the ones that happened to succeed once.
+        """
+        if not source_ids:
+            return []
+        rows = {
+            row.source_id: row
+            for row in self.session.scalars(
+                select(KnowledgeSourceRow).where(
+                    KnowledgeSourceRow.source_id.in_(source_ids)
+                )
+            ).all()
+        }
+        statuses: list[KnowledgeSourceStatus] = []
+        for source_id in source_ids:
+            row = rows.get(source_id)
+            if row is None:
+                statuses.append(KnowledgeSourceStatus(source_id=source_id))
+                continue
+            statuses.append(
+                KnowledgeSourceStatus(
+                    source_id=source_id,
+                    ingested=bool(row.fetched_at),
+                    last_ingested_at=row.fetched_at,
+                    content_hash_prefix=row.content_hash[:_CONTENT_HASH_PREFIX_LEN],
+                    chunk_count=row.chunk_count,
+                    status=row.status,
+                    error=row.error,
+                    site_stale=row.site_stale or "unknown",
+                    site_last_modified=row.site_last_modified,
+                    source_last_modified=row.source_last_modified,
+                    site_checked_at=row.site_checked_at,
+                )
+            )
+        return statuses
 
     def replace_knowledge_chunks(
         self,

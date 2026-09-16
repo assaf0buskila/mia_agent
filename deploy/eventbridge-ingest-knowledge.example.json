@@ -1,9 +1,8 @@
 {
   "Name": "mia-ingest-knowledge",
-  "Description": "Re-read assafweb.com into Mia's brain. Without this the corpus silently drifts from the live site: change a price on the site and Mia keeps quoting the old one, with nothing anywhere saying so.",
+  "Description": "Re-read assafweb.com into Mia's brain, hourly (C12). A weekly cron let a Tuesday site edit sit unseen until the next Monday; the per-source content hash (app/brain/knowledge.py) makes an hourly re-check cheap -- an unchanged source costs one GET and zero embedding spend. This closes only the 'Mia lags the files' gap: the ingest run also checks whether the files themselves still track the live site (app/brain/site_freshness.py) and surfaces that separately, in the owner daily brief.",
   "State": "ENABLED",
-  "ScheduleExpression": "cron(20 4 ? * MON *)",
-  "ScheduleExpressionTimezone": "Asia/Jerusalem",
+  "ScheduleExpression": "rate(1 hour)",
   "FlexibleTimeWindow": {
     "Mode": "OFF"
   },
