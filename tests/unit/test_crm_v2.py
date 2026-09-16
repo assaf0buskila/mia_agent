@@ -1554,6 +1554,79 @@ def test_activity_sheet_cell_falls_back_safely_for_an_unmapped_action(
         session.rollback()
 
 
+def test_activity_sheet_action_cell_passes_owner_hebrew_kind_through_verbatim(
+    sessions: sessionmaker[Session],
+) -> None:
+    """An owner's own Hebrew words -- the freeform `kind` typed through the
+    `crm_record_activity` tool -- must survive untranslated. Collapsing them to
+    the generic fallback would erase information the owner deliberately
+    entered, which is worse than the original bug.
+    """
+    with sessions() as session:
+        service = CrmService(session)
+        seed = service.capture({"phone": "0509991111", "name": "Roni"}, source_ref="seed-c11-he-1")
+        assert seed.contact is not None
+        contact_id = seed.contact.id
+        session.flush()
+
+        activity = service.record_activity(
+            contact_id,
+            source_ref="owner:c11:activity-he-1",
+            kind="פגישה",
+            summary="נקבעה פגישה ליום שלישי",
+        )
+        assert activity.action == "פגישה"  # stored value untouched
+
+        outbox = session.scalars(
+            select(CrmOutboxRow).where(
+                CrmOutboxRow.destination == "activity",
+                CrmOutboxRow.aggregate_id == activity.id,
+            )
+        ).one()
+        cells = json.loads(outbox.payload_json)["cells"]
+        assert len(cells) == 6
+        assert cells[5] == activity.id
+        assert cells[3] == "פגישה"  # the owner's own word, untranslated
+        session.rollback()
+
+
+def test_activity_sheet_action_cell_caps_a_long_owner_hebrew_kind(
+    sessions: sessionmaker[Session],
+) -> None:
+    """A long Hebrew kind is capped for scannability, but the cut must be clean
+    -- a proper prefix followed by an ellipsis, never a mangled final character.
+    """
+    with sessions() as session:
+        service = CrmService(session)
+        seed = service.capture({"phone": "0509992222", "name": "Gili"}, source_ref="seed-c11-he-2")
+        assert seed.contact is not None
+        contact_id = seed.contact.id
+        session.flush()
+
+        long_hebrew_kind = "פגישת ייעוץ ראשונית ומעקב אחרי הפנייה של הלקוח " * 4
+        activity = service.record_activity(
+            contact_id,
+            source_ref="owner:c11:activity-he-2",
+            kind=long_hebrew_kind,
+            summary="סוכם על פגישה",
+        )
+
+        outbox = session.scalars(
+            select(CrmOutboxRow).where(
+                CrmOutboxRow.destination == "activity",
+                CrmOutboxRow.aggregate_id == activity.id,
+            )
+        ).one()
+        cells = json.loads(outbox.payload_json)["cells"]
+        assert len(cells) == 6
+        assert len(cells[3]) <= 120
+        assert cells[3].endswith("…")
+        # A clean prefix cut, not a corrupted/mangled tail: everything before
+        # the ellipsis is an exact, uncut prefix of the original text.
+        assert long_hebrew_kind.strip().startswith(cells[3][:-1])
+        session.rollback()
+
+
 def test_store_contact_captured_queries_still_match_after_hebrew_translation(
     sessions: sessionmaker[Session],
 ) -> None:

@@ -234,16 +234,16 @@ def _bounded_fields(fields: Mapping[str, Any]) -> dict[str, str]:
 # itself is never renamed -- app/db/store.py's website-lead queries filter on the
 # exact literal "contact_captured" -- only the outgoing Sheet cell is translated.
 # Historical rows (pre-2026-09-11) already read "שיחת אתר"; match that vocabulary
-# so old and new rows read the same way. An action outside this map -- a future
-# system action, or the free-text `kind` an owner types through the
-# `crm_record_activity` tool (see app/tools/owner/crm.py) -- falls back to a
-# short, generic, honest label instead of leaking a raw snake_case enum into
-# the sheet.
+# so old and new rows read the same way. An action outside this map is either a
+# owner's own Hebrew text (the free-text `kind` typed through the
+# `crm_record_activity` tool, see app/tools/owner/crm.py) or a genuinely unknown
+# value -- see ``_activity_action_cell`` for how those two are told apart.
 _ACTIVITY_ACTION_LABELS_HE: dict[str, str] = {
     "contact_captured": "שיחת אתר",
     "contact_updated": "עדכון פרטים",
 }
 _ACTIVITY_ACTION_FALLBACK_HE = "פעילות"
+_HEBREW_CHAR_RE = re.compile(r"[֐-׿]")
 
 # Short, fixed outcomes for the `תוצאה` column, keyed by the same action enum.
 # The full text (e.g. the model-written lead brief behind "contact_captured")
@@ -253,12 +253,36 @@ _ACTIVITY_ACTION_FALLBACK_HE = "פעילות"
 _ACTIVITY_OUTCOME_LABELS_HE: dict[str, str] = {
     "contact_captured": "נרשם",
 }
-_ACTIVITY_OUTCOME_FALLBACK_MAX_CHARS = 120
+_ACTIVITY_CELL_MAX_CHARS = 120
+
+
+def _cap_activity_cell(text: str) -> str:
+    """Trim a Sheet cell to a short, scannable length. Pure; never raises."""
+    if len(text) <= _ACTIVITY_CELL_MAX_CHARS:
+        return text
+    return text[: _ACTIVITY_CELL_MAX_CHARS - 1].rstrip() + "…"
 
 
 def _activity_action_cell(action: str) -> str:
-    """Hebrew label for the Sheet's `מה עשתה` column. Pure; never raises."""
-    return _ACTIVITY_ACTION_LABELS_HE.get(action, _ACTIVITY_ACTION_FALLBACK_HE)
+    """Hebrew label for the Sheet's `מה עשתה` column. Pure; never raises.
+
+    Checked in this order so a future enum can never be mistaken for owner
+    text: (1) the known internal enum -- its fixed Hebrew label; (2) anything
+    else that already contains a Hebrew character is an owner's own words,
+    typed through the `crm_record_activity` tool's freeform `kind` -- pass it
+    through verbatim (capped like the outcome cell), translating it would
+    erase information the owner deliberately entered, not add any; (3)
+    anything else -- unmapped and non-Hebrew, e.g. a future English enum --
+    falls back to the honest, generic "פעילות": there is nothing readable to
+    show, and a raw English enum in this column is the defect being fixed.
+    """
+    label = _ACTIVITY_ACTION_LABELS_HE.get(action)
+    if label is not None:
+        return label
+    trimmed = action.strip()
+    if _HEBREW_CHAR_RE.search(trimmed):
+        return _cap_activity_cell(trimmed)
+    return _ACTIVITY_ACTION_FALLBACK_HE
 
 
 def _activity_outcome_cell(action: str, result: str) -> str:
@@ -272,10 +296,7 @@ def _activity_outcome_cell(action: str, result: str) -> str:
     label = _ACTIVITY_OUTCOME_LABELS_HE.get(action)
     if label is not None:
         return label
-    trimmed = result.strip()
-    if len(trimmed) > _ACTIVITY_OUTCOME_FALLBACK_MAX_CHARS:
-        return trimmed[: _ACTIVITY_OUTCOME_FALLBACK_MAX_CHARS - 1].rstrip() + "…"
-    return trimmed
+    return _cap_activity_cell(result.strip())
 
 
 def _autoflushing(method: Callable[..., Any]) -> Callable[..., Any]:
