@@ -88,11 +88,61 @@ rotation gets a dated manual runbook step rather than an exception deploy.
 
 Order: H0 → H1 → (H2, H3, H4 parallel) → H5 → H6 → H7 → H8 → H10 → H9.
 
-- [ ] H0 — re-baseline at `ef8ff78` + cleanup inventory. No code. Grades the 12 new commits,
-      including `app/brain/site_freshness.py` (142 lines, never inspected, lands inside S6's
-      sector); challenges the 36 claims deferred when the first inspection hit the usage limit;
-      runs the two completeness critics that never ran; inventories cleanup candidates with
-      liveness proofs.
+- [x] H0 — re-baseline at `ef8ff78` + cleanup inventory. 19 agents, 36/36 claims challenged:
+      **27 confirmed and still present, 9 refuted, 1 already fixed by C12.** 37 cleanup
+      candidates, 5 proven dead, 2 proven alive.
+
+### P0 — the contact veto silently loses leads, in production, today
+
+`app/surfaces/site_v2.py:594` vetoes contact capture whenever `_CONTACT_NEGATION` (`:133`) or
+`_CONTACT_EXAMPLE` (`:143`) matches anywhere in the visitor's message. Reproduced by executing
+the regexes against realistic lead text: **8 of 11 messages carrying a real phone or email are
+vetoed**, including the highest-intent phrasing there is —
+
+- `Can I get a quote for a landing page? email me at dana@x.com` → vetoed on the bare word
+  **`quote`** (meant to catch `quoted`, as in quoting a third party; it catches *price quote*)
+- `I dont have a landline, my mobile is 052-7654321` → `dont`
+- `never mind the email, call me at 052-7654321` → `never`
+- `no need to rush, email me at dana@x.com` → `no need to`
+- `send me a sample, my email is dana@x.com` → `sample`
+- Hebrew: `בלי מייל בבקשה, תתקשרו 052-7654321` → `בלי מייל`
+
+The veto returns `{}` **before** the semantic classifier runs and **before** `state.pending_contact`
+is populated (that only happens in the `else` branch at `:638-642`), so the documented
+next-turn-confirmation recovery does not exist — the lead is simply gone, leaving one
+undifferentiated warning line. `grep` across `tests/` for `_CONTACT_EXAMPLE`,
+`_CONTACT_NEGATION` and `negation_or_example_veto` returns **0**. Byte-identical in production
+`110ada6` (`git show 110ada6:app/surfaces/site_v2.py` line 594).
+
+It also contradicts the design rule written 20 lines below it at `:616-618`: *"Phrase detectors
+must not gate semantically valid wording."* So the fix is to delete the pre-classifier veto and
+let the consent classifier decide — which makes it **HEAVY to design and HEAVY to review** under
+`AGENTS.md`, not a regex tweak. **Decision needed: hotfix now, or lead H2 with it.**
+
+### Grades at `ef8ff78` (overall 5, down from 6)
+
+| S1 | S2 | S3 | S4 | S5 | S6 | S7 | S8 | S9 | S10 | S11 | S12 | S13 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 5↓ | 6↓ | **4↓↓** | 7 | 7↓ | 6 | 6↓ | 6 | 6↓ | 6 | 8 | 5↓ | 7 |
+
+Six sectors fell. Nothing rose: C12 is good work, but it gates nothing on the visitor path.
+Two refutations cleared guards that were being blamed unfairly — approval expiry **is** enforced
+at every callback path, and the Hebrew edit-truncation defect is unreachable behind a working
+fallback.
+
+### What H0 changed about the plan
+
+- **H2 is now the most urgent chunk, not H1**, and leads with the veto plus the captured-latch
+  fix — both lose a lead silently on the same path and share a test harness.
+- **H3 must be re-scoped raiser-first before it starts, or it will do harm.** The
+  `except RuntimeError` sweep was planned on one reported instance. There are five call sites and
+  only `app/core/outbound.py:45-49` is dead; three of the others catch a raiser that genuinely
+  raises bare `RuntimeError`. A call-site grep would "fix" three correct handlers and miss the
+  inverse class — a `MiaError` raised where only `RuntimeError` is caught.
+- **H4 gains the client half** — the localStorage credential and transcript in `ask_mia.js`.
+- **H1 shrinks and gets concrete**: baseline to beat is 28 log statements across 8 files.
+- **`app/domain/meetings/*` (1471 lines + ~2800 lines of tests) is escalated to Assaf as a
+  product question, not cleanup.** Retire it or re-wire it — H10 must not touch it either way.
 - [ ] H1 — observability spine. Reason-code registry, one `guard_tripped` emitter, a durable trip
       row on `/health`, `log_comm` called with `success=True` on every channel, `persist_ai_run`
       wired into site v2. Precondition for all 13 sectors.
