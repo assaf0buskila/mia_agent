@@ -694,6 +694,7 @@ def test_more_real_formatter_constants_are_treated_as_empty() -> None:
     could quietly drift from them.
     """
     from app.domain.content_ideas import _EMPTY_LINE, _HEADER_LINE
+    from app.domain.gmail.brief import GMAIL_BRIEF_EMPTY_WINDOW
     from app.domain.gmail.summaries import _NOT_FOUND_ACK as gmail_not_found_ack
     from app.domain.lead_reviews import (
         _LEAD_MATCH_NO_NAME_LINE,
@@ -703,6 +704,7 @@ def test_more_real_formatter_constants_are_treated_as_empty() -> None:
     from app.domain.meetings.briefs import _BRIEF_NOT_FOUND_ACK
     from app.domain.owner.calendar import _EMPTY_ACK as calendar_free_slots_empty_ack
     from app.domain.owner.notifications import _EMPTY_ACK as meeting_notifications_empty_ack
+    from app.domain.owner.uncertain_writes import OWNER_UNCERTAIN_WRITES_EMPTY
     from app.tools.registries.owner_tools import ToolResult
 
     exact_cases = (
@@ -710,6 +712,8 @@ def test_more_real_formatter_constants_are_treated_as_empty() -> None:
         gmail_not_found_ack,  # app/domain/gmail/summaries.py:29,173
         calendar_free_slots_empty_ack,  # app/domain/owner/calendar.py:26
         meeting_notifications_empty_ack,  # app/domain/owner/notifications.py:32
+        GMAIL_BRIEF_EMPTY_WINDOW,  # app/domain/gmail/brief.py:29
+        OWNER_UNCERTAIN_WRITES_EMPTY,  # app/domain/owner/uncertain_writes.py:51
     )
     for text in exact_cases:
         assert _looks_empty(ToolResult(ok=True, text=text)) is True, text

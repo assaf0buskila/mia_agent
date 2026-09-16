@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from typing import Protocol
-from zoneinfo import ZoneInfo
 
 LOCKED_SPREADSHEET_ID = "1HW8mnc9GFXraS6oG5VIxFcJvZq9gMDJBFRxY2mpVOhI"
 CONTACTS_TAB = "Contacts"
@@ -44,8 +42,6 @@ ACTIVITY_HEADERS: tuple[str, ...] = (
 )
 ACTIVITY_ID_HEADER = "מזהה פעילות"
 ACTIVITY_V2_HEADERS: tuple[str, ...] = (*ACTIVITY_HEADERS, ACTIVITY_ID_HEADER)
-
-_IL_TZ = ZoneInfo("Asia/Jerusalem")
 
 
 def sheet_tab_from_a1(a1_range: str) -> str:
@@ -149,13 +145,6 @@ class ActivityRecord:
             self.action.strip(),
             self.result.strip(),
         ]
-
-
-def now_israel(clock: datetime | None = None) -> str:
-    moment = clock or datetime.now(UTC)
-    if moment.tzinfo is None:
-        moment = moment.replace(tzinfo=UTC)
-    return moment.astimezone(_IL_TZ).replace(microsecond=0).isoformat()
 
 
 def normalize_phone(value: str) -> str:
@@ -299,61 +288,3 @@ class SheetsContactsCrm:
         return tuple(self._tabs)
 
 
-def resolved_spreadsheet_id(settings: object | None = None) -> str:
-    """Env override if set; otherwise the locked Contacts workbook."""
-    if settings is not None:
-        resolver = getattr(settings, "resolved_sheets_spreadsheet_id", None)
-        if callable(resolver):
-            return str(resolver())
-        raw = str(getattr(settings, "sheets_spreadsheet_id", "") or "").strip()
-        if raw:
-            return raw
-    return LOCKED_SPREADSHEET_ID
-
-
-def build_contacts_crm(settings: object | None = None, port: object | None = None) -> ContactsCrm:
-    spreadsheet_id = resolved_spreadsheet_id(settings)
-    if port is not None and hasattr(port, "write_locked_contact"):
-        return SheetsContactsCrm(port, spreadsheet_id=spreadsheet_id)
-    return DisabledContactsCrm(spreadsheet_id=spreadsheet_id)
-
-
-def log_contact(
-    crm: ContactsCrm,
-    record: ContactRecord,
-    *,
-    who: str,
-    channel: str,
-    action: str,
-    result: str,
-    clock: datetime | None = None,
-) -> ContactRecord:
-    """Upsert Contacts and append Activity. Refuses a row with no phone or email."""
-    stamp = now_israel(clock)
-    stamped = ContactRecord(
-        name=record.name,
-        phone=record.phone,
-        email=record.email,
-        date=record.date,
-        business=record.business,
-        source=record.source,
-        language=record.language,
-        want=record.want,
-        status=record.status or "פתוח",
-        summary=record.summary,
-        next_step=record.next_step,
-        created=record.created or stamp,
-        updated=stamp,
-        pinged=record.pinged,
-    )
-    written = crm.upsert_contact(stamped)
-    crm.append_activity(
-        ActivityRecord(
-            when=stamp,
-            who=who,
-            channel=channel,
-            action=action,
-            result=result,
-        )
-    )
-    return written

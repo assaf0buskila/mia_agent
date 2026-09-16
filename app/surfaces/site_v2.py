@@ -932,6 +932,7 @@ def _lead_summary(state: SiteV2State, contact: Mapping[str, str], latest: str) -
 def _refresh_first_brief_with_submit_lead(
     db: Session,
     *,
+    settings: Settings,
     state: SiteV2State,
     contact: Mapping[str, str],
     latest: str,
@@ -953,7 +954,7 @@ def _refresh_first_brief_with_submit_lead(
     new_summary = _lead_summary(state, refreshed_contact, latest)
     if new_summary == summary:
         return
-    CrmService(db).refresh_pending_site_brief(
+    CrmService(db, timezone=settings.calendar_timezone).refresh_pending_site_brief(
         contact_id=state.contact_id,
         job_ids=state.delivery_job_ids,
         summary=new_summary,
@@ -1004,7 +1005,7 @@ def run_site_v2_turn(
     if contact and not state.captured:
         summary = _lead_summary(state, contact, text)
         try:
-            result = CrmService(db).capture_site_lead(
+            result = CrmService(db, timezone=settings.calendar_timezone).capture_site_lead(
                 {**contact, "business": state.business_context, "summary": summary,
                  "next_step": state.next_step or "לחזור לפונה"},
                 conversation_id=session_id,
@@ -1095,6 +1096,7 @@ def run_site_v2_turn(
                 if captured and had_submit_lead_call:
                     _refresh_first_brief_with_submit_lead(
                         db,
+                        settings=settings,
                         state=state,
                         contact=contact,
                         latest=text,

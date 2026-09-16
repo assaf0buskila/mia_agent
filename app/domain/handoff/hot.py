@@ -2,70 +2,71 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
-from typing import NamedTuple
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.capabilities.leads import leads_handlers
 from app.capabilities.policy import execute_capability
 from app.capabilities.types import Principal
 from app.core.config import Settings
-from app.core.errors import PolicyDenied
-from app.core.risk import RiskAction, RiskLevel, assert_allowed
-from app.domain.conversation_scope import TakeoverState
-from app.domain.handoff.delivery import (
-    KIND_HOT_LEAD_LEGACY,
-    KIND_WEBSITE_HANDOFF_DELIVERY,
-    WEBSITE_HANDOFF_DELIVERY_KINDS,
-)
-from app.domain.sales import SalesState
 
-KIND_HOT_LEAD = KIND_HOT_LEAD_LEGACY
-
-_BRIEF_MAX = 500
+_NO_HOT_LEADS_ACK = "אין לידים חמים שמחכים לתפיסה."
 
 
-class OwnerNotifyAttempt(NamedTuple):
-    """Result of one owner Telegram attempt.
+def _v1_hot_labels(store, ids: list[str]) -> list[str]:
+    """Best-effort sales headline per v1 lead id; falls back to the bare id.
 
-    ``known_unreachable`` distinguishes missing Telegram configuration from a
-    duplicate recipient claim, without consuming a later retry claim.
+    v1 leads have no name field anywhere (`LeadRow`/`CustomerRow` are pure
+    identity rows) -- `SalesState.headline` is the closest thing to a label,
+    and it is not always present. One `get_sales` read per id (up to 12, capped
+    by the caller) -- an N+1 not batched here; a future pass could add a
+    bulk-lookup store method if this list ever needs to grow past that cap.
+    Only `KeyError` (no `SalesStateRow` for that lead) and `SQLAlchemyError`
+    (a transient store read failure) degrade to the bare id -- anything else is
+    a real bug and must not be swallowed here.
     """
-
-    delivered: tuple[str, ...]
-    attempted: bool
-    known_unreachable: bool = False
-
-
-def format_hot_brief(*, lead_id: str, sales: SalesState, want: str) -> str:
-    lines = [
-        "ליד חם — מיה עוצרת.",
-        lead_id,
-        f"fit={sales.fit.value}",
-        f"pain={int(sales.pain_level)}",
-        f"workflow={'yes' if sales.workflow_known else 'no'}",
-        f"want={want[:120]}" if want else "want=handoff",
-        "הבא: תפיסה אנושית.",
-    ]
-    return "\n".join(lines)[:_BRIEF_MAX]
+    labels: list[str] = []
+    for lead_id in ids:
+        headline = ""
+        try:
+            headline = (store.get_sales(lead_id).headline or "").strip()
+        except (KeyError, SQLAlchemyError):
+            headline = ""
+        labels.append(f"{headline} ({lead_id})" if headline else lead_id)
+    return labels
 
 
 def format_hot_leads_ack(store, *, principal: Principal) -> str:
+    """Union of two "hot" sources: v1's takeover-state leads and v2's unconfirmed pings.
+
+    v1: `leads.get_recent`'s `hot_ids` -- `store.list_hot_lead_ids()`, i.e.
+    `LeadRow.takeover_state == HUMAN_TAKEOVER_REQUIRED`, set by
+    `store.set_takeover_state`. The auto-freeze *writer* (`apply_hot_handoff`)
+    was removed 2026-09-16 per Assaf's decision that Mia must not freeze a
+    conversation and hand it over automatically -- he wants hot leads listed so
+    he can decide. The *read* stays: a row already in that state (production
+    has one right now; see HANDOFF section 0) must keep surfacing here, and any
+    future explicit `set_takeover_state` call is honoured too.
+
+    v2: `store.list_undelivered_captured_website_leads` -- a website capture
+    whose own Telegram ping never reached `confirmed`. v2 has no takeover-state
+    equivalent; this is the real, already-tracked "Assaf was not reliably told"
+    signal for that path instead.
+    """
     result = execute_capability(
         "leads.get_recent",
         principal=principal,
         args={"limit": 12},
         handlers=leads_handlers(store),
     )
-    ids = [str(item) for item in (result.get("hot_ids") or []) if item]
-    # v2 has no sales-workflow "hot" state (no fit/pain/takeover). Rather than invent
-    # one, an unconfirmed Telegram ping is a real signal already tracked on the
-    # outbox: it means Assaf has not reliably been told about this capture yet.
-    v2_ids = [
-        str(item) for item in store.list_undelivered_captured_website_leads(limit=12) if item
+    v1_ids = [str(item) for item in (result.get("hot_ids") or []) if item]
+    v2_leads = store.list_undelivered_captured_website_leads(limit=12)
+    v1_labels = _v1_hot_labels(store, v1_ids)
+    v2_labels = [
+        f"{name} ({contact_id})" if name else contact_id for contact_id, name in v2_leads
     ]
-    combined = list(dict.fromkeys([*ids, *v2_ids]))
+    combined = list(dict.fromkeys([*v1_labels, *v2_labels]))
     if not combined:
-        return "אין לידים חמים שמחכים לתפיסה."
+        return _NO_HOT_LEADS_ACK
     listed = ", ".join(combined[:12])
     extra = "" if len(combined) <= 12 else f" (+{len(combined) - 12})"
     return f"לידים חמים: {listed}{extra}"
@@ -112,116 +113,3 @@ def _deliver_owners(
         parse_mode=parse_mode,
         recipient_ids=recipient_ids,
     )
-
-
-def apply_hot_handoff(
-    store,
-    *,
-    lead_id: str,
-    inbound_id: str,
-    want: str,
-    kill_switch: bool,
-    settings: Settings,
-    brief: str | None = None,
-    parse_mode: str | None = None,
-    notification_key: str = "",
-) -> OwnerNotifyAttempt:
-    """Mark HUMAN_TAKEOVER_REQUIRED, claim the notify, then Telegram. Never raise to inbound.
-
-    Returns whether this call attempted a send and which chat ids Telegram accepted.
-    Empty delivered means Assaf was not told — callers must not claim a transfer happened.
-
-    The send is gated on a claiming insert that reports whether it actually won. The
-    previous version persisted through an upsert that returns None and silently no-ops on a
-    duplicate, then sent unconditionally — so every retry of the same inbound re-sent the
-    brief and Assaf got the same hot lead over and over. One handoff, one message.
-    """
-    try:
-        assert_allowed(
-            RiskAction(name="hot_handoff_persist", risk=RiskLevel.R1_LOW_WRITE),
-            kill_switch=kill_switch,
-        )
-    except PolicyDenied:
-        return OwnerNotifyAttempt((), False)
-    # Policy denial must leave the lead exactly as it was: no takeover state,
-    # follow-up cancellation, inbox row, recipient claim, or transport attempt.
-    store.set_takeover_state(lead_id, TakeoverState.HUMAN_TAKEOVER_REQUIRED.value)
-    store.cancel_pending_follow_up(lead_id)
-    now_iso = datetime.now(UTC).replace(microsecond=0).isoformat()
-    sales = store.get_sales(lead_id)
-    text = brief if brief is not None else format_hot_brief(
-        lead_id=lead_id, sales=sales, want=want
-    )
-    mode = parse_mode if brief is not None else None
-    # The owner inbox is durable handoff state, not a transport claim.  Keep it even
-    # when Telegram cannot presently be attempted; recipient claims below remain
-    # untouched so a later valid replay is eligible.
-    store.upsert_owner_notification(
-        kind=KIND_HOT_LEAD, lead_id=lead_id, scheduled_at=now_iso
-    )
-    if any(
-        store.has_owner_notification_claim(
-            kind=kind, lead_id=lead_id, conversation_id=notification_key
-        )
-        for kind in WEBSITE_HANDOFF_DELIVERY_KINDS
-    ):
-        return OwnerNotifyAttempt((), False)
-    token = settings.telegram_bot_token.strip()
-    recipients = tuple(sorted(settings.telegram_owner_user_id_set()))
-    if not token or not recipients or not text.strip():
-        accepted = store.confirmed_owner_notification_recipients(
-            kind=KIND_WEBSITE_HANDOFF_DELIVERY,
-            lead_id=lead_id,
-            notification_key=notification_key,
-        )
-        if accepted:
-            return OwnerNotifyAttempt(accepted, False)
-        # Known no-attempt: no recipient claim is consumed, so a later valid replay
-        # remains eligible.
-        return OwnerNotifyAttempt((), False, True)
-    claimed_recipients = tuple(
-        recipient_id
-        for recipient_id in recipients
-        if store.try_claim_owner_notification_recipient_compatible(
-            kind=KIND_WEBSITE_HANDOFF_DELIVERY,
-            compatible_kinds=WEBSITE_HANDOFF_DELIVERY_KINDS,
-            lead_id=lead_id,
-            notification_key=notification_key,
-            recipient_id=recipient_id,
-            claimed_at=now_iso,
-        )
-    )
-    if not claimed_recipients:
-        return OwnerNotifyAttempt(
-            store.confirmed_owner_notification_recipients(
-                kind=KIND_WEBSITE_HANDOFF_DELIVERY,
-                lead_id=lead_id,
-                notification_key=notification_key,
-            ),
-            False,
-        )
-    # FastAPI normally commits only after the route returns. Telegram must never be
-    # called while the takeover/inbox/recipient claims can still roll back, or an
-    # accepted owner ping can be duplicated by the next retry.
-    if not store.commit_owner_notification_delivery_state():
-        return OwnerNotifyAttempt((), False, True)
-    delivery = _deliver_owners(
-        brief=text,
-        inbound_id=inbound_id,
-        settings=settings,
-        parse_mode=mode,
-        recipient_ids=claimed_recipients,
-    )
-    store.record_owner_notification_recipient_delivery_outcomes_durably(
-        kind=KIND_WEBSITE_HANDOFF_DELIVERY,
-        lead_id=lead_id,
-        notification_key=notification_key,
-        delivered_recipient_ids=delivery.delivered,
-        rejected_recipient_ids=delivery.rejected,
-    )
-    accepted = store.confirmed_owner_notification_recipients(
-        kind=KIND_WEBSITE_HANDOFF_DELIVERY,
-        lead_id=lead_id,
-        notification_key=notification_key,
-    )
-    return OwnerNotifyAttempt(accepted, True)

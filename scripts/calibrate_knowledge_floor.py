@@ -1,18 +1,22 @@
-"""Measure the knowledge evidence floor instead of guessing it.
+"""Measure a knowledge evidence floor instead of guessing one.
 
-`MIA_KNOWLEDGE_MIN_SIMILARITY` decides when Mia says "I do not have that published"
-rather than quoting the least-bad chunk in a 33-document corpus. Picking that number
-by feel is how a gate ends up either useless or silently muting real answers, so it
-comes from data: embed a set of questions the published corpus genuinely answers and
-a set it plainly does not, look at the top raw cosine each one gets, and take the
-floor from the gap between the two groups.
+There is no `MIA_KNOWLEDGE_MIN_SIMILARITY` setting. The only knob is `min_similarity`,
+an ordinary keyword argument on `retrieve_knowledge` (`app/brain/retrieval.py`) and
+`get_context`/friends (`app/brain/context.py`), and every live caller today leaves it
+at its default of `0.0` -- no evidence floor is applied before Mia quotes a published
+chunk. Picking a non-zero value by feel is how a gate ends up either useless or
+silently muting real answers, so this script derives a candidate from data instead:
+embed a set of questions the published corpus genuinely answers and a set it plainly
+does not, look at the top raw cosine each one gets, and take the floor from the gap
+between the two groups. It only ever suggests a number; wiring it into a call site is
+a separate, deliberate change.
 
 Read-only. Touches the knowledge corpus and the embedding provider, nothing else.
 
     uv run python scripts/calibrate_knowledge_floor.py
 
 Exit codes:
-    0  clean separation; a floor is printed
+    0  clean separation; a candidate `min_similarity` value is printed
     1  the groups overlap -- no honest floor exists for this corpus and these queries
     2  the corpus or the embedding provider is not available
 """
@@ -92,8 +96,8 @@ def main() -> int:
             print()
             print("OVERLAP: no floor separates these groups.")
             print("A threshold here would either mute a real answer or admit an")
-            print("unrelated one. Leave MIA_KNOWLEDGE_MIN_SIMILARITY at 0.0 and fix")
-            print("retrieval or the corpus instead of inventing a number.")
+            print("unrelated one. Leave min_similarity at 0.0 at every call site and")
+            print("fix retrieval or the corpus instead of inventing a number.")
             return 1
 
         # Sit in the gap, biased toward the negatives so a real question is never
@@ -101,7 +105,9 @@ def main() -> int:
         floor = strongest_negative + (weakest_positive - strongest_negative) * 0.35
         print()
         print(f"gap: {weakest_positive - strongest_negative:.4f}")
-        print(f"suggested MIA_KNOWLEDGE_MIN_SIMILARITY = {floor:.3f}")
+        print(f"suggested min_similarity = {floor:.3f}")
+        print("(pass this to retrieve_knowledge/get_context at a call site; there is")
+        print("no setting to update -- none exists)")
         return 0
     finally:
         db.close()

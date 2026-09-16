@@ -549,10 +549,12 @@ def execute_approved_owner_action_with_adapters(
                 return False
             if not crm_pre_synced:
                 try:
-                    sync_owner_crm_sheet_in_session(store, sheets=sheets)
+                    sync_owner_crm_sheet_in_session(
+                        store, sheets=sheets, timezone=settings.calendar_timezone
+                    )
                 except Exception:
                     return False
-            ports["crm"] = CrmService(store.session)
+            ports["crm"] = CrmService(store.session, timezone=settings.calendar_timezone)
             return True
         if kind in {"calendar.create", "calendar.reschedule"}:
             binding = approved_typed_binding(kind)
@@ -850,7 +852,9 @@ def execute_approved_owner_action_with_adapters(
             catalog.__exit__(None, None, None)
 
 
-def sync_owner_crm_sheet_in_session(store, *, sheets: object) -> int:
+def sync_owner_crm_sheet_in_session(
+    store, *, sheets: object, timezone: str = "Asia/Jerusalem"
+) -> int:
     """Merge current Contacts rows through the caller's open transaction.
 
     Approval callbacks must not open a second writer while the callback session holds
@@ -864,7 +868,7 @@ def sync_owner_crm_sheet_in_session(store, *, sheets: object) -> int:
     from app.services.crm_v2 import CrmService
 
     sheets.ensure_crm_workspace()
-    service = CrmService(store.session)
+    service = CrmService(store.session, timezone=timezone)
     seen_ids: set[str] = set()
     row_count = 0
     start_row = 2

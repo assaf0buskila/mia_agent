@@ -10,12 +10,9 @@ from app.core.risk import RiskAction, RiskLevel, assert_allowed
 from app.domain.approvals import (
     ACTION_COMPOSIO_WRITE,
     DECISION_APPROVED,
-    DECISION_PENDING,
     RESOURCE_COMPOSIO_TOOL,
-    approval_expires_at,
     is_approval_expired,
 )
-from app.domain.events import Channel, build_approval_required_event
 from app.domain.owner.composio_effects import (
     EffectRoute,
     composio_effect,
@@ -31,7 +28,6 @@ from app.integrations.composio_catalog import (
     validate_arguments,
 )
 
-_NO_COLD_DM_WORDS = frozenset({"MESSAGE", "DM", "INMAIL"})
 MAX_COMPOSIO_APPROVAL_PARAMETERS_BYTES = 16 * 1024
 
 
@@ -103,69 +99,6 @@ def generic_composio_effect_supported(slug: str) -> bool:
         EffectRoute.GENERIC_CREATE,
         EffectRoute.SNAPSHOT_WRITE,
     }
-
-
-def propose_composio_write(
-    *,
-    store,
-    channel: Channel,
-    catalog: ComposioCatalog,
-    slug: str,
-    arguments: dict,
-    kill_switch: bool,
-) -> str:
-    if kill_switch:
-        return "Composio action denied by kill switch."
-    tool = catalog.detail(slug)
-    if tool is None:
-        return "That Composio tool is not active for this owner."
-    risk = risk_for_slug(tool.slug, tool.toolkit)
-    if risk is RiskLevel.R0_READ:
-        return "This is a read; use composio_execute_tool."
-    denial = _generic_write_denial(tool.slug, tool.toolkit, risk)
-    if denial:
-        return denial
-    if tool.toolkit == "LINKEDIN" and frozenset(tool.slug.split("_")) & _NO_COLD_DM_WORDS:
-        return "LinkedIn direct messages are not available; cold outreach remains denied."
-    problem = validate_arguments(tool.input_schema, arguments)
-    if problem:
-        return problem
-    parameters = _parameters(tool.slug, arguments)
-    if not composio_parameters_within_bound(parameters):
-        return "The exact Composio action is too large to bind safely for approval."
-    resource_id = composio_approval_resource_id(tool.slug, arguments)
-    risk_value = risk.value
-    store.upsert_composio_approval(
-        channel=channel.value,
-        action=ACTION_COMPOSIO_WRITE,
-        risk=risk_value,
-        payload_hash=_digest(
-            channel=channel.value, resource_id=resource_id, risk=risk_value, parameters=parameters
-        ),
-        decision=DECISION_PENDING,
-        resource_id=resource_id,
-        expires_at=approval_expires_at(now=datetime.now(UTC)),
-        proposed_parameters=parameters,
-    )
-    row = store.get_approval_by_resource(
-        RESOURCE_COMPOSIO_TOOL, resource_id, ACTION_COMPOSIO_WRITE
-    )
-    if row is None:
-        return "I could not record the Composio approval. Nothing was executed."
-    key = f"{resource_id}:approval"
-    if store.claim_operation(scope="approval", key=key):
-        store.save_canonical_event(
-            provider=channel.value,
-            event=build_approval_required_event(
-                provider=channel.value,
-                channel=channel,
-                action=ACTION_COMPOSIO_WRITE,
-                risk=risk_value,
-                resource_id=resource_id,
-            ),
-        )
-        store.complete_operation(scope="approval", key=key, result_json='{"ok":true}')
-    return f"Composio action is ready for your exact approval: {tool.slug}. Nothing was executed."
 
 
 def composio_row_valid(row) -> tuple[str, dict] | None:
