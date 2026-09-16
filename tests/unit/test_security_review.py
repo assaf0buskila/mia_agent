@@ -1,6 +1,10 @@
 """Pre-cloud security review — contracts that must stay fail-closed."""
 
+import logging
+
+import httpx
 from app.core.config import Settings, get_settings
+from app.core.logging import RedactingFilter
 from app.core.redact import redact
 from app.core.risk import PolicyDecision, RiskAction, RiskLevel, decide
 from app.core.write_flags import named_write_may_auto, write_flag_enabled
@@ -42,6 +46,50 @@ def test_redact_strips_secrets_and_pii() -> None:
     )
     assert cleaned["nested"]["composio_api_key"] == "[redacted]"
     assert cleaned["nested"]["database_url"] == "[redacted]"
+
+
+def test_redact_scrubs_bot_token_from_a_non_string_log_arg() -> None:
+    """httpx logs `request.url` as an `httpx.URL` object, not a pre-formatted
+    string. `redact` used to only pattern-match str/dict/list, so this exact
+    object type fell through untouched and leaked the token into CloudWatch."""
+    url = httpx.URL("https://api.telegram.org/bot123456:AAFakeTokenValue/sendMessage")
+    cleaned = redact(url)
+    assert isinstance(cleaned, str)
+    assert "AAFakeTokenValue" not in cleaned
+    assert cleaned == "https://api.telegram.org/bot[redacted]/sendMessage"
+
+    # A non-URL, non-string arg (e.g. a status code formatted with %d) must
+    # come back completely unchanged, in type and value, or %-formatting
+    # breaks downstream.
+    assert redact(200) == 200
+    assert isinstance(redact(200), int)
+
+
+def test_redacting_filter_scrubs_the_telegram_token_httpx_actually_logs() -> None:
+    """End-to-end reproduction of the real leak: httpx's own request logger
+    calls `logger.info('HTTP Request: %s %s "%s %d %s"', method, url, ...)`
+    with `url` as an object, not a string. Prove the token never survives to
+    the formatted log line CloudWatch would receive."""
+    token = "123456:AAFakeTokenValueThatMustNeverAppearInLogs"
+    url = httpx.URL(f"https://api.telegram.org/bot{token}/sendMessage")
+    record = logging.LogRecord(
+        name="httpx",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=0,
+        msg='HTTP Request: %s %s "%s %d %s"',
+        args=("POST", url, "HTTP/1.1", 200, "OK"),
+        exc_info=None,
+    )
+    assert RedactingFilter().filter(record) is True
+    formatted = record.getMessage()
+    assert token not in formatted
+    assert "AAFakeTokenValueThatMustNeverAppearInLogs" not in formatted
+    # The rest of the line -- proof this scrubs the token, not the log line.
+    expected = (
+        'HTTP Request: POST https://api.telegram.org/bot[redacted]/sendMessage "HTTP/1.1 200 OK"'
+    )
+    assert formatted == expected
 
 
 def test_r4_approval_r5_deny_not_flag_overridable() -> None:
