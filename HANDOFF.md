@@ -15,6 +15,35 @@ website lead delivered end to end to Assaf's Telegram. Every item below is `LOCA
 CI-green + independently reviewed at most — deployment status for anything past `110ada6` (i.e.
 this session's C7b work) is unaffected by this correction.
 
+### CURRENT STATE — read this before anything else (2026-09-16, end of session)
+
+- **Master is `8ed912e`; production runs `110ada6` on task definition `mia:65`.** Four merged
+  PRs are **NOT deployed**: #73 (C7b cleanup), #75 (C11 Activity Sheet), #74 (C8 token-leak fix
+  plus the rotation Lambda code), #76 (C9 Hebrew presentation). The formatting Assaf objected to
+  is fixed in master and still live on his phone.
+- **The production database was deliberately wiped** (full fresh start, 56 tables truncated,
+  `mia-wipe-data --confirm fresh-start` as an ECS one-off). Restore point: RDS snapshot
+  **`mia-pre-wipe-20260916-112916`**. The wipe also cleared the knowledge base; it was
+  re-ingested immediately and `/health` reports 37 chunks. Assaf's Sheet keeps its rows, but
+  deletions now stick because no contact remains for the reconciler to re-append.
+- **The Telegram bot token was revoked and replaced.** Two lessons: ECS injects secrets at
+  container start, so changing a secret does nothing until the task is replaced; and revoking a
+  token drops the webhook, which must be re-registered via the `mia-telegram-webhook` entrypoint
+  run as an ECS one-off (it prints `getWebhookInfo` back, so registration is verified). A correct
+  token with no webhook looks exactly like a wrong token: silence, no errors.
+- **`aws ecs update-service --force-new-deployment` silently produced no new deployment twice.**
+  Always confirm a new deployment `createdAt` and that the task's `startedAt` is later than the
+  secret's `LastChangedDate`; otherwise stop the task directly.
+- **The next RDS rotation is ~2026-09-19.** The auto-sync Lambda code is merged, but **no AWS
+  resources exist yet** (function, IAM role, EventBridge rule, DLQ, alarm), and its EventBridge
+  pattern is **UNVERIFIED** — it cannot be confirmed without a real rotation firing it. Round-2
+  review found the original pattern (`AWS API Call via CloudTrail`) could never match a
+  service-emitted rotation event; it is now `AWS Service Event via CloudTrail`, still unproven.
+- **Mia's knowledge lags Assaf's website by design.** She reads only `llms-full.txt`, `llms.txt`
+  and `pricing.md`; all three were still dated 2026-09-14 after he updated the site on 09-16, and
+  the ingest schedule is weekly (`cron(20 4 ? * MON *)`). Chunk C12 addresses the schedule and the
+  visibility; regenerating those files at build time is on the Vercel side and is Assaf's.
+
 ### C8 — RDS credential rotation took production down for ~9 hours (2026-09-16)
 
 **Root cause.** RDS has `ManageMasterUserPassword` enabled and rotates the master password
@@ -152,7 +181,7 @@ credential-rotation question either way; merged on its own.
 | #71 | C6a | Social capability truth: real per-tool capability clauses, a `social_capabilities` tool, a social-writing rule that separates observed data / inference / recommendation; routing needle-collision fixes (content-word plurals, Hebrew clitics, reels); the audit method itself replaced (a differential sweep against master instead of audit-by-inspection) | — |
 | #72 | C2b | Approval cards render from the stored envelope, one Telegram message per proposal with its own keyboard; a real edit-failure fallback send; no button ever delivered on a partially-sent card; callback `sent` reflects actual delivery, not intent; the pending-approvals digest is always sent as its own message, never combined with a card | see C7b below — a card-succeeds-while-digest-fails variant of the same "no button on a partial send" property left the webhook mark and the outbound canonical event both keyed on the digest alone |
 
-### C7b (this session, committed locally, not pushed / no PR yet)
+### C7b — merged as #73
 
 **Correction (2026-09-16, round 2 review):** the first version of this section claimed
 `human_takeover` (boolean) and `takeover_state` (string) are independent columns with different
@@ -234,14 +263,18 @@ earlier interrupted session — ignore it. Master after the last campaign merge:
 
 ### Remaining queue
 
-1. **C7b** — push, PR, fresh opus review on the three-dot diff to this session's final SHA, fix,
-   merge on PASS + green CI. This chunk is unusually high-risk for its size (a production data
-   point in play, and round 1 of this exact review already caught a false premise here) — the
-   review should specifically re-verify the "Decisions" entry below against the code rather than
-   take it on faith.
-2. **Prompt 4 release readiness** (opus, read-only): full gates, capability evidence matrix,
-   exact live tests needing Assaf's approval, rollout + rollback plan. **Stop for go/no-go.**
-3. **Prompt 5 deploy** only after Assaf approves a specific CI-green SHA; then phone acceptance.
+1. **C12 live knowledge** — worktree `.claude/worktrees/mia-c12`, branch
+   `claude/mia-c12-live-knowledge`. Hourly ingest instead of weekly (safe: the ingest already
+   skips unchanged sources via `content_hash`), per-source freshness in `/health`, and a warning
+   when Assaf's site is newer than the knowledge files he maintains.
+2. **Social pass** — the capability text in `social_capabilities.py` is English while every other
+   owner surface is Hebrew; verify C6a's routing fixes behave in production; LinkedIn publishing
+   is still `CODE_CHECKED` only, never verified live.
+3. **Deploy** — brings the four merged-but-undeployed PRs live. Procedure proven this session;
+   rollback target is the revision serving before the deploy.
+4. **Create the Lambda infrastructure**, then **deliberately trigger a rotation** to prove the
+   EventBridge pattern fires, before ~09-19. A safety net that silently does not exist is worse
+   than none, because it suppresses the manual check.
 
 ### Assaf's decisions (2026-09-14)
 
@@ -307,15 +340,23 @@ earlier interrupted session — ignore it. Master after the last campaign merge:
 ### Start the next session with
 
 ```text
-Read CLAUDE.md, HANDOFF.md section 0 and TASKS.md "Campaign finish". Do not re-audit.
-Verify in five lines: git fetch; origin/master SHA; `gh pr list` (nothing campaign-related should
-be open; if #69 is not merged, finish it first); `git worktree list`.
-Then continue the queue in HANDOFF section 0 using the Ready briefs in
-docs/MIA_CLAUDE_CODE_PROMPTS.md: launch the C2b and C6a builders (sonnet, own worktrees off the
-latest origin/master), then for each: push + PR → fresh opus review on the three-dot diff → fixes
-→ merge on review PASS + green CI. Then C7b last. Max 2 agents at once.
-Stop before Prompt 4's go/no-go and before any deploy.
+Read CLAUDE.md, HANDOFF.md section 0 (especially CURRENT STATE) and TASKS.md. Do not re-audit
+merged work.
+
+Verify: git fetch; origin/master SHA; gh pr list; git worktree list; and
+curl -s https://mia.assafweb.com/health | jq '.deployment.commit_sha, .ops, .brain.corpus'
+
+Then continue the queue in section 0: C12 live knowledge, then the social pass, then deploy.
+Per chunk: push + PR -> fresh opus review on the three-dot diff origin/master...<sha> -> fixes
+-> merge on review PASS + green CI.
+
+Stop before any deploy and before creating AWS resources.
 ```
+
+Waiting on Assaf, not on the session: regenerate `llms.txt` / `llms-full.txt` / `pricing.md` on
+Vercel (they are dated 09-14 and did not update with his 09-16 site change, so Mia cannot see it
+however often she ingests); clean the Sheet rows; one controlled live LinkedIn post; decide
+whether `content_ideas` should produce drafts instead of categories.
 
 ### Commands the loop uses
 
