@@ -64,15 +64,6 @@ PURPOSE_MODEL_SETTINGS = (
     "MIA_OWNER_AGENT_GEMINI_MODEL",
     "MIA_GEMINI_TRANSCRIBE_MODEL",
 )
-# RDS `ManageMasterUserPassword` rotates this secret's `password` key on its own
-# schedule; injecting it as a container secret (rather than copying the value
-# into mia/prod) is what lets app/core/config.effective_database_url stay in
-# sync with rotation instead of needing a hand-updated stale copy (chunk C8).
-RDS_MANAGED_PASSWORD_SECRET_ARN = (
-    "arn:aws:secretsmanager:eu-north-1:535252061205:secret:"
-    "rds!db-d7c051e7-2f6a-4711-826d-2bf7d243a2f8-gjs5XD:password::"
-)
-RDS_MANAGED_PASSWORD_SECRET_NAME = "MIA_DATABASE_PASSWORD"
 _DIGEST_IMAGE = re.compile(
     r"^(?P<account>\d{12})\.dkr\.ecr\.(?P<region>[a-z0-9-]+)\.amazonaws\.com/"
     r"(?P<repository>[^@\s]+)@(?P<digest>sha256:[0-9a-f]{64})$"
@@ -263,14 +254,7 @@ def _normalize_v2_container(container: dict, *, image_uri: str, sha: str) -> Non
         dict(entry)
         for entry in container.get("secrets", [])
         if entry.get("name") not in RETIRED_NAMES
-        and entry.get("name") != RDS_MANAGED_PASSWORD_SECRET_NAME
     ]
-    # Re-added fresh every time (never left untouched) so a stale or wrong
-    # valueFrom from an earlier revision self-heals instead of persisting,
-    # and so re-running this script never produces a duplicate entry.
-    container["secrets"].append(
-        {"name": RDS_MANAGED_PASSWORD_SECRET_NAME, "valueFrom": RDS_MANAGED_PASSWORD_SECRET_ARN}
-    )
     container["image"] = image_uri
 
 

@@ -22,22 +22,31 @@ the two copies had silently diverged with no signal. The next task restart (a ro
 deploy) tried to authenticate fresh, failed against the rotated password, and production
 was down until the `mia/prod` copy was hand-updated: roughly nine hours.
 
-**Fix (this chunk, `app/core/config.py` + `app/db/session.py` + `scripts/deploy_ecs_revision.py`).**
-A new optional `MIA_DATABASE_PASSWORD` setting, sourced directly from the RDS-managed
-secret as its own container secret, overrides just the password component of
-`database_url` at the single choke point `Settings.effective_database_url()` (consumed by
-`app.db.session.get_engine()`). The two values can no longer independently drift: the
-container always reads the current rotated password straight from RDS's own secret.
-`scripts/deploy_ecs_revision.py` now wires that secret into every registered revision
-idempotently, so this is no longer a manual step at deploy time.
+**Fix, take 1 (in-app override) — designed, reviewed, then dropped.** A first design added
+an optional `MIA_DATABASE_PASSWORD` setting sourced from the RDS-managed secret as its own
+container secret, overriding just the password in `database_url` at one choke point
+(`Settings.effective_database_url()` / `app.db.session.get_engine()`). Review confirmed the
+substitution logic itself was correct under adversarial testing (23 passwords round-tripped
+exactly through SQLAlchemy's own parser, including `%40`, `%2F`, 512 chars, Hebrew, emoji;
+last-`@` anchoring correct; choke point confirmed sole). It was still dropped: the ECS
+execution role `miaTaskExecutionRole`'s inline policy `ReadMiaProdBoxOnly` is scoped to
+`secret:mia/prod*` only, so it cannot read `secret:rds!db-...` — deploying the RDS-managed
+secret as a container secret as designed would have prevented every task from starting.
+Assaf chose not to widen that policy.
 
-**Consequence — flag for later, not done here.** Once this deploys, the password embedded
-in `mia/prod`'s `MIA_DATABASE_URL` becomes vestigial (never read, since the override always
-wins when set). It should later be reduced to a passwordless URL to remove the stale-copy
-risk entirely. This chunk deliberately does not touch that secret — only the app-side code
-and the deploy script change here.
+**Fix, take 2 (auto-sync) — the chosen approach, next chunk.** Instead of the running
+container reading the rotated password directly, an EventBridge rule on the RDS-managed
+secret's rotation event triggers a Lambda that (a) reads the new password from the
+RDS-managed secret, (b) rewrites only the password inside `mia/prod`'s `MIA_DATABASE_URL`
+— every other key and the rest of the URL preserved byte-for-byte — and (c) forces a new
+ECS deployment so the already-running task actually picks up the change instead of holding
+the old password until something else restarts it (which is exactly today's failure mode).
+The Lambda gets its own narrow IAM role: read the RDS-managed secret, `PutSecretValue` on
+`mia/prod`, `ecs:UpdateService` + `ecs:DescribeServices` on the `mia` service — nothing
+wider. `mia/prod`'s embedded password stays load-bearing under this design (it is what the
+container actually reads); it does not become vestigial the way take 1 would have made it.
 
-**Separate, incidental finding fixed in the same area (own commit): Telegram bot token
+**Separate, incidental finding fixed and kept regardless of which take: Telegram bot token
 leaking into CloudWatch.** httpx's own request logger (`logging.getLogger("httpx")`) logs
 `request.url` as an `httpx.URL` object, not a pre-formatted string. `app/core/redact.py`'s
 `redact()` only pattern-matched `str`/`dict`/`list` values, so this one non-string `%`-style
@@ -45,9 +54,8 @@ log argument fell through every branch untouched, and the Telegram bot token emb
 the URL path (`api.telegram.org/bot<TOKEN>/sendMessage`) reached `/ecs/mia` in plaintext.
 Assaf already revoked the exposed token; the replacement would have leaked identically.
 Fixed by extending `redact()` to stringify and pattern-check any non-str/dict/list value,
-substituting the scrubbed string only when a token is actually present (an int like a
-status code, or anything else with no token in its string form, is returned completely
-unchanged so `%`-formatting for non-`%s` placeholders still works).
+substituting the scrubbed string only when a token is actually present. Independent of the
+credential-rotation question either way; merged on its own.
 
 ### Merged to master (each: failing test → fix → fresh opus review → fixes → green CI)
 

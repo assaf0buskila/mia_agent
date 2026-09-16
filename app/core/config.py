@@ -1,55 +1,12 @@
 import os
 from enum import StrEnum
 from typing import Literal
-from urllib.parse import quote, urlparse
+from urllib.parse import urlparse
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.core.models import model_chain
-
-
-def _with_overridden_dsn_password(url: str, password: str) -> str:
-    """Return `url` with its credentials-section password replaced by `password`.
-
-    Built for RDS `ManageMasterUserPassword` rotation: the rotated password is
-    injected as its own container secret, and this is the one place that
-    recombines it with the rest of the stored DSN, so the two can never drift
-    out of sync again (see HANDOFF.md root cause, chunk C8).
-
-    Preserves scheme, driver suffix, username, host, port, path and query
-    byte-for-byte -- only the password changes, and it is percent-encoded so
-    punctuation RDS generates (`#? / @ % :` and spaces) can never corrupt URL
-    parsing downstream.
-
-    A no-op when `url` has no `scheme://` authority, or that authority has no
-    `@`-delimited credentials section at all (e.g. `sqlite:///:memory:` or a
-    bare sqlite path) -- there is no password slot to fill. When a credentials
-    section is present, the password is set (inserted if absent, replaced if
-    present); the split point is the LAST `@` before the first `/` after the
-    scheme, so a stray, unencoded `@` already inside an existing password is
-    never mistaken for the userinfo/host boundary.
-    """
-    marker = "://"
-    scheme_end = url.find(marker)
-    if scheme_end == -1:
-        return url
-    scheme = url[:scheme_end]
-    rest = url[scheme_end + len(marker) :]
-
-    slash_idx = rest.find("/")
-    if slash_idx == -1:
-        authority, tail = rest, ""
-    else:
-        authority, tail = rest[:slash_idx], rest[slash_idx:]
-
-    if "@" not in authority:
-        return url
-
-    userinfo, _, hostport = authority.rpartition("@")
-    username = userinfo.split(":", 1)[0]
-    encoded_password = quote(password, safe="")
-    return f"{scheme}{marker}{username}:{encoded_password}@{hostport}{tail}"
 
 
 class MiaEnv(StrEnum):
@@ -96,13 +53,6 @@ class Settings(BaseSettings):
     )
 
     database_url: str = Field(default="sqlite:///:memory:")
-    # RDS `ManageMasterUserPassword` rotates the DB password into its own
-    # AWS-managed secret on a schedule, independent of `database_url`'s
-    # embedded copy -- the two used to only agree until the next rotation.
-    # When set, this overrides just the password component of `database_url`
-    # (see `effective_database_url`); absent (default) is exactly today's
-    # behaviour, `database_url`'s own embedded password, unchanged.
-    database_password: str = Field(default="")
     composio_api_key: str = Field(default="")
     composio_user_id: str = Field(default="")
     # Ask Composio for resource ids (GSC site, GA4 property) when the matching env var is
@@ -246,19 +196,6 @@ class Settings(BaseSettings):
         """True when DATABASE_URL is Postgres. Never returns the DSN."""
         scheme = self.database_url.strip().split(":", 1)[0].lower()
         return scheme in {"postgres", "postgresql"} or scheme.startswith("postgresql+")
-
-    def effective_database_url(self) -> str:
-        """`database_url`, with `database_password` substituted in when set.
-
-        This is the single choke point every DB consumer must go through
-        (`app.db.session.get_engine`) so RDS-managed credential rotation can
-        never desynchronise from a stale copy again. Never logs the password,
-        the composed URL, or any fragment of either.
-        """
-        password = self.database_password.strip()
-        if not password:
-            return self.database_url
-        return _with_overridden_dsn_password(self.database_url, password)
 
     def public_https_ready(self) -> bool:
         """True when public_base_url is stable HTTPS. Never a tunnel or loopback."""
