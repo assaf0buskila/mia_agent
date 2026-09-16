@@ -8,12 +8,19 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+from app.brain.embeddings import FakeEmbeddingPort
+from app.brain.knowledge import FakeDocumentFetcher, ingest_source
 from app.brain.site_freshness import (
     FakeSiteFreshnessChecker,
+    SourceFreshness,
     check_site_freshness,
     compare_staleness,
     parse_http_date,
 )
+from app.brain.store import BrainStore
+from app.db.models import KnowledgeSourceRow
+from app.db.session import get_session_factory, init_db
+from app.workers import ingest_knowledge as ingest_worker
 
 _OLD = "Mon, 14 Sep 2026 19:14:00 GMT"
 _NEW = "Wed, 16 Sep 2026 09:00:00 GMT"
@@ -160,3 +167,130 @@ def test_material_staleness_window_is_hours_not_minutes() -> None:
         )
         == "stale"
     )
+
+
+# --- the worker wiring: a freshness failure must not cost the ingest -----------
+#
+# `_check_and_record_site_freshness` runs INSIDE the ingest's open transaction and
+# `main()` commits unconditionally afterwards. Before the savepoint, a DB error here
+# left the Session in pending-rollback, the commit raised, and the outer handler
+# rolled back every chunk the run had just fetched and embedded.
+
+
+def _fresh_brain():
+    init_db()
+    session = get_session_factory()()
+    return session, BrainStore(session)
+
+
+def test_freshness_db_failure_does_not_discard_the_chunks_just_ingested(monkeypatch) -> None:
+    """The P1 regression, with a GENUINE DB error rather than a mocked one.
+
+    Forces the `uq_brain_knowledge_source` conflict the reviewer reproduced -- the
+    exact shape two overlapping ingest runs produce, which moving to hourly makes
+    far more likely -- and asserts the freshly-embedded chunks survive the commit.
+    """
+    session, brain = _fresh_brain()
+    source_id = "p1-regression.txt"
+    url = f"https://example.invalid/{source_id}"
+    try:
+        ingest_source(
+            brain,
+            source_id=source_id,
+            url=url,
+            fetcher=FakeDocumentFetcher(
+                {url: "# S\n\n## Services\nA description long enough to chunk.\n"}
+            ),
+            embedding_port=FakeEmbeddingPort(),
+        )
+        chunks_before = brain.count_knowledge_chunks()
+        assert chunks_before > 0, "the test needs real chunks pending in this transaction"
+
+        def _duplicate_source(self, **kwargs) -> None:
+            # A real IntegrityError from the database, not a raised stub: a second
+            # row for a source_id that already exists violates uq_brain_knowledge_source.
+            self.session.add(KnowledgeSourceRow(source_id=source_id))
+            self.session.flush()
+
+        monkeypatch.setattr(BrainStore, "record_site_freshness", _duplicate_source)
+        monkeypatch.setattr(
+            ingest_worker,
+            "check_site_freshness",
+            lambda **kwargs: [
+                SourceFreshness(
+                    source_id=source_id,
+                    site_last_modified=_NEW,
+                    source_last_modified=_OLD,
+                    stale="stale",
+                )
+            ],
+        )
+        monkeypatch.setattr(ingest_worker, "HttpSiteFreshnessChecker", lambda *a, **k: None)
+
+        # Must not raise, and must leave the outer transaction committable.
+        ingest_worker._check_and_record_site_freshness(
+            brain, website_url="https://example.invalid", sources=[source_id]
+        )
+        session.commit()
+    finally:
+        session.close()
+
+    verify = get_session_factory()()
+    try:
+        assert BrainStore(verify).count_knowledge_chunks() >= chunks_before
+    finally:
+        verify.close()
+
+
+def test_freshness_db_failure_on_one_source_still_records_the_others(monkeypatch) -> None:
+    """The savepoint is per item, so one bad source does not skip the rest."""
+    session, brain = _fresh_brain()
+    good, bad = "good-source.txt", "bad-source.txt"
+    try:
+        real = BrainStore.record_site_freshness
+
+        def _fail_one(self, **kwargs):
+            if kwargs.get("source_id") == bad:
+                self.session.add(KnowledgeSourceRow(source_id=bad))
+                self.session.add(KnowledgeSourceRow(source_id=bad))
+                self.session.flush()
+                return None
+            return real(self, **kwargs)
+
+        monkeypatch.setattr(BrainStore, "record_site_freshness", _fail_one)
+        monkeypatch.setattr(
+            ingest_worker,
+            "check_site_freshness",
+            lambda **kwargs: [
+                SourceFreshness(
+                    source_id=bad,
+                    site_last_modified=_NEW,
+                    source_last_modified=_OLD,
+                    stale="stale",
+                ),
+                SourceFreshness(
+                    source_id=good,
+                    site_last_modified=_NEW,
+                    source_last_modified=_OLD,
+                    stale="stale",
+                ),
+            ],
+        )
+        monkeypatch.setattr(ingest_worker, "HttpSiteFreshnessChecker", lambda *a, **k: None)
+
+        ingest_worker._check_and_record_site_freshness(
+            brain, website_url="https://example.invalid", sources=[bad, good]
+        )
+        session.commit()
+    finally:
+        session.close()
+
+    verify = get_session_factory()()
+    try:
+        statuses = {
+            s.source_id: s
+            for s in BrainStore(verify).list_knowledge_source_statuses([good, bad])
+        }
+        assert statuses[good].site_stale == "stale", "the good source must still be recorded"
+    finally:
+        verify.close()

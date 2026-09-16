@@ -13,6 +13,8 @@ from __future__ import annotations
 import argparse
 import sys
 
+from sqlalchemy.exc import SQLAlchemyError
+
 from app.brain.embeddings import build_embedding_port
 from app.brain.knowledge import HttpDocumentFetcher, build_chunks, source_urls
 from app.brain.knowledge import ingest_website as run_ingest
@@ -59,16 +61,35 @@ def _check_and_record_site_freshness(
             sources=source_urls(website_url, sources),
             checker=HttpSiteFreshnessChecker(),
         )
-        for item in results:
-            store.record_site_freshness(
-                source_id=item.source_id,
-                site_last_modified=item.site_last_modified,
-                source_last_modified=item.source_last_modified,
-                stale=item.stale,
-            )
-            print(f"{item.source_id}: site_stale={item.stale}")
     except Exception as exc:  # noqa: BLE001 - never let this abort a successful ingest
         print(f"site freshness check failed: {type(exc).__name__}", file=sys.stderr)
+        return
+
+    for item in results:
+        try:
+            # A SAVEPOINT, the same idiom as `app/db/migrate.py::_apply_file`.
+            # Without it, a DB error here leaves the Session in pending-rollback,
+            # `main()`'s unconditional `session.commit()` then raises, and the
+            # outer handler rolls back EVERY chunk this run just fetched and
+            # embedded -- the exact opposite of this function's contract.
+            # `record_site_freshness` flushes, so the statement really is emitted
+            # inside the savepoint despite the session's `autoflush=False`.
+            with store.session.begin_nested():
+                store.record_site_freshness(
+                    source_id=item.source_id,
+                    site_last_modified=item.site_last_modified,
+                    source_last_modified=item.source_last_modified,
+                    stale=item.stale,
+                )
+        except SQLAlchemyError as exc:
+            # Rolled back to the savepoint only: the outer transaction stays clean
+            # and committable, and the remaining sources still get their turn.
+            print(
+                f"{item.source_id}: site freshness record failed ({type(exc).__name__})",
+                file=sys.stderr,
+            )
+            continue
+        print(f"{item.source_id}: site_stale={item.stale}")
 
 
 def main() -> int:

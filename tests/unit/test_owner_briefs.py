@@ -299,6 +299,12 @@ def test_apply_owner_brief_silent_without_a_brain_argument() -> None:
         db.close()
 
 
+# The site header every staleness test uses is 16.09.2026 09:00 GMT. These pin "now"
+# relative to it so the edge-triggered window is deterministic rather than wall-clock.
+_SHORTLY_AFTER_SITE_CHANGE = datetime(2026, 9, 16, 12, 0, tzinfo=UTC)
+_DAYS_AFTER_SITE_CHANGE = datetime(2026, 9, 20, 12, 0, tzinfo=UTC)
+
+
 def test_apply_owner_brief_silent_when_knowledge_is_fresh() -> None:
     init_db()
     db = get_session_factory()()
@@ -336,7 +342,17 @@ def test_apply_owner_brief_silent_when_staleness_is_unknown() -> None:
     try:
         store = LeadStore(db)
         brain = BrainStore(brain_session)
-        # Never checked at all -> "unknown" by default; no record_site_freshness call.
+        # Recorded EXPLICITLY rather than relying on the column default: in file
+        # order a preceding test leaves llms.txt at "fresh" in the shared DB, so
+        # the default-only version of this test never reached the unknown branch
+        # at all -- mutating the filter to ("stale", "unknown") left it green.
+        brain.record_site_freshness(
+            source_id="llms.txt",
+            site_last_modified="",
+            source_last_modified="",
+            stale="unknown",
+        )
+        brain_session.flush()
         text = apply_owner_brief(
             store,
             timezone="Asia/Jerusalem",
@@ -371,6 +387,9 @@ def test_apply_owner_brief_adds_one_line_when_a_source_is_stale() -> None:
             timezone="Asia/Jerusalem",
             kill_switch=False,
             demo_active=False,
+            # Pinned: the line is edge-triggered on the site's own Last-Modified,
+            # so without an explicit `now` this test would pass only on 16.09.2026.
+            now=_SHORTLY_AFTER_SITE_CHANGE,
             brain=brain,
             knowledge_sources=["llms.txt", "pricing.md"],
         )
@@ -418,6 +437,7 @@ def test_apply_owner_brief_names_every_stale_source() -> None:
             timezone="Asia/Jerusalem",
             kill_switch=False,
             demo_active=False,
+            now=_SHORTLY_AFTER_SITE_CHANGE,
             brain=brain,
             knowledge_sources=["llms.txt", "pricing.md", "llms-full.txt"],
         )
@@ -425,6 +445,85 @@ def test_apply_owner_brief_names_every_stale_source() -> None:
         assert "llms.txt" in text
         assert "pricing.md" in text
         assert text.count("ישנים מהאתר") == 1
+    finally:
+        brain_session.close()
+        db.close()
+
+
+def test_staleness_line_is_edge_triggered_and_stops_nagging() -> None:
+    """The standing condition must not print the same warning every day forever.
+
+    Production is already site 09-16 / files 09-14 and regenerating those files is
+    out of this chunk's scope, so a level-triggered check would have warned from day
+    one and never stopped -- defeating the "say nothing when there is nothing new"
+    intent that makes the line worth reading at all. Same stale row, two different
+    brief days: named on the first, silent on the second.
+    """
+    init_db()
+    db = get_session_factory()()
+    brain_session = get_session_factory()()
+    try:
+        store = LeadStore(db)
+        brain = BrainStore(brain_session)
+        brain.record_site_freshness(
+            source_id="pricing.md",
+            site_last_modified="Wed, 16 Sep 2026 09:00:00 GMT",
+            source_last_modified="Mon, 14 Sep 2026 19:14:00 GMT",
+            stale="stale",
+        )
+        brain_session.commit()
+
+        def brief(now):
+            return apply_owner_brief(
+                store,
+                timezone="Asia/Jerusalem",
+                kill_switch=False,
+                demo_active=False,
+                now=now,
+                brain=brain,
+                knowledge_sources=["pricing.md"],
+            )
+
+        first = brief(_SHORTLY_AFTER_SITE_CHANGE)
+        assert first is not None and "ישנים מהאתר" in first
+
+        # Nothing about the row changed; the site simply has not moved again.
+        later = brief(_DAYS_AFTER_SITE_CHANGE)
+        assert later is not None
+        assert "ישנים מהאתר" not in later
+        assert "pricing.md" not in later
+    finally:
+        brain_session.close()
+        db.close()
+
+
+def test_staleness_line_returns_when_the_site_changes_again() -> None:
+    """A second site change is new content he is missing, so it is reported again."""
+    init_db()
+    db = get_session_factory()()
+    brain_session = get_session_factory()()
+    try:
+        store = LeadStore(db)
+        brain = BrainStore(brain_session)
+        brain.record_site_freshness(
+            source_id="pricing.md",
+            site_last_modified="Sat, 19 Sep 2026 22:00:00 GMT",
+            source_last_modified="Mon, 14 Sep 2026 19:14:00 GMT",
+            stale="stale",
+        )
+        brain_session.commit()
+        text = apply_owner_brief(
+            store,
+            timezone="Asia/Jerusalem",
+            kill_switch=False,
+            demo_active=False,
+            now=_DAYS_AFTER_SITE_CHANGE,
+            brain=brain,
+            knowledge_sources=["pricing.md"],
+        )
+        assert text is not None
+        assert "ישנים מהאתר" in text
+        assert "19.09.2026" in text
     finally:
         brain_session.close()
         db.close()

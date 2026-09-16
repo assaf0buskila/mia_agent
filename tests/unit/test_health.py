@@ -368,18 +368,22 @@ def test_knowledge_freshness_reports_recency_hash_and_site_stale_after_ingest() 
     init_db()
     session = get_session_factory()()
     brain = BrainStore(session)
-    url = "https://www.assafweb.com/llms.txt"
+    # A source id and body unique to this test. Ingesting "llms.txt" with the same
+    # body as tests/unit/test_brain_voice_knowledge.py minted identical chunk_ids in
+    # the shared DB, so that file failed on UNIQUE brain_knowledge_chunks.chunk_id
+    # and this pair passed only by alphabetical collection order.
+    url = "https://www.assafweb.com/health-freshness.txt"
     ingest_source(
         brain,
-        source_id="llms.txt",
+        source_id="health-freshness.txt",
         url=url,
         fetcher=FakeDocumentFetcher(
-            {url: "# S\n\n## Services\nA description long enough to chunk.\n"}
+            {url: "# Health freshness fixture\n\n## Services\nA description long enough to chunk.\n"}
         ),
         embedding_port=FakeEmbeddingPort(),
     )
     brain.record_site_freshness(
-        source_id="llms.txt",
+        source_id="health-freshness.txt",
         site_last_modified="Wed, 16 Sep 2026 09:00:00 GMT",
         source_last_modified="Mon, 14 Sep 2026 19:14:00 GMT",
         stale="stale",
@@ -387,11 +391,11 @@ def test_knowledge_freshness_reports_recency_hash_and_site_stale_after_ingest() 
     session.commit()
     session.close()
 
-    settings = _settings_with_sources("llms.txt")
+    settings = _settings_with_sources("health-freshness.txt")
     result = knowledge_freshness(settings)
     assert len(result) == 1
     entry = result[0]
-    assert entry["source_id"] == "llms.txt"
+    assert entry["source_id"] == "health-freshness.txt"
     assert entry["ingested"] is True
     assert entry["last_ingested_at"] != ""
     assert entry["content_hash_prefix"] != ""
