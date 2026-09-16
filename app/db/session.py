@@ -33,7 +33,7 @@ def make_engine(url: str) -> Engine:
 def get_engine() -> Engine:
     global _engine, _SessionLocal
     if _engine is None:
-        _engine = make_engine(get_settings().database_url)
+        _engine = make_engine(get_settings().effective_database_url())
         _SessionLocal = sessionmaker(bind=_engine, autoflush=False, autocommit=False)
     return _engine
 

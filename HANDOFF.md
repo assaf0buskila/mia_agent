@@ -11,6 +11,44 @@ Plan: `docs/MIA_CAMPAIGN_FINISH_PLAN.md`. Chunk briefs: `docs/MIA_CLAUDE_CODE_PR
 **Production is unchanged.** `/health` last reported commit `4b80f31` (2026-09-14). Nothing
 below is deployed. Every item is `LOCAL_TESTED` + CI-green + independently reviewed at most.
 
+### C8 — RDS credential rotation took production down for ~9 hours (2026-09-16)
+
+**Root cause.** RDS has `ManageMasterUserPassword` enabled and rotates the master password
+into its own AWS-managed secret (`rds!db-d7c051e7-2f6a-4711-826d-2bf7d243a2f8-...`, key
+`password`) every 7 days; last rotation 2026-09-12. The app's own secret `mia/prod` held a
+second, independent copy of the password embedded in `MIA_DATABASE_URL`. When RDS rotated,
+the already-running task kept working on its already-open connection, so nothing alarmed —
+the two copies had silently diverged with no signal. The next task restart (a routine
+deploy) tried to authenticate fresh, failed against the rotated password, and production
+was down until the `mia/prod` copy was hand-updated: roughly nine hours.
+
+**Fix (this chunk, `app/core/config.py` + `app/db/session.py` + `scripts/deploy_ecs_revision.py`).**
+A new optional `MIA_DATABASE_PASSWORD` setting, sourced directly from the RDS-managed
+secret as its own container secret, overrides just the password component of
+`database_url` at the single choke point `Settings.effective_database_url()` (consumed by
+`app.db.session.get_engine()`). The two values can no longer independently drift: the
+container always reads the current rotated password straight from RDS's own secret.
+`scripts/deploy_ecs_revision.py` now wires that secret into every registered revision
+idempotently, so this is no longer a manual step at deploy time.
+
+**Consequence — flag for later, not done here.** Once this deploys, the password embedded
+in `mia/prod`'s `MIA_DATABASE_URL` becomes vestigial (never read, since the override always
+wins when set). It should later be reduced to a passwordless URL to remove the stale-copy
+risk entirely. This chunk deliberately does not touch that secret — only the app-side code
+and the deploy script change here.
+
+**Separate, incidental finding fixed in the same area (own commit): Telegram bot token
+leaking into CloudWatch.** httpx's own request logger (`logging.getLogger("httpx")`) logs
+`request.url` as an `httpx.URL` object, not a pre-formatted string. `app/core/redact.py`'s
+`redact()` only pattern-matched `str`/`dict`/`list` values, so this one non-string `%`-style
+log argument fell through every branch untouched, and the Telegram bot token embedded in
+the URL path (`api.telegram.org/bot<TOKEN>/sendMessage`) reached `/ecs/mia` in plaintext.
+Assaf already revoked the exposed token; the replacement would have leaked identically.
+Fixed by extending `redact()` to stringify and pattern-check any non-str/dict/list value,
+substituting the scrubbed string only when a token is actually present (an int like a
+status code, or anything else with no token in its string form, is returned completely
+unchanged so `%`-formatting for non-`%s` placeholders still works).
+
 ### Merged to master (each: failing test → fix → fresh opus review → fixes → green CI)
 
 | PR | Chunk | What it fixed | Known limits recorded |

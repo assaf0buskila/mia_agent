@@ -53,7 +53,13 @@ def test_v2_payload_changes_only_mia_and_pins_digest() -> None:
     assert env["MIA_OWNER_AGENT_GEMINI_MODEL"] == "gemini-safe"
     assert env["MIA_GEMINI_TRANSCRIBE_MODEL"] == "gemini-safe"
     assert all(env[name] == "true" for name in deploy.ENABLED_V2_SETTINGS)
-    assert mia["secrets"] == [{"name": "MIA_GEMINI_API_KEY", "valueFrom": "gemini-ref"}]
+    assert mia["secrets"] == [
+        {"name": "MIA_GEMINI_API_KEY", "valueFrom": "gemini-ref"},
+        {
+            "name": deploy.RDS_MANAGED_PASSWORD_SECRET_NAME,
+            "valueFrom": deploy.RDS_MANAGED_PASSWORD_SECRET_ARN,
+        },
+    ]
 
 
 def test_v2_payload_removes_every_retired_reference_and_keeps_live_configuration() -> None:
@@ -108,6 +114,49 @@ def test_v2_payload_removes_every_retired_reference_and_keeps_live_configuration
     assert env["MIA_WHATSAPP_CLICK_TO_CHAT"] == "https://wa.me/current"
     assert secrets["MIA_GEMINI_API_KEY"] == "gemini-ref"
     assert secrets["MIA_COMPOSIO_API_KEY"] == "current-composio-ref"
+
+
+def test_rds_managed_password_secret_is_added_when_missing() -> None:
+    task = _task()
+    payload = deploy._v2_payload(task, image_uri=IMAGE, sha="sha")
+    secrets = {
+        item["name"]: item["valueFrom"] for item in payload["containerDefinitions"][0]["secrets"]
+    }
+    name = deploy.RDS_MANAGED_PASSWORD_SECRET_NAME
+    assert secrets[name] == deploy.RDS_MANAGED_PASSWORD_SECRET_ARN
+
+
+def test_rds_managed_password_secret_is_not_duplicated_on_rerun() -> None:
+    task = _task()
+    mia = task["containerDefinitions"][0]
+    # Simulate a prior run of this same script having already added the entry,
+    # with a stale/wrong ARN, to prove re-running self-heals instead of
+    # accumulating a second entry.
+    mia["secrets"].append(
+        {"name": deploy.RDS_MANAGED_PASSWORD_SECRET_NAME, "valueFrom": "stale-ref"}
+    )
+
+    payload = deploy._v2_payload(task, image_uri=IMAGE, sha="sha")
+    secrets = payload["containerDefinitions"][0]["secrets"]
+    matching = [s for s in secrets if s["name"] == deploy.RDS_MANAGED_PASSWORD_SECRET_NAME]
+    assert matching == [
+        {
+            "name": deploy.RDS_MANAGED_PASSWORD_SECRET_NAME,
+            "valueFrom": deploy.RDS_MANAGED_PASSWORD_SECRET_ARN,
+        }
+    ]
+
+
+def test_rds_managed_password_secret_does_not_disturb_other_secrets_or_env() -> None:
+    task = _task()
+    payload = deploy._v2_payload(task, image_uri=IMAGE, sha="sha")
+    mia = payload["containerDefinitions"][0]
+    secrets = {item["name"]: item["valueFrom"] for item in mia["secrets"]}
+    env = {item["name"]: item["value"] for item in mia["environment"]}
+    assert secrets["MIA_GEMINI_API_KEY"] == "gemini-ref"
+    assert env["UNCHANGED"] == "kept"
+    assert "MIA_DATABASE_URL" not in env
+    assert "MIA_DATABASE_URL" not in secrets
 
 
 def test_existing_purpose_models_are_preserved_without_sales_fallback() -> None:
