@@ -17,32 +17,102 @@ this session's C7b work) is unaffected by this correction.
 
 ### CURRENT STATE — read this before anything else (2026-09-16, end of session)
 
-- **Master is `8ed912e`; production runs `110ada6` on task definition `mia:65`.** Four merged
-  PRs are **NOT deployed**: #73 (C7b cleanup), #75 (C11 Activity Sheet), #74 (C8 token-leak fix
-  plus the rotation Lambda code), #76 (C9 Hebrew presentation). The formatting Assaf objected to
-  is fixed in master and still live on his phone.
-- **The production database was deliberately wiped** (full fresh start, 56 tables truncated,
-  `mia-wipe-data --confirm fresh-start` as an ECS one-off). Restore point: RDS snapshot
-  **`mia-pre-wipe-20260916-112916`**. The wipe also cleared the knowledge base; it was
-  re-ingested immediately and `/health` reports 37 chunks. Assaf's Sheet keeps its rows, but
-  deletions now stick because no contact remains for the reconciler to re-append.
-- **The Telegram bot token was revoked and replaced.** Two lessons: ECS injects secrets at
-  container start, so changing a secret does nothing until the task is replaced; and revoking a
-  token drops the webhook, which must be re-registered via the `mia-telegram-webhook` entrypoint
-  run as an ECS one-off (it prints `getWebhookInfo` back, so registration is verified). A correct
-  token with no webhook looks exactly like a wrong token: silence, no errors.
+- **The code queue is closed.** Master is `96a0f3c`. No campaign PR is open. The only open PRs are
+  #46 (Hebrew RTL docs, 2026-09-09) and #8 (stale cursor draft), neither part of this effort.
+- **Production runs `110ada6` on task definition `mia:65`. SEVEN merged PRs are undeployed:**
+  #73 (C7b cleanup), #74 (C8 token leak + rotation Lambda code), #75 (C11 Activity Sheet),
+  #76 (C9 Hebrew presentation), #77 (handoff refresh), #78 (social pass: capability text in
+  Hebrew), #79 (C12 live knowledge). Two of them fix exactly what Assaf judges the release on:
+  today his Activity tab still shows `contact_captured` with the whole brief in one cell, and his
+  approval cards still render monospaced emails and ids with no LTR protection.
+- **Prompt 4 has been run. Verdict: GO-WITH-CONDITIONS on deploying `96a0f3c`, NO-GO on calling
+  the campaign ready to launch.** Those are different questions with different answers. The deploy
+  is low-risk and strictly improves what Assaf complained about; the campaign rests on capabilities
+  whose evidence is mocked, unreachable or absent. The full report went to Assaf as a file; the
+  load-bearing findings are recorded below so they survive this session.
+- **The production database was deliberately wiped** (2026-09-16). Restore point: RDS snapshot
+  **`mia-pre-wipe-20260916-112916`**. Consequence for evidence: no production observation older
+  than 2026-09-16 still holds. The single post-wipe live data point for the whole lead pipeline is
+  one website lead reaching Telegram on `110ada6`, which predates C9 and C11 entirely.
+- **The Telegram bot token was revoked and replaced.** ECS injects secrets at container start, so
+  changing a secret does nothing until the task is replaced; and revoking a token drops the
+  webhook, which must be re-registered via the `mia-telegram-webhook` entrypoint as an ECS one-off.
+  A correct token with no webhook looks exactly like a wrong token: silence, no errors.
 - **`aws ecs update-service --force-new-deployment` silently produced no new deployment twice.**
-  Always confirm a new deployment `createdAt` and that the task's `startedAt` is later than the
-  secret's `LastChangedDate`; otherwise stop the task directly.
-- **The next RDS rotation is ~2026-09-19.** The auto-sync Lambda code is merged, but **no AWS
-  resources exist yet** (function, IAM role, EventBridge rule, DLQ, alarm), and its EventBridge
-  pattern is **UNVERIFIED** — it cannot be confirmed without a real rotation firing it. Round-2
-  review found the original pattern (`AWS API Call via CloudTrail`) could never match a
-  service-emitted rotation event; it is now `AWS Service Event via CloudTrail`, still unproven.
-- **Mia's knowledge lags Assaf's website by design.** She reads only `llms-full.txt`, `llms.txt`
-  and `pricing.md`; all three were still dated 2026-09-14 after he updated the site on 09-16, and
-  the ingest schedule is weekly (`cron(20 4 ? * MON *)`). Chunk C12 addresses the schedule and the
-  visibility; regenerating those files at build time is on the Vercel side and is Assaf's.
+  Confirm a new deployment `createdAt` and that the task's `startedAt` is later than the secret's
+  `LastChangedDate`; otherwise stop the task directly.
+
+### Deploy ordering — verified 2026-09-16, and NOT in README
+
+`README.md` steps 1-7 contain **no migration step**. C12 (#79) adds
+`migrations/20260916_brain_knowledge_site_freshness.sql`, which has never been applied to
+production. Insert between README steps 4 and 5:
+
+```bash
+uv run python scripts/run_ecs_migration.py --task-definition mia:N
+```
+
+- It applies the `.sql` files baked into **that image**. Run against `mia:65` it finds no new file,
+  applies nothing and **exits 0** — a silent no-op that looks like success. Confirm the printed
+  summary lists the file under `applied`, not `already` or `skipped`.
+- **Deploying the code first is the dangerous order, and nothing catches it.** `schema_ready()`
+  compares the running image's ORM columns against the DB, so the new image against the old schema
+  makes `database_ready()` false: `/health` goes all-null, `/health/ready` returns 503, and every
+  hourly ingest dies at the first ORM read. Both the ALB target group and the ECS container check
+  probe **`/health/live`**, which returns 200 without touching the database, so ECS reports a
+  healthy, stable deployment throughout. `/health/ready` has no consumer.
+- **Migration-first is safe in the other direction**: `schema_ready()` only checks model ⊆ DB, so
+  the four extra columns are invisible to `110ada6`. They are `NOT NULL` with **literal defaults**,
+  so old-image inserts omit them and the server fills them — which is also why rollback stays
+  clean, and why a `NOT NULL` without a default would have broken every old-image write during the
+  rolling window.
+- **Re-pin `mia-due-scan` to the new revision afterwards.** No script does it; it fails silently.
+- Rollback: `update-service` back to `mia:65`, and re-pin `mia-due-scan` to 65 as well. No
+  down-migration exists or is needed. Rolling back also restores the mangled Hebrew rendering and
+  the English Activity cells, so it is cheap technically and immediately visible to Assaf.
+
+### Release readiness — findings that must not be rediscovered (Prompt 4, at `96a0f3c`)
+
+Gates: `2420 passed, 7 skipped`, ruff clean, widget checks pass. **A green suite is the weakest
+evidence in this report**, for reasons the audit made concrete:
+
+- **All 7 skips are PostgreSQL-DSN gaps, none benign.** CI's `postgres` job covers six of them on
+  real PG 18. It does **not** cover
+  `tests/unit/test_due_scan_worker.py::test_due_reminder_claim_survives_outer_rollback_after_accepted_send`,
+  which is in none of that job's three named files and skips in `checks` too. **That test runs
+  nowhere, ever** — the durable due-reminder claim on real Postgres is `NOT_INCLUDED`.
+- **`node tests/unit/widget_behavior.test.js` is not in CI.** CI runs `node --check app/web/ask_mia.js`,
+  a syntax parse only. `AGENTS.md` requires the behavioural file, so that gate exists only when a
+  human runs it locally.
+- **Real-model evals cannot run, and CI never invokes them.** `app/evals/predeploy/` needs
+  credentials; `report.py` states plainly that a skip is not a pass. Pass@1/Pass^3 on all ten owner
+  scenarios, including the hard-safety `owner_forbidden_write`, has **no evidence at this SHA**.
+  The suite also defines **zero website scenarios**, so even with credentials the consent
+  classifier and the narrative validator stay unevidenced.
+- **There is no `INTEGRATION_TESTED` evidence anywhere in this system.** Sheets, Calendar, Gmail,
+  Composio, Telegram and STT are faked in every test.
+- **Local green is not CI green.** This machine runs CPython 3.14.3; CI pins 3.12.
+
+Top blockers, in the audit's order (the full list is in the delivered report):
+
+1. **C10 password auto-sync does not exist in AWS, and the next RDS rotation is ~2026-09-19.** The
+   only blocker with a deadline. Either create the Lambda/IAM/EventBridge/DLQ and prove the event
+   pattern with a deliberate rotation, or put a dated manual runbook step on the calendar.
+2. **LinkedIn publishing may be unreachable, and it is the release demo.** The only route requires
+   the literal word `CREATE` in the live Composio slug; if the real slug is `LINKEDIN_POST_UPDATE`
+   or similar, Mia refuses. A read-only catalog listing settles it, and nothing else can be
+   scheduled before it runs.
+3. **The widget's post-capture screen has zero real coverage, and its tests pin a contract the
+   server cannot emit.** `ask_mia.js` branches on `ask_contact`/`confirm_contact`/`handoff`;
+   `site_v2.py` only ever emits `answer`/`contact_saved`. The one path a converting visitor
+   actually hits is untested, and the tests assert the dead branch stays.
+4. **`state.pending_contact` is never cleared on refusal.** A number given, then refused, then
+   quoted back by Mia, plus a later "כן", can capture someone who explicitly said no. One-line
+   fix plus a test.
+5. **The standing memory note "MIA_KILL_SWITCH does not stop the live owner tool loop" does not
+   match `96a0f3c`** — here the worker path stops before every adapter. It was never checked
+   against `110ada6`, so it may still be true of what production runs. Resolve before anyone
+   relies on either reading.
 
 ### C8 — RDS credential rotation took production down for ~9 hours (2026-09-16)
 
@@ -253,7 +323,7 @@ Left deliberately alone, with reasons (do not treat these as missed):
   `app/services/owner_actions.py` change) — record only, no code touched.
 - No PostgreSQL coverage for C3a's same-turn refresh — record only, no code touched.
 
-### C12 — live knowledge (this session, committed locally, not pushed / no PR yet)
+### C12 — live knowledge (merged as #79, with review fixes)
 
 Two independent staleness gaps, both previously invisible, per the CURRENT STATE note above.
 
@@ -337,27 +407,62 @@ Left deliberately alone, with reasons:
 
 ### In flight at handoff
 
-C12 above (committed locally on `claude/mia-c12-live-knowledge`, not pushed / no PR yet — push,
-PR, fresh review on the three-dot diff, fix, merge on PASS + green CI, same as every other
-chunk). Before acting, run `gh pr list` and `git worktree list`: the finished
-chunk worktrees (`.claude/worktrees/mia-c1b`, `mia-c2a`, `mia-c3a`, `mia-c3b`, `mia-c4`, `mia-c5`,
-`mia-c5h`, `mia-c2b`, `mia-c6a`) are merged and can be removed with `git worktree remove` once
-confirmed clean. A stale locked directory may exist at `.claude/worktrees/mia-c6a` from an
-earlier interrupted session — ignore it. Master after the last campaign merge: `110ada6` (#72).
+**Nothing.** The code queue is closed: C12 merged as #79 and the social pass as #78, and no
+campaign PR is open. Worktrees still on disk are `.claude/worktrees/mia-c12`, `mia-social` and
+`mia-docs`; all three are merged and can be removed with `git worktree remove` once confirmed
+clean. A stale locked directory may exist at `.claude/worktrees/mia-c6a` from an earlier
+interrupted session — ignore it.
 
 ### Remaining queue
 
-1. **C12 live knowledge — done this session, needs push/PR/review/merge.** See the `### C12`
-   entry above for what shipped and what is deliberately left for the deploy step (the live
-   EventBridge schedule is not re-pointed by this commit — no script does that).
-2. **Social pass** — the capability text in `social_capabilities.py` is English while every other
-   owner surface is Hebrew; verify C6a's routing fixes behave in production; LinkedIn publishing
-   is still `CODE_CHECKED` only, never verified live.
-3. **Deploy** — brings the four merged-but-undeployed PRs live. Procedure proven this session;
-   rollback target is the revision serving before the deploy.
-4. **Create the Lambda infrastructure**, then **deliberately trigger a rotation** to prove the
-   EventBridge pattern fires, before ~09-19. A safety net that silently does not exist is worse
-   than none, because it suppresses the manual check.
+Everything below needs Assaf, not another coding session. The next session's job is to execute an
+approved deploy (Prompt 5), not to write more code.
+
+1. **Deploy `96a0f3c`** — brings all seven merged-but-undeployed PRs live. Prompt 4 says
+   GO-WITH-CONDITIONS. Follow the "Deploy ordering" section above exactly: the migration step
+   between README steps 4 and 5, and the `mia-due-scan` re-pin afterwards. Neither is in README.
+2. **Before ~2026-09-19: the RDS rotation.** Create the Lambda / IAM role / EventBridge rule /
+   DLQ / alarm, then **deliberately trigger a rotation** to prove the event pattern fires. It has
+   never fired and cannot be verified any other way. A safety net that silently does not exist is
+   worse than none, because it suppresses the manual check. The fallback, if the infrastructure is
+   not created in time, is a dated manual runbook step: update `mia/prod` **and replace the task**.
+3. **Read-only Composio catalog listing for LinkedIn**, before scheduling anything else. The
+   publish route requires the literal word `CREATE` in the live slug; if the real slug differs,
+   Mia refuses and the release demo does not exist. The same listing checks the forbidden-action
+   word lists against real slug names.
+4. **The approved live tests** (Prompt 5). Twenty-six of them are named individually in the
+   delivered readiness report, ordered read-only first. Each needs its own yes.
+5. **Two code fixes the audit surfaced that are worth doing before the campaign**, neither
+   started: clear `state.pending_contact` on a refusal (a consent bug — a refused number can still
+   be captured via a later readback plus "כן"), and reconcile the widget's post-capture contract
+   with what `site_v2.py` can actually emit (the tests currently pin a dead branch).
+
+### Start the next session with
+
+```text
+Read CLAUDE.md, HANDOFF.md section 0 (CURRENT STATE, then Deploy ordering) and TASKS.md.
+Do not re-audit merged work. Prompt 4 has already been run - do not re-run it.
+
+Verify: git fetch; origin/master SHA; gh pr list; git worktree list; and
+curl -s https://mia.assafweb.com/health | jq '.deployment.commit_sha, .ops, .brain.corpus'
+
+The code queue is closed. Master is 96a0f3c; production is 110ada6 on mia:65.
+Do not start new chunks. The remaining work needs Assaf's approval, not more code.
+
+If Assaf approves the deploy, execute Prompt 5 against 96a0f3c using the "Deploy ordering"
+section: build+push, register mia:N, RUN THE MIGRATION (scripts/run_ecs_migration.py
+--task-definition mia:N, confirming the file lands in `applied`), only then update-service,
+then re-pin mia-due-scan, then verify /health and /health/ready - never /health/live.
+
+Otherwise stop and ask. Do not deploy or create AWS resources without an explicit go.
+```
+
+Waiting on Assaf, not on the session: regenerate `llms.txt` / `llms-full.txt` / `pricing.md` on
+Vercel (they are dated 09-14 and did not update with his 09-16 site change, so Mia cannot see it
+however often she ingests); merge `assaf-landingPage#28` so the site stops serving the scripted
+fake chat box (until it lands, the deploy ships a working widget to a site that does not embed
+it); clean the Sheet rows; one controlled live LinkedIn post; decide whether `content_ideas`
+should produce drafts instead of categories.
 
 ### Assaf's decisions (2026-09-14)
 
@@ -420,27 +525,6 @@ earlier interrupted session — ignore it. Master after the last campaign merge:
   latent test-isolation debt, not a deploy gate; it would only surface if collection order
   changed.
 
-### Start the next session with
-
-```text
-Read CLAUDE.md, HANDOFF.md section 0 (especially CURRENT STATE) and TASKS.md. Do not re-audit
-merged work.
-
-Verify: git fetch; origin/master SHA; gh pr list; git worktree list; and
-curl -s https://mia.assafweb.com/health | jq '.deployment.commit_sha, .ops, .brain.corpus'
-
-Then continue the queue in section 0: C12 live knowledge, then the social pass, then deploy.
-Per chunk: push + PR -> fresh opus review on the three-dot diff origin/master...<sha> -> fixes
--> merge on review PASS + green CI.
-
-Stop before any deploy and before creating AWS resources.
-```
-
-Waiting on Assaf, not on the session: regenerate `llms.txt` / `llms-full.txt` / `pricing.md` on
-Vercel (they are dated 09-14 and did not update with his 09-16 site change, so Mia cannot see it
-however often she ingests); clean the Sheet rows; one controlled live LinkedIn post; decide
-whether `content_ideas` should produce drafts instead of categories.
-
 ### Commands the loop uses
 
 ```bash
@@ -461,149 +545,13 @@ Agent tool (`general-purpose`, `model: sonnet` for builders, `model: opus` for r
 `run_in_background: true`) and resumed with `SendMessage` to their id. Use `/compact` at a chunk
 boundary rather than carrying review transcripts forward.
 
----
-
-# Mia handoff — 2026-09-11
-
-Supersedes every earlier HANDOFF.md. Verified against AWS, GitHub, the code and live
-production traffic today. Where an earlier handoff was wrong, it is called out.
-
-## 1. P0 CRM delivery outage — FIXED AND DEPLOYED
-
-Production ran `mia:58` (commit `e0ae94e`) and failed every CRM delivery cycle from
-2026-09-10 23:18 UTC — website leads did not reach Telegram for ~11.5 hours. Root cause:
-`app/db/session.py` sets `autoflush=False` but the CRM tests ran with autoflush on
-(PR #55, master `a7a1b5b`).
-
-**Deployed:** `mia:59`, image `mia@sha256:62604f49…`, `MIA_BUILD_SHA=a7a1b5b…`.
-`/health` confirms `deployment.commit_sha == a7a1b5b`. Scheduler `mia-due-scan` ENABLED and
-re-pinned to `mia:59`; `mia-reconcile` DISABLED and deliberately unrevisioned. Rollback: `mia:58`.
-
-The failure loop is definitively stopped (old task: one failure every ~6s; new task: zero
-warnings in a 30-minute window). The delivery worker logs **only** failures by design
-(`app/workers/crm_runtime.py`) and no outbox-depth counter is exposed, so positive proof that
-queued briefs landed can only come from Assaf's Telegram.
-
-## 2. Website lead capture was broken in production — FIXED, NEEDS DEPLOY
-
-Found by driving live Mia through real conversations: **6 contact attempts across 3 sessions
-produced 0 leads.** Every API response returned `lead_id: ""`, `next_action: "answer"`,
-`delivery_status: "none"`.
-
-A closed loop, not a one-off:
-- `_actual_contact` only inspected the **current** message. Mia routinely reads the number back
-  and asks the visitor to confirm; that confirmation carries no phone or email, so capture
-  returned `{}` immediately and could never complete.
-- The consent classifier returns non-affirmative on the turn that *does* contain the number,
-  which is what makes Mia ask for confirmation in the first place.
-- No fallback exists: the widget's structured contact form renders only on
-  `next_action === 'ask_contact'` (`app/web/ask_mia.js`), and v2 only ever emits `answer` or
-  `contact_saved` (`app/surfaces/site_v2.py`). Free text is the only capture path.
-
-Worst observed case: Mia instructed the visitor to reply with an exact phrase, they did, and she
-asked again. Another deflected a hot lead to the website contact form.
-
-**Fix:** the server remembers contact it extracted but could not yet read as consent
-(`state.pending_contact`) and completes the capture on a later turn — but only when Mia quoted
-that exact value back on the previous turn (`_contact_readback`) **and** the classifier reads the
-reply as affirmative. The value always originates from a server regex over the visitor's own
-words, never from the model, so "the server alone validates contact" is unchanged. A bare
-confirmation with no readback still captures nothing. Two regression tests cover both directions.
-
-Also fixed in the same area: `submit_lead`'s `name`/`next_step` arguments were parsed and thrown
-away, so `state.next_step` was never assigned and every brief ended with the default suggested
-step. A name is accepted only if it appears verbatim in the visitor's message. Capture runs
-before the model turn, so a recovered next step reaches the **next** brief — do not reorder
-capture, four other call sites depend on that order. The system prompt also never told Mia to
-invite contact details at all; it now does.
-
-### The actual root cause — found after those two fixes both failed live
-
-Neither fix above changed the live result, and no downgrade log ever appeared, because the
-classifier was failing **before** any of the checks that log. Chain, from the code:
-
-1. `build_site_client` is the OpenAI **Responses** API with `reasoning: {effort: "low"}`
-   sent on every call (`app/integrations/llm_client.py:_responses_payload`).
-2. `_classified_consent` requested `max_completion_tokens=180`, mapped to
-   `max_output_tokens: 180` — which on Responses bounds **reasoning and visible output
-   together**.
-3. The model spent the whole 180 reasoning and emitted nothing. The adapter deliberately
-   turns `status=incomplete / max_output_tokens` into `LlmResponse(text="", tool_calls=(),
-   finish_reason="length")` — no exception, so `LlmModelChain` never fell back to Gemini.
-4. `len(response.tool_calls) != 1` → `"ambiguous"`, silently, 100% of the time.
-
-The narrative validator uses 1200 and works; replies use 500 and mostly work — except the
-post-tool completion on the contact turn, which is why *that* turn blanked to the greeting.
-Same cause, both bugs. Fix: `_CONSENT_MAX_OUTPUT_TOKENS = 600`, `_REPLY_MAX_OUTPUT_TOKENS =
-900`, an explicit `reason=truncated` log, and a regression test that asserts the budget
-actually requested at the call boundary (≥ 512), since a constant alone proves nothing.
-
-Also on this branch: dictated numbers normalised to digits (`_spoken_digits_to_numerals`,
-English and Hebrew; the live voice transcript was `"zero five two, one one one…"`), and
-the owner surface returns `OWNER_UNAVAILABLE` instead of the greeting when the brain fails.
-
-## 3. Cleanup — DONE
-
-Branch `claude/mia-v2-cleanup-final`, merged here. 1957 passed / 7 skipped (the 7 are the
-expected PostgreSQL skips when `MIA_TEST_POSTGRES_URL` is unset), ruff clean.
-Removed: the dead OwnerGraph layer and its tests, langgraph, `llm_compose.py`, two dead config
-flags, two dead notification helpers, the unused `crm`/`gmail_port`/`talk` params on
-`run_owner_loop` (the Telegram worker was building CRM/Gmail ports every turn for nothing),
-14 dead `LeadStore` methods, `published_facts`, and `app/domain/owner/followups.py`.
-
-Also fixed a live bug: `app/core/capabilities.py` advertised the already-deleted
-`app.agents.owner.graph` as `status=ALIVE` on `/health`.
-
-### The old handoff's "verified dead" list was WRONG — these stayed
-- `app/domain/policies/decision.py` — `app/domain/ai_runs.py` imports `DETERMINISTIC_NBA_CONFIDENCE`.
-- `app/domain/policies/failure_policy.py` — bound to `CapabilityId.FDE_FAILURE_POLICY` (ALIVE).
-- 6 `LeadStore` methods in the "WhatsApp-identity" / "v1 website-session" groups are live.
-- `VISITOR_TOOLS` is a live permission gate; only the `"published_facts"` string was removable.
-- `app/domain/meetings/{booking,changes,copy}.py` — NOT deleted. `tests/conftest.py` patches them
-  by dotted string in `freeze_mia_clock`, so removing them breaks 100+ unrelated tests.
-  **Open product question for Assaf: is meeting booking retired, or waiting to be re-wired?**
-
-### Known consequences
-- `/health`'s `integration_failures` can now only decrease — `upsert_reconciliation_finding` was
-  its only writer. Frozen at 11.
-- `scripts/calibrate_knowledge_floor.py` still documents `MIA_KNOWLEDGE_MIN_SIMILARITY`, which no
-  longer exists. It is now a no-op advisor.
-- `build_contacts_crm` in `app/surfaces/crm.py` is an orphaned factory with zero callers. The rest
-  of that module is live — delete only that function, not the file.
-- The 8 deleted followups tests were the only coverage of owner pronoun/data-anchor resolution.
-
-## 4. Website — Mia as an inline hero box. PR OPEN
-
-`AiHeroChat.tsx` was a fully scripted fake (5 hard-coded messages, typewriter, no input, no
-network). PR **assaf-landingPage#28** (`feat/mia-inline-hero`, based on `origin/main`) replaces it
-with `MiaHeroChat`, which renders a `[data-mia-inline]` container; the widget mounts inside it,
-always open, no launcher, sized to the host. `AiHeroChat` is kept as a fallback when the Mia
-origin is unconfigured. `npm run lint` (tsc) passes. Leo is untouched.
-
-**Do not merge until** the widget inline mode and the capture fix are deployed — merging
-auto-deploys to Vercel via the Git integration.
-
-- `lib/mia.ts` on `main` already defaults to `https://mia.assafweb.com`, so no env var is needed.
-- The widget is ID-based throughout, so only ONE instance per page — inline and floating cannot
-  coexist without a class/shadow-DOM refactor.
-- The other website checkout is on branch `rebrand/ai-solutions-studio`, dirty, with the Leo files
-  untracked, and another agent session is editing it. `3cce2b9` is in `origin/main` but not in
-  that branch. Work from a worktree off `origin/main`.
-- There is no CI on the website repo; `npm run lint` is `tsc --noEmit` only.
-
-## 5. Still open
-
-- **Owner greeting on brain failure.** `app/surfaces/owner.py` still returns `"פה. מה צריך?"` when
-  the brain throws. The comment there claims this was fixed; only a log line was added.
-  `OWNER_UNAVAILABLE` already exists — gate on the failure reason, since `deterministic_intent` is
-  a legitimate short ack.
-- **Docs.** README.md, MIA_V2.md, TASKS.md, AGENTS.md need a short, code-based rewrite. TASKS.md
-  still falsely claims "no deployment has occurred". AGENTS.md has the two graphs backwards.
-- **Voice path untested.** Browser control cannot inject microphone audio; test by posting an
-  audio file to `/v1/website/sessions/{id}/voice`.
-- `business_context` is still a write-once latch on the visitor's first message.
-
 ## Deploy gotchas — do not rediscover these
+
+Carried forward from the 2026-09-11 handoff, whose narrative sections (the P0 CRM outage,
+the website-capture root cause, the cleanup, the inline-widget PR and its "still open" list)
+were deleted on 2026-09-16 as superseded. These are the only part of it still load-bearing.
+Its "Housekeeping" section went too: the uncommitted `crm_v2.py` edits it warned about are
+gone (the main checkout is clean), and its `.env` rule is already in `AGENTS.md`.
 
 - **OCI index trap.** `scripts/deploy_ecs_revision.py` accepts only `oci.image.manifest.v1+json` /
   `docker.distribution.manifest.v2+json`. Docker 29's default build emits an attestation manifest
@@ -623,9 +571,3 @@ auto-deploys to Vercel via the Git integration.
   reliable count. Sort by timestamp instead.
 - AWS credentials come from `aws login` (profile `default`) and expire mid-session.
 - Piping pytest through `tail` swallows the summary line; redirect to a file instead.
-
-## Housekeeping
-
-- The MAIN checkout (`assaf_agent/`, master) still has uncommitted `app/services/crm_v2.py` and
-  `tests/unit/test_crm_v2.py` changes that PR #55 supersedes. Tell that session or discard.
-- Never read `.env`. Secrets live in Secrets Manager.

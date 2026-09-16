@@ -1,6 +1,6 @@
 # TASKS.md
 
-Updated 2026-09-16. **Production is deployed and current**: `110ada6` is live on ECS task
+Updated 2026-09-16 (end of campaign coding). **Production is deployed and current**: `110ada6` is live on ECS task
 definition `mia:65`, verified via `/health`, with a real website lead delivered end to end to
 Assaf's Telegram. This supersedes every earlier "nothing is deployed" note in this file and in
 `HANDOFF.md` (both said `4b80f31`/#60, which is now stale). Detail and next-session instructions
@@ -34,8 +34,9 @@ Deploy is a separate go. Max 2 agents at once (session usage limit).
       dropped after review (IAM boundary); see HANDOFF section 0.
 - [x] C8 follow-up — `RedactingFilter` (`app/core/logging.py`) now scrubs a non-str
       `record.msg` and `exc_info`/`exc_text` too, not just a str `msg`; own commit.
-- [ ] C9 — Hebrew presentation standard: `owner_text()` egress normaliser, bidi isolation,
-      no em-dashes, no raw ids (PR #76, in review).
+- [x] C9 — Hebrew presentation standard: `owner_text()` egress normaliser, bidi isolation,
+      no em-dashes, no raw ids (#76). LOCAL_TESTED only: no test in this repo can render bidi
+      the way a Telegram client does, so this has a permanent ceiling until Assaf reads his phone.
 - [ ] C10 — RDS to mia/prod password auto-sync (`scripts/lambda_sync_db_password.py`; the
       commits label it C9, renamed here to avoid colliding with the Hebrew chunk).
       `CODE_CHECKED` + `LOCAL_TESTED` only, NOT deployed. Round-2 review fixed: EventBridge
@@ -44,15 +45,52 @@ Deploy is a separate go. Max 2 agents at once (session usage limit).
       turned a successful run into a failure under throttling), added log group, DLQ and an
       `Errors` alarm. Before deploy: create the Lambda, role and EventBridge rule, and verify
       the event pattern against one real rotation.
-- [ ] C12 — live knowledge: hourly ingest instead of weekly (safe: `content_hash` already
+- [x] C12 — live knowledge: hourly ingest instead of weekly (safe: `content_hash` already
       skips unchanged sources); `/health`'s `brain.knowledge_freshness` reports per-source
       recency + hash prefix + site-vs-files staleness; owner brief gets one Hebrew line only
       when a source is stale. Committed locally on `claude/mia-c12-live-knowledge`, not
       pushed/PR'd yet; see `HANDOFF.md` section 0 for detail. The live EventBridge schedule is
       NOT re-pointed by this commit — no script does that, same manual step as `mia-due-scan`.
-- [ ] Prompt 4 — release readiness, go/no-go → **stop for Assaf**
-- [ ] Prompt 5 — approved deploy + phone acceptance (live LinkedIn post, email send, calendar
-      event, website lead — each approved individually)
+- [x] Social pass — `social_capabilities.py` answered in English while every other owner surface
+      answers in Hebrew; now Hebrew with no capability claim changed (#78). The model-facing
+      `ToolSpec.description`s and `SOCIAL_WRITING_RULE` stay English on purpose. Still open from
+      the same pass and NOT code: verify C6a's routing live (production already runs C6a), and
+      the one controlled live LinkedIn post.
+- [x] Prompt 4 — release readiness, go/no-go. **Run at `96a0f3c`. Verdict: GO-WITH-CONDITIONS on
+      deploying, NO-GO on calling the campaign ready to launch.** Full report delivered to Assaf;
+      the load-bearing findings are in `HANDOFF.md` section 0 under "Release readiness". The
+      conditions are: run the migration before `update-service`, re-pin `mia-due-scan` after, and
+      pass the post-deploy smoke tests.
+- [ ] Prompt 5 — approved deploy + phone acceptance. **Blocked on Assaf's go.** Twenty-six
+      controlled live tests are named individually in the readiness report, ordered read-only
+      first; each needs its own approval.
+- [ ] **Before ~2026-09-19** — create the C10 Lambda/IAM/EventBridge/DLQ and deliberately trigger
+      an RDS rotation to prove the event pattern fires. It never has. The only deadline item.
+- [ ] **Read-only Composio catalog listing for LinkedIn**, before scheduling the live post. The
+      publish route requires the literal word `CREATE` in the live slug; if the real slug differs
+      Mia refuses, and the release demo does not exist.
+
+## Gaps the readiness audit found in the gates themselves
+
+Recorded so nobody reads a green suite as completeness.
+
+- [ ] `tests/unit/test_due_scan_worker.py::test_due_reminder_claim_survives_outer_rollback_after_accepted_send`
+      **runs nowhere** — it needs a Postgres DSN, so it skips locally and in CI's `checks` job, and
+      CI's `postgres` job runs only three named files, none of them this one.
+- [ ] `node tests/unit/widget_behavior.test.js` is **not in CI**. CI runs `node --check` on the
+      widget, a syntax parse. `AGENTS.md` requires the behavioural file; that gate is human-only.
+- [ ] The real-model eval suite (`app/evals/predeploy/`) is invoked by **no CI job** and cannot run
+      without credentials, so `owner_forbidden_write` — marked `hard_safety`, must pass 3/3 — has
+      no evidence at any SHA. The suite also defines **zero website scenarios**, so the consent
+      classifier and narrative validator would stay unevidenced even with credentials.
+- [ ] There is **no `INTEGRATION_TESTED` evidence anywhere**: Sheets, Calendar, Gmail, Composio,
+      Telegram and STT are faked in every test.
+- [ ] Local runs use CPython 3.14.3; CI pins 3.12. Neither result is evidence about the other.
+- [ ] `state.pending_contact` is never cleared on a refusal, so a refused number can still be
+      captured by a later readback plus "כן". A consent bug, one-line fix plus a test.
+- [ ] The widget's post-capture screen branches on `ask_contact`/`confirm_contact`/`handoff`,
+      which `site_v2.py` can never emit, and the tests assert that dead branch stays.
+
 
 ## Done today
 
@@ -67,13 +105,13 @@ Deploy is a separate go. Max 2 agents at once (session usage limit).
 
 ## Open
 
-- [ ] **Website lead capture — root cause found and fixed, needs deploy.** The consent
-      classifier ran on the Responses API with reasoning enabled and a 180-token
-      `max_output_tokens`. Reasoning consumed the budget, no tool call was emitted, and
-      the adapter reports that truncation as a normal response — so every verdict silently
-      became "ambiguous" and the chain never fell back. Fixed on
-      `claude/mia-consent-observability`: budget 600, truncation logged, regression tests
-      that guard the requested budget. Deploy, then prove a lead lands in Telegram.
+- [x] **Website lead capture — root cause found, fixed and merged.** The consent classifier ran
+      on the Responses API with reasoning enabled and a 180-token `max_output_tokens`; reasoning
+      consumed the budget, no tool call was emitted, and the adapter reported that truncation as a
+      normal response, so every verdict silently became "ambiguous" and the chain never fell back.
+      Budget raised to 600, truncation logged, regression tests guard the requested budget. This is
+      **deployed** — it is in `110ada6` — and one real website lead has reached Telegram since.
+      The line above that called this "needs deploy" was stale and contradicted the header.
 - [x] Contact-turn reply blanking to `"איך אפשר לעזור?"` — most likely the same cause on
       the post-tool completion (500-token cap). Reply budget raised to 900; truncation and
       the empty-reply fallback are now logged so the validator path stays visible.

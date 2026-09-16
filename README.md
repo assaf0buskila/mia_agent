@@ -77,9 +77,24 @@ ECR repository `mia`. Secrets come from Secrets Manager. Never copy `.env` anywh
 4. `uv run python scripts/deploy_ecs_revision.py --v2-release --image-uri <ecr>/mia@<digest> --sha $SHA`
    It verifies the image label and env match `$SHA` through the ECR API (no local Docker
    needed), requires `HEAD == $SHA` with a clean tree, and registers the next `mia:N`.
-5. `aws ecs update-service --cluster mia --service mia --task-definition mia:N`, wait stable.
-6. Re-pin scheduler `mia-due-scan` to `mia:N`. Leave `mia-reconcile` disabled.
-7. Confirm `https://mia.assafweb.com/health` reports `deployment.commit_sha == $SHA`.
+5. **Apply migrations BEFORE updating the service.** This step is easy to skip and nothing
+   catches it:
+   ```bash
+   uv run python scripts/run_ecs_migration.py --task-definition mia:N
+   ```
+   It runs `mia-migrate` from the image in **that** task definition, so it only sees the `.sql`
+   files baked into the new image. Run it against the currently-serving revision and it applies
+   nothing and exits 0. Confirm each new file appears under `applied` in the printed summary,
+   not `already` or `skipped`. Re-running is safe (ledger + savepointed duplicate tolerance).
+6. `aws ecs update-service --cluster mia --service mia --task-definition mia:N`, wait stable.
+7. Re-pin scheduler `mia-due-scan` to `mia:N`. Leave `mia-reconcile` disabled. Nothing does
+   this automatically and forgetting it fails silently.
+8. Confirm `https://mia.assafweb.com/health` reports `deployment.commit_sha == $SHA`, every
+   field non-null, and `/health/ready` returns 200. **Do not judge a deploy by `/health/live`** —
+   both the ALB target group and the ECS container check probe it, and it returns 200 without
+   touching the database. If step 5 was skipped, `schema_ready()` fails, `/health` goes all-null,
+   `/health/ready` returns 503 and the scheduled workers die on their first ORM read, while ECS
+   reports a healthy, stable deployment throughout.
 
 Rollback is `update-service` to the previous revision. Machine-specific gotchas
 (Docker Desktop, the credential helper, `aws login` expiry) are in `HANDOFF.md`.
