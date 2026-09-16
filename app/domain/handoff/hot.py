@@ -14,7 +14,7 @@ _NO_HOT_LEADS_ACK = "אין לידים חמים שמחכים לתפיסה."
 
 
 def _v1_hot_labels(store, ids: list[str]) -> list[str]:
-    """Best-effort sales headline per v1 lead id; falls back to the bare id.
+    """Best-effort sales headline per v1 lead id; never the raw id (R3).
 
     v1 leads have no name field anywhere (`LeadRow`/`CustomerRow` are pure
     identity rows) -- `SalesState.headline` is the closest thing to a label,
@@ -22,17 +22,25 @@ def _v1_hot_labels(store, ids: list[str]) -> list[str]:
     by the caller) -- an N+1 not batched here; a future pass could add a
     bulk-lookup store method if this list ever needs to grow past that cap.
     Only `KeyError` (no `SalesStateRow` for that lead) and `SQLAlchemyError`
-    (a transient store read failure) degrade to the bare id -- anything else is
-    a real bug and must not be swallowed here.
+    (a transient store read failure) degrade to a positional placeholder --
+    anything else is a real bug and must not be swallowed here.
+
+    Assaf's explicit call for this surface (C9): hot leads are rendered as a
+    name, never a raw internal id -- so a lead with no headline gets a
+    position-based placeholder ("ליד 1", "ליד 2", ...) instead of falling back
+    to `lead_id`. The position is stable within one call (`enumerate` over the
+    same `ids` order the caller already capped to 12), so it still
+    distinguishes several unnamed leads from each other without ever printing
+    an id the owner could paste back into a tool that expects one internally.
     """
     labels: list[str] = []
-    for lead_id in ids:
+    for position, lead_id in enumerate(ids, start=1):
         headline = ""
         try:
             headline = (store.get_sales(lead_id).headline or "").strip()
         except (KeyError, SQLAlchemyError):
             headline = ""
-        labels.append(f"{headline} ({lead_id})" if headline else lead_id)
+        labels.append(headline or f"ליד {position}")
     return labels
 
 
@@ -62,8 +70,12 @@ def format_hot_leads_ack(store, *, principal: Principal) -> str:
     v1_ids = [str(item) for item in (result.get("hot_ids") or []) if item]
     v2_leads = store.list_undelivered_captured_website_leads(limit=12)
     v1_labels = _v1_hot_labels(store, v1_ids)
+    # Same "name, never a raw id" rule as v1 (R3): a website contact with no
+    # captured name gets a position-based placeholder, distinct from v1's
+    # ("פנייה" vs "ליד") so the two sources never collide in the dedupe below.
     v2_labels = [
-        f"{name} ({contact_id})" if name else contact_id for contact_id, name in v2_leads
+        name or f"פנייה {position}"
+        for position, (_contact_id, name) in enumerate(v2_leads, start=1)
     ]
     combined = list(dict.fromkeys([*v1_labels, *v2_labels]))
     if not combined:

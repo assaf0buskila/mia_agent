@@ -21,17 +21,22 @@ _MENU = (
 def format_owner_status_ack(
     store: LeadStore, *, principal: Principal, timezone: str
 ) -> str:
-    """Hebrew operator digest for greetings and unclassified owner text."""
-    lines = [
-        "אני כאן. זו קונסולת הבעלים — לא שיחת מכירות.",
-    ]
+    """Hebrew operator digest for greetings and unclassified owner text.
+
+    Always the full dashboard, zeros included -- Assaf's explicit call for this
+    surface: a predictable shape he can scan without wondering what got hidden,
+    even on a quiet day where the general "omit an empty section" structure
+    rule would otherwise apply. No filler opener: line 1 is always the day's
+    numbers, not a greeting.
+    """
+    lines: list[str] = []
     snapshot = compute_daily_brief(store, timezone=timezone)
     if snapshot is not None:
         lines.append(
             "היום: "
-            f"לידים {snapshot.leads} · "
-            f"הוצעו {snapshot.meetings_offered} · "
-            f"נקבעו {snapshot.meetings_booked} · "
+            f"לידים {snapshot.leads}, "
+            f"הוצעו {snapshot.meetings_offered}, "
+            f"נקבעו {snapshot.meetings_booked}, "
             f"העברות {snapshot.handoffs}"
         )
     lines.append(f"אישורים ממתינים: {store.count_pending_approvals()}")
