@@ -18,6 +18,13 @@ Deploy is a separate go. Max 2 agents at once (session usage limit).
 - [x] C3b — owner reports count v2 leads; Sheet created/updated system-owned; CRM reads stop
       creating tabs (#70)
 - [x] C4 — `gmail_brief` daily email data; `owner_uncertain_writes` (#69)
+- [x] C8 — Telegram bot token no longer leaks into CloudWatch via httpx request logs
+      (`app/core/redact.py`). The in-app `MIA_DATABASE_PASSWORD` override design was
+      dropped after review (IAM boundary); see HANDOFF §0.
+- [ ] C9 — RDS→mia/prod password auto-sync (`scripts/lambda_sync_db_password.py`),
+      `CODE_CHECKED` + `LOCAL_TESTED` only — not deployed. Needs: create the Lambda/role/
+      EventBridge rule (verify the rotation event pattern against AWS docs first), then a
+      real-AWS staging test of one rotation cycle before this can move past `LOCAL_TESTED`.
 - [ ] C2b — approval cards from the stored envelope; callback `sent` truth (brief ready)
 - [ ] C6a — social capability truth + routing collisions (brief ready; after C4)
 - [ ] C7b — proven-dead code, reviewed follow-ups, docs (brief ready; last)

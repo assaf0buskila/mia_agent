@@ -1,0 +1,7 @@
+{
+  "FunctionName": "mia-db-password-sync",
+  "StatementId": "AllowMiaDbPasswordRotationRule",
+  "Action": "lambda:InvokeFunction",
+  "Principal": "events.amazonaws.com",
+  "SourceArn": "arn:aws:events:REGION:ACCOUNT_ID:rule/mia-db-password-rotated"
+}

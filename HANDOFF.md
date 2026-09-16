@@ -34,17 +34,35 @@ execution role `miaTaskExecutionRole`'s inline policy `ReadMiaProdBoxOnly` is sc
 secret as a container secret as designed would have prevented every task from starting.
 Assaf chose not to widen that policy.
 
-**Fix, take 2 (auto-sync) — the chosen approach, next chunk.** Instead of the running
-container reading the rotated password directly, an EventBridge rule on the RDS-managed
-secret's rotation event triggers a Lambda that (a) reads the new password from the
-RDS-managed secret, (b) rewrites only the password inside `mia/prod`'s `MIA_DATABASE_URL`
-— every other key and the rest of the URL preserved byte-for-byte — and (c) forces a new
-ECS deployment so the already-running task actually picks up the change instead of holding
-the old password until something else restarts it (which is exactly today's failure mode).
-The Lambda gets its own narrow IAM role: read the RDS-managed secret, `PutSecretValue` on
-`mia/prod`, `ecs:UpdateService` + `ecs:DescribeServices` on the `mia` service — nothing
-wider. `mia/prod`'s embedded password stays load-bearing under this design (it is what the
+**Fix, take 2 (auto-sync) — the chosen approach, chunk C9, `CODE_CHECKED` + `LOCAL_TESTED`,
+not deployed.** Instead of the running container reading the rotated password directly, an
+EventBridge rule on the RDS-managed secret's rotation event
+(`deploy/eventbridge-db-password-rotation-rule.example.json` +
+`-targets.example.json`, `deploy/iam-lambda-invoke-permission.example.json`) triggers a
+Lambda (`scripts/lambda_sync_db_password.py`, `sync_database_password`) that (a) reads the
+new password from the RDS-managed secret, (b) rewrites only the password inside `mia/prod`'s
+`MIA_DATABASE_URL` — every other key and the rest of the URL preserved byte-for-byte — and
+(c) forces a new ECS deployment (`ecs:UpdateService` with `forceNewDeployment`) so the
+already-running task actually picks up the change instead of holding the old password until
+something else restarts it (which is exactly today's failure mode; the code comment says so
+explicitly). The percent-encoding + last-`@`-anchoring substitution is carried over verbatim
+from take 1's already-adversarially-reviewed `_with_overridden_dsn_password`, not rewritten.
+Idempotent (re-running against an already-current secret is a no-op on the value, still
+forces a deployment). Guards a UTF-8 BOM on read (one already made this exact secret invalid
+JSON) and never writes one.
+
+The Lambda's IAM role (`deploy/iam-lambda-db-password-sync.example.json` +
+`-trust.example.json`) is scoped to: `secretsmanager:GetSecretValue` on the RDS-managed
+secret; `secretsmanager:GetSecretValue` **and** `PutSecretValue` on `mia/prod`;
+`ecs:UpdateService` + `ecs:DescribeServices` on the `mia` service. The extra
+`GetSecretValue` on `mia/prod` (beyond the originally-specified `PutSecretValue`-only) is
+necessary — the handler cannot preserve every other key byte-for-byte without reading the
+current secret first — and is called out here rather than silently added. Nothing wider than
+that. `mia/prod`'s embedded password stays load-bearing under this design (it is what the
 container actually reads); it does not become vestigial the way take 1 would have made it.
+Not deployed: creating the Lambda, its role, or the EventBridge rule is a separate approval,
+and the rule's exact CloudTrail event name/pattern needs verifying against AWS docs first
+(flagged in the rule's own `Description`) since it was never checked against real AWS.
 
 **Separate, incidental finding fixed and kept regardless of which take: Telegram bot token
 leaking into CloudWatch.** httpx's own request logger (`logging.getLogger("httpx")`) logs
