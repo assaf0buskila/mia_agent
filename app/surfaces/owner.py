@@ -319,7 +319,7 @@ def _pending_approvals_messages(
             (
                 OutboundMessage(
                     conversation_id=item.get("chat_id") or item["from"],
-                    text=f"ועוד {remaining} {word} לאישור.",
+                    text=owner_text(f"ועוד {remaining} {word} לאישור.", html=True),
                     channel=Channel.TELEGRAM.value,
                     idempotency_key=f"{item['id']}:pending:more",
                     parse_mode="HTML",

@@ -39,7 +39,7 @@ from app.integrations.telegram import (
     parse_telegram_update,
     validate_telegram_voice_media,
 )
-from app.integrations.telegram_format import parse_callback_token
+from app.integrations.telegram_format import owner_text, parse_callback_token
 from app.integrations.transcribe import TranscriptionError, TranscriptionPort
 from app.workers.telegram_owner import process_telegram_owner_update
 
@@ -271,6 +271,13 @@ async def _handle_callback(
             "unknown": "תוצאת הפעולה אינה ודאית וממתינה לבדיקה. לא ביצעתי שוב.",
             "expired": "האישור פג. צריך להכין בקשת אישור חדשה.",
         }.get(outcome.status, "הפעולה לא בוצעה.")
+    # Every branch above either interpolates only server-escaped HTML (bold()/code()
+    # from resolve_owner_callback_result) or a fixed Hebrew literal, except
+    # outcome.text, which can carry a provider-echoed value (see
+    # app/services/owner_actions.py execute_owner_action) -- that value is escaped at
+    # its source, not here, so this call is dash/bidi normalisation only, never a
+    # second escaping pass over already-built HTML.
+    reply_text = owner_text(reply_text, html=True)
     # `sent` reflects whether the edit itself landed -- never re-run the decided
     # action just because the owner's console failed to update. A failed edit still
     # leaves the result unreported, so one fallback sendMessage carries the same

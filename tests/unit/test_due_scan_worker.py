@@ -17,6 +17,7 @@ from app.domain.commitments import (
     TRIGGER_DUE_DATE,
 )
 from app.domain.followups import follow_up_due_on
+from app.integrations.telegram_format import owner_text
 from app.workers import due_scan as due_scan_module
 from app.workers.due_scan import main, run_due_scan
 from sqlalchemy import create_engine, text
@@ -154,7 +155,12 @@ def test_due_scan_sends_one_unprompted_owner_reminder(
         )
         assert first.owner_tasks_due_ready >= 1
         assert first.owner_reminders_sent == 1
-        assert sent == [f"יש {first.owner_tasks_due_ready} משימות שמחכות לטיפול."]
+        # C9: due-reminder text now passes through owner_text() at egress, which
+        # isolates the LTR digit run so it does not reorder inside the Hebrew
+        # sentence -- the visible digits are unchanged.
+        assert sent == [
+            owner_text(f"יש {first.owner_tasks_due_ready} משימות שמחכות לטיפול.")
+        ]
         second = run_due_scan(
             store,
             timezone="Asia/Jerusalem",

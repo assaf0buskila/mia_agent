@@ -488,24 +488,30 @@ def join_sections(*blocks: str) -> str:
 
 
 # Spans that cannot be safely cut in half: a fenced block (spans newlines by design),
-# a bold/code span (never spans a newline, but a raw hard-cut has no newline to
-# respect in the first place), and a bidi isolate run (FSI...PDI -- cutting between
-# the two would ship a chunk with an unterminated isolate, corrupting direction for
-# everything after it in that chunk). This is NOT "every span this module ever
-# emits" -- `italic()`, `link()` and `blockquote()` still emit spans this regex
-# does not protect; they have no callers today (see the module's top docstring),
-# so that gap is latent rather than live. All the protected forms are mutually
-# exclusive/non-nesting in our own output, so one regex and one resolver handles
-# all of them identically. The isolate alternative is listed LAST so a `<code>`
-# span containing an isolate matches as the code span first and protects the
-# isolate inside it, rather than the isolate matching on its own.
+# a bold/code/blockquote span (never spans a newline by our own construction, but a
+# raw hard-cut has no newline to respect in the first place), and a bidi isolate run
+# (FSI...PDI -- cutting between the two would ship a chunk with an unterminated
+# isolate, corrupting direction for everything after it in that chunk). This is NOT
+# "every span this module ever emits" -- `italic()` and `link()` still emit spans
+# this regex does not protect; they have no callers today (see the module's top
+# docstring), so that gap is latent rather than live. `blockquote()` WAS in that
+# same latent state (zero callers, unprotected) until this line was added -- fixed
+# here rather than left for whoever first calls it, because an unclosed
+# `<blockquote>` makes Telegram reject the whole message with no partial delivery.
+# All the protected forms are mutually exclusive/non-nesting in our own output, so
+# one regex and one resolver handles all of them identically. The isolate
+# alternative is listed LAST so a `<code>` span containing an isolate matches as the
+# code span first and protects the isolate inside it, rather than the isolate
+# matching on its own.
 _UNSPLITTABLE_SPAN_RE = re.compile(
     r"<pre>.*?</pre>|<b>[^<]*?</b>|<code>[^<]*?</code>"
+    r"|<blockquote(?: expandable)?>.*?</blockquote>"
     r"|" + _FSI + r"[^" + _FSI + _PDI + r"]*" + _PDI,
     re.DOTALL,
 )
 _PRE_OPEN = "<pre>"
 _PRE_CLOSE = "</pre>"
+_BLOCKQUOTE_CLOSE = "</blockquote>"
 # Any HTML tag this module emits, or an HTML entity (`&amp;`, `&lt;`, `&gt;`). Both are
 # parsed atomically by Telegram, so a hard cut must never land inside either.
 _TAG_OR_ENTITY_RE = re.compile(r"<[^<>]*>|&[a-zA-Z0-9#]+;")
@@ -519,6 +525,8 @@ def _span_tags(span_text: str) -> tuple[str, str]:
         return "<b>", "</b>"
     if span_text.startswith("<code>"):
         return "<code>", "</code>"
+    if span_text.startswith("<blockquote"):
+        return span_text[: span_text.index(">") + 1], _BLOCKQUOTE_CLOSE
     return _FSI, _PDI
 
 
