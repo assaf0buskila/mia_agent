@@ -76,7 +76,13 @@ class CrmNotFound(CrmError):
 
 @dataclass(frozen=True)
 class ActivityInput:
-    who: str = "Mia"
+    # Stored verbatim in ``CrmActivityRow.who`` -- never filtered or matched by
+    # value anywhere (unlike ``action``, see ``_ACTIVITY_ACTION_LABELS_HE``
+    # below), so the Hebrew default is safe to store directly rather than
+    # mapped at the Sheet-cell boundary. This also restores the exact value
+    # pre-2026-09-11 rows already had before a since-changed default (`"Mia"`)
+    # started writing the English name instead.
+    who: str = "מיה"
     channel: str = ""
     action: str = "contact_updated"
     result: str = ""
@@ -222,6 +228,54 @@ def _bounded_fields(fields: Mapping[str, Any]) -> dict[str, str]:
         if raw_email and not bounded["email"]:
             raise CrmError("invalid email")
     return bounded
+
+
+# Hebrew labels for the Activity Sheet's `מה עשתה` column. ``CrmActivityRow.action``
+# itself is never renamed -- app/db/store.py's website-lead queries filter on the
+# exact literal "contact_captured" -- only the outgoing Sheet cell is translated.
+# Historical rows (pre-2026-09-11) already read "שיחת אתר"; match that vocabulary
+# so old and new rows read the same way. An action outside this map -- a future
+# system action, or the free-text `kind` an owner types through the
+# `crm_record_activity` tool (see app/tools/owner/crm.py) -- falls back to a
+# short, generic, honest label instead of leaking a raw snake_case enum into
+# the sheet.
+_ACTIVITY_ACTION_LABELS_HE: dict[str, str] = {
+    "contact_captured": "שיחת אתר",
+    "contact_updated": "עדכון פרטים",
+}
+_ACTIVITY_ACTION_FALLBACK_HE = "פעילות"
+
+# Short, fixed outcomes for the `תוצאה` column, keyed by the same action enum.
+# The full text (e.g. the model-written lead brief behind "contact_captured")
+# stays exactly as stored in ``CrmActivityRow.result`` -- ``refresh_pending_site_brief``
+# keeps it in sync with the Telegram message already sent to the owner, which is
+# the right surface for the full brief -- only the Sheet cell is shortened.
+_ACTIVITY_OUTCOME_LABELS_HE: dict[str, str] = {
+    "contact_captured": "נרשם",
+}
+_ACTIVITY_OUTCOME_FALLBACK_MAX_CHARS = 120
+
+
+def _activity_action_cell(action: str) -> str:
+    """Hebrew label for the Sheet's `מה עשתה` column. Pure; never raises."""
+    return _ACTIVITY_ACTION_LABELS_HE.get(action, _ACTIVITY_ACTION_FALLBACK_HE)
+
+
+def _activity_outcome_cell(action: str, result: str) -> str:
+    """Short outcome for the Sheet's `תוצאה` column. Pure; never raises.
+
+    A known action gets its fixed short outcome regardless of how long
+    ``result`` is. Anything else keeps its own (already short, owner- or
+    model-typed) result text, truncated defensively so a future long value
+    can't dump a brief into the sheet again.
+    """
+    label = _ACTIVITY_OUTCOME_LABELS_HE.get(action)
+    if label is not None:
+        return label
+    trimmed = result.strip()
+    if len(trimmed) > _ACTIVITY_OUTCOME_FALLBACK_MAX_CHARS:
+        return trimmed[: _ACTIVITY_OUTCOME_FALLBACK_MAX_CHARS - 1].rstrip() + "…"
+    return trimmed
 
 
 def _autoflushing(method: Callable[..., Any]) -> Callable[..., Any]:
@@ -1407,8 +1461,8 @@ class CrmService:
                         row.occurred_at,
                         row.who,
                         row.channel,
-                        row.action,
-                        row.result,
+                        _activity_action_cell(row.action),
+                        _activity_outcome_cell(row.action, row.result),
                         row.id,
                     ],
                 },

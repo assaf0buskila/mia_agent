@@ -20,6 +20,7 @@ from app.db.models import (
     CrmOutboxRow,
     CrmSyncSnapshotRow,
 )
+from app.db.store import LeadStore
 from app.integrations.sheets import FakeSheetsPort
 from app.services.crm_v2 import ActivityInput, CrmError, CrmRevisionConflict, CrmService
 from app.workers.crm_delivery import CrmDeliveryWorker
@@ -1456,3 +1457,124 @@ def test_delivery_projects_cleanly_despite_mismatched_timestamp_snapshot_base(
     assert (run.claimed, run.confirmed, run.conflicts) == (1, 1, 0)
     row = next(r for r in sheets.locked_contacts if r[14] == contact_id)
     assert row[4] == "Studio"
+
+
+# --- C11: Activity Sheet readability -----------------------------------------
+#
+# Before 2026-09-11 the Activity Sheet's `מה עשתה`/`תוצאה` columns read
+# "שיחת אתר" / "נרשם". A regression started writing the raw English enum
+# ("contact_captured") and dumping the entire model-written lead brief into
+# the outcome cell. These tests pin: the DB keeps the untouched English enum
+# (store.py's website-lead queries filter on it), only the outgoing Sheet
+# cells are translated/shortened, an unmapped action never crashes and never
+# leaks a raw enum, and `who` renders as "מיה".
+
+
+def test_activity_sheet_cells_translate_action_and_shorten_result_for_site_lead(
+    sessions: sessionmaker[Session],
+) -> None:
+    long_brief = (
+        "פנייה חדשה מהאתר\n"
+        "שם: נועה\n"
+        "עסק: סטודיו\n"
+        "רוצה: שיחת ייעוץ\n"
+        "השלב הבא המומלץ: לחזור אליה היום"
+    )
+    with sessions() as session:
+        result = CrmService(session).capture_site_lead(
+            {"name": "נועה", "phone": "0501234567", "business": "סטודיו"},
+            conversation_id="session-c11-1",
+            source_ref="site:session-c11-1:message-1",
+            summary=long_brief,
+            recipient_ids=("123",),
+        )
+        assert result.contact is not None
+
+        # The DB keeps the exact enum/full brief -- store.py filters on the
+        # literal "contact_captured", and refresh_pending_site_brief keeps
+        # this in sync with the Telegram message, the right surface for the
+        # full brief. Neither may change.
+        activity_row = session.scalars(select(CrmActivityRow)).one()
+        assert activity_row.action == "contact_captured"
+        assert activity_row.result == long_brief
+        assert activity_row.who == "מיה"
+
+        outbox = session.scalars(
+            select(CrmOutboxRow).where(CrmOutboxRow.destination == "activity")
+        ).one()
+        cells = json.loads(outbox.payload_json)["cells"]
+
+        assert len(cells) == 6  # crm_delivery.py rejects anything else
+        assert cells[5] == activity_row.id  # dedupe key -- must stay row.id
+        assert cells[1] == "מיה"
+        assert cells[3] == "שיחת אתר"  # matches the pre-2026-09-11 vocabulary
+        assert cells[4] == "נרשם"  # short outcome, also matching that vocabulary
+        assert long_brief not in cells[4]
+        assert "רוצה" not in cells[4]  # none of the brief leaked into the cell
+        session.rollback()
+
+
+def test_activity_sheet_cell_falls_back_safely_for_an_unmapped_action(
+    sessions: sessionmaker[Session],
+) -> None:
+    """An action outside the known map -- a future system action, or the
+    free-text `kind` an owner types through the `crm_record_activity` tool --
+    must never crash and must never leak a raw snake_case enum into the sheet.
+    """
+    with sessions() as session:
+        service = CrmService(session)
+        seed = service.capture({"phone": "0509990000", "name": "Dana"}, source_ref="seed-c11")
+        assert seed.contact is not None
+        contact_id = seed.contact.id
+        session.flush()
+
+        very_long_owner_note = "x" * 5000
+        activity = service.record_activity(
+            contact_id,
+            source_ref="owner:c11:activity-1",
+            kind="some_future_action_kind",
+            summary=very_long_owner_note,
+        )
+        assert activity.action == "some_future_action_kind"  # stored value untouched
+
+        outbox = session.scalars(
+            select(CrmOutboxRow).where(
+                CrmOutboxRow.destination == "activity",
+                CrmOutboxRow.aggregate_id == activity.id,
+            )
+        ).one()
+        cells = json.loads(outbox.payload_json)["cells"]
+
+        assert len(cells) == 6
+        assert cells[5] == activity.id
+        assert cells[3] == "פעילות"  # honest generic fallback
+        assert "some_future_action_kind" not in cells[3]  # never a raw enum
+        assert len(cells[4]) <= 121  # truncated, not the full 5000-char note
+        assert very_long_owner_note not in cells[4]
+        session.rollback()
+
+
+def test_store_contact_captured_queries_still_match_after_hebrew_translation(
+    sessions: sessionmaker[Session],
+) -> None:
+    """Regression pin for the likeliest slip-through: translating the Sheet cell
+    must never touch the stored `action` value app/db/store.py filters on.
+    """
+    with sessions() as session:
+        result = CrmService(session).capture_site_lead(
+            {"name": "איתי", "phone": "0507778888"},
+            conversation_id="session-c11-2",
+            source_ref="site:session-c11-2:message-1",
+            summary="פנייה חדשה",
+            recipient_ids=(),
+        )
+        assert result.contact is not None
+        contact_id = result.contact.id
+        session.commit()
+
+    with sessions() as session:
+        store = LeadStore(session)
+        assert store.count_captured_website_leads() == 1
+        leads = store.list_captured_website_leads()
+        assert len(leads) == 1
+        assert leads[0].contact_id == contact_id
