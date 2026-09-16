@@ -8,8 +8,12 @@ Section 0 is the campaign-finish state for the next session. Sections 1 onward a
 Plan: `docs/MIA_CAMPAIGN_FINISH_PLAN.md`. Chunk briefs: `docs/MIA_CLAUDE_CODE_PROMPTS.md`
 (the "Ready briefs" section at the end is copy-paste ready). Session rules: `CLAUDE.md`.
 
-**Production is unchanged.** `/health` last reported commit `4b80f31` (2026-09-14). Nothing
-below is deployed. Every item is `LOCAL_TESTED` + CI-green + independently reviewed at most.
+**Correction (2026-09-16): production is deployed and current, not unchanged.** This line
+previously said `/health` last reported `4b80f31` (2026-09-14) and nothing was deployed. That is
+now stale: `110ada6` is live on ECS task definition `mia:65`, verified via `/health`, with a real
+website lead delivered end to end to Assaf's Telegram. Every item below is `LOCAL_TESTED` +
+CI-green + independently reviewed at most — deployment status for anything past `110ada6` (i.e.
+this session's C7b work) is unaffected by this correction.
 
 ### Merged to master (each: failing test → fix → fresh opus review → fixes → green CI)
 

@@ -1,7 +1,10 @@
 # TASKS.md
 
-Updated 2026-09-16. Production `/health` last reported commit `4b80f31` (#60) — nothing from the
-campaign is deployed. Detail and next-session instructions in `HANDOFF.md` section 0.
+Updated 2026-09-16. **Production is deployed and current**: `110ada6` is live on ECS task
+definition `mia:65`, verified via `/health`, with a real website lead delivered end to end to
+Assaf's Telegram. This supersedes every earlier "nothing is deployed" note in this file and in
+`HANDOFF.md` (both said `4b80f31`/#60, which is now stale). Detail and next-session instructions
+in `HANDOFF.md` section 0.
 
 ## Campaign finish (plan: `docs/MIA_CAMPAIGN_FINISH_PLAN.md`)
 
