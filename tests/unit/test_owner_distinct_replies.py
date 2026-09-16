@@ -116,7 +116,9 @@ class _StubStore:
         del occurred_from, occurred_to
         return 0
 
-    def list_undelivered_captured_website_leads(self, *, limit: int = 12) -> list[str]:
+    def list_undelivered_captured_website_leads(
+        self, *, limit: int = 12
+    ) -> list[tuple[str, str]]:
         del limit
         return []
 

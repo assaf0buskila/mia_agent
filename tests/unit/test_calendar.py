@@ -619,6 +619,34 @@ def test_window_free_excluding_self_refuses_when_agenda_is_unavailable() -> None
     )
 
 
+def test_window_free_excluding_self_refuses_when_agenda_lacks_list_events_strict() -> None:
+    """An agenda port that does not implement `list_events_strict` (a partial
+    double, or a future port that only supports merged free/busy) must fail
+    closed like a missing agenda, never raise AttributeError at approval time.
+    """
+
+    class _NoStrictReadAgenda:
+        def list_events(self, **_kwargs: object) -> list[CalendarEvent]:
+            raise AssertionError("must not fall back to the merged read")
+
+    self_start = FIXED_NOW
+    self_end = self_start + timedelta(minutes=30)
+    window_start = FIXED_NOW + timedelta(minutes=15)
+    window_end = window_start + timedelta(minutes=30)
+    assert (
+        window_free_excluding_self(
+            _RaisingCalendarPort(),
+            window_start=window_start,
+            window_end=window_end,
+            self_start=self_start,
+            self_end=self_end,
+            self_event_id="self-evt",
+            agenda=_NoStrictReadAgenda(),
+        )
+        is False
+    )
+
+
 def test_window_free_excluding_self_with_no_self_falls_back_to_plain_free_check() -> None:
     slot = _slot_at(day_offset=1, hour=10, minutes=30)
     calendar = FakeCalendarPort([slot])

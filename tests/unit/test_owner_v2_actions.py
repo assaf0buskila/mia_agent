@@ -308,7 +308,14 @@ def _owner(actor: str = "123") -> Principal:
     return Principal.owner(source="telegram", actor_id=actor)
 
 
-def test_concurrent_owner_proposals_keep_distinct_exact_bindings() -> None:
+def test_concurrent_owner_proposals_get_distinct_ids_and_pure_keyboard_tokens() -> None:
+    """Two proposals get distinct approval/proposal ids and, from those ids alone,
+    `approval_keyboard(approval_token(x))` builds distinct pure keyboards whose
+    callback data embeds the right id. This does not exercise real message
+    wiring (which card actually reaches Telegram for which proposal) -- that is
+    pinned by `test_two_turn_proposals_get_prose_then_own_cards` in
+    tests/unit/test_telegram_owner_outbound.py.
+    """
     store, session = _store()
     marker = uuid4().hex
     try:
@@ -2317,6 +2324,36 @@ def test_crm_conflicts_refuses_when_workspace_missing() -> None:
         assert result.ok is False
         assert "not set up" in (result.error or "")
         assert sheets.crm_workspace_ensures == 0
+    finally:
+        session.close()
+
+
+def test_crm_search_treats_a_transient_list_sheet_names_error_as_not_missing() -> None:
+    """`_crm_workspace_missing`'s except only covers adapter/schema errors -- a
+    transient failure there must read as "not missing" (fail open on this narrow
+    check) so the real provisioning check inside the sync step that follows is
+    what actually reports the problem, never a false "not set up" from here.
+    """
+
+    class _RaisingListPort(FakeSheetsPort):
+        def list_sheet_names(self, *, spreadsheet_id: str) -> list[str]:
+            raise AdapterResponseError()
+
+    store, session = _store()
+    try:
+        ctx = ToolContext(
+            store=store,
+            brain=BrainStore(session),
+            settings=Settings(_env_file=None),
+            principal=_owner(),
+            embedding_port=FakeEmbeddingPort(),
+            source_ref=f"tg:{uuid4().hex}",
+            owner_text="find dana in contacts",
+            sheets=_RaisingListPort(),
+        )
+        result = _crm_search(ctx, {"query": "dana"})
+        assert result.ok is True
+        assert "not set up" not in (result.error or "")
     finally:
         session.close()
 

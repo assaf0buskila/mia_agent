@@ -98,6 +98,8 @@ def test_v2_capture_is_included_in_hot_leads_and_status(
         # now surfaces for v2.
         hot = format_hot_leads_ack(store, principal=Principal.owner(source="test"))
         assert result.contact.id in hot
+        # The reply leads with the captured name, not a bare crm_... id.
+        assert "יוסי" in hot
 
         status = format_owner_status_ack(
             store, principal=Principal.owner(source="test"), timezone=_TZ
@@ -108,6 +110,80 @@ def test_v2_capture_is_included_in_hot_leads_and_status(
             store, principal=Principal.owner(source="test"), timezone=_TZ
         )
         assert result.contact.id in snapshot
+
+
+def test_hot_lead_with_no_name_falls_back_to_the_bare_contact_id(
+    sessions: sessionmaker[Session],
+) -> None:
+    with sessions() as session:
+        store = LeadStore(session)
+        result = CrmService(session).capture_site_lead(
+            {"phone": "0507654322", "business": "מוסך"},
+            conversation_id="v2-hot-noname",
+            source_ref="site:v2-hot-noname:m1",
+            summary="רוצה שיחה",
+            recipient_ids=("999",),
+        )
+        assert result.contact is not None
+        session.commit()
+        hot = format_hot_leads_ack(store, principal=Principal.owner(source="test"))
+        assert result.contact.id in hot
+
+
+def test_v1_takeover_state_lead_still_reported_alongside_v2(
+    sessions: sessionmaker[Session],
+) -> None:
+    """2026-09-16 review P0: a `LeadRow` with `takeover_state ==
+    HUMAN_TAKEOVER_REQUIRED` (set by `store.set_takeover_state`, historically via
+    the now-removed `apply_hot_handoff`) must keep surfacing here even though the
+    auto-freeze writer is gone -- production has exactly this row today. Union
+    with a v2 capture proves neither source hides the other.
+    """
+    from app.domain.conversation_scope import TakeoverState
+
+    with sessions() as session:
+        store = LeadStore(session)
+        _customer_id, lead_id = store.open_channel_lead(
+            channel=Channel.WHATSAPP, external_id="972500001111"
+        )
+        store.set_takeover_state(lead_id, TakeoverState.HUMAN_TAKEOVER_REQUIRED.value)
+        v2 = CrmService(session).capture_site_lead(
+            {"name": "Dana", "phone": "0501112222", "business": "Studio"},
+            conversation_id="v1-union-1",
+            source_ref="site:v1-union-1:m1",
+            summary="x",
+            recipient_ids=("999",),
+        )
+        assert v2.contact is not None
+        session.commit()
+
+        hot = format_hot_leads_ack(store, principal=Principal.owner(source="test"))
+        assert lead_id in hot
+        assert v2.contact.id in hot
+
+
+def test_v1_takeover_state_lead_shows_its_sales_headline_as_a_label(
+    sessions: sessionmaker[Session],
+) -> None:
+    """Mirrors the v2 name-label fix: a v1 lead's `SalesState.headline` (the
+    closest thing v1 has to a name -- `LeadRow`/`CustomerRow` store no name at
+    all) is used as a label alongside the id, not just the bare `lead_...` id.
+    """
+    from app.domain.conversation_scope import TakeoverState
+    from app.domain.sales import SalesState
+
+    with sessions() as session:
+        store = LeadStore(session)
+        _customer_id, lead_id = store.open_channel_lead(
+            channel=Channel.WHATSAPP, external_id="972500002222"
+        )
+        store.set_takeover_state(lead_id, TakeoverState.HUMAN_TAKEOVER_REQUIRED.value)
+        store.save_sales(SalesState(lead_id=lead_id, headline="needs a site urgently"))
+        session.commit()
+
+        hot = format_hot_leads_ack(store, principal=Principal.owner(source="test"))
+        assert lead_id in hot
+        assert "needs a site urgently" in hot
 
 
 def test_legacy_lead_still_counted_without_v2(sessions: sessionmaker[Session]) -> None:

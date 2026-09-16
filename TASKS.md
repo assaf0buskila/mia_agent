@@ -1,7 +1,10 @@
 # TASKS.md
 
-Updated 2026-09-15. Production `/health` last reported commit `4b80f31` (#60) — nothing from the
-campaign is deployed. Detail and next-session instructions in `HANDOFF.md` section 0.
+Updated 2026-09-16. **Production is deployed and current**: `110ada6` is live on ECS task
+definition `mia:65`, verified via `/health`, with a real website lead delivered end to end to
+Assaf's Telegram. This supersedes every earlier "nothing is deployed" note in this file and in
+`HANDOFF.md` (both said `4b80f31`/#60, which is now stale). Detail and next-session instructions
+in `HANDOFF.md` section 0.
 
 ## Campaign finish (plan: `docs/MIA_CAMPAIGN_FINISH_PLAN.md`)
 
@@ -18,9 +21,14 @@ Deploy is a separate go. Max 2 agents at once (session usage limit).
 - [x] C3b — owner reports count v2 leads; Sheet created/updated system-owned; CRM reads stop
       creating tabs (#70)
 - [x] C4 — `gmail_brief` daily email data; `owner_uncertain_writes` (#69)
-- [ ] C2b — approval cards from the stored envelope; callback `sent` truth (brief ready)
-- [ ] C6a — social capability truth + routing collisions (brief ready; after C4)
-- [ ] C7b — proven-dead code, reviewed follow-ups, docs (brief ready; last)
+- [x] C2b — approval cards from the stored envelope; callback `sent` truth (#72)
+- [x] C6a — social capability truth + routing collisions (#71)
+- [x] C7b — proven-dead code, v1 hot-lead auto-freeze (`apply_hot_handoff`) retired while its
+      read path (`list_hot_lead_ids`/`hot_ids`/`set_takeover_state`) stays live, reviewed
+      follow-ups, docs. A round-2 review caught a false premise in the first pass (production
+      has a live takeover-state row) — fixed at `2311e5b`. Committed locally on
+      `claude/mia-c7b-cleanup-docs`, not yet pushed/PR'd. See `HANDOFF.md` section 0 for the
+      SHAs, evidence and what was deliberately left alone.
 - [ ] Prompt 4 — release readiness, go/no-go → **stop for Assaf**
 - [ ] Prompt 5 — approved deploy + phone acceptance (live LinkedIn post, email send, calendar
       event, website lead — each approved individually)
@@ -57,9 +65,11 @@ Deploy is a separate go. Max 2 agents at once (session usage limit).
       demo) once capture is proven. Merging auto-deploys to Vercel.
 - [ ] Product decision: is meeting booking (`app/domain/meetings`) retired, or waiting to
       be re-wired? It has no callers and ~100 tests.
-- [ ] Small: `build_contacts_crm` is an orphan; `scripts/calibrate_knowledge_floor.py`
-      tunes a setting that no longer exists; the main checkout still has stale uncommitted
-      `crm_v2.py` edits superseded by #55.
+- [x] `build_contacts_crm` (with `log_contact`/`resolved_spreadsheet_id`/`now_israel`) and
+      the `scripts/calibrate_knowledge_floor.py` phantom-setting docstring — both fixed
+      in C7b.
+- [ ] The main checkout still has stale uncommitted `crm_v2.py` edits superseded by #55
+      (unverified from this worktree).
 
 ## Live acceptance (Assaf)
 

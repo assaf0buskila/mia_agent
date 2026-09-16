@@ -34,7 +34,10 @@ def _crm_workspace_missing(ctx: ToolContext, port: object) -> bool:
         return False
     try:
         existing = set(lister(spreadsheet_id=_crm_spreadsheet_id(ctx)))
-    except Exception:
+    except AdapterHttpError:
+        # Covers AdapterResponseError/AdapterSchemaError too -- both subclass
+        # AdapterHttpError (see app/domain/tools.py). A narrower catch than
+        # `Exception` so a real bug here surfaces instead of reading as "not missing".
         return False
     return CONTACTS_TAB not in existing or ACTIVITY_TAB not in existing
 
@@ -47,7 +50,9 @@ def _crm_search(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     problem = _sync_current_sheet_edits(ctx, port)
     if problem:
         return ToolResult(ok=False, error=problem)
-    contacts = CrmService(ctx.store.session).lookup(query=query or None, limit=20)
+    contacts = CrmService(ctx.store.session, timezone=ctx.timezone()).lookup(
+        query=query or None, limit=20
+    )
     if not contacts:
         return ToolResult(ok=True, text="No CRM contact matched.")
     return ToolResult(
@@ -159,7 +164,7 @@ def _propose_crm_upsert(
     if problem:
         return ToolResult(ok=False, error=problem)
     try:
-        snapshot = CrmService(ctx.store.session).snapshot_identity(fields)
+        snapshot = CrmService(ctx.store.session, timezone=ctx.timezone()).snapshot_identity(fields)
         if not snapshot.contact_id and new_contact_defaults:
             fields = {
                 **fields,
@@ -197,7 +202,9 @@ def _crm_record_activity(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     if problem:
         return ToolResult(ok=False, error=problem)
     try:
-        snapshot = CrmService(ctx.store.session).snapshot_target(contact_id)
+        snapshot = CrmService(ctx.store.session, timezone=ctx.timezone()).snapshot_target(
+            contact_id
+        )
         proposal = propose_owner_action(
             ctx.store,
             principal=ctx.principal,
@@ -223,7 +230,9 @@ def _crm_conflicts(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     if problem:
         return ToolResult(ok=False, error=problem)
     contact_id = str(args.get("contact_id") or "").strip() or None
-    conflicts = CrmService(ctx.store.session).list_conflicts(contact_id=contact_id)
+    conflicts = CrmService(ctx.store.session, timezone=ctx.timezone()).list_conflicts(
+        contact_id=contact_id
+    )
     if not conflicts:
         return ToolResult(ok=True, text="No unresolved CRM conflicts.")
     return ToolResult(
@@ -249,7 +258,7 @@ def _crm_resolve_conflict(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     problem = _sync_current_sheet_edits(ctx, port)
     if problem:
         return ToolResult(ok=False, error=problem)
-    service = CrmService(ctx.store.session)
+    service = CrmService(ctx.store.session, timezone=ctx.timezone())
     conflict = next(
         (item for item in service.list_conflicts() if item.id == conflict_id), None
     )
@@ -288,7 +297,7 @@ def _sync_current_sheet_edits(ctx: ToolContext, port: object) -> str:
     ):
         return "CRM sheet import is unavailable; refusing to use a stale target"
     try:
-        sync_owner_crm_sheet_in_session(ctx.store, sheets=port)
+        sync_owner_crm_sheet_in_session(ctx.store, sheets=port, timezone=ctx.timezone())
     except (AdapterHttpError, OSError, RuntimeError, TypeError, ValueError):
         return "CRM sheet import failed; refusing to use a stale target"
     return ""
