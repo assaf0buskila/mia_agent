@@ -15,6 +15,12 @@ Bidi note: Telegram documents no RTL control for plain `sendMessage` (`is_rtl` e
 on rich messages). A Hebrew line ending in a Latin/numeric token reorders visibly, so
 LTR runs are wrapped in Unicode isolates. That is a Unicode-standard technique, not a
 Telegram-documented one, and is worth eyeballing on a real client.
+
+`owner_text()` is the single normaliser every owner-facing string passes through at
+egress -- dash punctuation by role, LTR-run isolation, and a leading RLM on a Hebrew
+line whose first strong character is Latin. It fixes what a builder cannot: model
+prose, and any owner copy nobody got around to isolating field-by-field. `isolate()`
+stays the builder-level primitive for a single known field (an id, a URL, a date).
 """
 
 from __future__ import annotations
@@ -241,7 +247,9 @@ _RUN_TRAILING_PUNCT = ".,:;!?"
 # `html=False` (raw prose, pre-`render_owner_markdown`): a fenced block, an inline
 # `code` span, or an existing isolate is opaque -- never re-isolated, never
 # dash-normalised a second time (this is what makes the function idempotent).
-_OPAQUE_PLAIN_RE = re.compile(r"```.*?```|`[^`\n]+`|" + _FSI + r"[^" + _PDI + r"]*" + _PDI, re.DOTALL)
+_OPAQUE_PLAIN_RE = re.compile(
+    r"```.*?```|`[^`\n]+`|" + _FSI + r"[^" + _PDI + r"]*" + _PDI, re.DOTALL
+)
 # `html=True` (already-built card HTML): a `<pre>`/`<code>` span, any tag, any
 # entity, or an existing isolate is opaque.
 _OPAQUE_HTML_RE = re.compile(
@@ -259,7 +267,18 @@ _LEADING_GLYPH_RE = re.compile(r"^[ \t]*(?:[•*-][ \t]*)?")
 
 
 def _normalise_dashes(text: str) -> str:
-    """R1: a line-leading dash is deleted; a mid-sentence padded dash becomes a comma."""
+    """R1: a line-leading dash is deleted; a mid-sentence padded dash becomes a comma.
+
+    Called per-gap (see `_transform_gaps`), never on a whole opaque-containing
+    string, so a literal ` -- ` inside a fenced/code/`<pre>`/`<code>` span --
+    real data, e.g. `git diff -- a.py b.py` -- is never touched. The one
+    accepted imprecision: a gap that begins immediately after an opaque span
+    (no separating space) is treated as if it were a fresh line for the
+    line-leading rule, since this function only sees the gap's own text, not
+    its absolute position in the original string. That can turn a dash right
+    after e.g. `` `Vercel`--`` into a deletion instead of a comma -- still not
+    a punctuation dash either way, just the less common of the two fixes.
+    """
     text = _LINE_LEADING_DASH_RE.sub("", text)
     text = _MID_DASH_RE.sub(", ", text)
     return text
@@ -273,15 +292,28 @@ def _wrap_ltr_run(match: re.Match[str]) -> str:
     return f"{_FSI}{trimmed}{_PDI}{run[len(trimmed):]}"
 
 
-def _isolate_ltr_runs(text: str, opaque_re: re.Pattern[str]) -> str:
-    """Wrap every LTR run outside `opaque_re`'s matches; leave the matches untouched."""
+def _transform_gaps(text: str, opaque_re: re.Pattern[str], *, isolate_runs: bool) -> str:
+    """Apply dash normalisation (and, when asked, LTR-run isolation) to every
+    gap between `opaque_re`'s matches; the matches themselves pass through
+    completely untouched. This is what makes fenced/code/`<pre>`/`<code>`
+    content, any tag or entity, and any isolate a builder already inserted,
+    opaque to BOTH transforms -- not just to isolation -- so data inside one
+    is never dash-normalised either.
+    """
+
+    def _transform(gap: str) -> str:
+        gap = _normalise_dashes(gap)
+        if isolate_runs:
+            gap = _LTR_RUN_RE.sub(_wrap_ltr_run, gap)
+        return gap
+
     pieces: list[str] = []
     pos = 0
     for match in opaque_re.finditer(text):
-        pieces.append(_LTR_RUN_RE.sub(_wrap_ltr_run, text[pos : match.start()]))
+        pieces.append(_transform(text[pos : match.start()]))
         pieces.append(match.group())
         pos = match.end()
-    pieces.append(_LTR_RUN_RE.sub(_wrap_ltr_run, text[pos:]))
+    pieces.append(_transform(text[pos:]))
     return "".join(pieces)
 
 
@@ -311,13 +343,12 @@ def owner_text(text: str, *, html: bool = False) -> str:
     and on plain-text notification bodies. `html=True` treats tags, entities,
     <pre> and <code> content as opaque -- use it on already-built card HTML.
     """
+    opaque_re = _OPAQUE_HTML_RE if html else _OPAQUE_PLAIN_RE
     if not _HEBREW_RE.search(text):
         # Pure-English tool/provider text gets the dash rule only: there is no
         # Hebrew base direction to protect, so nothing needs isolating.
-        return _normalise_dashes(text)
-    text = _normalise_dashes(text)
-    opaque_re = _OPAQUE_HTML_RE if html else _OPAQUE_PLAIN_RE
-    text = _isolate_ltr_runs(text, opaque_re)
+        return _transform_gaps(text, opaque_re, isolate_runs=False)
+    text = _transform_gaps(text, opaque_re, isolate_runs=True)
     return "\n".join(_apply_line_direction(line) for line in text.split("\n"))
 
 

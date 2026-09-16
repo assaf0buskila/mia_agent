@@ -18,12 +18,14 @@ from app.integrations.telegram_format import (
     bullets,
     callback_data,
     code,
+    dotted_date,
     esc,
     hebrew_date,
     hebrew_datetime,
     isolate,
     join_sections,
     key_values,
+    owner_text,
     parse_callback_token,
     plain_text_length,
     relative_hebrew_day,
@@ -31,6 +33,10 @@ from app.integrations.telegram_format import (
     section,
     split_message,
 )
+
+_FSI = "⁨"
+_PDI = "⁩"
+_RLM = "‏"
 
 # ------------------------------------------------------------------- escaping
 
@@ -659,3 +665,307 @@ def test_split_message_terminates_when_limit_is_smaller_than_a_tag_pair() -> Non
             assert "<pre></pre>" not in chunk
         rejoined = "".join(chunks).replace("</pre><pre>", "")
         assert rejoined == rendered
+
+
+# --------------------------------------------- unclosed <blockquote> bug (C9)
+
+
+def test_split_message_never_splits_a_blockquote_unclosed() -> None:
+    """Before C9, `<blockquote>`/`<blockquote expandable>` were not in
+    `_UNSPLITTABLE_SPAN_RE`'s allowlist, so a long one split unclosed and
+    Telegram rejected the whole message with "can't parse entities". There is
+    no production caller of `blockquote()` yet, so this was latent -- fixed
+    here rather than left as a trap for whoever calls it first.
+    """
+    long_quote = blockquote("א" * 9000, expandable=True)
+    text = "לפני. " + long_quote + " אחרי."
+    for limit in (64, 100, 512, 3900):
+        chunks = split_message(text, limit=limit)
+        assert len(chunks) > 1
+        for chunk in chunks:
+            opens = len(re.findall(r"<blockquote(?: expandable)?>", chunk))
+            assert opens == chunk.count("</blockquote>")
+            assert "<blockquote></blockquote>" not in chunk
+            assert "<blockquote expandable></blockquote>" not in chunk
+
+
+# ============================================================== owner_text (C9)
+# House rules for Hebrew owner output, enforced at egress: R1 (no dash as
+# punctuation), R7 (every owner line starts with Hebrew, in bidi terms). See
+# owner_text()'s own docstring and the module comment above it for the
+# mechanism this pins.
+
+
+def _strip_bidi(text: str) -> str:
+    return text.replace(_FSI, "").replace(_PDI, "").replace(_RLM, "")
+
+
+# ---------------------------------------------------- golden codepoint tests
+
+
+def test_owner_text_golden_the_real_production_message() -> None:
+    """The exact shape of the message Assaf received, round-tripped through
+    owner_text alone -- no builder, no structural rewrite, just the egress
+    normaliser. Isolates present, no em-dash survives, every digit unchanged.
+    """
+    message = (
+        "נבדקו 25 הודעות ב־17 שרשורים. התיבה חלקית — "
+        "ייתכן שיש הודעות נוספות מעבר לעמוד הראשון.\n"
+        "• Vercel — כניסה חדשה לחשבון בשעה 10:54. כדאי לוודא שזו הייתה הכניסה שלך.\n"
+        "• GitHub/Vercel — עדכון על PR #31 בנושא FAQPage JSON-LD בעמוד "
+        "/blog/soken-koli."
+    )
+    expected = (
+        "נבדקו ⁨25⁩ הודעות ב־⁨17⁩ שרשורים. התיבה חלקית, "
+        "ייתכן שיש הודעות נוספות מעבר לעמוד הראשון.\n"
+        "• ‏⁨Vercel⁩, כניסה חדשה לחשבון בשעה ⁨10:54⁩. "
+        "כדאי לוודא שזו הייתה הכניסה שלך.\n"
+        "• ‏⁨GitHub/Vercel⁩, עדכון על ⁨PR #31⁩ בנושא "
+        "⁨FAQPage JSON-LD⁩ בעמוד ⁨/blog/soken-koli⁩."
+    )
+    out = owner_text(message)
+    assert out == expected
+    assert "–" not in out and "—" not in out and "--" not in out
+    assert re.findall(r"\d+", _strip_bidi(out)) == re.findall(r"\d+", message)
+    assert owner_text(out) == out  # idempotent
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (
+            "עדכון על PR #31 בעמוד /blog/soken-koli.",
+            "עדכון על ⁨PR #31⁩ בעמוד ⁨/blog/soken-koli⁩.",
+        ),
+        ("שעות פעילות 09:00-17:00 בזום.", "שעות פעילות ⁨09:00-17:00⁩ בזום."),
+        ("המודל gpt-5.6 עודכן.", "המודל ⁨gpt-5.6⁩ עודכן."),
+        # A label -> value dash becomes a colon only when a BUILDER chose that
+        # shape explicitly; the automatic fallback for ungoverned model prose
+        # (R1's own stated fallback) is a comma.
+        ("סטטוס — פעיל", "סטטוס, פעיל"),
+        # A line-leading dash is deleted outright, not converted.
+        ("— פריט ברשימה", "פריט ברשימה"),
+        # A dash with no surrounding spaces is data (part of one LTR token),
+        # left untouched and isolated whole.
+        ("המזהה soken-koli תקין.", "המזהה ⁨soken-koli⁩ תקין."),
+    ],
+)
+def test_owner_text_golden_lines(raw: str, expected: str) -> None:
+    assert owner_text(raw) == expected
+
+
+def test_owner_text_leading_rlm_when_first_strong_char_is_latin() -> None:
+    """R7: Telegram derives paragraph direction from the first strong character
+    of the line -- a Hebrew line that starts (after a bullet) with a Latin
+    token needs an explicit RLM, or the whole line flips to an LTR base and
+    the bullet/punctuation land on the wrong side.
+    """
+    out = owner_text("• Vercel: כניסה חדשה.")
+    assert out.startswith("• " + _RLM + _FSI + "Vercel" + _PDI)
+
+
+def test_owner_text_no_rlm_when_line_already_starts_hebrew() -> None:
+    out = owner_text("כניסה חדשה ל-Vercel.")
+    assert _RLM not in out
+
+
+def test_owner_text_pure_english_gets_dash_rule_only() -> None:
+    """No Hebrew in the line -> no base direction to protect, so isolating
+    would add controls for no reason; only the dash rule applies.
+    """
+    out = owner_text("Status -- active. See gpt-5.6 for details.")
+    assert _FSI not in out and _PDI not in out
+    assert out == "Status, active. See gpt-5.6 for details."
+
+
+# --------------------------------------------------------- structural properties
+# Adversarial fixtures: Latin-only text, a Hebrew sentence with an ASCII-quoted
+# query, an email address, a long id, an em-dash inside a provider-shaped
+# snippet, a time range, and a ~6000-char body (forces multi-chunk downstream).
+
+_ADVERSARIAL_CORPUS = [
+    "נבדקו 25 הודעות ב־17 שרשורים. התיבה חלקית — ייתכן שיש הודעות נוספות.",
+    "• Vercel — כניסה חדשה לחשבון בשעה 10:54.",
+    "• GitHub/Vercel — עדכון על PR #31 בעמוד /blog/soken-koli.",
+    "Subject only, no Hebrew at all -- still needs the dash fixed.",
+    'שאילתה עם "מרכאות" ומילים באנגלית inside quotes -- like this.',
+    "המייל a.b+tag@example.co.il התקבל.",
+    "המזהה lead_ab12cd34ef56gh78 עודכן.",
+    "מזהה ארוך: " + "x" * 41 + " נשמר.",
+    "פער — בין שתי עובדות בלי בילדר.",
+    "טווח שעות 09:00-17:00 ו-18:00-20:00 פנויים.",
+    "עדכון: " + ("תוכן ארוך. " * 600),
+]
+
+
+@pytest.mark.parametrize("raw", _ADVERSARIAL_CORPUS)
+def test_owner_text_is_idempotent(raw: str) -> None:
+    """Double application at two egress points (e.g. a builder that already
+    called owner_text, then the outbound_reply adoption site) must be harmless.
+    """
+    once = owner_text(raw)
+    assert owner_text(once) == once
+    once_html = owner_text(raw, html=True)
+    assert owner_text(once_html, html=True) == once_html
+
+
+@pytest.mark.parametrize("raw", _ADVERSARIAL_CORPUS)
+def test_owner_text_no_banned_dash_form_survives(raw: str) -> None:
+    out = owner_text(raw)
+    assert "–" not in out
+    assert "—" not in out
+    assert " -- " not in out
+
+
+@pytest.mark.parametrize("raw", _ADVERSARIAL_CORPUS)
+def test_owner_text_preserves_every_digit_run(raw: str) -> None:
+    """R5, data is immutable: owner_text may insert bidi controls and change
+    dash punctuation, never a digit. Comparing digit runs after stripping bidi
+    controls enforces that mechanically instead of by eyeballing.
+    """
+    out = owner_text(raw)
+    assert re.findall(r"\d+", _strip_bidi(out)) == re.findall(r"\d+", raw)
+
+
+@pytest.mark.parametrize("raw", _ADVERSARIAL_CORPUS)
+def test_owner_text_no_isolated_run_contains_hebrew(raw: str) -> None:
+    """Catches over-wrapping: an isolate must never swallow a Hebrew character."""
+    out = owner_text(raw)
+    for match in re.finditer(_FSI + r"([^" + _PDI + r"]*)" + _PDI, out):
+        assert not re.search(r"[֐-׿]", match.group(1)), match.group(1)
+
+
+@pytest.mark.parametrize("raw", _ADVERSARIAL_CORPUS)
+def test_owner_text_isolate_depth_never_negative_and_ends_at_zero(raw: str) -> None:
+    out = owner_text(raw)
+    depth = 0
+    for char in out:
+        if char == _FSI:
+            depth += 1
+        elif char == _PDI:
+            depth -= 1
+        assert depth >= 0, out
+    assert depth == 0, out
+
+
+def test_owner_text_html_mode_never_isolates_inside_a_tag_or_entity() -> None:
+    html = (
+        "<b>Vercel</b> עדכן את <code>lead_ab12cd34</code> ולינק "
+        '<a href="https://example.com/soken-koli?x=1">כאן</a> &amp; זהו.'
+    )
+    out = owner_text(html, html=True)
+    for tag in re.finditer(r"<[^<>]*>", out):
+        assert _FSI not in tag.group() and _PDI not in tag.group()
+    for entity in re.finditer(r"&[a-zA-Z0-9#]+;", out):
+        assert _FSI not in entity.group() and _PDI not in entity.group()
+    for href in re.findall(r'href="([^"]*)"', out):
+        assert _FSI not in href and _PDI not in href
+    # <code> content is opaque to owner_text -- a builder must isolate it
+    # itself (see proposal_cards._kv_lines: code(isolate(v)), never the
+    # reverse), so an id already inside a code span is left exactly as-is.
+    assert "<code>lead_ab12cd34</code>" in out
+
+
+def test_owner_text_html_mode_is_opaque_to_pre_and_code_content() -> None:
+    html = "<pre>git diff -- a.py b.py</pre> ותוכן <code>a -- b</code> חדש."
+    out = owner_text(html, html=True)
+    assert "<pre>git diff -- a.py b.py</pre>" in out
+    assert "<code>a -- b</code>" in out
+
+
+def test_owner_text_does_not_re_isolate_a_field_a_builder_already_wrapped() -> None:
+    """A builder that already called isolate() on a known field must not be
+    double-wrapped by the automatic egress pass -- this is what makes it safe
+    to add owner_text() unconditionally at every adoption site.
+    """
+    pre_isolated = f"מזהה: {code(isolate('op_308abc9002f37d0'))} עודכן."
+    out = owner_text(pre_isolated, html=True)
+    assert out.count(_FSI) == 1
+    assert out.count(_PDI) == 1
+
+
+# ------------------------------------------------- no em-dash reaches egress
+
+
+def test_outbound_reply_strips_dashes_from_model_prose() -> None:
+    """app.api.inbound_common.outbound_reply is the single highest-value
+    adoption site: the last hop for model-composed Hebrew before Telegram.
+    """
+    from app.api.inbound_common import outbound_reply
+    from app.domain.events import Channel as _Channel
+
+    item = {"id": "evt.1", "from": "111", "chat_id": "111"}
+    message = outbound_reply(
+        item,
+        text="בדיקה — עם מקף וגם PR #7 בתוך המשפט.",
+        channel=_Channel.TELEGRAM,
+    )
+    assert "–" not in message.text
+    assert "—" not in message.text
+    assert _FSI in message.text  # "PR #7" isolated
+
+
+# --------------------------------------------------------------- dotted_date
+
+
+def test_dotted_date_formats_and_isolates() -> None:
+    assert dotted_date("2026-09-16") == _FSI + "16.09.2026" + _PDI
+
+
+def test_dotted_date_passes_through_unrecognised_input() -> None:
+    assert dotted_date("not-a-date") == "not-a-date"
+
+
+# ------------------------------------------- splitter isolate invariant (C9)
+
+
+@pytest.mark.parametrize("limit", [64, 100, 512, 3900])
+def test_split_message_isolate_invariant_over_corpus(limit: int) -> None:
+    """The four-part invariant from the C9 design, pinned exactly:
+    (1) isolate depth never negative and ends at 0 in every returned chunk --
+        an isolate pair is never separated across a chunk boundary;
+    (2) no isolate lands inside a tag or entity, and no href value carries one;
+    (3) every `<pre>`/`<b>`/`<code>`/`<blockquote>` opened in a chunk is closed
+        in that same chunk;
+    (4) concatenating the chunks and deleting bidi controls and tags
+        reproduces the original visible content (whitespace at a cut boundary
+        aside -- that trimming is `split_message`'s own pre-existing, bidi-
+        unrelated behaviour) -- proving the isolate/tag handling added only
+        controls and never changed data.
+    """
+    bodies = [render_owner_markdown(owner_text(raw)) for raw in _ADVERSARIAL_CORPUS]
+    bodies.append(_FSI + ("A" * 4000) + _PDI)  # one isolated run alone > every limit
+    bodies.append(bold("כותרת") + "\n" + owner_text("תוכן ארוך. " * 500, html=True))
+    bodies.append(
+        '<a href="https://example.com/soken-koli?x=1">'
+        + owner_text("קישור")
+        + "</a> חדש."
+    )
+    for body in bodies:
+        chunks = split_message(body, limit=limit)
+
+        def _visible_no_whitespace(html: str) -> str:
+            no_tags = re.sub(r"<[^<>]*>", "", html)
+            return re.sub(r"\s+", "", _strip_bidi(no_tags))
+
+        assert _visible_no_whitespace("".join(chunks)) == _visible_no_whitespace(body)  # (4)
+
+        for chunk in chunks:
+            depth = 0
+            for char in chunk:
+                if char == _FSI:
+                    depth += 1
+                elif char == _PDI:
+                    depth -= 1
+                assert depth >= 0, chunk  # (1)
+            assert depth == 0, chunk  # (1)
+
+            stripped = re.sub(r"<[^<>]*>|&[a-zA-Z0-9#]+;", "", chunk)
+            assert stripped.count(_FSI) == chunk.count(_FSI)  # (2)
+            assert stripped.count(_PDI) == chunk.count(_PDI)  # (2)
+            for href in re.findall(r'href="([^"]*)"', chunk):
+                assert _FSI not in href and _PDI not in href  # (2)
+
+            for tag_name in ("pre", "b", "code", "blockquote"):
+                opens = len(re.findall(rf"<{tag_name}(?: expandable)?>", chunk))
+                assert opens == chunk.count(f"</{tag_name}>"), (tag_name, chunk)  # (3)
