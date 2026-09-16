@@ -92,7 +92,7 @@ def test_social_capabilities_unconfigured_linkedin_does_not_promise_the_write_pa
         assert "קריאת פרופיל LinkedIn: לא מוגדר" in result.text
         assert "פוסט או תגובה ב-LinkedIn: לא זמין" in result.text
         assert "אין חיבור LinkedIn פעיל להציע מולו" in result.text
-        assert "עוד לא אומת בשידור חי" not in result.text
+        assert "עוד לא אומת בסביבה החיה" not in result.text
     finally:
         session.close()
 
@@ -107,7 +107,7 @@ def test_social_capabilities_configured_linkedin_states_the_write_path() -> None
         ctx = _ctx(session, linkedin=FakeLinkedInPort(LinkedInProfile(name="Assaf Web")))
         result = execute_tool("social_capabilities", {}, ctx)
         assert "קריאת פרופיל LinkedIn: זמין" in result.text
-        assert "עוד לא אומת בשידור חי" in result.text
+        assert "עוד לא אומת בסביבה החיה" in result.text
         assert "פוסט או תגובה ב-LinkedIn: לא זמין" not in result.text
     finally:
         session.close()
@@ -320,7 +320,7 @@ def test_capability_text_keeps_every_claim_when_nothing_is_configured() -> None:
         assert "אין חיבור LinkedIn פעיל להציע מולו" in result.text
         # True regardless of configuration.
         assert "פרסום ב-Instagram: לא זמין, חסום במדיניות" in result.text
-        assert "הודעות ישירות ומודעות ב-Instagram: לא זמינים בשום מסלול" in result.text
+        assert "הודעות ישירות ומודעות ב-Instagram: לא זמינות בשום מסלול" in result.text
         assert "אין תזמון באף אחת מהפלטפורמות" in result.text
         assert "לא פוסט שפורסם" in result.text
     finally:
@@ -333,10 +333,14 @@ def test_capability_text_keeps_every_claim_when_linkedin_is_configured() -> None
         ctx = _ctx(session, linkedin=FakeLinkedInPort(LinkedInProfile(name="Assaf Web")))
         result = execute_tool("social_capabilities", {}, ctx)
         assert "קריאת פרופיל LinkedIn: זמין" in result.text
-        assert "עוד לא אומת בשידור חי" in result.text
+        assert "עוד לא אומת בסביבה החיה" in result.text
         assert "פוסט או תגובה ב-LinkedIn: לא זמין" not in result.text
         # The policy denial does not soften because something else got connected.
         assert "פרסום ב-Instagram: לא זמין, חסום במדיניות" in result.text
+        # The configured write line is a different string from the unconfigured one,
+        # so the Latin sweep above never renders it. Sweep this branch too.
+        latin_runs = {run.strip() for run in re.findall(r"[A-Za-z][A-Za-z ]*", result.text)}
+        assert latin_runs == {"LinkedIn", "Instagram"}, latin_runs
     finally:
         session.close()
 
@@ -374,8 +378,17 @@ def test_connection_audit_not_connected_marker_is_independent_of_this_module() -
     rather than a silent break. Pin both halves so a later change cannot quietly
     couple them: the marker still works from its real producer, and this module is
     still not a probe.
+
+    This test is a forward regression pin, NOT the evidence that the translation was
+    safe. It references nothing in the diff, so it passes before and after by
+    construction. The actual evidence is the reachability trace: `_status` has one
+    caller (`format_owner_connection_audit`), which has one caller
+    (`_owner_system_audit`), whose probe list does not include this tool.
     """
     assert "not connected" in HOUSE_NOT_CONNECTED.casefold()
     probe = OwnerAuditResult(label="LinkedIn profile", ok=True, text=HOUSE_NOT_CONNECTED)
     assert _status(probe) == "לא מחובר או לא מוגדר"
-    assert "_social_capabilities" not in inspect.getsource(_owner_system_audit)
+    # Matched WITHOUT the leading underscore on purpose: a probe written as
+    # `execute_tool("social_capabilities", ...)` or `get_tool("social_capabilities")`
+    # is the same coupling and would evade an `_social_capabilities` match.
+    assert "social_capabilities" not in inspect.getsource(_owner_system_audit)
