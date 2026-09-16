@@ -67,17 +67,29 @@ def format_hot_leads_ack(store, *, principal: Principal) -> str:
         args={"limit": 12},
         handlers=leads_handlers(store),
     )
-    v1_ids = [str(item) for item in (result.get("hot_ids") or []) if item]
-    v2_leads = store.list_undelivered_captured_website_leads(limit=12)
+    # De-duped on the underlying id, never on the rendered label (C9 P2 fix):
+    # `dict.fromkeys` used to run over "name (id)" strings, which were always
+    # unique because the id was part of the string. Once the id was dropped
+    # from the label, deduping on the label instead started silently
+    # collapsing two different hot leads that happen to render the same name
+    # -- a shared first name is common in Hebrew -- shrinking both the
+    # listing and the "+N" overflow count and understating how many leads are
+    # actually hot.
+    v1_ids = list(dict.fromkeys(str(item) for item in (result.get("hot_ids") or []) if item))
+    v2_names: dict[str, str] = {}
+    for contact_id, name in store.list_undelivered_captured_website_leads(limit=12):
+        v2_names.setdefault(contact_id, name)
+    v2_ids = list(v2_names)
     v1_labels = _v1_hot_labels(store, v1_ids)
     # Same "name, never a raw id" rule as v1 (R3): a website contact with no
     # captured name gets a position-based placeholder, distinct from v1's
-    # ("פנייה" vs "ליד") so the two sources never collide in the dedupe below.
+    # ("פנייה" vs "ליד") for readability -- dedup already ran on ids above, so
+    # a placeholder collision across sources can no longer drop a real lead.
     v2_labels = [
-        name or f"פנייה {position}"
-        for position, (_contact_id, name) in enumerate(v2_leads, start=1)
+        v2_names[contact_id] or f"פנייה {position}"
+        for position, contact_id in enumerate(v2_ids, start=1)
     ]
-    combined = list(dict.fromkeys([*v1_labels, *v2_labels]))
+    combined = v1_labels + v2_labels
     if not combined:
         return _NO_HOT_LEADS_ACK
     listed = ", ".join(combined[:12])

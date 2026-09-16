@@ -224,7 +224,9 @@ def isolate(value: object) -> str:
 _HEBREW_RE = re.compile(r"[֐-׿]")
 
 _LINE_LEADING_DASH_RE = re.compile(r"^[ \t]*[–—][ \t]*", re.MULTILINE)
-_MID_DASH_RE = re.compile(r"(?<=\S) (?:--|–|—) (?=\S)")
+# `[ \t]+` on each side, not a single literal space, so `א  —  ב` and `א\t—\tב`
+# (multi-space/tab padding, not just the single-space case) still normalise.
+_MID_DASH_RE = re.compile(r"(?<=\S)[ \t]+(?:--|–|—)[ \t]+(?=\S)")
 
 # A "run" is one or more space-joined LTR "tokens": a generic alnum-anchored word
 # (letters/digits plus the punctuation that is normally DATA inside one -- path,
@@ -264,6 +266,7 @@ _OPAQUE_HTML_RE = re.compile(
 
 _BIDI_STRONG = {"L", "R", "AL"}
 _LEADING_GLYPH_RE = re.compile(r"^[ \t]*(?:[•*-][ \t]*)?")
+_LINE_TAG_RE = re.compile(r"<[^<>]*>")
 
 
 def _normalise_dashes(text: str) -> str:
@@ -271,13 +274,16 @@ def _normalise_dashes(text: str) -> str:
 
     Called per-gap (see `_transform_gaps`), never on a whole opaque-containing
     string, so a literal ` -- ` inside a fenced/code/`<pre>`/`<code>` span --
-    real data, e.g. `git diff -- a.py b.py` -- is never touched. The one
-    accepted imprecision: a gap that begins immediately after an opaque span
-    (no separating space) is treated as if it were a fresh line for the
-    line-leading rule, since this function only sees the gap's own text, not
-    its absolute position in the original string. That can turn a dash right
-    after e.g. `` `Vercel`--`` into a deletion instead of a comma -- still not
-    a punctuation dash either way, just the less common of the two fixes.
+    real data, e.g. `git diff -- a.py b.py` -- is never touched.
+
+    A gap does not know its own absolute position in the original string, so
+    without help `^` (MULTILINE) treats the gap's own position 0 as a line
+    start even when the gap actually begins mid-line, right after an opaque
+    span. `_transform_gaps` corrects for that by prepending a `\\x00`
+    sentinel before calling this function whenever the gap is not truly at a
+    line start, and stripping it afterwards -- see there for why that also
+    keeps `_MID_DASH_RE`'s `(?<=\\S)` lookbehind correct instead of merely
+    inert.
     """
     text = _LINE_LEADING_DASH_RE.sub("", text)
     text = _MID_DASH_RE.sub(", ", text)
@@ -292,6 +298,12 @@ def _wrap_ltr_run(match: re.Match[str]) -> str:
     return f"{_FSI}{trimmed}{_PDI}{run[len(trimmed):]}"
 
 
+# Never a legitimate character in owner-facing text; used only as a scratch
+# marker inside `_transform_gaps`, immediately stripped before the gap is
+# ever returned.
+_GAP_SENTINEL = "\x00"
+
+
 def _transform_gaps(text: str, opaque_re: re.Pattern[str], *, isolate_runs: bool) -> str:
     """Apply dash normalisation (and, when asked, LTR-run isolation) to every
     gap between `opaque_re`'s matches; the matches themselves pass through
@@ -299,21 +311,39 @@ def _transform_gaps(text: str, opaque_re: re.Pattern[str], *, isolate_runs: bool
     content, any tag or entity, and any isolate a builder already inserted,
     opaque to BOTH transforms -- not just to isolation -- so data inside one
     is never dash-normalised either.
+
+    A gap that does not start at a real line boundary (position 0 of the
+    whole text, or right after a `\\n`) -- i.e. one that opens right after an
+    opaque span, such as the " -- " in `` `git status` -- ``` or in
+    `<b>ליד</b> -- דנה` -- gets a leading `\\x00` sentinel before
+    `_normalise_dashes` runs, stripped again after. Without it, `^`
+    (MULTILINE) in `_LINE_LEADING_DASH_RE` matches the gap's own position 0
+    as if it were a fresh line, so a mid-sentence dash right after a code
+    span or tag was DELETED along with its surrounding spaces instead of
+    becoming a comma -- gluing the two sides together
+    (`` `git status`הכול נקי.`` instead of `` `git status`, הכול נקי.``).
+    The sentinel is not whitespace, so it also satisfies `_MID_DASH_RE`'s
+    `(?<=\\S)` lookbehind correctly rather than merely blocking the
+    line-leading rule.
     """
 
-    def _transform(gap: str) -> str:
-        gap = _normalise_dashes(gap)
+    def _transform(gap: str, *, at_line_start: bool) -> str:
+        padded = gap if at_line_start else _GAP_SENTINEL + gap
+        padded = _normalise_dashes(padded)
         if isolate_runs:
-            gap = _LTR_RUN_RE.sub(_wrap_ltr_run, gap)
-        return gap
+            padded = _LTR_RUN_RE.sub(_wrap_ltr_run, padded)
+        return padded if at_line_start else padded.lstrip(_GAP_SENTINEL)
+
+    def _at_line_start(pos: int) -> bool:
+        return pos == 0 or text[pos - 1] == "\n"
 
     pieces: list[str] = []
     pos = 0
     for match in opaque_re.finditer(text):
-        pieces.append(_transform(text[pos : match.start()]))
+        pieces.append(_transform(text[pos : match.start()], at_line_start=_at_line_start(pos)))
         pieces.append(match.group())
         pos = match.end()
-    pieces.append(_transform(text[pos:]))
+    pieces.append(_transform(text[pos:], at_line_start=_at_line_start(pos)))
     return "".join(pieces)
 
 
@@ -325,9 +355,20 @@ def _first_strong_bidi_class(line: str) -> str:
     return ""
 
 
-def _apply_line_direction(line: str) -> str:
-    """R7: prefix RLM when a Hebrew line's first strong character is Latin."""
-    if not _HEBREW_RE.search(line) or _first_strong_bidi_class(line) != "L":
+def _apply_line_direction(line: str, *, html: bool) -> str:
+    """R7: prefix RLM when a Hebrew line's first strong character is Latin.
+
+    A tag name (`<b>`, `<code>`, ...) is itself Latin letters, so in
+    `html=True` mode the first-strong-character scan runs over the line with
+    every tag stripped out first -- otherwise `<b>ליד</b>, דנה` (a Hebrew
+    line that merely happens to open with a bold tag) would read "b" as the
+    first strong character and get a spurious RLM. Tags are stripped only
+    for that scan; the RLM, when one is needed, is still inserted into the
+    real line, ahead of the tag, exactly where `_LEADING_GLYPH_RE` finds the
+    logical start of content.
+    """
+    scan_line = _LINE_TAG_RE.sub("", line) if html else line
+    if not _HEBREW_RE.search(scan_line) or _first_strong_bidi_class(scan_line) != "L":
         return line
     leading = _LEADING_GLYPH_RE.match(line)
     cut = leading.end() if leading else 0
@@ -349,7 +390,7 @@ def owner_text(text: str, *, html: bool = False) -> str:
         # Hebrew base direction to protect, so nothing needs isolating.
         return _transform_gaps(text, opaque_re, isolate_runs=False)
     text = _transform_gaps(text, opaque_re, isolate_runs=True)
-    return "\n".join(_apply_line_direction(line) for line in text.split("\n"))
+    return "\n".join(_apply_line_direction(line, html=html) for line in text.split("\n"))
 
 
 _DATE_DISPLAY_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
@@ -603,6 +644,26 @@ def _resolve_unsplittable_span(remaining: str, cut: int, limit: int) -> tuple[in
             cut = content_start + 1
         if cut >= content_end:
             return match.end(), False, "", ""
+        # The `code(isolate(v))` shape (proposal_cards.py's mono fields) nests an
+        # FSI...PDI run inside this span's content. A cut computed above from
+        # `limit` alone knows nothing about that nested run, so it can land
+        # between the FSI and PDI: this span's own reopen already keeps `<code>`
+        # balanced across the two chunks, but the isolate inside it would ship
+        # unterminated in one chunk and a stray PDI in the next. Walk the cut to
+        # the nearest content boundary of that isolate instead — back to just
+        # before its FSI when there is room, else forward past its PDI.
+        if _isolate_depth(remaining[content_start:cut]) > 0:
+            last_open = remaining.rfind(_FSI, content_start, cut)
+            if last_open > content_start:
+                cut = last_open
+            else:
+                next_close = remaining.find(_PDI, cut, content_end)
+                if next_close != -1:
+                    cut = next_close + 1
+            if cut <= content_start:
+                return match.start(), False, "", ""
+            if cut >= content_end:
+                return match.end(), False, "", ""
         return cut, True, open_tag, close_tag
     return cut, False, "", ""
 

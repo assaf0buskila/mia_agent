@@ -49,6 +49,25 @@ def test_notify_owners_sends_to_every_allowlisted_owner(monkeypatch) -> None:
     assert all(call["text"] == "ליד חם" for call in client.calls)
 
 
+def test_notify_owners_normalises_the_brief_through_owner_text(monkeypatch) -> None:
+    """C9 regression guard for the `_deliver_owners` adoption diff
+    (`text=owner_text(brief, html=...)`). Every other brief in this file
+    ("ליד חם") has no dash and no Latin/digit run, so `owner_text` is a no-op
+    on it and none of those tests can tell the adoption diff apart from a
+    revert to a bare `brief`. This one has both.
+    """
+    client = _RecordingClient()
+    _patch_client(monkeypatch, client)
+    settings = Settings(telegram_bot_token="tok", telegram_owner_user_ids="111")
+
+    delivered = notify_owners(
+        brief="ליד חם — 3 הודעות ממתינות.", inbound_id="in_1", settings=settings
+    )
+
+    assert delivered == ("111",)
+    assert client.calls[0]["text"] == "ליד חם, ⁨3⁩ הודעות ממתינות."
+
+
 def test_notify_owners_second_failure_does_not_stop_first_and_is_not_success(
     monkeypatch,
 ) -> None:

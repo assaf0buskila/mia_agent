@@ -748,10 +748,26 @@ def test_owner_text_golden_the_real_production_message() -> None:
         # A dash with no surrounding spaces is data (part of one LTR token),
         # left untouched and isolated whole.
         ("המזהה soken-koli תקין.", "המזהה ⁨soken-koli⁩ תקין."),
+        # P1 review fix: a dash right after an opaque span (here, a backtick
+        # code span) must still become a comma, not a line-leading deletion
+        # that glues the two sides together. `^` in `_LINE_LEADING_DASH_RE`
+        # used to treat the gap's own position 0 as a fresh line.
+        (
+            "הרצתי `git status` — הכול נקי.",
+            "הרצתי `git status`, הכול נקי.",
+        ),
     ],
 )
 def test_owner_text_golden_lines(raw: str, expected: str) -> None:
     assert owner_text(raw) == expected
+
+
+def test_owner_text_golden_html_dash_right_after_a_tag_becomes_a_comma() -> None:
+    """P1 review fix, html=True shape: the gap right after `</b>` is not a
+    real line start either -- `<b>ליד</b> — דנה` used to lose both spaces
+    and become `<b>ליד</b>דנה`.
+    """
+    assert owner_text("<b>ליד</b> — דנה", html=True) == "<b>ליד</b>, דנה"
 
 
 def test_owner_text_leading_rlm_when_first_strong_char_is_latin() -> None:
@@ -941,6 +957,13 @@ def test_split_message_isolate_invariant_over_corpus(limit: int) -> None:
         + owner_text("קישור")
         + "</a> חדש."
     )
+    # P3 review fix: `code(isolate(v))` (proposal_cards._kv_lines's mono shape)
+    # nests a full FSI...PDI run inside a `<code>` span; when that span alone
+    # is bigger than `limit`, the reopen path used to cut inside the nested
+    # isolate, shipping an unterminated FSI in one chunk and a stray PDI in
+    # the next.
+    bodies.append("לפני. " + code(isolate("op_" + "a" * 200)) + " אחרי.")
+    bodies.append("X " + bold(isolate("B" * 300)) + " Y")
     for body in bodies:
         chunks = split_message(body, limit=limit)
 

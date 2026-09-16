@@ -136,6 +136,42 @@ def test_hot_lead_with_no_name_falls_back_to_a_position_placeholder_not_the_id(
         assert "פנייה 1" in hot
 
 
+def test_hot_leads_sharing_a_rendered_name_are_never_merged(
+    sessions: sessionmaker[Session],
+) -> None:
+    """C9 (P2 review fix): dedup in format_hot_leads_ack must run on the
+    underlying contact id, never on the rendered label. Two different website
+    captures that happen to share a first name -- common in Hebrew -- used to
+    collapse into one line via `dict.fromkeys` over the label, silently
+    telling Assaf he has fewer hot leads than he actually does.
+    """
+    with sessions() as session:
+        store = LeadStore(session)
+        service = CrmService(session)
+        first = service.capture_site_lead(
+            {"name": "דנה", "phone": "0501110001", "business": "עסק א"},
+            conversation_id="hot-dup-name-1",
+            source_ref="site:hot-dup-name-1:m1",
+            summary="x",
+            recipient_ids=("999",),
+        )
+        second = service.capture_site_lead(
+            {"name": "דנה", "phone": "0501110002", "business": "עסק ב"},
+            conversation_id="hot-dup-name-2",
+            source_ref="site:hot-dup-name-2:m1",
+            summary="y",
+            recipient_ids=("999",),
+        )
+        assert first.contact is not None and second.contact is not None
+        assert first.contact.id != second.contact.id  # two genuinely different leads
+        session.commit()
+
+        hot = format_hot_leads_ack(store, principal=Principal.owner(source="test"))
+        # Both leads must be counted, not collapsed into a single "דנה".
+        assert hot.count("דנה") == 2
+        assert hot == "לידים חמים: דנה, דנה"
+
+
 def test_v1_takeover_state_lead_still_reported_alongside_v2(
     sessions: sessionmaker[Session],
 ) -> None:

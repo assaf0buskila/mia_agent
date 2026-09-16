@@ -44,6 +44,41 @@ def test_receipt_survives_handler_restart_and_never_resends(tmp_path):
         engine.dispose()
 
 
+def test_receipt_bridge_sends_the_owner_text_normalised_body(tmp_path):
+    """C9 regression guard for the crm_runtime.py adoption diff
+    (`text=owner_text(body)`): the shared `_runtime` fixture's payload
+    ("Test lead") is plain English with no Hebrew and no dash, so isolation
+    is a no-op there and no existing test can tell `owner_text(body)` apart
+    from a bare `body` if the call were reverted. Assert the exact literal
+    the transport receives -- a hardcoded expected string, not a second call
+    to `owner_text` -- so a revert of the adoption diff actually fails this.
+    """
+    engine = make_engine(f"sqlite:///{tmp_path / 'receipts-owner-text.db'}")
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(engine)
+    settings = Settings(
+        _env_file=None,
+        telegram_bot_token="test-token",
+        telegram_owner_user_ids="123",
+    )
+    payload = {
+        "conversation_id": "site-owner-text",
+        "recipient_id": "123",
+        "text": "ליד חדש מהאתר: 5 הודעות בשיחה.",
+    }
+    sends = []
+    try:
+        handle = telegram_receipt_handler(
+            factory, settings, transport=lambda *args: sends.append(args)
+        )
+        assert handle(payload, False) == "confirmed"
+        assert len(sends) == 1
+        _chat_id, text = sends[0]
+        assert text == "ליד חדש מהאתר: ⁨5⁩ הודעות בשיחה."
+    finally:
+        engine.dispose()
+
+
 def test_ambiguous_receipt_blocks_retry_and_reconciliation_cannot_send(tmp_path):
     engine, factory, settings, payload = _runtime(tmp_path)
     attempts = []
