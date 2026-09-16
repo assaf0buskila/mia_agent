@@ -20,9 +20,12 @@ Deploy is a separate go. Max 2 agents at once (session usage limit).
 - [x] C4 — `gmail_brief` daily email data; `owner_uncertain_writes` (#69)
 - [x] C2b — approval cards from the stored envelope; callback `sent` truth (#72)
 - [x] C6a — social capability truth + routing collisions (#71)
-- [x] C7b — proven-dead code, v1 hot-lead takeover retired, reviewed follow-ups, docs.
-      Committed locally on `claude/mia-c7b-cleanup-docs`, not yet pushed/PR'd. See
-      `HANDOFF.md` section 0 for the SHAs, evidence and what was deliberately left alone.
+- [x] C7b — proven-dead code, v1 hot-lead auto-freeze (`apply_hot_handoff`) retired while its
+      read path (`list_hot_lead_ids`/`hot_ids`/`set_takeover_state`) stays live, reviewed
+      follow-ups, docs. A round-2 review caught a false premise in the first pass (production
+      has a live takeover-state row) — fixed at `2311e5b`. Committed locally on
+      `claude/mia-c7b-cleanup-docs`, not yet pushed/PR'd. See `HANDOFF.md` section 0 for the
+      SHAs, evidence and what was deliberately left alone.
 - [ ] Prompt 4 — release readiness, go/no-go → **stop for Assaf**
 - [ ] Prompt 5 — approved deploy + phone acceptance (live LinkedIn post, email send, calendar
       event, website lead — each approved individually)

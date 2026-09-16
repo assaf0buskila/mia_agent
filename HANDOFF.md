@@ -29,9 +29,23 @@ below is deployed. Every item is `LOCAL_TESTED` + CI-green + independently revie
 
 ### C7b (this session, committed locally, not pushed / no PR yet)
 
+**Correction (2026-09-16, round 2 review):** the first version of this section claimed
+`human_takeover` (boolean) and `takeover_state` (string) are independent columns with different
+writers, and used that to justify deleting `list_hot_lead_ids`/`set_takeover_state`/the `hot_ids`
+field entirely. **That claim was false and the deletion was wrong.** `store.set_takeover_state`
+writes *both* columns on the same row (`row.takeover_state = state; row.human_takeover =
+human_takeover_flag(state)` — true for `HUMAN_TAKEOVER_REQUIRED`), so they are not independent.
+Production corroborated it directly: Assaf's owner console showed `ליד חם: lead_887149792f1c` —
+a `lead_` + 12-hex id, which only `_new_id("lead")` for `LeadRow` ever mints (v2 mints `crm_` +
+32-hex and never passes a `contact_id` into `capture_site_lead`), so that id could only have come
+from the v1 `hot_ids` path this session had just deleted. The write path (`apply_hot_handoff`)
+being unreachable does not make a column it already wrote historically unreadable — reads outlive
+writers. Fixed below; do not repeat the "unreachable writer implies dead reader" mistake on
+persisted state.
+
 Branch `claude/mia-c7b-cleanup-docs` off `origin/master` = `110ada6`. Two code commits (kept
-separate because the second is materially riskier than everything else in the chunk) plus this
-docs commit:
+separate because the second is materially riskier than everything else in the chunk), a docs
+commit, then a round-2 review fix commit (`2311e5b`) plus this correction to the docs:
 
 - `25a5c59` — proven-dead deletions (`propose_composio_write`; `log_contact` /
   `build_contacts_crm` / `resolved_spreadsheet_id` / `now_israel`;
@@ -43,19 +57,24 @@ docs commit:
   check narrowed from `except Exception` to `except AdapterHttpError`; `run_owner_loop`'s new
   `delivered_any` flag; a pinned "zero pending rows → no keyboard" test; a clarified test name
   in `test_owner_v2_actions.py`).
-- `35e9ee9` — retired the inert v1 hot-lead takeover subsystem (`apply_hot_handoff` and its
-  now-unreachable siblings, `store.set_takeover_state`, `store.list_hot_lead_ids`, the `hot_ids`
-  field on `leads.get_recent`, and the now-orphaned `TAKEOVER_BLOCKS_SEND`/
-  `takeover_blocks_send`/`human_takeover_flag` in `conversation_scope.py`) after proving the v2
-  path already reports hot leads independently, and fixed hot-lead replies to show a captured
-  name instead of a raw `crm_…` id. Full evidence, and why this is safe despite `/health`
-  reporting `human_takeover: 1` in production right now, in "Decisions" below — read that before
-  touching any of `apply_hot_handoff`/takeover-state code again.
+- A second commit retires **only** the auto-freeze *behaviour* Assaf rejected — `apply_hot_handoff`
+  and its now-unreachable siblings `OwnerNotifyAttempt`, `format_hot_brief`, `KIND_HOT_LEAD`
+  (each had zero callers, production or test, the moment `apply_hot_handoff` went; `notify_owners`/
+  `_deliver_owners` are untouched, still test-covered, still exported — a general Telegram
+  fan-out helper, not part of the takeover mechanism). Everything that *reads* takeover state is
+  restored/kept exactly as it was: `store.set_takeover_state`, `store.list_hot_lead_ids`, the
+  `hot_ids` field on `leads.get_recent`, `TAKEOVER_BLOCKS_SEND`/`takeover_blocks_send`/
+  `human_takeover_flag`. `format_hot_leads_ack` unions v1 (`hot_ids`, via a restored
+  `execute_capability("leads.get_recent", principal=principal, …)` authorization call — a P2 from
+  round-2 review had dropped it) and v2 (`list_undelivered_captured_website_leads`) again, and
+  now labels *both* id shapes instead of a bare id: a v2 `crm_…` id shows its captured contact
+  name, a v1 `lead_…` id shows `SalesState.headline` (the closest thing v1 has to a name — no v1
+  table stores one) — either falls back to the bare id when no label exists.
 
-Verify at `35e9ee9`: `MIA_ENV=test uv run pytest` → **2266 passed, 7 skipped** (master was 2267;
-net -1 is exactly accounted for — 9 tests removed with the dead code they covered, 8 added as
-new regression tests). `uv run ruff check app tests` → clean. `node tests/unit/widget_behavior.test.js`
-→ passed (untouched this chunk).
+Verify at `2311e5b`: `MIA_ENV=test uv run pytest` → **2270 passed, 7 skipped** (was 2266 before
+this fix; +4 for the restored/new takeover-union tests — see `2311e5b`'s message for the exact
+list; master itself was 2267). `uv run ruff check app tests` → clean.
+`node tests/unit/widget_behavior.test.js` → passed (untouched this chunk).
 
 Left deliberately alone, with reasons (do not treat these as missed):
 - `execute_approved_composio_write` (app/domain/owner/composio_writes.py) — still on hold per
@@ -67,14 +86,11 @@ Left deliberately alone, with reasons (do not treat these as missed):
   Zero production callers, but 28 test files call `open_channel_lead` directly to seed a lead;
   deleting it would churn the suite for no runtime benefit. Same precedent as
   `app/domain/meetings`.
-- `notify_owners` / `_deliver_owners` (app/domain/handoff/hot.py) — general Telegram fan-out
-  helper, not part of the takeover mechanism. No production caller was found either (its only
-  callers are its own five tests in `test_hot_handoff.py`), but it was not in this chunk's
-  authorized deletion list and is left for a future pass to verify independently.
-- `store.set_human_takeover` / `store.get_takeover_state` (app/db/store.py) — also test-only
-  (one caller each, both in `tests/unit/test_telegram_owner_controls.py` /
-  `test_hot_handoff.py`), also not in the authorized deletion list. `set_human_takeover` is the
-  live guard's *setter*, not part of the removed takeover-request flow, so it stays regardless.
+- `store.set_human_takeover` / `store.get_takeover_state` (app/db/store.py) — test-only (one
+  caller each, in `tests/unit/test_telegram_owner_controls.py` / `test_hot_handoff.py`), not in
+  this chunk's authorized deletion list either way. `set_human_takeover` is a separate,
+  self-contained setter (does not call `set_takeover_state`; the two were never entangled) for
+  the same live guard `is_human_takeover` reads — stays regardless of anything above.
 - `app/workers/crm_delivery.py`'s 7 `CrmService(...)` calls still use the hardcoded
   `Asia/Jerusalem` default. Its constructor has no settings/timezone parameter at all; adding
   one and wiring it through the worker's instantiation site is a larger, separate change than
@@ -93,10 +109,11 @@ earlier interrupted session — ignore it. Master after the last campaign merge:
 
 ### Remaining queue
 
-1. **C7b** — push, PR, fresh opus review on the three-dot diff `origin/master...35e9ee9`, fix,
+1. **C7b** — push, PR, fresh opus review on the three-dot diff to this session's final SHA, fix,
    merge on PASS + green CI. This chunk is unusually high-risk for its size (a production data
-   point in play) — the review should specifically re-verify the `human_takeover` vs
-   `takeover_state` distinction in "Decisions" below rather than take it on faith.
+   point in play, and round 1 of this exact review already caught a false premise here) — the
+   review should specifically re-verify the "Decisions" entry below against the code rather than
+   take it on faith.
 2. **Prompt 4 release readiness** (opus, read-only): full gates, capability evidence matrix,
    exact live tests needing Assaf's approval, rollout + rollback plan. **Stop for go/no-go.**
 3. **Prompt 5 deploy** only after Assaf approves a specific CI-green SHA; then phone acceptance.
@@ -116,22 +133,21 @@ earlier interrupted session — ignore it. Master after the last campaign merge:
 - **`LeadStore.open_channel_lead`/`_save_lead_created`: keep, as test-only scaffolding.** Zero
   production callers; ~28 test files depend on it to seed a lead. Deleting it would churn the
   suite for no runtime benefit — same call as `app/domain/meetings`. No code change.
-- **The v1 hot-lead takeover subsystem: delete it, once the v2 path is proven to report hot
-  leads on its own.** Assaf does not want Mia to auto-freeze a hot conversation and hand it
-  over; he wants hot leads listed in his brief and decides himself. Proof (required before
-  deleting anything) and the full deletion are in the C7b entry above. The one wrinkle worth
-  restating here because it is easy to get wrong on a future pass: production's `/health`
-  reports `ops.human_takeover: 1` today. That counter is `LeadRow.human_takeover` (a boolean,
-  read by `store.count_human_takeover`), **not** `LeadRow.takeover_state ==
-  HUMAN_TAKEOVER_REQUIRED` (a string, read by the now-deleted `list_hot_lead_ids`) — they are
-  different columns with different writers. The boolean's only writer,
-  `store.set_human_takeover`, has zero production callers anywhere (including at production's
-  exact deployed commit `4b80f31`) and belongs to a WhatsApp-only owner command already retired
-  before `4b80f31` shipped (see `tests/unit/test_telegram_owner_controls.py`'s docstring and
-  commits `dc5919b`→`40747c8`). The live production row is a legacy artifact, still fully
-  protected by `store.is_human_takeover` (gates `app/core/outbound.py` sends and
-  `app/domain/followups.py` scheduling) and still correctly counted at `/health` — neither of
-  which this chunk touched.
+- **The v1 hot-lead takeover subsystem: delete the auto-freeze *behaviour* only, keep the
+  *read*.** Assaf does not want Mia to auto-freeze a hot conversation and hand it over; he wants
+  hot leads listed in his brief and decides himself. That is a statement about behaviour
+  (`apply_hot_handoff`, which froze the conversation and could only ever be triggered by that
+  now-gone auto-freeze code path), not about the report. `store.list_hot_lead_ids`/the `hot_ids`
+  field/`store.set_takeover_state` all stay: **production has a live row right now**
+  (`takeover_state == HUMAN_TAKEOVER_REQUIRED`, surfaced to Assaf as `ליד חם: lead_887149792f1c`
+  in the owner console), and deleting the read path would have made it invisible while the
+  write-gate columns kept silently protecting it. See the corrected evidence at the top of the
+  C7b entry above — an earlier version of this note wrongly treated `human_takeover` and
+  `takeover_state` as independent columns with different writers; `set_takeover_state` sets both
+  on the same row, so they are not independent, and that error is exactly what nearly caused the
+  wrong deletion. `store.is_human_takeover` (gates `app/core/outbound.py` sends and
+  `app/domain/followups.py` scheduling) and `store.count_human_takeover` (`/health`) were never
+  touched either way.
 
 ### Follow-ups already identified (not yet done)
 
