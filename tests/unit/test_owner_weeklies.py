@@ -17,6 +17,7 @@ from app.domain.owner.weeklies import (
     compute_weekly_brief,
     format_weekly_brief,
 )
+from app.integrations.telegram_format import dotted_date
 from sqlalchemy import delete
 
 FROZEN_NOW = datetime(2026, 8, 21, 9, 0, tzinfo=UTC)
@@ -41,7 +42,9 @@ def test_format_weekly_brief_header_and_no_execute_line() -> None:
         )
         assert snapshot is not None
         text = format_weekly_brief(snapshot)
-        assert text.startswith("סיכום שבועי 17.08.2026")
+        # C9: the date is now isolated at the source (dotted_date) so it never
+        # reorders inside the Hebrew header -- the visible digits are unchanged.
+        assert text.startswith(f"סיכום שבועי {dotted_date('2026-08-17')}")
         assert "פגישות נקבעו:" in text
         assert "בקשות ביטול:" in text
         assert "מעקבים פתוחים:" in text
