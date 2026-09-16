@@ -1142,11 +1142,15 @@ async def test_middle_chunk_failure_never_delivers_the_approve_button(monkeypatc
 @pytest.mark.asyncio
 async def test_card_delivered_when_prose_fails_still_marks_webhook_sent(monkeypatch) -> None:
     """C2b review follow-up: when message index 0 (the prose/digest) fails but a
-    later card fully sends, the webhook must be marked `sent` (not `processed`)
-    and the MESSAGE_OUT canonical event must still be recorded -- the card is
-    complete, so nothing is approved unseen, but the audit trail must reflect
-    that Assaf did receive something this turn. Before this fix, both were
-    gated on `sent`, which only ever tracked index 0.
+    later card fully sends, the webhook must be marked `sent` (not `processed`) --
+    a retry of the same webhook must not re-send a card whose keyboard already
+    reached Telegram. The card is complete, so nothing is approved unseen. But
+    the MESSAGE_OUT canonical event -- whose `text` is the prose Mia never
+    actually managed to say -- must NOT be recorded: `render_transcript` replays
+    canonical events as what Mia said on the next owner turn, so recording a
+    reply that never reached Assaf would give her a false memory of her own
+    output (round-2 review P2 on the first version of this fix, which gated both
+    on the same flag).
     """
     init_db()
     db = get_session_factory()()
@@ -1186,10 +1190,12 @@ async def test_card_delivered_when_prose_fails_still_marks_webhook_sent(monkeypa
         webhook = store.get_webhook(provider="telegram", provider_event_id=item_id)
         assert webhook is not None
         assert webhook.status == "sent"
+        # No MESSAGE_OUT for the undelivered prose: Mia must not remember saying
+        # something Assaf never received.
         outgoing = store.get_canonical_event(
             provider="telegram", provider_event_id=f"{item_id}:out"
         )
-        assert outgoing is not None
+        assert outgoing is None
     finally:
         db.close()
 

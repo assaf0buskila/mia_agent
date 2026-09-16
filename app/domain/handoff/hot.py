@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from sqlalchemy.exc import SQLAlchemyError
+
 from app.capabilities.leads import leads_handlers
 from app.capabilities.policy import execute_capability
 from app.capabilities.types import Principal
@@ -15,14 +17,19 @@ def _v1_hot_labels(store, ids: list[str]) -> list[str]:
 
     v1 leads have no name field anywhere (`LeadRow`/`CustomerRow` are pure
     identity rows) -- `SalesState.headline` is the closest thing to a label,
-    and it is not always present.
+    and it is not always present. One `get_sales` read per id (up to 12, capped
+    by the caller) -- an N+1 not batched here; a future pass could add a
+    bulk-lookup store method if this list ever needs to grow past that cap.
+    Only `KeyError` (no `SalesStateRow` for that lead) and `SQLAlchemyError`
+    (a transient store read failure) degrade to the bare id -- anything else is
+    a real bug and must not be swallowed here.
     """
     labels: list[str] = []
     for lead_id in ids:
         headline = ""
         try:
             headline = (store.get_sales(lead_id).headline or "").strip()
-        except KeyError:
+        except (KeyError, SQLAlchemyError):
             headline = ""
         labels.append(f"{headline} ({lead_id})" if headline else lead_id)
     return labels

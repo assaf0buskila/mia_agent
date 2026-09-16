@@ -28,7 +28,6 @@ from app.integrations.composio_catalog import (
     validate_arguments,
 )
 
-_NO_COLD_DM_WORDS = frozenset({"MESSAGE", "DM", "INMAIL"})
 MAX_COMPOSIO_APPROVAL_PARAMETERS_BYTES = 16 * 1024
 
 

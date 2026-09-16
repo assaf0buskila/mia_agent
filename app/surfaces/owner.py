@@ -161,10 +161,13 @@ async def run_owner_loop(
     # handed to Telegram -- unlike `sent`, which stays scoped to message index 0
     # (the prose/digest) for its own established meaning (`delivery_state["sent"]`,
     # the returned `OwnerTurnResult.sent`). Index 0 failing while a later card
-    # chunk succeeds must still mark the webhook `sent` and record the outbound
-    # canonical event: safety is intact either way (a card is only ever sent whole,
-    # so nothing is approved unseen), but leaving both gated on `sent` alone made
-    # the audit trail claim nothing went out when a card in fact did.
+    # chunk succeeds must still mark the webhook `sent`, not `processed` -- a
+    # retried delivery of the same webhook must not re-send a card whose keyboard
+    # already reached Telegram. It must NOT gate the MESSAGE_OUT canonical event:
+    # that event's `text` is `reply`, the prose/digest content, and a canonical
+    # record of Mia having *said* something she was never actually able to say
+    # would poison `render_transcript`'s replay of it on the next owner turn.
+    # MESSAGE_OUT stays gated on `sent` alone, exactly as before.
     delivered_any = False
     # A label groups every chunk of one card (or is "" for the digest/prose, which
     # is never grouped). Once one chunk of a card has failed to send, every later
@@ -216,7 +219,7 @@ async def run_owner_loop(
             "owner webhook status update failed after delivery error=%s",
             type(exc).__name__,
         )
-    if delivered_any:
+    if sent:
         outgoing = build_message_out_event(
             provider=provider,
             channel=channel,
