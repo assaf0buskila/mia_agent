@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from datetime import datetime
 from typing import TYPE_CHECKING
 
@@ -11,11 +10,10 @@ from pydantic import BaseModel, Field
 from app.core.errors import PolicyDenied
 from app.core.risk import RiskAction, RiskLevel, assert_allowed
 from app.domain.kpis import compute_weekly_kpi, week_bounds_utc_iso
+from app.integrations.telegram_format import dotted_date
 
 if TYPE_CHECKING:
     from app.db.store import LeadStore
-
-_DATE_DISPLAY = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
 
 
 class WeeklyBriefSnapshot(BaseModel):
@@ -27,14 +25,6 @@ class WeeklyBriefSnapshot(BaseModel):
     follow_ups_pending: int = Field(ge=0)
     meetings_booked: int = Field(ge=0)
     cancellation_requests: int = Field(ge=0)
-
-
-def _format_week_start(week_start: str) -> str:
-    match = _DATE_DISPLAY.fullmatch(week_start)
-    if match is None:
-        return week_start
-    year, month, day = match.groups()
-    return f"{day}.{month}.{year}"
 
 
 def compute_weekly_brief(
@@ -75,7 +65,7 @@ def compute_weekly_brief(
 
 def format_weekly_brief(snapshot: WeeklyBriefSnapshot) -> str:
     lines = [
-        f"סיכום שבועי {_format_week_start(snapshot.week_start)}",
+        f"סיכום שבועי {dotted_date(snapshot.week_start)}",
         f"לידים: {snapshot.leads}",
         f"פגישות הוצעו: {snapshot.meetings_offered}",
         f"פגישות נקבעו: {snapshot.meetings_booked}",

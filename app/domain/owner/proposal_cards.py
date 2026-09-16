@@ -38,6 +38,7 @@ from app.integrations.telegram_format import (
     code,
     esc,
     hebrew_datetime,
+    isolate,
     join_sections,
     section,
 )
@@ -93,13 +94,21 @@ def _card(title: str, *sections: str, note: str = "") -> str:
 
 
 def _kv_lines(pairs: Iterable[tuple[str, Any, bool]]) -> str:
-    """`label: value` lines, one per non-empty pair. `mono` picks code() over esc()."""
+    """`label: value` lines, one per non-empty pair. `mono` picks code() over esc().
+
+    The isolate goes INSIDE the `code()` call, never around it: `code(isolate(v))`,
+    never `isolate(code(v))`. `owner_text(html=True)` treats a `<code>...</code>`
+    span as opaque (so it is never re-isolated or dash-normalised a second time),
+    which means it will never isolate content *inside* one either -- so a
+    monospaced id/email that needs LTR protection has to get it here, at the
+    point the tag is built, or it never gets it at all.
+    """
     lines: list[str] = []
     for label, value, mono in pairs:
         text = str(value if value is not None else "").strip()
         if not text:
             continue
-        rendered = code(text) if mono else esc(text)
+        rendered = code(isolate(text)) if mono else esc(text)
         lines.append(f"{bold(label)}: {rendered}")
     return "\n".join(lines)
 
@@ -165,7 +174,7 @@ def _card_gmail_create_draft(parameters: Mapping[str, Any], target: Mapping[str,
         "טיוטת מייל",
         fields,
         body_section,
-        note="תיווצר טיוטה — לא יישלח מייל.",
+        note="תיווצר טיוטה, לא יישלח מייל.",
     )
 
 

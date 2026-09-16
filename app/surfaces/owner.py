@@ -43,7 +43,7 @@ from app.domain.owner.tasks import OwnerTaskType
 from app.domain.tools import AdapterHttpError
 from app.graph.owner_agent import OwnerUsage
 from app.integrations.base import MessagePort, OutboundMessage
-from app.integrations.telegram_format import approval_keyboard, split_message
+from app.integrations.telegram_format import approval_keyboard, owner_text, split_message
 
 _log = logging.getLogger("mia.owner")
 
@@ -254,7 +254,7 @@ def _card_chunks(
     splitting is a no-op per chunk and the keyboard placed on the last one lands on
     the last physical Telegram message, never a mid-card one.
     """
-    chunks = split_message(text) or [text]
+    chunks = split_message(owner_text(text, html=True)) or [text]
     last = len(chunks) - 1
     conversation_id = item.get("chat_id") or item["from"]
     return [

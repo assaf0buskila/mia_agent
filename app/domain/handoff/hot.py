@@ -8,6 +8,7 @@ from app.capabilities.leads import leads_handlers
 from app.capabilities.policy import execute_capability
 from app.capabilities.types import Principal
 from app.core.config import Settings
+from app.integrations.telegram_format import owner_text
 
 _NO_HOT_LEADS_ACK = "אין לידים חמים שמחכים לתפיסה."
 
@@ -108,7 +109,7 @@ def _deliver_owners(
 
     _ = inbound_id
     return deliver_owner_telegram(
-        text=brief,
+        text=owner_text(brief, html=(parse_mode == "HTML")),
         settings=settings,
         parse_mode=parse_mode,
         recipient_ids=recipient_ids,

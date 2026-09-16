@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -14,11 +13,10 @@ from app.domain.engine_health import compute_engine_health, format_engine_health
 from app.domain.followups import follow_up_due_on, local_day_bounds_utc_iso
 from app.domain.funnel import compute_website_funnel, format_website_funnel
 from app.domain.kpis import KPI_EVENT_TYPES, OWNER_BRIEF_EVENT_TYPES
+from app.integrations.telegram_format import dotted_date
 
 if TYPE_CHECKING:
     from app.db.store import LeadStore
-
-_DATE_DISPLAY = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
 
 
 class DailyBriefSnapshot(BaseModel):
@@ -30,14 +28,6 @@ class DailyBriefSnapshot(BaseModel):
     follow_ups_due: int = Field(ge=0)
     meetings_booked: int = Field(ge=0)
     cancellation_requests: int = Field(ge=0)
-
-
-def _format_brief_date(brief_date: str) -> str:
-    match = _DATE_DISPLAY.fullmatch(brief_date)
-    if match is None:
-        return brief_date
-    year, month, day = match.groups()
-    return f"{day}.{month}.{year}"
 
 
 def _count_leads_today(
@@ -126,7 +116,7 @@ def compute_daily_brief(
 
 def format_daily_brief(snapshot: DailyBriefSnapshot) -> str:
     lines = [
-        f"סיכום יומי {_format_brief_date(snapshot.brief_date)}",
+        f"סיכום יומי {dotted_date(snapshot.brief_date)}",
         f"לידים: {snapshot.leads}",
         f"פגישות הוצעו: {snapshot.meetings_offered}",
         f"פגישות נקבעו: {snapshot.meetings_booked}",

@@ -18,6 +18,7 @@ from app.domain.handoff.delivery import (
     website_ping_scope,
 )
 from app.integrations.sheets import build_sheets_port
+from app.integrations.telegram_format import owner_text
 from app.services.notifications import deliver_owner_telegram
 from app.workers.crm_delivery import POLL_SECONDS, CrmDeliveryWorker, DeliveryOutcome
 
@@ -71,7 +72,7 @@ def telegram_receipt_handler(
             if not claimed:
                 return "unknown"
             result = deliver_owner_telegram(
-                text=body,
+                text=owner_text(body),
                 settings=settings,
                 recipient_ids=(recipient,),
                 transport=transport,
