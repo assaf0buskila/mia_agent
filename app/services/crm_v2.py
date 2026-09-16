@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -76,7 +77,13 @@ class CrmNotFound(CrmError):
 
 @dataclass(frozen=True)
 class ActivityInput:
-    who: str = "Mia"
+    # Stored verbatim in ``CrmActivityRow.who`` -- never filtered or matched by
+    # value anywhere (unlike ``action``, see ``_ACTIVITY_ACTION_LABELS_HE``
+    # below), so the Hebrew default is safe to store directly rather than
+    # mapped at the Sheet-cell boundary. This also restores the exact value
+    # pre-2026-09-11 rows already had before a since-changed default (`"Mia"`)
+    # started writing the English name instead.
+    who: str = "מיה"
     channel: str = ""
     action: str = "contact_updated"
     result: str = ""
@@ -222,6 +229,96 @@ def _bounded_fields(fields: Mapping[str, Any]) -> dict[str, str]:
         if raw_email and not bounded["email"]:
             raise CrmError("invalid email")
     return bounded
+
+
+# Hebrew labels for the Activity Sheet's `מה עשתה` column. ``CrmActivityRow.action``
+# itself is never renamed -- app/db/store.py's website-lead queries filter on the
+# exact literal "contact_captured" -- only the outgoing Sheet cell is translated.
+# Historical rows (pre-2026-09-11) already read "שיחת אתר"; match that vocabulary
+# so old and new rows read the same way. An action outside this map is either a
+# genuinely internal value this map hasn't caught up with yet, or an owner's own
+# freeform `kind` typed through the `crm_record_activity` tool (see
+# app/tools/owner/crm.py, unconstrained -- any language, case or punctuation) --
+# see ``_activity_action_cell`` for how those two are told apart. They are *not*
+# told apart by language: an owner's own words can be plain English ("call"),
+# and a future internal action could in principle be anything -- only its
+# snake_case *shape* is a reliable tell.
+_ACTIVITY_ACTION_LABELS_HE: dict[str, str] = {
+    "contact_captured": "שיחת אתר",
+    "contact_updated": "עדכון פרטים",
+}
+_ACTIVITY_ACTION_FALLBACK_HE = "פעילות"
+# Matches only lowercase, underscore-joined tokens (``contact_captured``,
+# ``some_future_action_kind``) -- the shape every internal action enum in this
+# codebase actually has. An owner typing a `kind` through `crm_record_activity`
+# essentially never produces this exact shape by accident, so it is a safe
+# (not perfect, but honest) way to catch a future enum this map hasn't caught
+# up with yet without also catching -- and erasing -- an owner's own words.
+_INTERNAL_ENUM_SHAPE_RE = re.compile(r"[a-z0-9]+(_[a-z0-9]+)+")
+
+# Short, fixed outcomes for the `תוצאה` column, keyed by the same action enum.
+# The full text (e.g. the model-written lead brief behind "contact_captured")
+# stays exactly as stored in ``CrmActivityRow.result`` -- ``refresh_pending_site_brief``
+# keeps it in sync with the Telegram message already sent to the owner, which is
+# the right surface for the full brief -- only the Sheet cell is shortened.
+_ACTIVITY_OUTCOME_LABELS_HE: dict[str, str] = {
+    "contact_captured": "נרשם",
+}
+_ACTIVITY_CELL_MAX_CHARS = 120
+
+
+def _cap_activity_cell(text: str) -> str:
+    """Trim a Sheet cell to a short, scannable length. Pure; never raises.
+
+    Strips trailing whitespace *and* trailing Unicode format controls (a
+    zero-width joiner, a right-to-left mark, ...) before appending the
+    ellipsis, so a cut that lands right after one of those never leaves it
+    dangling in front of the "…".
+    """
+    if len(text) <= _ACTIVITY_CELL_MAX_CHARS:
+        return text
+    head = text[: _ACTIVITY_CELL_MAX_CHARS - 1]
+    while head and (head[-1].isspace() or unicodedata.category(head[-1]) == "Cf"):
+        head = head[:-1]
+    return head + "…"
+
+
+def _activity_action_cell(action: str) -> str:
+    """Hebrew label for the Sheet's `מה עשתה` column. Pure; never raises.
+
+    (1) A known internal enum gets its fixed Hebrew label. (2) Empty, or
+    shaped like an internal enum this map hasn't caught up with yet (plain
+    lowercase, underscore-joined -- see ``_INTERNAL_ENUM_SHAPE_RE``), falls
+    back to the honest, generic "פעילות": there is nothing readable to show,
+    and a raw snake_case token in this column is the defect being fixed. (3)
+    Anything else -- an owner's own freeform `kind` typed through the
+    `crm_record_activity` tool, in whatever language, case or punctuation
+    ("call", "Quote sent", "פגישה") -- passes through verbatim, capped like
+    the outcome cell. Translating or genericizing an owner's own words would
+    erase information he deliberately entered and diverge from what an
+    approved proposal showed him -- worse than the raw-enum bug this fixes.
+    """
+    trimmed = action.strip()
+    label = _ACTIVITY_ACTION_LABELS_HE.get(trimmed)
+    if label is not None:
+        return label
+    if not trimmed or _INTERNAL_ENUM_SHAPE_RE.fullmatch(trimmed):
+        return _ACTIVITY_ACTION_FALLBACK_HE
+    return _cap_activity_cell(trimmed)
+
+
+def _activity_outcome_cell(action: str, result: str) -> str:
+    """Short outcome for the Sheet's `תוצאה` column. Pure; never raises.
+
+    A known action gets its fixed short outcome regardless of how long
+    ``result`` is. Anything else keeps its own (already short, owner- or
+    model-typed) result text, truncated defensively so a future long value
+    can't dump a brief into the sheet again.
+    """
+    label = _ACTIVITY_OUTCOME_LABELS_HE.get(action)
+    if label is not None:
+        return label
+    return _cap_activity_cell(result.strip())
 
 
 def _autoflushing(method: Callable[..., Any]) -> Callable[..., Any]:
@@ -1407,8 +1504,8 @@ class CrmService:
                         row.occurred_at,
                         row.who,
                         row.channel,
-                        row.action,
-                        row.result,
+                        _activity_action_cell(row.action),
+                        _activity_outcome_cell(row.action, row.result),
                         row.id,
                     ],
                 },
