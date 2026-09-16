@@ -41,7 +41,9 @@ EventBridge rule on the RDS-managed secret's rotation event
 `-targets.example.json`, `deploy/iam-lambda-invoke-permission.example.json`) triggers a
 Lambda (`scripts/lambda_sync_db_password.py`, `sync_database_password`) that (a) reads the
 new password from the RDS-managed secret, (b) rewrites only the password inside `mia/prod`'s
-`MIA_DATABASE_URL` — every other key and the rest of the URL preserved byte-for-byte — and
+`MIA_DATABASE_URL` — the rest of the URL string preserved byte-for-byte, every other key
+preserved JSON-equivalent (`json.dumps`'s default `ensure_ascii=True` escapes non-ASCII
+values as `\uXXXX`; semantically identical, not literally byte-identical) — and
 (c) forces a new ECS deployment (`ecs:UpdateService` with `forceNewDeployment`) so the
 already-running task actually picks up the change instead of holding the old password until
 something else restarts it (which is exactly today's failure mode; the code comment says so
@@ -54,15 +56,59 @@ JSON) and never writes one.
 The Lambda's IAM role (`deploy/iam-lambda-db-password-sync.example.json` +
 `-trust.example.json`) is scoped to: `secretsmanager:GetSecretValue` on the RDS-managed
 secret; `secretsmanager:GetSecretValue` **and** `PutSecretValue` on `mia/prod`;
-`ecs:UpdateService` + `ecs:DescribeServices` on the `mia` service. The extra
-`GetSecretValue` on `mia/prod` (beyond the originally-specified `PutSecretValue`-only) is
-necessary — the handler cannot preserve every other key byte-for-byte without reading the
-current secret first — and is called out here rather than silently added. Nothing wider than
-that. `mia/prod`'s embedded password stays load-bearing under this design (it is what the
-container actually reads); it does not become vestigial the way take 1 would have made it.
-Not deployed: creating the Lambda, its role, or the EventBridge rule is a separate approval,
-and the rule's exact CloudTrail event name/pattern needs verifying against AWS docs first
-(flagged in the rule's own `Description`) since it was never checked against real AWS.
+`ecs:UpdateService` (only — see below) on the `mia` service; the three
+`logs:CreateLogGroup`/`CreateLogStream`/`PutLogEvents` actions scoped to this Lambda's own
+log group; `sns:Publish` on its DLQ/alerts topic. The extra `GetSecretValue` on `mia/prod`
+(beyond the originally-specified `PutSecretValue`-only) is necessary — the handler cannot
+preserve every other key without reading the current secret first — and is called out here
+rather than silently added. No resource is `*`. `mia/prod`'s embedded password stays
+load-bearing under this design (it is what the container actually reads); it does not
+become vestigial the way take 1 would have made it.
+
+**Review round 2 findings, fixed:**
+- The EventBridge rule's `detail-type` was wrong (`"AWS API Call via CloudTrail"`, an
+  API-call pattern) for a **service-emitted** event — Secrets Manager's rotation-succeeded
+  event surfaces as `"AWS Service Event via CloudTrail"`. As written, the rule could never
+  match, so the Lambda would never run — a safety net that silently doesn't exist, worse
+  than none, because nobody would do the manual check believing it was automated. Fixed the
+  detail-type and dropped the `requestParameters.secretId` narrowing (the id likely lives
+  under `additionalEventData` for a service event, not `requestParameters`; the handler
+  already hardcodes the RDS secret ARN, so a broader match costs nothing).
+  **Still true, and must stay true until proven otherwise: this event pattern is UNVERIFIED.
+  It has never been fired by a real rotation. Do not treat it as working, do not deploy the
+  rule on the assumption it fires, until one real rotation cycle in staging proves it does.**
+- `ecs.describe_services` was called after every successful write+redeploy purely to
+  populate a status field nothing reads (EventBridge discards the return value). If that
+  call throttled or was denied, it raised *after* the secret write and the redeploy had
+  already succeeded — Lambda's automatic retries would then repeat both, forcing up to
+  three rolling production restarts for a run that had already worked. Removed the call,
+  the `describe_services` Protocol method, the `service_status` return key, and
+  `ecs:DescribeServices` from the IAM policy.
+- The Lambda ran with no log-group grant, no documented base execution permissions, and no
+  DLQ — a failed sync would have been invisible, the exact silent-divergence failure mode
+  this chunk exists to close. Added the CloudWatch Logs statement, `DeadLetterConfig`
+  pointing at an SNS topic (`deploy/lambda-db-password-sync.example.json`), and a
+  CloudWatch `Errors` alarm on that same topic (`deploy/cloudwatch-db-password-sync-errors.example.json`).
+- Three load-bearing properties had no test pinning them (all passed the full suite
+  unmutated): `quote(safe="")` vs. an accidental `safe="%"` (a password literally
+  containing `%40` decodes to the wrong character under the mutant); the write-then-redeploy
+  *order* (if the secret write raises, the redeploy must never fire); and `rpartition("@")`
+  vs. `partition("@")` when the *current* password already contains a literal `@` (plausible
+  here — the current password came from a hand-written secret during the incident). All
+  three now have a dedicated test in `tests/unit/test_lambda_sync_db_password.py`.
+- A runtime `assert not new_secret_string.startswith(BOM)` could never fire — `json.dumps`
+  cannot produce a leading BOM — so it proved nothing and was removed; the "never write a
+  BOM" property is a structural fact about `json.dumps`, checked instead by
+  `test_sync_never_writes_a_bom`.
+
+Not deployed: creating the Lambda, its role, or the EventBridge rule is a separate approval.
+Deploying before the event pattern is verified against one real rotation would recreate the
+exact silent-divergence failure this chunk exists to close, just one layer up the stack.
+
+**Pre-existing, out of scope, recorded not fixed:** `app/core/logging.py`'s `RedactingFilter`
+guards `record.msg` with `isinstance(..., str)` and never touches `exc_info` — both are
+still a path for a token or password to reach the logs if a future log call passes either
+shape. Flagged as a follow-up task, not fixed here (unrelated to C8/C9's scope).
 
 **Separate, incidental finding fixed and kept regardless of which take: Telegram bot token
 leaking into CloudWatch.** httpx's own request logger (`logging.getLogger("httpx")`) logs

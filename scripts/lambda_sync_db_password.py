@@ -5,8 +5,11 @@ dropped: `miaTaskExecutionRole`'s inline policy `ReadMiaProdBoxOnly` is scoped
 to `secret:mia/prod*` only, so the running container cannot read the
 RDS-managed secret directly, and Assaf declined to widen that policy. Instead,
 this Lambda is triggered by an EventBridge rule on the RDS-managed secret's
-rotation-succeeded event (see `deploy/eventbridge-db-password-rotation.example.json`)
-and pushes the new password to where the container can already read it.
+rotation-succeeded event (see `deploy/eventbridge-db-password-rotation-rule.example.json`
++ `-targets.example.json`) and pushes the new password to where the container
+can already read it. That rule's exact event pattern is UNVERIFIED against
+real AWS behaviour -- see its own `Description` and HANDOFF.md -- it has
+never been fired by a real rotation.
 
 Deployment (this Lambda, its IAM role, and the EventBridge rule) is a separate
 approval. This module is code only, exercised by `tests/unit/test_lambda_sync_db_password.py`
@@ -26,6 +29,10 @@ from urllib.parse import quote
 
 # The RDS-managed secret Secrets Manager rotates automatically. Its `password`
 # key always holds the current master password (see HANDOFF.md C8 root cause).
+# Hardcoded, not a REGION/ACCOUNT_ID placeholder like deploy/*.example.json:
+# those are templates for infrastructure that doesn't exist yet and gets
+# filled in at bootstrap time; this constant identifies one specific,
+# already-existing secret this Lambda must call every single invocation.
 RDS_SECRET_ARN = (
     "arn:aws:secretsmanager:eu-north-1:535252061205:secret:"
     "rds!db-d7c051e7-2f6a-4711-826d-2bf7d243a2f8-gjs5XD"
@@ -45,7 +52,6 @@ class EcsClient(Protocol):
     def update_service(
         self, *, cluster: str, service: str, forceNewDeployment: bool
     ) -> dict: ...
-    def describe_services(self, *, cluster: str, services: list[str]) -> dict: ...
 
 
 def _strip_bom(text: str) -> str:
@@ -140,22 +146,22 @@ def sync_database_password(
 
     updated_payload = dict(mia_payload)
     updated_payload[DATABASE_URL_KEY] = new_url
+    # json.dumps can never emit a leading BOM -- no runtime check needed here;
+    # test_sync_never_writes_a_bom is the regression guard for this fact.
     new_secret_string = json.dumps(updated_payload)
-    assert not new_secret_string.startswith("﻿")  # never write a BOM
 
     secretsmanager.put_secret_value(SecretId=MIA_PROD_SECRET_ID, SecretString=new_secret_string)
 
     # Not optional -- see module docstring. Called every run, including the
     # idempotent no-op case, so a task that never picked up a previous
-    # invocation's write still gets one.
+    # invocation's write still gets one. Must run strictly after the write
+    # above: if the write raises, a partially-applied run must not also
+    # force a production restart on top of the failure.
     ecs.update_service(cluster=ECS_CLUSTER, service=ECS_SERVICE, forceNewDeployment=True)
-    described = ecs.describe_services(cluster=ECS_CLUSTER, services=[ECS_SERVICE])
-    services = described.get("services") or [{}]
 
     return {
         "password_changed": new_url != current_url,
         "deployment_forced": True,
-        "service_status": str(services[0].get("status", "")),
     }
 
 

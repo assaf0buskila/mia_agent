@@ -22,9 +22,12 @@ Deploy is a separate go. Max 2 agents at once (session usage limit).
       (`app/core/redact.py`). The in-app `MIA_DATABASE_PASSWORD` override design was
       dropped after review (IAM boundary); see HANDOFF §0.
 - [ ] C9 — RDS→mia/prod password auto-sync (`scripts/lambda_sync_db_password.py`),
-      `CODE_CHECKED` + `LOCAL_TESTED` only — not deployed. Needs: create the Lambda/role/
-      EventBridge rule (verify the rotation event pattern against AWS docs first), then a
-      real-AWS staging test of one rotation cycle before this can move past `LOCAL_TESTED`.
+      `CODE_CHECKED` + `LOCAL_TESTED` only — not deployed. Round 2 review fixed: EventBridge
+      detail-type (was `AwsApiCall`, could never match a service-emitted rotation event —
+      still UNVERIFIED against a real rotation), removed `ecs:DescribeServices` (turned a
+      successful run into a failure on throttling), added log-group/DLQ/`Errors` alarm.
+      Needs before deploy: create the Lambda/role/EventBridge rule, verify the rotation
+      event pattern against AWS docs and one real staging rotation cycle.
 - [ ] C2b — approval cards from the stored envelope; callback `sent` truth (brief ready)
 - [ ] C6a — social capability truth + routing collisions (brief ready; after C4)
 - [ ] C7b — proven-dead code, reviewed follow-ups, docs (brief ready; last)

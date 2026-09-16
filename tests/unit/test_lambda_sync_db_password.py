@@ -50,8 +50,14 @@ class FakeEcs:
         )
         return {}
 
-    def describe_services(self, *, cluster: str, services: list[str]) -> dict:
-        return {"services": [{"status": "ACTIVE"}]}
+
+class RaisingSecretsManager(FakeSecretsManager):
+    """Simulates PutSecretValue failing (throttled/denied) after both
+    GetSecretValue reads already succeeded -- proves the redeploy is never
+    reached when the write fails."""
+
+    def put_secret_value(self, *, SecretId: str, SecretString: str) -> dict:
+        raise RuntimeError("simulated PutSecretValue failure")
 
 
 def _mia_prod_payload(url: str) -> dict:
@@ -90,6 +96,13 @@ def _secretsmanager(
         "has:colon",
         "has space",
         "mix#?/@%: space",
+        # Literal 3-char passwords, not pre-encoded "@"/"/". A `quote(safe="%")`
+        # mutant would leave these as-is, and the URL parser would then wrongly
+        # decode them to "@" / "/" -- "has%percent" alone gives false
+        # confidence here because "pe" isn't valid hex, so it round-trips
+        # (or errors) either way.
+        "%40",
+        "%2F",
     ],
 )
 def test_sync_substitutes_password_and_round_trips_through_sqlalchemy(password: str) -> None:
@@ -112,7 +125,12 @@ def test_sync_substitutes_password_and_round_trips_through_sqlalchemy(password: 
     assert result["password_changed"] is True
 
 
-def test_sync_preserves_every_other_key_byte_for_byte() -> None:
+def test_sync_preserves_every_other_key_json_equivalent() -> None:
+    """"JSON-equivalent", not literally byte-for-byte: json.dumps's default
+    ensure_ascii=True would re-escape a non-ASCII value as \\uXXXX -- same
+    value once parsed back, not the identical source bytes. Values here are
+    plain ASCII, so this also happens to be byte-identical, but the claim
+    this test backs is value equality, not byte equality."""
     original_url = "postgresql://appuser:oldpass@db.example.internal:5432/mia"
     payload = _mia_prod_payload(original_url)
     secretsmanager = _secretsmanager(rds_password="rotated", mia_prod_url=original_url)
@@ -191,6 +209,43 @@ def test_sync_is_idempotent_and_never_double_encodes_on_repeated_invocation() ->
     assert secretsmanager._secrets[MIA_PROD] == secretsmanager.put_calls[-1][1]
 
 
+def test_sync_never_forces_a_redeploy_when_the_secret_write_fails() -> None:
+    """Pins the write-then-redeploy order. A mutant that swapped these two
+    calls would force a production restart on top of a write that never
+    happened -- reproducing an outage instead of preventing one."""
+    original_url = "postgresql://appuser:oldpass@db.example.internal:5432/mia"
+    mia_prod_json = json.dumps(_mia_prod_payload(original_url))
+    secretsmanager = RaisingSecretsManager(
+        {RDS_ARN: json.dumps({"password": "rotated"}), MIA_PROD: mia_prod_json}
+    )
+    ecs = FakeEcs()
+
+    with pytest.raises(RuntimeError, match="simulated PutSecretValue failure"):
+        sync_mod.sync_database_password(secretsmanager=secretsmanager, ecs=ecs)
+
+    assert ecs.update_service_calls == []
+
+
+def test_sync_anchors_on_the_last_at_when_the_current_password_already_has_one() -> None:
+    """The *current* (soon to be replaced) password came from a hand-written
+    secret during the C8 incident -- plausibly containing an unencoded "@".
+    A `partition` (first-@) mutant here would treat part of the password as
+    the host and write a garbage URL to production."""
+    current_url = "postgresql://appuser:p@ssw0rd@db.example.internal:5432/mia"
+    secretsmanager = _secretsmanager(rds_password="rotated-pw", mia_prod_url=current_url)
+    ecs = FakeEcs()
+
+    sync_mod.sync_database_password(secretsmanager=secretsmanager, ecs=ecs)
+
+    written = json.loads(secretsmanager._secrets[MIA_PROD])
+    parsed = make_url(written["MIA_DATABASE_URL"])
+    assert parsed.username == "appuser"
+    assert parsed.host == "db.example.internal"
+    assert parsed.port == 5432
+    assert parsed.database == "mia"
+    assert parsed.password == "rotated-pw"
+
+
 def test_sync_raises_when_mia_prod_url_has_no_credentials_section() -> None:
     """A silent no-op here would leave mia/prod's password stale forever with
     no signal -- fail loudly instead, and touch nothing on the way out."""
@@ -250,12 +305,19 @@ def test_iac_examples_are_least_privilege_and_linked() -> None:
             statement["Action"] if isinstance(statement["Action"], list) else [statement["Action"]]
         )
     }
-    assert actions == {
+    # Superset, not exact equality: adding a legitimate new permission (a log
+    # group grant, say) should never require touching this test just to
+    # widen an exact-match set. What matters is the required actions are
+    # present, ecs:DescribeServices is gone (it turned a successful run into
+    # a failure -- see HANDOFF), and nothing above resolved to a "*" resource.
+    required_actions = {
         "secretsmanager:GetSecretValue",
         "secretsmanager:PutSecretValue",
         "ecs:UpdateService",
-        "ecs:DescribeServices",
     }
+    assert required_actions <= actions
+    assert "ecs:DescribeServices" not in actions
+
     rds_statement = next(s for s in policy["Statement"] if s["Sid"] == "ReadRdsManagedPassword")
     assert rds_statement["Action"] == "secretsmanager:GetSecretValue"
     assert "rds!db-d7c051e7" in rds_statement["Resource"]
@@ -265,8 +327,37 @@ def test_iac_examples_are_least_privilege_and_linked() -> None:
     assert "mia/prod" in mia_prod_statement["Resource"]
     assert "rds!db" not in mia_prod_statement["Resource"]
 
+    # The Lambda can write logs and reach its own DLQ/alarm topic.
+    log_statement = next(
+        s for s in policy["Statement"] if "logs:PutLogEvents" in s["Action"]
+    )
+    assert function["FunctionName"] in log_statement["Resource"]
+    dlq_topic = function["DeadLetterConfig"]["TargetArn"]
+    sns_statement = next(s for s in policy["Statement"] if s["Action"] == "sns:Publish")
+    assert sns_statement["Resource"] == dlq_topic
+
+    # The Errors alarm pages the same topic the DLQ delivers to.
+    errors_alarm = json.loads(
+        (ROOT / "deploy/cloudwatch-db-password-sync-errors.example.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert errors_alarm["Namespace"] == "AWS/Lambda"
+    assert errors_alarm["MetricName"] == "Errors"
+    assert errors_alarm["Dimensions"][0]["Value"] == function["FunctionName"]
+    assert errors_alarm["AlarmActions"] == [dlq_topic]
+
+    # detail-type must be the SERVICE-EVENT form: Secrets Manager rotation
+    # completion is service-emitted, not an API call, and an AwsApiCall
+    # detail-type can never match it (round-1 finding: the rule could never
+    # fire). Still unverified against a real rotation -- see the rule's own
+    # Description and HANDOFF -- so this only pins the pattern shape, not
+    # that AWS actually emits exactly this.
+    assert rule["EventPattern"]["detail-type"] == ["AWS Service Event via CloudTrail"]
+    assert rule["EventPattern"]["detail"]["eventName"] == ["RotationSucceeded"]
+    assert "requestParameters" not in rule["EventPattern"]["detail"]
+
     assert rule["Name"] == "mia-db-password-rotated"
-    assert "rds!db-d7c051e7" in json.dumps(rule["EventPattern"])
     assert targets["Rule"] == rule["Name"]
     assert function["FunctionName"] in targets["Targets"][0]["Arn"]
     assert invoke_permission["FunctionName"] == function["FunctionName"]
