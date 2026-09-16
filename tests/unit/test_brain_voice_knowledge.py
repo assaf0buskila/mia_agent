@@ -301,6 +301,94 @@ def test_fetch_rejects_an_oversized_document() -> None:
     assert report.status == "error"
 
 
+# ------------------------------------------------------- knowledge freshness (C12)
+
+
+def test_knowledge_source_status_for_never_ingested_source_is_unknown() -> None:
+    """`/health` and the brief must be able to answer for a *configured* source that
+    has never actually been ingested -- not raise, not silently omit it."""
+    brain = _brain()
+    statuses = brain.list_knowledge_source_statuses(["never-ingested"])
+    assert len(statuses) == 1
+    status = statuses[0]
+    assert status.source_id == "never-ingested"
+    assert status.ingested is False
+    assert status.last_ingested_at == ""
+    assert status.content_hash_prefix == ""
+    assert status.site_stale == "unknown"
+
+
+def test_knowledge_source_status_reports_recency_and_hash_prefix_after_ingest() -> None:
+    brain = _brain()
+    url = f"{SITE}/llms.txt"
+    ingest_source(
+        brain,
+        source_id="llms.txt",
+        url=url,
+        fetcher=FakeDocumentFetcher(
+            {url: "# S\n\n## Services\nA description long enough to chunk.\n"}
+        ),
+        embedding_port=FakeEmbeddingPort(),
+    )
+    full_hash = brain.knowledge_source_hash("llms.txt")
+    status = brain.list_knowledge_source_statuses(["llms.txt"])[0]
+    assert status.ingested is True
+    assert status.last_ingested_at != ""
+    assert status.content_hash_prefix == full_hash[:12]
+    assert status.content_hash_prefix != full_hash  # a prefix, not the whole digest
+    # Nothing has checked the live site yet.
+    assert status.site_stale == "unknown"
+
+
+def test_record_site_freshness_persists_verdict_and_both_timestamps() -> None:
+    brain = _brain()
+    brain.record_site_freshness(
+        source_id="pricing.md",
+        site_last_modified="Wed, 16 Sep 2026 09:00:00 GMT",
+        source_last_modified="Mon, 14 Sep 2026 19:14:00 GMT",
+        stale="stale",
+    )
+    status = brain.list_knowledge_source_statuses(["pricing.md"])[0]
+    assert status.site_stale == "stale"
+    assert status.site_last_modified == "Wed, 16 Sep 2026 09:00:00 GMT"
+    assert status.source_last_modified == "Mon, 14 Sep 2026 19:14:00 GMT"
+    assert status.site_checked_at != ""
+
+
+def test_record_site_freshness_before_any_ingest_still_creates_a_row() -> None:
+    """The freshness check and the content ingest write the same row independently --
+    whichever runs first for a source must not stop the other from recording."""
+    brain = _brain()
+    brain.record_site_freshness(
+        source_id="brand-new",
+        site_last_modified="Wed, 16 Sep 2026 09:00:00 GMT",
+        source_last_modified="",
+        stale="unknown",
+    )
+    status = brain.list_knowledge_source_statuses(["brand-new"])[0]
+    assert status.ingested is False
+    assert status.site_stale == "unknown"
+    assert status.site_last_modified == "Wed, 16 Sep 2026 09:00:00 GMT"
+
+
+def test_record_site_freshness_overwrites_a_stale_verdict_once_fixed() -> None:
+    brain = _brain()
+    brain.record_site_freshness(
+        source_id="llms-full.txt",
+        site_last_modified="Wed, 16 Sep 2026 09:00:00 GMT",
+        source_last_modified="Mon, 14 Sep 2026 19:14:00 GMT",
+        stale="stale",
+    )
+    brain.record_site_freshness(
+        source_id="llms-full.txt",
+        site_last_modified="Wed, 16 Sep 2026 09:00:00 GMT",
+        source_last_modified="Wed, 16 Sep 2026 08:59:00 GMT",
+        stale="fresh",
+    )
+    status = brain.list_knowledge_source_statuses(["llms-full.txt"])[0]
+    assert status.site_stale == "fresh"
+
+
 # --------------------------------------------------------------- embeddings
 
 

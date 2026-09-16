@@ -2,6 +2,7 @@ import inspect
 from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
+from app.brain.store import BrainStore
 from app.core.capabilities import CapabilityId, require_alive
 from app.db.models import CanonicalEventRow, OwnerBriefRow
 from app.db.session import get_session_factory, init_db
@@ -13,10 +14,12 @@ from app.domain.events import (
 )
 from app.domain.kpis import KPI_EVENT_TYPES
 from app.domain.owner.briefs import (
+    apply_owner_brief,
     apply_owner_brief_policy,
     compute_daily_brief,
     format_daily_brief,
 )
+from app.integrations.telegram_format import owner_text
 from sqlalchemy import delete
 
 
@@ -276,3 +279,152 @@ def test_owner_briefs_module_no_message_or_meta_ports() -> None:
 
 def test_require_alive_owner_brief() -> None:
     require_alive(CapabilityId.OWNER_BRIEF)
+
+
+# ------------------------------------------------- knowledge staleness line (C12)
+
+
+def test_apply_owner_brief_silent_without_a_brain_argument() -> None:
+    """Every pre-C12 caller omits `brain`/`knowledge_sources`; must still work."""
+    init_db()
+    db = get_session_factory()()
+    try:
+        store = LeadStore(db)
+        text = apply_owner_brief(
+            store, timezone="Asia/Jerusalem", kill_switch=False, demo_active=False
+        )
+        assert text is not None
+        assert "ישנים מהאתר" not in text
+    finally:
+        db.close()
+
+
+def test_apply_owner_brief_silent_when_knowledge_is_fresh() -> None:
+    init_db()
+    db = get_session_factory()()
+    brain_session = get_session_factory()()
+    try:
+        store = LeadStore(db)
+        brain = BrainStore(brain_session)
+        brain.record_site_freshness(
+            source_id="llms.txt",
+            site_last_modified="Mon, 14 Sep 2026 19:20:00 GMT",
+            source_last_modified="Mon, 14 Sep 2026 19:14:00 GMT",
+            stale="fresh",
+        )
+        brain_session.commit()
+        text = apply_owner_brief(
+            store,
+            timezone="Asia/Jerusalem",
+            kill_switch=False,
+            demo_active=False,
+            brain=brain,
+            knowledge_sources=["llms.txt"],
+        )
+        assert text is not None
+        assert "ישנים מהאתר" not in text
+    finally:
+        brain_session.close()
+        db.close()
+
+
+def test_apply_owner_brief_silent_when_staleness_is_unknown() -> None:
+    """A missing/unparsable header is not evidence of staleness -- must stay quiet."""
+    init_db()
+    db = get_session_factory()()
+    brain_session = get_session_factory()()
+    try:
+        store = LeadStore(db)
+        brain = BrainStore(brain_session)
+        # Never checked at all -> "unknown" by default; no record_site_freshness call.
+        text = apply_owner_brief(
+            store,
+            timezone="Asia/Jerusalem",
+            kill_switch=False,
+            demo_active=False,
+            brain=brain,
+            knowledge_sources=["llms.txt"],
+        )
+        assert text is not None
+        assert "ישנים מהאתר" not in text
+    finally:
+        brain_session.close()
+        db.close()
+
+
+def test_apply_owner_brief_adds_one_line_when_a_source_is_stale() -> None:
+    init_db()
+    db = get_session_factory()()
+    brain_session = get_session_factory()()
+    try:
+        store = LeadStore(db)
+        brain = BrainStore(brain_session)
+        brain.record_site_freshness(
+            source_id="pricing.md",
+            site_last_modified="Wed, 16 Sep 2026 09:00:00 GMT",
+            source_last_modified="Mon, 14 Sep 2026 19:14:00 GMT",
+            stale="stale",
+        )
+        brain_session.commit()
+        text = apply_owner_brief(
+            store,
+            timezone="Asia/Jerusalem",
+            kill_switch=False,
+            demo_active=False,
+            brain=brain,
+            knowledge_sources=["llms.txt", "pricing.md"],
+        )
+        assert text is not None
+        assert "pricing.md" in text
+        assert "ישנים מהאתר" in text
+        # Only one staleness line, not one per configured source.
+        assert text.count("ישנים מהאתר") == 1
+        assert "16.09.2026" in text
+        assert "lead_" not in text
+        assert "—" not in text and " -- " not in text
+        # The whole composed brief must still survive the standard owner-facing
+        # normaliser unchanged in substance (idempotent, isolates the date/filename).
+        rendered = owner_text(text)
+        assert "pricing.md" in rendered
+        assert "16.09.2026" in rendered
+    finally:
+        brain_session.close()
+        db.close()
+
+
+def test_apply_owner_brief_names_every_stale_source() -> None:
+    init_db()
+    db = get_session_factory()()
+    brain_session = get_session_factory()()
+    try:
+        store = LeadStore(db)
+        brain = BrainStore(brain_session)
+        for source_id in ("llms.txt", "pricing.md"):
+            brain.record_site_freshness(
+                source_id=source_id,
+                site_last_modified="Wed, 16 Sep 2026 09:00:00 GMT",
+                source_last_modified="Mon, 14 Sep 2026 19:14:00 GMT",
+                stale="stale",
+            )
+        brain.record_site_freshness(
+            source_id="llms-full.txt",
+            site_last_modified="Wed, 16 Sep 2026 09:00:00 GMT",
+            source_last_modified="Wed, 16 Sep 2026 08:59:00 GMT",
+            stale="fresh",
+        )
+        brain_session.commit()
+        text = apply_owner_brief(
+            store,
+            timezone="Asia/Jerusalem",
+            kill_switch=False,
+            demo_active=False,
+            brain=brain,
+            knowledge_sources=["llms.txt", "pricing.md", "llms-full.txt"],
+        )
+        assert text is not None
+        assert "llms.txt" in text
+        assert "pricing.md" in text
+        assert text.count("ישנים מהאתר") == 1
+    finally:
+        brain_session.close()
+        db.close()

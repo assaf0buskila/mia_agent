@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 
+from app.brain.site_freshness import parse_http_date
 from app.core.errors import PolicyDenied
 from app.core.risk import RiskAction, RiskLevel, assert_allowed
 from app.domain.engine_health import compute_engine_health, format_engine_health
@@ -16,6 +17,7 @@ from app.domain.kpis import KPI_EVENT_TYPES, OWNER_BRIEF_EVENT_TYPES
 from app.integrations.telegram_format import dotted_date
 
 if TYPE_CHECKING:
+    from app.brain.store import BrainStore
     from app.db.store import LeadStore
 
 
@@ -129,6 +131,37 @@ def format_daily_brief(snapshot: DailyBriefSnapshot) -> str:
     return "\n".join(lines)
 
 
+def _knowledge_staleness_line(
+    brain: BrainStore, *, knowledge_sources: list[str]
+) -> str | None:
+    """One short Hebrew line iff the site has drifted ahead of a knowledge file.
+
+    Silent whenever everything is fresh AND whenever the signal is merely
+    "unknown" (a missing/unparsable `Last-Modified` header is not evidence of
+    staleness) -- a line that shows up every day is one Assaf stops reading.
+    `compare_staleness` only ever returns "stale" when both headers parsed, so
+    `dotted_date` below always has a real date to render.
+    """
+    if not knowledge_sources:
+        return None
+    stale = [
+        status
+        for status in brain.list_knowledge_source_statuses(knowledge_sources)
+        if status.site_stale == "stale"
+    ]
+    if not stale:
+        return None
+    names = ", ".join(status.source_id for status in stale)
+    site_dt = parse_http_date(stale[0].site_last_modified)
+    site_date = dotted_date(site_dt.date().isoformat()) if site_dt is not None else ""
+    if not site_date:
+        return f"קבצי הידע ({names}) ישנים מהאתר עצמו. כדאי להריץ עדכון ידע."
+    return (
+        f"קבצי הידע ({names}) ישנים מהאתר עצמו. "
+        f"עדכון אחרון באתר: {site_date}. כדאי להריץ עדכון ידע."
+    )
+
+
 def apply_owner_brief_policy(
     store: LeadStore,
     *,
@@ -164,8 +197,16 @@ def apply_owner_brief(
     kill_switch: bool,
     demo_active: bool,
     now: datetime | None = None,
+    brain: BrainStore | None = None,
+    knowledge_sources: list[str] | None = None,
 ) -> str | None:
-    """Compute daily brief, optionally persist, return Hebrew scorecard or None."""
+    """Compute daily brief, optionally persist, return Hebrew scorecard or None.
+
+    `brain`/`knowledge_sources` are optional so every existing caller (and test)
+    keeps working unchanged; only a caller that has a `BrainStore` and configured
+    sources on hand (the owner tool loop does, via `ToolContext`) gets the C12
+    site-staleness line.
+    """
     if demo_active:
         return None
     snapshot = compute_daily_brief(store, timezone=timezone, now=now)
@@ -191,4 +232,10 @@ def apply_owner_brief(
     engine = compute_engine_health(store, timezone=timezone, now=now)
     if engine is not None and engine.total_runs:
         lines.append(format_engine_health(engine))
+    if brain is not None:
+        staleness = _knowledge_staleness_line(
+            brain, knowledge_sources=knowledge_sources or []
+        )
+        if staleness is not None:
+            lines.append(staleness)
     return "\n".join(lines)

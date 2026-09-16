@@ -671,6 +671,14 @@ class KnowledgeSourceRow(Base):
     chunk_count: Mapped[int] = mapped_column(Integer, default=0)
     status: Mapped[str] = mapped_column(String(16), default="active")
     error: Mapped[str] = mapped_column(String(255), default="")
+    # C12 site-vs-files staleness (app/brain/site_freshness.py). Written only by the
+    # scheduled ingest run, never per request. Raw HTTP `Last-Modified` header values
+    # (or "" when the header was absent/unparsable) plus the verdict computed from
+    # them and when that comparison last ran.
+    site_last_modified: Mapped[str] = mapped_column(String(64), default="")
+    source_last_modified: Mapped[str] = mapped_column(String(64), default="")
+    site_checked_at: Mapped[str] = mapped_column(String(64), default="")
+    site_stale: Mapped[str] = mapped_column(String(16), default="unknown")
 
 
 class KnowledgeChunkRow(Base):

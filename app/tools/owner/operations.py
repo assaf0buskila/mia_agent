@@ -36,6 +36,8 @@ def _daily_brief(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
             kill_switch=ctx.kill_switch,
             demo_active=ctx.demo_active,
             now=ctx.now,
+            brain=ctx.brain,
+            knowledge_sources=ctx.settings.knowledge_source_list(),
         ),
         "No activity recorded for today yet.",
     )

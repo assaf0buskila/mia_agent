@@ -266,3 +266,29 @@ class ExtractionResult(BaseModel):
     candidates: tuple[MemoryCandidate, ...] = ()
     gaps: tuple[str, ...] = Field(default_factory=tuple)
     skipped: int = 0
+
+
+class KnowledgeSourceStatus(BaseModel):
+    """Per-source ingest and site-vs-files freshness, as last stored.
+
+    Read-only reporting shape for `/health` and the owner daily brief. Everything
+    here comes from `app/db/models.py::KnowledgeSourceRow` as of the last scheduled
+    ingest run -- never a live fetch, so reading it is always cheap. `site_stale` is
+    one of "fresh" / "stale" / "unknown" (see `app/brain/site_freshness.py`);
+    "unknown" whenever either `Last-Modified` header was absent, unparsable, or the
+    check has never run -- never a false "fresh".
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    source_id: str
+    ingested: bool = False
+    last_ingested_at: str = ""
+    content_hash_prefix: str = ""
+    chunk_count: int = 0
+    status: str = ""
+    error: str = ""
+    site_stale: str = "unknown"
+    site_last_modified: str = ""
+    source_last_modified: str = ""
+    site_checked_at: str = ""
