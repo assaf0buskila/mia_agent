@@ -97,8 +97,8 @@ def test_v2_capture_is_included_in_hot_leads_and_status(
         # exactly the "Assaf has not reliably been told" signal `format_hot_leads_ack`
         # now surfaces for v2.
         hot = format_hot_leads_ack(store, principal=Principal.owner(source="test"))
-        assert result.contact.id in hot
-        # The reply leads with the captured name, not a bare crm_... id.
+        # C9 (R3): the reply shows the captured name, never the raw crm_... id.
+        assert result.contact.id not in hot
         assert "יוסי" in hot
 
         status = format_owner_status_ack(
@@ -109,12 +109,17 @@ def test_v2_capture_is_included_in_hot_leads_and_status(
         snapshot = format_operator_snapshot_ack(
             store, principal=Principal.owner(source="test"), timezone=_TZ
         )
-        assert result.contact.id in snapshot
+        assert result.contact.id not in snapshot
+        assert "יוסי" in snapshot
 
 
-def test_hot_lead_with_no_name_falls_back_to_the_bare_contact_id(
+def test_hot_lead_with_no_name_falls_back_to_a_position_placeholder_not_the_id(
     sessions: sessionmaker[Session],
 ) -> None:
+    """C9 (R3): a hot lead with no captured name used to fall back to the bare
+    crm_... id; Assaf's explicit call for this surface is a name, never a raw
+    internal id, so the fallback is now a position-based placeholder instead.
+    """
     with sessions() as session:
         store = LeadStore(session)
         result = CrmService(session).capture_site_lead(
@@ -127,7 +132,44 @@ def test_hot_lead_with_no_name_falls_back_to_the_bare_contact_id(
         assert result.contact is not None
         session.commit()
         hot = format_hot_leads_ack(store, principal=Principal.owner(source="test"))
-        assert result.contact.id in hot
+        assert result.contact.id not in hot
+        assert "פנייה 1" in hot
+
+
+def test_hot_leads_sharing_a_rendered_name_are_never_merged(
+    sessions: sessionmaker[Session],
+) -> None:
+    """C9 (P2 review fix): dedup in format_hot_leads_ack must run on the
+    underlying contact id, never on the rendered label. Two different website
+    captures that happen to share a first name -- common in Hebrew -- used to
+    collapse into one line via `dict.fromkeys` over the label, silently
+    telling Assaf he has fewer hot leads than he actually does.
+    """
+    with sessions() as session:
+        store = LeadStore(session)
+        service = CrmService(session)
+        first = service.capture_site_lead(
+            {"name": "דנה", "phone": "0501110001", "business": "עסק א"},
+            conversation_id="hot-dup-name-1",
+            source_ref="site:hot-dup-name-1:m1",
+            summary="x",
+            recipient_ids=("999",),
+        )
+        second = service.capture_site_lead(
+            {"name": "דנה", "phone": "0501110002", "business": "עסק ב"},
+            conversation_id="hot-dup-name-2",
+            source_ref="site:hot-dup-name-2:m1",
+            summary="y",
+            recipient_ids=("999",),
+        )
+        assert first.contact is not None and second.contact is not None
+        assert first.contact.id != second.contact.id  # two genuinely different leads
+        session.commit()
+
+        hot = format_hot_leads_ack(store, principal=Principal.owner(source="test"))
+        # Both leads must be counted, not collapsed into a single "דנה".
+        assert hot.count("דנה") == 2
+        assert hot == "לידים חמים: דנה, דנה"
 
 
 def test_v1_takeover_state_lead_still_reported_alongside_v2(
@@ -158,8 +200,12 @@ def test_v1_takeover_state_lead_still_reported_alongside_v2(
         session.commit()
 
         hot = format_hot_leads_ack(store, principal=Principal.owner(source="test"))
-        assert lead_id in hot
-        assert v2.contact.id in hot
+        # C9 (R3): neither source's raw id is ever shown; the v1 lead (no
+        # headline) gets a position placeholder, the v2 lead shows its name.
+        assert lead_id not in hot
+        assert v2.contact.id not in hot
+        assert "ליד 1" in hot
+        assert "Dana" in hot
 
 
 def test_v1_takeover_state_lead_shows_its_sales_headline_as_a_label(
@@ -167,7 +213,8 @@ def test_v1_takeover_state_lead_shows_its_sales_headline_as_a_label(
 ) -> None:
     """Mirrors the v2 name-label fix: a v1 lead's `SalesState.headline` (the
     closest thing v1 has to a name -- `LeadRow`/`CustomerRow` store no name at
-    all) is used as a label alongside the id, not just the bare `lead_...` id.
+    all) is used as the label INSTEAD of the id, never alongside it (C9, R3:
+    no raw internal id in owner prose).
     """
     from app.domain.conversation_scope import TakeoverState
     from app.domain.sales import SalesState
@@ -182,7 +229,7 @@ def test_v1_takeover_state_lead_shows_its_sales_headline_as_a_label(
         session.commit()
 
         hot = format_hot_leads_ack(store, principal=Principal.owner(source="test"))
-        assert lead_id in hot
+        assert lead_id not in hot
         assert "needs a site urgently" in hot
 
 
@@ -291,7 +338,9 @@ def test_returning_visitor_second_session_shown_hot_despite_first_confirmed(
         session.commit()
 
         hot = format_hot_leads_ack(store, principal=Principal.owner(source="test"))
-        assert first.contact.id in hot
+        # C9 (R3): shown by name, never the raw id.
+        assert first.contact.id not in hot
+        assert "Dana" in hot
 
 
 def test_returning_visitor_same_day_counts_as_one_lead_and_one_line(

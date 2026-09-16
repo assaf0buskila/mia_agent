@@ -29,6 +29,7 @@ from app.domain.approvals import (
     DECISION_REJECTED,
     new_approval_id,
 )
+from app.integrations.telegram_format import esc
 
 ACTION_OWNER_EXTERNAL_WRITE = "owner_external_write"
 RESOURCE_OWNER_PROPOSAL = "owner_proposal"
@@ -331,7 +332,15 @@ def execute_owner_action(
     row.execution_operation_id = operation_key[:64]
     row.result = str(text)[:255]
     store.session.flush()
-    return OwnerActionExecution("executed", str(text))
+    # `text` is whatever the caller's `execute` returned -- today always a fixed
+    # English confirmation shape with a provider-issued id interpolated (draft id,
+    # contact id, event id, ...). Those ids are not guaranteed alnum-only, and this
+    # value reaches Telegram with parse_mode="HTML" via `OwnerActionExecution.text`
+    # (app/api/telegram.py) with nothing else escaping it on that path, so it is
+    # escaped once here, at the source, rather than trusted at the send site. The
+    # stored `row.result` above stays raw -- that is an internal record, never
+    # rendered as HTML.
+    return OwnerActionExecution("executed", esc(str(text)))
 
 
 def execute_approved_owner_action_with_adapters(

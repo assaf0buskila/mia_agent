@@ -17,7 +17,7 @@ from app.domain.owner.request_routing import (
 )
 from app.domain.owner.tasks import OwnerTaskType
 from app.integrations.base import RecordingMessagePort
-from app.integrations.telegram_format import approval_keyboard
+from app.integrations.telegram_format import approval_keyboard, isolate
 from app.surfaces.crm import DisabledContactsCrm
 from app.surfaces.owner import _talk_with_optional_agent, run_owner_loop
 from app.tools.registries.owner_tools import tool_names
@@ -90,7 +90,9 @@ async def test_live_owner_surface_answers_inventory_without_history_model_or_lea
         db.close()
 
     assert result.sent is True
-    assert port.sent and "49 כלים רשומים" in port.sent[0].text
+    # C9: the live send path goes through owner_text() at egress, which
+    # isolates the LTR digit run -- the visible count is unchanged.
+    assert port.sent and f"{isolate(len(tool_names()))} כלים רשומים" in port.sent[0].text
     assert calls == {"talk": 0, "history": 0, "learn": 0}
     assert elapsed < 1.0
 

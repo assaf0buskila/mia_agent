@@ -41,7 +41,11 @@ def test_format_weekly_brief_header_and_no_execute_line() -> None:
         )
         assert snapshot is not None
         text = format_weekly_brief(snapshot)
-        assert text.startswith("סיכום שבועי 17.08.2026")
+        # C9: the date is now isolated at the source (dotted_date) so it never
+        # reorders inside the Hebrew header -- the visible digits are unchanged.
+        # Spelled out with a literal FSI/PDI escape rather than a second call to
+        # dotted_date, so a revert of that adoption would actually fail this.
+        assert text.startswith("סיכום שבועי ⁨17.08.2026⁩")
         assert "פגישות נקבעו:" in text
         assert "בקשות ביטול:" in text
         assert "מעקבים פתוחים:" in text

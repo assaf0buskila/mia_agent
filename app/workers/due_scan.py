@@ -14,6 +14,7 @@ from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
 from app.domain.commitments import scan_due_owner_tasks
 from app.domain.followups import follow_up_due_on
+from app.integrations.telegram_format import owner_text
 from app.services.notifications import deliver_owner_telegram
 
 logger = logging.getLogger(__name__)
@@ -109,7 +110,7 @@ def maybe_notify_due_owner_tasks(
     if not store.commit_owner_notification_delivery_state():
         return 0
     delivery = deliver_owner_telegram(
-        text=text, settings=settings, recipient_ids=claimed_recipients
+        text=owner_text(text), settings=settings, recipient_ids=claimed_recipients
     )
     store.record_owner_notification_recipient_delivery_outcomes_durably(
         kind=KIND_DUE_REMINDER,

@@ -15,11 +15,18 @@ Bidi note: Telegram documents no RTL control for plain `sendMessage` (`is_rtl` e
 on rich messages). A Hebrew line ending in a Latin/numeric token reorders visibly, so
 LTR runs are wrapped in Unicode isolates. That is a Unicode-standard technique, not a
 Telegram-documented one, and is worth eyeballing on a real client.
+
+`owner_text()` is the single normaliser every owner-facing string passes through at
+egress -- dash punctuation by role, LTR-run isolation, and a leading RLM on a Hebrew
+line whose first strong character is Latin. It fixes what a builder cannot: model
+prose, and any owner copy nobody got around to isolating field-by-field. `isolate()`
+stays the builder-level primitive for a single known field (an id, a URL, a date).
 """
 
 from __future__ import annotations
 
 import re
+import unicodedata
 from datetime import date, datetime
 from html import escape
 from zoneinfo import ZoneInfo
@@ -202,6 +209,206 @@ def isolate(value: object) -> str:
     return f"{_FSI}{text}{_PDI}"
 
 
+# ------------------------------------------------------------------ owner_text
+# House rules for Hebrew owner output, enforced at egress rather than by convention
+# (see docs/MIA_CAMPAIGN_FINISH_PLAN.md C9 for the design this implements):
+#
+# R1. No dash as punctuation. `—`/`–`/`--` padded by spaces is not how Mia
+#     separates two facts in a sentence; a comma is. A dash with no surrounding
+#     spaces (`gpt-5.6`, `soken-koli`, `09:00-17:00`) is DATA and is left alone.
+# R7. Every owner line starts with Hebrew. Telegram derives paragraph direction
+#     from the first *strong* character of the line; a line whose first strong
+#     character is Latin flips the whole line to an LTR base and reorders the
+#     bullet/punctuation around it. A leading U+200F (RLM) fixes that without
+#     touching any visible character.
+_HEBREW_RE = re.compile(r"[֐-׿]")
+
+_LINE_LEADING_DASH_RE = re.compile(r"^[ \t]*[–—][ \t]*", re.MULTILINE)
+# `[ \t]+` on each side, not a single literal space, so `א  —  ב` and `א\t—\tב`
+# (multi-space/tab padding, not just the single-space case) still normalise.
+_MID_DASH_RE = re.compile(r"(?<=\S)[ \t]+(?:--|–|—)[ \t]+(?=\S)")
+
+# A "run" is one or more space-joined LTR "tokens": a generic alnum-anchored word
+# (letters/digits plus the punctuation that is normally DATA inside one -- path,
+# version, hashtag, handle, decimal, env-var separators) or an HH:MM(:SS) clock
+# reading, optionally followed directly by a `-` and a second clock reading (a
+# time range), so `09:00-17:00` and `PR #31` isolate as one run each, never split
+# on their own internal punctuation. A bare colon is excluded from the generic
+# class on purpose -- `label:` must stay a delimiter, not get swallowed into the
+# run.
+_LTR_CLOCK_SRC = r"\d{1,2}:\d{2}(?::\d{2})?"
+_LTR_TOKEN_SRC = (
+    rf"(?:{_LTR_CLOCK_SRC}(?:-{_LTR_CLOCK_SRC})?|[A-Za-z0-9#@/][A-Za-z0-9._/#@%+=-]*)"
+)
+_LTR_RUN_RE = re.compile(rf"{_LTR_TOKEN_SRC}(?:[ \t]{_LTR_TOKEN_SRC})*")
+# Trailing punctuation is sentence structure, not data -- `soken-koli.` isolates as
+# `soken-koli` with the period outside, `gpt-5.6` (no trailing char in this set)
+# isolates whole.
+_RUN_TRAILING_PUNCT = ".,:;!?"
+
+# `html=False` (raw prose, pre-`render_owner_markdown`): a fenced block, an inline
+# `code` span, or an existing isolate is opaque -- never re-isolated, never
+# dash-normalised a second time (this is what makes the function idempotent).
+_OPAQUE_PLAIN_RE = re.compile(
+    r"```.*?```|`[^`\n]+`|" + _FSI + r"[^" + _PDI + r"]*" + _PDI, re.DOTALL
+)
+# `html=True` (already-built card HTML): a `<pre>`/`<code>` span, any tag, any
+# entity, or an existing isolate is opaque.
+_OPAQUE_HTML_RE = re.compile(
+    r"<pre>.*?</pre>|<code>[^<]*</code>|<[^<>]*>|&[a-zA-Z0-9#]+;|"
+    + _FSI
+    + r"[^"
+    + _PDI
+    + r"]*"
+    + _PDI,
+    re.DOTALL,
+)
+
+_BIDI_STRONG = {"L", "R", "AL"}
+_LEADING_GLYPH_RE = re.compile(r"^[ \t]*(?:[•*-][ \t]*)?")
+_LINE_TAG_RE = re.compile(r"<[^<>]*>")
+
+
+def _normalise_dashes(text: str) -> str:
+    """R1: a line-leading dash is deleted; a mid-sentence padded dash becomes a comma.
+
+    Called per-gap (see `_transform_gaps`), never on a whole opaque-containing
+    string, so a literal ` -- ` inside a fenced/code/`<pre>`/`<code>` span --
+    real data, e.g. `git diff -- a.py b.py` -- is never touched.
+
+    A gap does not know its own absolute position in the original string, so
+    without help `^` (MULTILINE) treats the gap's own position 0 as a line
+    start even when the gap actually begins mid-line, right after an opaque
+    span. `_transform_gaps` corrects for that by prepending a `\\x00`
+    sentinel before calling this function whenever the gap is not truly at a
+    line start, and stripping it afterwards -- see there for why that also
+    keeps `_MID_DASH_RE`'s `(?<=\\S)` lookbehind correct instead of merely
+    inert.
+    """
+    text = _LINE_LEADING_DASH_RE.sub("", text)
+    text = _MID_DASH_RE.sub(", ", text)
+    return text
+
+
+def _wrap_ltr_run(match: re.Match[str]) -> str:
+    run = match.group()
+    trimmed = run.rstrip(_RUN_TRAILING_PUNCT)
+    if not trimmed:
+        return run
+    return f"{_FSI}{trimmed}{_PDI}{run[len(trimmed):]}"
+
+
+# Never a legitimate character in owner-facing text; used only as a scratch
+# marker inside `_transform_gaps`, immediately stripped before the gap is
+# ever returned.
+_GAP_SENTINEL = "\x00"
+
+
+def _transform_gaps(text: str, opaque_re: re.Pattern[str], *, isolate_runs: bool) -> str:
+    """Apply dash normalisation (and, when asked, LTR-run isolation) to every
+    gap between `opaque_re`'s matches; the matches themselves pass through
+    completely untouched. This is what makes fenced/code/`<pre>`/`<code>`
+    content, any tag or entity, and any isolate a builder already inserted,
+    opaque to BOTH transforms -- not just to isolation -- so data inside one
+    is never dash-normalised either.
+
+    A gap that does not start at a real line boundary (position 0 of the
+    whole text, or right after a `\\n`) -- i.e. one that opens right after an
+    opaque span, such as the " -- " in `` `git status` -- ``` or in
+    `<b>ליד</b> -- דנה` -- gets a leading `\\x00` sentinel before
+    `_normalise_dashes` runs, stripped again after. Without it, `^`
+    (MULTILINE) in `_LINE_LEADING_DASH_RE` matches the gap's own position 0
+    as if it were a fresh line, so a mid-sentence dash right after a code
+    span or tag was DELETED along with its surrounding spaces instead of
+    becoming a comma -- gluing the two sides together
+    (`` `git status`הכול נקי.`` instead of `` `git status`, הכול נקי.``).
+    The sentinel is not whitespace, so it also satisfies `_MID_DASH_RE`'s
+    `(?<=\\S)` lookbehind correctly rather than merely blocking the
+    line-leading rule.
+    """
+
+    def _transform(gap: str, *, at_line_start: bool) -> str:
+        padded = gap if at_line_start else _GAP_SENTINEL + gap
+        padded = _normalise_dashes(padded)
+        if isolate_runs:
+            padded = _LTR_RUN_RE.sub(_wrap_ltr_run, padded)
+        return padded if at_line_start else padded.lstrip(_GAP_SENTINEL)
+
+    def _at_line_start(pos: int) -> bool:
+        return pos == 0 or text[pos - 1] == "\n"
+
+    pieces: list[str] = []
+    pos = 0
+    for match in opaque_re.finditer(text):
+        pieces.append(_transform(text[pos : match.start()], at_line_start=_at_line_start(pos)))
+        pieces.append(match.group())
+        pos = match.end()
+    pieces.append(_transform(text[pos:], at_line_start=_at_line_start(pos)))
+    return "".join(pieces)
+
+
+def _first_strong_bidi_class(line: str) -> str:
+    for char in line:
+        bidi_class = unicodedata.bidirectional(char)
+        if bidi_class in _BIDI_STRONG:
+            return bidi_class
+    return ""
+
+
+def _apply_line_direction(line: str, *, html: bool) -> str:
+    """R7: prefix RLM when a Hebrew line's first strong character is Latin.
+
+    A tag name (`<b>`, `<code>`, ...) is itself Latin letters, so in
+    `html=True` mode the first-strong-character scan runs over the line with
+    every tag stripped out first -- otherwise `<b>ליד</b>, דנה` (a Hebrew
+    line that merely happens to open with a bold tag) would read "b" as the
+    first strong character and get a spurious RLM. Tags are stripped only
+    for that scan; the RLM, when one is needed, is still inserted into the
+    real line, ahead of the tag, exactly where `_LEADING_GLYPH_RE` finds the
+    logical start of content.
+    """
+    scan_line = _LINE_TAG_RE.sub("", line) if html else line
+    if not _HEBREW_RE.search(scan_line) or _first_strong_bidi_class(scan_line) != "L":
+        return line
+    leading = _LEADING_GLYPH_RE.match(line)
+    cut = leading.end() if leading else 0
+    return f"{line[:cut]}‏{line[cut:]}"
+
+
+def owner_text(text: str, *, html: bool = False) -> str:
+    """The single normaliser every owner-facing string passes through.
+
+    Idempotent. Never changes data: only dash punctuation, invisible bidi
+    controls, and nothing else. `html=False` (default) treats ``` fences and
+    `code` spans as opaque -- use it on raw prose BEFORE render_owner_markdown
+    and on plain-text notification bodies. `html=True` treats tags, entities,
+    <pre> and <code> content as opaque -- use it on already-built card HTML.
+    """
+    opaque_re = _OPAQUE_HTML_RE if html else _OPAQUE_PLAIN_RE
+    if not _HEBREW_RE.search(text):
+        # Pure-English tool/provider text gets the dash rule only: there is no
+        # Hebrew base direction to protect, so nothing needs isolating.
+        return _transform_gaps(text, opaque_re, isolate_runs=False)
+    text = _transform_gaps(text, opaque_re, isolate_runs=True)
+    return "\n".join(_apply_line_direction(line, html=html) for line in text.split("\n"))
+
+
+_DATE_DISPLAY_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
+
+
+def dotted_date(value: str) -> str:
+    """`2026-09-16` -> an isolated `16.09.2026`; anything else passes through unchanged.
+
+    The one date-display helper for every owner brief -- daily and weekly briefs
+    used to each keep a byte-identical private copy of this.
+    """
+    match = _DATE_DISPLAY_RE.fullmatch(value)
+    if match is None:
+        return value
+    year, month, day = match.groups()
+    return isolate(f"{day}.{month}.{year}")
+
+
 def code(value: object) -> str:
     """Monospace and tap-to-copy in Telegram clients. Ideal for ids and emails."""
     return f"<code>{esc(value)}</code>"
@@ -352,16 +559,31 @@ def join_sections(*blocks: str) -> str:
     return "\n\n".join(block.strip() for block in blocks if block and block.strip())
 
 
-# Every span this module ever emits that cannot be safely cut in half: a fenced block
-# (which spans newlines by design) and a bold/code span (which never spans a newline,
-# but a raw hard-cut has no newline to respect in the first place). All three are
-# mutually exclusive/non-nesting in our own output, so one regex and one resolver
-# handles all of them identically.
+# Spans that cannot be safely cut in half: a fenced block (spans newlines by design),
+# a bold/code/blockquote span (never spans a newline by our own construction, but a
+# raw hard-cut has no newline to respect in the first place), and a bidi isolate run
+# (FSI...PDI -- cutting between the two would ship a chunk with an unterminated
+# isolate, corrupting direction for everything after it in that chunk). This is NOT
+# "every span this module ever emits" -- `italic()` and `link()` still emit spans
+# this regex does not protect; they have no callers today (see the module's top
+# docstring), so that gap is latent rather than live. `blockquote()` WAS in that
+# same latent state (zero callers, unprotected) until this line was added -- fixed
+# here rather than left for whoever first calls it, because an unclosed
+# `<blockquote>` makes Telegram reject the whole message with no partial delivery.
+# All the protected forms are mutually exclusive/non-nesting in our own output, so
+# one regex and one resolver handles all of them identically. The isolate
+# alternative is listed LAST so a `<code>` span containing an isolate matches as the
+# code span first and protects the isolate inside it, rather than the isolate
+# matching on its own.
 _UNSPLITTABLE_SPAN_RE = re.compile(
-    r"<pre>.*?</pre>|<b>[^<]*?</b>|<code>[^<]*?</code>", re.DOTALL
+    r"<pre>.*?</pre>|<b>[^<]*?</b>|<code>[^<]*?</code>"
+    r"|<blockquote(?: expandable)?>.*?</blockquote>"
+    r"|" + _FSI + r"[^" + _FSI + _PDI + r"]*" + _PDI,
+    re.DOTALL,
 )
 _PRE_OPEN = "<pre>"
 _PRE_CLOSE = "</pre>"
+_BLOCKQUOTE_CLOSE = "</blockquote>"
 # Any HTML tag this module emits, or an HTML entity (`&amp;`, `&lt;`, `&gt;`). Both are
 # parsed atomically by Telegram, so a hard cut must never land inside either.
 _TAG_OR_ENTITY_RE = re.compile(r"<[^<>]*>|&[a-zA-Z0-9#]+;")
@@ -373,11 +595,15 @@ def _span_tags(span_text: str) -> tuple[str, str]:
         return _PRE_OPEN, _PRE_CLOSE
     if span_text.startswith("<b>"):
         return "<b>", "</b>"
-    return "<code>", "</code>"
+    if span_text.startswith("<code>"):
+        return "<code>", "</code>"
+    if span_text.startswith("<blockquote"):
+        return span_text[: span_text.index(">") + 1], _BLOCKQUOTE_CLOSE
+    return _FSI, _PDI
 
 
 def _resolve_unsplittable_span(remaining: str, cut: int, limit: int) -> tuple[int, bool, str, str]:
-    """Adjust `cut` around any `<pre>`/`<b>`/`<code>` span it falls inside.
+    """Adjust `cut` around any `<pre>`/`<b>`/`<code>`/isolate span it falls inside.
 
     Returns `(new_cut, reopen, open_tag, close_tag)`. When the whole span fits under
     `limit`, it is deferred to the next chunk whole (cut right before it) — or, if it
@@ -418,12 +644,43 @@ def _resolve_unsplittable_span(remaining: str, cut: int, limit: int) -> tuple[in
             cut = content_start + 1
         if cut >= content_end:
             return match.end(), False, "", ""
+        # The `code(isolate(v))` shape (proposal_cards.py's mono fields) nests an
+        # FSI...PDI run inside this span's content. A cut computed above from
+        # `limit` alone knows nothing about that nested run, so it can land
+        # between the FSI and PDI: this span's own reopen already keeps `<code>`
+        # balanced across the two chunks, but the isolate inside it would ship
+        # unterminated in one chunk and a stray PDI in the next. Walk the cut to
+        # the nearest content boundary of that isolate instead — back to just
+        # before its FSI when there is room, else forward past its PDI.
+        if _isolate_depth(remaining[content_start:cut]) > 0:
+            last_open = remaining.rfind(_FSI, content_start, cut)
+            if last_open > content_start:
+                cut = last_open
+            else:
+                next_close = remaining.find(_PDI, cut, content_end)
+                if next_close != -1:
+                    cut = next_close + 1
+            if cut <= content_start:
+                return match.start(), False, "", ""
+            if cut >= content_end:
+                return match.end(), False, "", ""
         return cut, True, open_tag, close_tag
     return cut, False, "", ""
 
 
+def _isolate_depth(text: str) -> int:
+    """Net count of unterminated FSI...PDI pairs opened in `text`."""
+    depth = 0
+    for char in text:
+        if char == _FSI:
+            depth += 1
+        elif char == _PDI and depth > 0:
+            depth -= 1
+    return depth
+
+
 def _safe_hard_cut(text: str, limit: int) -> int:
-    """A last-resort hard cut at `limit`, nudged off any tag/entity and toward a space.
+    """A last-resort hard cut at `limit`, nudged off any tag/entity/isolate and toward a space.
 
     `window.rfind` found no usable newline, so the cut is a raw character index. That
     index must never land inside `<...>` or `&...;` — Telegram parses both atomically —
@@ -435,7 +692,10 @@ def _safe_hard_cut(text: str, limit: int) -> int:
     `<code>` span's content (a tag/entity match only covers the 3-7 literal characters
     of the tag itself, not everything between an opening and closing tag). That is
     `split_message`'s job via `_resolve_unsplittable_span`, applied to every cut —
-    newline-based or hard — right after this returns.
+    newline-based or hard — right after this returns. As a second line of defence
+    (not a substitute for that span handling), a cut that still leaves an odd number
+    of open isolates ahead of it is walked back to the isolate's own start, so this
+    function never itself hands back a cut that would ship an unterminated FSI.
     """
     cut = limit
     for match in _TAG_OR_ENTITY_RE.finditer(text):
@@ -447,16 +707,21 @@ def _safe_hard_cut(text: str, limit: int) -> int:
     space = text.rfind(" ", 0, cut)
     if space >= limit // 2:
         cut = space
+    if _isolate_depth(text[:cut]) > 0:
+        last_open = text.rfind(_FSI, 0, cut)
+        if last_open >= limit // 2:
+            cut = last_open
     return cut
 
 
 def split_message(text: str, *, limit: int = _CHUNK_BUDGET) -> list[str]:
     """Chunk to stay under the 4096 limit, preferring paragraph then line boundaries.
 
-    Splitting never lands inside a `<pre>`, `<b>` or `<code>` span (never mid-tag,
-    mid-entity, and — thanks to `_resolve_unsplittable_span` — never with one of these
-    three sliced without being closed and reopened), so every chunk is independently
-    valid Telegram HTML, even when a single such span alone is bigger than `limit`.
+    Splitting never lands inside a `<pre>`, `<b>`, `<code>` or bidi-isolate (FSI...PDI)
+    span (never mid-tag, mid-entity, and — thanks to `_resolve_unsplittable_span` —
+    never with one of these sliced without being closed and reopened), so every chunk
+    is independently valid Telegram HTML with balanced isolates, even when a single
+    such span alone is bigger than `limit`.
 
     `limit` is floored at 64: production always calls with the default (3900), so this
     only ever affects a caller passing something pathologically small, and it exists

@@ -161,7 +161,7 @@ def execute_approved_gmail_send(
     if not write_flag_enabled(settings, "gmail_send"):
         return (
             "השליחה כבויה. הטיוטה נשארה בתיבת הדואר. "
-            "לא שלחתי — צריך MIA_GMAIL_SEND=true אחרי האישור."
+            "לא שלחתי, צריך MIA_GMAIL_SEND=true אחרי האישור."
         )
     row = store.get_approval_by_resource(RESOURCE_GMAIL, draft_id, ACTION_GMAIL_SEND)
     if row is None or row.decision != DECISION_APPROVED:

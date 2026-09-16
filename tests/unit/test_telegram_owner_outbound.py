@@ -223,7 +223,9 @@ async def test_pending_approvals_owner_turn_sends_digest_then_its_own_card(tmp_p
         digest, card = port.sent
         assert digest.parse_mode == "HTML"
         assert digest.reply_markup is None
-        assert "מחכים לאישור: 1" in digest.text
+        # C9: the digest passes through owner_text(html=True), which isolates the
+        # LTR digit run -- the visible count is still 1, just bidi-protected.
+        assert "מחכים לאישור: ⁨1⁩" in digest.text
         assert card.reply_markup == approval_keyboard(approval_token(row.approval_id))
         assert lead_id in card.text
         assert digest.text != card.text
@@ -867,11 +869,12 @@ async def test_pending_view_caps_at_five_with_more_notice(tmp_path) -> None:
         # neither the digest nor the trailing notice carries a keyboard.
         assert len(port.sent) == 7
         assert port.sent[0].reply_markup is None
-        assert "מחכים לאישור: 7" in port.sent[0].text
+        # C9: owner_text(html=True) isolates the LTR digit runs -- counts unchanged.
+        assert "מחכים לאישור: ⁨7⁩" in port.sent[0].text
         for message in port.sent[1:6]:
             assert message.reply_markup is not None
         assert port.sent[6].reply_markup is None
-        assert "ועוד 2" in port.sent[6].text
+        assert "ועוד ⁨2⁩" in port.sent[6].text
         assert port.sent[1].reply_markup == approval_keyboard(approval_token(approval_ids[-1]))
     finally:
         db.close()
@@ -1261,7 +1264,7 @@ async def test_pending_digest_persisted_and_returned_matches_what_was_sent(tmp_p
     from app.core.config import Settings
     from app.db.base import Base
     from app.db.session import make_engine
-    from app.integrations.telegram_format import render_owner_markdown
+    from app.integrations.telegram_format import owner_text, render_owner_markdown
     from app.surfaces.owner import run_owner_loop
     from sqlalchemy.orm import sessionmaker
 
@@ -1296,7 +1299,9 @@ async def test_pending_digest_persisted_and_returned_matches_what_was_sent(tmp_p
 
         assert result.sent is True
         assert len(port.sent) == 2  # digest, then the one card
-        assert render_owner_markdown(result.last_reply) == port.sent[0].text
+        # C9: outbound_reply now normalises through owner_text() (dash punctuation,
+        # bidi isolation) before render_owner_markdown -- match that pipeline exactly.
+        assert render_owner_markdown(owner_text(result.last_reply)) == port.sent[0].text
     finally:
         db.close()
         engine.dispose()
