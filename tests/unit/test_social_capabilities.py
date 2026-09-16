@@ -8,12 +8,16 @@ Instagram, or content-ideas turn.
 
 from __future__ import annotations
 
+import inspect
+import re
+
 from app.brain.embeddings import FakeEmbeddingPort
 from app.brain.store import BrainStore
 from app.capabilities.types import Principal
 from app.core.config import Settings
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
+from app.domain.owner.connection_audit import OwnerAuditResult, _status
 from app.domain.two_state import (
     OWNER_HOUSE_TOOLS,
     MiaState,
@@ -26,6 +30,9 @@ from app.integrations.instagram_insights import (
     FakeInstagramInsightsPort,
 )
 from app.integrations.linkedin import DisabledLinkedInPort, FakeLinkedInPort, LinkedInProfile
+from app.integrations.telegram_format import owner_text
+from app.tools.owner.operations import _owner_system_audit
+from app.tools.owner.types import _NOT_CONNECTED as HOUSE_NOT_CONNECTED
 from app.tools.registries.owner_tools import ToolContext, execute_tool, get_tool, tool_names
 
 
@@ -64,11 +71,11 @@ def test_social_capabilities_reports_not_configured_by_default() -> None:
     try:
         result = execute_tool("social_capabilities", {}, _ctx(session))
         assert result.ok is True
-        assert "LinkedIn profile read: not configured" in result.text
-        assert "Instagram insights read: not configured" in result.text
+        assert "קריאת פרופיל LinkedIn: לא מוגדר" in result.text
+        assert "קריאת תובנות Instagram: לא מוגדר" in result.text
         # These facts hold regardless of configuration.
-        assert "Instagram publishing: not available" in result.text
-        assert "No scheduling on either platform." in result.text
+        assert "פרסום ב-Instagram: לא זמין" in result.text
+        assert "אין תזמון באף אחת מהפלטפורמות." in result.text
     finally:
         session.close()
 
@@ -82,10 +89,10 @@ def test_social_capabilities_unconfigured_linkedin_does_not_promise_the_write_pa
     session = _session()
     try:
         result = execute_tool("social_capabilities", {}, _ctx(session))
-        assert "LinkedIn profile read: not configured" in result.text
-        assert "LinkedIn post or comment: not available" in result.text
-        assert "no active LinkedIn connection to propose against" in result.text
-        assert "not yet verified live" not in result.text
+        assert "קריאת פרופיל LinkedIn: לא מוגדר" in result.text
+        assert "פוסט או תגובה ב-LinkedIn: לא זמין" in result.text
+        assert "אין חיבור LinkedIn פעיל להציע מולו" in result.text
+        assert "עוד לא אומת בשידור חי" not in result.text
     finally:
         session.close()
 
@@ -99,9 +106,9 @@ def test_social_capabilities_configured_linkedin_states_the_write_path() -> None
     try:
         ctx = _ctx(session, linkedin=FakeLinkedInPort(LinkedInProfile(name="Assaf Web")))
         result = execute_tool("social_capabilities", {}, ctx)
-        assert "LinkedIn profile read: available" in result.text
-        assert "not yet verified live" in result.text
-        assert "LinkedIn post or comment: not available" not in result.text
+        assert "קריאת פרופיל LinkedIn: זמין" in result.text
+        assert "עוד לא אומת בשידור חי" in result.text
+        assert "פוסט או תגובה ב-LinkedIn: לא זמין" not in result.text
     finally:
         session.close()
 
@@ -113,8 +120,8 @@ def test_social_capabilities_reflects_composio_settings_readiness() -> None:
         settings.composio_api_key = "key"
         settings.composio_user_id = "user"
         result = execute_tool("social_capabilities", {}, _ctx(session, settings=settings))
-        assert "LinkedIn profile read: available" in result.text
-        assert "Instagram insights read: available" in result.text
+        assert "קריאת פרופיל LinkedIn: זמין" in result.text
+        assert "קריאת תובנות Instagram: זמין" in result.text
     finally:
         session.close()
 
@@ -134,8 +141,8 @@ def test_social_capabilities_reflects_an_already_resolved_port_over_settings() -
             instagram_insights=FakeInstagramInsightsPort([]),
         )
         result = execute_tool("social_capabilities", {}, ctx)
-        assert "LinkedIn profile read: available" in result.text
-        assert "Instagram insights read: available" in result.text
+        assert "קריאת פרופיל LinkedIn: זמין" in result.text
+        assert "קריאת תובנות Instagram: זמין" in result.text
     finally:
         session.close()
 
@@ -159,8 +166,8 @@ def test_social_capabilities_treats_an_explicit_disabled_port_as_not_configured(
             instagram_insights=DisabledInstagramInsightsPort(),
         )
         result = execute_tool("social_capabilities", {}, ctx)
-        assert "LinkedIn profile read: not configured" in result.text
-        assert "Instagram insights read: not configured" in result.text
+        assert "קריאת פרופיל LinkedIn: לא מוגדר" in result.text
+        assert "קריאת תובנות Instagram: לא מוגדר" in result.text
     finally:
         session.close()
 
@@ -191,8 +198,8 @@ def test_social_capabilities_agrees_with_instagram_insights_on_a_direct_graph_on
         assert "Not connected" in read_result.text
 
         caps_result = execute_tool("social_capabilities", {}, ctx)
-        assert "Instagram insights read: not configured" in caps_result.text
-        assert "Instagram insights read: available" not in caps_result.text
+        assert "קריאת תובנות Instagram: לא מוגדר" in caps_result.text
+        assert "קריאת תובנות Instagram: זמין" not in caps_result.text
     finally:
         session.close()
 
@@ -216,8 +223,8 @@ def test_social_capabilities_makes_no_provider_call() -> None:
         ctx = _ctx(session, linkedin=_PoisonedLinkedIn(), instagram_insights=_PoisonedInstagram())
         result = execute_tool("social_capabilities", {}, ctx)
         assert result.ok is True
-        assert "LinkedIn profile read: available" in result.text
-        assert "Instagram insights read: available" in result.text
+        assert "קריאת פרופיל LinkedIn: זמין" in result.text
+        assert "קריאת תובנות Instagram: זמין" in result.text
     finally:
         session.close()
 
@@ -271,3 +278,104 @@ def test_social_writing_rule_states_its_four_guardrails() -> None:
     assert "reach, performance, follower counts, or a best time to post" in SOCIAL_WRITING_RULE
     assert "not scheduled or published by writing it" in SOCIAL_WRITING_RULE
     assert "at most one clarifying question" in SOCIAL_WRITING_RULE
+
+
+# --- Social pass: the rendered capability text is Hebrew ---------------------
+#
+# `format_social_capabilities` renders the one owner-facing capability *answer*.
+# The tool `description`s and `SOCIAL_WRITING_RULE` asserted above are model-facing
+# prompt text and stay English on purpose: they are instructions to the model, not
+# anything Assaf ever reads.
+
+FSI = "⁨"
+PDI = "⁩"
+_HEBREW = re.compile(r"[֐-׿]")
+
+
+def test_capability_text_is_hebrew_with_only_brand_names_in_latin() -> None:
+    """Every verdict reads in Hebrew; the only Latin runs left are brand names.
+
+    Deliberately not a blanket "no ASCII" check: `LinkedIn` and `Instagram` are
+    proper nouns and must stay Latin. What must not survive is an English verdict
+    or an English sentence, which is what made this the one owner-facing read
+    answering in a different language from every other one.
+    """
+    session = _session()
+    try:
+        result = execute_tool("social_capabilities", {}, _ctx(session))
+        latin_runs = {run.strip() for run in re.findall(r"[A-Za-z][A-Za-z ]*", result.text)}
+        assert latin_runs == {"LinkedIn", "Instagram"}, latin_runs
+        assert _HEBREW.search(result.text) is not None
+    finally:
+        session.close()
+
+
+def test_capability_text_keeps_every_claim_when_nothing_is_configured() -> None:
+    session = _session()
+    try:
+        result = execute_tool("social_capabilities", {}, _ctx(session))
+        assert "קריאת פרופיל LinkedIn: לא מוגדר" in result.text
+        assert "קריאת תובנות Instagram: לא מוגדר" in result.text
+        assert "פוסט או תגובה ב-LinkedIn: לא זמין" in result.text
+        assert "אין חיבור LinkedIn פעיל להציע מולו" in result.text
+        # True regardless of configuration.
+        assert "פרסום ב-Instagram: לא זמין, חסום במדיניות" in result.text
+        assert "הודעות ישירות ומודעות ב-Instagram: לא זמינים בשום מסלול" in result.text
+        assert "אין תזמון באף אחת מהפלטפורמות" in result.text
+        assert "לא פוסט שפורסם" in result.text
+    finally:
+        session.close()
+
+
+def test_capability_text_keeps_every_claim_when_linkedin_is_configured() -> None:
+    session = _session()
+    try:
+        ctx = _ctx(session, linkedin=FakeLinkedInPort(LinkedInProfile(name="Assaf Web")))
+        result = execute_tool("social_capabilities", {}, ctx)
+        assert "קריאת פרופיל LinkedIn: זמין" in result.text
+        assert "עוד לא אומת בשידור חי" in result.text
+        assert "פוסט או תגובה ב-LinkedIn: לא זמין" not in result.text
+        # The policy denial does not soften because something else got connected.
+        assert "פרסום ב-Instagram: לא זמין, חסום במדיניות" in result.text
+    finally:
+        session.close()
+
+
+def test_capability_text_survives_the_c9_egress_normaliser() -> None:
+    """C9 integration: the Latin brand runs get isolated at egress, not here.
+
+    `owner_text()` isolates LTR runs only when the string contains Hebrew, so this
+    property could not hold while the text was English -- it is new behaviour the
+    translation buys, and it is what stops `LinkedIn`/`Instagram` reordering inside
+    the surrounding RTL text on a real client. Isolation belongs at egress:
+    hand-isolating here would apply a builder-level primitive to whole prose.
+    """
+    session = _session()
+    try:
+        result = execute_tool("social_capabilities", {}, _ctx(session))
+        rendered = owner_text(result.text)
+        for brand in ("LinkedIn", "Instagram"):
+            assert f"{FSI}{brand}{PDI}" in rendered
+            # No bare, unisolated occurrence may remain anywhere.
+            assert re.search(f"(?<!{FSI}){brand}", rendered) is None
+        assert owner_text(rendered) == rendered, "owner_text must stay idempotent"
+    finally:
+        session.close()
+
+
+def test_connection_audit_not_connected_marker_is_independent_of_this_module() -> None:
+    """The audit's English marker comes from `_house_unavailable`, not from here.
+
+    `connection_audit._status` classifies a probe as unconnected by matching the
+    literal English "not connected" / "not configured" in the probed tool's own
+    text, and `format_social_capabilities` used to be the loudest producer of the
+    second phrase. The two never met -- `social_capabilities` is not one of the
+    audit's probes -- and that is the only reason translating this module is safe
+    rather than a silent break. Pin both halves so a later change cannot quietly
+    couple them: the marker still works from its real producer, and this module is
+    still not a probe.
+    """
+    assert "not connected" in HOUSE_NOT_CONNECTED.casefold()
+    probe = OwnerAuditResult(label="LinkedIn profile", ok=True, text=HOUSE_NOT_CONNECTED)
+    assert _status(probe) == "לא מחובר או לא מוגדר"
+    assert "_social_capabilities" not in inspect.getsource(_owner_system_audit)
