@@ -378,7 +378,10 @@ def test_knowledge_freshness_reports_recency_hash_and_site_stale_after_ingest() 
         source_id="health-freshness.txt",
         url=url,
         fetcher=FakeDocumentFetcher(
-            {url: "# Health freshness fixture\n\n## Services\nA description long enough to chunk.\n"}
+            {
+                url: "# Health freshness fixture\n\n"
+                "## Services\nA description long enough to chunk.\n"
+            }
         ),
         embedding_port=FakeEmbeddingPort(),
     )
