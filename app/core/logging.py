@@ -1,13 +1,30 @@
 import logging
+import traceback
 from typing import Any
 
 from app.core.redact import redact
 
 
+def _redacted_exc_text(exc_info: tuple) -> str:
+    """Render `exc_info` with the standard traceback formatter, then scrub
+    the resulting text. Structure and frames are untouched -- `redact` only
+    substitutes a matched secret substring within the text -- so a real
+    stack trace stays fully readable; only a secret embedded in an
+    exception's own message can be caught (see module docstring intent:
+    same regex/detection `redact` already applies to `record.msg`/`args`)."""
+    return redact("".join(traceback.format_exception(*exc_info)))
+
+
 class RedactingFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
-        if isinstance(record.msg, str):
-            record.msg = redact(record.msg)
+        # Unconditional, not gated on isinstance(record.msg, str): a non-str
+        # msg (an object whose __str__ carries a secret, or a lazy-formatting
+        # object) used to skip this branch entirely and reach the log with
+        # the secret intact once `record.getMessage()` stringified it later.
+        # `redact` already returns any other type unchanged, in type and
+        # value, when no secret pattern matches, so this is safe for every
+        # shape a LogRecord's `msg` actually takes.
+        record.msg = redact(record.msg)
         if record.args:
             if isinstance(record.args, dict):
                 record.args = redact(record.args)
@@ -17,6 +34,21 @@ class RedactingFilter(logging.Filter):
         for key in ("email", "phone", "token", "api_key"):
             if key in extra:
                 extra[key] = "[redacted]"
+        # exc_info/exc_text: scrub at the record level, never by mutating the
+        # exception object itself (`exc_info[1].args`) -- the caller, or
+        # other code up the stack, may still hold and inspect that same
+        # exception instance, and mutating it in place would be a surprising
+        # side effect on someone else's object. `Formatter.format()` only
+        # (re)computes `record.exc_text` from `exc_info` when `exc_text` is
+        # still falsy, so pre-populating it here with an already-redacted
+        # render is enough to make every handler use our scrubbed text
+        # instead, without touching `record.exc_info` or the exception at
+        # all. `record.stack_info` (a `stack_info=True` call's current-stack
+        # dump, unrelated to an exception) is deliberately left untouched --
+        # out of the scope raised here, and not how a caught exception's own
+        # message reaches the log.
+        if record.exc_info:
+            record.exc_text = _redacted_exc_text(record.exc_info)
         return True
 
 

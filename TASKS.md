@@ -26,9 +26,24 @@ Deploy is a separate go. Max 2 agents at once (session usage limit).
 - [x] C7b — proven-dead code, v1 hot-lead auto-freeze (`apply_hot_handoff`) retired while its
       read path (`list_hot_lead_ids`/`hot_ids`/`set_takeover_state`) stays live, reviewed
       follow-ups, docs. A round-2 review caught a false premise in the first pass (production
-      has a live takeover-state row) — fixed at `2311e5b`. Committed locally on
-      `claude/mia-c7b-cleanup-docs`, not yet pushed/PR'd. See `HANDOFF.md` section 0 for the
-      SHAs, evidence and what was deliberately left alone.
+      has a live takeover-state row), fixed at `2311e5b` (#73).
+- [x] C11 — Activity Sheet cells readable again: Hebrew who/action and a short outcome, with
+      the stored enum unchanged so `store.py`'s `contact_captured` queries still match (#75).
+- [x] C8 — Telegram bot token no longer leaks into CloudWatch via httpx request logs
+      (`app/core/redact.py`). The in-app `MIA_DATABASE_PASSWORD` override design was
+      dropped after review (IAM boundary); see HANDOFF section 0.
+- [x] C8 follow-up — `RedactingFilter` (`app/core/logging.py`) now scrubs a non-str
+      `record.msg` and `exc_info`/`exc_text` too, not just a str `msg`; own commit.
+- [ ] C9 — Hebrew presentation standard: `owner_text()` egress normaliser, bidi isolation,
+      no em-dashes, no raw ids (PR #76, in review).
+- [ ] C10 — RDS to mia/prod password auto-sync (`scripts/lambda_sync_db_password.py`; the
+      commits label it C9, renamed here to avoid colliding with the Hebrew chunk).
+      `CODE_CHECKED` + `LOCAL_TESTED` only, NOT deployed. Round-2 review fixed: EventBridge
+      detail-type (was `AwsApiCall`, which could never match a service-emitted rotation event
+      and is still UNVERIFIED against a real rotation), removed `ecs:DescribeServices` (it
+      turned a successful run into a failure under throttling), added log group, DLQ and an
+      `Errors` alarm. Before deploy: create the Lambda, role and EventBridge rule, and verify
+      the event pattern against one real rotation.
 - [ ] Prompt 4 — release readiness, go/no-go → **stop for Assaf**
 - [ ] Prompt 5 — approved deploy + phone acceptance (live LinkedIn post, email send, calendar
       event, website lead — each approved individually)

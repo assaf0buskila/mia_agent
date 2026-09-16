@@ -15,6 +15,127 @@ website lead delivered end to end to Assaf's Telegram. Every item below is `LOCA
 CI-green + independently reviewed at most — deployment status for anything past `110ada6` (i.e.
 this session's C7b work) is unaffected by this correction.
 
+### C8 — RDS credential rotation took production down for ~9 hours (2026-09-16)
+
+**Root cause.** RDS has `ManageMasterUserPassword` enabled and rotates the master password
+into its own AWS-managed secret (`rds!db-d7c051e7-2f6a-4711-826d-2bf7d243a2f8-...`, key
+`password`) every 7 days; last rotation 2026-09-12. The app's own secret `mia/prod` held a
+second, independent copy of the password embedded in `MIA_DATABASE_URL`. When RDS rotated,
+the already-running task kept working on its already-open connection, so nothing alarmed —
+the two copies had silently diverged with no signal. The next task restart (a routine
+deploy) tried to authenticate fresh, failed against the rotated password, and production
+was down until the `mia/prod` copy was hand-updated: roughly nine hours.
+
+**Fix, take 1 (in-app override) — designed, reviewed, then dropped.** A first design added
+an optional `MIA_DATABASE_PASSWORD` setting sourced from the RDS-managed secret as its own
+container secret, overriding just the password in `database_url` at one choke point
+(`Settings.effective_database_url()` / `app.db.session.get_engine()`). Review confirmed the
+substitution logic itself was correct under adversarial testing (23 passwords round-tripped
+exactly through SQLAlchemy's own parser, including `%40`, `%2F`, 512 chars, Hebrew, emoji;
+last-`@` anchoring correct; choke point confirmed sole). It was still dropped: the ECS
+execution role `miaTaskExecutionRole`'s inline policy `ReadMiaProdBoxOnly` is scoped to
+`secret:mia/prod*` only, so it cannot read `secret:rds!db-...` — deploying the RDS-managed
+secret as a container secret as designed would have prevented every task from starting.
+Assaf chose not to widen that policy.
+
+**Fix, take 2 (auto-sync) — the chosen approach, chunk C9, `CODE_CHECKED` + `LOCAL_TESTED`,
+not deployed.** Instead of the running container reading the rotated password directly, an
+EventBridge rule on the RDS-managed secret's rotation event
+(`deploy/eventbridge-db-password-rotation-rule.example.json` +
+`-targets.example.json`, `deploy/iam-lambda-invoke-permission.example.json`) triggers a
+Lambda (`scripts/lambda_sync_db_password.py`, `sync_database_password`) that (a) reads the
+new password from the RDS-managed secret, (b) rewrites only the password inside `mia/prod`'s
+`MIA_DATABASE_URL` — the rest of the URL string preserved byte-for-byte, every other key
+preserved JSON-equivalent (`json.dumps`'s default `ensure_ascii=True` escapes non-ASCII
+values as `\uXXXX`; semantically identical, not literally byte-identical) — and
+(c) forces a new ECS deployment (`ecs:UpdateService` with `forceNewDeployment`) so the
+already-running task actually picks up the change instead of holding the old password until
+something else restarts it (which is exactly today's failure mode; the code comment says so
+explicitly). The percent-encoding + last-`@`-anchoring substitution is carried over verbatim
+from take 1's already-adversarially-reviewed `_with_overridden_dsn_password`, not rewritten.
+Idempotent (re-running against an already-current secret is a no-op on the value, still
+forces a deployment). Guards a UTF-8 BOM on read (one already made this exact secret invalid
+JSON) and never writes one.
+
+The Lambda's IAM role (`deploy/iam-lambda-db-password-sync.example.json` +
+`-trust.example.json`) is scoped to: `secretsmanager:GetSecretValue` on the RDS-managed
+secret; `secretsmanager:GetSecretValue` **and** `PutSecretValue` on `mia/prod`;
+`ecs:UpdateService` (only — see below) on the `mia` service; the three
+`logs:CreateLogGroup`/`CreateLogStream`/`PutLogEvents` actions scoped to this Lambda's own
+log group; `sns:Publish` on its DLQ/alerts topic. The extra `GetSecretValue` on `mia/prod`
+(beyond the originally-specified `PutSecretValue`-only) is necessary — the handler cannot
+preserve every other key without reading the current secret first — and is called out here
+rather than silently added. No resource is `*`. `mia/prod`'s embedded password stays
+load-bearing under this design (it is what the container actually reads); it does not
+become vestigial the way take 1 would have made it.
+
+**Review round 2 findings, fixed:**
+- The EventBridge rule's `detail-type` was wrong (`"AWS API Call via CloudTrail"`, an
+  API-call pattern) for a **service-emitted** event — Secrets Manager's rotation-succeeded
+  event surfaces as `"AWS Service Event via CloudTrail"`. As written, the rule could never
+  match, so the Lambda would never run — a safety net that silently doesn't exist, worse
+  than none, because nobody would do the manual check believing it was automated. Fixed the
+  detail-type and dropped the `requestParameters.secretId` narrowing (the id likely lives
+  under `additionalEventData` for a service event, not `requestParameters`; the handler
+  already hardcodes the RDS secret ARN, so a broader match costs nothing).
+  **Still true, and must stay true until proven otherwise: this event pattern is UNVERIFIED.
+  It has never been fired by a real rotation. Do not treat it as working, do not deploy the
+  rule on the assumption it fires, until one real rotation cycle in staging proves it does.**
+- `ecs.describe_services` was called after every successful write+redeploy purely to
+  populate a status field nothing reads (EventBridge discards the return value). If that
+  call throttled or was denied, it raised *after* the secret write and the redeploy had
+  already succeeded — Lambda's automatic retries would then repeat both, forcing up to
+  three rolling production restarts for a run that had already worked. Removed the call,
+  the `describe_services` Protocol method, the `service_status` return key, and
+  `ecs:DescribeServices` from the IAM policy.
+- The Lambda ran with no log-group grant, no documented base execution permissions, and no
+  DLQ — a failed sync would have been invisible, the exact silent-divergence failure mode
+  this chunk exists to close. Added the CloudWatch Logs statement, `DeadLetterConfig`
+  pointing at an SNS topic (`deploy/lambda-db-password-sync.example.json`), and a
+  CloudWatch `Errors` alarm on that same topic (`deploy/cloudwatch-db-password-sync-errors.example.json`).
+- Three load-bearing properties had no test pinning them (all passed the full suite
+  unmutated): `quote(safe="")` vs. an accidental `safe="%"` (a password literally
+  containing `%40` decodes to the wrong character under the mutant); the write-then-redeploy
+  *order* (if the secret write raises, the redeploy must never fire); and `rpartition("@")`
+  vs. `partition("@")` when the *current* password already contains a literal `@` (plausible
+  here — the current password came from a hand-written secret during the incident). All
+  three now have a dedicated test in `tests/unit/test_lambda_sync_db_password.py`.
+- A runtime `assert not new_secret_string.startswith(BOM)` could never fire — `json.dumps`
+  cannot produce a leading BOM — so it proved nothing and was removed; the "never write a
+  BOM" property is a structural fact about `json.dumps`, checked instead by
+  `test_sync_never_writes_a_bom`.
+
+Not deployed: creating the Lambda, its role, or the EventBridge rule is a separate approval.
+Deploying before the event pattern is verified against one real rotation would recreate the
+exact silent-divergence failure this chunk exists to close, just one layer up the stack.
+
+**Pre-existing gap, flagged by review then fixed on Assaf's call (separate commit):**
+`app/core/logging.py`'s `RedactingFilter` used to guard `record.msg` with
+`isinstance(..., str)` — a non-str `msg` skipped scrubbing entirely and reached the log with
+any secret in its `__str__` intact once `record.getMessage()` stringified it later, the same
+class of bug as the httpx/Telegram leak above. It also never touched `exc_info`/`exc_text`,
+so an exception whose own message embedded a token or password (exactly how a provider
+client error would carry one) reached the log unscrubbed. Both closed: `record.msg` now
+always passes through `redact()` regardless of type; `exc_info` is rendered via the standard
+traceback formatter and scrubbed into `record.exc_text` at the record level (the exception
+object itself is never mutated, since other code up the stack may still hold and inspect it)
+before any handler formats it, so `Formatter.format()`'s own cache-if-empty check picks up
+the already-redacted text instead of recomputing an unredacted one. Traceback structure and
+frames are untouched — only matched secret substrings are substituted — so real stack traces
+stay fully readable. `record.stack_info` (a separate, unrelated `stack_info=True` mechanism)
+is deliberately left untouched.
+
+**Separate, incidental finding fixed and kept regardless of which take: Telegram bot token
+leaking into CloudWatch.** httpx's own request logger (`logging.getLogger("httpx")`) logs
+`request.url` as an `httpx.URL` object, not a pre-formatted string. `app/core/redact.py`'s
+`redact()` only pattern-matched `str`/`dict`/`list` values, so this one non-string `%`-style
+log argument fell through every branch untouched, and the Telegram bot token embedded in
+the URL path (`api.telegram.org/bot<TOKEN>/sendMessage`) reached `/ecs/mia` in plaintext.
+Assaf already revoked the exposed token; the replacement would have leaked identically.
+Fixed by extending `redact()` to stringify and pattern-check any non-str/dict/list value,
+substituting the scrubbed string only when a token is actually present. Independent of the
+credential-rotation question either way; merged on its own.
+
 ### Merged to master (each: failing test → fix → fresh opus review → fixes → green CI)
 
 | PR | Chunk | What it fixed | Known limits recorded |
