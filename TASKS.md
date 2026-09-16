@@ -21,6 +21,8 @@ Deploy is a separate go. Max 2 agents at once (session usage limit).
 - [x] C8 — Telegram bot token no longer leaks into CloudWatch via httpx request logs
       (`app/core/redact.py`). The in-app `MIA_DATABASE_PASSWORD` override design was
       dropped after review (IAM boundary); see HANDOFF §0.
+- [x] C8 follow-up — `RedactingFilter` (`app/core/logging.py`) now scrubs a non-str
+      `record.msg` and `exc_info`/`exc_text` too, not just a str `msg`; own commit.
 - [ ] C9 — RDS→mia/prod password auto-sync (`scripts/lambda_sync_db_password.py`),
       `CODE_CHECKED` + `LOCAL_TESTED` only — not deployed. Round 2 review fixed: EventBridge
       detail-type (was `AwsApiCall`, could never match a service-emitted rotation event —

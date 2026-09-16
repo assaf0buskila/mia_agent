@@ -1,6 +1,7 @@
 """Pre-cloud security review — contracts that must stay fail-closed."""
 
 import logging
+import sys
 
 import httpx
 from app.core.config import Settings, get_settings
@@ -90,6 +91,75 @@ def test_redacting_filter_scrubs_the_telegram_token_httpx_actually_logs() -> Non
         'HTTP Request: POST https://api.telegram.org/bot[redacted]/sendMessage "HTTP/1.1 200 OK"'
     )
     assert formatted == expected
+
+
+def test_redacting_filter_scrubs_a_non_string_record_msg() -> None:
+    """Gap 1: `record.msg` used to only be scrubbed when `isinstance(msg,
+    str)` was already true. An object passed directly as `msg` (no `%s`
+    args at all) skipped that branch entirely and reached `getMessage()`
+    with its secret intact once stringified there."""
+    token = "123456:AAFakeTokenInNonStringMsg"
+    msg_obj = httpx.URL(f"https://api.telegram.org/bot{token}/sendMessage")
+    record = logging.LogRecord(
+        name="test", level=logging.INFO, pathname=__file__, lineno=0,
+        msg=msg_obj, args=(), exc_info=None,
+    )
+    assert not isinstance(record.msg, str)  # the exact shape the gate used to skip
+    assert RedactingFilter().filter(record) is True
+    formatted = record.getMessage()
+    assert token not in formatted
+    assert formatted == "https://api.telegram.org/bot[redacted]/sendMessage"
+
+
+def test_redacting_filter_scrubs_exception_message_in_final_formatted_output() -> None:
+    """Gap 2: an exception whose own message embeds a secret (exactly how a
+    provider client error would carry one) must not reach the formatted log
+    line. Goes through a real `logging.Formatter`, not just attribute
+    inspection, because that -- not `record.exc_info` alone -- is what a
+    handler actually writes to CloudWatch."""
+    token = "123456:AAFakeTokenInException"
+    try:
+        raise RuntimeError(f"failed calling https://api.telegram.org/bot{token}/sendMessage")
+    except RuntimeError:
+        exc_info = sys.exc_info()
+
+    record = logging.LogRecord(
+        name="test", level=logging.ERROR, pathname=__file__, lineno=0,
+        msg="owner turn failed", args=(), exc_info=exc_info,
+    )
+    original_exception = exc_info[1]
+    assert RedactingFilter().filter(record) is True
+    formatted = logging.Formatter("%(message)s").format(record)
+
+    assert token not in formatted
+    assert "Traceback (most recent call last):" in formatted  # structure intact
+    assert "RuntimeError" in formatted  # exception type still visible
+    # Scrubbed at the record level only -- the caller's own exception object,
+    # which other code up the stack may still hold, is never mutated.
+    assert token in str(original_exception)
+    assert token in original_exception.args[0]
+
+
+def test_redacting_filter_leaves_a_normal_exception_traceback_intact() -> None:
+    """A plain exception with nothing sensitive in it must format exactly as
+    before -- proof this fix cannot be confused with "we stopped logging
+    errors"."""
+    try:
+        raise ValueError("plain failure, nothing sensitive here")
+    except ValueError:
+        exc_info = sys.exc_info()
+
+    record = logging.LogRecord(
+        name="test", level=logging.ERROR, pathname=__file__, lineno=0,
+        msg="something broke", args=(), exc_info=exc_info,
+    )
+    assert RedactingFilter().filter(record) is True
+    formatted = logging.Formatter("%(message)s").format(record)
+
+    assert "something broke" in formatted
+    assert "ValueError" in formatted
+    assert "plain failure, nothing sensitive here" in formatted
+    assert "Traceback (most recent call last):" in formatted
 
 
 def test_r4_approval_r5_deny_not_flag_overridable() -> None:

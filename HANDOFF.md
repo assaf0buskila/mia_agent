@@ -105,10 +105,21 @@ Not deployed: creating the Lambda, its role, or the EventBridge rule is a separa
 Deploying before the event pattern is verified against one real rotation would recreate the
 exact silent-divergence failure this chunk exists to close, just one layer up the stack.
 
-**Pre-existing, out of scope, recorded not fixed:** `app/core/logging.py`'s `RedactingFilter`
-guards `record.msg` with `isinstance(..., str)` and never touches `exc_info` — both are
-still a path for a token or password to reach the logs if a future log call passes either
-shape. Flagged as a follow-up task, not fixed here (unrelated to C8/C9's scope).
+**Pre-existing gap, flagged by review then fixed on Assaf's call (separate commit):**
+`app/core/logging.py`'s `RedactingFilter` used to guard `record.msg` with
+`isinstance(..., str)` — a non-str `msg` skipped scrubbing entirely and reached the log with
+any secret in its `__str__` intact once `record.getMessage()` stringified it later, the same
+class of bug as the httpx/Telegram leak above. It also never touched `exc_info`/`exc_text`,
+so an exception whose own message embedded a token or password (exactly how a provider
+client error would carry one) reached the log unscrubbed. Both closed: `record.msg` now
+always passes through `redact()` regardless of type; `exc_info` is rendered via the standard
+traceback formatter and scrubbed into `record.exc_text` at the record level (the exception
+object itself is never mutated, since other code up the stack may still hold and inspect it)
+before any handler formats it, so `Formatter.format()`'s own cache-if-empty check picks up
+the already-redacted text instead of recomputing an unredacted one. Traceback structure and
+frames are untouched — only matched secret substrings are substituted — so real stack traces
+stay fully readable. `record.stack_info` (a separate, unrelated `stack_info=True` mechanism)
+is deliberately left untouched.
 
 **Separate, incidental finding fixed and kept regardless of which take: Telegram bot token
 leaking into CloudWatch.** httpx's own request logger (`logging.getLogger("httpx")`) logs
