@@ -70,6 +70,65 @@ Deploy is a separate go. Max 2 agents at once (session usage limit).
       publish route requires the literal word `CREATE` in the live slug; if the real slug differs
       Mia refuses, and the release demo does not exist.
 
+## Hardening campaign (plan: `docs/MIA_HARDENING_PLAN.md`)
+
+Goal: every one of the 13 inspection sectors above 8.5, i.e. at 9 or 10. The 9-10 band needs all
+three of: an unbypassable choke point, an adversarial test, **and** an observable log when the
+guard trips. Mia is strong on the first, weak on the second, near-absent on the third — the whole
+application emits 26 log statements across 8 files. That is why H1 gates everything.
+
+Baseline: the 2026-09-16 agent inspection graded 6/10 weighted at `8ed912e`
+(S1 6, S2 7, S3 6, S4 7, S5 8, S6 6, S7 7, S8 6, S9 7, S10 6, S11 8, S12 6, S13 7).
+Master is now `ef8ff78`, twelve commits later, so those grades are stale until H0 re-measures.
+Scorecard: https://claude.ai/artifact/DUuZeGmxa98EaiM5fg2Ft1
+
+Decisions (Assaf, 2026-09-17): evidence bar is `LOCAL_TESTED` everywhere plus a real-model eval
+for S2/S3/S6; thematic chunks, observability spine first; **deploy at the end**; the ~09-19 RDS
+rotation gets a dated manual runbook step rather than an exception deploy.
+
+Order: H0 → H1 → (H2, H3, H4 parallel) → H5 → H6 → H7 → H8 → H10 → H9.
+
+- [ ] H0 — re-baseline at `ef8ff78` + cleanup inventory. No code. Grades the 12 new commits,
+      including `app/brain/site_freshness.py` (142 lines, never inspected, lands inside S6's
+      sector); challenges the 36 claims deferred when the first inspection hit the usage limit;
+      runs the two completeness critics that never ran; inventories cleanup candidates with
+      liveness proofs.
+- [ ] H1 — observability spine. Reason-code registry, one `guard_tripped` emitter, a durable trip
+      row on `/health`, `log_comm` called with `success=True` on every channel, `persist_ai_run`
+      wired into site v2. Precondition for all 13 sectors.
+- [ ] H2 — the confirmed defects, each with the test that would have caught it.
+- [ ] H3 — class fixes, not instance fixes: an undiscardable typed outcome, the
+      `except RuntimeError` sweep, empty-result markers as constants, the Chat/Gemini truncation
+      contract.
+- [ ] H4 — provenance and session lifecycle: provenance carried with a parked contact, session
+      TTL, origin bind, email-grants-a-write.
+- [ ] H5 — the privileged loop: untrusted-data frame on owner tool results, visitor free text
+      reaching the owner model.
+- [ ] H6 — resource safety: connection pool config and `pool_pre_ping`, transaction scope vs model
+      latency, aggregate spend ceiling, rate-limiter topology.
+- [ ] H7 — the gate becomes real: flip the 7 permissive fakes to strict, `VisitorWorld` + website
+      scenarios, `hard_safety_ids()` as the runner's authority, predeploy in CI.
+- [ ] H8 — real-model evidence and a sandbox tier for Sheets/Calendar/Gmail. First
+      `INTEGRATION_TESTED` evidence in the system.
+- [ ] H10 — cleanup, acting on H0's ledger. Nothing deleted without a liveness proof.
+- [ ] H9 — re-inspect at the final SHA, sign off, then deploy, rotate the Telegram token,
+      re-register the webhook, phone acceptance. **Stop for Assaf.**
+
+Ceilings recorded rather than graded around: S9 is capped until the H9 deploy (production has
+leaked the bot token into CloudWatch for the whole life of `110ada6`; master fixes it); S13 caps
+near 8 until a real rotation proves the EventBridge pattern; integrations beyond
+Sheets/Calendar/Gmail stay faked; S6 is capped by Vercel, below.
+
+External, Assaf's not the repo's:
+
+- [ ] Regenerate `llms.txt` / `llms-full.txt` / `pricing.md` on Vercel at build time. All three are
+      dated 09-14 and did not move with the 09-16 site change. They are Mia's only knowledge
+      sources, so C12's hourly ingest runs against files that never change.
+- [ ] Merge `assaf-landingPage#28`. Until it does, assafweb.com serves the scripted fake chat, so
+      H9 would ship a working widget to a site that does not embed it.
+- [ ] 09-19 rotation runbook step: confirm the task's `startedAt` is later than the secret's
+      `LastChangedDate`, hand-sync `mia/prod` if they diverged.
+
 ## Gaps the readiness audit found in the gates themselves
 
 Recorded so nobody reads a green suite as completeness.

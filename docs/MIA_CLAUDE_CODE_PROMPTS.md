@@ -257,3 +257,31 @@ Return: findings (file:line, severity P0–P3, failing scenario, smallest fix), 
 ```text
 Resume <chunk> after the interruption: you were <last step>. Continue in <worktree> from its current state (check git status --short / git diff --stat first). <remaining items>. Foreground commands only. Same verify/commit/return rules.
 ```
+
+## Hardening briefs (campaign: `docs/MIA_HARDENING_PLAN.md`)
+
+Same mechanics as the ready briefs above: one brief per Agent call (`general-purpose`, background),
+own worktree off the latest `origin/master`, never pushes; the main session pushes, opens the PR
+and runs the reviewer template. Prepend the same `### Common builder rules` block, substituting
+the `H<n>` chunk id.
+
+`H0` has no builder brief — it is a re-baseline workflow the main session runs
+(`mia-h0-rebaseline`), and it writes no code.
+
+Two rules specific to this campaign, on top of the common block:
+
+```text
+A GUARD WITHOUT A LOG IS NOT DONE. Any chunk that adds or moves a guard adds its reason code to the registry and a caplog test in the same commit.
+FIX THE CLASS, NOT THE INSTANCE. If the same shape exists elsewhere, fix it too or record it as a named follow-up. Three fixes in this repo closed an instance and the class reappeared one level up.
+```
+
+### H1 — observability spine (plan §4 H1) — gates every other chunk
+
+```text
+Observability only: this chunk must not change control flow, a decision, a reply, a write or a schema's meaning. Every behavioural assertion in the existing suite must still pass unchanged. If you find a bug while wiring a log, record it for H2/H3 — do not fix it here.
+STATE: the whole application emits 26 log statements across 8 files. app/workers/crm_delivery.py is 702 lines with 0 log calls, 12 bare excepts and 48 returns; app/services/crm_v2.py (1669) and app/db/store.py (~3500) have 0 each. There is no reason-code registry: ~17 inline literals in the house format "<subject> <verb-phrase> reason=<snake_case>", reference set app/surfaces/site_v2.py:404-597. Only 3 test files use caplog. There is no in-process counter store of any kind, and delivery runs on a daemon thread (app/workers/crm_runtime.py:117), so a process-local counter would be wrong.
+REUSE, DO NOT REINVENT: (a) the allowlist-validated vocabulary pattern at app/core/owner_timing.py:15 (_ALLOWED_STAGES, unknown -> "unknown") — this is the only validated event vocabulary in the repo and the registry must copy it. (b) log_comm at app/core/logging.py:69 — a purpose-built PII-safe emitter with a policy_result reason slot, 14 fixed fields, 3 call sites (app/workers/telegram_owner.py:175,324,355) ALL passing success=False; its success=True default is dead. (c) RedactingFilter at app/core/logging.py:18 on the single handler from configure_logging at :55 — every record already passes it, so the emitter routes through the existing choke point and inherits redaction. (d) the _health_ops pattern at app/main.py:25 with store.count_pending_approvals/count_human_takeover/count_failed_webhooks/count_open_reconciliation (app/db/store.py:725,735,743,753) — a guard-trip count can only surface through a durable row, never a process counter.
+DO NOT TOUCH: CanonicalEvent (app/domain/events.py:90) and EventType. Its shape (StrEnum + per-type key allowlist + correlation_id) is the right model to copy, but its vocabulary is funnel-gated by COUNTABLE_EVENT_TYPES at app/db/store.py:2645 and a guard_tripped member would pollute KPI counts.
+IMPLEMENT: (1) app/core/guard.py — a StrEnum ReasonCode registry validated like _ALLOWED_STAGES, and one guard_tripped(code, **facts) emitter writing through the existing mia.* loggers in the house format. Facts are booleans, enums, counts, ids and durations only: never visitor text, never a provider payload, never a contact value. Unknown code -> "unknown" plus a test that the registry rejects it. (2) Adopt the existing ~17 literals into the registry without changing their emitted strings, so no log consumer breaks. (3) Persist a guard-trip row and surface a count through _health_ops alongside the existing four. (4) Call log_comm with success=True on every channel that completes a send — Telegram owner, website, CRM delivery — so the ledger has both halves; keep the existing failure sites. (5) Wire persist_ai_run (app/domain/ai_runs.py:175) into the site v2 turn: it has exactly 2 call sites, both in app/surfaces/owner.py (:411, :461), so website turns record nothing today. WEBSITE_ACTIONS already exists at app/domain/ai_runs.py:84 for a writer that no longer calls in, and the docstring at :106 claiming "Three surfaces write ai_runs" is drift — correct it. (6) Silent zones, in order: crm_delivery.py first (one line per job claim, per outcome, per bare-except, naming the reason), then crm_v2.py capture and conflict paths. Do not add a log inside db/store.py query helpers. (7) Give the three modules that use logging.getLogger(__name__) — app/surfaces/site_v2.py:39, app/workers/crm_runtime.py:25, app/workers/due_scan.py:20 — their proper mia.* names.
+TESTS: a caplog test per reason code asserting the code appears exactly once and the message carries no visitor text, no contact value and no token; a test that an unregistered code raises or degrades to "unknown"; a redaction test that a secret placed in a guard fact never reaches the record; a delivery test that a wedged outbox row now produces a line (today it produces none, ever); a site v2 turn writes one ai_run row; log_comm success=True round-trips on each channel. Assert the full suite is unchanged in behaviour: 2267 passed, 7 skipped is the baseline to beat.
+```
