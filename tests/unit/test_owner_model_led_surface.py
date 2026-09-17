@@ -841,3 +841,90 @@ def test_log_comm_no_longer_defaults_success_to_true() -> None:
     from app.core.logging import log_comm
 
     assert inspect.signature(log_comm).parameters["success"].default is inspect.Parameter.empty
+
+
+class _IndexZeroFailingMessagePort:
+    """Message index 0 -- the prose/digest -- fails; every later chunk goes through.
+
+    A Telegram 429 on the first chunk of a long reply, where the short approval card
+    that follows is small enough to get through.
+    """
+
+    def __init__(self) -> None:
+        self.attempts = 0
+        self.sent: list = []
+
+    async def send(self, message) -> None:  # noqa: ANN001
+        from app.integrations.telegram import TelegramSendError
+
+        self.attempts += 1
+        if self.attempts == 1:
+            raise TelegramSendError("telegram send failed HTTP 429")
+        self.sent.append(message)
+
+
+@pytest.mark.asyncio
+async def test_a_lost_prose_reply_is_not_a_successful_comm_record(monkeypatch, caplog) -> None:
+    """`mia.comm` success means the owner's answer landed, not that some chunk did.
+
+    Index 0 is the prose/digest on both composition branches, so `sent` is exactly
+    "Assaf's answer reached Telegram". Keyed on `delivered_any` instead, this record
+    read `success=True policy=owner_reply_delivered` for a turn where the answer was
+    lost permanently and only the follow-up card arrived -- so a reader counting
+    `success=False` to find lost owner replies undercounted them.
+
+    The webhook row stays `sent` here on purpose: that answers "may this turn be
+    re-sent?", and the card's keyboard already reached Telegram.
+    """
+    from app.domain.events import Channel
+    from app.integrations.base import OutboundMessage
+
+    def _talk(**kwargs):  # noqa: ANN003
+        kwargs["approval_ids_out"].append("appr-lost-prose")
+        return ("accepted", False)
+
+    monkeypatch.setattr(owner, "_talk_with_optional_agent", _talk)
+    monkeypatch.setattr(
+        owner,
+        "_turn_approval_card_messages",
+        lambda store, *, item, approval_ids: [
+            (
+                OutboundMessage(
+                    conversation_id=ACTOR,
+                    text="CARD",
+                    channel=Channel.TELEGRAM.value,
+                    idempotency_key=f"{item['id']}:card",
+                    parse_mode="HTML",
+                ),
+                "turn:appr-lost-prose",
+            )
+        ],
+    )
+    event_id = "surface-prose-lost-card-sent"
+    _claim(event_id)
+    db = get_session_factory()()
+    store = LeadStore(db)
+    port = _IndexZeroFailingMessagePort()
+    try:
+        with caplog.at_level("INFO", logger="mia.comm"):
+            result = await owner.run_owner_loop(
+                item={"id": event_id, "from": ACTOR, "chat_id": ACTOR, "text": "מה מצב?"},
+                store=store,
+                port=port,
+                settings=Settings(_env_file=None, telegram_owner_user_ids=ACTOR),
+                owner_ids={ACTOR},
+                channel=Channel.TELEGRAM,
+            )
+        # The card really did arrive, and the webhook really is terminal.
+        assert [message.text for message in port.sent] == ["CARD"]
+        assert not result.sent
+        row = store.get_webhook(provider="telegram", provider_event_id=event_id)
+        assert row.status == "sent"
+    finally:
+        db.close()
+    comm = [record for record in caplog.records if record.name == "mia.comm"]
+    assert len(comm) == 1
+    message = comm[0].getMessage()
+    assert "success=False" in message
+    assert "policy=owner_reply_send_failed" in message
+    assert "מה מצב?" not in message

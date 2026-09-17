@@ -216,21 +216,26 @@ async def run_owner_loop(
                     type(exc).__name__,
                     label,
                 )
-    # `processed` is terminal -- `claim_webhook` refuses to reclaim it and
-    # `is_webhook_duplicate` reports it as already handled -- while `failed` is
-    # retryable in both. A turn that had something to say and delivered none of it
-    # is not processed; calling it so lost the owner's answer permanently and kept
-    # /health's `failed_sends` (which counts `failed` rows) reading 0 while it
-    # happened. The `outbound` guard keeps a deliberate silence -- nothing composed
-    # to send at all -- reported as `processed`, so a quiet turn never shows up as a
-    # failed send.
-    #
     # One `mia.comm` line per owner delivery, whichever way it went. Until now the
     # only callers logged failures, so the channel had no denominator: a reader
     # could not tell "nothing failed" from "the logger never fired". Emitted before
     # the status write, which re-raises on an undelivered turn, so the record exists
     # even when the bookkeeping after it does not. Identifiers and booleans only --
     # never `reply`, the owner's text, or a provider payload.
+    #
+    # Keyed on `sent`, NOT on `delivered_any`, and the two are deliberately not the
+    # same question. `sent` is index 0, and index 0 is the prose/digest -- the
+    # owner's actual answer -- on both composition branches: the non-pending branch
+    # starts `outbound` with the prose, `_pending_approvals_messages` starts it with
+    # the digest unconditionally, and cards only ever follow. So `success` here
+    # means exactly "Assaf's answer reached Telegram". On `delivered_any` this
+    # record would read `success=True` for the very turn this chunk exists to
+    # surface -- prose 429s, a later approval card goes through, the answer is lost
+    # for good -- and a reader counting `success=False` to find lost owner replies
+    # would undercount them. The webhook status below stays on `delivered_any` on
+    # purpose: it answers a different question, "may this whole turn be re-sent?",
+    # and a card whose keyboard already reached Telegram must never be handed out
+    # twice.
     log_comm(
         channel=channel.value,
         provider=provider,
@@ -238,11 +243,22 @@ async def run_owner_loop(
         direction="out",
         external_message_id=item["id"],
         conversation_id=event_conversation_id(item),
-        policy_result="owner_reply_delivered" if delivered_any else "owner_reply_send_failed",
+        policy_result="owner_reply_delivered" if sent else "owner_reply_send_failed",
         latency_ms=elapsed_ms(send_started),
-        success=delivered_any,
+        success=sent,
         automation_mode=settings.automation_mode.value,
     )
+    # `processed` is terminal -- `claim_webhook` refuses to reclaim it and
+    # `is_webhook_duplicate` reports it as already handled -- while `failed` is
+    # retryable in both. A turn that had something to say and delivered none of it
+    # is not processed; calling it so lost the owner's answer permanently and kept
+    # /health's `failed_sends` (which counts `failed` rows) reading 0 while it
+    # happened. The `outbound` guard is defensive only -- it is not load-bearing
+    # today and nothing currently reaches its False arm: neither composition branch
+    # can produce an empty `outbound` (both always start with the prose/digest), and
+    # the kill switch's deliberate silence never gets this far, it returns near the
+    # top of this function and marks `processed` itself. The guard stays so that a
+    # future genuinely-quiet turn cannot be born as a failed send.
     try:
         store.mark_webhook(
             provider=provider,
