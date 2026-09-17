@@ -43,6 +43,8 @@ class Element {
   closest(s) {let e = this; while (e) {if (e.matches(s)) return e; e = e.parentNode;} return null;}
 }
 const allText = e => e.textContent + e.children.map(allText).join('');
+// What the fake server treats as "this turn carried a contact the classifier accepted".
+const CONTACT_IN_TEXT = /\d{7,}|@/;
 async function settle() {for (let i = 0; i < 5; i++) await new Promise(setImmediate);}
 function world({storage = new Map(), apple = false, rejectTimeslice = false, sessionResponse = null, inlineHost = false} = {}) {
   const document = new Element('document');
@@ -98,9 +100,15 @@ function world({storage = new Map(), apple = false, rejectTimeslice = false, ses
           return Promise.resolve({ok: false, status: 401, json: () => Promise.resolve({})});
         }
         const payload = JSON.parse(options.body);
-        if (state.expireContact && (payload.phone || payload.email)) {state.expireContact = false; return Promise.resolve({ok: false, status: 404, json: () => Promise.resolve({})});}
-        if ((payload.phone || payload.email) && !state.rejectContact) return ok({message: 'הפרטים התקבלו', next_action: 'confirm_contact', whatsapp_url: state.contactUrl});
-        return ok({message: 'השאירו טלפון או אימייל', next_action: 'ask_contact'});
+        // The live server captures a contact out of the visitor's own free text, through
+        // the consent classifier, and app/surfaces/site_v2.py can only ever answer with
+        // one of SITE_V2_ACTIONS. This fake used to reply 'confirm_contact'/'ask_contact',
+        // which made it the only implementation of that vocabulary anywhere and kept the
+        // widget's dead branches looking alive.
+        const carriesContact = CONTACT_IN_TEXT.test(payload.text || '');
+        if (state.expireContact && carriesContact) {state.expireContact = false; return Promise.resolve({ok: false, status: 404, json: () => Promise.resolve({})});}
+        if (carriesContact && !state.rejectContact) return ok({message: 'הפרטים התקבלו', next_action: 'contact_saved', delivery_status: 'confirmed', whatsapp_url: state.contactUrl});
+        return ok({message: 'השאירו טלפון או אימייל', next_action: 'answer'});
       }
       if (url.endsWith('/voice')) return ok({message: 'אפשר להמשיך', next_action: 'answer', heard: 'שלום בעברית'});
       if (url.endsWith('/handoff')) return state.deferHandoff
@@ -120,11 +128,6 @@ function world({storage = new Map(), apple = false, rejectTimeslice = false, ses
     state.el('input').value = text; state.el('send').click(); await settle();
     for (const [id,timer] of [...state.timers]) if (timer.ms <= 1000) {state.timers.delete(id); timer.fn();}
     await settle();
-  };
-  state.submit = async ({name = '', phone = '', email = ''} = {}) => {
-    const form = document.querySelector('.ask-mia-contact'); assert.ok(form);
-    for (const input of form.querySelectorAll('input')) input.value = ({name,phone,email})[input.name];
-    form.dispatchEvent({type: 'submit', preventDefault() {}}); await settle(); return form;
   };
   return state;
 }
@@ -168,28 +171,33 @@ async function main() {
   assert.equal(accessible.el('panel').hidden, true, 'Escape closes the panel');
   assert.equal(accessible.el('launcher').focused, true, 'closing returns focus to launcher');
 
+  // The widget's inline contact form is retired (h2d). It only ever opened on
+  // next_action 'ask_contact', a name app/surfaces/site_v2.py has not been able to emit
+  // since 40747c8, and its submit handler read the two live actions as a failed capture.
+  // Retired with it, and asserted nowhere else because the behaviour is gone: the
+  // empty-form guard that refused to post without a phone or an email, a rejected
+  // submission staying open with its button re-enabled, the structured
+  // {text:'רוצה להמשיך עם אסף', name, phone, email} payload, and the form's own field
+  // values never reaching the transcript. Capture now runs only through free text and
+  // the consent classifier, which is the path below.
+  assert.equal(source.includes('ask-mia-contact'), false, 'the retired contact form must not come back');
   const w = world(); await w.open(); await w.send('אני צריכה עזרה');
-  const form = await w.submit();
-  assert.equal(w.calls.filter(c => c.url.includes('/messages')).length, 1, 'empty form never posts');
-  w.rejectContact = true; await w.submit({phone: 'bad'});
-  assert.equal(form.hidden, false, 'rejected contact stays visible');
-  assert.equal(form.querySelector('button').disabled, false, 'rejected contact can be corrected');
-  w.rejectContact = false; await w.submit({name: 'דנה', email: 'dana@example.test'});
-  const payload = JSON.parse(w.calls.filter(c => c.url.includes('/messages')).at(-1).options.body);
-  assert.equal(payload.text, 'רוצה להמשיך עם אסף'); assert.equal(payload.email, 'dana@example.test');
-  assert.equal(payload.phone, ''); assert.equal(payload.name, 'דנה');
-  assert.equal(allText(w.el('transcript')).includes('dana@example.test'), false);
-  const cta = w.document.querySelector('.ask-mia-handoff-cta'); assert.ok(cta, 'confirmation immediately paints CTA');
+  w.rejectContact = true; await w.send('אפשר לחזור אליי 0501234567');
+  assert.equal(w.document.querySelector('.ask-mia-handoff-cta'), null, 'a turn the server did not capture paints no CTA');
+  assert.equal(w.el('status').textContent, '', 'a turn the server did not capture states nothing about the contact');
+  w.rejectContact = false; await w.send('כן, 0501234567');
+  assert.equal(w.el('status').textContent, 'הפרטים נשמרו והמסירה לאסף אושרה.', 'a capture reads as a success, never as a failure');
+  const cta = w.document.querySelector('.ask-mia-handoff-cta'); assert.ok(cta, 'a captured contact immediately paints CTA');
   assert.equal(cta.href, 'https://wa.me/972501234567'); cta.click(); await settle();
   assert.equal(w.storage.has('askMia.sessionId'), true, 'delivered handoff keeps the resumable session');
   await w.send('שיחה חדשה'); assert.equal(w.sessionCount, 1, 'conversation continues after handoff');
   assert.equal(allText(w.el('transcript')).includes('אני צריכה עזרה'), true, 'continued chat keeps its transcript');
   const expiredContact = world(); await expiredContact.open(); await expiredContact.send('צריכה עזרה');
-  expiredContact.expireContact = true; await expiredContact.submit({email: 'dana@example.test'});
-  assert.equal(expiredContact.sessionCount, 2, 'expired contact session retries with a new session');
+  expiredContact.expireContact = true; await expiredContact.send('הטלפון שלי 0501234567');
+  assert.equal(expiredContact.sessionCount, 2, 'expired capture turn retries with a new session');
   assert.ok(expiredContact.document.querySelector('.ask-mia-handoff-cta'));
   const delayed = world(); await delayed.open(); await delayed.send('השיחה הישנה');
-  await delayed.submit({phone: '0501234567'}); delayed.deferHandoff = true;
+  await delayed.send('0501234567'); delayed.deferHandoff = true;
   delayed.document.querySelector('.ask-mia-handoff-cta').click(); await settle();
   await delayed.send('שיחה חדשה');
   assert.equal(delayed.sessionCount, 1, 'pending handoff holds queued send');
@@ -203,9 +211,13 @@ async function main() {
   assert.equal(JSON.parse(queued.options.body).text, 'שיחה חדשה');
   for (const url of ['', 'https://evil.example/972501234567']) {
     const missing = world(); missing.contactUrl = url;
-    await missing.open(); await missing.send('צריכה עזרה'); await missing.submit({phone: '0501234567'});
-    assert.equal(missing.document.querySelector('.ask-mia-handoff-cta'), null);
-    assert.equal(missing.el('status').textContent, 'וואטסאפ לא זמין כרגע.');
+    await missing.open(); await missing.send('צריכה עזרה'); await missing.send('0501234567');
+    assert.equal(missing.document.querySelector('.ask-mia-handoff-cta'), null, 'only an https wa.me URL is ever painted');
+    // Retired with the dead branches: the 'וואטסאפ לא זמין כרגע.' status this used to
+    // assert came from applyReply's confirm_contact/handoff arm, so a capture with an
+    // unusable URL only ever read that way against a server reply that cannot occur.
+    // On the live contact_saved path the save is still reported, and no CTA is painted.
+    assert.equal(missing.el('status').textContent, 'הפרטים נשמרו והמסירה לאסף אושרה.');
   }
   for (const apple of [false, true]) {
     const v = world({apple}); await v.open(); v.el('mic').click(); await settle();

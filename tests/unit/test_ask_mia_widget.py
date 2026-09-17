@@ -452,11 +452,17 @@ def test_whatsapp_click_claims_delivery_only_after_telegram_acceptance() -> None
     )
 
 
-def test_widget_offers_whatsapp_on_handoff_as_well_as_confirm_contact() -> None:
-    """HANDOFF used to claim a transfer with no CTA. The visitor had no way to reach Assaf."""
+def test_widget_offers_whatsapp_on_a_captured_contact() -> None:
+    """A transfer claimed with no CTA left the visitor no way to reach Assaf.
+
+    Retired in h2d with the actions themselves: this used to pin 'confirm_contact' and
+    'handoff' in applyReply. app/surfaces/site_v2.py has not been able to emit either
+    since 40747c8, so those two assertions protected no reachable behaviour. The
+    behaviour that IS live -- a capture paints a CTA rather than revealing waBtn -- is
+    kept here against the action the server does emit.
+    """
     apply = _function_body(_source(), "applyReply")
-    assert "confirm_contact" in apply
-    assert "handoff" in apply
+    assert "contact_saved" in apply
     assert "placeWhatsAppCta" in apply or "requestWhatsAppCta" in apply
     assert "waBtn.hidden = false" not in apply
 
@@ -507,12 +513,14 @@ def test_whatsapp_offer_is_a_tappable_button_not_a_raw_url() -> None:
     apply = _function_body(source, "applyReply")
     assert "stripWaMeUrls" in apply
     assert apply.index("stripWaMeUrls") < apply.index("appendMsg")
-    assert "confirm_contact" in apply
-    assert "handoff" in apply
+    assert "contact_saved" in apply
     assert "isWaMeUrl(data.whatsapp_url)" in apply
     assert "placeWhatsAppCta" in apply
     assert "requestWhatsAppCta" not in source
-    assert "status.textContent = WA_NA" in apply
+    # WA_NA moved, it did not go: applyReply's copy sat on the retired confirm_contact /
+    # handoff arm, so it only ever fired on a reply the server cannot produce. The live
+    # "WhatsApp is unavailable" message is the one the visitor's own tap reaches.
+    assert "status.textContent = WA_NA" in _function_body(source, "openConfiguredWhatsApp")
     assert "if (!visible) status.textContent = ERR" in apply
     assert "waBtn.hidden = false" not in apply
     strip = _function_body(source, "stripWaMeUrls")

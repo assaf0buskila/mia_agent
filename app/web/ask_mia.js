@@ -402,27 +402,6 @@
       font-weight: 700;
       text-decoration: none;
     }
-    #ask-mia-root .ask-mia-contact {
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-      width: min(100%, 300px);
-      padding: 12px;
-      border: 1px solid #2f5f9321;
-      border-radius: 14px;
-      background: #eef7ff;
-    }
-    #ask-mia-root .ask-mia-contact label,
-    #ask-mia-root .ask-mia-contact small { color: #2f5f93; font-size: 12px; }
-    #ask-mia-root .ask-mia-contact input,
-    #ask-mia-root .ask-mia-contact button {
-      width: 100%;
-      min-height: 44px;
-      border-radius: 10px;
-      font: inherit;
-    }
-    #ask-mia-root .ask-mia-contact input { padding: 9px; border: 1px solid #7ba7d3; background: #fff; }
-    #ask-mia-root .ask-mia-contact button { border: 0; background: #2f5f93; color: #fff; font-weight: 700; }
     #ask-mia-root #ask-mia-status {
       flex: 0 0 auto;
       min-height: 20px;
@@ -597,80 +576,6 @@
   status.id = 'ask-mia-status';
   status.setAttribute('role', 'status');
   status.setAttribute('aria-live', 'polite');
-  var contactBlock = null;
-
-  function showContactCapture() {
-    if (contactBlock) {
-      contactBlock.hidden = false;
-      return;
-    }
-    contactBlock = document.createElement('form');
-    contactBlock.className = 'ask-mia-contact';
-    contactBlock.setAttribute('aria-label', 'פרטי קשר');
-    var name = document.createElement('input');
-    name.name = 'name';
-    name.maxLength = 80;
-    name.setAttribute('aria-label', 'שם (לא חובה)');
-    name.placeholder = 'שם (לא חובה)';
-    name.setAttribute('autocomplete', 'name');
-    var phone = document.createElement('input');
-    phone.name = 'phone';
-    phone.type = 'tel';
-    phone.maxLength = 40;
-    phone.setAttribute('aria-label', 'טלפון');
-    phone.placeholder = 'טלפון';
-    phone.setAttribute('autocomplete', 'tel');
-    var email = document.createElement('input');
-    email.name = 'email';
-    email.type = 'email';
-    email.maxLength = 120;
-    email.setAttribute('aria-label', 'אימייל');
-    email.placeholder = 'או אימייל';
-    email.setAttribute('autocomplete', 'email');
-    var note = document.createElement('small');
-    note.textContent = 'טלפון או אימייל. השם לא חובה.';
-    var submit = document.createElement('button');
-    submit.type = 'submit';
-    submit.textContent = 'המשיכו עם אסף';
-    contactBlock.appendChild(name);
-    contactBlock.appendChild(phone);
-    contactBlock.appendChild(email);
-    contactBlock.appendChild(note);
-    contactBlock.appendChild(submit);
-    contactBlock.addEventListener('submit', function (event) {
-      event.preventDefault();
-      if (busy || submit.disabled) return;
-      var phoneValue = phone.value.trim();
-      var emailValue = email.value.trim();
-      if (!phoneValue && !emailValue) {
-        status.textContent = 'השאירו טלפון או אימייל כדי שאסף יחזור אליכם.';
-        return;
-      }
-      submit.disabled = true;
-      busy = true;
-      status.textContent = '';
-      var contactMessageId = newClientMessageId();
-      retryOnce(function () {
-        return postContact(name.value.trim(), phoneValue, emailValue, contactMessageId);
-      })
-        .then(function (data) {
-          applyReply(data);
-          var captured = data.next_action === 'confirm_contact' || data.next_action === 'handoff';
-          contactBlock.hidden = captured;
-          if (!captured) status.textContent = 'בדקו את הטלפון או האימייל ונסו שוב.';
-          else if (isWaMeUrl(data.whatsapp_url)) status.textContent = 'פרטי הקשר התקבלו.';
-        })
-        .catch(function () {
-          status.textContent = ERR;
-        })
-        .finally(function () {
-          submit.disabled = false;
-          busy = false;
-        });
-    });
-    transcript.appendChild(contactBlock);
-    transcript.scrollTop = transcript.scrollHeight;
-  }
 
   function lastMiaText() {
     var nodes = transcript.querySelectorAll('.ask-mia-mia');
@@ -1080,7 +985,6 @@
   function resetFinishedConversation() {
     clearStoredSession();
     while (transcript.firstChild) transcript.removeChild(transcript.firstChild);
-    contactBlock = null;
     configuredWhatsAppUrl = '';
     waBtn.hidden = true;
     sessionEnded = false;
@@ -1194,16 +1098,12 @@
     }
     var raw = typeof data.message === 'string' ? data.message : '';
     var visible = stripWaMeUrls(raw);
-    var offering =
-      data.next_action === 'confirm_contact' ||
-      data.next_action === 'handoff';
     var replyUrl =
       typeof data.whatsapp_url === 'string' && isWaMeUrl(data.whatsapp_url)
         ? data.whatsapp_url
         : '';
     var painted = visible ? appendMsg('mia', visible) : false;
     if (!visible) status.textContent = ERR;
-    if (data.next_action === 'ask_contact') showContactCapture();
     if (data.next_action === 'contact_saved') {
       var deliveryStatus = typeof data.delivery_status === 'string'
         ? data.delivery_status
@@ -1222,18 +1122,12 @@
         showConfiguredWhatsApp(replyUrl);
       }
     }
-    if (offering) {
-      waBtn.hidden = true;
-      waBtn.classList.remove('offer');
-      if (replyUrl) {
-        placeWhatsAppCta(replyUrl, painted);
-        if (contactBlock) contactBlock.hidden = true;
-      } else {
-        status.textContent = WA_NA;
-      }
-    } else {
-      waBtn.classList.remove('offer');
-    }
+    // Unconditional on purpose, and it is what already ran on every real reply: the
+    // branch this replaces skipped it only for the two retired actions the server has
+    // not been able to emit since 40747c8, so the else arm was the whole live behaviour.
+    // The persistent WhatsApp button keeps its own visibility from showConfiguredWhatsApp;
+    // only the transient "offer" highlight is cleared once the reply has been painted.
+    waBtn.classList.remove('offer');
   }
 
   function retryOnce(run) {
@@ -1253,23 +1147,6 @@
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ text: text, client_message_id: clientMessageId }),
-      }
-    );
-  }
-
-  function postContact(name, phone, email, clientMessageId) {
-    return fetchJson(
-      api + '/v1/website/sessions/' + encodeURIComponent(sessionId) + '/messages',
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          text: 'רוצה להמשיך עם אסף',
-          name: name || '',
-          phone: phone || '',
-          email: email || '',
-          client_message_id: clientMessageId,
-        }),
       }
     );
   }

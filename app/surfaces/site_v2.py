@@ -323,6 +323,18 @@ class SiteV2Reply:
     delivery_status: str = ""
     whatsapp_url: str | None = None
 
+    def __post_init__(self) -> None:
+        # Every next_action the widget can ever see is carried by this dataclass: the two
+        # construction sites in this module are the only ones in app/, and app/api/website.py
+        # copies `out.next_action` straight onto the wire. 40747c8 narrowed the vocabulary
+        # to SITE_V2_ACTIONS and nothing downstream noticed, so the widget kept branching on
+        # names that could no longer arrive. Refusing to construct an unlisted action makes
+        # that drift impossible to reintroduce silently rather than merely documented.
+        # ValueError, not MiaError: this is a dataclass invariant, not a port failure.
+        if self.next_action not in SITE_V2_ACTIONS:
+            _LOG.error("site reply rejected reason=next_action_not_in_vocabulary")
+            raise ValueError(f"next_action not in SITE_V2_ACTIONS: {self.next_action!r}")
+
 
 class _SiteTurnClient:
     """Share one configured model-call budget across consent, reply and validation."""
