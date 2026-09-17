@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -32,6 +33,8 @@ from app.services.crm_v2 import (
     normalize_phone,
 )
 
+_LOG = logging.getLogger(__name__)
+
 # "created"/"updated" cell indices within the 14 CONTACT_FIELDS columns. They are
 # system-computed and legitimately differ from any prior snapshot on every
 # delivery (time passes), so they must never trip the destination-changed
@@ -48,6 +51,18 @@ MAX_SHEET_ROWS = 100_000
 _PROCESS_CRM_EFFECT_LOCK = RLock()
 
 DeliveryOutcome = Literal["confirmed", "failed", "unknown", "conflict"]
+
+# The destination boundary, in one place so `_deliver` and `_reconcile_unknown`
+# cannot drift apart again. `AdapterResponseError` subclasses `AdapterHttpError`,
+# so the "failed" tuple must always be caught first: a destination that answered
+# "I refused this" is a settled negative, while a transport-level failure leaves
+# the external effect genuinely unobserved.
+#
+# `SQLAlchemyError` is deliberately NOT in either tuple. It maps to "failed" in
+# `_deliver` (back off and retry) but to "unknown" in `_reconcile_unknown`, and
+# the two must be written out at each site so the difference stays visible.
+_DESTINATION_FAILED_EXCEPTIONS = (AdapterResponseError, ValueError)
+_DESTINATION_UNKNOWN_EXCEPTIONS = (AdapterHttpError, OSError, RuntimeError, TypeError)
 
 
 class CrmSheetsPort(Protocol):
@@ -385,11 +400,9 @@ class CrmDeliveryWorker:
                         outcome = self._deliver_contact(session, payload)
                 else:
                     outcome = self._dispatch(job.destination, payload, reconcile_only=False)
-            except AdapterResponseError:
+            except _DESTINATION_FAILED_EXCEPTIONS:
                 outcome = "failed"
-            except ValueError:
-                outcome = "failed"
-            except (AdapterHttpError, OSError, RuntimeError, TypeError):
+            except _DESTINATION_UNKNOWN_EXCEPTIONS:
                 outcome = "unknown"
             except SQLAlchemyError:
                 # A DB-level error (a value one destination handler could not persist,
@@ -448,15 +461,50 @@ class CrmDeliveryWorker:
                 job = session.get(CrmOutboxRow, job_id)
                 if job is None or job.status != "unknown":
                     continue
+                destination = job.destination
+                reason = ""
                 try:
                     payload = json.loads(job.payload_json)
                     outcome = (
-                        self._dispatch(job.destination, payload, reconcile_only=True)
+                        self._dispatch(destination, payload, reconcile_only=True)
                         if isinstance(payload, dict)
                         else "failed"
                     )
-                except (AdapterHttpError, AdapterResponseError, OSError, RuntimeError, TypeError):
+                except SQLAlchemyError:
+                    # The one mapping that must differ from `_deliver`, which marks a
+                    # DB error "failed" so the job backs off and retries. Here that
+                    # would be a lie with teeth: `_claim_one` re-claims status in
+                    # ("pending", "failed"), so "failed" hands a job whose external
+                    # effect may already have landed back to the delivery loop for a
+                    # real re-send -- and the DB error may have struck the very
+                    # claim-check that prevents a duplicate owner ping. A readback we
+                    # could not complete leaves the outcome exactly where it was:
+                    # unknown. Roll back first so this session is usable for `_finish`.
+                    session.rollback()
                     outcome = "unknown"
+                    reason = "reconcile_db_error"
+                except _DESTINATION_FAILED_EXCEPTIONS as error:
+                    # Including json.JSONDecodeError, a ValueError: an unparseable
+                    # payload can never be reconciled, and used to escape this method
+                    # past run_once, stopping every reconcile and every delivery
+                    # behind it on every poll, forever.
+                    outcome = "failed"
+                    reason = (
+                        "reconcile_payload_invalid"
+                        if isinstance(error, ValueError)
+                        else "reconcile_destination_rejected"
+                    )
+                except _DESTINATION_UNKNOWN_EXCEPTIONS:
+                    outcome = "unknown"
+                    reason = "reconcile_readback_unavailable"
+                if reason:
+                    _LOG.warning(
+                        "crm reconcile job left %s reason=%s destination=%s attempts=%s",
+                        outcome,
+                        reason,
+                        destination,
+                        job.attempts,
+                    )
                 self._finish(session, job, outcome)
                 session.commit()
                 outcomes.append(outcome)
@@ -678,6 +726,14 @@ class CrmDeliveryWorker:
             job.last_error = "confirmed destination failure"
         elif outcome == "unknown":
             job.last_error = "outcome unknown; readback required before retry"
+            # `last_attempt_at` is the reconcile queue's ordering column
+            # (`_reconcile_unknown` reads the oldest MAX_BATCH rows by it), and only
+            # `_claim_one` used to advance it. A job that reconciles back to "unknown"
+            # therefore kept its timestamp forever, so every poll re-read the same
+            # oldest rows and anything behind them was never reconciled at all. Move
+            # it to the back of the queue, exactly as the "failed" branch above moves
+            # its own `next_attempt_at`.
+            job.last_attempt_at = now
         else:
             job.last_error = "destination state conflicts with attempted write"
             try:
