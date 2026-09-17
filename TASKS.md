@@ -146,6 +146,36 @@ fallback.
 - [ ] H1 — observability spine. Reason-code registry, one `guard_tripped` emitter, a durable trip
       row on `/health`, `log_comm` called with `success=True` on every channel, `persist_ai_run`
       wired into site v2. Precondition for all 13 sectors.
+- [x] H1a — owner send truth (#84). A Telegram 429 on a long owner reply marked the webhook
+      `processed`, which is terminal, so the answer was lost permanently and invisibly. Now
+      `failed` (retryable, counted), with a reason code, and `mia.comm` finally has a denominator.
+- [x] H3a — reconcile guard (#85). A poison job wedged the delivery cycle permanently, and 25
+      unknown rows starved everything behind them. The drift guard now asserts the outcome
+      MAPPING, not just the exception-name set: the name-only version passed on the buggy head.
+- [x] H3b — truncation contract (#86). A truncated Gemini reply returned partial prose plus a
+      well-formed-looking tool call that walked past the guard into dispatch.
+- [x] H4a — CRM writer trust (#83). SECURITY: a visitor who knew a customer's email overwrote
+      that customer's row. `writer` is now a required no-default kwarg, so every call site
+      declares its trust level at compile time.
+
+### Routed out of wave 1, deliberately not fixed in-chunk
+
+- [ ] `app/workers/telegram_owner.py:341` — `_mark_claimed(store, extras, "sent")` is
+      unconditional on the normal-return path, so a totally-failed coalesced burst leaves the
+      merged row `failed` (retryable, counted by /health) while every earlier sibling row is
+      `sent` — terminal, unretryable, uncounted. Same class as H1a. Both the round-1 and round-2
+      reviewers confirmed the bug AND confirmed that fixing it inside H1a would have been exactly
+      the cross-chunk coupling this wave kept hitting. Fix: `"sent" if <delivered> else "failed"`,
+      using the same delivery signal the merged row uses.
+- [ ] `app/workers/telegram_owner.py:91-95` — `_send_owner_notice` swallows
+      `except (RuntimeError, MiaError, AdapterHttpError): return False` with no reason code, so an
+      owner who got neither the reply nor the failure notice leaves no distinguishable trace.
+- [ ] H4a follow-up: ownership is first-public-writer-wins and permanent, so an attacker who
+      captures a victim's email BEFORE the victim ever visits owns that row. Needs a product
+      decision on identity precedence, not just code.
+- [ ] H3a follow-up: the outcome-mapping drift guard is one-sided — it checks
+      `_reconcile_unknown` but not `_deliver`.
+
 - [ ] H2 — the confirmed defects, each with the test that would have caught it.
 - [ ] H3 — class fixes, not instance fixes: an undiscardable typed outcome, the
       `except RuntimeError` sweep, empty-result markers as constants, the Chat/Gemini truncation
