@@ -2,7 +2,12 @@ import json
 
 import pytest
 from app.api.deps import get_transcription_port
-from app.db.models import CrmActivityRow, CrmContactRow, CrmOutboxRow
+from app.db.models import (
+    CrmActivityRow,
+    CrmContactConversationRow,
+    CrmContactRow,
+    CrmOutboxRow,
+)
 from app.db.session import get_session_factory
 from app.db.site_v2 import SiteV2SessionRow
 from app.db.store import LeadStore
@@ -699,8 +704,18 @@ def test_email_contact_accepts_sentence_punctuation(monkeypatch, ending: str) ->
         assert response.status_code == 200
         assert response.json()["next_action"] == "contact_saved"
         with get_session_factory()() as db:
+            # Anchored on the conversation association, not on
+            # ``CrmContactRow.conversation_id``: these parametrised turns all submit the
+            # same address, and since chunk H4A a later visitor no longer takes over the
+            # row a first visitor created (nor its conversation id). The association is
+            # what "this session captured a contact" has always actually meant.
             contact = db.scalar(
-                select(CrmContactRow).where(CrmContactRow.conversation_id == session_id)
+                select(CrmContactRow)
+                .join(
+                    CrmContactConversationRow,
+                    CrmContactConversationRow.contact_id == CrmContactRow.id,
+                )
+                .where(CrmContactConversationRow.conversation_id == session_id)
             )
             assert contact is not None
             assert json.loads(contact.fields_json)["email"] == "dana@example.com"

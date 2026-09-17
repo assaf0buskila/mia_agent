@@ -16,7 +16,7 @@ from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
 from app.graph.owner_agent import TOOL_DEADLINE_REPLY, _run_tool_with_timeout
 from app.integrations.sheets import FakeSheetsPort
-from app.services.crm_v2 import CONTACT_FIELDS, CrmService
+from app.services.crm_v2 import CONTACT_FIELDS, WRITER_OWNER, CrmService
 from app.tools.registries.owner_tools import (
     OUTCOME_FAILURE,
     OUTCOME_SUCCESS,
@@ -119,7 +119,9 @@ def test_a_current_crm_import_is_a_clean_success() -> None:
     try:
         sheets = _CurrentCrmSheets()
         seeded = CrmService(db).capture(
-            {"name": "Dana", "phone": "050-0000000"}, source_ref="seed:outcome-truth"
+            {"name": "Dana", "phone": "050-0000000"},
+            writer=WRITER_OWNER,
+            source_ref="seed:outcome-truth",
         )
         assert seeded.contact is not None
         sheets.locked_contacts[0] = [

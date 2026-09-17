@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
@@ -22,7 +23,14 @@ from app.db.models import (
 )
 from app.db.store import LeadStore
 from app.integrations.sheets import FakeSheetsPort
-from app.services.crm_v2 import ActivityInput, CrmError, CrmRevisionConflict, CrmService
+from app.services.crm_v2 import (
+    WRITER_OWNER,
+    WRITER_PUBLIC,
+    ActivityInput,
+    CrmError,
+    CrmRevisionConflict,
+    CrmService,
+)
 from app.workers.crm_delivery import CrmDeliveryWorker
 from sqlalchemy import create_engine, event, select, text
 from sqlalchemy.orm import Session, sessionmaker
@@ -82,12 +90,14 @@ def test_repeated_source_and_identity_are_idempotent(sessions: sessionmaker[Sess
         service = CrmService(session)
         first = service.capture(
             {"email": "Person@Example.com", "name": "One"},
+            writer=WRITER_OWNER,
             source_ref="owner:update:1",
             activity=ActivityInput(source_ref="owner:update:1:activity"),
         )
         session.commit()
         second = service.capture(
             {"email": "person@example.com", "name": "One"},
+            writer=WRITER_OWNER,
             source_ref="owner:update:1",
             activity=ActivityInput(source_ref="owner:update:1:activity"),
         )
@@ -103,9 +113,15 @@ def test_identity_collision_does_not_mutate_either_contact_or_enqueue_projection
 ) -> None:
     with sessions() as session:
         service = CrmService(session)
-        left = service.capture({"phone": "0501111111", "name": "Left"}, source_ref="seed:left")
+        left = service.capture(
+            {"phone": "0501111111", "name": "Left"},
+            writer=WRITER_OWNER,
+            source_ref="seed:left",
+        )
         right = service.capture(
-            {"email": "right@example.com", "name": "Right"}, source_ref="seed:right"
+            {"email": "right@example.com", "name": "Right"},
+            writer=WRITER_OWNER,
+            source_ref="seed:right",
         )
         session.commit()
         assert left.contact is not None and right.contact is not None
@@ -114,6 +130,7 @@ def test_identity_collision_does_not_mutate_either_contact_or_enqueue_projection
 
         collision = service.capture(
             {"phone": "0501111111", "email": "right@example.com", "name": "Changed"},
+            writer=WRITER_OWNER,
             source_ref="owner:collision",
         )
         session.commit()
@@ -132,25 +149,31 @@ def test_identity_collision_blocks_later_projections_for_every_involved_contact(
     with sessions() as session:
         service = CrmService(session)
         phone_owner = service.capture(
-            {"phone": "0501111112", "name": "Phone owner"}, source_ref="seed:phone"
+            {"phone": "0501111112", "name": "Phone owner"},
+            writer=WRITER_OWNER,
+            source_ref="seed:phone",
         )
         email_owner = service.capture(
             {"email": "email-owner@example.com", "name": "Email owner"},
+            writer=WRITER_OWNER,
             source_ref="seed:email",
         )
         assert phone_owner.contact is not None and email_owner.contact is not None
         collision = service.capture(
             {"phone": "0501111112", "email": "email-owner@example.com"},
+            writer=WRITER_OWNER,
             source_ref="capture:collision",
         )
         assert collision.status == "conflict"
 
         service.capture(
             {"phone": "0501111112", "name": "Later phone edit"},
+            writer=WRITER_OWNER,
             source_ref="later:phone",
         )
         service.capture(
             {"email": "email-owner@example.com", "name": "Later email edit"},
+            writer=WRITER_OWNER,
             source_ref="later:email",
         )
         session.commit()
@@ -182,11 +205,12 @@ def test_absence_bound_create_rejects_identity_created_after_proposal(
         service = CrmService(session)
         snapshot = service.snapshot_identity({"email": "new@example.com"})
         assert snapshot.contact_id == "" and snapshot.revision == 0
-        service.capture({"email": "new@example.com"}, source_ref="race:winner")
+        service.capture({"email": "new@example.com"}, writer=WRITER_OWNER, source_ref="race:winner")
         session.commit()
         with pytest.raises(CrmRevisionConflict):
             service.capture(
                 {"email": "new@example.com", "name": "Late"},
+                writer=WRITER_OWNER,
                 source_ref="race:late",
                 expected_revision=snapshot.revision,
             )
@@ -199,6 +223,7 @@ def test_three_way_merge_accepts_disjoint_changes_and_pauses_same_field(
         service = CrmService(session)
         created = service.capture(
             {"phone": "0502222222", "name": "Base", "business": "Old"},
+            writer=WRITER_OWNER,
             source_ref="seed",
         )
         assert created.contact is not None
@@ -206,7 +231,9 @@ def test_three_way_merge_accepts_disjoint_changes_and_pauses_same_field(
         session.commit()
 
         updated = service.capture(
-            {"phone": "0502222222", "business": "Database"}, source_ref="owner:edit"
+            {"phone": "0502222222", "business": "Database"},
+            writer=WRITER_OWNER,
+            source_ref="owner:edit",
         )
         assert updated.contact is not None
         sheet = ["Sheet Name", "0502222222", "", "", "Sheet Business"]
@@ -296,7 +323,11 @@ class _AmbiguousOnceSheets(FakeSheetsPort):
 def test_unknown_write_is_read_back_before_retry(sessions: sessionmaker[Session]) -> None:
     sheets = _AmbiguousOnceSheets()
     with sessions() as session:
-        CrmService(session).capture({"phone": "0503333333"}, source_ref="capture")
+        CrmService(session).capture(
+            {"phone": "0503333333"},
+            writer=WRITER_OWNER,
+            source_ref="capture",
+        )
         session.commit()
     worker = CrmDeliveryWorker(session_factory=sessions, sheets=sheets)
 
@@ -318,7 +349,11 @@ def test_expired_lease_becomes_unknown_and_does_not_blind_send(
 ) -> None:
     sheets = FakeSheetsPort()
     with sessions() as session:
-        CrmService(session).capture({"phone": "0504444444"}, source_ref="capture")
+        CrmService(session).capture(
+            {"phone": "0504444444"},
+            writer=WRITER_OWNER,
+            source_ref="capture",
+        )
         job = session.scalars(select(CrmOutboxRow)).one()
         job.status = "in_flight"
         job.lease_owner = "dead-worker"
@@ -336,7 +371,11 @@ def test_finish_refuses_to_complete_a_lease_no_longer_owned(
     sheets = FakeSheetsPort()
     worker = CrmDeliveryWorker(session_factory=sessions, sheets=sheets, worker_id="worker-a")
     with sessions() as session:
-        CrmService(session).capture({"phone": "0504545454"}, source_ref="capture")
+        CrmService(session).capture(
+            {"phone": "0504545454"},
+            writer=WRITER_OWNER,
+            source_ref="capture",
+        )
         session.commit()
     job_id = worker._claim_one()
     assert job_id is not None
@@ -364,13 +403,25 @@ def test_open_contact_conflict_pauses_every_later_projection(
 ) -> None:
     with sessions() as session:
         service = CrmService(session)
-        created = service.capture({"phone": "0505555555", "business": "Base"}, source_ref="seed")
+        created = service.capture(
+            {"phone": "0505555555", "business": "Base"},
+            writer=WRITER_OWNER,
+            source_ref="seed",
+        )
         assert created.contact is not None
         service.mark_contact_synced(created.contact.id, row_number=2)
-        service.capture({"phone": "0505555555", "business": "Database"}, source_ref="db-change")
+        service.capture(
+            {"phone": "0505555555", "business": "Database"},
+            writer=WRITER_OWNER,
+            source_ref="db-change",
+        )
         sheet = ["", "0505555555", "", "", "Sheet"] + [""] * 9 + [created.contact.id]
         assert service.import_sheet_contact(sheet, row_number=2).status == "conflict"
-        later = service.capture({"phone": "0505555555", "name": "Later"}, source_ref="later-change")
+        later = service.capture(
+            {"phone": "0505555555", "name": "Later"},
+            writer=WRITER_OWNER,
+            source_ref="later-change",
+        )
         assert later.contact is not None
         session.commit()
 
@@ -393,7 +444,11 @@ def test_conflict_resolution_converges_through_exact_observed_sheet_write(
     sheets = FakeSheetsPort()
     with sessions() as session:
         service = CrmService(session)
-        created = service.capture({"phone": "0505656565", "business": "Base"}, source_ref="seed")
+        created = service.capture(
+            {"phone": "0505656565", "business": "Base"},
+            writer=WRITER_OWNER,
+            source_ref="seed",
+        )
         assert created.contact is not None
         contact_id = created.contact.id
         base_cells = [
@@ -419,7 +474,9 @@ def test_conflict_resolution_converges_through_exact_observed_sheet_write(
         service.mark_contact_synced(contact_id, row_number=2)
         session.scalars(select(CrmOutboxRow)).one().status = "confirmed"
         changed = service.capture(
-            {"phone": "0505656565", "business": "Database"}, source_ref="db-change"
+            {"phone": "0505656565", "business": "Database"},
+            writer=WRITER_OWNER,
+            source_ref="db-change",
         )
         assert changed.contact is not None
         sheets.locked_contacts[0][4] = "Sheet"
@@ -462,7 +519,11 @@ def test_conflict_resolution_rejects_sheet_change_after_approval_observation(
     sheets = FakeSheetsPort()
     with sessions() as session:
         service = CrmService(session)
-        created = service.capture({"phone": "0505757575", "business": "Base"}, source_ref="seed")
+        created = service.capture(
+            {"phone": "0505757575", "business": "Base"},
+            writer=WRITER_OWNER,
+            source_ref="seed",
+        )
         assert created.contact is not None
         contact_id = created.contact.id
         cells = [
@@ -488,7 +549,9 @@ def test_conflict_resolution_rejects_sheet_change_after_approval_observation(
         service.mark_contact_synced(contact_id, row_number=2)
         session.scalars(select(CrmOutboxRow)).one().status = "confirmed"
         changed = service.capture(
-            {"phone": "0505757575", "business": "Database"}, source_ref="db-change"
+            {"phone": "0505757575", "business": "Database"},
+            writer=WRITER_OWNER,
+            source_ref="db-change",
         )
         assert changed.contact is not None
         sheets.locked_contacts[0][4] = "Observed Sheet"
@@ -531,6 +594,7 @@ def test_multiple_field_resolutions_share_one_projection_and_allow_later_edits(
         service = CrmService(session)
         created = service.capture(
             {"phone": "0505858585", "name": "Base name", "business": "Base business"},
+            writer=WRITER_OWNER,
             source_ref="seed",
         )
         assert created.contact is not None
@@ -559,6 +623,7 @@ def test_multiple_field_resolutions_share_one_projection_and_allow_later_edits(
         session.scalars(select(CrmOutboxRow)).one().status = "confirmed"
         changed = service.capture(
             {"phone": "0505858585", "name": "Database name", "business": "Database business"},
+            writer=WRITER_OWNER,
             source_ref="db-change",
         )
         assert changed.contact is not None
@@ -602,6 +667,7 @@ def test_multiple_field_resolutions_share_one_projection_and_allow_later_edits(
         assert service.list_conflicts(contact_id=contact_id) == []
         service.capture(
             {"phone": "0505858585", "summary": "Later database edit"},
+            writer=WRITER_OWNER,
             source_ref="later-db",
         )
         session.commit()
@@ -620,7 +686,11 @@ def test_issue_created_after_claim_blocks_contact_effect(
     sheets = FakeSheetsPort()
     worker = CrmDeliveryWorker(session_factory=sessions, sheets=sheets)
     with sessions() as session:
-        created = CrmService(session).capture({"phone": "0505959595"}, source_ref="seed")
+        created = CrmService(session).capture(
+            {"phone": "0505959595"},
+            writer=WRITER_OWNER,
+            source_ref="seed",
+        )
         assert created.contact is not None
         contact_id = created.contact.id
         session.commit()
@@ -644,6 +714,7 @@ def test_previously_synchronized_contact_deleted_after_claim_is_not_recreated(
         service = CrmService(session)
         created = service.capture(
             {"phone": "0506161616", "business": "Original"},
+            writer=WRITER_OWNER,
             source_ref="seed",
         )
         assert created.contact is not None
@@ -657,6 +728,7 @@ def test_previously_synchronized_contact_deleted_after_claim_is_not_recreated(
         session.scalars(select(CrmOutboxRow)).one().status = "confirmed"
         updated = service.capture(
             {"phone": "0506161616", "business": "Updated"},
+            writer=WRITER_OWNER,
             source_ref="database:update",
         )
         assert updated.contact is not None
@@ -682,6 +754,7 @@ def test_never_synchronized_contact_may_still_append(
     with sessions() as session:
         created = CrmService(session).capture(
             {"phone": "0506262626", "business": "New"},
+            writer=WRITER_OWNER,
             source_ref="new-contact",
         )
         assert created.contact is not None
@@ -706,6 +779,7 @@ def test_destination_time_owner_edit_is_imported_and_never_overwritten(
         service = CrmService(session)
         created = service.capture(
             {"name": "Base", "phone": "0506666666", "business": "Old"},
+            writer=WRITER_OWNER,
             source_ref="seed",
         )
         assert created.contact is not None
@@ -732,7 +806,11 @@ def test_destination_time_owner_edit_is_imported_and_never_overwritten(
         sheets.locked_contacts.append(base_cells + [contact_id])
         service.mark_contact_synced(contact_id, row_number=2)
         session.scalars(select(CrmOutboxRow)).one().status = "confirmed"
-        service.capture({"phone": "0506666666", "business": "Database"}, source_ref="db-change")
+        service.capture(
+            {"phone": "0506666666", "business": "Database"},
+            writer=WRITER_OWNER,
+            source_ref="db-change",
+        )
         session.commit()
 
     worker = CrmDeliveryWorker(session_factory=sessions, sheets=sheets)
@@ -838,7 +916,11 @@ def test_new_issue_is_flushed_before_its_contact_link_is_added(
     # so assert the ordering directly instead of hoping a flush happens to fail.
     with sessions() as session:
         service = CrmService(session)
-        created = service.capture({"phone": "0507070707"}, source_ref="fk:seed")
+        created = service.capture(
+            {"phone": "0507070707"},
+            writer=WRITER_OWNER,
+            source_ref="fk:seed",
+        )
         assert created.contact is not None
         session.commit()
         service._issue(contact_id=created.contact.id, issue_type="probe")
@@ -892,8 +974,8 @@ def test_identity_conflict_resolution_cannot_take_another_contacts_identity(
 ) -> None:
     with sessions() as session:
         service = CrmService(session)
-        left = service.capture({"phone": "0508888888"}, source_ref="left")
-        right = service.capture({"phone": "0509999999"}, source_ref="right")
+        left = service.capture({"phone": "0508888888"}, writer=WRITER_OWNER, source_ref="left")
+        right = service.capture({"phone": "0509999999"}, writer=WRITER_OWNER, source_ref="right")
         assert left.contact is not None and right.contact is not None
         issue = CrmIssueRow(
             id="issue-phone",
@@ -927,7 +1009,7 @@ def test_identity_conflict_resolution_reconciles_the_identity_index(
 ) -> None:
     with sessions() as session:
         service = CrmService(session)
-        created = service.capture({"phone": "0501212121"}, source_ref="seed")
+        created = service.capture({"phone": "0501212121"}, writer=WRITER_OWNER, source_ref="seed")
         assert created.contact is not None
         session.add(
             CrmIssueRow(
@@ -961,7 +1043,7 @@ def test_finish_rechecks_current_lease_owner(sessions: sessionmaker[Session]) ->
     sheets = FakeSheetsPort()
     worker = CrmDeliveryWorker(session_factory=sessions, sheets=sheets, worker_id="worker-a")
     with sessions() as session:
-        CrmService(session).capture({"phone": "0504545454"}, source_ref="seed")
+        CrmService(session).capture({"phone": "0504545454"}, writer=WRITER_OWNER, source_ref="seed")
         session.commit()
     job_id = worker._claim_one()
     assert job_id is not None
@@ -1019,6 +1101,7 @@ def test_postgres_revision_compare_and_swap_uses_dedicated_schema() -> None:
         with factory() as session:
             created = CrmService(session).capture(
                 {"email": "postgres@example.com", "name": "Before"},
+                writer=WRITER_OWNER,
                 source_ref="postgres:create",
             )
             session.commit()
@@ -1032,6 +1115,7 @@ def test_postgres_revision_compare_and_swap_uses_dedicated_schema() -> None:
                 try:
                     CrmService(contender).capture(
                         {"email": "postgres@example.com", "name": name},
+                        writer=WRITER_OWNER,
                         source_ref=f"postgres:{name.casefold()}",
                         expected_revision=revision,
                     )
@@ -1053,6 +1137,7 @@ def test_postgres_revision_compare_and_swap_uses_dedicated_schema() -> None:
                 try:
                     CrmService(contender).capture(
                         {"email": "new-race@example.com", "name": name},
+                        writer=WRITER_OWNER,
                         source_ref=f"postgres:create:{name.casefold()}",
                         expected_revision=0,
                     )
@@ -1090,7 +1175,7 @@ def test_postgres_issue_creation_serializes_with_final_contact_effect() -> None:
         worker = CrmDeliveryWorker(session_factory=factory, sheets=sheets)
         with factory() as session:
             created = CrmService(session).capture(
-                {"phone": "0506060606"}, source_ref="postgres:seed"
+                {"phone": "0506060606"}, writer=WRITER_OWNER, source_ref="postgres:seed"
             )
             assert created.contact is not None
             contact_id = created.contact.id
@@ -1169,7 +1254,9 @@ def test_refresh_pending_site_brief_updates_pending_job_activity_and_fields(
             "השלב הבא המומלץ: לתאם שיחה"
         )
         service.refresh_pending_site_brief(
+            writer=WRITER_PUBLIC,
             contact_id=contact_id,
+            conversation_id="session-refresh-1",
             job_ids=telegram_job_ids,
             summary=new_summary,
             next_step="לתאם שיחה",
@@ -1258,7 +1345,9 @@ def test_refresh_pending_site_brief_refuses_non_pending_or_foreign_jobs(
         session.flush()
 
         service.refresh_pending_site_brief(
+            writer=WRITER_PUBLIC,
             contact_id=contact_a,
+            conversation_id="session-refresh-2",
             job_ids=[job_a.id, job_b.id],
             summary="rewritten",
             next_step="new step",
@@ -1282,7 +1371,11 @@ def test_contact_view_fills_created_and_updated_in_owner_local_iso(
     with sessions() as session:
         fixed_now = datetime(2026, 9, 6, 13, 16, 47, tzinfo=UTC)
         service = CrmService(session, now=fixed_now, timezone="Asia/Jerusalem")
-        created = service.capture({"phone": "0509999001", "name": "Dana"}, source_ref="seed:ts")
+        created = service.capture(
+            {"phone": "0509999001", "name": "Dana"},
+            writer=WRITER_OWNER,
+            source_ref="seed:ts",
+        )
         session.commit()
         assert created.contact is not None
         # Asia/Jerusalem is UTC+3 in September (DST).
@@ -1292,7 +1385,9 @@ def test_contact_view_fills_created_and_updated_in_owner_local_iso(
         later = datetime(2026, 9, 7, 6, 0, 0, tzinfo=UTC)
         updater = CrmService(session, now=later, timezone="Asia/Jerusalem")
         updated = updater.capture(
-            {"phone": "0509999001", "business": "Studio"}, source_ref="seed:ts:2"
+            {"phone": "0509999001", "business": "Studio"},
+            writer=WRITER_OWNER,
+            source_ref="seed:ts:2",
         )
         session.commit()
         assert updated.contact is not None
@@ -1307,7 +1402,9 @@ def test_owner_edit_to_other_field_produces_no_conflict_from_timestamp_columns(
     with sessions() as session:
         service = CrmService(session, now=datetime(2026, 9, 6, 13, 0, 0, tzinfo=UTC))
         created = service.capture(
-            {"phone": "0509999002", "name": "Base", "business": "Old"}, source_ref="seed"
+            {"phone": "0509999002", "name": "Base", "business": "Old"},
+            writer=WRITER_OWNER,
+            source_ref="seed",
         )
         assert created.contact is not None
         service.mark_contact_synced(created.contact.id, row_number=2)
@@ -1351,7 +1448,7 @@ def test_owner_typed_timestamp_does_not_overwrite_db_timestamps(
     with sessions() as session:
         service = CrmService(session, now=datetime(2026, 9, 6, 13, 0, 0, tzinfo=UTC))
         created = service.capture(
-            {"phone": "0509999003", "name": "Base"}, source_ref="seed"
+            {"phone": "0509999003", "name": "Base"}, writer=WRITER_OWNER, source_ref="seed"
         )
         assert created.contact is not None
         service.mark_contact_synced(created.contact.id, row_number=2)
@@ -1390,7 +1487,11 @@ def test_owner_edit_to_updated_cell_self_heals_and_later_field_still_delivers(
     sheets = FakeSheetsPort()
     with sessions() as session:
         service = CrmService(session)
-        created = service.capture({"phone": "0509991234", "name": "Dana"}, source_ref="seed")
+        created = service.capture(
+            {"phone": "0509991234", "name": "Dana"},
+            writer=WRITER_OWNER,
+            source_ref="seed",
+        )
         assert created.contact is not None
         contact_id = created.contact.id
         session.commit()
@@ -1407,7 +1508,7 @@ def test_owner_edit_to_updated_cell_self_heals_and_later_field_still_delivers(
 
     with sessions() as session:
         CrmService(session).capture(
-            {"phone": "0509991234", "want": "more clients"}, source_ref="later"
+            {"phone": "0509991234", "want": "more clients"}, writer=WRITER_OWNER, source_ref="later"
         )
         session.commit()
 
@@ -1431,7 +1532,11 @@ def test_delivery_projects_cleanly_despite_mismatched_timestamp_snapshot_base(
     sheets = FakeSheetsPort()
     with sessions() as session:
         service = CrmService(session)
-        created = service.capture({"phone": "0509995678", "name": "Yossi"}, source_ref="seed2")
+        created = service.capture(
+            {"phone": "0509995678", "name": "Yossi"},
+            writer=WRITER_OWNER,
+            source_ref="seed2",
+        )
         assert created.contact is not None
         contact_id = created.contact.id
         session.commit()
@@ -1449,7 +1554,7 @@ def test_delivery_projects_cleanly_despite_mismatched_timestamp_snapshot_base(
 
     with sessions() as session:
         CrmService(session).capture(
-            {"phone": "0509995678", "business": "Studio"}, source_ref="seed2:2"
+            {"phone": "0509995678", "business": "Studio"}, writer=WRITER_OWNER, source_ref="seed2:2"
         )
         session.commit()
 
@@ -1523,7 +1628,11 @@ def test_activity_sheet_cell_falls_back_safely_for_an_unmapped_action(
     """
     with sessions() as session:
         service = CrmService(session)
-        seed = service.capture({"phone": "0509990000", "name": "Dana"}, source_ref="seed-c11")
+        seed = service.capture(
+            {"phone": "0509990000", "name": "Dana"},
+            writer=WRITER_OWNER,
+            source_ref="seed-c11",
+        )
         assert seed.contact is not None
         contact_id = seed.contact.id
         session.flush()
@@ -1573,7 +1682,11 @@ def test_activity_sheet_action_cell_passes_owner_freeform_kind_through_verbatim(
     """
     with sessions() as session:
         service = CrmService(session)
-        seed = service.capture({"phone": "0509991111", "name": "Roni"}, source_ref="seed-c11-he-1")
+        seed = service.capture(
+            {"phone": "0509991111", "name": "Roni"},
+            writer=WRITER_OWNER,
+            source_ref="seed-c11-he-1",
+        )
         assert seed.contact is not None
         contact_id = seed.contact.id
         session.flush()
@@ -1627,7 +1740,11 @@ def test_activity_sheet_action_cell_caps_a_long_owner_hebrew_kind(
     """
     with sessions() as session:
         service = CrmService(session)
-        seed = service.capture({"phone": "0509992222", "name": "Gili"}, source_ref="seed-c11-he-2")
+        seed = service.capture(
+            {"phone": "0509992222", "name": "Gili"},
+            writer=WRITER_OWNER,
+            source_ref="seed-c11-he-2",
+        )
         assert seed.contact is not None
         contact_id = seed.contact.id
         session.flush()
@@ -1701,3 +1818,218 @@ def test_store_contact_captured_queries_still_match_after_hebrew_translation(
         leads = store.list_captured_website_leads()
         assert len(leads) == 1
         assert leads[0].contact_id == contact_id
+
+
+def test_public_capture_never_rewrites_a_contact_it_does_not_own(
+    sessions: sessionmaker[Session],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Chunk H4A: "Holding a phone or email grants nothing" (AGENTS.md).
+
+    ``_matched_contact_ids`` resolves a contact by normalised phone/email alone, with
+    no session or ownership scoping, and the capture merge then overwrote every
+    non-empty incoming field onto whatever row that match found. An anonymous website
+    visitor who merely knew a customer's email therefore owned that customer's row:
+    the capture returned ``status="updated"``, bumped the revision and projected the
+    rewritten name to the Contacts Sheet.
+
+    The must-not-break half is asserted in the same test: the visitor is still a lead.
+    Freezing the stranger's fields must not cost Assaf the Telegram brief, so the
+    session-scoped Telegram job and the visitor's own Activity are still required.
+    """
+    with sessions() as session:
+        service = CrmService(session)
+        victim = service.capture(
+            {
+                "email": "customer@example.com",
+                "name": "Real Customer",
+                "business": "Real Business",
+                "summary": "Real summary",
+            },
+            writer=WRITER_OWNER,
+            source_ref="owner:seed:h4a",
+        )
+        assert victim.contact is not None
+        victim_id = victim.contact.id
+        victim_revision = victim.contact.revision
+        session.commit()
+
+        caplog.set_level(logging.WARNING, logger="app.services.crm_v2")
+        attack = service.capture_site_lead(
+            {
+                "email": "customer@example.com",
+                "name": "ATTACKER",
+                "business": "ATTACKER LTD",
+                "summary": "ATTACKER summary",
+            },
+            conversation_id="session-h4a-attacker",
+            source_ref="site:session-h4a-attacker:msg-1",
+            summary="פנייה חדשה מהאתר",
+            recipient_ids=("123",),
+        )
+        session.commit()
+
+        assert attack.contact is not None
+        assert attack.contact.id == victim_id
+        assert attack.status != "updated"
+
+        stored = session.get(CrmContactRow, victim_id)
+        session.refresh(stored)
+        fields = json.loads(stored.fields_json)
+        assert fields["name"] == "Real Customer"
+        assert fields["business"] == "Real Business"
+        assert fields["summary"] == "Real summary"
+        assert stored.revision == victim_revision
+
+        # The visitor's conversation is still associated with the matched row (that
+        # association predates this chunk), but it must not become ownership: a second
+        # capture from the same session is refused exactly like the first.
+        second = service.capture_site_lead(
+            {"email": "customer@example.com", "name": "ATTACKER AGAIN"},
+            conversation_id="session-h4a-attacker",
+            source_ref="site:session-h4a-attacker:msg-2",
+            summary="פנייה נוספת",
+            recipient_ids=("123",),
+        )
+        session.commit()
+        assert second.contact is not None and second.status != "updated"
+        session.refresh(stored)
+        assert json.loads(stored.fields_json)["name"] == "Real Customer"
+        assert stored.revision == victim_revision
+
+        assert any(
+            "crm capture fields frozen reason=public_writer_not_row_owner"
+            in record.getMessage()
+            for record in caplog.records
+        )
+        assert not any("ATTACKER" in record.getMessage() for record in caplog.records)
+
+        # ...and the lead still reaches Assaf.
+        telegram_jobs = session.scalars(
+            select(CrmOutboxRow).where(CrmOutboxRow.destination == "telegram")
+        ).all()
+        assert [job.dedupe_key for job in telegram_jobs] == [
+            "telegram:crm:session-h4a-attacker:123"
+        ]
+        assert telegram_jobs[0].aggregate_id == victim_id
+        activity = session.scalars(
+            select(CrmActivityRow).where(
+                CrmActivityRow.source_ref == "site:session-h4a-attacker:msg-1:activity"
+            )
+        ).one()
+        assert activity.contact_id == victim_id
+        assert activity.channel == "website"
+
+
+def test_refresh_pending_site_brief_leaves_a_foreign_contact_alone(
+    sessions: sessionmaker[Session],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The same-turn brief rewrite is the same defect one level up.
+
+    ``refresh_pending_site_brief`` writes ``name`` and ``next_step`` straight onto the
+    contact the capture matched, so the field guard in ``capture`` alone would leave a
+    second public path onto a stranger's row. The still-pending Telegram job and the
+    Activity this visitor created are theirs and must still be rewritten -- only the
+    contact row is off limits.
+    """
+    with sessions() as session:
+        service = CrmService(session)
+        victim = service.capture(
+            {"email": "owner-owned@example.com", "name": "Real Customer"},
+            writer=WRITER_OWNER,
+            source_ref="owner:seed:h4a-refresh",
+        )
+        assert victim.contact is not None
+        victim_id = victim.contact.id
+        victim_revision = victim.contact.revision
+
+        attack = service.capture_site_lead(
+            {"email": "owner-owned@example.com"},
+            conversation_id="session-h4a-refresh",
+            source_ref="site:session-h4a-refresh:msg-1",
+            summary="original brief",
+            recipient_ids=("123",),
+        )
+        assert attack.contact is not None and attack.contact.id == victim_id
+        job_ids = [
+            job.id
+            for job in session.scalars(
+                select(CrmOutboxRow).where(CrmOutboxRow.destination == "telegram")
+            ).all()
+        ]
+        assert len(job_ids) == 1
+        session.commit()
+
+        caplog.set_level(logging.WARNING, logger="app.services.crm_v2")
+        service.refresh_pending_site_brief(
+            writer=WRITER_PUBLIC,
+            contact_id=victim_id,
+            conversation_id="session-h4a-refresh",
+            job_ids=job_ids,
+            summary="rewritten brief",
+            next_step="ATTACKER next step",
+            name="ATTACKER",
+            source_ref="site:session-h4a-refresh:msg-1",
+        )
+        session.commit()
+
+        stored = session.get(CrmContactRow, victim_id)
+        session.refresh(stored)
+        fields = json.loads(stored.fields_json)
+        assert fields["name"] == "Real Customer"
+        assert fields["next_step"] == ""
+        assert stored.revision == victim_revision
+        assert any(
+            "crm brief refresh fields frozen reason=public_writer_not_row_owner"
+            in record.getMessage()
+            for record in caplog.records
+        )
+
+        # The visitor's own brief and Activity still carry the new text.
+        job = session.get(CrmOutboxRow, job_ids[0])
+        assert json.loads(job.payload_json)["text"] == "rewritten brief"
+        activity = session.scalars(
+            select(CrmActivityRow).where(
+                CrmActivityRow.source_ref == "site:session-h4a-refresh:msg-1:activity"
+            )
+        ).one()
+        assert activity.result == "rewritten brief"
+
+
+def test_a_visitor_still_owns_and_updates_the_contact_its_own_session_created(
+    sessions: sessionmaker[Session],
+) -> None:
+    """The guard is scoped to *foreign* rows, not to public writers in general.
+
+    A returning visitor in the same website session must still be able to correct the
+    name or add a phone to the contact that session created, or the H4A guard would
+    quietly become a second lead-quality bug.
+    """
+    with sessions() as session:
+        service = CrmService(session)
+        first = service.capture_site_lead(
+            {"email": "visitor@example.com", "name": "Noa"},
+            conversation_id="session-h4a-owned",
+            source_ref="site:session-h4a-owned:msg-1",
+            summary="first brief",
+            recipient_ids=("123",),
+        )
+        assert first.contact is not None
+        contact_id = first.contact.id
+        session.commit()
+
+        second = service.capture_site_lead(
+            {"email": "visitor@example.com", "name": "Noa Levi", "phone": "0501234567"},
+            conversation_id="session-h4a-owned",
+            source_ref="site:session-h4a-owned:msg-2",
+            summary="second brief",
+            recipient_ids=("123",),
+        )
+        session.commit()
+        assert second.contact is not None and second.contact.id == contact_id
+        assert second.status == "updated"
+        stored = session.get(CrmContactRow, contact_id)
+        session.refresh(stored)
+        assert json.loads(stored.fields_json)["name"] == "Noa Levi"
+        assert json.loads(stored.fields_json)["phone"] == "0501234567"

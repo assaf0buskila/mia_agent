@@ -37,7 +37,7 @@ from app.integrations.composio_catalog import (
 )
 from app.integrations.sheets import FakeSheetsPort
 from app.integrations.telegram_format import approval_keyboard
-from app.services.crm_v2 import CrmService
+from app.services.crm_v2 import WRITER_OWNER, CrmService
 from app.services.owner_actions import (
     decide_owner_action,
     execute_approved_owner_action_with_adapters,
@@ -1881,7 +1881,11 @@ def test_crm_conflict_read_and_resolution_are_bound_to_exact_revision() -> None:
     store, session = _store()
     try:
         service = CrmService(session)
-        created = service.capture({"email": "conflict@example.com"}, source_ref="seed")
+        created = service.capture(
+            {"email": "conflict@example.com"},
+            writer=WRITER_OWNER,
+            source_ref="seed",
+        )
         assert created.contact is not None
         issue = CrmIssueRow(
             id=f"issue-{uuid4().hex}",
@@ -2362,7 +2366,11 @@ def test_crm_search_succeeds_when_workspace_already_provisioned() -> None:
     store, session = _store()
     try:
         service = CrmService(session)
-        service.capture({"phone": "0509990001", "name": "Dana Test"}, source_ref="seed:search")
+        service.capture(
+            {"phone": "0509990001", "name": "Dana Test"},
+            writer=WRITER_OWNER,
+            source_ref="seed:search",
+        )
         session.commit()
         ctx = ToolContext(
             store=store,

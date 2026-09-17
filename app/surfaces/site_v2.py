@@ -33,7 +33,7 @@ from app.integrations.llm_client import (
     function_tool,
     tool_result_message,
 )
-from app.services.crm_v2 import CrmError, CrmService
+from app.services.crm_v2 import WRITER_PUBLIC, CrmError, CrmService
 
 SITE_PROMPT_VERSION = "site_v2_v1"
 _LOG = logging.getLogger(__name__)
@@ -1105,7 +1105,9 @@ def _refresh_first_brief_with_submit_lead(
     if new_summary == summary:
         return
     CrmService(db, timezone=settings.calendar_timezone).refresh_pending_site_brief(
+        writer=WRITER_PUBLIC,
         contact_id=state.contact_id,
+        conversation_id=session_id,
         job_ids=state.delivery_job_ids,
         summary=new_summary,
         next_step=state.next_step,
