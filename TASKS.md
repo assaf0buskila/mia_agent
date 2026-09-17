@@ -70,6 +70,128 @@ Deploy is a separate go. Max 2 agents at once (session usage limit).
       publish route requires the literal word `CREATE` in the live slug; if the real slug differs
       Mia refuses, and the release demo does not exist.
 
+## Hardening campaign (plan: `docs/MIA_HARDENING_PLAN.md`)
+
+Goal: every one of the 13 inspection sectors above 8.5, i.e. at 9 or 10. The 9-10 band needs all
+three of: an unbypassable choke point, an adversarial test, **and** an observable log when the
+guard trips. Mia is strong on the first, weak on the second, near-absent on the third — the whole
+application emits 26 log statements across 8 files. That is why H1 gates everything.
+
+Baseline: the 2026-09-16 agent inspection graded 6/10 weighted at `8ed912e`
+(S1 6, S2 7, S3 6, S4 7, S5 8, S6 6, S7 7, S8 6, S9 7, S10 6, S11 8, S12 6, S13 7).
+Master is now `ef8ff78`, twelve commits later, so those grades are stale until H0 re-measures.
+Scorecard: https://claude.ai/artifact/DUuZeGmxa98EaiM5fg2Ft1
+
+Decisions (Assaf, 2026-09-17): evidence bar is `LOCAL_TESTED` everywhere plus a real-model eval
+for S2/S3/S6; thematic chunks, observability spine first; **deploy at the end**; the ~09-19 RDS
+rotation gets a dated manual runbook step rather than an exception deploy.
+
+Order: H0 → H1 → (H2, H3, H4 parallel) → H5 → H6 → H7 → H8 → H10 → H9.
+
+- [x] H0 — re-baseline at `ef8ff78` + cleanup inventory. 19 agents, 36/36 claims challenged:
+      **27 confirmed and still present, 9 refuted, 1 already fixed by C12.** 37 cleanup
+      candidates, 5 proven dead, 2 proven alive.
+
+### P0 — the contact veto silently loses leads, in production, today
+
+`app/surfaces/site_v2.py:594` vetoes contact capture whenever `_CONTACT_NEGATION` (`:133`) or
+`_CONTACT_EXAMPLE` (`:143`) matches anywhere in the visitor's message. Reproduced by executing
+the regexes against realistic lead text: **8 of 11 messages carrying a real phone or email are
+vetoed**, including the highest-intent phrasing there is —
+
+- `Can I get a quote for a landing page? email me at dana@x.com` → vetoed on the bare word
+  **`quote`** (meant to catch `quoted`, as in quoting a third party; it catches *price quote*)
+- `I dont have a landline, my mobile is 052-7654321` → `dont`
+- `never mind the email, call me at 052-7654321` → `never`
+- `no need to rush, email me at dana@x.com` → `no need to`
+- `send me a sample, my email is dana@x.com` → `sample`
+- Hebrew: `בלי מייל בבקשה, תתקשרו 052-7654321` → `בלי מייל`
+
+The veto returns `{}` **before** the semantic classifier runs and **before** `state.pending_contact`
+is populated (that only happens in the `else` branch at `:638-642`), so the documented
+next-turn-confirmation recovery does not exist — the lead is simply gone, leaving one
+undifferentiated warning line. `grep` across `tests/` for `_CONTACT_EXAMPLE`,
+`_CONTACT_NEGATION` and `negation_or_example_veto` returns **0**. Byte-identical in production
+`110ada6` (`git show 110ada6:app/surfaces/site_v2.py` line 594).
+
+It also contradicts the design rule written 20 lines below it at `:616-618`: *"Phrase detectors
+must not gate semantically valid wording."* So the fix is to delete the pre-classifier veto and
+let the consent classifier decide — which makes it **HEAVY to design and HEAVY to review** under
+`AGENTS.md`, not a regex tweak. **Decision needed: hotfix now, or lead H2 with it.**
+
+### Grades at `ef8ff78` (overall 5, down from 6)
+
+| S1 | S2 | S3 | S4 | S5 | S6 | S7 | S8 | S9 | S10 | S11 | S12 | S13 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 5↓ | 6↓ | **4↓↓** | 7 | 7↓ | 6 | 6↓ | 6 | 6↓ | 6 | 8 | 5↓ | 7 |
+
+Six sectors fell. Nothing rose: C12 is good work, but it gates nothing on the visitor path.
+Two refutations cleared guards that were being blamed unfairly — approval expiry **is** enforced
+at every callback path, and the Hebrew edit-truncation defect is unreachable behind a working
+fallback.
+
+### What H0 changed about the plan
+
+- **H2 is now the most urgent chunk, not H1**, and leads with the veto plus the captured-latch
+  fix — both lose a lead silently on the same path and share a test harness.
+- **H3 must be re-scoped raiser-first before it starts, or it will do harm.** The
+  `except RuntimeError` sweep was planned on one reported instance. There are five call sites and
+  only `app/core/outbound.py:45-49` is dead; three of the others catch a raiser that genuinely
+  raises bare `RuntimeError`. A call-site grep would "fix" three correct handlers and miss the
+  inverse class — a `MiaError` raised where only `RuntimeError` is caught.
+- **H4 gains the client half** — the localStorage credential and transcript in `ask_mia.js`.
+- **H1 shrinks and gets concrete**: baseline to beat is 28 log statements across 8 files.
+- **`app/domain/meetings/*` (1471 lines + ~2800 lines of tests) is escalated to Assaf as a
+  product question, not cleanup.** Retire it or re-wire it — H10 must not touch it either way.
+- [ ] H1 — observability spine. Reason-code registry, one `guard_tripped` emitter, a durable trip
+      row on `/health`, `log_comm` called with `success=True` on every channel, `persist_ai_run`
+      wired into site v2. Precondition for all 13 sectors.
+- [ ] H2 — the confirmed defects, each with the test that would have caught it.
+- [ ] H3 — class fixes, not instance fixes: an undiscardable typed outcome, the
+      `except RuntimeError` sweep, empty-result markers as constants, the Chat/Gemini truncation
+      contract.
+- [ ] H4 — provenance and session lifecycle: provenance carried with a parked contact, session
+      TTL, origin bind, email-grants-a-write.
+- [ ] H5 — the privileged loop: untrusted-data frame on owner tool results, visitor free text
+      reaching the owner model.
+- [ ] H6 — resource safety: connection pool config and `pool_pre_ping`, transaction scope vs model
+      latency, aggregate spend ceiling, rate-limiter topology.
+- [ ] H7 — the gate becomes real: flip the 7 permissive fakes to strict, `VisitorWorld` + website
+      scenarios, `hard_safety_ids()` as the runner's authority, predeploy in CI.
+- [ ] H8 — real-model evidence and a sandbox tier for Sheets/Calendar/Gmail. First
+      `INTEGRATION_TESTED` evidence in the system.
+- [ ] H10 — cleanup, acting on H0's ledger. Nothing deleted without a liveness proof.
+- [ ] H9 — re-inspect at the final SHA, sign off, then deploy, rotate the Telegram token,
+      re-register the webhook, phone acceptance. **Stop for Assaf.**
+
+Ceilings recorded rather than graded around: S9 is capped until the H9 deploy (production has
+leaked the bot token into CloudWatch for the whole life of `110ada6`; master fixes it); S13 caps
+near 8 until a real rotation proves the EventBridge pattern; integrations beyond
+Sheets/Calendar/Gmail stay faked; S6 is capped by Vercel, below.
+
+External, Assaf's not the repo's:
+
+- [x] **Telegram bot token rotation — ACCEPTED RISK, deliberately not done (Assaf, 2026-09-17).**
+      The token leaked into CloudWatch for the whole life of `110ada6` through httpx request
+      logging. The leak itself is closed: `app/core/redact.py` and `RedactingFilter` are live as
+      of `78af85f`, so no new log line carries it. What remains is historical — the entries
+      already written — and the token is still valid, verified two ways: `mia/prod` last changed
+      2026-09-16 12:50 (before the decision), and a `mia-telegram-webhook` one-off authenticated
+      against it successfully today. Do not re-raise this as outstanding, and do not read the
+      silence as "it was done". If it is ever revisited: new value into `mia/prod`, revoke the old
+      in BotFather, **replace the ECS task** (secrets are injected at container start, so updating
+      the secret changes nothing until the container restarts), then re-register via the
+      `mia-telegram-webhook` one-off — a correct token with no webhook looks exactly like a wrong
+      one: silence, no errors.
+
+- [ ] Regenerate `llms.txt` / `llms-full.txt` / `pricing.md` on Vercel at build time. All three are
+      dated 09-14 and did not move with the 09-16 site change. They are Mia's only knowledge
+      sources, so C12's hourly ingest runs against files that never change.
+- [ ] Merge `assaf-landingPage#28`. Until it does, assafweb.com serves the scripted fake chat, so
+      H9 would ship a working widget to a site that does not embed it.
+- [ ] 09-19 rotation runbook step: confirm the task's `startedAt` is later than the secret's
+      `LastChangedDate`, hand-sync `mia/prod` if they diverged.
+
 ## Gaps the readiness audit found in the gates themselves
 
 Recorded so nobody reads a green suite as completeness.
