@@ -151,14 +151,20 @@ _CONTACT_VERB = (
     r"(?:contact|call|phone|email|e-?mail|reach|messag(?:e|ing)|text|ring|"
     r"follow[ -]?up|get in touch|be in touch)"
 )
-# The object is required. "don't contact me" refuses; "don't phone the office" and
-# "don't mail me the brochure" are ordinary instructions from a live lead, and a bare
-# verb match turned both into silent lead loss. Requiring the object also disposes of
-# the tense problem -- "you guys never called me back" is a complaint, not a refusal,
-# and "never called" cannot reach "\s+me" from "call".
+# The object is required, and it must be FIRST PERSON. "don't contact me" refuses, but
+# "don't call my office line, call my mobile 0501234567" redirects to a preferred channel
+# and is the commonest real lead shape there is. Allowing "my" and "our" here re-created
+# the original defect for eight of fourteen realistic leads while catching no true refusal
+# at all -- the possessive was pure cost. "don't phone the office" and "don't mail me the
+# brochure" are ordinary instructions from a live lead too, and a bare verb match turned
+# all of them into silent lead loss. Requiring the object also disposes of the tense
+# problem: "you guys never called me back" is a complaint, and "never called" cannot
+# reach "\s+me" from "call".
 # No end-of-clause alternative: "I never text, email me at ..." states a channel
 # preference, and treating it as refusal lost exactly the lead this fix exists for.
-_CONTACT_OBJECT = r"(?:\s+or\s+\w+)?(?:\s+with)?\s+(?:me|us|my|our)\b"
+# "out" and "to" are optional because "don't reach out to me" is the commonest English
+# refusal verb phrase and the bare preposition list missed it.
+_CONTACT_OBJECT = r"(?:\s+or\s+\w+)?(?:\s+out)?(?:\s+(?:with|to))?\s+(?:me|us)\b"
 _CONTACT_REFUSAL = re.compile(
     # A negation governing a contact verb aimed at the visitor. "don't text or call me"
     # and "don't follow up with me" coordinate and take a preposition; "don't phone the
@@ -179,9 +185,13 @@ _CONTACT_REFUSAL = re.compile(
     r"without (?:my|our|your) (?:permission|consent)|"
     r"(?:do not|do\s?n['’]?t|dont) have (?:my|our) permission|"
     # Hebrew. Imperatives appear in masculine singular, feminine singular and plural; the
-    # plural-only form used to let "אל תתקשר" through.
+    # plural-only form used to let "אל תתקשר" through. The first-person object is required
+    # here for the same reason as the English branch, and against the same counter-example:
+    # "אל תתקשרו למשרד, תתקשרו אליי 0501234567" redirects a channel, it does not refuse.
+    # A bare "אל תתקשרו" now goes to the classifier, which is the right bias for a guard
+    # that only has to carry the unmistakable cases.
     r"אל\s+(?:תחזור|תחזרי|תחזרו|תתקשר|תתקשרי|תתקשרו|תשלח|תשלחי|תשלחו|"
-    r"תיצור|תיצרי|תיצרו)|"
+    r"תיצור|תיצרי|תיצרו)\s+(?:אליי|אלי|אלינו|לי|לנו|איתי|איתנו)|"
     r"לא\s+(?:לחזור|להתקשר|לשלוח|ליצור קשר)|"
     r"לא רוצה ש(?:תחזור|תחזרו|תתקשר|תתקשרו|תשלח|תשלחו|תיצור קשר|תיצרו קשר)|"
     r"לא מאשר(?:ת|ים)? ש(?:תחזור|תחזרו|תתקשר|תתקשרו|תשלח|תשלחו)|"

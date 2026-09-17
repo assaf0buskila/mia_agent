@@ -1731,7 +1731,58 @@ def test_the_consent_refusal_alternative_uses_a_real_word_boundary() -> None:
     """
     from app.surfaces.site_v2 import _CONTACT_REFUSAL
 
-    assert "" not in _CONTACT_REFUSAL.pattern
+    assert chr(8) not in _CONTACT_REFUSAL.pattern, "a literal control character survived"
     assert _CONTACT_REFUSAL.search("I don't consent.")
     assert _CONTACT_REFUSAL.search("I do not consent.")
     assert not _CONTACT_REFUSAL.search("is consent required for a quote? dana@x.com")
+
+
+# Added after the third review round. Every round has failed on the same class -- a guard
+# clause broad enough to swallow an ordinary lead -- so these pin the shapes directly.
+
+@pytest.mark.parametrize("text", (
+    "don't call my office line, call my mobile 0501234567",
+    "Don't email my work address, use dana@gmail.com",
+    "don't call or email my landline, my mobile is 0501234567",
+    "please don't email my assistant, email me directly at dana@x.com",
+    "do not call my old number 0521111111, the new one is 0509999999",
+    "don't ring my desk phone, my cell is 0503334444",
+    "don't text my partner, text me 0501234567",
+    "never call my home, call my mobile 0508887777",
+    "אל תתקשרו למשרד, תתקשרו אליי 0501234567",
+    "אל תשלחו למשרד, שלחו אליי dana@x.com",
+))
+def test_redirecting_to_a_preferred_channel_is_not_a_refusal(text: str) -> None:
+    """"Don't use that number, use this one" is the commonest real lead shape.
+
+    The guard's object was briefly ``me|us|my|our``, which made every one of these read as
+    a refusal: the possessive turns "don't call the office" into "don't call my office"
+    without changing the meaning of the sentence for consent purposes. It caught no true
+    refusal at all, so it was pure cost. The Hebrew branch had no object requirement and
+    dropped the same shape.
+    """
+    from app.surfaces.site_v2 import SiteV2State, _actual_contact
+
+    fake = _StagedConsent("affirmative")
+    result = _actual_contact(
+        SiteV2State(), client=fake, text=text, name="", phone="", email="", date="",
+    )
+    assert fake.consent_prompts, "the classifier was never consulted for: " + text
+    assert result.get("phone") or result.get("email"), text
+
+
+@pytest.mark.parametrize("text", (
+    "don't reach out to me", "do not reach out to me", "never reach out to us",
+))
+def test_reach_out_to_me_is_a_refusal(text: str) -> None:
+    """The commonest English refusal verb phrase, missed until the object bridged "out to"."""
+    from app.surfaces.site_v2 import SiteV2State, _actual_contact
+
+    fake = _SiteClient()
+    state = SiteV2State()
+    state.pending_contact = {"phone": "0501234567"}
+    assert _actual_contact(
+        state, client=fake, text=text, name="", phone="", email="", date="",
+    ) == {}
+    assert fake.consent_prompts == []
+    assert state.pending_contact == {}
