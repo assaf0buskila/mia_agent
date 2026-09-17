@@ -1431,3 +1431,119 @@ def test_absorb_submit_lead_rejects_single_letter_and_fragment_names() -> None:
         state, _Call({"name": "דנה", "next_step": None}), visitor_text=visitor_text
     )
     assert state.pending_name == "דנה"
+
+# --------------------------------------------------------------------------------------
+# Regression: the pre-classifier contact veto silently lost leads in production.
+#
+# The guard that ran here matched bare "quote", "sample", "dont", "never" and "no need to"
+# anywhere in the message, ahead of the consent classifier and ahead of the parking that
+# makes a next-turn confirmation possible. Measured against realistic lead text, 8 of 11
+# messages carrying a real phone or email were discarded with no record and no recovery.
+# Neither detector had a single test.
+# --------------------------------------------------------------------------------------
+
+_ORDINARY_LEADS = (
+    "Can I get a quote for a landing page? email me at dana@example.com",
+    "I dont have a landline, my mobile is 052-7654321",
+    "never mind the email, call me at 052-7654321",
+    "I have never used a service like this. my email dana@example.com",
+    "no need to rush, email me at dana@example.com",
+    "send me a sample, my email is dana@example.com",
+    "how much do you quote for a shop? 052-7654321",
+    "we dont need a rewrite, just a quote - dana@example.com",
+    "אפשר לקבל הצעת מחיר? המייל שלי dana@example.com",
+)
+
+
+@pytest.mark.parametrize("text", _ORDINARY_LEADS)
+def test_an_ordinary_lead_reaches_the_consent_classifier(text: str) -> None:
+    """No phrase detector may decide a contact-bearing message before the classifier.
+
+    The assertion that matters is ``consent_prompts``: a lead that never reaches the
+    classifier was thrown away by a regex, which is the defect this test exists for.
+    """
+    from app.surfaces.site_v2 import SiteV2State, _actual_contact
+
+    fake = _SiteClient()
+    result = _actual_contact(
+        SiteV2State(), client=fake, text=text, name="", phone="", email="", date="",
+    )
+    assert fake.consent_prompts, "the classifier was never consulted for: " + text
+    assert result.get("phone") or result.get("email"), text
+
+
+@pytest.mark.parametrize("text", (
+    "אני לא רוצה שתיצרו קשר. המייל שלי nofollow@example.com",
+    "Do not contact me at this address. nofollow@example.com",
+    "My email is refusal2@example.com, but I refuse permission to contact me.",
+    "My email is refusal4@example.com, but I forbid you to contact me.",
+    "never call me, email only: refusal6@example.com",
+    "please don't email me, refusal7@example.com",
+    "המייל שלי refusal3@example.com, אבל אני מסרבת לתת אישור ליצור איתי קשר.",
+))
+def test_an_explicit_refusal_blocks_capture_without_the_classifier(text: str) -> None:
+    """Explicit refusal is decided deterministically, so it still holds with no model.
+
+    This is the one thing the old veto got right and the reason it is not simply deleted:
+    the classifier is instructed that refusal overrides everything, but it can be
+    disabled, time out or truncate, and a refusal must survive all three.
+    """
+    from app.surfaces.site_v2 import SiteV2State, _actual_contact
+
+    fake = _SiteClient()
+    state = SiteV2State()
+    assert _actual_contact(
+        state, client=fake, text=text, name="", phone="", email="", date="",
+    ) == {}
+    assert fake.consent_prompts == []
+    assert state.pending_contact == {}
+
+
+@pytest.mark.parametrize("decision", ("refused", "quoted"))
+def test_a_decided_non_consent_verdict_is_not_parked_for_a_later_turn(decision: str) -> None:
+    """A refusal and a third-party contact are answers, not uncertainty.
+
+    Parking either would let the readback path capture, one turn later, a contact the
+    visitor declined or never owned.
+    """
+    from app.surfaces.site_v2 import SiteV2State, _actual_contact
+
+    state = SiteV2State()
+    assert _actual_contact(
+        state, client=_StagedConsent(decision), text="reach me at parked@example.com",
+        name="", phone="", email="", date="",
+    ) == {}
+    assert state.pending_contact == {}
+
+
+def test_a_model_ambiguous_verdict_is_still_parked_for_a_later_turn() -> None:
+    """The case parking exists for: the model looked and was genuinely unsure."""
+    from app.surfaces.site_v2 import SiteV2State, _actual_contact
+
+    state = SiteV2State()
+    assert _actual_contact(
+        state, client=_StagedConsent("ambiguous"), text="reach me at maybe@example.com",
+        name="", phone="", email="", date="",
+    ) == {}
+    assert state.pending_contact == {"email": "maybe@example.com"}
+
+
+def test_an_unresolved_classifier_does_not_park_the_contact() -> None:
+    """A disabled client yields no verdict, and no verdict must not look like uncertainty.
+
+    ``_classified_consent`` reports both "the model said ambiguous" and "there was no
+    model" as the decision ``ambiguous``; only ``resolved`` separates them. Parking on
+    the second would let a contact be captured later once the classifier recovered.
+    """
+    from app.surfaces.site_v2 import SiteV2State, _actual_contact
+
+    class _Disabled(_SiteClient):
+        def enabled(self) -> bool:
+            return False
+
+    state = SiteV2State()
+    assert _actual_contact(
+        state, client=_Disabled(), text="reach me at down@example.com",
+        name="", phone="", email="", date="",
+    ) == {}
+    assert state.pending_contact == {}
