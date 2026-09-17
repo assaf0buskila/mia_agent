@@ -69,7 +69,7 @@ jobs:
           uv run mia-migrate
           uv run mia-migrate
       - name: PostgreSQL concurrency and migration behavior
-        run: uv run pytest tests/unit/test_crm_v2.py tests/unit/test_v2_migration_postgres.py tests/unit/test_website_v2_postgres.py --basetemp=.cache/pytest-postgres-ci
+        run: uv run pytest tests/unit/test_crm_v2.py tests/unit/test_v2_migration_postgres.py tests/unit/test_website_v2_postgres.py tests/unit/test_column_widths.py --basetemp=.cache/pytest-postgres-ci
 
   container:
     runs-on: ubuntu-latest

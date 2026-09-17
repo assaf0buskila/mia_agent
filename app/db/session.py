@@ -127,6 +127,14 @@ _CONTROLLED_VALUE_COLUMNS = frozenset(
         # the other would write a row whose name no longer matches its own key.
         "name",
         "next_action",
+        # `meeting_debriefs.next_step` and `.outcome` are closed vocabularies, not
+        # prose: `upsert_meeting_debrief` (app/db/store.py) drops the write outright
+        # unless the value is in `ALLOWLISTED_NEXT_STEPS` / `ALLOWLISTED_OUTCOMES`
+        # (app/domain/debriefs.py). Truncating a controlled value substitutes a
+        # silently wrong one, which is exactly the case that must be loud. Each is
+        # bounded on that one table only, so this classification reaches nothing else.
+        "next_step",
+        "outcome",
         # Normalised contact value, UNIQUE with `kind`. Truncating it merges two
         # different people into one identity.
         "normalized_value",
@@ -177,8 +185,6 @@ _FREE_TEXT_COLUMNS = frozenset(
         # A human-facing list of the fields a lead review is still missing. It is
         # read, never matched on.
         "missing_fields",
-        "next_step",
-        "outcome",
         "problem",
         "result",
         "summary",
@@ -223,27 +229,154 @@ def bounded_string_columns(table: Table) -> dict[str, tuple[str, int]]:
     return cached
 
 
-def _rewrite_row(
-    row: Any, changes: Mapping[str, str], positiontup: Sequence[str] | None
-) -> Any | None:
-    """Apply truncations to one DBAPI parameter row, or return None if it cannot be."""
+def _parameter_rows(
+    parameters: Any, positiontup: Sequence[str] | None
+) -> tuple[list[Any], bool] | None:
+    """Split the DBAPI parameters into the row(s) actually about to be executed.
+
+    Returns ``(rows, flat)`` where ``flat`` says ``parameters`` *was* one row and
+    so one row must be handed back, or ``None`` when the shape is not one this
+    guard understands.
+
+    The ``executemany`` flag is deliberately NOT used to decide this. SQLAlchemy's
+    ``insertmanyvalues`` path -- any multi-row INSERT into a table with a
+    server-generated PK, which is most of them -- calls ``before_cursor_execute``
+    once PER ROW with ``executemany=True`` while ``parameters`` holds that single
+    flat row. Trusting the flag is what made this guard fail open: it read
+    ``parameters`` as a list of rows, got a list of scalars, could not rewrite
+    them, and passed the over-long value straight through *after* logging that it
+    had truncated it.
+    """
     if positiontup is None:
-        if not isinstance(row, Mapping) or any(key not in row for key in changes):
+        if isinstance(parameters, Mapping):
+            return [parameters], True
+        if (
+            isinstance(parameters, (list, tuple))
+            and parameters
+            and all(isinstance(row, Mapping) for row in parameters)
+        ):
+            return list(parameters), False
+        return None
+    if not isinstance(parameters, (list, tuple)):
+        return None
+    width = len(positiontup)
+    if parameters and all(
+        isinstance(row, (list, tuple)) and len(row) == width for row in parameters
+    ):
+        # A true executemany: a sequence of complete rows.
+        return list(parameters), False
+    if len(parameters) == width:
+        # One flat row: a single INSERT/UPDATE, or one insertmanyvalues callback.
+        return [parameters], True
+    return None
+
+
+def _guarded_binds(
+    row: Any, positiontup: Sequence[str] | None, limits: Mapping[str, tuple[str, int]]
+) -> list[tuple[Any, str, int, Any]] | None:
+    """``(slot, column name, limit, value)`` for each bounded bind this row carries.
+
+    ``slot`` is the tuple index (positional dialect) or the bind key (named
+    dialect) that has to be replaced in order to truncate the value. Only the
+    FIRST occurrence of a bind key is guarded: a later duplicate is a WHERE
+    comparison, which must keep the value the caller actually asked about.
+    """
+    if positiontup is None:
+        if not isinstance(row, Mapping):
             return None
-        updated = dict(row)
-        updated.update(changes)
-        return updated
-    if not isinstance(row, (tuple, list)) or len(row) != len(positiontup):
+        return [
+            (bind_key, column_name, limit, row[bind_key])
+            for bind_key, (column_name, limit) in limits.items()
+            if bind_key in row
+        ]
+    if not isinstance(row, (list, tuple)) or len(row) != len(positiontup):
         return None
     positions = list(positiontup)
-    updated_row = list(row)
-    for key, value in changes.items():
-        if key not in positions:
-            return None
-        # The first occurrence is the VALUES/SET bind. A later duplicate is a WHERE
-        # comparison, which must keep the value the caller actually asked about.
-        updated_row[positions.index(key)] = value
-    return tuple(updated_row)
+    found: list[tuple[Any, str, int, Any]] = []
+    for bind_key, (column_name, limit) in limits.items():
+        if bind_key not in positions:
+            continue
+        index = positions.index(bind_key)
+        found.append((index, column_name, limit, row[index]))
+    return found
+
+
+def _guard_row(
+    row: Any,
+    positiontup: Sequence[str] | None,
+    limits: Mapping[str, tuple[str, int]],
+    table_name: str,
+) -> Any:
+    """Validate, and where the policy says so truncate, one real parameter row.
+
+    Raises ``ColumnWidthExceeded`` for a RAISE or unclassified column. Returns the
+    row to execute, which is the very same object when nothing was over-long.
+    """
+    binds = _guarded_binds(row, positiontup, limits)
+    if binds is None:
+        # Not a shape this guard can map bind keys onto, so it cannot have detected
+        # an over-long value either. Say exactly that and change nothing: a guard
+        # that cannot see must never claim an outcome.
+        _LOG.error(
+            "db write not guarded reason=column_width_guard_unsupported_shape table=%s",
+            table_name,
+        )
+        return row
+
+    truncations: list[tuple[str, int, int]] = []
+    changes: dict[Any, str] = {}
+    for slot, column_name, limit, value in binds:
+        if not isinstance(value, str) or len(value) <= limit:
+            continue
+        policy = column_width_policy(column_name)
+        if policy == POLICY_TRUNCATE:
+            changes[slot] = value[:limit]
+            truncations.append((column_name, limit, len(value)))
+            continue
+        reason = (
+            "column_width_exceeded"
+            if policy == POLICY_RAISE
+            else "column_width_unclassified"
+        )
+        _LOG.error(
+            "db write rejected overlong value reason=%s "
+            "table=%s column=%s limit=%d length=%d",
+            reason,
+            table_name,
+            column_name,
+            limit,
+            len(value),
+        )
+        raise ColumnWidthExceeded(
+            f"value for {table_name}.{column_name} exceeds its declared width "
+            f"(limit={limit} length={len(value)})"
+        )
+
+    if not changes:
+        return row
+
+    if positiontup is None:
+        updated: Any = dict(row)
+        updated.update(changes)
+    else:
+        as_list = list(row)
+        for index, replacement in changes.items():
+            as_list[index] = replacement
+        updated = tuple(as_list)
+
+    # Logged only here, once the rewritten row exists. The reason-code trail is this
+    # repo's ground truth for what was written, so it must never report a truncation
+    # that did not actually reach the cursor.
+    for column_name, limit, length in truncations:
+        _LOG.warning(
+            "db write truncated overlong value reason=column_width_truncated "
+            "table=%s column=%s limit=%d length=%d",
+            table_name,
+            column_name,
+            limit,
+            length,
+        )
+    return updated
 
 
 def _apply_column_width_guard(
@@ -262,81 +395,20 @@ def _apply_column_width_guard(
     if not limits:
         return statement, parameters
 
-    edits: dict[int, dict[str, str]] = {}
-    for row_index, compiled_row in enumerate(context.compiled_parameters):
-        for bind_key, (column_name, limit) in limits.items():
-            value = compiled_row.get(bind_key)
-            if not isinstance(value, str) or len(value) <= limit:
-                continue
-            policy = column_width_policy(column_name)
-            if policy == POLICY_TRUNCATE:
-                _LOG.warning(
-                    "db write truncated overlong value reason=column_width_truncated "
-                    "table=%s column=%s limit=%d length=%d",
-                    table.name,
-                    column_name,
-                    limit,
-                    len(value),
-                )
-                edits.setdefault(row_index, {})[bind_key] = value[:limit]
-                continue
-            if policy == POLICY_RAISE:
-                _LOG.error(
-                    "db write rejected overlong value reason=column_width_exceeded "
-                    "table=%s column=%s limit=%d length=%d",
-                    table.name,
-                    column_name,
-                    limit,
-                    len(value),
-                )
-            else:
-                _LOG.error(
-                    "db write rejected overlong value reason=column_width_unclassified "
-                    "table=%s column=%s limit=%d length=%d",
-                    table.name,
-                    column_name,
-                    limit,
-                    len(value),
-                )
-            raise ColumnWidthExceeded(
-                f"value for {table.name}.{column_name} exceeds its declared width "
-                f"(limit={limit} length={len(value)})"
-            )
-
-    if not edits:
-        return statement, parameters
-
     positiontup = list(compiled.positiontup or []) if context.dialect.positional else None
-    if executemany:
-        rows = list(parameters)
-        for row_index, changes in edits.items():
-            rewritten = (
-                _rewrite_row(rows[row_index], changes, positiontup)
-                if row_index < len(rows)
-                else None
-            )
-            if rewritten is None:
-                _LOG.error(
-                    "db write left overlong value reason=column_width_truncate_deferred "
-                    "table=%s",
-                    table.name,
-                )
-                return statement, parameters
-            rows[row_index] = rewritten
-        return statement, rows
-
-    rewritten_single = _rewrite_row(parameters, edits.get(0, {}), positiontup)
-    if rewritten_single is None:
-        # The parameter row is not shaped the way this dialect's compiled bind list
-        # says it should be (SQLAlchemy batched several rows into one statement).
-        # Leave the value alone so the database behaves exactly as it does today
-        # rather than the guard inventing a third outcome -- but say so.
+    split = _parameter_rows(parameters, positiontup)
+    if split is None:
         _LOG.error(
-            "db write left overlong value reason=column_width_truncate_deferred table=%s",
+            "db write not guarded reason=column_width_guard_unsupported_shape table=%s",
             table.name,
         )
         return statement, parameters
-    return statement, rewritten_single
+
+    rows, flat = split
+    guarded = [_guard_row(row, positiontup, limits, table.name) for row in rows]
+    if all(new is old for new, old in zip(guarded, rows)):
+        return statement, parameters
+    return statement, guarded[0] if flat else guarded
 
 
 def install_column_width_guard(engine: Engine) -> Engine:

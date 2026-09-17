@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
@@ -25,6 +27,7 @@ from app.db.base import Base
 from app.db.models import (
     CrmOutboxRow,
     CustomerRow,
+    KnowledgeGapRow,
     OwnerNotificationRow,
     SalesStateRow,
 )
@@ -32,19 +35,52 @@ from app.db.session import (
     POLICY_RAISE,
     POLICY_TRUNCATE,
     ColumnWidthExceeded,
-    _rewrite_row,
+    _guard_row,
+    _parameter_rows,
     bounded_string_columns,
     column_width_policy,
+    install_column_width_guard,
     make_engine,
 )
 from app.integrations.sheets import FakeSheetsPort
 from app.workers.crm_delivery import CrmDeliveryWorker
-from sqlalchemy import Boolean, Float, Integer, String, and_, insert, select
+from sqlalchemy import (
+    Boolean,
+    Float,
+    Integer,
+    String,
+    and_,
+    create_engine,
+    insert,
+    select,
+    text,
+)
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import sessionmaker
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
+
+# `text(` followed by a string literal opening with INSERT or UPDATE, matched over
+# the whole file source rather than line by line. An f/r/b prefix, a triple-quoted
+# body and a newline between `text(` and the verb all match here; none of them did
+# under the previous line-by-line `line.split('text(')` form, which stripped only
+# quotes and spaces and so read straight past an f-string prefix.
+_RAW_WRITE = re.compile(
+    "text\\(\\s*[frbFRB]{0,2}(\"\"\"|'''|\"|')\\s*"
+    "(INSERT\\s+INTO|UPDATE)\\s+\"?(\\w+)",
+    re.IGNORECASE,
+)
+
+# The one raw write the guard provably cannot reach, with the argument for why it
+# is safe. `schema_migrations` is created by raw DDL in `migrate.py` and is not a
+# `Base.metadata` table, so `bounded_string_columns` has nothing to guard it with.
+# Its two values are repo-controlled, never visitor- or model-supplied: `filename`
+# is a name from `migrations/` (VARCHAR(255), longest in-tree name is far under it)
+# and `applied_at` is an ISO timestamp (VARCHAR(64)). Both are also keys, so RAISE
+# is the policy they would get, which is what Postgres already does unaided.
+# Anything NEW -- another file, another table -- still fails this test.
+_RAW_WRITE_ALLOWED = {("app/db/migrate.py", "schema_migrations")}
 
 
 @pytest.fixture
@@ -228,16 +264,48 @@ def test_truncation_rewrites_named_and_positional_parameters_identically() -> No
     execution that both branches write the same truncated value into the same bind,
     rather than assuming they agree.
     """
-    changes = {"headline": "trunc"}
-    positional = _rewrite_row(("original", "lead_1"), changes, ["headline", "lead_id"])
-    named = _rewrite_row({"headline": "original", "lead_id": "lead_1"}, changes, None)
-    assert positional == ("trunc", "lead_1")
-    assert named == {"headline": "trunc", "lead_id": "lead_1"}
+    limits = {"headline": ("headline", 5)}
+    positional = _guard_row(("original", "lead_1"), ["headline", "lead_id"], limits, "t")
+    named = _guard_row({"headline": "original", "lead_id": "lead_1"}, None, limits, "t")
+    assert positional == ("origi", "lead_1")
+    assert named == {"headline": "origi", "lead_id": "lead_1"}
 
-    # A shape the guard cannot rewrite safely returns None, so the caller leaves the
-    # value alone and logs `column_width_truncate_deferred` instead of guessing.
-    assert _rewrite_row(("original",), changes, ["headline", "lead_id"]) is None
-    assert _rewrite_row({"lead_id": "lead_1"}, changes, None) is None
+    # A bind the row does not carry is simply not guarded: it is not being written.
+    untouched = {"lead_id": "lead_1"}
+    assert _guard_row(untouched, None, limits, "t") is untouched
+
+    # A duplicate bind key is a WHERE comparison. Only the first occurrence -- the
+    # VALUES/SET bind -- is rewritten; the comparison keeps what the caller asked.
+    assert _guard_row(
+        ("original", "original"), ["headline", "headline"], limits, "t"
+    ) == ("origi", "original")
+
+
+def test_parameter_rows_reads_the_row_being_executed_not_the_executemany_flag() -> None:
+    """`executemany=True` does not mean `parameters` is a list of rows.
+
+    SQLAlchemy's insertmanyvalues path calls the hook once per row with
+    `executemany=True` and `parameters` holding that one flat row. The guard has to
+    key off the actual shape; keying off the flag is what made it fail open.
+    """
+    positiontup = ["lead_id", "headline"]
+
+    # One flat positional row -- the insertmanyvalues and single-INSERT shape.
+    flat = ("lead_1", "text")
+    assert _parameter_rows(flat, positiontup) == ([flat], True)
+
+    # A true executemany -- a sequence of complete rows.
+    many = [("lead_1", "a"), ("lead_2", "b")]
+    assert _parameter_rows(many, positiontup) == (many, False)
+
+    # Named dialect, both shapes.
+    one = {"lead_id": "lead_1", "headline": "text"}
+    assert _parameter_rows(one, None) == ([one], True)
+    assert _parameter_rows([one, one], None) == ([one, one], False)
+
+    # A shape the guard does not understand is reported, never guessed at.
+    assert _parameter_rows(("only_one",), positiontup) is None
+    assert _parameter_rows("not a row", None) is None
 
 
 def test_truncation_applies_to_each_row_of_an_executemany(engine: Engine) -> None:
@@ -258,6 +326,93 @@ def test_truncation_applies_to_each_row_of_an_executemany(engine: Engine) -> Non
             ).all()
         )
     assert stored == {"lead_many1": "a" * limit, "lead_many2": "b" * limit}
+
+
+def test_truncation_applies_to_every_row_of_a_server_pk_multirow_insert(
+    engine: Engine,
+) -> None:
+    """The shape the guard used to fail open on: insertmanyvalues.
+
+    `test_truncation_applies_to_each_row_of_an_executemany` uses `SalesStateRow`,
+    whose PK is client-supplied, so it takes the real executemany path. A table with
+    a server-generated PK -- which is most of them -- takes SQLAlchemy's
+    `insertmanyvalues` path instead: the hook fires once PER ROW with
+    `executemany=True` while `parameters` is that single flat row. The guard read
+    `parameters` as a list of rows, got a list of scalars, and passed the over-long
+    value through untruncated *after* logging `column_width_truncated` for it. On
+    Postgres that is still a `DataError`, i.e. the whole write lost, while the
+    reason-code trail said it had been handled.
+
+    Two rows in one flush is the minimum that reproduces it; one row takes the
+    single-INSERT path and was always correct.
+    """
+    limit = KnowledgeGapRow.__table__.c.topic.type.length
+    factory = sessionmaker(engine)
+    with factory() as db:
+        db.add(KnowledgeGapRow(gap_id="gap_imv1", topic="x" * (limit + 40), question="q"))
+        db.add(KnowledgeGapRow(gap_id="gap_imv2", topic="y" * (limit + 40), question="q"))
+        db.commit()
+
+    with factory() as db:
+        stored = {row.gap_id: row.topic for row in db.query(KnowledgeGapRow).all()}
+    assert stored == {"gap_imv1": "x" * limit, "gap_imv2": "y" * limit}
+
+
+def test_a_raise_on_a_later_row_of_a_multirow_insert_leaves_nothing_behind(
+    engine: Engine,
+) -> None:
+    """A semantic the rewrite moved, pinned so it cannot drift back.
+
+    The old guard re-scanned every row in `context.compiled_parameters` on every
+    callback, so a violation anywhere raised on callback 1, before any row reached
+    the cursor. The new guard checks the row it is actually handed, so a violation
+    on row 2 raises on callback 2 -- after row 1 has already been executed. That is
+    only safe because the flush is inside the transaction, so the whole thing rolls
+    back. Proved here rather than assumed.
+    """
+    gap_limit = KnowledgeGapRow.__table__.c.gap_id.type.length
+    factory = sessionmaker(engine)
+    with factory() as db:
+        db.add(KnowledgeGapRow(gap_id="good1", topic="t", question="q"))
+        db.add(KnowledgeGapRow(gap_id="z" * (gap_limit + 1), topic="t", question="q"))
+        with pytest.raises(ColumnWidthExceeded):
+            db.commit()
+
+    with factory() as db:
+        assert db.query(KnowledgeGapRow).all() == [], (
+            "the row that preceded the rejected one must not survive the raise"
+        )
+
+
+def test_a_truncation_reason_code_is_only_logged_when_the_value_was_truncated(
+    engine: Engine, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The reason-code trail is ground truth, so it must not claim what did not happen.
+
+    The old guard emitted `column_width_truncated` while detecting, then discovered
+    it could not rewrite the row and left the value at full length. Every emitted
+    truncation reason code must correspond to a value that really was shortened.
+    """
+    limit = KnowledgeGapRow.__table__.c.topic.type.length
+    factory = sessionmaker(engine)
+    with caplog.at_level(logging.WARNING, logger="app.db.session"):
+        with factory() as db:
+            db.add(KnowledgeGapRow(gap_id="gap_log1", topic="x" * (limit + 5), question="q"))
+            db.add(KnowledgeGapRow(gap_id="gap_log2", topic="y" * (limit + 5), question="q"))
+            db.commit()
+
+    truncated = [r for r in caplog.messages if "reason=column_width_truncated" in r]
+    assert len(truncated) == 2, (
+        "one reason code per value actually truncated, no more and no fewer"
+    )
+    assert not [r for r in caplog.messages if "column_width_truncate_deferred" in r]
+    assert not [
+        r for r in caplog.messages if "column_width_guard_unsupported_shape" in r
+    ]
+
+    with factory() as db:
+        lengths = sorted(len(row.topic) for row in db.query(KnowledgeGapRow).all())
+    assert lengths == [limit, limit]
 
 
 def test_guard_raise_is_caught_by_the_delivery_worker_and_does_not_wedge_the_queue(
@@ -342,12 +497,77 @@ def test_app_has_no_raw_text_insert_or_update() -> None:
     complete rather than becoming a claim about the past.
     """
     offenders: list[str] = []
+    allowed_seen: set[tuple[str, str]] = set()
     for path in sorted((_REPO_ROOT / "app").rglob("*.py")):
         source = path.read_text(encoding="utf-8")
-        for number, line in enumerate(source.splitlines(), start=1):
-            if "text(" not in line:
+        relative = path.relative_to(_REPO_ROOT).as_posix()
+        for match in _RAW_WRITE.finditer(source):
+            target = (relative, match.group(3).lower())
+            if target in _RAW_WRITE_ALLOWED:
+                allowed_seen.add(target)
                 continue
-            statement = line.split("text(", 1)[1].lstrip("\"' ").upper()
-            if statement.startswith(("INSERT", "UPDATE")):
-                offenders.append(f"{path.relative_to(_REPO_ROOT)}:{number}")
+            number = source.count("\n", 0, match.start()) + 1
+            offenders.append(f"{relative}:{number} -> {match.group(3)}")
     assert offenders == []
+    assert allowed_seen == _RAW_WRITE_ALLOWED, (
+        "an allowlisted raw write is gone; delete its entry rather than leaving "
+        "the allowlist claiming an exception that no longer exists"
+    )
+
+
+@pytest.mark.skipif(
+    not os.getenv("MIA_TEST_POSTGRES_URL"), reason="test PostgreSQL DSN not set"
+)
+def test_guard_truncates_and_raises_against_real_postgres() -> None:
+    """The whole point of the guard, proved on the only engine that enforces widths.
+
+    Every other test here runs on SQLite, which ignores `VARCHAR(N)` outright -- the
+    exact blindness this chunk exists to remove. Without this test the guard is
+    proved only where the bug it prevents cannot occur, so a regression on the
+    multi-row INSERT path (which Postgres answers with `DataError` and SQLite
+    silently accepts) would pass CI green.
+
+    psycopg is also a *named* (pyformat) dialect while SQLite is positional, so this
+    is the only end-to-end exercise of the `positiontup is None` branch.
+    """
+    url = os.environ["MIA_TEST_POSTGRES_URL"]
+    schema = "mia_widths_" + uuid4().hex
+    admin = create_engine(url)
+    with admin.begin() as conn:
+        conn.execute(text(f'CREATE SCHEMA "{schema}"'))
+    engine = install_column_width_guard(
+        create_engine(url, connect_args={"options": f"-csearch_path={schema}"})
+    )
+    try:
+        Base.metadata.create_all(engine)
+        factory = sessionmaker(engine)
+        limit = KnowledgeGapRow.__table__.c.topic.type.length
+
+        # Two rows in one flush: the insertmanyvalues shape. Postgres rejects an
+        # over-long value outright, so reaching the assert at all proves the guard
+        # truncated every row rather than only claiming to.
+        with factory() as db:
+            db.add(
+                KnowledgeGapRow(gap_id="pg1", topic="x" * (limit + 40), question="q")
+            )
+            db.add(
+                KnowledgeGapRow(gap_id="pg2", topic="y" * (limit + 40), question="q")
+            )
+            db.commit()
+        with factory() as db:
+            stored = {row.gap_id: row.topic for row in db.query(KnowledgeGapRow).all()}
+        assert stored == {"pg1": "x" * limit, "pg2": "y" * limit}
+
+        # And a RAISE column is still stopped before it reaches the server.
+        gap_limit = KnowledgeGapRow.__table__.c.gap_id.type.length
+        with factory() as db:
+            db.add(
+                KnowledgeGapRow(gap_id="z" * (gap_limit + 1), topic="t", question="q")
+            )
+            with pytest.raises(ColumnWidthExceeded):
+                db.commit()
+    finally:
+        engine.dispose()
+        with admin.begin() as conn:
+            conn.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
+        admin.dispose()
