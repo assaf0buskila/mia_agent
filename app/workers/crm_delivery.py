@@ -52,13 +52,20 @@ _PROCESS_CRM_EFFECT_LOCK = RLock()
 
 DeliveryOutcome = Literal["confirmed", "failed", "unknown", "conflict"]
 
-# The destination boundary, in one place so `_deliver` and `_reconcile_unknown`
-# cannot drift apart again. `AdapterResponseError` subclasses `AdapterHttpError`,
-# so the "failed" tuple must always be caught first: a destination that answered
-# "I refused this" is a settled negative, while a transport-level failure leaves
-# the external effect genuinely unobserved.
+# The destination boundary. `_DESTINATION_UNKNOWN_EXCEPTIONS` is shared because it
+# means the same thing on both sides -- the external effect is genuinely unobserved,
+# so the only honest outcome is "unknown" -- and so an exception added to one side
+# cannot be forgotten on the other.
 #
-# `SQLAlchemyError` is deliberately NOT in either tuple. It maps to "failed" in
+# `_DESTINATION_FAILED_EXCEPTIONS` is used by `_deliver` ONLY, and must stay that
+# way. On a first attempt, "the destination answered 'I refused this'" is a settled
+# negative worth retrying. On a readback it is not: `_claim_one` re-claims status in
+# ("pending", "failed"), so "failed" would hand a job whose external effect may
+# already have landed back to the delivery loop for a real re-send. `AdapterResponseError`
+# subclasses `AdapterHttpError`, so where both tuples are caught the failed one must
+# come first; `_reconcile_unknown` catches neither as failed and maps both to "unknown".
+#
+# `SQLAlchemyError` is deliberately in neither tuple. It maps to "failed" in
 # `_deliver` (back off and retry) but to "unknown" in `_reconcile_unknown`, and
 # the two must be written out at each site so the difference stays visible.
 _DESTINATION_FAILED_EXCEPTIONS = (AdapterResponseError, ValueError)
@@ -463,40 +470,50 @@ class CrmDeliveryWorker:
                     continue
                 destination = job.destination
                 reason = ""
+                # The stored payload is parsed in its own guard, because it is the
+                # only thing here that can settle as "failed". An unparseable payload
+                # can never be reconciled by anyone (and used to escape this method
+                # past run_once as a json.JSONDecodeError, stopping every reconcile
+                # and every delivery behind it on every poll, forever). Everything
+                # raised by the readback itself belongs to the guard below, where the
+                # external effect is still unobserved and "unknown" is the only
+                # honest answer.
                 try:
                     payload = json.loads(job.payload_json)
-                    outcome = (
-                        self._dispatch(destination, payload, reconcile_only=True)
-                        if isinstance(payload, dict)
-                        else "failed"
-                    )
-                except SQLAlchemyError:
-                    # The one mapping that must differ from `_deliver`, which marks a
-                    # DB error "failed" so the job backs off and retries. Here that
-                    # would be a lie with teeth: `_claim_one` re-claims status in
-                    # ("pending", "failed"), so "failed" hands a job whose external
-                    # effect may already have landed back to the delivery loop for a
-                    # real re-send -- and the DB error may have struck the very
-                    # claim-check that prevents a duplicate owner ping. A readback we
-                    # could not complete leaves the outcome exactly where it was:
-                    # unknown. Roll back first so this session is usable for `_finish`.
-                    session.rollback()
-                    outcome = "unknown"
-                    reason = "reconcile_db_error"
-                except _DESTINATION_FAILED_EXCEPTIONS as error:
-                    # Including json.JSONDecodeError, a ValueError: an unparseable
-                    # payload can never be reconciled, and used to escape this method
-                    # past run_once, stopping every reconcile and every delivery
-                    # behind it on every poll, forever.
+                    if not isinstance(payload, dict):
+                        raise ValueError("job payload is not an object")
+                except ValueError:
                     outcome = "failed"
-                    reason = (
-                        "reconcile_payload_invalid"
-                        if isinstance(error, ValueError)
-                        else "reconcile_destination_rejected"
-                    )
-                except _DESTINATION_UNKNOWN_EXCEPTIONS:
-                    outcome = "unknown"
-                    reason = "reconcile_readback_unavailable"
+                    reason = "reconcile_payload_invalid"
+                else:
+                    try:
+                        outcome = self._dispatch(destination, payload, reconcile_only=True)
+                    except SQLAlchemyError:
+                        # A DB error during a readback must not become "failed" the way
+                        # `_deliver` maps it: `_claim_one` re-claims status in
+                        # ("pending", "failed"), so "failed" hands a job whose external
+                        # effect may already have landed back to the delivery loop for a
+                        # real re-send -- and the DB error may have struck the very
+                        # claim-check that prevents a duplicate owner ping. Roll back
+                        # first so this session is usable for `_finish`.
+                        session.rollback()
+                        outcome = "unknown"
+                        reason = "reconcile_db_error"
+                    except (
+                        *_DESTINATION_UNKNOWN_EXCEPTIONS,
+                        AdapterResponseError,
+                        ValueError,
+                    ):
+                        # Every destination-side failure, settled-looking or not.
+                        # `AdapterResponseError` ("the destination refused this") is
+                        # named explicitly although `AdapterHttpError` already covers
+                        # it: on a readback even a refusal says nothing about whether
+                        # the original write landed, so it stays "unknown" rather than
+                        # becoming re-claimable. A `ValueError` raised out of the
+                        # readback (a cell that would not parse, a malformed id) is
+                        # the same -- unlike one raised by the payload parse above.
+                        outcome = "unknown"
+                        reason = "reconcile_readback_unavailable"
                 if reason:
                     _LOG.warning(
                         "crm reconcile job left %s reason=%s destination=%s attempts=%s",
