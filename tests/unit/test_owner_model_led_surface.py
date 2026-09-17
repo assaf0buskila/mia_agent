@@ -720,3 +720,211 @@ async def test_a_broken_session_during_the_failed_turn_persist_does_not_mask_the
     finally:
         db.close()
     assert [message.text for message in port.sent] == [owner.OWNER_UNAVAILABLE]
+
+
+class _AlwaysFailingMessagePort:
+    """Every send raises, as a Telegram 429 on a long owner reply does."""
+
+    def __init__(self) -> None:
+        self.attempts = 0
+
+    async def send(self, message) -> None:  # noqa: ANN001
+        from app.integrations.telegram import TelegramSendError
+
+        self.attempts += 1
+        raise TelegramSendError("telegram send failed HTTP 429")
+
+
+@pytest.mark.asyncio
+async def test_a_total_send_failure_is_failed_not_processed(monkeypatch, caplog) -> None:
+    """A turn that delivered nothing at all must leave a retryable webhook row.
+
+    `processed` is terminal: `claim_webhook` refuses it and `is_webhook_duplicate`
+    reports it as a duplicate, so a 429 that ate the whole reply used to lose the
+    owner's answer permanently -- and silently, since /health's `failed_sends`
+    counts only `failed` rows and never moved.
+    """
+    from app.domain.events import Channel
+
+    monkeypatch.setattr(owner, "_talk_with_optional_agent", lambda **_kwargs: ("accepted", False))
+    event_id = "surface-total-send-failure"
+    _claim(event_id)
+    db = get_session_factory()()
+    store = LeadStore(db)
+    port = _AlwaysFailingMessagePort()
+    # The in-memory test database is shared across the whole session, so other
+    # tests' failed rows are subtracted out rather than assumed absent.
+    failed_before = store.count_failed_webhooks()
+    try:
+        with caplog.at_level("WARNING", logger="mia.owner"):
+            result = await owner.run_owner_loop(
+                item={"id": event_id, "from": ACTOR, "chat_id": ACTOR, "text": "מה מצב?"},
+                store=store,
+                port=port,
+                settings=Settings(_env_file=None, telegram_owner_user_ids=ACTOR),
+                owner_ids={ACTOR},
+                channel=Channel.TELEGRAM,
+            )
+        assert port.attempts == 1
+        assert not result.sent
+        row = store.get_webhook(provider="telegram", provider_event_id=event_id)
+        assert row.status == "failed"
+        assert store.count_failed_webhooks() == failed_before + 1
+        # The row is now retryable in both directions, which is the whole point.
+        assert not store.is_webhook_duplicate(provider="telegram", provider_event_id=event_id)
+    finally:
+        db.close()
+    prose_failures = [
+        record
+        for record in caplog.records
+        if record.name == "mia.owner" and "reason=prose_send_failed" in record.getMessage()
+    ]
+    assert len(prose_failures) == 1
+    message = prose_failures[0].getMessage()
+    assert "TelegramSendError" in message
+    # The reason code and the exception class only -- never the provider's own text.
+    assert "429" not in message
+    assert "מה מצב?" not in message
+
+
+@pytest.mark.asyncio
+async def test_every_owner_turn_leaves_one_comm_record_either_way(monkeypatch, caplog) -> None:
+    """`mia.comm` needs a denominator: without a success record a reader cannot
+
+    tell "no failures" from "the logger never fires". One line per owner delivery,
+    whichever way it went, and never carrying the message text.
+    """
+    from app.domain.events import Channel
+
+    monkeypatch.setattr(owner, "_talk_with_optional_agent", lambda **_kwargs: ("accepted", False))
+    settings = Settings(_env_file=None, telegram_owner_user_ids=ACTOR)
+
+    async def run(event_id: str, port) -> list:  # noqa: ANN001
+        _claim(event_id)
+        db = get_session_factory()()
+        caplog.clear()
+        try:
+            with caplog.at_level("INFO", logger="mia.comm"):
+                await owner.run_owner_loop(
+                    item={"id": event_id, "from": ACTOR, "chat_id": ACTOR, "text": "מה מצב?"},
+                    store=LeadStore(db),
+                    port=port,
+                    settings=settings,
+                    owner_ids={ACTOR},
+                    channel=Channel.TELEGRAM,
+                )
+        finally:
+            db.close()
+        return [record for record in caplog.records if record.name == "mia.comm"]
+
+    delivered = await run("surface-comm-denominator-ok", RecordingMessagePort())
+    assert len(delivered) == 1
+    assert "success=True" in delivered[0].getMessage()
+
+    failed = await run("surface-comm-denominator-fail", _AlwaysFailingMessagePort())
+    assert len(failed) == 1
+    assert "success=False" in failed[0].getMessage()
+
+    for record in (*delivered, *failed):
+        text = record.getMessage()
+        assert "accepted" not in text
+        assert "מה מצב?" not in text
+
+
+def test_log_comm_no_longer_defaults_success_to_true() -> None:
+    """A default no caller has ever reached is a trap: a future caller on a path
+
+    that may not be a success would inherit `success=True` for free.
+    """
+    import inspect
+
+    from app.core.logging import log_comm
+
+    assert inspect.signature(log_comm).parameters["success"].default is inspect.Parameter.empty
+
+
+class _IndexZeroFailingMessagePort:
+    """Message index 0 -- the prose/digest -- fails; every later chunk goes through.
+
+    A Telegram 429 on the first chunk of a long reply, where the short approval card
+    that follows is small enough to get through.
+    """
+
+    def __init__(self) -> None:
+        self.attempts = 0
+        self.sent: list = []
+
+    async def send(self, message) -> None:  # noqa: ANN001
+        from app.integrations.telegram import TelegramSendError
+
+        self.attempts += 1
+        if self.attempts == 1:
+            raise TelegramSendError("telegram send failed HTTP 429")
+        self.sent.append(message)
+
+
+@pytest.mark.asyncio
+async def test_a_lost_prose_reply_is_not_a_successful_comm_record(monkeypatch, caplog) -> None:
+    """`mia.comm` success means the owner's answer landed, not that some chunk did.
+
+    Index 0 is the prose/digest on both composition branches, so `sent` is exactly
+    "Assaf's answer reached Telegram". Keyed on `delivered_any` instead, this record
+    read `success=True policy=owner_reply_delivered` for a turn where the answer was
+    lost permanently and only the follow-up card arrived -- so a reader counting
+    `success=False` to find lost owner replies undercounted them.
+
+    The webhook row stays `sent` here on purpose: that answers "may this turn be
+    re-sent?", and the card's keyboard already reached Telegram.
+    """
+    from app.domain.events import Channel
+    from app.integrations.base import OutboundMessage
+
+    def _talk(**kwargs):  # noqa: ANN003
+        kwargs["approval_ids_out"].append("appr-lost-prose")
+        return ("accepted", False)
+
+    monkeypatch.setattr(owner, "_talk_with_optional_agent", _talk)
+    monkeypatch.setattr(
+        owner,
+        "_turn_approval_card_messages",
+        lambda store, *, item, approval_ids: [
+            (
+                OutboundMessage(
+                    conversation_id=ACTOR,
+                    text="CARD",
+                    channel=Channel.TELEGRAM.value,
+                    idempotency_key=f"{item['id']}:card",
+                    parse_mode="HTML",
+                ),
+                "turn:appr-lost-prose",
+            )
+        ],
+    )
+    event_id = "surface-prose-lost-card-sent"
+    _claim(event_id)
+    db = get_session_factory()()
+    store = LeadStore(db)
+    port = _IndexZeroFailingMessagePort()
+    try:
+        with caplog.at_level("INFO", logger="mia.comm"):
+            result = await owner.run_owner_loop(
+                item={"id": event_id, "from": ACTOR, "chat_id": ACTOR, "text": "מה מצב?"},
+                store=store,
+                port=port,
+                settings=Settings(_env_file=None, telegram_owner_user_ids=ACTOR),
+                owner_ids={ACTOR},
+                channel=Channel.TELEGRAM,
+            )
+        # The card really did arrive, and the webhook really is terminal.
+        assert [message.text for message in port.sent] == ["CARD"]
+        assert not result.sent
+        row = store.get_webhook(provider="telegram", provider_event_id=event_id)
+        assert row.status == "sent"
+    finally:
+        db.close()
+    comm = [record for record in caplog.records if record.name == "mia.comm"]
+    assert len(comm) == 1
+    message = comm[0].getMessage()
+    assert "success=False" in message
+    assert "policy=owner_reply_send_failed" in message
+    assert "מה מצב?" not in message

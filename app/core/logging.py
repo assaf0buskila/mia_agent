@@ -80,10 +80,16 @@ def log_comm(
     approval_id: str = "",
     policy_result: str = "",
     latency_ms: int = 0,
-    success: bool = True,
+    success: bool,
     automation_mode: str = "",
 ) -> None:
-    """Operational comm log. Never include message text, tokens, or secrets."""
+    """Operational comm log. Never include message text, tokens, or secrets.
+
+    `success` is deliberately required. Its `True` default was never reached by any
+    caller, so it was not a default but a trap: a future caller on a path that may
+    not have succeeded would have inherited "success" for free, and the one field
+    the operational log exists to answer would have been silently wrong.
+    """
     _COMM_LOG.info(
         "comm channel=%s provider=%s actor_type=%s direction=%s msg=%s lead=%s conv=%s "
         "scope=%s takeover=%s approval=%s policy=%s latency_ms=%s success=%s mode=%s",
