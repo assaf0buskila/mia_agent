@@ -802,8 +802,10 @@ def test_a_span_pointing_at_another_contact_is_rejected(span: str) -> None:
 class _TruncatingConsent(_SiteClient):
     """Provider exhausted max_output_tokens while reasoning: no prose, no tool call.
 
-    This is exactly what the Responses adapter returns for status=incomplete, and it
-    is not an error, so the model chain does not fall back.
+    This is exactly what both adapters now return for a truncation, and it is not an
+    error. `LlmModelChain` used to read the stripped shape as `empty_reply` and spend
+    its fallback rung on it; it now recognises `finish_reason == "length"` and hands
+    the truncation straight back, so this arrives at the caller unchanged.
     """
 
     def __init__(self) -> None:
