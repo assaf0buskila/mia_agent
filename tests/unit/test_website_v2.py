@@ -803,9 +803,10 @@ class _TruncatingConsent(_SiteClient):
     """Provider exhausted max_output_tokens while reasoning: no prose, no tool call.
 
     This is exactly what both adapters now return for a truncation, and it is not an
-    error. `LlmModelChain` used to read the stripped shape as `empty_reply` and spend
-    its fallback rung on it; it now recognises `finish_reason == "length"` and hands
-    the truncation straight back, so this arrives at the caller unchanged.
+    error. This client is a single rung, not a chain, so the truncation reaches
+    `_classified_consent` directly -- which is the fail-closed case under test here.
+    Behind a real chain a truncation still crosses to the other provider first and is
+    only handed back by the last rung; that path is covered in test_llm_client.py.
     """
 
     def __init__(self) -> None:

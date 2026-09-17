@@ -461,6 +461,8 @@ class LlmClient:
             raise LlmError("llm response message was not an object")
         usage = body.get("usage") if isinstance(body.get("usage"), dict) else {}
         finish_reason = str(choice.get("finish_reason") or "")
+        raw_refusal = message.get("refusal")
+        refusal = raw_refusal.strip() if isinstance(raw_refusal, str) else ""
         if finish_reason == "length":
             # Same contract as the Responses transport. Generation stopped early, so
             # partial prose can read as a finished sentence and a function call can look
@@ -468,6 +470,11 @@ class LlmClient:
             # `parse_tool_arguments` silently normalises to `{}` rather than raising.
             # Expose neither prose nor calls: the caller sees only a truncation, and
             # cannot dispatch half a generated intent.
+            #
+            # The refusal survives the strip. It is a decided answer about the request,
+            # not a fragment of generated output, and dropping it turned a model that
+            # refused and then ran out of budget into a plain "truncated" -- the weaker
+            # and less honest of the two reason codes.
             _LOG.warning(
                 "llm chat reply stripped reason=truncated model=%s tokens_out=%s",
                 self._model,
@@ -477,18 +484,17 @@ class LlmClient:
                 text="",
                 tool_calls=(),
                 finish_reason="length",
-                refusal="",
+                refusal=refusal,
                 tokens_in=_clamp_tokens(usage.get("prompt_tokens")),
                 tokens_out=_clamp_tokens(usage.get("completion_tokens")),
                 raw_message={"role": "assistant", "content": ""},
             )
         content = message.get("content")
-        refusal = message.get("refusal")
         return LlmResponse(
             text=_message_text(content),
             tool_calls=self._parse_tool_calls(message),
             finish_reason=finish_reason,
-            refusal=refusal.strip() if isinstance(refusal, str) else "",
+            refusal=refusal,
             tokens_in=_clamp_tokens(usage.get("prompt_tokens")),
             tokens_out=_clamp_tokens(usage.get("completion_tokens")),
             raw_message=message,
@@ -633,12 +639,35 @@ class LlmModelChain:
                 last = exc
                 continue
             if response.truncated():
-                # A budget exhausted by this model's own reasoning is not a dead model.
-                # The next rung would run the same prompt into the same ceiling, so
-                # advancing spends the fallback on a problem no fallback can fix -- and
-                # relabels the one finish_reason that names truncation as "empty_reply",
-                # which is why callers never saw a truncation on this transport. Return
-                # the truncation as a truncation and let the caller fail closed.
+                # A budget exhausted by this model's own reasoning is not a dead model,
+                # and it must stop being relabelled "empty_reply" -- that is why callers
+                # never saw a truncation on this transport. But how far it travels is
+                # the same question ADVANCE_ON_CROSS_PROVIDER already answers. A sibling
+                # rung on the SAME host runs the same prompt into the same ceiling, so
+                # spending it fixes nothing. A DIFFERENT provider does not reproduce it:
+                # the OpenAI Responses truncation is that model's own reasoning eating
+                # the output budget, which the Gemini rung never spends. Both real
+                # chains are OpenAI rungs then a Gemini rung, so the cross-provider
+                # rescue is the normal case and returning here would drop the website
+                # lead the Gemini rung would have classified. Gemini is last, so a
+                # truncation there still reaches the caller and still fails closed.
+                #
+                # Deliberately computed here rather than shared with the LlmError
+                # branch's `crosses_provider`: that one looks past sibling rungs in
+                # `self._clients`, this one looks only at rungs that will actually be
+                # tried. On these chains the two agree, but they answer different
+                # questions and are kept apart so neither drifts into the other.
+                remaining = candidate_indexes[candidate_indexes.index(index) + 1 :]
+                self.errors.append(f"{client.model}:truncated")
+                if any(self._clients[i].provider != client.provider for i in remaining):
+                    _LOG.warning(
+                        "llm chain advancing past truncation reason=truncated "
+                        "model=%s tokens_out=%s",
+                        client.model,
+                        response.tokens_out,
+                    )
+                    last = LlmError("llm request failed: truncated")
+                    continue
                 _LOG.warning(
                     "llm chain returned truncation reason=truncated model=%s tokens_out=%s",
                     client.model,
