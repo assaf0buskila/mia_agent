@@ -171,6 +171,19 @@ Sheets/Calendar/Gmail stay faked; S6 is capped by Vercel, below.
 
 External, Assaf's not the repo's:
 
+- [x] **Telegram bot token rotation — ACCEPTED RISK, deliberately not done (Assaf, 2026-09-17).**
+      The token leaked into CloudWatch for the whole life of `110ada6` through httpx request
+      logging. The leak itself is closed: `app/core/redact.py` and `RedactingFilter` are live as
+      of `78af85f`, so no new log line carries it. What remains is historical — the entries
+      already written — and the token is still valid, verified two ways: `mia/prod` last changed
+      2026-09-16 12:50 (before the decision), and a `mia-telegram-webhook` one-off authenticated
+      against it successfully today. Do not re-raise this as outstanding, and do not read the
+      silence as "it was done". If it is ever revisited: new value into `mia/prod`, revoke the old
+      in BotFather, **replace the ECS task** (secrets are injected at container start, so updating
+      the secret changes nothing until the container restarts), then re-register via the
+      `mia-telegram-webhook` one-off — a correct token with no webhook looks exactly like a wrong
+      one: silence, no errors.
+
 - [ ] Regenerate `llms.txt` / `llms-full.txt` / `pricing.md` on Vercel at build time. All three are
       dated 09-14 and did not move with the 09-16 site change. They are Mia's only knowledge
       sources, so C12's hourly ingest runs against files that never change.
