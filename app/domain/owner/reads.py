@@ -4,12 +4,19 @@ Read-only by construction. These functions answer "what is waiting for me?" and
 "what happened on the website?" from Postgres. Deciding an approval and replying to
 a lead stay on their existing typed paths, so a free-form owner question can never
 become a write.
+
+Read-only is not the same as trusted. The website reads below render text that a visitor
+typed on assafweb.com into ` · `-joined, newline-separated lines that the owner loop then
+reads as one tool result, so every visitor-authored field goes through
+`sanitize_untrusted_line` before it is interpolated. Without that, a visitor could end a
+field with a newline and mint a whole extra lead row in Assaf's brief.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from app.brain.context import sanitize_untrusted_line
 from app.domain.lead_label import lead_display
 from app.domain.sales import FitLevel, PainLevel, SalesState, manual_step_established
 
@@ -17,6 +24,11 @@ if TYPE_CHECKING:
     from app.db.store import CapturedWebsiteLead, LeadStore
 
 _MAX_LISTED = 8
+
+
+def _visitor_text(value: str) -> str:
+    """One line, always. Visitor-authored fields only -- never a server-minted id."""
+    return sanitize_untrusted_line(value, subject="owner website read")
 
 
 def format_pending_approvals_ack(store: LeadStore, *, limit: int = _MAX_LISTED) -> str:
@@ -65,7 +77,15 @@ _discovery_depth = discovery_depth
 
 def _lead_line(sales: SalesState) -> str:
     # Lead with who they are. The state flags are the detail, not the identity.
-    parts = [lead_display(sales.lead_id, sales.headline, sales.display_name)]
+    # `headline` and `display_name` are derived from what the visitor said; `lead_id` is
+    # server-minted and is left alone so the id Assaf acts on is never rewritten here.
+    parts = [
+        lead_display(
+            sales.lead_id,
+            _visitor_text(sales.headline),
+            _visitor_text(sales.display_name),
+        )
+    ]
     if sales.workflow_known:
         parts.append("workflow")
     if manual_step_established(sales):
@@ -107,10 +127,12 @@ def top_website_lead_id(store: LeadStore) -> str | None:
 def _captured_lead_line(lead: CapturedWebsiteLead) -> str:
     """v2 has no sales-workflow state to render; show the fields C3a fills instead."""
     fields = lead.fields
-    name = fields.get("name", "").strip()
-    business = fields.get("business", "").strip()
-    want = fields.get("want", "").strip()
-    next_step = fields.get("next_step", "").strip()
+    # Every one of these four is website visitor free text (`business` is the one-time
+    # `state.business_context` latch), so each is flattened before it is joined into a line.
+    name = _visitor_text(fields.get("name", ""))
+    business = _visitor_text(fields.get("business", ""))
+    want = _visitor_text(fields.get("want", ""))
+    next_step = _visitor_text(fields.get("next_step", ""))
     label = name or business or lead.contact_id
     parts = [label]
     if business and business != label:

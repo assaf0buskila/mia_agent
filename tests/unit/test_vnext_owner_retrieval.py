@@ -38,6 +38,8 @@ from app.domain.owner.brain import answer_owner
 from app.domain.owner.tasks import OwnerTaskType
 from app.integrations.llm_client import LlmClient
 
+from tests.unit.test_owner_untrusted_frame import untrusted_body
+
 MEMORY_TEXT = "Assaf runs the zorblat pipeline every Friday morning"
 KNOWLEDGE_TEXT = "The zorblat service is billed as a fixed monthly fee"
 QUESTION = "what is the zorblat status"
@@ -278,7 +280,12 @@ def test_the_answer_is_grounded_in_what_was_retrieved(monkeypatch) -> None:
     """Retrieving once is only correct if that one copy is the one the model sees.
 
     This is the only remaining test proving that retrieved memory and knowledge text
-    actually reaches the system prompt.
+    actually reaches the model. H5b split where each one lands: owner-authored memory
+    still goes in the system prompt, while ingested website knowledge is third-party text
+    and now travels in its own framed user message instead of sitting in the system role
+    under "Everything above is what you know." The behaviour under test is unchanged --
+    exactly one retrieved copy, and the model sees it -- so the assertion follows the
+    knowledge to its new message rather than being dropped.
     """
     session, brain = _seeded_brain()
     _count_retrievals(monkeypatch)
@@ -289,6 +296,11 @@ def test_the_answer_is_grounded_in_what_was_retrieved(monkeypatch) -> None:
     finally:
         session.close()
 
-    system = script.requests[0]["messages"][0]["content"]
+    messages = script.requests[0]["messages"]
+    system = messages[0]["content"]
     assert MEMORY_TEXT in system
-    assert KNOWLEDGE_TEXT in system
+    assert KNOWLEDGE_TEXT not in system
+    carriers = [m for m in messages if KNOWLEDGE_TEXT in str(m.get("content", ""))]
+    assert len(carriers) == 1
+    assert carriers[0]["role"] == "user"
+    assert KNOWLEDGE_TEXT in untrusted_body(carriers[0]["content"])

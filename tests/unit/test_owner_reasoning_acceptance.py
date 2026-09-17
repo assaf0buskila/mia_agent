@@ -20,6 +20,8 @@ from app.integrations.sheets import FakeSheetsPort
 from app.surfaces import owner
 from app.surfaces.crm import FakeContactsCrm
 
+from tests.unit.test_owner_untrusted_frame import untrusted_body
+
 ACTOR = "550088"
 
 
@@ -147,7 +149,11 @@ def test_bad_model_contact_write_choice_cannot_turn_data_into_authority(
     assert not sheets.owner_operations
     observation = model.requests[-1]["messages"][-1]
     assert observation["role"] == "tool"
-    assert json.loads(observation["content"])["ok"] is False
+    # H5b moved the wire shape: a tool result now travels inside the per-turn untrusted
+    # frame, so the JSON is the frame's body rather than the whole content. The assertion
+    # is unchanged in strength -- the refusal must still be `ok: false` -- and it now also
+    # proves this refusal reached the model framed.
+    assert json.loads(untrusted_body(observation["content"]))["ok"] is False
 
 
 def test_profile_without_live_evidence_never_reaches_owner(real_owner_path, monkeypatch) -> None:

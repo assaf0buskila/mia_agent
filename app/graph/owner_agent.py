@@ -38,12 +38,19 @@ a prose answer instead of looping forever or running up cost:
 from __future__ import annotations
 
 import json
+import logging
 import re
 import threading
 from time import monotonic
 from typing import Any, NamedTuple
 
-from app.brain.context import BrainContext, render_context_block
+from app.brain.context import (
+    BrainContext,
+    new_untrusted_nonce,
+    render_context_block,
+    render_untrusted_knowledge_message,
+    untrusted_block,
+)
 from app.core.owner_timing import owner_stage
 
 # Each of these is a tool handler's own real "no data" text, imported (not
@@ -87,6 +94,8 @@ from app.tools.registries.owner_tools import (
     execute_tool,
     tool_definitions,
 )
+
+_LOG = logging.getLogger(__name__)
 
 PROMPT_VERSION = "owner_agent_v9"
 
@@ -457,8 +466,16 @@ def build_messages(
     context: BrainContext | None,
     now_line: str = "",
     input_source: str = "text",
+    untrusted_nonce: str = "",
 ) -> list[dict[str, Any]]:
-    """System + context + history + the owner's message. History is data, not instructions."""
+    """System + owner context + framed knowledge + history + the owner's message.
+
+    History is data, not instructions -- and so is ingested website knowledge, which is
+    why it no longer rides inside the system message. `untrusted_nonce` is the frame id
+    for this turn; a caller that also frames tool results passes its own so one turn uses
+    one nonce, and a caller that does not gets a fresh one here rather than a static tag.
+    """
+    nonce = untrusted_nonce or new_untrusted_nonce()
     system = SYSTEM_PROMPT
     toolkit = asked_toolkit(owner_message)
     if toolkit:
@@ -481,6 +498,15 @@ def build_messages(
     if context_block:
         system = f"{system}\n\n{context_block}"
     messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
+    knowledge_block = (
+        render_untrusted_knowledge_message(context, nonce=nonce) if context is not None else ""
+    )
+    if knowledge_block:
+        messages.append({"role": "user", "content": knowledge_block})
+        _LOG.info(
+            "owner knowledge framed reason=untrusted_knowledge_framed items=%d",
+            len(context.knowledge) if context is not None else 0,
+        )
     transcript = render_transcript(list(history))
     if transcript:
         messages.append(
@@ -536,7 +562,12 @@ def run_owner_agent(
     tokens_out = 0
     total_tool_calls = 0
     seen_calls: set[tuple[str, str]] = set()
-    completed_call_results: dict[tuple[str, str], dict[str, Any]] = {}
+    # The framed *wire string*, not the raw payload, so a duplicate call replays exactly
+    # what the first call put on the wire -- frame included.
+    completed_call_results: dict[tuple[str, str], str] = {}
+    # One frame id for this whole turn: the knowledge message and every tool result share
+    # it, and it is minted fresh per run, so nothing carried in from a prior turn can name it.
+    untrusted_nonce = new_untrusted_nonce()
     empty_counts: dict[str, int] = {}
     blocked_tools: set[str] = set()
     approval_ids: list[str] = []
@@ -555,6 +586,7 @@ def run_owner_agent(
         context=None if full_profile else context,
         now_line=now_line,
         input_source=input_source,
+        untrusted_nonce=untrusted_nonce,
     )
     messages[0]["content"] += (
         "\n\nMIA V2 OWNER CONTRACT: Converse freely and let the model select useful "
@@ -752,7 +784,8 @@ def run_owner_agent(
                 cached = completed_call_results.get(key)
                 if cached is not None:
                     # Keep duplicate telemetry distinguishable from a fresh execution;
-                    # the cached payload itself is still returned to the model.
+                    # the cached payload itself is still returned to the model, and it is
+                    # the already-framed wire string, so the replay carries the same frame.
                     steps.append(
                         AgentStep(tool=call.name, ok=False, detail="duplicate reused result")
                     )
@@ -813,8 +846,25 @@ def run_owner_agent(
                 snippet = (result.text or "").strip()
                 if snippet:
                     tool_reports.append(f"{call.name}: {snippet[:400]}")
-            messages.append(tool_result_message(call.call_id, result.payload()))
-            completed_call_results[key] = result.payload()
+            # The single choke point for provider/visitor text entering this loop. A tool
+            # result is Gmail body, Sheets cell, scraped snippet, CRM field or website
+            # visitor free text; it is framed here so it cannot read as a server assertion.
+            # The three server-authored results above (per-step cap, total-call ceiling,
+            # duplicate-in-progress) stay unframed dicts on purpose: they are loop control
+            # ("do not call more tools on this turn"), and framing them as untrusted would
+            # tell the model to ignore its own budget stop. The fourth, the cached replay,
+            # is a real tool result and is framed -- it replays this exact string.
+            framed = untrusted_block(
+                json.dumps(result.payload(), ensure_ascii=False, default=str),
+                nonce=untrusted_nonce,
+            )
+            messages.append(tool_result_message(call.call_id, framed))
+            completed_call_results[key] = framed
+            _LOG.info(
+                "owner tool result framed reason=untrusted_tool_result_framed tool=%s ok=%s",
+                call.name,
+                result.ok,
+            )
     # Unreachable in practice: the final iteration always sets `last_step`, which drops
     # tools and forces the `not response.tool_calls` branch above to return. Kept as a
     # safety net so the function always has an explicit terminal return.
