@@ -646,7 +646,10 @@ def run_owner_agent(
             )
         # A truncated body may carry half a tool-call argument string. Checking this
         # before parsing keeps a truncation from being misread as malformed JSON.
-        if response.truncated() and not response.text:
+        # Not conditioned on empty text: both transports now strip a truncation to no
+        # prose and no calls, and the old `and not response.text` meant any transport
+        # that returned partial prose walked straight past this guard into dispatch.
+        if response.truncated():
             return finish(
                 completed=False,
                 completion="truncated",

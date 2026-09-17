@@ -817,8 +817,11 @@ def test_a_span_pointing_at_another_contact_is_rejected(span: str) -> None:
 class _TruncatingConsent(_SiteClient):
     """Provider exhausted max_output_tokens while reasoning: no prose, no tool call.
 
-    This is exactly what the Responses adapter returns for status=incomplete, and it
-    is not an error, so the model chain does not fall back.
+    This is exactly what both adapters now return for a truncation, and it is not an
+    error. This client is a single rung, not a chain, so the truncation reaches
+    `_classified_consent` directly -- which is the fail-closed case under test here.
+    Behind a real chain a truncation still crosses to the other provider first and is
+    only handed back by the last rung; that path is covered in test_llm_client.py.
     """
 
     def __init__(self) -> None:
