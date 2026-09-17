@@ -297,7 +297,11 @@ def test_owner_system_audit_keeps_unseen_booked_meetings_unconsumed() -> None:
     session = _session()
     try:
         ctx = _ctx(session)
-        lead_id = f"owner-audit-{uuid4().hex}"
+        # 44 chars once, into OwnerNotificationRow.lead_id String(32) - a value
+        # production cannot produce (real ids are `lead_<12hex>`), which SQLite
+        # accepted and Postgres would have rejected. The write-time width guard
+        # makes that loud, so the fixture now stays inside the column.
+        lead_id = f"owner-audit-{uuid4().hex[:20]}"
         ctx.store.upsert_owner_notification(
             kind=KIND_MEETING_BOOKED,
             lead_id=lead_id,
