@@ -8,10 +8,25 @@ per client IP (and per session where a session id exists).
 The widget posts with ``credentials: 'omit'``; the browser still sends
 ``Origin``. Allowlist is ``MIA_CORS_ORIGINS`` plus the public host so the
 same-origin preview page keeps working.
+
+``Origin`` is the only request-supplied value this guard may key off. Fetch
+appends ``Origin`` to every request whose method is not GET/HEAD, and every
+route behind this guard is a POST, so a browser -- widget, preview harness or
+a same-origin call from the app itself -- always sends one. An earlier
+fallback accepted a missing ``Origin`` when ``Sec-Fetch-Site`` said
+``same-origin``/``same-site`` or ``Referer`` named an allowlisted origin, and
+then synthesised the origin from the request's own base URL. All three are
+attacker-supplied strings, and ``Sec-Fetch-Site`` is a forbidden header name
+that page JavaScript cannot set, so the fallback protected no real client
+while letting ``curl -H 'Sec-Fetch-Site: same-origin'`` through the whole
+boundary. It is gone; nothing in the tree needed it (the widget is a browser,
+and ``scripts/probe_live_website.py``, ``scripts/smoke_production.py`` and
+``scripts/smoke_website_telegram.py`` all send ``Origin`` explicitly).
 """
 
 from __future__ import annotations
 
+import logging
 from collections import defaultdict, deque
 from ipaddress import ip_address
 from threading import Lock
@@ -21,6 +36,8 @@ from urllib.parse import urlparse
 from fastapi import HTTPException, Request
 
 from app.core.config import MiaEnv, Settings, get_settings
+
+_LOG = logging.getLogger(__name__)
 
 WINDOW_SECONDS = 900
 
@@ -113,35 +130,50 @@ def client_ip(request: Request, *, settings: Settings | None = None) -> str:
     return "unknown"
 
 
+def _origin_rejected(bucket: str, *, reason: str) -> HTTPException:
+    """Build the 403 and log the one line that makes a real rejection visible.
+
+    Only the bucket and a fixed reason code are logged. The Origin/Referer/
+    Sec-Fetch-Site values are attacker supplied, so they never reach the log.
+    """
+    _LOG.warning("website origin bind rejected bucket=%s reason=%s", bucket, reason)
+    return HTTPException(status_code=403, detail="origin not allowed")
+
+
+def _rate_limited(bucket: str, *, reason: str) -> HTTPException:
+    """Build the 429 and log it under its own reason code.
+
+    The per-IP and per-session ceilings are tuned separately, so a flood has to be
+    attributable to the one that actually fired. The session id is not logged.
+    """
+    _LOG.warning("website request rate limited bucket=%s reason=%s", bucket, reason)
+    return HTTPException(
+        status_code=429,
+        detail="rate limited",
+        headers={"Retry-After": str(WINDOW_SECONDS)},
+    )
+
+
 def enforce_public_website(request: Request, *, bucket: str) -> None:
     settings = get_settings()
     origin = request.headers.get("origin", "")
-    if not origin:
-        sec_fetch = request.headers.get("sec-fetch-site", "")
-        referer = request.headers.get("referer", "")
-        if sec_fetch in {"same-origin", "same-site"} or (
-            referer and origin_allowed(_origin_from_url(referer), settings)
-        ):
-            origin = _origin_from_url(str(request.base_url))
     if not origin_allowed(origin, settings):
-        raise HTTPException(status_code=403, detail="origin not allowed")
+        # Absent and present-but-unknown are different operational stories. Absent
+        # means a client that is not a browser (see the module docstring); unknown
+        # means an embed on a host nobody put in MIA_CORS_ORIGINS.
+        raise _origin_rejected(
+            bucket,
+            reason="origin_header_absent" if not origin.strip() else "origin_not_allowlisted",
+        )
     ip = client_ip(request, settings=settings)
     ip_limit = LIMITS_PER_IP[bucket]
     if not _limiter.allow(f"{bucket}:ip:{ip}", limit=ip_limit):
-        raise HTTPException(
-            status_code=429,
-            detail="rate limited",
-            headers={"Retry-After": str(WINDOW_SECONDS)},
-        )
+        raise _rate_limited(bucket, reason="rate_limit_per_ip")
     session_id = request.path_params.get("session_id")
     session_limit = LIMITS_PER_SESSION.get(bucket)
     if session_id and session_limit is not None:
         if not _limiter.allow(f"{bucket}:session:{session_id}", limit=session_limit):
-            raise HTTPException(
-                status_code=429,
-                detail="rate limited",
-                headers={"Retry-After": str(WINDOW_SECONDS)},
-            )
+            raise _rate_limited(bucket, reason="rate_limit_per_session")
 
 
 def public_website_guard(bucket: str):
