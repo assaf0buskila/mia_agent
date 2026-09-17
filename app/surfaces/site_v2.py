@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from hashlib import sha256
 from secrets import token_urlsafe
 from time import monotonic
-from typing import Any
+from typing import Any, NamedTuple
 
 from fastapi import HTTPException
 from sqlalchemy import select, update
@@ -130,22 +130,109 @@ _CONTACT_VOLUNTEER = re.compile(
     r"(?:phone|email|contact)(?: number| address)?\s*(?:is|:))",
     re.I,
 )
-_CONTACT_NEGATION = re.compile(
-    r"(do not|don't|dont|never|no need to|please don't|"
-    r"refus(?:e|ed|ing)(?: permission)?|declin(?:e|ed|ing)(?: permission)?|"
-    r"forbid(?:den)?|prohibit(?:ed|ing)?|"
-    r"(?:without|no) permission|(?:do not|don't) have permission|"
-    r"אל (?:תחזרו|תתקשרו|תשלחו|תיצרו)|לא (?:לחזור|להתקשר|לשלוח|ליצור קשר)|"
-    r"לא רוצה ש(?:תחזרו|תתקשרו|תשלחו|תיצרו קשר)|בלי (?:טלפון|מייל|אימייל)|"
-    r"מסרב(?:ת)?(?: לתת)? אישור|אינ(?:י|ני) מאשר(?:ת)?|אין (?:לכם )?אישור)",
+# An explicit refusal is the one thing worth deciding before the classifier runs: it is
+# unambiguous, and it must still hold when the classifier is unavailable. Everything
+# else -- including third-party and example contact -- is the classifier's call, because
+# it is instructed on exactly that ("Refusal overrides affirmative wording anywhere",
+# "Quoted, third-party, hypothetical, or example contact is quoted").
+#
+# The previous version of this guard also matched bare "do not", "dont", "never",
+# "no need to", and an example detector matching bare "quote" and "sample". Those are
+# ordinary buying words, and the guard ran before the classifier and before the value
+# was parked, so the lead was gone with no record and no recovery. Measured: 8 of 11
+# realistic lead messages carrying a real phone or email were dropped, including
+# "Can I get a quote for a landing page? email me at dana@x.com".
+#
+# The rule now is that the negation must GOVERN a contact verb -- "do not contact me",
+# not "I dont have a landline"; "never call me", not "never mind the email". Only a
+# possessive or pronoun may sit between them. The permission phrasings need no verb:
+# they cannot appear in a request to be contacted.
+_CONTACT_VERB = (
+    r"(?:contact|call|phone|email|e-?mail|reach|messag(?:e|ing)|text|ring|"
+    r"follow[ -]?up|get in touch|be in touch)"
+)
+# The object is required, and it must be FIRST PERSON. "don't contact me" refuses, but
+# "don't call my office line, call my mobile 0501234567" redirects to a preferred channel
+# and is the commonest real lead shape there is. Allowing "my" and "our" here re-created
+# the original defect for eight of fourteen realistic leads while catching no true refusal
+# at all -- the possessive was pure cost. "don't phone the office" and "don't mail me the
+# brochure" are ordinary instructions from a live lead too, and a bare verb match turned
+# all of them into silent lead loss. Requiring the object also disposes of the tense
+# problem: "you guys never called me back" is a complaint, and "never called" cannot
+# reach "\s+me" from "call".
+# No end-of-clause alternative: "I never text, email me at ..." states a channel
+# preference, and treating it as refusal lost exactly the lead this fix exists for.
+# "out" and "to" are optional because "don't reach out to me" is the commonest English
+# refusal verb phrase and the bare preposition list missed it.
+#
+# KNOWN LIMITATION, accepted deliberately. A refusal phrase naming the visitor, followed by
+# a redirect to another channel, is decided here rather than by the classifier:
+#     don't call me at the office, call my mobile 0501234567
+#     don't reach out to me on linkedin, email me dana@x.com
+# These are leads and they are dropped. The guard cannot tell them from a plain refusal by
+# surface form -- the two are identical up to the object, and the discriminator lives in
+# what comes AFTER. Layering a second pattern to spot the redirect is exactly the move that
+# failed three review rounds on this file, so it is not being made here at round four on a
+# consent path. The real fix is the classifier seeing these messages, which needs the
+# real-model eval (H8) to prove it handles them; until then this is recorded, tested and
+# visible rather than silent. Do not widen the guard to "fix" it.
+_CONTACT_OBJECT = r"(?:\s+or\s+\w+)?(?:\s+out)?(?:\s+(?:with|to))?\s+(?:me|us)\b"
+_CONTACT_REFUSAL = re.compile(
+    # A negation governing a contact verb aimed at the visitor. "don't text or call me"
+    # and "don't follow up with me" coordinate and take a preposition; "don't phone the
+    # office" does not name the visitor and is an instruction from a live lead.
+    rf"(?:do\s?n['’]?t|dont|do not|never|may not|must not)\s+(?:ever\s+)?"
+    rf"{_CONTACT_VERB}{_CONTACT_OBJECT}|"
+    # Permission and consent. These cannot appear in a request to be contacted, which is
+    # what makes them safe to decide without the classifier.
+    r"refus(?:e|ed|ing)(?: to give)?(?: permission| consent)|"
+    r"declin(?:e|ed|ing)(?: permission| consent)|"
+    r"withhold(?:ing)? (?:permission|consent)|"
+    r"(?:do not|do\s?n['’]?t|dont) consent\b|"
+    r"(?:do not|do\s?n['’]?t|dont) (?:want|wish) to be contacted|"
+    rf"forbid(?:den)?(?: you)? to {_CONTACT_VERB}|"
+    rf"prohibit(?:ed|ing)? (?:from |you from )?{_CONTACT_VERB}|"
+    # A possessive is required: "without my permission" refuses, "without permission
+    # slips" is a visitor describing how their own business runs.
+    r"without (?:my|our|your) (?:permission|consent)|"
+    r"(?:do not|do\s?n['’]?t|dont) have (?:my|our) permission|"
+    # Hebrew. Imperatives appear in masculine singular, feminine singular and plural; the
+    # plural-only form used to let "אל תתקשר" through. The first-person object is required
+    # here for the same reason as the English branch, and against the same counter-example:
+    # "אל תתקשרו למשרד, תתקשרו אליי 0501234567" redirects a channel, it does not refuse.
+    # A bare "אל תתקשרו" now goes to the classifier, which is the right bias for a guard
+    # that only has to carry the unmistakable cases.
+    # One word may sit between the verb and the object: "אל תיצרו קשר איתי" is the standard
+    # phrasing, and "אל תתקשרו יותר אליי" is ordinary. Verified that allowing it still
+    # rejects "אל תתקשרו למשרד אלא אליי 0501234567".
+    r"אל\s+(?:תחזור|תחזרי|תחזרו|תתקשר|תתקשרי|תתקשרו|תשלח|תשלחי|תשלחו|"
+    r"תיצור|תיצרי|תיצרו)\s+(?:\S+\s+)?(?:אליי|אלי|אלינו|לי|לנו|איתי|איתנו)|"
+    r"לא\s+(?:לחזור|להתקשר|לשלוח|ליצור קשר)|"
+    r"לא רוצה ש(?:תחזור|תחזרו|תתקשר|תתקשרו|תשלח|תשלחו|תיצור קשר|תיצרו קשר)|"
+    r"לא מאשר(?:ת|ים)? ש(?:תחזור|תחזרו|תתקשר|תתקשרו|תשלח|תשלחו)|"
+    # Restored after review: dropping this was an unflagged weakening, and
+    # "בלי מייל בבקשה, 0501234567" captured the number.
+    r"בלי (?:טלפון|מייל|אימייל)|"
+    r"מסרב(?:ת)?(?: לתת)? אישור|אינ(?:י|ני) מאשר(?:ת)?|אין (?:לכם )?אישור",
     re.I,
 )
-_CONTACT_EXAMPLE = re.compile(
-    r"(for example|example only|sample|e\.g\.|quoted|quote|"
-    r"(?:a |the )?(?:customer|client|visitor) (?:wrote|said)|"
-    r"לדוגמה|למשל|דוגמה|ציטוט|(?:ה)?(?:לקוח|לקוחה|מבקר|מבקרת) (?:כתב|כתבה|אמר|אמרה))",
-    re.I,
-)
+# Deliberately NOT here, after two review rounds proved each one eats leads:
+# "unsubscribe", "remove me from", "take me off", "opt out", "no calls|emails|contact|
+# follow-ups", and "stop|quit|cease ...ing". Every one appears in ordinary messages from
+# buying visitors -- "how do I unsubscribe from your newsletter? my email is dana@x.com",
+# "no contact form on your site? email me", "stop calling the office line, call my mobile
+# 0501234567" -- and matching them here discards the lead before the classifier is ever
+# asked, which is the precise defect this guard was narrowed to fix. They are refusals
+# often enough that the classifier should weigh them and ambiguous often enough that
+# nothing deterministic should.
+#
+# Capture already fails closed without them. Nothing but an "affirmative" verdict
+# captures, an affirmative needs verbatim evidence and a span covering the server's own
+# value, and _settle_pending_contact now clears the parked value on every other outcome
+# -- so a disabled, timed-out or truncated classifier cannot let a refusal through by
+# omission. This guard exists only to stop a WORKING classifier being talked out of an
+# unmistakable refusal, so it should carry only the unmistakable ones.
+
 _DELIVERY_QUESTION = re.compile(
     r"(did (?:you|it).{0,35}(?:save|store|send|deliver|forward)|"
     r"(?:were|are|have) (?:my )?(?:details|contact|email|phone).{0,35}"
@@ -397,12 +484,34 @@ def begin_site_message(
     return _load_state(row), None
 
 
+class ConsentVerdict(NamedTuple):
+    """What the consent classifier concluded, and whether it concluded anything at all.
+
+    ``decision`` alone cannot carry this: a model that genuinely reports "ambiguous" and
+    a classifier that never ran both read as ambiguous, and the two must not lead to the
+    same handling. A model-emitted ambiguous means the visitor may yet confirm, so the
+    value is worth parking for the next turn. An unresolved verdict means the server
+    knows nothing -- the client was disabled, the call raised, the budget truncated, or
+    the model's own evidence did not survive verification -- and parking a value on that
+    basis would let a contact the visitor never volunteered be captured later, once the
+    classifier recovers. Unresolved therefore fails closed: no capture, and nothing kept.
+    """
+
+    decision: str
+    resolved: bool
+
+
+# Every failure path reports the same thing: no verdict. The reason codes distinguish
+# them in the log, which is where that distinction belongs.
+_CONSENT_UNRESOLVED = ConsentVerdict("ambiguous", resolved=False)
+
+
 def _classified_consent(
     client: Any, *, text: str, contact_value: str, prior_invitation: str = ""
-) -> str:
+) -> ConsentVerdict:
     if not client.enabled():
         _LOG.warning("site consent unresolved reason=client_disabled")
-        return "ambiguous"
+        return _CONSENT_UNRESOLVED
     instructions = (
         "Classify consent for follow-up from the complete current visitor input below. "
         "Refusal overrides affirmative wording anywhere. Quoted, third-party, hypothetical, "
@@ -441,30 +550,30 @@ def _classified_consent(
         # Includes the shared per-turn deadline in _SiteTurnClient. Silently returning
         # "ambiguous" here drops a lead and leaves nothing to explain why.
         _LOG.warning("site consent unresolved reason=llm_error error=%s", type(exc).__name__)
-        return "ambiguous"
+        return _CONSENT_UNRESOLVED
     if response.finish_reason == "length":
         # The adapter strips prose and calls from a truncated response on purpose, so
         # this is the only place a budget exhausted by reasoning becomes visible.
         _LOG.warning(
             "site consent unresolved reason=truncated tokens_out=%s", response.tokens_out
         )
-        return "ambiguous"
+        return _CONSENT_UNRESOLVED
     if len(response.tool_calls) != 1:
         _LOG.warning("site consent unresolved reason=tool_calls n=%d", len(response.tool_calls))
-        return "ambiguous"
+        return _CONSENT_UNRESOLVED
     call = response.tool_calls[0]
     if call.name != "classify_contact_consent":
         _LOG.warning("site consent unresolved reason=wrong_tool")
-        return "ambiguous"
+        return _CONSENT_UNRESOLVED
     decision = call.arguments.get("decision")
     evidence = call.arguments.get("evidence")
     contact_span = call.arguments.get("contact_span")
     if decision not in {"affirmative", "refused", "quoted", "ambiguous"}:
         _LOG.warning("site consent unresolved reason=invalid_decision")
-        return "ambiguous"
+        return _CONSENT_UNRESOLVED
     if not isinstance(evidence, str) or not isinstance(contact_span, str):
         _LOG.warning("site consent unresolved reason=non_string_fields decision=%s", decision)
-        return "ambiguous"
+        return _CONSENT_UNRESOLVED
     if decision == "ambiguous":
         # The model itself was unsure. Distinguishing this from the server rejecting a
         # confident verdict is the whole point of these reason codes.
@@ -472,18 +581,19 @@ def _classified_consent(
             "site consent unresolved reason=model_ambiguous had_invitation=%s",
             bool(prior_invitation),
         )
-        return decision
+        # The model itself reached ambiguous, so a confirmation next turn is still live.
+        return ConsentVerdict(decision, resolved=True)
     if not evidence or evidence not in text:
         # Log the reason, never the visitor's words: a silent downgrade here is
         # indistinguishable from the model genuinely being unsure, and it costs a lead.
         _LOG.warning("site consent downgraded decision=%s reason=evidence_not_verbatim", decision)
-        return "ambiguous"
+        return _CONSENT_UNRESOLVED
     if decision == "affirmative" and not _span_covers_contact(
         contact_span, contact_value, text=text
     ):
         _LOG.warning("site consent downgraded decision=affirmative reason=span_mismatch")
-        return "ambiguous"
-    return decision
+        return _CONSENT_UNRESOLVED
+    return ConsentVerdict(decision, resolved=True)
 
 
 def _span_covers_contact(span: str, value: str, *, text: str) -> bool:
@@ -567,6 +677,30 @@ def _contact_readback(state: SiteV2State) -> str:
     return ""
 
 
+def _settle_pending_contact(
+    state: SiteV2State, verdict: ConsentVerdict, *, phone: str = "", email: str = ""
+) -> None:
+    """Decide, in one place, whether a contact stays parked for a later confirmation.
+
+    Parking exists for exactly one outcome: the model looked at the whole input and
+    reported genuine uncertainty, so an explicit confirmation next turn can legitimately
+    complete the capture. A refusal and a quoted third-party contact are decided answers,
+    and an unresolved verdict is not an answer at all; keeping the value on any of those
+    lets the readback path capture it one turn later.
+
+    This is a single function because the first fix put the logic in the contact-bearing
+    branch only. The readback branch reaches a non-affirmative verdict too, so a refusal
+    the deterministic guard missed was correctly classified ``refused`` by the model and
+    the parked value survived anyway -- the same defect, one branch over. Both branches
+    now settle here, and a third caller cannot forget.
+    """
+    state.pending_contact = (
+        {key: value for key, value in (("phone", phone), ("email", email)) if value}
+        if verdict.resolved and verdict.decision == "ambiguous"
+        else {}
+    )
+
+
 def _actual_contact(
     state: SiteV2State,
     *,
@@ -591,10 +725,16 @@ def _actual_contact(
         )
         else ""
     )
-    contradicted = bool(_CONTACT_NEGATION.search(text) or _CONTACT_EXAMPLE.search(text))
-    if contradicted:
+    if _CONTACT_REFUSAL.search(text):
+        # A decided answer, not a missing one. The parked value is cleared unconditionally,
+        # and the usual case is precisely the one that carries no contact of its own: the
+        # visitor gave a number earlier, it was parked as ambiguous, Mia read it back, and
+        # this turn is the refusal. Clearing only when this message repeats the value left
+        # that parked number alive, and a bland "ok thanks" two turns later captured it
+        # through the readback path -- a contact taken from someone who had just refused.
+        state.pending_contact = {}
         if supplied_phone or supplied_email:
-            _LOG.warning("site contact skipped reason=negation_or_example_veto")
+            _LOG.warning("site contact skipped reason=explicit_refusal")
         return {}
     structured_contact = bool(phone.strip() or email.strip())
     # The widget's explicit contact form is already a consent action.  Free-form
@@ -617,32 +757,42 @@ def _actual_contact(
         supplied_phone = state.pending_contact.get("phone", "")
         supplied_email = state.pending_contact.get("email", "")
         contact_value = supplied_phone or supplied_email
-        if _classified_consent(
+        readback_verdict = _classified_consent(
             client, text=text, contact_value=contact_value, prior_invitation=readback
-        ) != "affirmative":
+        )
+        if readback_verdict.decision != "affirmative":
+            # The value stays parked only while the model is still undecided about it.
+            _settle_pending_contact(
+                state, readback_verdict, phone=supplied_phone, email=supplied_email
+            )
             return {}
     else:
         contact_value = supplied_phone or supplied_email
         verdict = (
-            "affirmative"
+            ConsentVerdict("affirmative", resolved=True)
             if exact_form_operation
             else _classified_consent(
                 client, text=text, contact_value=contact_value,
                 prior_invitation=prior_invitation,
             )
         )
-        if verdict != "affirmative":
-            _LOG.warning(
-                "site contact not captured verdict=%s had_invitation=%s kind=%s",
-                verdict, bool(prior_invitation), "phone" if supplied_phone else "email",
+        if verdict.decision != "affirmative":
+            # Parking is only right where a confirmation next turn could legitimately
+            # complete the capture, and that is exactly one case: the model looked at
+            # the whole input and reported genuine uncertainty. A refusal and a quoted
+            # third-party contact are decided answers -- keeping either would let the
+            # readback path capture, one turn later, a contact the visitor declined or
+            # never owned. An unresolved verdict is not an answer at all, so it fails
+            # closed the same way.
+            _settle_pending_contact(
+                state, verdict, phone=supplied_phone, email=supplied_email
             )
-            # Remember it so an explicit confirmation on the next turn can complete the
-            # capture instead of dead-ending.
-            state.pending_contact = {
-                key: value
-                for key, value in (("phone", supplied_phone), ("email", supplied_email))
-                if value
-            }
+            _LOG.warning(
+                "site contact not captured verdict=%s resolved=%s parked=%s "
+                "had_invitation=%s kind=%s",
+                verdict.decision, verdict.resolved, bool(state.pending_contact),
+                bool(prior_invitation), "phone" if supplied_phone else "email",
+            )
             return {}
     current: dict[str, str] = {}
     # The widget's contact form is the primary source of a name; fall back to one the
