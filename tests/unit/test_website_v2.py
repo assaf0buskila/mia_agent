@@ -1725,7 +1725,7 @@ def test_an_unresolved_verdict_on_the_readback_turn_clears_the_parked_value() ->
 def test_the_consent_refusal_alternative_uses_a_real_word_boundary() -> None:
     """Guards against a corrupted escape, which is how this line shipped once.
 
-    ``consent`` was written through a non-raw string and became a literal backspace,
+    ``consent\b`` was written through a non-raw string and became a literal backspace,
     so the whole alternative silently matched nothing while the pattern still compiled
     and every other alternative kept working. Reading the regex could not show it.
     """
@@ -1781,6 +1781,49 @@ def test_reach_out_to_me_is_a_refusal(text: str) -> None:
     fake = _SiteClient()
     state = SiteV2State()
     state.pending_contact = {"phone": "0501234567"}
+    assert _actual_contact(
+        state, client=fake, text=text, name="", phone="", email="", date="",
+    ) == {}
+    assert fake.consent_prompts == []
+    assert state.pending_contact == {}
+
+@pytest.mark.parametrize("text", (
+    "don't call me at the office, call my mobile 0501234567",
+    "don't reach out to me on linkedin, email me dana@x.com",
+    "don't reach out to me by email, call me on 0501234567",
+    "don't reach out to us at the old address, use dana@x.com",
+))
+def test_a_refusal_naming_the_visitor_then_redirecting_is_a_known_limitation(text: str) -> None:
+    """Pins an accepted loss so it stays visible instead of silent.
+
+    "don't reach out to me on linkedin, email me dana@x.com" is a lead, and the guard drops
+    it. The guard cannot tell it from a plain refusal by surface form: the two are identical
+    up to the object and the discriminator is in what follows. Layering a second pattern to
+    spot the redirect is the move that failed three review rounds on this file, so the loss
+    is recorded here rather than papered over.
+
+    This test asserts today's behaviour, NOT desired behaviour. When the real-model eval
+    (H8) shows the classifier handles these, delete the guard branch and invert this test.
+    """
+    from app.surfaces.site_v2 import SiteV2State, _actual_contact
+
+    fake = _SiteClient()
+    assert _actual_contact(
+        SiteV2State(), client=fake, text=text, name="", phone="", email="", date="",
+    ) == {}
+    assert fake.consent_prompts == [], "if this now reaches the classifier, invert the test"
+
+
+@pytest.mark.parametrize("text", (
+    "אל תיצרו קשר איתי", "אל תתקשרו יותר אליי", "אל תחזרו אליי בבקשה",
+))
+def test_a_hebrew_refusal_with_a_word_between_verb_and_object_is_caught(text: str) -> None:
+    """"אל תיצרו קשר איתי" is the standard phrasing and strict adjacency missed it."""
+    from app.surfaces.site_v2 import SiteV2State, _actual_contact
+
+    state = SiteV2State()
+    state.pending_contact = {"phone": "0501234567"}
+    fake = _SiteClient()
     assert _actual_contact(
         state, client=fake, text=text, name="", phone="", email="", date="",
     ) == {}

@@ -164,6 +164,18 @@ _CONTACT_VERB = (
 # preference, and treating it as refusal lost exactly the lead this fix exists for.
 # "out" and "to" are optional because "don't reach out to me" is the commonest English
 # refusal verb phrase and the bare preposition list missed it.
+#
+# KNOWN LIMITATION, accepted deliberately. A refusal phrase naming the visitor, followed by
+# a redirect to another channel, is decided here rather than by the classifier:
+#     don't call me at the office, call my mobile 0501234567
+#     don't reach out to me on linkedin, email me dana@x.com
+# These are leads and they are dropped. The guard cannot tell them from a plain refusal by
+# surface form -- the two are identical up to the object, and the discriminator lives in
+# what comes AFTER. Layering a second pattern to spot the redirect is exactly the move that
+# failed three review rounds on this file, so it is not being made here at round four on a
+# consent path. The real fix is the classifier seeing these messages, which needs the
+# real-model eval (H8) to prove it handles them; until then this is recorded, tested and
+# visible rather than silent. Do not widen the guard to "fix" it.
 _CONTACT_OBJECT = r"(?:\s+or\s+\w+)?(?:\s+out)?(?:\s+(?:with|to))?\s+(?:me|us)\b"
 _CONTACT_REFUSAL = re.compile(
     # A negation governing a contact verb aimed at the visitor. "don't text or call me"
@@ -190,8 +202,11 @@ _CONTACT_REFUSAL = re.compile(
     # "אל תתקשרו למשרד, תתקשרו אליי 0501234567" redirects a channel, it does not refuse.
     # A bare "אל תתקשרו" now goes to the classifier, which is the right bias for a guard
     # that only has to carry the unmistakable cases.
+    # One word may sit between the verb and the object: "אל תיצרו קשר איתי" is the standard
+    # phrasing, and "אל תתקשרו יותר אליי" is ordinary. Verified that allowing it still
+    # rejects "אל תתקשרו למשרד אלא אליי 0501234567".
     r"אל\s+(?:תחזור|תחזרי|תחזרו|תתקשר|תתקשרי|תתקשרו|תשלח|תשלחי|תשלחו|"
-    r"תיצור|תיצרי|תיצרו)\s+(?:אליי|אלי|אלינו|לי|לנו|איתי|איתנו)|"
+    r"תיצור|תיצרי|תיצרו)\s+(?:\S+\s+)?(?:אליי|אלי|אלינו|לי|לנו|איתי|איתנו)|"
     r"לא\s+(?:לחזור|להתקשר|לשלוח|ליצור קשר)|"
     r"לא רוצה ש(?:תחזור|תחזרו|תתקשר|תתקשרו|תשלח|תשלחו|תיצור קשר|תיצרו קשר)|"
     r"לא מאשר(?:ת|ים)? ש(?:תחזור|תחזרו|תתקשר|תתקשרו|תשלח|תשלחו)|"
