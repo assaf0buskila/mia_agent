@@ -147,19 +147,50 @@ _CONTACT_VOLUNTEER = re.compile(
 # not "I dont have a landline"; "never call me", not "never mind the email". Only a
 # possessive or pronoun may sit between them. The permission phrasings need no verb:
 # they cannot appear in a request to be contacted.
+_CONTACT_VERB = r"(?:contact|call|phone|email|e-mail|reach|message|text|ring)"
+# The object is required. "don't contact me" refuses; "don't phone the office" and
+# "don't mail me the brochure" are ordinary instructions from a live lead, and a bare
+# verb match turned both into silent lead loss. Requiring the object also disposes of
+# the tense problem -- "you guys never called me back" is a complaint, not a refusal,
+# and "never called" cannot reach "\s+me" from "call".
+# No end-of-clause alternative: "I never text, email me at ..." states a channel
+# preference, and treating it as refusal lost exactly the lead this fix exists for.
+_CONTACT_OBJECT = r"\s+(?:me|us|my|our)\b"
 _CONTACT_REFUSAL = re.compile(
-    r"((?:do not|don't|dont|never|please don't|no need to)\s+"
-    r"(?:ever\s+|you\s+|me\s+)?"
-    r"(?:contact|call|phone|email|e-mail|mail|reach|message|text|follow[ -]?up|"
-    r"get in touch|be in touch)|"
+    # A negation governing a contact verb aimed at the visitor.
+    rf"(?:do not|don'?t|dont|never|please do\s?n'?t)\s+(?:ever\s+)?"
+    rf"{_CONTACT_VERB}{_CONTACT_OBJECT}|"
+    # Standing-off imperatives, which carry the refusal in the verb itself.
+    rf"(?:stop|quit|cease)\s+(?:contact|call|email|messag|text|phon)(?:ing|s)?|"
+    r"unsubscribe|opt(?:\s+me)?\s+out|remove me from|take me off|"
+    r"no (?:calls|emails|contact|follow[ -]?ups?)\b|"
+    r"(?:do not|don'?t) (?:want to be|wish to be) contacted|"
+    r"(?:may|must) not contact me|"
+    # Permission and consent, which cannot appear in a request to be contacted.
     r"refus(?:e|ed|ing)(?: to give)?(?: permission| consent)|"
     r"declin(?:e|ed|ing)(?: permission| consent)|"
     r"withhold(?:ing)? (?:permission|consent)|"
-    r"forbid(?:den)?(?: you)?(?: to)?|prohibit(?:ed|ing)?|"
-    r"(?:without|no) (?:permission|consent)|(?:do not|don't) have permission|"
-    r"אל (?:תחזרו|תתקשרו|תשלחו|תיצרו)|לא (?:לחזור|להתקשר|לשלוח|ליצור קשר)|"
-    r"לא רוצה ש(?:תחזרו|תתקשרו|תשלחו|תיצרו קשר)|"
-    r"מסרב(?:ת)?(?: לתת)? אישור|אינ(?:י|ני) מאשר(?:ת)?|אין (?:לכם )?אישור)",
+    r"(?:do not|don'?t) consent\b|"
+    rf"forbid(?:den)?(?: you)? to {_CONTACT_VERB}|"
+    rf"prohibit(?:ed|ing)? (?:from |you from )?{_CONTACT_VERB}|"
+    # A possessive is required: "without my permission" refuses, "without permission
+    # slips" is someone describing how their business runs.
+    r"without (?:my|our|your) (?:permission|consent)|"
+    r"(?:do not|don'?t) have (?:my|our) permission|"
+    # Hebrew. Imperatives appear in masculine singular, feminine singular and plural;
+    # the plural-only form used to let "אל תתקשר" through.
+    r"אל\s+(?:תחזור|תחזרי|תחזרו|תתקשר|תתקשרי|תתקשרו|תשלח|תשלחי|תשלחו|"
+    r"תיצור|תיצרי|תיצרו)|"
+    r"לא\s+(?:לחזור|להתקשר|לשלוח|ליצור קשר)|"
+    r"לא רוצה ש(?:תחזור|תחזרו|תתקשר|תתקשרו|תשלח|תשלחו|תיצור קשר|תיצרו קשר)|"
+    r"לא מעוניי(?:ן|נת|נים|נות) ש(?:תחזור|תחזרו|תתקשר|תתקשרו)|"
+    r"לא מאשר(?:ת|ים)? ש(?:תחזור|תחזרו|תתקשר|תתקשרו|תשלח|תשלחו)|"
+    r"תפסיק(?:י|ו)? (?:להתקשר|לשלוח|ליצור קשר)|"
+    r"תסיר(?:י|ו)? אותי|הסר(?:ו|י)? אותי|"
+    # Restored: dropping this in the first pass was an unflagged weakening, and
+    # "בלי מייל בבקשה, 0501234567" captured the number.
+    r"בלי (?:טלפון|מייל|אימייל)|"
+    r"מסרב(?:ת)?(?: לתת)? אישור|אינ(?:י|ני) מאשר(?:ת)?|אין (?:לכם )?אישור",
     re.I,
 )
 _DELIVERY_QUESTION = re.compile(
@@ -631,11 +662,15 @@ def _actual_contact(
         else ""
     )
     if _CONTACT_REFUSAL.search(text):
-        # A decided answer, not a missing one: never captured, and never parked, so a
-        # readback plus "yes" on a later turn cannot resurrect it.
+        # A decided answer, not a missing one. The parked value is cleared unconditionally,
+        # and the usual case is precisely the one that carries no contact of its own: the
+        # visitor gave a number earlier, it was parked as ambiguous, Mia read it back, and
+        # this turn is the refusal. Clearing only when this message repeats the value left
+        # that parked number alive, and a bland "ok thanks" two turns later captured it
+        # through the readback path -- a contact taken from someone who had just refused.
+        state.pending_contact = {}
         if supplied_phone or supplied_email:
             _LOG.warning("site contact skipped reason=explicit_refusal")
-            state.pending_contact = {}
         return {}
     structured_contact = bool(phone.strip() or email.strip())
     # The widget's explicit contact form is already a consent action.  Free-form

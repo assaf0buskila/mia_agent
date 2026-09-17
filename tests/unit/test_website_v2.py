@@ -1464,10 +1464,13 @@ def test_an_ordinary_lead_reaches_the_consent_classifier(text: str) -> None:
     """
     from app.surfaces.site_v2 import SiteV2State, _actual_contact
 
-    fake = _SiteClient()
+    fake = _StagedConsent("affirmative")
     result = _actual_contact(
         SiteV2State(), client=fake, text=text, name="", phone="", email="", date="",
     )
+    # The load-bearing assertion: a lead that never reaches the classifier was thrown
+    # away by a regex. The capture below uses a scripted affirmative rather than
+    # _SiteClient's default so it asserts the server's handling, not the double's.
     assert fake.consent_prompts, "the classifier was never consulted for: " + text
     assert result.get("phone") or result.get("email"), text
 
@@ -1547,3 +1550,92 @@ def test_an_unresolved_classifier_does_not_park_the_contact() -> None:
         name="", phone="", email="", date="",
     ) == {}
     assert state.pending_contact == {}
+
+# Added after independent review of the fix above, which found each of these.
+
+@pytest.mark.parametrize("text", (
+    "no need to call, just email me at dana@example.com",
+    "there's no need to email, WhatsApp me 0501234567",
+    "don't mail me the brochure, just call 0501234567",
+    "you guys never called me back. my number is 0501234567",
+    "I never text, email me at dana@x.com",
+    "don't phone the office, phone me 0501234567",
+    "is it prohibited to send a quote to dana@x.com?",
+    "we work without permission slips, email dana@x.com",
+))
+def test_a_negated_verb_without_the_visitor_as_object_is_not_a_refusal(text: str) -> None:
+    """Channel preferences and past-tense complaints are leads, not refusals.
+
+    Every one of these was blocked by the first version of the refusal guard: it matched
+    a negated contact verb with no object, so "don't phone the office" and "you guys
+    never called me back" read as refusals.
+    """
+    from app.surfaces.site_v2 import SiteV2State, _actual_contact
+
+    fake = _StagedConsent("affirmative")
+    result = _actual_contact(
+        SiteV2State(), client=fake, text=text, name="", phone="", email="", date="",
+    )
+    assert fake.consent_prompts, "the classifier was never consulted for: " + text
+    assert result.get("phone") or result.get("email"), text
+
+
+@pytest.mark.parametrize("text", (
+    "unsubscribe me", "remove me from your list", "stop contacting me", "opt me out",
+    "no calls please", "I don't consent.", "you may not contact me",
+    "I do not want to be contacted.",
+    "בלי מייל בבקשה, 0501234567",
+    "אל תתקשר אליי", "אל תחזור אליי", "אל תשלח לי",
+    "תסירו אותי מהרשימה", "תפסיקו להתקשר",
+    "לא מעוניין שתחזרו אליי", "אני לא מאשר שתתקשרו",
+))
+def test_refusal_forms_beyond_the_original_guard_are_caught(text: str) -> None:
+    """Refusals the original guard missed, including every Hebrew imperative form.
+
+    The original guard carried plural imperatives only, so "אל תתקשר" (masculine
+    singular) passed; and "לא מעוניין" ends in a final nun, which a medial-nun pattern
+    cannot match. Both were live gaps.
+    """
+    from app.surfaces.site_v2 import SiteV2State, _actual_contact
+
+    fake = _SiteClient()
+    state = SiteV2State()
+    state.pending_contact = {"phone": "0501234567"}
+    assert _actual_contact(
+        state, client=fake, text=text, name="", phone="", email="", date="",
+    ) == {}
+    assert fake.consent_prompts == []
+    assert state.pending_contact == {}
+
+
+def test_a_refusal_carrying_no_contact_still_clears_the_parked_value() -> None:
+    """The refusal that matters carries no contact of its own.
+
+    The normal shape is: the visitor gives a number, the classifier is unsure so it is
+    parked, Mia reads it back, and the refusal arrives on the next turn carrying no value.
+    Clearing the park only when the refusal repeated the value left that number alive, and
+    a bland acknowledgement two turns later captured it through the readback path -- a
+    contact taken from a visitor who had just refused.
+    """
+    from app.surfaces.site_v2 import SiteV2State, _actual_contact
+
+    state = SiteV2State()
+    staged = _StagedConsent("ambiguous")
+    _actual_contact(
+        state, client=staged, text="my number is 0501234567",
+        name="", phone="", email="", date="",
+    )
+    assert state.pending_contact == {"phone": "0501234567"}
+
+    state.turns.append({"role": "mia", "text": "confirm 0501234567?"})
+    assert _actual_contact(
+        state, client=staged, text="no, please don't contact me",
+        name="", phone="", email="", date="",
+    ) == {}
+    assert state.pending_contact == {}
+
+    state.turns.append({"role": "mia", "text": "understood, I will not use 0501234567"})
+    assert _actual_contact(
+        state, client=_SiteClient(), text="ok thanks",
+        name="", phone="", email="", date="",
+    ) == {}
