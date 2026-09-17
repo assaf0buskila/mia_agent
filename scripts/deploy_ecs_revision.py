@@ -77,6 +77,15 @@ def _aws(*args: str) -> dict:
         capture_output=True,
         text=True,
         encoding="utf-8",
+        # ECS echoes service-event text back verbatim, and some of it is not valid UTF-8:
+        # describe-services on the mia service currently returns sixteen raw 0xaa bytes
+        # inside historical event messages quoting a provider error. Strict decoding raised
+        # UnicodeDecodeError inside subprocess's reader thread, stdout came back None, and
+        # the deploy died on a TypeError from json.loads with no usable message -- which
+        # reads like a broken deploy rather than an undecodable event string. Every field
+        # this script actually consumes (ARNs, image URIs, env names, SHAs) is ASCII, so
+        # replacing the undecodable bytes loses nothing and keeps the JSON parseable.
+        errors="replace",
         check=False,
     )
     if proc.returncode != 0:
