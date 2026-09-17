@@ -23,6 +23,12 @@ def _aws(*args: str) -> dict:
         capture_output=True,
         text=True,
         encoding="utf-8",
+        # Same reason as deploy_ecs_revision._aws: ECS returns event and failure text
+        # verbatim, some of it not valid UTF-8, and strict decoding turns that into a
+        # TypeError with no message. This runs the migration step, where a confusing
+        # failure is worst of all -- skipping it silently leaves /health all-null while
+        # ECS reports a healthy deployment.
+        errors="replace",
         check=False,
     )
     if proc.returncode != 0:
