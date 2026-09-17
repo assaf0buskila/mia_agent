@@ -1581,13 +1581,12 @@ def test_a_negated_verb_without_the_visitor_as_object_is_not_a_refusal(text: str
 
 
 @pytest.mark.parametrize("text", (
-    "unsubscribe me", "remove me from your list", "stop contacting me", "opt me out",
-    "no calls please", "I don't consent.", "you may not contact me",
-    "I do not want to be contacted.",
+    "I don't consent.", "you may not contact me", "I do not want to be contacted.",
+    "don't get in touch with me again", "please don't follow up with me",
+    "don't text or call me", "don’t call me", "without my permission",
     "בלי מייל בבקשה, 0501234567",
     "אל תתקשר אליי", "אל תחזור אליי", "אל תשלח לי",
-    "תסירו אותי מהרשימה", "תפסיקו להתקשר",
-    "לא מעוניין שתחזרו אליי", "אני לא מאשר שתתקשרו",
+    "אני לא מאשר שתתקשרו",
 ))
 def test_refusal_forms_beyond_the_original_guard_are_caught(text: str) -> None:
     """Refusals the original guard missed, including every Hebrew imperative form.
@@ -1639,3 +1638,100 @@ def test_a_refusal_carrying_no_contact_still_clears_the_parked_value() -> None:
         state, client=_SiteClient(), text="ok thanks",
         name="", phone="", email="", date="",
     ) == {}
+
+# Added after the second review round, which found that the fix had reintroduced the
+# defect it existed to fix and had left the same parked-value hole one branch over.
+
+@pytest.mark.parametrize("text", (
+    "how do I unsubscribe from your newsletter? my email is dana@x.com",
+    "no contact form on your site? email me dana@x.com",
+    "there is no contact info on the site, my number is 0501234567",
+    "no calls after 6pm please, but email me at dana@x.com",
+    "stop calling the office line, call my mobile 0501234567",
+    "take me off the waitlist and call me at 0501234567",
+    "no follow-ups needed on the old ticket, but email me dana@x.com",
+    "is consent required for a quote? dana@x.com",
+))
+def test_soft_refusal_wording_is_left_to_the_classifier(text: str) -> None:
+    """Wording that only sometimes means refusal must not be decided deterministically.
+
+    "unsubscribe", "no calls", "take me off" and "stop calling" were added to the guard
+    after the first review and every one of them turned out to appear in ordinary
+    messages from buying visitors -- a visitor asking how to unsubscribe while
+    volunteering their email is a lead. Matching them here discarded the lead before the
+    classifier was asked, which is the defect this whole change exists to fix. They are
+    retired from the deterministic guard and left to the classifier, which is instructed
+    that refusal overrides affirmative wording anywhere.
+    """
+    from app.surfaces.site_v2 import SiteV2State, _actual_contact
+
+    fake = _StagedConsent("affirmative")
+    result = _actual_contact(
+        SiteV2State(), client=fake, text=text, name="", phone="", email="", date="",
+    )
+    assert fake.consent_prompts, "the classifier was never consulted for: " + text
+    assert result.get("phone") or result.get("email"), text
+
+
+def test_a_classifier_refusal_on_the_readback_turn_clears_the_parked_value() -> None:
+    """The readback branch must forget a refused value, not only the other branch.
+
+    The first fix cleared the park in the contact-bearing branch alone. A refusal the
+    deterministic guard does not catch -- "no thanks, I'm not interested" -- reaches the
+    classifier through the readback branch instead, is correctly classified ``refused``,
+    and left the parked number alive, so the next bland turn captured it. Same defect,
+    one branch over; both now settle through _settle_pending_contact.
+    """
+    from app.surfaces.site_v2 import SiteV2State, _actual_contact
+
+    state = SiteV2State()
+    staged = _StagedConsent("ambiguous", "refused", "affirmative")
+    _actual_contact(
+        state, client=staged, text="my number is 0501234567",
+        name="", phone="", email="", date="",
+    )
+    assert state.pending_contact == {"phone": "0501234567"}
+
+    state.turns.append({"role": "mia", "text": "confirm 0501234567?"})
+    assert _actual_contact(
+        state, client=staged, text="no thanks, I'm not interested",
+        name="", phone="", email="", date="",
+    ) == {}
+    assert state.pending_contact == {}
+
+    state.turns.append({"role": "mia", "text": "understood, I will not use 0501234567"})
+    assert _actual_contact(
+        state, client=staged, text="ok thanks", name="", phone="", email="", date="",
+    ) == {}
+
+
+def test_an_unresolved_verdict_on_the_readback_turn_clears_the_parked_value() -> None:
+    """A classifier that never ran is not uncertainty, on either branch."""
+    from app.surfaces.site_v2 import SiteV2State, _actual_contact
+
+    class _Disabled(_SiteClient):
+        def enabled(self) -> bool:
+            return False
+
+    state = SiteV2State()
+    state.pending_contact = {"phone": "0501234567"}
+    state.turns.append({"role": "mia", "text": "confirm 0501234567?"})
+    assert _actual_contact(
+        state, client=_Disabled(), text="yes please", name="", phone="", email="", date="",
+    ) == {}
+    assert state.pending_contact == {}
+
+
+def test_the_consent_refusal_alternative_uses_a_real_word_boundary() -> None:
+    """Guards against a corrupted escape, which is how this line shipped once.
+
+    ``consent`` was written through a non-raw string and became a literal backspace,
+    so the whole alternative silently matched nothing while the pattern still compiled
+    and every other alternative kept working. Reading the regex could not show it.
+    """
+    from app.surfaces.site_v2 import _CONTACT_REFUSAL
+
+    assert "" not in _CONTACT_REFUSAL.pattern
+    assert _CONTACT_REFUSAL.search("I don't consent.")
+    assert _CONTACT_REFUSAL.search("I do not consent.")
+    assert not _CONTACT_REFUSAL.search("is consent required for a quote? dana@x.com")

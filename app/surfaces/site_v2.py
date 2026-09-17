@@ -147,7 +147,10 @@ _CONTACT_VOLUNTEER = re.compile(
 # not "I dont have a landline"; "never call me", not "never mind the email". Only a
 # possessive or pronoun may sit between them. The permission phrasings need no verb:
 # they cannot appear in a request to be contacted.
-_CONTACT_VERB = r"(?:contact|call|phone|email|e-mail|reach|message|text|ring)"
+_CONTACT_VERB = (
+    r"(?:contact|call|phone|email|e-?mail|reach|messag(?:e|ing)|text|ring|"
+    r"follow[ -]?up|get in touch|be in touch)"
+)
 # The object is required. "don't contact me" refuses; "don't phone the office" and
 # "don't mail me the brochure" are ordinary instructions from a live lead, and a bare
 # verb match turned both into silent lead loss. Requiring the object also disposes of
@@ -155,44 +158,56 @@ _CONTACT_VERB = r"(?:contact|call|phone|email|e-mail|reach|message|text|ring)"
 # and "never called" cannot reach "\s+me" from "call".
 # No end-of-clause alternative: "I never text, email me at ..." states a channel
 # preference, and treating it as refusal lost exactly the lead this fix exists for.
-_CONTACT_OBJECT = r"\s+(?:me|us|my|our)\b"
+_CONTACT_OBJECT = r"(?:\s+or\s+\w+)?(?:\s+with)?\s+(?:me|us|my|our)\b"
 _CONTACT_REFUSAL = re.compile(
-    # A negation governing a contact verb aimed at the visitor.
-    rf"(?:do not|don'?t|dont|never|please do\s?n'?t)\s+(?:ever\s+)?"
+    # A negation governing a contact verb aimed at the visitor. "don't text or call me"
+    # and "don't follow up with me" coordinate and take a preposition; "don't phone the
+    # office" does not name the visitor and is an instruction from a live lead.
+    rf"(?:do\s?n['’]?t|dont|do not|never|may not|must not)\s+(?:ever\s+)?"
     rf"{_CONTACT_VERB}{_CONTACT_OBJECT}|"
-    # Standing-off imperatives, which carry the refusal in the verb itself.
-    rf"(?:stop|quit|cease)\s+(?:contact|call|email|messag|text|phon)(?:ing|s)?|"
-    r"unsubscribe|opt(?:\s+me)?\s+out|remove me from|take me off|"
-    r"no (?:calls|emails|contact|follow[ -]?ups?)\b|"
-    r"(?:do not|don'?t) (?:want to be|wish to be) contacted|"
-    r"(?:may|must) not contact me|"
-    # Permission and consent, which cannot appear in a request to be contacted.
+    # Permission and consent. These cannot appear in a request to be contacted, which is
+    # what makes them safe to decide without the classifier.
     r"refus(?:e|ed|ing)(?: to give)?(?: permission| consent)|"
     r"declin(?:e|ed|ing)(?: permission| consent)|"
     r"withhold(?:ing)? (?:permission|consent)|"
-    r"(?:do not|don'?t) consent\b|"
+    r"(?:do not|do\s?n['’]?t|dont) consent\b|"
+    r"(?:do not|do\s?n['’]?t|dont) (?:want|wish) to be contacted|"
     rf"forbid(?:den)?(?: you)? to {_CONTACT_VERB}|"
     rf"prohibit(?:ed|ing)? (?:from |you from )?{_CONTACT_VERB}|"
     # A possessive is required: "without my permission" refuses, "without permission
-    # slips" is someone describing how their business runs.
+    # slips" is a visitor describing how their own business runs.
     r"without (?:my|our|your) (?:permission|consent)|"
-    r"(?:do not|don'?t) have (?:my|our) permission|"
-    # Hebrew. Imperatives appear in masculine singular, feminine singular and plural;
-    # the plural-only form used to let "אל תתקשר" through.
+    r"(?:do not|do\s?n['’]?t|dont) have (?:my|our) permission|"
+    # Hebrew. Imperatives appear in masculine singular, feminine singular and plural; the
+    # plural-only form used to let "אל תתקשר" through.
     r"אל\s+(?:תחזור|תחזרי|תחזרו|תתקשר|תתקשרי|תתקשרו|תשלח|תשלחי|תשלחו|"
     r"תיצור|תיצרי|תיצרו)|"
     r"לא\s+(?:לחזור|להתקשר|לשלוח|ליצור קשר)|"
     r"לא רוצה ש(?:תחזור|תחזרו|תתקשר|תתקשרו|תשלח|תשלחו|תיצור קשר|תיצרו קשר)|"
-    r"לא מעוניי(?:ן|נת|נים|נות) ש(?:תחזור|תחזרו|תתקשר|תתקשרו)|"
     r"לא מאשר(?:ת|ים)? ש(?:תחזור|תחזרו|תתקשר|תתקשרו|תשלח|תשלחו)|"
-    r"תפסיק(?:י|ו)? (?:להתקשר|לשלוח|ליצור קשר)|"
-    r"תסיר(?:י|ו)? אותי|הסר(?:ו|י)? אותי|"
-    # Restored: dropping this in the first pass was an unflagged weakening, and
+    # Restored after review: dropping this was an unflagged weakening, and
     # "בלי מייל בבקשה, 0501234567" captured the number.
     r"בלי (?:טלפון|מייל|אימייל)|"
     r"מסרב(?:ת)?(?: לתת)? אישור|אינ(?:י|ני) מאשר(?:ת)?|אין (?:לכם )?אישור",
     re.I,
 )
+# Deliberately NOT here, after two review rounds proved each one eats leads:
+# "unsubscribe", "remove me from", "take me off", "opt out", "no calls|emails|contact|
+# follow-ups", and "stop|quit|cease ...ing". Every one appears in ordinary messages from
+# buying visitors -- "how do I unsubscribe from your newsletter? my email is dana@x.com",
+# "no contact form on your site? email me", "stop calling the office line, call my mobile
+# 0501234567" -- and matching them here discards the lead before the classifier is ever
+# asked, which is the precise defect this guard was narrowed to fix. They are refusals
+# often enough that the classifier should weigh them and ambiguous often enough that
+# nothing deterministic should.
+#
+# Capture already fails closed without them. Nothing but an "affirmative" verdict
+# captures, an affirmative needs verbatim evidence and a span covering the server's own
+# value, and _settle_pending_contact now clears the parked value on every other outcome
+# -- so a disabled, timed-out or truncated classifier cannot let a refusal through by
+# omission. This guard exists only to stop a WORKING classifier being talked out of an
+# unmistakable refusal, so it should carry only the unmistakable ones.
+
 _DELIVERY_QUESTION = re.compile(
     r"(did (?:you|it).{0,35}(?:save|store|send|deliver|forward)|"
     r"(?:were|are|have) (?:my )?(?:details|contact|email|phone).{0,35}"
@@ -637,6 +652,30 @@ def _contact_readback(state: SiteV2State) -> str:
     return ""
 
 
+def _settle_pending_contact(
+    state: SiteV2State, verdict: ConsentVerdict, *, phone: str = "", email: str = ""
+) -> None:
+    """Decide, in one place, whether a contact stays parked for a later confirmation.
+
+    Parking exists for exactly one outcome: the model looked at the whole input and
+    reported genuine uncertainty, so an explicit confirmation next turn can legitimately
+    complete the capture. A refusal and a quoted third-party contact are decided answers,
+    and an unresolved verdict is not an answer at all; keeping the value on any of those
+    lets the readback path capture it one turn later.
+
+    This is a single function because the first fix put the logic in the contact-bearing
+    branch only. The readback branch reaches a non-affirmative verdict too, so a refusal
+    the deterministic guard missed was correctly classified ``refused`` by the model and
+    the parked value survived anyway -- the same defect, one branch over. Both branches
+    now settle here, and a third caller cannot forget.
+    """
+    state.pending_contact = (
+        {key: value for key, value in (("phone", phone), ("email", email)) if value}
+        if verdict.resolved and verdict.decision == "ambiguous"
+        else {}
+    )
+
+
 def _actual_contact(
     state: SiteV2State,
     *,
@@ -693,9 +732,14 @@ def _actual_contact(
         supplied_phone = state.pending_contact.get("phone", "")
         supplied_email = state.pending_contact.get("email", "")
         contact_value = supplied_phone or supplied_email
-        if _classified_consent(
+        readback_verdict = _classified_consent(
             client, text=text, contact_value=contact_value, prior_invitation=readback
-        ).decision != "affirmative":
+        )
+        if readback_verdict.decision != "affirmative":
+            # The value stays parked only while the model is still undecided about it.
+            _settle_pending_contact(
+                state, readback_verdict, phone=supplied_phone, email=supplied_email
+            )
             return {}
     else:
         contact_value = supplied_phone or supplied_email
@@ -715,21 +759,14 @@ def _actual_contact(
             # readback path capture, one turn later, a contact the visitor declined or
             # never owned. An unresolved verdict is not an answer at all, so it fails
             # closed the same way.
-            keep = verdict.resolved and verdict.decision == "ambiguous"
+            _settle_pending_contact(
+                state, verdict, phone=supplied_phone, email=supplied_email
+            )
             _LOG.warning(
                 "site contact not captured verdict=%s resolved=%s parked=%s "
                 "had_invitation=%s kind=%s",
-                verdict.decision, verdict.resolved, keep,
+                verdict.decision, verdict.resolved, bool(state.pending_contact),
                 bool(prior_invitation), "phone" if supplied_phone else "email",
-            )
-            state.pending_contact = (
-                {
-                    key: value
-                    for key, value in (("phone", supplied_phone), ("email", supplied_email))
-                    if value
-                }
-                if keep
-                else {}
             )
             return {}
     current: dict[str, str] = {}
