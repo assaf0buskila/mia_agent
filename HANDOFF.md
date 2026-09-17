@@ -102,10 +102,10 @@ Top blockers, in the audit's order (the full list is in the delivered report):
    the literal word `CREATE` in the live Composio slug; if the real slug is `LINKEDIN_POST_UPDATE`
    or similar, Mia refuses. A read-only catalog listing settles it, and nothing else can be
    scheduled before it runs.
-3. **The widget's post-capture screen has zero real coverage, and its tests pin a contract the
-   server cannot emit.** `ask_mia.js` branches on `ask_contact`/`confirm_contact`/`handoff`;
-   `site_v2.py` only ever emits `answer`/`contact_saved`. The one path a converting visitor
-   actually hits is untested, and the tests assert the dead branch stays.
+3. ~~**The widget's post-capture screen has zero real coverage, and its tests pin a contract the
+   server cannot emit.**~~ **Closed by H2D** (below). `ask_mia.js` no longer branches on
+   `ask_contact`/`confirm_contact`/`handoff`, the inline contact form they gated is retired, and
+   the path a converting visitor actually hits is what the node suite now exercises.
 4. **`state.pending_contact` is never cleared on refusal.** A number given, then refused, then
    quoted back by Mia, plus a later "כן", can capture someone who explicitly said no. One-line
    fix plus a test.
@@ -113,6 +113,40 @@ Top blockers, in the audit's order (the full list is in the delivered report):
    match `96a0f3c`** — here the worker path stops before every adapter. It was never checked
    against `110ada6`, so it may still be true of what production runs. Resolve before anyone
    relies on either reading.
+
+### H2D — widget/server action vocabulary (branch `claude/mia-h2d-widget-vocabulary`)
+
+Closes blocker 3 above. Base `b336158` ("retire the widget contact form and the dead action
+vocabulary") plus one review-fix commit on the same branch. Not merged, not deployed.
+
+- **What changed.** `app/web/ask_mia.js` no longer branches on `ask_contact`, `confirm_contact`
+  or `handoff`, and the inline contact form those branches gated is gone — it could never open
+  (only `ask_contact` opened it) and its submit handler read `contact_saved` as a *failed*
+  capture. Free text through the consent classifier is now the single capture path.
+- **Both wire paths are guarded, not just one.** `SiteV2Reply.__post_init__` refuses to
+  construct an action outside `SITE_V2_ACTIONS`. That covers direct construction only, so
+  `_wire_action` guards the two paths that actually reach the client — the value
+  `run_site_v2_turn` computes, and the value `begin_site_message` replays out of
+  `response_json` (which goes to the wire as a bare dict; `MessageOut.next_action` is a bare
+  `str`). On those two it **degrades to `answer` and logs
+  `site reply rejected reason=next_action_not_in_vocabulary`** rather than raising: the turn
+  picks its label as its last statement, inside the API's transaction, after the contact save
+  and the canonical events, so raising there would roll back a capture to punish a wrong label.
+- **Commands.** `MIA_ENV=test uv run pytest` (full suite),
+  `node tests/unit/widget_behavior.test.js`, `uv run ruff check app tests`. Results are in the
+  branch's commit messages; evidence state is `LOCAL_TESTED`.
+
+**H4b blocker — the consent-classifier bypass is still open, and now has no legitimate user.**
+`app/surfaces/site_v2.py` (`exact_form_operation`) treats a structured `phone`/`email` plus the
+exact literal `רוצה להמשיך עם אסף` as consent and fabricates an affirmative verdict, so the
+classifier is never consulted. The widget that produced that shape is now retired, so the only
+remaining callers are `tests/unit/test_public_website_guard.py:163,210`, which use the literal
+as a deliberate bypass — that file belongs to H4b, which is why this was routed out rather than
+reached for. Reproduced by execution on this branch: one POST to
+`/v1/website/sessions/<id>/messages` with `{"text": "רוצה להמשיך עם אסף", "phone": "<any valid
+number>", "client_message_id": "x"}` returns 200 with `next_action=contact_saved`,
+`delivery_status=saved`, and **zero** calls into the consent classifier. `MessageIn`
+`name`/`phone`/`email` (`app/api/website.py:87-89`) are likewise now client-only fields.
 
 ### C8 — RDS credential rotation took production down for ~9 hours (2026-09-16)
 

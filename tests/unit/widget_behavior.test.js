@@ -188,6 +188,11 @@ async function main() {
   w.rejectContact = false; await w.send('כן, 0501234567');
   assert.equal(w.el('status').textContent, 'הפרטים נשמרו והמסירה לאסף אושרה.', 'a capture reads as a success, never as a failure');
   const cta = w.document.querySelector('.ask-mia-handoff-cta'); assert.ok(cta, 'a captured contact immediately paints CTA');
+  // The one statement kept from applyReply's retired if/else. showConfiguredWhatsApp turns
+  // the transient highlight on for the persistent button; painting the reply is what turns
+  // it off. Delete that line and this is the assertion that notices.
+  assert.equal(w.el('wa').hidden, false, 'a capture reveals the persistent WhatsApp button');
+  assert.equal(w.el('wa').classList.contains('offer'), false, 'a painted reply clears the offer highlight');
   assert.equal(cta.href, 'https://wa.me/972501234567'); cta.click(); await settle();
   assert.equal(w.storage.has('askMia.sessionId'), true, 'delivered handoff keeps the resumable session');
   await w.send('שיחה חדשה'); assert.equal(w.sessionCount, 1, 'conversation continues after handoff');

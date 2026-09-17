@@ -210,8 +210,13 @@ Recorded so nobody reads a green suite as completeness.
 - [ ] Local runs use CPython 3.14.3; CI pins 3.12. Neither result is evidence about the other.
 - [ ] `state.pending_contact` is never cleared on a refusal, so a refused number can still be
       captured by a later readback plus "כן". A consent bug, one-line fix plus a test.
-- [ ] The widget's post-capture screen branches on `ask_contact`/`confirm_contact`/`handoff`,
-      which `site_v2.py` can never emit, and the tests assert that dead branch stays.
+- [x] H2D — the widget's post-capture screen branched on `ask_contact`/`confirm_contact`/`handoff`,
+      which `site_v2.py` can never emit, and the tests asserted that dead branch stays. The form
+      and the three dead branches are retired; both wire paths (`run_site_v2_turn` and the
+      `begin_site_message` replay) now degrade an unlisted action to `answer` with a reason code,
+      and `tests/unit/test_ask_mia_behavior.py` pins the vocabulary in both directions.
+      **Left open, routed to H4b:** `app/surfaces/site_v2.py` `exact_form_operation` still
+      bypasses the consent classifier — repro in `HANDOFF.md` section 0.
 
 
 ## Done today

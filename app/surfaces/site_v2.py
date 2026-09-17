@@ -316,6 +316,24 @@ class SiteV2State:
     delivery_job_ids: list[str] = field(default_factory=list)
 
 
+def _wire_action(action: str) -> str:
+    """Return an action the widget knows, degrading an unlisted one to the fall-through.
+
+    There are exactly two ways a next_action reaches the wire, and this is on both: the
+    value `run_site_v2_turn` computes for a fresh turn, and the value `begin_site_message`
+    replays out of a stored row. Degrading rather than raising is deliberate on these two,
+    and is the opposite of what SiteV2Reply does with the same value. A turn builds its
+    reply as its last statement, inside the API's transaction, after the contact save and
+    the canonical events: raising there would roll back a capture to punish a wrong label.
+    "answer" is the safe degradation because it is exactly what the widget already does
+    with a name it does not branch on -- paint the reply and nothing else.
+    """
+    if action in SITE_V2_ACTIONS:
+        return action
+    _LOG.error("site reply rejected reason=next_action_not_in_vocabulary")
+    return "answer"
+
+
 @dataclass(frozen=True)
 class SiteV2Reply:
     message: str
@@ -324,13 +342,17 @@ class SiteV2Reply:
     whatsapp_url: str | None = None
 
     def __post_init__(self) -> None:
-        # Every next_action the widget can ever see is carried by this dataclass: the two
-        # construction sites in this module are the only ones in app/, and app/api/website.py
-        # copies `out.next_action` straight onto the wire. 40747c8 narrowed the vocabulary
+        # This dataclass carries next_action on the non-replay path: the two construction
+        # sites in this module are the only ones in app/, and app/api/website.py copies
+        # `out.next_action` straight onto the wire. It is NOT the only carrier -- a replayed
+        # response_json goes to the wire as a bare dict without passing through here, which
+        # is why _wire_action guards that path separately. 40747c8 narrowed the vocabulary
         # to SITE_V2_ACTIONS and nothing downstream noticed, so the widget kept branching on
         # names that could no longer arrive. Refusing to construct an unlisted action makes
         # that drift impossible to reintroduce silently rather than merely documented.
-        # ValueError, not MiaError: this is a dataclass invariant, not a port failure.
+        # ValueError, not MiaError: this is a dataclass invariant, not a port failure. The
+        # turn path degrades through _wire_action before it ever gets here, so this raise
+        # answers a direct construction and can no longer roll a capture back.
         if self.next_action not in SITE_V2_ACTIONS:
             _LOG.error("site reply rejected reason=next_action_not_in_vocabulary")
             raise ValueError(f"next_action not in SITE_V2_ACTIONS: {self.next_action!r}")
@@ -467,7 +489,15 @@ def begin_site_message(
         if prior.request_hash != digest:
             raise HTTPException(status_code=409, detail="client_message_id payload mismatch")
         if prior.status == "completed" and prior.response_json:
-            return None, json.loads(prior.response_json)
+            # A replay is a second wire response assembled from a row written by whatever
+            # code was running when the first attempt completed, and it reaches the client
+            # without passing through SiteV2Reply (app/api/website.py returns this dict as
+            # it stands, and MessageOut.next_action is a bare str). A row stored before
+            # 40747c8 still names a retired action the widget no longer branches on, so
+            # replaying it verbatim would claim an action nobody implements.
+            replayed = json.loads(prior.response_json)
+            replayed["next_action"] = _wire_action(str(replayed.get("next_action") or ""))
+            return None, replayed
         raise HTTPException(status_code=409, detail="message already processing")
     stamp = _now()
     claimed = db.execute(
@@ -749,8 +779,13 @@ def _actual_contact(
             _LOG.warning("site contact skipped reason=explicit_refusal")
         return {}
     structured_contact = bool(phone.strip() or email.strip())
-    # The widget's explicit contact form is already a consent action.  Free-form
-    # contact-bearing input still goes through semantic classification below.
+    # NOT a widget signal any more, and no longer a consent action: the inline contact form
+    # that was the only producer of this shape was retired here, so nothing Mia serves can
+    # send it. What survives is a classifier bypass usable by any client that posts a phone
+    # or an email together with this literal -- the verdict below is then fabricated as
+    # affirmative and the consent classifier is never consulted. Its only remaining callers
+    # are two tests owned by another chunk this wave; recorded as an H4b blocker, with the
+    # repro, in HANDOFF.md section 0.
     exact_form_operation = structured_contact and text.strip() == "רוצה להמשיך עם אסף"
     has_contact = bool(supplied_phone or supplied_email)
     # A valid contact value is enough to invoke the whole-input classifier.  Phrase
@@ -1288,7 +1323,9 @@ def run_site_v2_turn(
         # Logged because on a contact turn this greeting reads as ignoring the visitor.
         _LOG.warning("site reply empty fallback")
         reply = "איך אפשר לעזור?" if hebrew else "How can I help?"
-    next_action = "contact_saved" if captured else "answer"
+    # Degrade, do not raise: everything this turn was going to persist is already written
+    # by the time the label is chosen, and the transaction this runs inside is the API's.
+    next_action = _wire_action("contact_saved" if captured else "answer")
     whatsapp_url = None
     if captured and settings.whatsapp_click_to_chat.strip():
         raw_token, _expires_at = LeadStore(db).issue_handoff_token(session_id, session_id)

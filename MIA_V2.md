@@ -58,9 +58,11 @@ only failures, by design — success is silent, so proof of delivery is the Tele
 Floating launcher by default. Inline mode: add `<div data-mia-inline>` to the page (or
 `data-mia-mount="<selector>"` on the script tag) and the widget mounts there — always
 open, no launcher, sized to the host, Escape and close inert. Selectors are ID-based, so
-one instance per page. Preview harness: `/v1/website/preview`. The structured contact
-form renders only on `next_action=ask_contact`, which v2 never emits — free text is the
-only capture path.
+one instance per page. Preview harness: `/v1/website/preview`. There is no contact form:
+free text through the consent classifier is the only capture path. The widget reads exactly
+two `next_action` values, `answer` and `contact_saved` (`SITE_V2_ACTIONS`), and the server
+cannot put any other name on the wire — `ask_contact`/`confirm_contact`/`handoff` and the
+inline form that branched on them were retired in h2d.
 
 ## Providers
 
