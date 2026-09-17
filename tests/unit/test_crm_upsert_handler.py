@@ -16,7 +16,7 @@ from app.db.store import LeadStore
 from app.domain.approvals import DECISION_APPROVED
 from app.integrations import sheets as sheets_integration
 from app.integrations.sheets import FakeSheetsPort
-from app.services.crm_v2 import CONTACT_FIELDS, CrmService
+from app.services.crm_v2 import CONTACT_FIELDS, WRITER_OWNER, CrmService
 from app.services.owner_actions import (
     decide_owner_action,
     execute_approved_owner_action_with_adapters,
@@ -59,6 +59,7 @@ def _ctx(db, sheets, *, source_ref: str, owner_text: str) -> ToolContext:
 def _seed_current_contact(db, sheets: FakeSheetsPort) -> str:
     created = CrmService(db).capture(
         {"name": "דנה", "phone": "0501234567", "want": "ניהול תורים"},
+        writer=WRITER_OWNER,
         source_ref="seed:crm-owner-test",
     )
     assert created.contact is not None
@@ -128,11 +129,13 @@ def test_current_crm_contact_capture_is_idempotent_in_the_durable_database() -> 
         service = CrmService(db)
         first = service.capture(
             {"name": "דנה", "phone": "0501234567"},
+            writer=WRITER_OWNER,
             source_ref="tg.crm.capture.1",
         )
         db.commit()
         second = service.capture(
             {"name": "דנה", "phone": "0501234567"},
+            writer=WRITER_OWNER,
             source_ref="tg.crm.capture.1",
         )
         db.commit()
@@ -324,7 +327,11 @@ def test_approving_the_crm_upsert_proposal_writes_exactly_one_contact(monkeypatc
 
 
 def _seed_contact(db, sheets: FakeSheetsPort, fields: dict[str, str]) -> str:
-    created = CrmService(db).capture(fields, source_ref=f"seed:{fields['phone']}")
+    created = CrmService(db).capture(
+        fields,
+        writer=WRITER_OWNER,
+        source_ref=f"seed:{fields['phone']}",
+    )
     assert created.contact is not None
     contact = created.contact
     sheets.locked_contacts.append(
@@ -425,6 +432,7 @@ def test_crm_upsert_is_rejected_when_the_contact_changed_before_approval(monkeyp
         [current] = service.lookup(query=phone)
         service.capture(
             {"phone": phone, "business": "שונה בינתיים"},
+            writer=WRITER_OWNER,
             source_ref="seed:changed-after-proposal",
             contact_id=contact_id,
             expected_revision=current.revision,

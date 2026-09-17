@@ -385,7 +385,12 @@ def execute_approved_owner_action_with_adapters(
     )
     from app.integrations.gmail import ComposioGmailPort, DisabledGmailPort
     from app.integrations.sheets import ComposioSheetsPort, DisabledSheetsPort, build_sheets_port
-    from app.services.crm_v2 import CrmError, CrmRevisionConflict, CrmService
+    from app.services.crm_v2 import (
+        WRITER_OWNER,
+        CrmError,
+        CrmRevisionConflict,
+        CrmService,
+    )
 
     row = store.get_approval_by_resource(
         RESOURCE_OWNER_PROPOSAL, proposal_id, ACTION_OWNER_EXTERNAL_WRITE
@@ -758,6 +763,7 @@ def execute_approved_owner_action_with_adapters(
             try:
                 result = ports["crm"].capture(
                     parameters["fields"],
+                    writer=WRITER_OWNER,
                     source_ref=f"approval:{proposal_id}",
                     contact_id=parameters["contact_id"] or None,
                     expected_revision=parameters["expected_revision"],

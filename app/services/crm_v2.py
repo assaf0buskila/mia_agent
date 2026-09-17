@@ -7,6 +7,7 @@ plain bounded data and can never select tools or grant authority.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import unicodedata
 from collections.abc import Callable, Mapping, Sequence
@@ -61,6 +62,25 @@ OUTBOX_STATUSES = frozenset(
 DESTINATIONS = frozenset({"contacts", "activity", "telegram"})
 CRM_PROJECTION_LOCK_KEY = 1_872_440_921
 _PHONE_DIGITS = re.compile(r"\D+")
+
+_LOG = logging.getLogger(__name__)
+
+# Who is asking for this write, declared by the call site rather than inferred here.
+# ``capture`` takes it as a required, no-default keyword precisely so that a new call
+# site cannot inherit owner trust by forgetting to say what it is: a public writer is
+# anything driven by an anonymous website visitor, an owner writer is the approved
+# owner tool loop or a Contacts Sheet import.
+#
+# The trust difference is narrow and deliberate. A public writer may CREATE a contact,
+# may add its own Activity, and may still raise its own Telegram brief -- losing the
+# lead would be a worse bug than the one this guard closes. What it may not do is
+# rewrite the stored fields of a row it did not create: identity is resolved by
+# normalised phone/email alone, so otherwise anyone who merely knows a customer's
+# email could overwrite that customer's name, business and summary.
+WRITER_OWNER = "owner"
+WRITER_PUBLIC = "public"
+Writer = Literal["owner", "public"]
+WRITERS = frozenset({WRITER_OWNER, WRITER_PUBLIC})
 
 
 class CrmError(ValueError):
@@ -397,6 +417,7 @@ class CrmService:
         self,
         fields: Mapping[str, Any],
         *,
+        writer: Writer,
         source_ref: str,
         conversation_id: str | None = None,
         contact_id: str | None = None,
@@ -405,6 +426,8 @@ class CrmService:
         expected_revision: int | None = None,
     ) -> CaptureResult:
         self._lock_projection_effects()
+        if writer not in WRITERS:
+            raise CrmError("writer must be declared as 'owner' or 'public'")
         source_ref = source_ref.strip()
         if not source_ref or len(source_ref) > 255:
             raise CrmError("source_ref is required and must be at most 255 characters")
@@ -422,6 +445,7 @@ class CrmService:
         row = self.session.get(CrmContactRow, next(iter(matched_ids))) if matched_ids else None
         prior_fields: dict[str, str] | None = None
         created = row is None
+        frozen = False
         if row is not None and expected_revision == 0:
             raise CrmRevisionConflict("contact was created after the proposal")
         if row is None:
@@ -446,8 +470,23 @@ class CrmService:
                 )
             current = _load_fields(row.fields_json)
             prior_fields = current
+            # "Holding a phone or email grants nothing" (AGENTS.md). The row was found
+            # by normalised phone/email alone, which an anonymous visitor can simply
+            # know, so a public writer may only rewrite a row its own conversation
+            # created. Everything else about this capture still runs: the visitor gets
+            # their Activity and their Telegram brief, they just cannot edit a stranger.
+            frozen = writer == WRITER_PUBLIC and not self._public_writer_owns(
+                row, conversation_id or ""
+            )
+            if frozen:
+                _LOG.warning(
+                    "crm capture fields frozen reason=public_writer_not_row_owner "
+                    "fields=%d",
+                    len(incoming),
+                )
             merged = dict(current)
-            merged.update({key: value for key, value in incoming.items() if value})
+            if not frozen:
+                merged.update({key: value for key, value in incoming.items() if value})
             changed = merged != current
             if changed:
                 old_revision = row.revision
@@ -512,7 +551,11 @@ class CrmService:
             contact=contact_view,
             activity=activity_view,
             outbox_ids=tuple(dict.fromkeys(outbox_ids)),
-            status="created" if created else ("updated" if incoming else "unchanged"),
+            status=(
+                "created"
+                if created
+                else ("updated" if incoming and not frozen else "unchanged")
+            ),
         )
 
     upsert_contact = capture
@@ -544,6 +587,7 @@ class CrmService:
         )
         return self.capture(
             fields,
+            writer=WRITER_PUBLIC,
             source_ref=source_ref,
             conversation_id=conversation_id,
             activity=ActivityInput(
@@ -559,7 +603,9 @@ class CrmService:
     def refresh_pending_site_brief(
         self,
         *,
+        writer: Writer,
         contact_id: str,
+        conversation_id: str = "",
         job_ids: Sequence[str],
         summary: str,
         source_ref: str,
@@ -581,6 +627,8 @@ class CrmService:
         that new revision, mirroring ``capture``, or the Sheet worker sees a
         payload/row revision mismatch and permanently conflicts the projection.
         """
+        if writer not in WRITERS:
+            raise CrmError("writer must be declared as 'owner' or 'public'")
         contact_id = contact_id.strip()
         safe_summary = summary.strip()[:MAX_FIELD_CHARS]
         if not contact_id or not safe_summary:
@@ -609,6 +657,13 @@ class CrmService:
             activity.result = safe_summary
         row = self.session.get(CrmContactRow, contact_id)
         if row is None:
+            return
+        # Same trust question as ``capture``: this rewrites ``name``/``next_step`` on a
+        # row reached by an identity match, so a public writer only gets to touch a row
+        # its own conversation created. The brief itself is already rewritten above --
+        # the lead still reaches the owner either way.
+        if writer == WRITER_PUBLIC and not self._public_writer_owns(row, conversation_id):
+            _LOG.warning("crm brief refresh fields frozen reason=public_writer_not_row_owner")
             return
         fields = _load_fields(row.fields_json)
         updated = dict(fields)
@@ -899,7 +954,9 @@ class CrmService:
         source_ref = f"sheets:Contacts:{row_number}"
         if not sheet_id:
             try:
-                result = self.capture(sheet_fields, source_ref=source_ref)
+                result = self.capture(
+                    sheet_fields, writer=WRITER_OWNER, source_ref=source_ref
+                )
                 if result.contact is None or result.issue_ids:
                     return result
                 binding = {
@@ -1216,6 +1273,24 @@ class CrmService:
                 text("SELECT pg_advisory_xact_lock(hashtext(:identity_key))"),
                 {"identity_key": f"crm:{kind}:{value}"},
             )
+
+    def _public_writer_owns(self, row: CrmContactRow, conversation_id: str) -> bool:
+        """True when this public conversation is the one that created the contact row.
+
+        Ownership is ``CrmContactRow.conversation_id``, set once when the row is
+        created and only ever rewritten by a writer already allowed to change the row.
+        It is deliberately *not* ``CrmContactConversationRow``: that association table
+        also records a second visitor whose email merely matched an existing row, so
+        reading ownership from it would let a refused capture grant itself ownership
+        and rewrite the row on the visitor's very next message.
+
+        An owner-created row carries no conversation id at all, so it is foreign to
+        every visitor -- which is the case this guard exists for.
+        """
+        conversation_id = conversation_id.strip()
+        if not conversation_id:
+            return False
+        return (row.conversation_id or "").strip() == conversation_id
 
     def _link_conversation(
         self,
