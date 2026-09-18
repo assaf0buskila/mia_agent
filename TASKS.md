@@ -282,6 +282,74 @@ Recorded so nobody reads a green suite as completeness.
 - [ ] The main checkout still has stale uncommitted `crm_v2.py` edits superseded by #55
       (unverified from this worktree).
 
+## Telegram owner turn timeouts (branch `claude/telegram-owner-timeouts-1645f0`, not merged)
+
+Both text and voice owner turns were returning the timeout line for ordinary messages,
+including a bare `?`. Four root causes, all confirmed against the deployed SHA `6369126`
+(whose `app/` was byte-identical to master at the time):
+
+- **The owner execution deadline started before input preprocessing.** It was computed at
+  the top of the worker, ahead of media download, STT, transcript persistence and the 1.5s
+  coalesce wait. `OpenAITranscribePort` tries a model then a fallback model, and
+  `FallbackTranscriptionPort` adds the Gemini rung, each at `transcription_timeout_seconds`
+  -- so STT alone could consume 60s of a 45s owner budget. Voice could never work on a slow
+  transcription. Now the deadline starts after the final owner utterance exists.
+- **One model call could consume the entire remaining parent budget.** The whole remainder
+  was passed as the model timeout, and `LlmModelChain` treats that as a chain-wide deadline,
+  so a slow primary starved every fallback rung without trying it. Now each rung is capped
+  per attempt, but only when there is more than one rung to protect.
+- **No final-delivery reserve.** An answer arriving near the deadline was discarded by the
+  post-deadline check and replaced with the timeout notice. 5s is now reserved.
+- **Natural capability phrasing matched no deterministic route.** "תפרטי לי פשוט את כל
+  היכולות שלך, הכל" fell through to the full model path with ~40 tool schemas. Now answered
+  from the live registry with no model, provider or DB access.
+
+A fifth, found while fixing: a tool could be granted budget past the last synthesis
+opportunity, so a **successful** CRM row fetched at t=35s was discarded and the owner got
+the timeout notice anyway. The tool reserve now covers the send reserve plus one minimum
+model call.
+
+Why the deployed suite could not catch any of this: `tests/conftest.py` zeroes
+`COALESCE_WAIT_S` for the whole suite, and no test paired a realistic
+`owner_turn_timeout_seconds` with a slow STT.
+
+New settings, all defaults **proposals** pending real latency data --
+`MIA_OWNER_FINAL_RESERVE_SECONDS` 5, `MIA_OWNER_MODEL_ATTEMPT_TIMEOUT_SECONDS` 20,
+`MIA_OWNER_MIN_MODEL_SECONDS` 6, `MIA_OWNER_MIN_TOOL_SECONDS` 2.
+`MIA_OWNER_TURN_TIMEOUT_SECONDS` stays **45** by Assaf's decision: the fix is the moved
+boundary and the per-child caps, not a bigger number.
+
+Evidence state: **LOCAL_TESTED**. 2666 unit tests pass, ruff clean, three independent opus
+reviews. Not deployed, not merged, and **no real Telegram turn has exercised it** -- every
+provider and STT call in these tests is mocked, so per `AGENTS.md` this proves nothing about
+live model or delivery behaviour.
+
+### Blocked on Assaf
+
+- **Add four names to `.env.example`**: `MIA_OWNER_FINAL_RESERVE_SECONDS`,
+  `MIA_OWNER_MODEL_ATTEMPT_TIMEOUT_SECONDS`, `MIA_OWNER_MIN_MODEL_SECONDS`,
+  `MIA_OWNER_MIN_TOOL_SECONDS`. `test_env_example_documents_settings_and_adapter_map` fails
+  until then, so CI cannot be green. Every agent session is denied that path by permission
+  settings; it needs hands with access.
+- **Tune the four defaults from production**, once `aws login` is current. The query is a
+  CloudWatch Insights `stats` over `owner_stage` by stage:
+  `filter @message like /owner_stage/ | parse @message "stage=* outcome=* latency_ms=*" as
+  stage, outcome, latency_ms | stats count(*), pct(latency_ms,50), pct(latency_ms,95) by
+  stage, outcome`. The new stage names make `input_preprocess`, `stt`, `model_primary`,
+  `model_fallback`, `final_model`, `tool` and `send` separable for the first time.
+- **A real Telegram acceptance turn** before this is trusted: a voice note, a bare `?`, the
+  capability sentence, and one tool-using question. Then read the `timeout_stage` lines.
+
+### Known bounds, stated rather than hidden
+
+- If every model rung hangs for its full per-attempt cap, a 3-rung chain reaches rungs 1 and
+  2 inside the turn budget and does not reach the cross-provider rung. The common failure is
+  a primary that fails fast, which leaves the whole remainder to the rest of the chain.
+- A turn needing two slow-house tools still cannot fit in 45s. It now fails honestly with
+  `timeout_stage` naming the child that ran out, instead of hanging.
+- Input preprocessing is now outside any turn budget and has no typing indicator, so a slow
+  STT means a longer silent wait before the turn starts.
+
 ## Live acceptance (Assaf)
 
 Telegram: natural conversation, Hebrew voice and image, explicit memory, approve /
