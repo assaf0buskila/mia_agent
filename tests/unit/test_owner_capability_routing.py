@@ -169,9 +169,18 @@ def test_capability_reply_and_kind_need_no_model_provider_or_db(monkeypatch) -> 
     monkeypatch.setattr("app.integrations.llm_client.LlmClient", _boom)
     # A regression would reach the DB through the session factory ...
     monkeypatch.setattr("app.db.session.get_session_factory", _no_db)
-    # ... and any provider or health check through one of these two.
+    # ... and any provider or health check through a client or a module-level
+    # helper. Patching `httpx.Client` alone was not enough: a review showed
+    # `httpx.get(...)` -- the most idiomatic one-liner of all -- sailed straight
+    # past it, because `httpx._api.get` builds its client from
+    # `httpx._client.Client`, not from the `httpx.Client` alias. So both the
+    # underlying class and the module-level verbs are blocked here.
+    monkeypatch.setattr("httpx._client.Client", _no_network)
+    monkeypatch.setattr("httpx._client.AsyncClient", _no_network)
     monkeypatch.setattr(httpx, "Client", _no_network)
     monkeypatch.setattr(httpx, "AsyncClient", _no_network)
+    for verb in ("get", "post", "put", "patch", "delete", "head", "options", "request"):
+        monkeypatch.setattr(httpx, verb, _no_network)
 
     assert capability_request_kind("מה היכולות שלך") == "capabilities"
     assert isinstance(owner_capability_reply(), str)
@@ -280,35 +289,53 @@ def test_invisible_marks_cannot_turn_a_business_request_into_a_capability_one() 
         assert capability_request_kind(mark * 5) == ""
 
 
-def test_mias_own_egress_does_not_reach_this_route_but_a_round_trip_is_safe() -> None:
-    """Pins what egress ACTUALLY does, so the wrong causal story is not re-derived.
+def test_mias_own_egress_really_does_feed_marks_back_into_this_route() -> None:
+    """The normalisation is load-bearing, not merely defence in depth.
 
-    The review that prompted the normalisation above argued that Mia's own egress
-    feeds these marks back in: `owner_text` wraps LTR runs in FSI...PDI, so a
-    copy-paste of her text would carry them. Measured, that is only half true --
-    `owner_text` inserts nothing into pure-Hebrew or pure-Latin text, and every
-    phrasing that actually routes is one or the other. A mixed-script capability
-    question is rejected for having a scope ("CRM") in the remainder anyway.
+    Two corrections are baked into this test, in order.
 
-    So the normalisation is defence in depth, not a fix for a live egress loop: the
-    marks arrive from real-world copy-paste, bidi-rendering editors and some mobile
-    keyboards, not from Mia. Kept because it fails safe (stripping can only shrink
-    the remainder) and because the failure it prevents is invisible in Telegram.
-    This test exists so nobody later "fixes" the comment to claim more than is true.
+    A review argued Mia's own egress feeds these marks back: `owner_text` wraps LTR
+    runs in FSI...PDI, so a copy-paste of her text carries them. The first response
+    was that this is only half true, because `owner_text` is a no-op on pure-Hebrew
+    and pure-Latin text and "every phrasing that actually routes is one or the
+    other". That second half was wrong. A Hebrew capability question carrying an
+    English filler word -- `please`, `mia`, `just`, `available`, `tell` are all
+    filler -- both ROUTES and is mixed-script, so egress marks it up. One case even
+    gains a U+200F.
+
+    So the round trip really is reachable: Mia sends a line, Assaf copies part of it
+    back, and before normalisation the invisible marks pushed it to the model path.
+    Kept measured rather than argued, because both earlier readings of this were
+    confidently stated and wrong.
     """
+    import unicodedata
+
     from app.integrations.telegram_format import owner_text
 
-    # Pure Hebrew and pure Latin: egress is a no-op, so no round trip can break.
+    # Pure script: egress genuinely is a no-op, so nothing to round-trip.
     for text in (ASSAF_EXACT, "what can you do"):
         assert owner_text(text, html=False) == text
 
-    # Mixed script is where egress really does insert marks ...
-    mixed = "מה הכלים שלך CRM"
-    assert owner_text(mixed, html=False) != mixed
-    # ... and that phrase is correctly NOT a meta-request, marks or no marks: the
-    # scope survives normalisation and keeps the remainder non-empty.
-    assert capability_request_kind(mixed) == ""
-    assert capability_request_kind(owner_text(mixed, html=False)) == ""
+    # Mixed script that DOES route: egress inserts marks, and the round trip still
+    # routes to the same kind. Before the normalisation these returned "".
+    mixed_and_routing = (
+        ("מה הכלים שלך please", "tools"),
+        ("tell me מה הכלים שלך", "tools"),
+        ("מה היכולות שלך available", "capabilities"),
+    )
+    for text, expected in mixed_and_routing:
+        assert capability_request_kind(text) == expected, text
+        marked = owner_text(text, html=False)
+        assert marked != text, f"egress inserted nothing into {text!r}"
+        assert any(unicodedata.category(ch) == "Cf" for ch in marked), marked
+        assert capability_request_kind(marked) == expected, repr(marked)
+
+    # And a mixed-script phrase carrying a real scope stays a business request,
+    # marks or no marks: the scope survives normalisation and keeps the remainder
+    # non-empty.
+    scoped = "מה הכלים שלך CRM"
+    assert capability_request_kind(scoped) == ""
+    assert capability_request_kind(owner_text(scoped, html=False)) == ""
 
 
 # ---------------------------------------------------------------------------

@@ -260,8 +260,21 @@ def _run_tool_with_timeout(
     # `remaining - reserve < owner_min_model_seconds`. Measured on the real
     # defaults: at t=4s a slow tool could take 36s, return a SUCCESSFUL CRM row at
     # t=35s, and then the synthesis call was refused -- so Assaf got the timeout
-    # notice and the row he had waited 35s for was thrown away. Reserving both
-    # terms means a tool is cut short in favour of answering, never the reverse.
+    # notice and the row he had waited 35s for was thrown away.
+    #
+    # BUT be precise about what this buys, because an earlier version of this
+    # comment overclaimed and a review caught it. This bounds the WAIT, not the
+    # tool. The drain below (`done.wait()` with no timeout) is deliberately
+    # unbounded -- the worker owns `ctx.store.session` and abandoning a live
+    # DB-backed thread would let the session close underneath it -- so a tool whose
+    # REAL latency exceeds its grant still makes the turn pay that real latency, and
+    # the synthesis call can still be refused afterwards. Measured: grant 30s,
+    # actual latency 31s, wall clock 31s, synthesis refused. So the honest claim is
+    # "a cooperative tool is cut short in favour of answering", and the residual is
+    # an overrunning adapter, bounded in practice only by the adapter's own timeout.
+    # `test_the_reserve_bounds_the_wait_not_the_tools_real_latency` pins that
+    # residual by measuring ELAPSED time rather than the granted bound, so this
+    # limitation stays visible instead of being asserted away.
     wait_s = child_call_timeout(
         deadline_at=deadline_at,
         configured=base_wait,
@@ -671,7 +684,16 @@ def run_owner_agent(
         # have ~43.5s, turning slow-but-successful calls into fast failures with no
         # fallback to make up for it. A chain with one rung has no sibling to
         # protect, so it is not capped per attempt at all.
-        rung_count = len(getattr(client, "models", ())) or 1
+        # REACHABLE rungs, not configured ones. On a tool continuation the chain
+        # skips sibling rungs on the same provider, so an OpenAI-primary +
+        # OpenAI-fallback chain has one reachable rung on every post-tool step --
+        # capping it protects nothing and only turns a slow success into a provider
+        # error. The chain computes this itself so the candidate rule lives in one
+        # place.
+        if isinstance(client, LlmModelChain):
+            rung_count = client.reachable_rungs(messages)
+        else:
+            rung_count = len(getattr(client, "models", ())) or 1
         model_timeout = child_call_timeout(
             deadline_at=deadline_at,
             configured=ctx.settings.llm_request_timeout_seconds,

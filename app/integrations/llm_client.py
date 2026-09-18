@@ -577,6 +577,33 @@ class LlmModelChain:
             return ""
         return self._clients[self._active_index].model
 
+    def reachable_rungs(self, messages: object) -> int:
+        """How many rungs `complete` would actually TRY for these messages.
+
+        Not the same as `len(self.models)`, and the difference is load-bearing for
+        any caller deciding whether to impose a per-attempt cap. On a tool
+        continuation this chain deliberately skips sibling rungs on the SAME
+        provider (encrypted Responses reasoning belongs to the endpoint that
+        produced it), so an OpenAI-primary + OpenAI-fallback chain has exactly ONE
+        reachable rung on every step after a tool call. Capping that rung buys
+        nothing -- there is no sibling left to protect -- and only converts a call
+        that would have succeeded into a provider error.
+
+        Deliberately computed here rather than by a caller reproducing the
+        candidate-index logic: two copies of this rule would drift, and the
+        `complete` below is the only thing that decides what "reachable" means.
+        """
+        if not self._clients:
+            return 0
+        if not _has_tool_continuation(messages):
+            return len(self._clients)
+        active_provider = self._clients[self._active_index].provider
+        return 1 + sum(
+            1
+            for later in self._clients[self._active_index + 1 :]
+            if later.provider != active_provider
+        )
+
     def complete(self, **kwargs: Any) -> LlmResponse:
         if not self._clients:
             raise LlmError("no model configured")

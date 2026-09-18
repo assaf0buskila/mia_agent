@@ -15,12 +15,17 @@ _NO_HISTORY_PATTERNS = (
 # recognise: one stray U+200F leaves a non-empty remainder and sends even Assaf's
 # exact sentence back to the slow model path.
 #
-# This is not hypothetical. Mia's OWN egress inserts exactly these characters:
-# `owner_text()` appends a U+200F per line and `isolate()` wraps LTR runs in
-# U+2068/U+2069 (app/integrations/telegram_format.py). Any copy-paste round trip of
-# her own text -- including the capability reply's own closing offer to send the
-# exact tool names -- carries them back in, and the resulting failure is invisible
-# in Telegram and indistinguishable from "the fix never shipped".
+# This is not hypothetical, and the precise reason took two corrections to get
+# right. Mia's OWN egress inserts exactly these characters:
+# `app/integrations/telegram_format.py`'s `owner_text()` adds a U+200F where a line
+# needs it and `isolate()` wraps LTR runs in U+2068/U+2069. It is a no-op on
+# pure-Hebrew and pure-Latin text -- but a Hebrew capability question carrying an
+# English filler word ("מה הכלים שלך please", "tell me מה הכלים שלך") both routes
+# AND is mixed-script, so egress does mark it up, one case gaining a U+200F. So the
+# round trip is genuinely reachable: Mia sends a line, Assaf copies part of it back,
+# and without this the invisible marks push it to the model path -- a failure
+# invisible in Telegram and indistinguishable from "the fix never shipped".
+# Measured in `test_mias_own_egress_really_does_feed_marks_back_into_this_route`.
 #
 # Deliberately written with real \u escapes rather than a raw string, so the
 # characters are resolved at parse time and never depend on regex-level escape
@@ -31,11 +36,11 @@ _NO_HISTORY_PATTERNS = (
 # that the anchored patterns plus the empty-remainder rule would not already accept.
 _BIDI_AND_ZERO_WIDTH = re.compile(
     "["
-    "​‌‍"  # ZWSP, ZWNJ, ZWJ
-    "‎‏"  # LRM, RLM
-    "‪‫‬‭‮"  # LRE, RLE, PDF, LRO, RLO
-    "⁦⁧⁨⁩"  # LRI, RLI, FSI, PDI
-    "﻿"  # BOM / ZWNBSP
+    "\\u200b\\u200c\\u200d"  # ZWSP, ZWNJ, ZWJ
+    "\\u200e\\u200f"  # LRM, RLM
+    "\\u202a\\u202b\\u202c\\u202d\\u202e"  # LRE, RLE, PDF, LRO, RLO
+    "\\u2066\\u2067\\u2068\\u2069"  # LRI, RLI, FSI, PDI
+    "\\ufeff"  # BOM / ZWNBSP
     "]"
 )
 # Filler is stripped BEFORE matching (see capability_request_kind), so every entry

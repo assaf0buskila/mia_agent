@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from time import monotonic
+from time import monotonic, sleep
 
 import pytest
 from app.brain.embeddings import FakeEmbeddingPort
@@ -29,7 +29,7 @@ from app.graph import owner_agent
 from app.integrations.base import RecordingMessagePort
 from app.integrations.llm_client import LlmError, LlmModelChain, LlmResponse, ToolCall
 from app.integrations.transcribe import FakeTranscriptionPort
-from app.tools.registries.owner_tools import ToolContext, ToolResult
+from app.tools.registries.owner_tools import OUTCOME_TIMEOUT, ToolContext, ToolResult
 from app.workers import telegram_owner
 
 ACTOR = "770011"
@@ -628,3 +628,144 @@ def test_tool_refused_and_tool_abandoned_are_distinguishable() -> None:
     from app.core.owner_timing import _TIMEOUT_STAGES
 
     assert {"tool", "tool_abandoned"} <= _TIMEOUT_STAGES
+
+
+# ---------------------------------------------------------------------------
+# Review round 3, F-2: rung_count must count REACHABLE rungs, not configured
+# ones. On a tool continuation the chain skips same-provider siblings, so a
+# 2-rung OpenAI chain has one reachable rung and must not be capped.
+# ---------------------------------------------------------------------------
+
+
+def test_reachable_rungs_matches_what_the_chain_would_actually_try() -> None:
+    same_provider = LlmModelChain(
+        [
+            _ScriptedChainClient("primary", "openai", []),
+            _ScriptedChainClient("fallback", "openai", []),
+        ]
+    )
+    cross_provider = LlmModelChain(
+        [
+            _ScriptedChainClient("primary", "openai", []),
+            _ScriptedChainClient("gemini", "google", []),
+        ]
+    )
+    fresh = [{"role": "user", "content": "hi"}]
+    continuation = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "tool_calls": [{"id": "c1"}]},
+        {"role": "tool", "content": "{}", "tool_call_id": "c1"},
+    ]
+
+    # A fresh call can try everything.
+    assert same_provider.reachable_rungs(fresh) == 2
+    assert cross_provider.reachable_rungs(fresh) == 2
+    # A continuation skips the same-provider sibling but keeps a cross-provider one.
+    assert same_provider.reachable_rungs(continuation) == 1
+    assert cross_provider.reachable_rungs(continuation) == 2
+
+
+def test_a_same_provider_chain_is_not_capped_after_a_tool_call(monkeypatch) -> None:
+    """The sole reachable rung on a post-tool step must get the whole budget.
+
+    Round 2 fixed the single-CONFIGURED-rung case; this is the same harm in the
+    shape that fix missed. An OpenAI primary + OpenAI fallback chain (permitted:
+    `owner_agent_ready` needs no Gemini key) has one reachable rung once a tool
+    result is in the messages, and capping it at the per-attempt limit could only
+    turn a slow success into a provider error.
+    """
+    settings = Settings(_env_file=None)
+    tool_step = _tool_call_response("c1", "hot_leads", {})
+    final = _text_response("שתי לידים חמים")
+    primary = _ScriptedChainClient("primary", "openai", [tool_step, final])
+    sibling = _ScriptedChainClient("fallback", "openai", [])
+    chain = LlmModelChain([primary, sibling])
+    ctx = _ctx(settings, owner_text="מי חם")
+    monkeypatch.setattr(
+        owner_agent, "execute_tool", lambda *_a, **_kw: ToolResult(ok=True, text="lead")
+    )
+
+    outcome = owner_agent.run_owner_agent(
+        client=chain,
+        ctx=ctx,
+        owner_message="מי חם",
+        deadline_at=monotonic() + 40.0,
+    )
+
+    assert outcome.completed is True
+    assert len(primary.calls) == 2
+    assert sibling.calls == []  # unreachable on the continuation, as designed
+    # Step 1 is a fresh call with two reachable rungs -> capped.
+    assert primary.calls[0]["timeout"] <= settings.owner_model_attempt_timeout_seconds
+    # Step 2 is a continuation with ONE reachable rung -> not capped.
+    assert primary.calls[1]["timeout"] > settings.owner_model_attempt_timeout_seconds
+
+
+# ---------------------------------------------------------------------------
+# Review round 3, F-1: the reserve bounds the WAIT, not the tool. Pinned by
+# measuring elapsed time, because asserting the granted bound cannot see this.
+# ---------------------------------------------------------------------------
+
+
+def test_the_reserve_bounds_the_wait_not_the_tools_real_latency(monkeypatch) -> None:
+    """An overrunning tool still costs the turn its real latency. Documented, not fixed.
+
+    `_run_tool_with_timeout` drains with an unbounded `done.wait()` on purpose: the
+    worker owns `ctx.store.session` and abandoning a live DB-backed thread would let
+    that session close underneath it. So the reserve cannot prevent an adapter that
+    ignores its grant from eating the synthesis budget.
+
+    This test exists to keep that honest. It asserts the residual rather than the
+    intention, and it is the reason the comment at the call site no longer claims a
+    tool is cut short "never the reverse". If someone later bounds the drain safely,
+    this test should start failing -- and that failure is good news.
+    """
+    settings = Settings(_env_file=None)
+    grant_seen: dict = {}
+    real = owner_agent.child_call_timeout
+
+    def spy(**kwargs):
+        result = real(**kwargs)
+        grant_seen.setdefault("granted", result)
+        return result
+
+    monkeypatch.setattr(owner_agent, "child_call_timeout", spy)
+
+    overrun_s = 0.25
+
+    def slow_tool(*_a, **_kw):
+        sleep(overrun_s)
+        return ToolResult(ok=True, text="a successful row")
+
+    monkeypatch.setattr(owner_agent, "execute_tool", slow_tool)
+
+    # Grant deliberately far below the tool's real latency.
+    monkeypatch.setattr(owner_agent, "TOOL_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(owner_agent, "SLOW_HOUSE_TOOLS", frozenset())
+
+    started = monotonic()
+    result = owner_agent._run_tool_with_timeout(
+        "hot_leads", {}, _ctx(settings), deadline_at=monotonic() + 30.0
+    )
+    elapsed = monotonic() - started
+
+    assert grant_seen["granted"] == pytest.approx(0.05, abs=0.01)
+    # The turn paid the tool's real latency, not the grant. This is the residual.
+    assert elapsed >= overrun_s, elapsed
+    # And the successful row was still discarded, truthfully reported as a timeout.
+    assert result.ok is False
+    assert result.outcome == OUTCOME_TIMEOUT
+    assert "a successful row" not in (result.text or "")
+
+
+def test_timeout_stages_are_a_subset_of_allowed_stages() -> None:
+    """Keeps the two allowlists in the relation their comments claim.
+
+    `log_timeout_stage` gates on `_TIMEOUT_STAGES` and `owner_stage` gates on
+    `_ALLOWED_STAGES` -- different sets. A reason code missing from the second
+    would log as "unknown" the moment anyone wrapped it in an `owner_stage`, which
+    is the kind of drift no existing test could see.
+    """
+    from app.core.owner_timing import _ALLOWED_STAGES, _TIMEOUT_STAGES
+
+    assert _TIMEOUT_STAGES <= _ALLOWED_STAGES, _TIMEOUT_STAGES - _ALLOWED_STAGES

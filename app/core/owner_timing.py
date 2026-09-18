@@ -34,8 +34,11 @@ _ALLOWED_STAGES = frozenset(
         # distinct from "model" (a tool-calling turn) for observability.
         "final_model",
         "tool",
-        # Not a measured span -- a timeout reason code only (see _TIMEOUT_STAGES).
-        # Allowlisted here because `log_timeout_stage` shares this gate.
+        # Not a measured span -- a timeout reason code only (see _TIMEOUT_STAGES,
+        # which is the gate `log_timeout_stage` actually checks; this set is
+        # `owner_stage`'s). Listed here so the two sets stay in the subset relation
+        # that `test_timeout_stages_are_a_subset_of_allowed_stages` pins, and so a
+        # future `owner_stage("tool_abandoned")` would not silently log "unknown".
         "tool_abandoned",
         "send",
         "learning",
@@ -120,9 +123,16 @@ def log_timeout_stage(stage: str, *, source_ref: str = "") -> None:
     parent turn budget left), or when a call that did start ran out its own
     bound -- so a CloudWatch reader can grep `timeout_stage=` and learn WHICH
     child ran out without any transcript, message, or provider content ever
-    being logged. `stage` must be one of the four reason codes a reader can
-    act on (`model_primary`, `model_fallback`, `tool`, `final_model`); anything
-    else logs as "unknown" rather than silently accepting an unbounded value.
+    being logged. `stage` must be one of the five reason codes a reader can act
+    on (`model_primary`, `model_fallback`, `tool`, `tool_abandoned`,
+    `final_model`); anything else logs as "unknown" rather than silently
+    accepting an unbounded value.
+
+    `tool` vs `tool_abandoned` is the one distinction that decides whether a
+    retry is safe: `tool` means the dispatch was refused before its thread
+    started, so nothing ran; `tool_abandoned` means the handler completed and
+    its result was discarded, so an external write may have executed. Both look
+    identical to the owner, so this is the only place it survives.
 
     No `source_ref` given reuses the hash already set by an enclosing
     `owner_stage`, exactly like `owner_stage` itself does -- so calling this
