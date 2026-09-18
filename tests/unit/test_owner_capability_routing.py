@@ -372,3 +372,150 @@ def test_capability_reply_never_advertises_an_unregistered_ability() -> None:
             assert live, f"{label!r} is advertised but has no registered tool"
         else:
             assert not live, f"{label!r} has registered tools but is not advertised"
+
+
+# ---------------------------------------------------------------------------
+# Review round 2, F5 (full): the remaining natural phrasings the reviewer listed
+# as still taking the slow model path.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "what else can you do",
+        "what are you capable of",
+        "tell me your capabilities",
+        "list your capabilities",
+        "let me know what you can do",
+        "capabilities",
+        "מה עוד את יכולה לעשות",
+        "מה עוד אפשר לעשות איתך",
+        "איזה יכולות יש לך",
+        "היכולות שלך",
+        "אני רוצה לדעת מה היכולות שלך",
+    ],
+    ids=[
+        "what-else",
+        "capable-of",
+        "tell-me-caps",
+        "list-caps",
+        "let-me-know",
+        "bare-caps",
+        "od-can-do",
+        "od-with-you",
+        "which-caps",
+        "bare-caps-he",
+        "want-to-know",
+    ],
+)
+def test_remaining_natural_capability_phrasings_route(text: str) -> None:
+    assert capability_request_kind(text) == "capabilities"
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["הצג את כל הכלים שלך", "תפרטי את הכלים שלך", "מה הכלים הזמינים שלך"],
+    ids=["show-all-tools", "detail-tools", "available-tools"],
+)
+def test_remaining_natural_tools_phrasings_route(text: str) -> None:
+    assert capability_request_kind(text) == "tools"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        # `עוד` / `else` as filler must not swallow a real question.
+        "מה עוד יש ביומן",
+        "what else is on the calendar",
+        # The multi-word lead-ins.
+        "אני רוצה לדעת מה יש ביומן",
+        "i want to know the latest lead",
+        "let me know when dana replies",
+        # The bare noun-phrase patterns.
+        "תעדכני את היכולות שלך במסמך",
+        "your capabilities are limited",
+        "tell me the capabilities of this tool",
+        "update capabilities in the doc",
+        "list your capabilities and send the email",
+        # Someone else's tools/capabilities, not Mia's.
+        "איזה יכולות יש ללקוח",
+        "הצג את כל הכלים של דני",
+        "תפרטי את הכלים שבשימוש הלקוח",
+        # `הזמינים` as filler.
+        "מה הפגישות הזמינות מחר",
+        # Scoped, so still a real request.
+        "מה עוד את יכולה לעשות עם הליד הזה",
+    ],
+)
+def test_the_round_two_widenings_swallow_no_business_request(text: str) -> None:
+    assert capability_request_kind(text) == "", text
+
+
+# The reviewer's own methodology, kept as a permanent guard: every anchor crossed
+# with realistic business prefixes and suffixes. Any combination that still routes
+# is a phrase where Mia would answer "here is what I can do" instead of doing the
+# work -- the one failure mode that matters for this route.
+_SWEEP_ANCHORS = (
+    "מה היכולות שלך",
+    "מה עוד את יכולה לעשות",
+    "איזה יכולות יש לך",
+    "היכולות שלך",
+    "what can you do",
+    "what else can you do",
+    "what are you capable of",
+    "capabilities",
+    "list your capabilities",
+    "tell me your capabilities",
+    "show me what you can do",
+    "הצג את כל הכלים שלך",
+    "תפרטי את הכלים שלך",
+    "מה הכלים הזמינים שלך",
+    "מה הכלים שלך",
+    "אני רוצה לדעת מה היכולות שלך",
+    "תפרטי לי פשוט את כל היכולות שלך, הכל",
+)
+_SWEEP_PREFIXES = (
+    "",
+    "תבדקי ",
+    "תשלחי מייל ו",
+    "אחרי שתסיימי ",
+    "לדני כהן ",
+    "בשביל הליד ",
+    "check ",
+    "send an email and ",
+    "for acme ",
+    "before you ",
+)
+_SWEEP_SUFFIXES = (
+    "",
+    " ותבדקי את היומן",
+    " לדני",
+    " על הליד הזה",
+    " במסמך",
+    " של הלקוח",
+    " and send the email",
+    " for this client",
+    " to dana",
+    " in the doc",
+)
+
+
+def test_no_anchor_plus_business_text_is_ever_treated_as_a_meta_request() -> None:
+    leaks = []
+    for anchor in _SWEEP_ANCHORS:
+        for prefix in _SWEEP_PREFIXES:
+            for suffix in _SWEEP_SUFFIXES:
+                if not prefix and not suffix:
+                    continue  # the bare anchor is supposed to route
+                text = f"{prefix}{anchor}{suffix}"
+                kind = capability_request_kind(text)
+                if kind:
+                    leaks.append((text, kind))
+    assert leaks == [], leaks
+
+
+def test_every_sweep_anchor_still_routes_on_its_own() -> None:
+    """The other half: the sweep above is only meaningful if the anchors work."""
+    for anchor in _SWEEP_ANCHORS:
+        assert capability_request_kind(anchor), anchor

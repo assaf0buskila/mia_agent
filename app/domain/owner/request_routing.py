@@ -72,7 +72,25 @@ _INVENTORY_FILLER = re.compile(
     r"\bcurrently\b|\bcurrent\b|\bavailable\b|"
     r"\bפשוט\b|\bאת\b|\bכל\b|\bהכל\b|\bהכול\b|"
     r"\bme\b|\beverything\b|\ball\b|\byour\b|"
-    r"\bתגידי\b|\bתגיד\b|\btell\b"
+    r"\bתגידי\b|\bתגיד\b|\btell\b|"
+    #   עוד / else     -- "what *else* can you do", "מה *עוד* את יכולה לעשות".
+    #                     Safe: "מה עוד יש ביומן" strips to "מה יש ביומן", which
+    #                     matches nothing.
+    #   הזמינים/הזמינות -- "available", the Hebrew of a filler already in this set.
+    r"\bעוד\b|\belse\b|\bהזמינים\b|\bהזמינות\b"
+    r")",
+    re.I,
+)
+# Multi-word lead-ins, stripped like filler but too long to express as word
+# alternatives. Same bounded logic: removing the lead-in cannot create a match on its
+# own, because whatever follows must STILL be a complete meta-question and nothing
+# else. "אני רוצה לדעת מה יש ביומן" strips to "מה יש ביומן" and matches nothing.
+_LEAD_INS = re.compile(
+    r"(?:"
+    r"אני\s+רוצה\s+לדעת|"
+    r"i\s+want\s+to\s+know|"
+    r"let\s+me\s+know|"
+    r"i'?d\s+like\s+to\s+know"
     r")",
     re.I,
 )
@@ -83,7 +101,12 @@ _INVENTORY_FILLER = re.compile(
 _TOOLS_PATTERNS = (
     re.compile(r"\bמה\s+(?:הם\s+)?הכלים\s+שלך\b", re.I),
     re.compile(r"\bאיזה\s+כלים\s+(?:יש\s+)?לך\b", re.I),
-    re.compile(r"\b(?:תני|תן|הציגי|הצג)\s+רשימת\s+הכלים(?:\s+שלך)?\b", re.I),
+    # "רשימת" is optional and the imperative set includes תפרטי/תפרט: "הצג את כל
+    # הכלים שלך" and "תפרטי את הכלים שלך" are the same request as "תן רשימת הכלים"
+    # and were falling through to the model.
+    re.compile(
+        r"\b(?:תני|תן|הציגי|הצג|תפרטי|תפרט)\s+(?:רשימת\s+)?הכלים(?:\s+שלך)?\b", re.I
+    ),
     re.compile(r"\bwhat\s+(?:tools\s+do\s+you\s+have|are\s+tools)\b|\blist\s+tools\b", re.I),
 )
 # "Capabilities" is the broader "what can you do" meta-question. Same anti-false-
@@ -94,6 +117,23 @@ _CAPABILITY_PATTERNS = (
         r"\bמה\s+(?:היכולות\s+שלך|יכ(?:ול|ולה)\s+לעשות|אפשר\s+לעשות\s+איתך)\b", re.I
     ),
     re.compile(r"\b(?:תפרטי|תני|תן|הציגי|הצג)\s+היכולות\s+שלך\b", re.I),
+    # "איזה יכולות יש לך" -- the sibling of the tools-side "איזה כלים יש לך", which
+    # already existed. Asking the same question about capabilities instead of tools
+    # took the slow path.
+    re.compile(r"\bאיזה\s+יכולות\s+(?:יש\s+)?לך\b", re.I),
+    # Bare noun phrases, reached once a lead-in and filler are stripped: "תגידי לי
+    # את היכולות שלך", "tell me your capabilities", "list your capabilities",
+    # "אני רוצה לדעת מה היכולות שלך". Safe for the same reason every other pattern
+    # here is: the remainder must still be empty afterwards, so "תעדכני את היכולות
+    # שלך במסמך" keeps "תעדכני במסמך" and is rejected, as is "your capabilities are
+    # limited" ("are limited").
+    re.compile(r"\bהיכולות\s+שלך\b", re.I),
+    re.compile(r"\bcapabilities\b", re.I),
+    # The twin of the tools-side `list tools`, which already existed. Tried after the
+    # bare `capabilities` pattern above, which matches but leaves "list" behind -- the
+    # loop keeps going on a non-empty remainder, so this still gets its chance.
+    re.compile(r"\blist\s+capabilities\b", re.I),
+    re.compile(r"\bwhat\s+are\s+you\s+capable\s+of\b", re.I),
     # "you can do" alongside "can you do": the "tell me what ..." lead-in inverts the
     # word order, and the sibling `show ... you can do` pattern below already relies on
     # the same inverted form. The empty-remainder rule still applies, so "what you can
@@ -235,6 +275,7 @@ def capability_request_kind(text: str) -> str:
     remainder = _BIDI_AND_ZERO_WIDTH.sub("", text).strip()
     if not remainder:
         return ""
+    remainder = _LEAD_INS.sub(" ", remainder)
     remainder = _INVENTORY_FILLER.sub(" ", remainder)
     for kind, patterns in _KIND_PATTERNS:
         for pattern in patterns:
@@ -294,7 +335,13 @@ def owner_tool_inventory_reply() -> str:
 # no registered tool actually provides -- if a category gets a new tool, extend its
 # sentence to match what that tool does, don't leave a stale blurb making a bigger
 # promise than the registry backs.
+# Catch-all for a registered tool that no _TOOL_GROUPS entry claims. Mirrors
+# owner_tool_inventory_reply's own "כלים רשומים נוספים" group. Its blurb is
+# deliberately vague because, by definition, nothing here knows what the tool does.
+_UNCATEGORIZED_LABEL = "יכולות רשומות נוספות"
+
 _CAPABILITY_BLURBS: dict[str, str] = {
+    _UNCATEGORIZED_LABEL: "כלים רשומים שעדיין לא מקוטלגים בקטגוריה עסקית",
     "זיכרון וידע": "לזכור מה שסיכמתם ולחפש בזיכרון ובידע הפומבי שהאתר מפרסם",
     "תפעול ולידים": "סיכומי יום/שבוע, מי ממתין לאישור, לידים חמים ושיחות אתר",
     "יומן ומייל": "לבדוק יומן ומייל, ולהכין טיוטת מייל או הצעת פגישה לאישור",
@@ -330,6 +377,14 @@ def owner_capability_reply() -> str:
         for label, names in _TOOL_GROUPS
     ]
     groups = [(label, names) for label, names in groups if names]
+    # Parity with owner_tool_inventory_reply, which appends its own catch-all group.
+    # Without this, registry drift would make the stated total disagree with the sum
+    # of the category counts -- two drift tests do fail CI on that, so this is about
+    # the answer staying coherent if it ever ships anyway, not about the guard.
+    categorized = set().union(*(names for _, names in _TOOL_GROUPS))
+    uncategorized = [name for name in registered if name not in categorized and name in described]
+    if uncategorized:
+        groups.append((_UNCATEGORIZED_LABEL, uncategorized))
 
     lines = [
         f"אלה היכולות הרשומות שלי כרגע, {len(registered)} כלים בסך הכול:",
