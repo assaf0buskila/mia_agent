@@ -44,7 +44,8 @@ from time import monotonic
 from typing import Any, NamedTuple
 
 from app.brain.context import BrainContext, render_context_block
-from app.core.owner_timing import owner_stage
+from app.core.deadlines import child_call_timeout
+from app.core.owner_timing import log_timeout_stage, owner_stage
 
 # Each of these is a tool handler's own real "no data" text, imported (not
 # copied) so the empty-result markers below can never drift out of sync with
@@ -76,6 +77,7 @@ from app.domain.two_state import (
 from app.integrations.llm_client import (
     LlmClient,
     LlmError,
+    LlmModelChain,
     tool_result_message,
 )
 from app.tools.registries.owner_tools import (
@@ -233,6 +235,56 @@ def _run_tool_with_timeout(
     from app.tools.registries.owner_tools import ToolResult
 
     if deadline_at is not None and monotonic() >= deadline_at:
+        # Kept ahead of any `ctx.settings` access: some direct unit tests call
+        # this with a bare `object()` for `ctx` and an already-expired deadline,
+        # relying on exactly this short-circuit to never touch `ctx.settings`.
+        log_timeout_stage("tool", source_ref=getattr(ctx, "source_ref", ""))
+        return ToolResult(
+            ok=False,
+            text=TOOL_DEADLINE_REPLY,
+            error=OUTCOME_TIMEOUT,
+            outcome=OUTCOME_TIMEOUT,
+        )
+    base_wait = TOOL_TIMEOUT_SECONDS
+    if name in SLOW_HOUSE_TOOLS:
+        base_wait = TOOL_TIMEOUT_SECONDS + TOOL_RECOVERY_SECONDS
+    # `child_call_timeout` returning `None` here means "do not start this tool
+    # call" -- never "no bound" -- so it is checked before the thread is ever
+    # started, not forwarded anywhere that would read it as unbounded.
+    #
+    # The reserve is the final send reserve PLUS one minimum model call, and that
+    # second term is load-bearing: a tool result is useless unless the loop can
+    # still afford the synthesis turn that reads it. With the send reserve alone, a
+    # slow-house tool was legally granted up to `TOOL_TIMEOUT_SECONDS +
+    # TOOL_RECOVERY_SECONDS` (38s) while a model call is already refused once
+    # `remaining - reserve < owner_min_model_seconds`. Measured on the real
+    # defaults: at t=4s a slow tool could take 36s, return a SUCCESSFUL CRM row at
+    # t=35s, and then the synthesis call was refused -- so Assaf got the timeout
+    # notice and the row he had waited 35s for was thrown away.
+    #
+    # BUT be precise about what this buys, because an earlier version of this
+    # comment overclaimed and a review caught it. This bounds the WAIT, not the
+    # tool. The drain below (`done.wait()` with no timeout) is deliberately
+    # unbounded -- the worker owns `ctx.store.session` and abandoning a live
+    # DB-backed thread would let the session close underneath it -- so a tool whose
+    # REAL latency exceeds its grant still makes the turn pay that real latency, and
+    # the synthesis call can still be refused afterwards. Measured: grant 30s,
+    # actual latency 31s, wall clock 31s, synthesis refused. So the honest claim is
+    # "a cooperative tool is cut short in favour of answering", and the residual is
+    # an overrunning adapter, bounded in practice only by the adapter's own timeout.
+    # `test_the_reserve_bounds_the_wait_not_the_tools_real_latency` pins that
+    # residual by measuring ELAPSED time rather than the granted bound, so this
+    # limitation stays visible instead of being asserted away.
+    wait_s = child_call_timeout(
+        deadline_at=deadline_at,
+        configured=base_wait,
+        reserve=(
+            ctx.settings.owner_final_reserve_seconds + ctx.settings.owner_min_model_seconds
+        ),
+        minimum=ctx.settings.owner_min_tool_seconds,
+    )
+    if wait_s is None:
+        log_timeout_stage("tool", source_ref=ctx.source_ref)
         return ToolResult(
             ok=False,
             text=TOOL_DEADLINE_REPLY,
@@ -251,11 +303,6 @@ def _run_tool_with_timeout(
             done.set()
 
     threading.Thread(target=_run, daemon=True).start()
-    wait_s = TOOL_TIMEOUT_SECONDS
-    if name in SLOW_HOUSE_TOOLS:
-        wait_s = TOOL_TIMEOUT_SECONDS + TOOL_RECOVERY_SECONDS
-    if deadline_at is not None:
-        wait_s = max(0.0, min(wait_s, deadline_at - monotonic()))
     if not done.wait(timeout=wait_s):
         # Never abandon a DB-backed tool thread. The worker owns ctx.store.session;
         # returning while this thread still runs lets the worker close that session
@@ -264,6 +311,16 @@ def _run_tool_with_timeout(
         done.wait()
         # The late result is discarded and the owner is told truthfully that the
         # check stopped; it is never counted among the tools that worked.
+        #
+        # `tool_abandoned`, NOT `tool`: this is the one tool outcome where the
+        # handler actually RAN to completion and its result was thrown away, so an
+        # external write may genuinely have executed. The other two sites refuse
+        # before the thread starts and therefore cannot have had any effect. The
+        # owner-visible text is identical for all three on purpose -- the reason
+        # code is what tells a reader whether a retry is safe, and collapsing that
+        # into one label would leave `log_timeout_stage`'s promise ("learn WHICH
+        # child ran out") unable to answer the only question that matters here.
+        log_timeout_stage("tool_abandoned", source_ref=ctx.source_ref)
         return ToolResult(
             ok=False,
             text=TOOL_DEADLINE_REPLY,
@@ -610,21 +667,91 @@ def run_owner_agent(
         # by the empty-result guard, drop tools so the model must produce prose from what
         # it already has instead of asking for a call it will never get.
         force_prose = last_step or ceiling_hit or not available
+        stage_name = "final_model" if force_prose else "model"
+
+        # `configured` bounds the WHOLE model-chain call (every rung
+        # `client.complete` may try), and what the turn can afford for that is
+        # simply whatever is left after the reserve -- `child_call_timeout` takes
+        # the `min`. `llm_request_timeout_seconds` is the ceiling that still applies
+        # when the parent turn has no deadline at all, which keeps an unbounded
+        # parent from producing an unbounded child.
+        #
+        # Starvation protection is `attempt_timeout` below, per rung -- NOT this
+        # number. An earlier version computed `attempt * rung_count` here, which was
+        # inert for every real multi-rung chain (the reserve term already dominated)
+        # and actively harmful on a single-rung one: with only
+        # MIA_OWNER_AGENT_MODEL set, it handed the sole model 20s where it used to
+        # have ~43.5s, turning slow-but-successful calls into fast failures with no
+        # fallback to make up for it. A chain with one rung has no sibling to
+        # protect, so it is not capped per attempt at all.
+        # REACHABLE rungs, not configured ones. On a tool continuation the chain
+        # skips sibling rungs on the same provider, so an OpenAI-primary +
+        # OpenAI-fallback chain has one reachable rung on every post-tool step --
+        # capping it protects nothing and only turns a slow success into a provider
+        # error. The chain computes this itself so the candidate rule lives in one
+        # place.
+        if isinstance(client, LlmModelChain):
+            rung_count = client.reachable_rungs(messages)
+        else:
+            rung_count = len(getattr(client, "models", ())) or 1
+        model_timeout = child_call_timeout(
+            deadline_at=deadline_at,
+            configured=ctx.settings.llm_request_timeout_seconds,
+            reserve=ctx.settings.owner_final_reserve_seconds,
+            minimum=ctx.settings.owner_min_model_seconds,
+        )
+        if model_timeout is None:
+            # `child_call_timeout` said not to start this call at all -- never
+            # forward that `None` into `timeout=`, where it would be read as
+            # "unbounded" instead of "refused". Reuses the existing
+            # `deadline_exceeded` completion; not a new reason code. The chain
+            # never got far enough to try a specific rung, so a tool-calling
+            # turn is attributed to the rung it would have started at
+            # ("model_primary"); the tool-less final turn keeps its own name.
+            log_timeout_stage(
+                "final_model" if force_prose else "model_primary", source_ref=ctx.source_ref
+            )
+            return finish(
+                completed=False,
+                completion="deadline_exceeded",
+                error="deadline exceeded",
+                steps_used=step_index,
+            )
+
+        call_kwargs: dict[str, Any] = {
+            "messages": messages,
+            "tools": None if force_prose else available,
+            "tool_choice": None if force_prose else "auto",
+            "parallel_tool_calls": None if force_prose else False,
+            "max_completion_tokens": (ctx.settings.max_completion_tokens_owner or None),
+            # A real, positive float here always -- `model_timeout is None` already
+            # returned above -- so this is never the "use the client default"
+            # `timeout=None` that a bare `LlmClient.complete` would interpret as GO
+            # unbounded; it is always an explicit, computed bound.
+            "timeout": model_timeout,
+        }
+        if isinstance(client, LlmModelChain) and rung_count > 1:
+            # Chain-only kwarg: a raw `LlmClient.complete` has no `attempt_timeout`
+            # parameter and would raise TypeError if this were forwarded to it.
+            #
+            # Only sent when there is more than one rung. The cap's entire purpose is
+            # to stop a slow primary from starving the rungs behind it; with a single
+            # rung there is nothing behind it, and capping would only convert a call
+            # that would have succeeded into a provider error.
+            #
+            # Known bound, stated rather than hidden: if every rung hangs for its full
+            # cap, a 3-rung chain reaches rungs 1 and 2 within the turn budget and does
+            # not reach the cross-provider rung. The common failure is a primary that
+            # fails FAST (bad model id, 4xx, empty 200), which leaves the whole
+            # remainder to the rest of the chain. Tuning this needs real
+            # `owner_stage stage=model_primary latency_ms` data from production.
+            call_kwargs["attempt_timeout"] = ctx.settings.owner_model_attempt_timeout_seconds
 
         try:
             with owner_stage(
-                "model", source_ref=ctx.source_ref, model=getattr(client, "model", "")
+                stage_name, source_ref=ctx.source_ref, model=getattr(client, "model", "")
             ):
-                response = client.complete(
-                    messages=messages,
-                    tools=None if force_prose else available,
-                    tool_choice=None if force_prose else "auto",
-                    parallel_tool_calls=None if force_prose else False,
-                    max_completion_tokens=(ctx.settings.max_completion_tokens_owner or None),
-                    timeout=(
-                        max(0.1, deadline_at - monotonic()) if deadline_at is not None else None
-                    ),
-                )
+                response = client.complete(**call_kwargs)
         except LlmError as exc:
             return finish(
                 completed=False,

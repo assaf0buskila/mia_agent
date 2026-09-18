@@ -34,8 +34,9 @@ from app.domain.events import (
 from app.domain.owner.callbacks import approval_token
 from app.domain.owner.proposal_cards import pending_approval_cards, render_owner_approval_card
 from app.domain.owner.request_routing import (
+    capability_request_kind,
     is_pending_approvals_request,
-    is_tool_inventory_request,
+    owner_capability_reply,
     owner_tool_inventory_reply,
     requests_no_history,
 )
@@ -110,15 +111,30 @@ async def run_owner_loop(
     task_type = OwnerTaskType.NOTE
     crm_wrote = False
     turn_approval_ids: list[str] = []
-    inventory_request = not reply and is_tool_inventory_request(owner_text)
+    # Deterministic local meta-routing, before anything expensive. "tools" is the
+    # narrow tool-name inventory this surface already answered; "capabilities" is the
+    # broader "what can you do" question, which used to fall through to the full
+    # model-led path (~40 tool schemas) and time out in production for phrasings as
+    # ordinary as "תפרטי לי פשוט את כל היכולות שלך, הכל". Both answers come from the
+    # live registry -- no model, no provider, no connectivity check.
+    #
+    # Pending approvals keeps its precedence deliberately: it is the one meta request
+    # that reads durable state and surfaces live approve buttons, and a turn that is
+    # asking "what is waiting for me?" must never be answered with a capability list.
+    # `capability_request_kind` returns "" for that phrasing anyway, so this ordering
+    # is belt-and-braces rather than load-bearing -- which is exactly why it is worth
+    # keeping: the capability matcher may widen later, this precedence must not.
+    capability_kind = "" if reply else capability_request_kind(owner_text)
     pending_request = not reply and is_pending_approvals_request(owner_text)
     if pending_request:
         from app.domain.owner.reads import format_pending_approvals_ack
 
         task_type = OwnerTaskType.PENDING_APPROVALS
         reply = format_pending_approvals_ack(store)
-    elif inventory_request:
+    elif capability_kind == "tools":
         reply = owner_tool_inventory_reply()
+    elif capability_kind == "capabilities":
+        reply = owner_capability_reply()
     elif not reply:
         reply, crm_wrote = await asyncio.to_thread(
             lambda: _talk_with_optional_agent(

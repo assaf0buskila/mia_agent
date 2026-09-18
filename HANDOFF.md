@@ -3,6 +3,45 @@
 Section 0 is the current state for the next session. The sections after it are older handoffs and
 still hold — the deploy gotchas especially.
 
+## 0b. Telegram owner timeouts (2026-09-19) -- committed, NOT merged, NOT deployed
+
+Branch `claude/telegram-owner-timeouts-1645f0`, head `d4bdbde`, 11 commits, branched from
+`31a91c9`. Full detail in `TASKS.md`; this is the state a next session needs.
+
+Assaf reported owner turns timing out on both transports, including for a bare `?`. Fixed
+four root causes plus one found while fixing. The headline number: the owner execution
+deadline used to start before media download, STT, transcript persistence and the coalesce
+wait, and STT alone can take 60s (two OpenAI rungs plus Gemini at 20s each) out of a 45s
+budget. It now starts once the final owner utterance exists. `MIA_OWNER_TURN_TIMEOUT_SECONDS`
+stays 45 by his decision -- the fix is the boundary and the per-child caps, not a bigger
+number.
+
+**Two things block a merge, one of them only Assaf can do:**
+
+1. `.env.example` must document four new `MIA_OWNER_*` names (listed in `TASKS.md`).
+   `test_env_example_documents_settings_and_adapter_map` fails until then, so CI cannot go
+   green. **Every agent session is denied that path by permission settings** -- do not waste a
+   session rediscovering that. Same class as the `*secret*` deny already recorded.
+2. No PR is open. Assaf said commit only, explicitly no deploy, and he had already observed
+   Mia working well at the time. Do not open one, merge, or deploy without a fresh go.
+
+Evidence state **LOCAL_TESTED** and no higher: 2666 unit tests pass and three independent
+opus reviews ran, but every provider and STT call is mocked. Per `AGENTS.md` that proves
+nothing about live behaviour, so a real Telegram turn is still required -- voice note, bare
+`?`, the capability sentence, one tool-using question -- then read the new `timeout_stage`
+log lines.
+
+Three durable gotchas this chunk established:
+
+- **`tests/conftest.py` zeroes `COALESCE_WAIT_S` suite-wide.** That is why no existing test
+  could see preprocessing eating the reasoning budget. Any test about turn timing must set a
+  non-zero value locally.
+- **`HANG_REPLY` and the brain's timeout line are byte-identical.** Proved by execution. A
+  screenshot cannot tell you which layer ran out of budget; only `timeout_stage=` can.
+- **A `\b` written through a Bash heredoc becomes a literal 0x08.** The same bug class the
+  2026-09-17 handoff recorded for non-raw Python strings, now via the tooling. Use the
+  Edit/Write tools for any content containing backslashes.
+
 ## 0. Where this stands (2026-09-17, end of session)
 
 ### Production is CURRENT and verified
