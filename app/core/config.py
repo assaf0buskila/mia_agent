@@ -86,6 +86,28 @@ class Settings(BaseSettings):
         "none", "minimal", "low", "medium", "high", "xhigh", "max"
     ] = "medium"
     owner_turn_timeout_seconds: float = Field(default=45.0, gt=0.0, le=300.0)
+    # Reserved off the end of the owner turn deadline so a model/tool call that
+    # finishes right up against the deadline still leaves time for the reply to
+    # actually reach Telegram (app/surfaces/owner.py's post-deadline check stops
+    # a send that would otherwise start after `deadline_at`). This is the
+    # `reserve` in every `child_call_timeout` call the owner loop makes.
+    owner_final_reserve_seconds: float = Field(default=5.0, gt=0.0, le=30.0)
+    # Per-attempt cap for ONE model rung inside the owner tool loop. Bounds a
+    # slow/hanging primary so it cannot burn the whole remaining turn budget and
+    # starve every fallback rung behind it (see `LlmModelChain.complete`'s
+    # `attempt_timeout`). Independent of `llm_request_timeout_seconds`, which is
+    # only the client's own fallback default when no explicit timeout is given.
+    owner_model_attempt_timeout_seconds: float = Field(default=20.0, gt=0.0, le=120.0)
+    # Below this many seconds of remaining turn budget, a model call is not worth
+    # starting at all -- there would not be enough time left for even one
+    # plausible attempt plus the final-reserve send. Used as `child_call_timeout`'s
+    # `minimum` for the model chain call in `run_owner_agent`.
+    owner_min_model_seconds: float = Field(default=6.0, gt=0.0, le=60.0)
+    # Same idea as `owner_min_model_seconds`, for one tool dispatch
+    # (`_run_tool_with_timeout`'s `child_call_timeout` call): below this many
+    # seconds left, a tool call is refused rather than started and immediately
+    # cut off.
+    owner_min_tool_seconds: float = Field(default=2.0, gt=0.0, le=60.0)
     telegram_typing_interval_seconds: float = Field(default=4.0, gt=0.5, le=10.0)
     embedding_provider: str = Field(default="openai")
     embedding_model: str = Field(default="")

@@ -19,7 +19,7 @@ import httpx
 
 from app.core.errors import MiaError
 from app.core.models import model_chain
-from app.core.owner_timing import owner_stage
+from app.core.owner_timing import log_timeout_stage, owner_stage
 
 OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions"
 OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
@@ -582,6 +582,13 @@ class LlmModelChain:
             raise LlmError("no model configured")
         self.errors = []
         last: LlmError | None = None
+        # Chain-only cap on ONE rung's own attempt, independent of the overall
+        # chain deadline below (`timeout=`). Popped here and never forwarded to
+        # `LlmClient.complete`, which has no `attempt_timeout` parameter and would
+        # raise TypeError if this reached it. This is the RC2 fix: without it, a
+        # slow/unavailable primary rung could hold the entire `timeout=` chain
+        # deadline for itself, leaving nothing for a fallback rung behind it.
+        attempt_timeout = kwargs.pop("attempt_timeout", None)
         continuation = _has_tool_continuation(kwargs.get("messages"))
         if not continuation:
             # A reusable purpose client begins each independent turn at its primary.
@@ -605,14 +612,32 @@ class LlmModelChain:
         for index in candidate_indexes:
             client = self._clients[index]
             self.last_model = client.model
+            # The first rung actually tried in THIS call is "model_primary" (under
+            # continuation that may not be `self._clients[0]`); every later rung
+            # reached only because an earlier one failed is "model_fallback". Kept
+            # as "model_attempt" would still work (`_ALLOWED_STAGES` keeps it valid
+            # for any other reader), but this split is what lets a log reader tell
+            # a starved fallback apart from a failed primary.
+            stage_name = "model_primary" if index == candidate_indexes[0] else "model_fallback"
             try:
                 attempt_kwargs = dict(kwargs)
                 if deadline is not None:
                     remaining = deadline - monotonic()
                     if remaining <= 0:
+                        log_timeout_stage(stage_name)
                         raise LlmError("llm request failed: deadline exceeded")
                     attempt_kwargs["timeout"] = remaining
-                with owner_stage("model_attempt", model=client.model):
+                if attempt_timeout is not None:
+                    # `min(attempt_timeout, remaining_chain_budget)` per the
+                    # contract: this rung never gets more than its own configured
+                    # cap, and never more than what the chain has left either.
+                    existing = attempt_kwargs.get("timeout")
+                    attempt_kwargs["timeout"] = (
+                        min(attempt_timeout, existing)
+                        if isinstance(existing, (int, float))
+                        else attempt_timeout
+                    )
+                with owner_stage(stage_name, model=client.model):
                     response = client.complete(**attempt_kwargs)
             except LlmError as exc:
                 self.errors.append(f"{client.model}:{_llm_error_class(exc)}")

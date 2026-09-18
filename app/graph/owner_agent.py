@@ -44,7 +44,8 @@ from time import monotonic
 from typing import Any, NamedTuple
 
 from app.brain.context import BrainContext, render_context_block
-from app.core.owner_timing import owner_stage
+from app.core.deadlines import child_call_timeout
+from app.core.owner_timing import log_timeout_stage, owner_stage
 
 # Each of these is a tool handler's own real "no data" text, imported (not
 # copied) so the empty-result markers below can never drift out of sync with
@@ -76,6 +77,7 @@ from app.domain.two_state import (
 from app.integrations.llm_client import (
     LlmClient,
     LlmError,
+    LlmModelChain,
     tool_result_message,
 )
 from app.tools.registries.owner_tools import (
@@ -233,6 +235,30 @@ def _run_tool_with_timeout(
     from app.tools.registries.owner_tools import ToolResult
 
     if deadline_at is not None and monotonic() >= deadline_at:
+        # Kept ahead of any `ctx.settings` access: some direct unit tests call
+        # this with a bare `object()` for `ctx` and an already-expired deadline,
+        # relying on exactly this short-circuit to never touch `ctx.settings`.
+        log_timeout_stage("tool", source_ref=getattr(ctx, "source_ref", ""))
+        return ToolResult(
+            ok=False,
+            text=TOOL_DEADLINE_REPLY,
+            error=OUTCOME_TIMEOUT,
+            outcome=OUTCOME_TIMEOUT,
+        )
+    base_wait = TOOL_TIMEOUT_SECONDS
+    if name in SLOW_HOUSE_TOOLS:
+        base_wait = TOOL_TIMEOUT_SECONDS + TOOL_RECOVERY_SECONDS
+    # `child_call_timeout` returning `None` here means "do not start this tool
+    # call" -- never "no bound" -- so it is checked before the thread is ever
+    # started, not forwarded anywhere that would read it as unbounded.
+    wait_s = child_call_timeout(
+        deadline_at=deadline_at,
+        configured=base_wait,
+        reserve=ctx.settings.owner_final_reserve_seconds,
+        minimum=ctx.settings.owner_min_tool_seconds,
+    )
+    if wait_s is None:
+        log_timeout_stage("tool", source_ref=ctx.source_ref)
         return ToolResult(
             ok=False,
             text=TOOL_DEADLINE_REPLY,
@@ -251,11 +277,6 @@ def _run_tool_with_timeout(
             done.set()
 
     threading.Thread(target=_run, daemon=True).start()
-    wait_s = TOOL_TIMEOUT_SECONDS
-    if name in SLOW_HOUSE_TOOLS:
-        wait_s = TOOL_TIMEOUT_SECONDS + TOOL_RECOVERY_SECONDS
-    if deadline_at is not None:
-        wait_s = max(0.0, min(wait_s, deadline_at - monotonic()))
     if not done.wait(timeout=wait_s):
         # Never abandon a DB-backed tool thread. The worker owns ctx.store.session;
         # returning while this thread still runs lets the worker close that session
@@ -264,6 +285,7 @@ def _run_tool_with_timeout(
         done.wait()
         # The late result is discarded and the owner is told truthfully that the
         # check stopped; it is never counted among the tools that worked.
+        log_timeout_stage("tool", source_ref=ctx.source_ref)
         return ToolResult(
             ok=False,
             text=TOOL_DEADLINE_REPLY,
@@ -610,21 +632,61 @@ def run_owner_agent(
         # by the empty-result guard, drop tools so the model must produce prose from what
         # it already has instead of asking for a call it will never get.
         force_prose = last_step or ceiling_hit or not available
+        stage_name = "final_model" if force_prose else "model"
+
+        # `configured` bounds the WHOLE model-chain call (every rung `client.complete`
+        # may try), not one attempt -- `owner_model_attempt_timeout_seconds` per rung,
+        # times the number of rungs the chain actually has (1 for a bare LlmClient,
+        # which has no `.models`). `LlmModelChain.complete` further caps each
+        # individual rung to `owner_model_attempt_timeout_seconds` via `attempt_timeout`
+        # below, so a slow primary cannot spend this whole budget on one rung.
+        rung_count = len(getattr(client, "models", ())) or 1
+        model_timeout = child_call_timeout(
+            deadline_at=deadline_at,
+            configured=ctx.settings.owner_model_attempt_timeout_seconds * rung_count,
+            reserve=ctx.settings.owner_final_reserve_seconds,
+            minimum=ctx.settings.owner_min_model_seconds,
+        )
+        if model_timeout is None:
+            # `child_call_timeout` said not to start this call at all -- never
+            # forward that `None` into `timeout=`, where it would be read as
+            # "unbounded" instead of "refused". Reuses the existing
+            # `deadline_exceeded` completion; not a new reason code. The chain
+            # never got far enough to try a specific rung, so a tool-calling
+            # turn is attributed to the rung it would have started at
+            # ("model_primary"); the tool-less final turn keeps its own name.
+            log_timeout_stage(
+                "final_model" if force_prose else "model_primary", source_ref=ctx.source_ref
+            )
+            return finish(
+                completed=False,
+                completion="deadline_exceeded",
+                error="deadline exceeded",
+                steps_used=step_index,
+            )
+
+        call_kwargs: dict[str, Any] = {
+            "messages": messages,
+            "tools": None if force_prose else available,
+            "tool_choice": None if force_prose else "auto",
+            "parallel_tool_calls": None if force_prose else False,
+            "max_completion_tokens": (ctx.settings.max_completion_tokens_owner or None),
+            # A real, positive float here always -- `model_timeout is None` already
+            # returned above -- so this is never the "use the client default"
+            # `timeout=None` that a bare `LlmClient.complete` would interpret as GO
+            # unbounded; it is always an explicit, computed bound.
+            "timeout": model_timeout,
+        }
+        if isinstance(client, LlmModelChain):
+            # Chain-only kwarg: a raw `LlmClient.complete` has no `attempt_timeout`
+            # parameter and would raise TypeError if this were forwarded to it.
+            call_kwargs["attempt_timeout"] = ctx.settings.owner_model_attempt_timeout_seconds
 
         try:
             with owner_stage(
-                "model", source_ref=ctx.source_ref, model=getattr(client, "model", "")
+                stage_name, source_ref=ctx.source_ref, model=getattr(client, "model", "")
             ):
-                response = client.complete(
-                    messages=messages,
-                    tools=None if force_prose else available,
-                    tool_choice=None if force_prose else "auto",
-                    parallel_tool_calls=None if force_prose else False,
-                    max_completion_tokens=(ctx.settings.max_completion_tokens_owner or None),
-                    timeout=(
-                        max(0.1, deadline_at - monotonic()) if deadline_at is not None else None
-                    ),
-                )
+                response = client.complete(**call_kwargs)
         except LlmError as exc:
             return finish(
                 completed=False,
