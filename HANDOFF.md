@@ -38,7 +38,7 @@ Three durable gotchas this chunk established:
   non-zero value locally.
 - **`HANG_REPLY` and the brain's timeout line are byte-identical.** Proved by execution. A
   screenshot cannot tell you which layer ran out of budget; only `timeout_stage=` can.
-- **A `` written through a Bash heredoc becomes a literal 0x08.** The same bug class the
+- **A `\b` written through a Bash heredoc becomes a literal 0x08.** The same bug class the
   2026-09-17 handoff recorded for non-raw Python strings, now via the tooling. Use the
   Edit/Write tools for any content containing backslashes.
 
