@@ -34,8 +34,8 @@ from app.domain.events import (
 from app.domain.owner.callbacks import approval_token
 from app.domain.owner.proposal_cards import pending_approval_cards, render_owner_approval_card
 from app.domain.owner.request_routing import (
-    is_pending_approvals_request,
     capability_request_kind,
+    is_pending_approvals_request,
     owner_capability_reply,
     owner_tool_inventory_reply,
     requests_no_history,
