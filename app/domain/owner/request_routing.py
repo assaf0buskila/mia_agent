@@ -25,6 +25,16 @@ _NO_HISTORY_PATTERNS = (
 #   הכל / הכול       -- "everything" (two spellings), Assaf's own live trailing
 #                        "...שלך, הכל".
 #   me / everything / all / your -- the English equivalents of the same four.
+#   תגידי / תגיד / tell -- the "tell me ..." lead-in, so "תגידי לי מה את יכולה
+#                        לעשות" reaches the anchored pattern below instead of
+#                        falling through to the model. This one widens a guard that
+#                        already worked, so why it is safe is worth stating: the
+#                        filler only removes the lead-in, and the remainder must
+#                        STILL be a complete capability question and nothing else.
+#                        "תגידי לי מה יש ביומן" strips to "מה יש ביומן", which
+#                        matches no pattern; "תגידי לי מה הכלים שלך ותשלחי מייל"
+#                        leaves "ותשלחי מייל" in the remainder and is rejected.
+#                        Both are pinned by tests.
 # Each addition has a paired negative test in test_owner_capability_routing.py
 # proving it does not swallow an ordinary business request containing that word.
 _INVENTORY_FILLER = re.compile(
@@ -32,7 +42,8 @@ _INVENTORY_FILLER = re.compile(
     r"\bבבקשה\b|\bנא\b|\bplease\b|\bmia\b|\bמיה\b|\bלי\b|\bjust\b|\bרק\b|\bעכשיו\b|"
     r"\bcurrently\b|\bcurrent\b|\bavailable\b|"
     r"\bפשוט\b|\bאת\b|\bכל\b|\bהכל\b|\bהכול\b|"
-    r"\bme\b|\beverything\b|\ball\b|\byour\b"
+    r"\bme\b|\beverything\b|\ball\b|\byour\b|"
+    r"\bתגידי\b|\bתגיד\b|\btell\b"
     r")",
     re.I,
 )
@@ -54,7 +65,13 @@ _CAPABILITY_PATTERNS = (
         r"\bמה\s+(?:היכולות\s+שלך|יכ(?:ול|ולה)\s+לעשות|אפשר\s+לעשות\s+איתך)\b", re.I
     ),
     re.compile(r"\b(?:תפרטי|תני|תן|הציגי|הצג)\s+היכולות\s+שלך\b", re.I),
-    re.compile(r"\bwhat\s+(?:can\s+you\s+do|are\s+capabilities)\b", re.I),
+    # "you can do" alongside "can you do": the "tell me what ..." lead-in inverts the
+    # word order, and the sibling `show ... you can do` pattern below already relies on
+    # the same inverted form. The empty-remainder rule still applies, so "what you can
+    # do for this client" keeps "for this client" and is rejected.
+    re.compile(
+        r"\bwhat\s+(?:can\s+you\s+do|you\s+can\s+do|are\s+capabilities)\b", re.I
+    ),
     re.compile(r"\bshow\s+you\s+can\s+do\b", re.I),
 )
 _KIND_PATTERNS: tuple[tuple[str, tuple[re.Pattern[str], ...]], ...] = (

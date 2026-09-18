@@ -153,3 +153,47 @@ def test_capability_reply_and_kind_need_no_model_provider_or_db(monkeypatch) -> 
     assert capability_request_kind("מה היכולות שלך") == "capabilities"
     assert isinstance(owner_capability_reply(), str)
     assert owner_capability_reply()  # non-empty
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # The lead-in is stripped, so the anchored capability pattern is reached.
+        ("תגידי לי מה את יכולה לעשות", "capabilities"),
+        ("תגיד לי מה היכולות שלך", "capabilities"),
+        ("tell me what you can do", "capabilities"),
+        # ... but stripping it can never turn an ordinary request into a meta one:
+        # the remainder still has to be a complete capability question and nothing
+        # else. These are the two shapes that prove the widening is bounded.
+        ("תגידי לי מה יש ביומן", ""),
+        ("תגידי לי מה הכלים שלך ותשלחי מייל", ""),
+        ("tell me the latest lead", ""),
+    ],
+    ids=[
+        "tell-me-can-do",
+        "tell-me-capabilities",
+        "tell-me-en",
+        "tell-me-calendar-is-business",
+        "tell-me-tools-plus-action-is-business",
+        "tell-me-lead-is-business",
+    ],
+)
+def test_tell_me_lead_in_is_stripped_without_widening_the_guard(
+    text: str, expected: str
+) -> None:
+    assert capability_request_kind(text) == expected
+
+
+def test_scoped_capability_questions_still_reach_the_model() -> None:
+    """A narrower question about one area is a real request, not a meta request.
+
+    These deliberately return "" so the model answers them with live detail. Pinned
+    because the filler set is the thing most likely to drift into swallowing them.
+    """
+    for text in (
+        "מה היכולות שלך ב-CRM",
+        "what are your capabilities for email",
+        "what you can do for this client",
+        "מה היכולות שלנו",
+    ):
+        assert capability_request_kind(text) == "", text
