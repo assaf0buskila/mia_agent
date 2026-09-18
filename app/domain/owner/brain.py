@@ -67,6 +67,16 @@ _NOTE_FAILURE_CLASSES: tuple[tuple[str, str], ...] = (
     ("empty reply", "תשובה ריקה"),
     ("timeout", "תם הזמן"),
     ("timed out", "תם הזמן"),
+    # The turn budget ran out and the loop exited cooperatively rather than waiting
+    # for a provider read timeout to surface. Both spellings appear: `completion` is
+    # "deadline_exceeded" and the accompanying `error` is "deadline exceeded", and
+    # either can arrive alone. Without these two needles a budget exhaustion fell
+    # through to the generic "שגיאה" -- the one failure class Assaf can actually
+    # act on, reported as an unclassified error. Deliberately NOT folded in with
+    # "budget_exhausted" below: that one means the *step* budget was spent while the
+    # clock was still fine, which is a different thing to tell him.
+    ("deadline_exceeded", "תם הזמן"),
+    ("deadline exceeded", "תם הזמן"),
     ("http 429", "עומס ספק"),
     ("refused", "סירוב מודל"),
     ("truncated", "תשובה נחתכה"),
