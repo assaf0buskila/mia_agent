@@ -251,10 +251,23 @@ def _run_tool_with_timeout(
     # `child_call_timeout` returning `None` here means "do not start this tool
     # call" -- never "no bound" -- so it is checked before the thread is ever
     # started, not forwarded anywhere that would read it as unbounded.
+    #
+    # The reserve is the final send reserve PLUS one minimum model call, and that
+    # second term is load-bearing: a tool result is useless unless the loop can
+    # still afford the synthesis turn that reads it. With the send reserve alone, a
+    # slow-house tool was legally granted up to `TOOL_TIMEOUT_SECONDS +
+    # TOOL_RECOVERY_SECONDS` (38s) while a model call is already refused once
+    # `remaining - reserve < owner_min_model_seconds`. Measured on the real
+    # defaults: at t=4s a slow tool could take 36s, return a SUCCESSFUL CRM row at
+    # t=35s, and then the synthesis call was refused -- so Assaf got the timeout
+    # notice and the row he had waited 35s for was thrown away. Reserving both
+    # terms means a tool is cut short in favour of answering, never the reverse.
     wait_s = child_call_timeout(
         deadline_at=deadline_at,
         configured=base_wait,
-        reserve=ctx.settings.owner_final_reserve_seconds,
+        reserve=(
+            ctx.settings.owner_final_reserve_seconds + ctx.settings.owner_min_model_seconds
+        ),
         minimum=ctx.settings.owner_min_tool_seconds,
     )
     if wait_s is None:
@@ -285,7 +298,16 @@ def _run_tool_with_timeout(
         done.wait()
         # The late result is discarded and the owner is told truthfully that the
         # check stopped; it is never counted among the tools that worked.
-        log_timeout_stage("tool", source_ref=ctx.source_ref)
+        #
+        # `tool_abandoned`, NOT `tool`: this is the one tool outcome where the
+        # handler actually RAN to completion and its result was thrown away, so an
+        # external write may genuinely have executed. The other two sites refuse
+        # before the thread starts and therefore cannot have had any effect. The
+        # owner-visible text is identical for all three on purpose -- the reason
+        # code is what tells a reader whether a retry is safe, and collapsing that
+        # into one label would leave `log_timeout_stage`'s promise ("learn WHICH
+        # child ran out") unable to answer the only question that matters here.
+        log_timeout_stage("tool_abandoned", source_ref=ctx.source_ref)
         return ToolResult(
             ok=False,
             text=TOOL_DEADLINE_REPLY,
@@ -634,16 +656,25 @@ def run_owner_agent(
         force_prose = last_step or ceiling_hit or not available
         stage_name = "final_model" if force_prose else "model"
 
-        # `configured` bounds the WHOLE model-chain call (every rung `client.complete`
-        # may try), not one attempt -- `owner_model_attempt_timeout_seconds` per rung,
-        # times the number of rungs the chain actually has (1 for a bare LlmClient,
-        # which has no `.models`). `LlmModelChain.complete` further caps each
-        # individual rung to `owner_model_attempt_timeout_seconds` via `attempt_timeout`
-        # below, so a slow primary cannot spend this whole budget on one rung.
+        # `configured` bounds the WHOLE model-chain call (every rung
+        # `client.complete` may try), and what the turn can afford for that is
+        # simply whatever is left after the reserve -- `child_call_timeout` takes
+        # the `min`. `llm_request_timeout_seconds` is the ceiling that still applies
+        # when the parent turn has no deadline at all, which keeps an unbounded
+        # parent from producing an unbounded child.
+        #
+        # Starvation protection is `attempt_timeout` below, per rung -- NOT this
+        # number. An earlier version computed `attempt * rung_count` here, which was
+        # inert for every real multi-rung chain (the reserve term already dominated)
+        # and actively harmful on a single-rung one: with only
+        # MIA_OWNER_AGENT_MODEL set, it handed the sole model 20s where it used to
+        # have ~43.5s, turning slow-but-successful calls into fast failures with no
+        # fallback to make up for it. A chain with one rung has no sibling to
+        # protect, so it is not capped per attempt at all.
         rung_count = len(getattr(client, "models", ())) or 1
         model_timeout = child_call_timeout(
             deadline_at=deadline_at,
-            configured=ctx.settings.owner_model_attempt_timeout_seconds * rung_count,
+            configured=ctx.settings.llm_request_timeout_seconds,
             reserve=ctx.settings.owner_final_reserve_seconds,
             minimum=ctx.settings.owner_min_model_seconds,
         )
@@ -677,9 +708,21 @@ def run_owner_agent(
             # unbounded; it is always an explicit, computed bound.
             "timeout": model_timeout,
         }
-        if isinstance(client, LlmModelChain):
+        if isinstance(client, LlmModelChain) and rung_count > 1:
             # Chain-only kwarg: a raw `LlmClient.complete` has no `attempt_timeout`
             # parameter and would raise TypeError if this were forwarded to it.
+            #
+            # Only sent when there is more than one rung. The cap's entire purpose is
+            # to stop a slow primary from starving the rungs behind it; with a single
+            # rung there is nothing behind it, and capping would only convert a call
+            # that would have succeeded into a provider error.
+            #
+            # Known bound, stated rather than hidden: if every rung hangs for its full
+            # cap, a 3-rung chain reaches rungs 1 and 2 within the turn budget and does
+            # not reach the cross-provider rung. The common failure is a primary that
+            # fails FAST (bad model id, 4xx, empty 200), which leaves the whole
+            # remainder to the rest of the chain. Tuning this needs real
+            # `owner_stage stage=model_primary latency_ms` data from production.
             call_kwargs["attempt_timeout"] = ctx.settings.owner_model_attempt_timeout_seconds
 
         try:

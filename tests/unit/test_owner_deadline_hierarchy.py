@@ -447,3 +447,184 @@ async def test_late_completion_during_drain_never_duplicates_the_reply(monkeypat
 
     assert len(port.sent) == 1
     assert port.sent[0].text == "real answer"
+
+
+# ---------------------------------------------------------------------------
+# Review round 1, finding 1: the tool ceiling and the model minimum were not
+# reconciled. A tool result is worthless unless the loop can still afford the
+# synthesis turn that reads it.
+#
+# These drive the REAL `_run_tool_with_timeout` call site and read back what it
+# actually asked for. Computing the expected reserve independently and asserting
+# the arithmetic against itself would pass on the broken code too.
+# ---------------------------------------------------------------------------
+
+
+def _captured_tool_bound(monkeypatch, *, deadline_in: float) -> dict:
+    """Run one slow-house tool dispatch and return the bound it actually requested."""
+    seen: dict = {}
+    real = owner_agent.child_call_timeout
+
+    def spy(**kwargs):
+        result = real(**kwargs)
+        seen.update(kwargs)
+        seen["granted"] = result
+        return result
+
+    monkeypatch.setattr(owner_agent, "child_call_timeout", spy)
+    monkeypatch.setattr(
+        owner_agent, "execute_tool", lambda *_a, **_kw: ToolResult(ok=True, text="row")
+    )
+    settings = Settings(_env_file=None)
+    owner_agent._run_tool_with_timeout(
+        "crm_search", {}, _ctx(settings), deadline_at=monotonic() + deadline_in
+    )
+    assert seen, "the tool dispatch never consulted child_call_timeout"
+    return seen
+
+
+def test_tool_dispatch_reserves_room_for_the_synthesis_call(monkeypatch) -> None:
+    """The reserve must cover the final send AND one minimum model call.
+
+    `crm_search` is in SLOW_HOUSE_TOOLS, so its ceiling is
+    TOOL_TIMEOUT_SECONDS + TOOL_RECOVERY_SECONDS (38s) -- higher than the point at
+    which a model call is already refused. Reserving only the send reserve is what
+    shipped, and it let a successful tool result be thrown away.
+    """
+    settings = Settings(_env_file=None)
+    seen = _captured_tool_bound(monkeypatch, deadline_in=40.0)
+    assert seen["reserve"] == pytest.approx(
+        settings.owner_final_reserve_seconds + settings.owner_min_model_seconds
+    )
+    # Not merely the send reserve -- the exact bug this pins.
+    assert seen["reserve"] > settings.owner_final_reserve_seconds
+
+
+def test_no_moment_lets_a_tool_outlive_the_last_synthesis_opportunity(monkeypatch) -> None:
+    """Swept across the turn: the failure lived in a band a single sample misses.
+
+    At every tenth of a second of turn budget, whatever the real dispatch would be
+    granted must still leave enough for a minimum synthesis call plus the send
+    reserve. On the shipped code this failed for roughly t=4s..34s.
+    """
+    settings = Settings(_env_file=None)
+    floor = settings.owner_final_reserve_seconds + settings.owner_min_model_seconds
+    total = settings.owner_turn_timeout_seconds
+
+    for elapsed_tenths in range(0, int(total * 10)):
+        remaining_budget = total - elapsed_tenths / 10.0
+        seen = _captured_tool_bound(monkeypatch, deadline_in=remaining_budget)
+        granted = seen["granted"]
+        if granted is None:
+            continue
+        left_after_tool = remaining_budget - granted
+        assert left_after_tool >= floor - 0.05, (
+            f"with {remaining_budget}s of turn left a tool was granted {granted}s, "
+            f"leaving {left_after_tool}s -- under the {floor}s needed for a "
+            f"synthesis call plus the send reserve"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Review round 1, finding 2: the per-rung cap must not apply to a single-rung
+# chain. Its purpose is to protect the rungs BEHIND the primary; with one rung
+# there are none, so capping only turns a slow success into a fast failure.
+# ---------------------------------------------------------------------------
+
+
+def test_a_single_rung_chain_gets_the_whole_usable_budget_not_the_attempt_cap() -> None:
+    """With only MIA_OWNER_AGENT_MODEL set, the sole rung must not be capped at 20s.
+
+    Regression guard for a fix that over-reached: bounding every model call at
+    `owner_model_attempt_timeout_seconds` handed a single-model deployment 20s where
+    it previously had the whole turn, with no fallback to cover the difference. The
+    observable consequence is the timeout the rung actually receives.
+    """
+    settings = Settings(_env_file=None)
+    only_rung = _ScriptedChainClient("solo", "providerA", [_text_response("בסדר")])
+    chain = LlmModelChain([only_rung])
+    ctx = _ctx(settings, owner_text="מה יש לי מחר")
+    turn_budget = 40.0
+
+    outcome = owner_agent.run_owner_agent(
+        client=chain,
+        ctx=ctx,
+        owner_message="מה יש לי מחר",
+        deadline_at=monotonic() + turn_budget,
+    )
+
+    assert outcome.completed is True
+    assert len(only_rung.calls) == 1
+    received = only_rung.calls[0]["timeout"]
+    assert received is not None
+    # The whole budget minus the send reserve, NOT the 20s per-attempt cap.
+    expected = turn_budget - settings.owner_final_reserve_seconds
+    assert received == pytest.approx(expected, abs=1.0), received
+    assert received > settings.owner_model_attempt_timeout_seconds
+
+
+def test_a_multi_rung_chain_is_still_capped_per_attempt() -> None:
+    """The counterpart: more than one rung means the cap must still be enforced.
+
+    Without this, "don't cap a single rung" could be mis-generalised into "don't cap
+    at all", which is the original production bug (RC2) restored.
+    """
+    settings = Settings(_env_file=None)
+    primary = _ScriptedChainClient("primary", "providerA", [_text_response("א")])
+    fallback = _ScriptedChainClient("fallback", "providerB", [_text_response("ב")])
+    chain = LlmModelChain([primary, fallback])
+    ctx = _ctx(settings, owner_text="מה יש לי מחר")
+
+    outcome = owner_agent.run_owner_agent(
+        client=chain,
+        ctx=ctx,
+        owner_message="מה יש לי מחר",
+        deadline_at=monotonic() + 40.0,
+    )
+
+    assert outcome.completed is True
+    received = primary.calls[0]["timeout"]
+    assert received is not None
+    assert received <= settings.owner_model_attempt_timeout_seconds
+
+
+# ---------------------------------------------------------------------------
+# Review round 2, F6: the timeout-stage allowlist was a convention, not a
+# tested contract -- removing the bound broke no test.
+# ---------------------------------------------------------------------------
+
+
+def test_timeout_stage_allowlist_collapses_anything_unexpected(caplog) -> None:
+    """An unrecognised stage name must never reach the log verbatim.
+
+    The bound is what keeps this line safe if a future caller passes something
+    derived from input rather than a literal. Proven by passing exactly that.
+    """
+    from app.core.owner_timing import _TIMEOUT_STAGES, log_timeout_stage
+
+    hostile = "model_primary; owner said תבדקי את המייל של dana@example.com"
+    with caplog.at_level("INFO", logger="mia.owner_timing"):
+        log_timeout_stage(hostile, source_ref="tg.1")
+        for stage in sorted(_TIMEOUT_STAGES):
+            log_timeout_stage(stage, source_ref="tg.1")
+
+    records = [r.getMessage() for r in caplog.records]
+    assert any("timeout_stage=unknown" in message for message in records)
+    assert not any("dana@example.com" in message for message in records)
+    assert not any("תבדקי" in message for message in records)
+    # Every legitimate stage still reports itself.
+    for stage in sorted(_TIMEOUT_STAGES):
+        assert any(f"timeout_stage={stage}" in message for message in records), stage
+
+
+def test_tool_refused_and_tool_abandoned_are_distinguishable() -> None:
+    """The one distinction that decides whether a retry is safe.
+
+    `tool` means the dispatch was refused before its thread started, so nothing
+    ran. `tool_abandoned` means the handler completed and its result was discarded,
+    so an external write may have executed. Both produce the same owner-visible
+    text, so the reason code is the only place this survives.
+    """
+    from app.core.owner_timing import _TIMEOUT_STAGES
+
+    assert {"tool", "tool_abandoned"} <= _TIMEOUT_STAGES

@@ -9,6 +9,35 @@ _NO_HISTORY_PATTERNS = (
     re.compile(r"(?:don't|do not)\s+use\s+(?:the\s+)?history", re.I),
     re.compile(r"(?:without|ignore)\s+(?:the\s+)?history", re.I),
 )
+# Ingress normalisation, applied before anything else. Bidi and zero-width controls
+# carry no meaning for intent matching, and the empty-remainder rule in
+# `capability_request_kind` is maximally sensitive to any character it does not
+# recognise: one stray U+200F leaves a non-empty remainder and sends even Assaf's
+# exact sentence back to the slow model path.
+#
+# This is not hypothetical. Mia's OWN egress inserts exactly these characters:
+# `owner_text()` appends a U+200F per line and `isolate()` wraps LTR runs in
+# U+2068/U+2069 (app/integrations/telegram_format.py). Any copy-paste round trip of
+# her own text -- including the capability reply's own closing offer to send the
+# exact tool names -- carries them back in, and the resulting failure is invisible
+# in Telegram and indistinguishable from "the fix never shipped".
+#
+# Deliberately written with real \u escapes rather than a raw string, so the
+# characters are resolved at parse time and never depend on regex-level escape
+# handling. This repo has already shipped a `\b` that became a literal 0x08 inside a
+# pattern that compiled fine and matched nothing.
+#
+# Stripping these can only ever SHRINK the remainder, so it cannot create a match
+# that the anchored patterns plus the empty-remainder rule would not already accept.
+_BIDI_AND_ZERO_WIDTH = re.compile(
+    "["
+    "​‌‍"  # ZWSP, ZWNJ, ZWJ
+    "‎‏"  # LRM, RLM
+    "‪‫‬‭‮"  # LRE, RLE, PDF, LRO, RLO
+    "⁦⁧⁨⁩"  # LRI, RLI, FSI, PDI
+    "﻿"  # BOM / ZWNBSP
+    "]"
+)
 # Filler is stripped BEFORE matching (see capability_request_kind), so every entry
 # here must be \b-bounded: Hebrew has no separate word-break token, and an unbounded
 # "כל" or "לי" would silently eat those letters out of the middle of "הכלים" or
@@ -72,7 +101,11 @@ _CAPABILITY_PATTERNS = (
     re.compile(
         r"\bwhat\s+(?:can\s+you\s+do|you\s+can\s+do|are\s+capabilities)\b", re.I
     ),
-    re.compile(r"\bshow\s+you\s+can\s+do\b", re.I),
+    # The optional "what" matters: "show me what you can do" is the more natural of
+    # the two phrasings, and without it the earlier `what you can do` pattern matches
+    # first, leaves "show" in the remainder, and the phrase is rejected -- while
+    # "show me everything you can do" was accepted. Same question, opposite answer.
+    re.compile(r"\bshow\s+(?:what\s+)?you\s+can\s+do\b", re.I),
 )
 _KIND_PATTERNS: tuple[tuple[str, tuple[re.Pattern[str], ...]], ...] = (
     ("tools", _TOOLS_PATTERNS),
@@ -199,7 +232,7 @@ def capability_request_kind(text: str) -> str:
     left over after the tools anchor matches means this is an ordinary business
     request, not a meta-question, and it falls through to "" (the model path).
     """
-    remainder = text.strip()
+    remainder = _BIDI_AND_ZERO_WIDTH.sub("", text).strip()
     if not remainder:
         return ""
     remainder = _INVENTORY_FILLER.sub(" ", remainder)
@@ -268,7 +301,11 @@ _CAPABILITY_BLURBS: dict[str, str] = {
     "CRM ו-Sheets": "לחפש ולעדכן אנשי קשר בגיליון ה-CRM הנעול",
     "אתר, SEO ורשתות": "נתוני SEO ותנועה לאתר, לינקדאין ואינסטגרם",
     "מחקר ציבורי": "חיפוש מידע פומבי ברשת",
-    "כלים מחיבורים פעילים נוספים": "כלים נוספים מחיבורים שמחוברים בפועל, כשצריך",
+    # "שהוגדרו" (configured), never "שמחוברים בפועל" (actually connected): these five
+    # Composio tools are registered unconditionally and this function runs no health
+    # check, so claiming a live connection here would contradict the reply's own
+    # closing line ("לא בדיקת חיבור חיה") two lines later.
+    "כלים מחיבורים פעילים נוספים": "כלים נוספים מחיבורים שהוגדרו, אם החיבור פעיל",
 }
 
 

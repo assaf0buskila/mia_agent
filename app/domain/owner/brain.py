@@ -75,6 +75,15 @@ _NOTE_FAILURE_CLASSES: tuple[tuple[str, str], ...] = (
     # act on, reported as an unclassified error. Deliberately NOT folded in with
     # "budget_exhausted" below: that one means the *step* budget was spent while the
     # clock was still fine, which is a different thing to tell him.
+    #
+    # Position is deliberate. This scan is first-match-wins over a blob of
+    # `completion` + `reason`, and an aggregated `LlmModelChain` failure can carry
+    # both a 429 and a chain-deadline message. Placing these above "http 429" means
+    # such a turn reports "תם הזמן" rather than "עומס ספק" -- chosen because the
+    # actionable fact for Assaf is that the turn ran out of time, and because the
+    # pre-existing "timeout"/"timed out" needles directly above already sit above
+    # "http 429", so timeout-class beating load-class is the established precedence
+    # here, not something these two lines introduce.
     ("deadline_exceeded", "תם הזמן"),
     ("deadline exceeded", "תם הזמן"),
     ("http 429", "עומס ספק"),

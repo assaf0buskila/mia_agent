@@ -34,6 +34,9 @@ _ALLOWED_STAGES = frozenset(
         # distinct from "model" (a tool-calling turn) for observability.
         "final_model",
         "tool",
+        # Not a measured span -- a timeout reason code only (see _TIMEOUT_STAGES).
+        # Allowlisted here because `log_timeout_stage` shares this gate.
+        "tool_abandoned",
         "send",
         "learning",
         "owner_turn",
@@ -42,7 +45,16 @@ _ALLOWED_STAGES = frozenset(
 # The subset of stages that can report a bounded-timeout reason code via
 # `log_timeout_stage` below -- i.e. a child call that either never started, or
 # started and was cut off, because too little of the parent budget was left.
-_TIMEOUT_STAGES = frozenset({"model_primary", "model_fallback", "tool", "final_model"})
+#
+# `tool` and `tool_abandoned` are deliberately two codes for what the owner sees
+# as one message. `tool` means the dispatch was refused before its thread started,
+# so no handler ran and no external write can have happened. `tool_abandoned`
+# means the handler ran to completion and its result was discarded, so a write may
+# genuinely have executed and a blind retry is NOT safe. That difference is
+# invisible in the reply text and is the main thing a reader needs from these logs.
+_TIMEOUT_STAGES = frozenset(
+    {"model_primary", "model_fallback", "tool", "tool_abandoned", "final_model"}
+)
 _SAFE = re.compile(r"[^a-zA-Z0-9_.:-]")
 _KNOWN_MODEL_PREFIXES = ("gpt-", "o1", "o3", "o4", "gemini-", "claude-", "text-")
 _SOURCE_HASH: ContextVar[str] = ContextVar("mia_owner_source_hash", default="")

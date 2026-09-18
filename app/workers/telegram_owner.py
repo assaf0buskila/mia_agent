@@ -25,6 +25,7 @@ from app.api.inbound_common import (
 )
 from app.api.owner import _is_authorized_owner
 from app.core.config import get_settings
+from app.core.deadlines import remaining_seconds
 from app.core.errors import MiaError
 from app.core.logging import log_comm
 from app.core.owner_timing import owner_stage
@@ -263,7 +264,13 @@ async def process_telegram_owner_update(
                     delivery_state=delivery_state,
                 )
             )
-            remaining = max(0.0, deadline_at - monotonic())
+            # Same arithmetic as every child bound inside the turn, taken from the
+            # one module that owns it rather than recomputed here. `deadline_at` is
+            # a definite float by this point (assigned above, after preprocessing),
+            # so `remaining_seconds` cannot return None; the floor stays because a
+            # turn whose budget is already spent must pass timeout=0, not a
+            # negative, to `asyncio.wait`.
+            remaining = max(0.0, remaining_seconds(deadline_at) or 0.0)
             done, _pending = await asyncio.wait({loop_task}, timeout=remaining)
             if not done:
                 # The deadline is externally visible, but the DB lifecycle remains
