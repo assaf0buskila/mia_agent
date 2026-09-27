@@ -1,0 +1,2 @@
+# Files that run on the Linux VM must keep LF line endings.
+ops/gcp/vm/* text eol=lf
