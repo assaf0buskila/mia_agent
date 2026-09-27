@@ -79,3 +79,4 @@ Open a shell with `gcloud compute ssh mia --zone me-west1-a --project mia-assafw
 - **`$` in settings** is quoted by `mia settings` so Compose does not interpolate it.
 - **Line endings.** `.gitattributes` keeps `ops/gcp/vm/*` LF; the VM runs them with bash.
 - **The first deploy builds on the VM** (a few minutes). The VM keeps the last three builds.
+- **Telegram caches the webhook IP.** After a DNS move, Telegram kept delivering to the old AWS address (`last_error_message: Connection timed out`). Fix: re-set the webhook with `ip_address=34.165.183.186` (see `..\\mia-telegram-check.sh` next to the repo).

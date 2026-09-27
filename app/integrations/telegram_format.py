@@ -80,8 +80,17 @@ _FENCE_LANGUAGE_RE = re.compile(r"^([\w+-]+)\r?\n")
 # `_stash_fence`/`_stash_code` and the render_owner_markdown docstring.
 _BOLD_INLINE_RE = re.compile(r"\*\*(?!\s)([^\n*\x00\x01]+?)(?<!\s)\*\*")
 _CODE_INLINE_RE = re.compile(r"`([^`\n\x00\x01]+)`")
-_HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
-_BULLET_RE = re.compile(r"^(\s*)[-*]\s+(.*)$")
+# owner_text() may put an RLM (U+200F) or a stray isolate in front of a line; the
+# heading/bullet markers must still be recognised behind them.
+_HEADING_RE = re.compile(r"^[\u200f\u2068\u2069]*(#{1,6})[\u2069]?\s+(.*)$")
+_BULLET_RE = re.compile(r"^(\s*)[\u200f]?[-*]\s+(.*)$")
+# Single-asterisk emphasis (`*title*`) as the model writes it; never a bullet (that
+# needs a following space) and never half of a `**bold**` pair.
+# Isolates count as part of the neighbouring word, so `2*3` stays arithmetic after
+# owner_text() has wrapped the digits.
+_ITALIC_INLINE_RE = re.compile(
+    r"(?<![*\w\u2069])\*(?![\s*])([^\n*\x00\x01]+?)(?<![\s*])\*(?![*\w\u2068])"
+)
 _PRE_FENCE_TOKEN = "\x00PRE{}\x00"
 _CODE_INLINE_TOKEN = "\x01CODE{}\x01"
 _FENCE_TOKEN_RE = re.compile(r"\x00PRE\d+\x00")
@@ -194,8 +203,10 @@ def _apply_inline_markdown(
         without_code = text
     if allow_bold:
         without_code = _BOLD_INLINE_RE.sub(lambda m: f"<b>{m.group(1)}</b>", without_code)
+        without_code = _ITALIC_INLINE_RE.sub(lambda m: f"<i>{m.group(1)}</i>", without_code)
     else:
         without_code = _BOLD_INLINE_RE.sub(lambda m: m.group(1), without_code)
+        without_code = _ITALIC_INLINE_RE.sub(lambda m: m.group(1), without_code)
     for index, block in enumerate(codes):
         without_code = without_code.replace(_CODE_INLINE_TOKEN.format(index), block)
     return without_code
@@ -290,11 +301,25 @@ def _normalise_dashes(text: str) -> str:
     return text
 
 
+_MARKDOWN_MARKER_RUN_RE = re.compile(r"#{1,6}")
+# `### Gmail` is one space-joined run; the marker stays outside the isolate.
+_MARKDOWN_HEADING_PREFIX_RE = re.compile(r"(#{1,6}[ \t]+)(\S.*)")
+
+
 def _wrap_ltr_run(match: re.Match[str]) -> str:
     run = match.group()
     trimmed = run.rstrip(_RUN_TRAILING_PUNCT)
     if not trimmed:
         return run
+    # A bare `###` is a Markdown heading marker, not LTR data. Isolating it turned the
+    # owner's "### סיכום" into a literal "⁨###⁩ סיכום" that render_owner_markdown could
+    # no longer recognise as a heading, so Telegram showed raw hashes.
+    if _MARKDOWN_MARKER_RUN_RE.fullmatch(trimmed):
+        return run
+    heading = _MARKDOWN_HEADING_PREFIX_RE.match(trimmed)
+    if heading:
+        marker, rest = heading.groups()
+        return f"{marker}{_FSI}{rest}{_PDI}{run[len(trimmed):]}"
     return f"{_FSI}{trimmed}{_PDI}{run[len(trimmed):]}"
 
 
@@ -769,3 +794,81 @@ def plain_text_length(html: str) -> int:
         if not inside:
             result.append(char)
     return len("".join(result))
+
+
+# ------------------------------------------------------------------ lead cards
+# The website brief is stored as plain "label: value" lines (it is also the CRM Activity
+# text). The Telegram card is rendered from it at delivery, so Sheets never sees HTML
+# and a brief this function does not recognise is sent exactly as before.
+_LEAD_CARD_HEADERS = {
+    "פנייה חדשה מהאתר": "🔔",
+    "עדכון לפנייה מהאתר": "✏️",
+}
+_LEAD_CARD_FIELDS = {
+    "העסק": ("🏢", "העסק"),
+    "הצורך": ("🎯", "הצורך"),
+    "לוח זמנים": ("⏱", "לוח זמנים"),
+    "תקציב": ("💰", "תקציב"),
+    "זמינות לשיחה": ("🗓", "זמינות לשיחה"),
+    "שם": ("👤", "שם"),
+    "טלפון": ("📞", "טלפון"),
+    "אימייל": ("✉️", "אימייל"),
+    "מועד": ("🗓", "מועד"),
+    "השלב הבא המומלץ": ("➡️", "השלב הבא"),
+}
+_LEAD_CARD_COPYABLE = frozenset({"טלפון", "אימייל"})
+_LEAD_CARD_SECTIONS = (
+    ("העסק", "הצורך", "לוח זמנים", "תקציב"),
+    ("שם", "טלפון", "אימייל", "מועד", "זמינות לשיחה"),
+    ("השלב הבא המומלץ",),
+)
+
+
+def render_lead_card(summary: str) -> str:
+    """Render a website lead brief as a scannable Telegram HTML card.
+
+    Returns "" when ``summary`` is not a website brief, so the caller keeps sending the
+    plain text. Every value is escaped; phone and email are tap-to-copy ``<code>``.
+    The need section written as ``a | b`` (the visitor's own statements) becomes one
+    bullet per statement.
+    """
+    lines = [line.strip() for line in summary.strip().splitlines() if line.strip()]
+    if not lines or lines[0] not in _LEAD_CARD_HEADERS:
+        return ""
+    header = lines[0]
+    fields: dict[str, str] = {}
+    extra: list[str] = []
+    for line in lines[1:]:
+        label, sep, value = line.partition(":")
+        label, value = label.strip(), value.strip()
+        if not sep:
+            extra.append(line)
+        elif label == "יצירת קשר" and not value:
+            continue
+        elif label in _LEAD_CARD_FIELDS and value and label not in fields:
+            fields[label] = value
+        else:
+            extra.append(line)
+    out = [f"{_LEAD_CARD_HEADERS[header]} <b>{esc(header)}</b>"]
+    for section in _LEAD_CARD_SECTIONS:
+        block = []
+        for label in section:
+            value = fields.get(label)
+            if not value:
+                continue
+            icon, title = _LEAD_CARD_FIELDS[label]
+            if label == "הצורך" and " | " in value:
+                items = [item.strip() for item in value.split(" | ") if item.strip()]
+                block.append(f"{icon} <b>{esc(title)}:</b>")
+                block.extend(f"• {esc(item)}" for item in items)
+            elif label in _LEAD_CARD_COPYABLE:
+                block.append(f"{icon} <b>{esc(title)}:</b> {code(value)}")
+            else:
+                block.append(f"{icon} <b>{esc(title)}:</b> {esc(value)}")
+        if block:
+            out.append("")
+            out.extend(block)
+    if extra:
+        out.append("")
+        out.extend(esc(line) for line in extra)
+    return "\n".join(out)

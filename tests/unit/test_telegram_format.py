@@ -992,3 +992,49 @@ def test_split_message_isolate_invariant_over_corpus(limit: int) -> None:
             for tag_name in ("pre", "b", "code", "blockquote"):
                 opens = len(re.findall(rf"<{tag_name}(?: expandable)?>", chunk))
                 assert opens == chunk.count(f"</{tag_name}>"), (tag_name, chunk)  # (3)
+
+
+# ------------------------------------ owner_text -> render (2026-09-27 owner report)
+
+
+def test_markdown_heading_survives_owner_text_isolation() -> None:
+    """Live bug: owner_text() isolated `###` as LTR data, so Telegram showed
+    "⁨###⁩ סיכום מייל יומי" with raw hashes instead of a bold title."""
+    assert render_owner_markdown(owner_text("### סיכום מייל יומי")) == "<b>סיכום מייל יומי</b>"
+    rendered = render_owner_markdown(owner_text("### Gmail מה לא עובד"))
+    assert rendered.startswith("<b>") and rendered.endswith("</b>")
+    assert "#" not in rendered
+
+
+def test_single_asterisk_emphasis_becomes_italic_but_arithmetic_does_not() -> None:
+    rendered = render_owner_markdown(owner_text("לתפקיד *Junior AI Solution Engineer*: יום"))
+    assert "<i>" in rendered and "*" not in rendered
+    arithmetic = render_owner_markdown(owner_text("החישוב: 2*3 ו-a*b*c"))
+    assert "<i>" not in arithmetic
+    assert render_owner_markdown("זה **לא נסגר תקין") == "זה **לא נסגר תקין"
+
+
+def test_render_lead_card_structures_and_escapes_the_brief() -> None:
+    from app.integrations.telegram_format import render_lead_card
+
+    card = render_lead_card(
+        "פנייה חדשה מהאתר\n"
+        "העסק: קליניקה <b>x</b>\n"
+        "הצורך: א | ב\n"
+        "יצירת קשר:\n"
+        "שם: דנה\n"
+        "אימייל: dana@example.com\n"
+        "השלב הבא המומלץ: שיחה"
+    )
+    assert card.startswith("🔔 <b>פנייה חדשה מהאתר</b>")
+    assert "&lt;b&gt;x&lt;/b&gt;" in card
+    assert "• א" in card and "• ב" in card
+    assert "<code>dana@example.com</code>" in card
+    assert "<b>השלב הבא:</b> שיחה" in card
+
+
+def test_render_lead_card_ignores_other_notifications() -> None:
+    from app.integrations.telegram_format import render_lead_card
+
+    assert render_lead_card("ליד חדש מהאתר: 5 הודעות בשיחה.") == ""
+    assert render_lead_card("") == ""
