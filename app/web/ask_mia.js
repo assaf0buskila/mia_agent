@@ -895,7 +895,7 @@
         if (data.notification_status === 'delivered') {
           status.textContent = 'אסף קיבל את תקציר השיחה.';
         } else if (data.notification_status === 'pending') {
-          status.textContent = 'הפרטים נשמרו וההעברה לאסף ממתינה.';
+          status.textContent = 'הפרטים נשמרו ויועברו לאסף.';
         } else if (data.notification_status === 'failed') {
           status.textContent = 'לא הצלחתי להעביר את השיחה לאסף כרגע.';
         }
@@ -1209,11 +1209,11 @@
         ? data.delivery_status
         : '';
       if (deliveryStatus === 'confirmed') {
-        status.textContent = 'הפרטים נשמרו והמסירה לאסף אושרה.';
+        status.textContent = 'הפרטים נשמרו והגיעו לאסף.';
       } else if (deliveryStatus === 'pending') {
-        status.textContent = 'הפרטים נשמרו והמסירה לאסף עדיין ממתינה.';
+        status.textContent = 'הפרטים נשמרו ויועברו לאסף.';
       } else if (deliveryStatus === 'failed') {
-        status.textContent = 'הפרטים נשמרו, אך המסירה לאסף נכשלה.';
+        status.textContent = 'הפרטים נשמרו, אבל ההעברה לאסף לא הצליחה כרגע.';
       } else {
         status.textContent = 'הפרטים נשמרו.';
       }

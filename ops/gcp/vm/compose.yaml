@@ -1,0 +1,63 @@
+# Mia on one Google Cloud VM. Every service uses the host network. PostgreSQL and the app
+# bind to 127.0.0.1, so only Caddy (80/443, profile "https") is reachable from outside.
+#
+# /etc/mia/settings.env  from Secret Manager (mia-env): API keys, models, feature flags
+# /etc/mia/runtime.env   generated once on the VM: MIA_DATABASE_URL
+# /etc/mia/postgres.env  generated once on the VM: database password
+name: mia
+
+services:
+  caddy:
+    image: caddy:2.11.4-alpine
+    profiles: [https]
+    network_mode: host
+    volumes:
+      - /opt/mia/Caddyfile:/etc/caddy/Caddyfile:ro
+      - /var/lib/mia/caddy-data:/data
+      - /var/lib/mia/caddy-config:/config
+    depends_on:
+      app: { condition: service_healthy }
+    restart: unless-stopped
+
+  postgres:
+    # Same major version as the RDS instance it replaces, so pg_restore is exact.
+    image: postgres:16
+    network_mode: host
+    command: ["postgres", "-c", "listen_addresses=127.0.0.1", "-c", "shared_buffers=128MB"]
+    env_file: [/etc/mia/postgres.env]
+    volumes:
+      - /var/lib/mia/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "mia", "-d", "mia"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  migrate:
+    image: mia:${MIA_TAG:?MIA_TAG is required}
+    network_mode: host
+    command: ["mia-migrate"]
+    env_file: [/etc/mia/settings.env, /etc/mia/runtime.env]
+    depends_on:
+      postgres: { condition: service_healthy }
+    restart: "no"
+
+  app:
+    image: mia:${MIA_TAG:?MIA_TAG is required}
+    network_mode: host
+    # Same server as the ECS task, but bound to loopback: Caddy is the only public door.
+    command: ["uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8000",
+              "--proxy-headers", "--forwarded-allow-ips", "127.0.0.1",
+              "--timeout-keep-alive", "130"]
+    env_file: [/etc/mia/settings.env, /etc/mia/runtime.env]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live', timeout=4)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    stop_grace_period: 45s
+    restart: unless-stopped

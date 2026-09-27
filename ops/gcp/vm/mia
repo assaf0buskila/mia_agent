@@ -1,0 +1,264 @@
+#!/usr/bin/env bash
+# Mia's control script on the VM. `mia deploy` installs it to /usr/local/bin/mia.
+# Run as root: sudo mia <command>
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+usage: sudo mia <command>
+  deploy <tag> [sha]    build /opt/mia/src/<tag>, fetch settings, migrate, restart
+  settings              re-fetch settings from Secret Manager and restart
+  https enable|disable|status
+                        serve mia.assafweb.com through Caddy (after DNS points here)
+  jobs pause|resume|status
+                        scheduled jobs (due-scan every 15 min, knowledge ingest hourly)
+  job <name>            run one job now: mia-due-scan | mia-ingest-knowledge
+  telegram-webhook      register https://<public url>/v1/telegram/webhook with Telegram
+  go-live               after DNS points here: https enable, jobs resume, webhook, first ingest
+  restore <dump>        replace the database with a pg_dump custom-format file
+  backup                write a database dump to /var/lib/mia/backups
+  status                containers, health and timers
+  logs [service]        follow logs (postgres, migrate, app, caddy)
+EOF
+}
+
+die() { echo "mia: $*" >&2; exit 1; }
+https_marker="${MIA_HTTPS_MARKER:-/etc/mia/https-enabled}"
+jobs_paused="${MIA_JOBS_PAUSED:-/etc/mia/jobs-paused}"
+jobs=(mia-due-scan mia-ingest-knowledge)
+
+compose() {
+  local profile=()
+  [ ! -f "$https_marker" ] || profile=(--profile https)
+  docker compose -p mia -f /opt/mia/compose.yaml --env-file /opt/mia/tag.env "${profile[@]}" "$@"
+}
+
+# Settings owned by the VM are dropped from the uploaded secret.
+fetch_settings() {
+  python3 - <<'PY'
+import base64, json, os, re, sys, urllib.error, urllib.request
+
+def metadata(path):
+    request = urllib.request.Request(
+        "http://metadata.google.internal/computeMetadata/v1/" + path,
+        headers={"Metadata-Flavor": "Google"},
+    )
+    return urllib.request.urlopen(request, timeout=10).read().decode()
+
+project = metadata("project/project-id")
+token = json.loads(metadata("instance/service-accounts/default/token"))["access_token"]
+request = urllib.request.Request(
+    f"https://secretmanager.googleapis.com/v1/projects/{project}/secrets/mia-env/versions/latest:access",
+    headers={"Authorization": f"Bearer {token}"},
+)
+try:
+    response = urllib.request.urlopen(request, timeout=20)
+except urllib.error.HTTPError as error:
+    sys.exit(f"mia: cannot read secret mia-env (HTTP {error.code}); run ops/gcp/push-settings.ps1")
+data = json.loads(response.read())["payload"]["data"]
+owned = re.compile(r"^(MIA_DATABASE_URL|POSTGRES_\w+|PG\w+)\s*=")
+assignment = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
+lines = []
+for raw in base64.b64decode(data).decode("utf-8").splitlines():
+    line = re.sub(r"^\s*export\s+", "", raw)
+    match = assignment.match(line)
+    if not match or owned.match(line):
+        continue
+    name, value = match.groups()
+    # Compose interpolates ${...} in env files; single quotes keep a value literal.
+    if "$" in value:
+        value = f"'{value}'" if "'" not in value else value.replace("$", "$$")
+    lines.append(f"{name}={value}")
+temporary = "/etc/mia/settings.env.tmp"
+with os.fdopen(os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as file:
+    file.write("\n".join(lines) + "\n")
+os.replace(temporary, "/etc/mia/settings.env")
+print(f"mia: {len(lines)} settings loaded")
+PY
+}
+
+wait_healthy() {
+  local service="$1" id state
+  for _ in $(seq 60); do
+    id="$(compose ps -q "$service")"
+    state="$([ -n "$id" ] && docker inspect -f '{{.State.Health.Status}}' "$id" 2>/dev/null || true)"
+    [ "$state" = healthy ] && return 0
+    sleep 2
+  done
+  die "$service did not become healthy"
+}
+
+start_services() {
+  compose up -d --remove-orphans postgres migrate app
+  wait_healthy app
+  if [ -f "$https_marker" ]; then
+    compose run --rm --no-deps caddy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+    compose up -d --force-recreate caddy
+  fi
+}
+
+install_timers() {
+  cat > /etc/systemd/system/mia-job@.service <<'EOF'
+[Unit]
+Description=Mia scheduled job %i
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/mia job %i
+TimeoutStartSec=20min
+EOF
+  cat > /etc/systemd/system/mia-due-scan.timer <<'EOF'
+[Unit]
+Description=Mia owner-task reminders, every 15 minutes
+
+[Timer]
+OnCalendar=*:0/15
+Unit=mia-job@mia-due-scan.service
+
+[Install]
+WantedBy=timers.target
+EOF
+  cat > /etc/systemd/system/mia-ingest-knowledge.timer <<'EOF'
+[Unit]
+Description=Mia re-reads assafweb.com, hourly
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=5min
+Unit=mia-job@mia-ingest-knowledge.service
+
+[Install]
+WantedBy=timers.target
+EOF
+  systemctl daemon-reload
+  systemctl enable --now mia-due-scan.timer mia-ingest-knowledge.timer >/dev/null
+}
+
+cmd="${1:-}"; shift || true
+case "$cmd" in
+  deploy|settings|https|restore|go-live)
+    exec 9>/var/lock/mia-state.lock
+    flock -n 9 || die "another Mia operation is already running"
+    ;;
+esac
+
+case "$cmd" in
+  deploy)
+    tag="${1:?usage: mia deploy <tag> [sha]}"
+    sha="${2:-$tag}"
+    src="/opt/mia/src/$tag"
+    [ -f /var/lib/mia/.bootstrap-done ] || die "VM bootstrap has not finished; retry in a minute"
+    [ -d "$src" ] || die "missing $src"
+    # A brand-new VM starts with jobs paused so it cannot double-send while AWS is live.
+    [ -f /opt/mia/tag.env ] || touch "$jobs_paused"
+    install -m 755 "$src/ops/gcp/vm/mia" /usr/local/bin/mia
+    install -m 644 "$src/ops/gcp/vm/compose.yaml" /opt/mia/compose.yaml
+    install -m 644 "$src/ops/gcp/vm/Caddyfile" /opt/mia/Caddyfile
+    docker build --progress=plain --build-arg "MIA_BUILD_SHA=$sha" \
+      -f "$src/deploy/Dockerfile" -t "mia:$tag" "$src"
+    fetch_settings
+    printf 'MIA_TAG=%s\n' "$tag" > /opt/mia/tag.env
+    start_services
+    install_timers
+    # Keep the three newest sources and their images.
+    for old in $(ls -1t /opt/mia/src | tail -n +4); do
+      rm -rf "/opt/mia/src/$old"
+      docker image rm "mia:$old" >/dev/null 2>&1 || true
+    done
+    docker image prune -f >/dev/null
+    docker builder prune -f --filter until=168h >/dev/null 2>&1 || true
+    compose ps
+    ;;
+  settings)
+    fetch_settings
+    start_services
+    ;;
+  https)
+    case "${1:-status}" in
+      enable)  install -m 600 /dev/null "$https_marker"; start_services ;;
+      disable) rm -f "$https_marker"; docker compose -p mia -f /opt/mia/compose.yaml --env-file /opt/mia/tag.env stop caddy ;;
+      status)  if [ -f "$https_marker" ]; then echo enabled; else echo disabled; fi ;;
+      *) die "usage: mia https enable|disable|status" ;;
+    esac
+    ;;
+  jobs)
+    case "${1:-status}" in
+      pause)  install -m 600 /dev/null "$jobs_paused"; echo paused ;;
+      resume) rm -f "$jobs_paused"; echo resumed ;;
+      status)
+        if [ -f "$jobs_paused" ]; then echo paused; else echo running; fi
+        systemctl list-timers 'mia-*' --no-pager || true
+        ;;
+      *) die "usage: mia jobs pause|resume|status" ;;
+    esac
+    ;;
+  job)
+    name="${1:?usage: mia job <name>}"
+    printf '%s\n' "${jobs[@]}" | grep -qx "$name" || die "unknown job: $name"
+    [ -f /opt/mia/tag.env ] || die "not deployed yet"
+    if [ -f "$jobs_paused" ]; then echo "mia: jobs are paused; skipping $name"; exit 0; fi
+    exec 8>"/var/lock/mia-job-$name.lock"
+    flock -n 8 || { echo "mia: $name is already running"; exit 0; }
+    compose run --rm --no-deps -T app "$name"
+    ;;
+  telegram-webhook)
+    compose run --rm --no-deps -T app mia-telegram-webhook
+    ;;
+  go-live)
+    [ -f /opt/mia/tag.env ] || die "deploy first"
+    install -m 600 /dev/null "$https_marker"
+    start_services
+    for _ in $(seq 30); do
+      curl -fsS -o /dev/null --max-time 5 "https://mia.assafweb.com/health/live" && break
+      sleep 5
+    done
+    curl -fsS --max-time 10 "https://mia.assafweb.com/health/ready" >/dev/null \
+      || die "https://mia.assafweb.com is not ready yet (DNS or certificate); retry in a few minutes"
+    rm -f "$jobs_paused"
+    compose run --rm --no-deps -T app mia-telegram-webhook
+    compose run --rm --no-deps -T app mia-ingest-knowledge
+    echo "mia: live on https://mia.assafweb.com"
+    ;;
+  restore)
+    file="${1:?usage: mia restore <dump file>}"
+    [ -s "$file" ] || die "missing or empty dump: $file"
+    [ -f /opt/mia/tag.env ] || die "deploy once before restoring"
+    compose stop caddy app >/dev/null 2>&1 || true
+    compose up -d postgres
+    wait_healthy postgres
+    if compose exec -T postgres psql -U mia -d mia -tAc "select count(*) from information_schema.tables where table_schema='public'" 2>/dev/null | grep -qv '^0$'; then
+      safety="/var/lib/mia/backups/pre-restore-$(date -u +%Y%m%dT%H%M%SZ).dump"
+      compose exec -T postgres pg_dump -U mia -d mia --format=custom > "$safety"
+      chmod 600 "$safety"
+      echo "mia: existing database saved to $safety"
+    fi
+    compose exec -T postgres psql -U mia -d postgres -v ON_ERROR_STOP=1 \
+      -c "DROP DATABASE IF EXISTS mia WITH (FORCE)" -c "CREATE DATABASE mia OWNER mia"
+    compose exec -T postgres pg_restore -U mia -d mia --no-owner --no-privileges --exit-on-error < "$file"
+    echo "mia: restored $(compose exec -T postgres psql -U mia -d mia -tAc "select count(*) from information_schema.tables where table_schema='public'") tables"
+    start_services
+    ;;
+  backup)
+    file="/var/lib/mia/backups/mia-$(date -u +%Y%m%dT%H%M%SZ).dump"
+    compose exec -T postgres pg_dump -U mia -d mia --format=custom > "$file"
+    chmod 600 "$file"
+    echo "$file"
+    ;;
+  status)
+    compose ps -a
+    compose exec -T app python -c \
+      "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=8).read().decode())"
+    echo "https: $([ -f "$https_marker" ] && echo enabled || echo disabled)"
+    echo "jobs:  $([ -f "$jobs_paused" ] && echo paused || echo running)"
+    systemctl list-timers 'mia-*' --no-pager || true
+    ;;
+  logs)
+    compose logs -f --tail 200 "$@"
+    ;;
+  *)
+    usage
+    [ -z "$cmd" ] || exit 2
+    ;;
+esac

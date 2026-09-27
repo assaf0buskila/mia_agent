@@ -18,7 +18,7 @@ from app.domain.handoff.delivery import (
     website_ping_scope,
 )
 from app.integrations.sheets import build_sheets_port
-from app.integrations.telegram_format import owner_text
+from app.integrations.telegram_format import owner_text, render_lead_card
 from app.services.notifications import deliver_owner_telegram
 from app.workers.crm_delivery import POLL_SECONDS, CrmDeliveryWorker, DeliveryOutcome
 
@@ -40,6 +40,11 @@ def telegram_receipt_handler(
         if not conversation or recipient not in settings.telegram_owner_user_id_set():
             return "conflict"
         lead_id, key = website_ping_scope(conversation)
+        # A contact update after the first handoff carries its own scope, so it gets its
+        # own at-most-once claim and can never replay or suppress the first ping.
+        scope = str(payload.get("ping_scope") or "")
+        if scope:
+            key = f"{key}:{scope}"
         with session_factory() as db:
             store = LeadStore(db)
             if recipient in store.confirmed_owner_notification_recipients(
@@ -71,11 +76,13 @@ def telegram_receipt_handler(
             db.commit()
             if not claimed:
                 return "unknown"
+            card = render_lead_card(body)
             result = deliver_owner_telegram(
-                text=owner_text(body),
+                text=owner_text(card, html=True) if card else owner_text(body),
                 settings=settings,
                 recipient_ids=(recipient,),
                 transport=transport,
+                parse_mode="HTML" if card else None,
             )
             rejected = result.rejected or ((recipient,) if result.no_attempt else ())
             persisted = store.record_owner_notification_recipient_delivery_outcomes_durably(

@@ -569,18 +569,35 @@ class CrmService:
         source_ref: str,
         summary: str = "",
         recipient_ids: Sequence[str] = (),
+        ping_scope: str = "",
     ) -> CaptureResult:
+        """Capture a website lead and queue Assaf's Telegram card.
+
+        ``ping_scope`` is empty for the first handoff (at most one per conversation). A
+        later contact update passes a scope such as ``update-phone``; it gets its own
+        dedupe key and its own delivery claim, so it is at most once per scope and can
+        never replay or suppress the first handoff.
+        """
         safe_summary = summary.strip()[:MAX_FIELD_CHARS]
+        scope = "".join(ch for ch in ping_scope if ch.isalnum() or ch == "-")[:40]
+        suffix = f":{scope}" if scope else ""
+
+        def _payload(recipient_id: object) -> dict[str, str]:
+            payload = {
+                "recipient_id": str(recipient_id),
+                "text": safe_summary,
+                "conversation_id": conversation_id,
+                "receipt_key": f"crm:{conversation_id}:{recipient_id}{suffix}",
+            }
+            if scope:
+                payload["ping_scope"] = scope
+            return payload
+
         intents = tuple(
             DestinationIntent(
                 destination="telegram",
-                payload={
-                    "recipient_id": str(recipient_id),
-                    "text": safe_summary,
-                    "conversation_id": conversation_id,
-                    "receipt_key": f"crm:{conversation_id}:{recipient_id}",
-                },
-                dedupe_key=f"telegram:crm:{conversation_id}:{recipient_id}",
+                payload=_payload(recipient_id),
+                dedupe_key=f"telegram:crm:{conversation_id}:{recipient_id}{suffix}",
             )
             for recipient_id in recipient_ids
             if str(recipient_id).strip()
