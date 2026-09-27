@@ -1909,7 +1909,7 @@ def test_submit_lead_brief_fields_shape_the_owner_brief(monkeypatch) -> None:
             f"/v1/website/sessions/{session_id}/messages",
             json={
                 "text": "קוראים לי דנה, תחזרו אליי בבקשה",
-                "phone": "052-4443333",
+                "phone": "052-4443331",
                 "client_message_id": "lead-1",
             },
             headers=_headers(credential),
@@ -1931,7 +1931,7 @@ def test_submit_lead_brief_fields_shape_the_owner_brief(monkeypatch) -> None:
             assert "לוח זמנים: תוך חודש" in text
             assert "זמינות לשיחה: א׳-ה׳ אחרי 16:00" in text
             assert "תקציב" not in text
-            assert "טלפון: 052-4443333" in text
+            assert "טלפון: 052-4443331" in text
             assert "מה השירותים שלכם" not in text
 
 
@@ -1943,13 +1943,20 @@ def test_phone_added_after_capture_updates_contact_and_queues_one_update_card(
     monkeypatch.setenv("MIA_TELEGRAM_OWNER_USER_IDS", "123")
     fake = _SiteClient()
     monkeypatch.setattr("app.surfaces.site_v2.build_site_client", lambda _settings: fake)
+    # The test DB is shared across tests, so contact values must be unique here or the
+    # capture matches another test's contact (and, correctly, cannot edit it).
+    from uuid import uuid4
+
+    unique = uuid4().hex
+    email = f"clinic-{unique[:10]}@example.com"
+    number = "052-" + str(int(unique[10:18], 16) % 10_000_000).zfill(7)
     with TestClient(app) as client:
         session_id, credential = _new(client)
         first = client.post(
             f"/v1/website/sessions/{session_id}/messages",
             json={
                 "text": "יש לי קליניקה, תחזרו אליי בבקשה",
-                "email": "dana@example.com",
+                "email": email,
                 "client_message_id": "lead-1",
             },
             headers=_headers(credential),
@@ -1959,7 +1966,7 @@ def test_phone_added_after_capture_updates_contact_and_queues_one_update_card(
         phone = client.post(
             f"/v1/website/sessions/{session_id}/messages",
             json={
-                "text": "אפשר גם בטלפון, המספר שלי 052-1234567",
+                "text": f"אפשר גם בטלפון, המספר שלי {number}",
                 "client_message_id": "phone-1",
             },
             headers=_headers(credential),
@@ -1968,7 +1975,7 @@ def test_phone_added_after_capture_updates_contact_and_queues_one_update_card(
         assert phone.json()["message"].startswith("הפרטים עודכנו.")
         again = client.post(
             f"/v1/website/sessions/{session_id}/messages",
-            json={"text": "שוב, המספר שלי 052-1234567", "client_message_id": "phone-2"},
+            json={"text": f"שוב, המספר שלי {number}", "client_message_id": "phone-2"},
             headers=_headers(credential),
         )
         assert again.status_code == 200, again.text
@@ -1977,7 +1984,7 @@ def test_phone_added_after_capture_updates_contact_and_queues_one_update_card(
                 select(CrmContactRow).where(CrmContactRow.conversation_id == session_id)
             )
             fields = json.loads(contact.fields_json)
-            assert fields.get("email") == "dana@example.com"
+            assert fields.get("email") == email
             assert fields.get("phone")
             jobs = list(
                 db.scalars(
@@ -1993,7 +2000,7 @@ def test_phone_added_after_capture_updates_contact_and_queues_one_update_card(
             update = json.loads(jobs[1].payload_json)
             assert update["ping_scope"] == "update-phone"
             assert update["text"].startswith("עדכון לפנייה מהאתר")
-            assert "052-1234567" in update["text"]
+            assert number in update["text"]
 
 
 def test_system_prompt_flags_stop_repeated_invites_and_ask_phone_once() -> None:
