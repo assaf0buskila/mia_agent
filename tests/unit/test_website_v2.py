@@ -1966,7 +1966,7 @@ def test_phone_added_after_capture_updates_contact_and_queues_one_update_card(
         phone = client.post(
             f"/v1/website/sessions/{session_id}/messages",
             json={
-                "text": f"אפשר גם בטלפון, המספר שלי {number}",
+                "text": f"אפשר גם בטלפון, המספר שלי {number}.",
                 "client_message_id": "phone-1",
             },
             headers=_headers(credential),
@@ -2001,6 +2001,9 @@ def test_phone_added_after_capture_updates_contact_and_queues_one_update_card(
             assert update["ping_scope"] == "update-phone"
             assert update["text"].startswith("עדכון לפנייה מהאתר")
             assert number in update["text"]
+            # A number that ends the sentence is saved without the period.
+            assert f"{number}." not in update["text"]
+            assert not fields["phone"].endswith(".")
 
 
 def test_system_prompt_flags_stop_repeated_invites_and_ask_phone_once() -> None:
@@ -2045,3 +2048,89 @@ def test_hebrew_status_copy_never_exposes_internal_pending_step() -> None:
         message = _status_message(status, hebrew=True)
         assert "ממתינה" not in message and "לאישור" not in message
     assert _status_message("pending", hebrew=True) == "הפרטים נשמרו ויועברו לאסף."
+
+
+class _AvailabilityOnUpdateClient(_SiteClient):
+    """Replies normally, except the reply on the phone-update turn reports availability."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.reply_turns = 0
+
+    def complete(self, **kwargs):  # noqa: ANN003
+        if _has_tool(kwargs, "submit_lead"):
+            self.reply_turns += 1
+            if self.reply_turns == 2:
+                self.calls += 1
+                arguments = {
+                    "name": None, "phone": None, "email": None, "next_step": None,
+                    "business": None, "need": None, "timeline": None, "budget": None,
+                    "availability": "ב׳ ו-ד׳ בבוקר",
+                }
+                return LlmResponse(
+                    "",
+                    (ToolCall("lead-2", "submit_lead", arguments, "{}"),),
+                    "stop", "", 0, 0, {"role": "assistant", "content": None},
+                )
+        return super().complete(**kwargs)
+
+
+def test_availability_from_the_update_turn_reaches_the_update_card(monkeypatch) -> None:
+    """The update card carries the call times the visitor gave with their phone, and the
+    prompt stops asking for times once they are known."""
+    monkeypatch.setenv("MIA_WEBSITE_V2_ENABLED", "true")
+    monkeypatch.setenv("MIA_CRM_V2_ENABLED", "true")
+    monkeypatch.setenv("MIA_TELEGRAM_OWNER_USER_IDS", "123")
+    fake = _AvailabilityOnUpdateClient()
+    monkeypatch.setattr("app.surfaces.site_v2.build_site_client", lambda _settings: fake)
+    from uuid import uuid4
+
+    unique = uuid4().hex
+    email = f"studio-{unique[:10]}@example.com"
+    number = "054-" + str(int(unique[10:18], 16) % 10_000_000).zfill(7)
+    with TestClient(app) as client:
+        session_id, credential = _new(client)
+        first = client.post(
+            f"/v1/website/sessions/{session_id}/messages",
+            json={
+                "text": "יש לי סטודיו, תחזרו אליי בבקשה",
+                "email": email,
+                "client_message_id": "lead-1",
+            },
+            headers=_headers(credential),
+        )
+        assert first.status_code == 200, first.text
+        phone = client.post(
+            f"/v1/website/sessions/{session_id}/messages",
+            json={
+                "text": f"הטלפון שלי {number}, הכי נוח ב׳ ו-ד׳ בבוקר",
+                "client_message_id": "phone-1",
+            },
+            headers=_headers(credential),
+        )
+        assert phone.status_code == 200, phone.text
+        with get_session_factory()() as db:
+            state = json.loads(db.get(SiteV2SessionRow, session_id).state_json)
+            assert state["brief"]["availability"] == "ב׳ ו-ד׳ בבוקר"
+            contact = db.scalar(
+                select(CrmContactRow).where(CrmContactRow.conversation_id == session_id)
+            )
+            jobs = list(
+                db.scalars(
+                    select(CrmOutboxRow)
+                    .where(
+                        CrmOutboxRow.aggregate_id == contact.id,
+                        CrmOutboxRow.destination == "telegram",
+                    )
+                    .order_by(CrmOutboxRow.created_at)
+                ).all()
+            )
+            assert len(jobs) == 2
+            update_text = json.loads(jobs[1].payload_json)["text"]
+            assert "זמינות לשיחה: ב׳ ו-ד׳ בבוקר" in update_text
+        from app.surfaces.site_v2 import _system_prompt
+
+        prompt = _system_prompt(
+            True, "pending", has_phone=True, availability_known=bool(state["brief"])
+        )
+        assert "מתי נוח לדבר" not in prompt

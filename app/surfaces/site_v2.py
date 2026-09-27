@@ -767,7 +767,11 @@ def _actual_contact(
     # A dictated number arrives from transcription as words; try the numeral form too.
     phone_match = _PHONE.search(text) or _PHONE.search(_spoken_digits_to_numerals(text))
     email_match = _EMAIL.search(text)
-    supplied_phone = phone.strip() or (phone_match.group(0) if phone_match else "")
+    # The regex tolerates separators, so a number that ends a sentence ("...0501234567.")
+    # used to be saved with the period.
+    supplied_phone = (phone.strip() or (phone_match.group(0) if phone_match else "")).rstrip(
+        " .-"
+    )
     supplied_email = email.strip() or (email_match.group(0) if email_match else "")
     prior_invitation = (
         str(state.turns[-1].get("text") or "")
@@ -900,9 +904,11 @@ def _system_prompt(
                 "לשיחה קצרה.\""
             )
         if not availability_known:
-            follow_ups.append("שאלי מתי נוח לדבר עם אסף (ימים ושעות).")
+            follow_ups.append("שאלי פעם אחת מתי נוח לדבר עם אסף (ימים ושעות).")
         after_saved = (
             "- אחרי שמירה: אל תכתבי שום דבר על שמירה, העברה או מסירה; השרת מציג זאת.\n"
+            "  כשהמבקר מוסר ימים או שעות לשיחה, או פרט חדש על העסק, קראי שוב ל-submit_lead\n"
+            "  עם השדות שהתעדכנו (availability וכו'), ואל תשאלי שוב על מה שכבר נמסר.\n"
             "  הודי בקצרה במשפט אחד. "
             + (" ".join(follow_ups) + " " if follow_ups else "")
             + "אם יש שאלות נוספות, המשיכי לענות.\n"
@@ -1267,6 +1273,13 @@ def _refresh_first_brief_with_submit_lead(
     )
 
 
+class _ContactUpdate(NamedTuple):
+    added: dict[str, str]
+    job_ids: list[str]
+    summary: str
+    source_ref: str
+
+
 def _record_contact_update(
     db: Session,
     *,
@@ -1275,7 +1288,7 @@ def _record_contact_update(
     contact: Mapping[str, str],
     session_id: str,
     client_message_id: str,
-) -> bool:
+) -> _ContactUpdate | None:
     """A phone or email the visitor adds after the first capture updates the CRM contact
     and queues one short update card for Assaf. The first handoff ping is at most once per
     conversation; each update is at most once per added-field set (``ping_scope``).
@@ -1289,29 +1302,39 @@ def _record_contact_update(
         if key in {"phone", "email"} and value and not state.contact.get(key)
     }
     if not added:
-        return False
+        return None
     scope = "update-" + "-".join(sorted(added))
     if scope in state.update_scopes:
-        return False
+        return None
     fields = {**state.contact, **added}
+    source_ref = f"site:{session_id}:{client_message_id}"
+    summary = _contact_update_summary(state, added)
     try:
         result = CrmService(db, timezone=settings.calendar_timezone).capture_site_lead(
             fields,
             conversation_id=session_id,
-            source_ref=f"site:{session_id}:{client_message_id}",
-            summary=_contact_update_summary(state, added),
+            source_ref=source_ref,
+            summary=summary,
             recipient_ids=tuple(settings.telegram_owner_user_id_set()),
             ping_scope=scope,
         )
     except CrmError:
         _LOG.warning("site contact update skipped reason=crm_error")
-        return False
+        return None
     if result.contact is None or result.status == "conflict":
         _LOG.warning("site contact update skipped reason=conflict")
-        return False
+        return None
     state.contact.update(added)
     state.update_scopes.append(scope)
-    return True
+    job_ids = list(
+        db.scalars(
+            select(CrmOutboxRow.id).where(
+                CrmOutboxRow.id.in_(result.outbox_ids),
+                CrmOutboxRow.destination == "telegram",
+            )
+        ).all()
+    )
+    return _ContactUpdate(added, job_ids, summary, source_ref)
 
 
 def run_site_v2_turn(
@@ -1353,6 +1376,7 @@ def run_site_v2_turn(
     )
     captured = False
     updated = False
+    contact_update: _ContactUpdate | None = None
     delivery_status = ""
     if contact and not state.captured:
         summary = _lead_summary(state, contact, text)
@@ -1383,7 +1407,7 @@ def run_site_v2_turn(
             )
             delivery_status = "pending" if result.outbox_ids else "saved"
     elif contact and state.captured and state.contact_id:
-        updated = _record_contact_update(
+        contact_update = _record_contact_update(
             db,
             settings=settings,
             state=state,
@@ -1391,6 +1415,7 @@ def run_site_v2_turn(
             session_id=session_id,
             client_message_id=client_message_id,
         )
+        updated = contact_update is not None
 
     delivery_status = _contact_delivery_status(
         db,
@@ -1463,6 +1488,19 @@ def run_site_v2_turn(
                 response = client.complete(
                     messages=messages, max_completion_tokens=_REPLY_MAX_OUTPUT_TOKENS
                 )
+                if contact_update is not None and had_submit_lead_call:
+                    refreshed = _contact_update_summary(state, contact_update.added)
+                    if refreshed != contact_update.summary:
+                        CrmService(
+                            db, timezone=settings.calendar_timezone
+                        ).refresh_pending_site_brief(
+                            writer=WRITER_PUBLIC,
+                            contact_id=state.contact_id,
+                            conversation_id=session_id,
+                            job_ids=contact_update.job_ids,
+                            summary=refreshed,
+                            source_ref=contact_update.source_ref,
+                        )
                 if captured and had_submit_lead_call:
                     _refresh_first_brief_with_submit_lead(
                         db,
