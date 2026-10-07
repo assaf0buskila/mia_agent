@@ -15,6 +15,7 @@ from app.db.store import LeadStore
 from app.domain.handoff.delivery import (
     KIND_WEBSITE_HANDOFF_DELIVERY,
     WEBSITE_HANDOFF_DELIVERY_KINDS,
+    form_ping_scope,
     website_ping_scope,
 )
 from app.integrations.sheets import build_sheets_port
@@ -39,7 +40,14 @@ def telegram_receipt_handler(
         body = str(payload.get("text") or "")
         if not conversation or recipient not in settings.telegram_owner_user_id_set():
             return "conflict"
-        lead_id, key = website_ping_scope(conversation)
+        try:
+            lead_id, key = (
+                form_ping_scope(conversation)
+                if conversation.startswith("form:")
+                else website_ping_scope(conversation)
+            )
+        except (AssertionError, ValueError):
+            return "conflict"
         # A contact update after the first handoff carries its own scope, so it gets its
         # own at-most-once claim and can never replay or suppress the first ping.
         scope = str(payload.get("ping_scope") or "")

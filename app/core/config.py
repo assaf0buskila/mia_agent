@@ -112,6 +112,7 @@ class Settings(BaseSettings):
     telegram_bot_token: str = Field(default="")
     telegram_webhook_secret: str = Field(default="")
     telegram_owner_user_ids: str = Field(default="")
+    assafweb_form_intake_secret: str = Field(default="")
 
     instagram_access_token: str = Field(default="")
     instagram_account_id: str = Field(default="")
