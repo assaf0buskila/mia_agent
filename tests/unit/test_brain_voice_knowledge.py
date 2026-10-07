@@ -20,9 +20,10 @@ from app.brain.knowledge import (
     source_urls,
     split_markdown_sections,
 )
-from app.brain.schemas import KnowledgeCategory
+from app.brain.schemas import KnowledgeCategory, KnowledgeChunk
 from app.brain.store import BrainStore
 from app.core.config import get_settings
+from app.db.models import KnowledgeChunkRow
 from app.db.session import get_session_factory, init_db
 from app.integrations.transcribe import (
     OpenAITranscribePort,
@@ -30,6 +31,7 @@ from app.integrations.transcribe import (
     detected_language,
     transcription_request_fields,
 )
+from sqlalchemy import select
 
 SITE = "https://www.assafweb.com"
 
@@ -236,6 +238,122 @@ def test_changed_content_retires_old_chunks_and_writes_new() -> None:
     assert any("Old description" in text for text in before)
     assert not any("Old description" in text for text in after)
     assert any("Brand new description" in text for text in after)
+
+
+def test_partial_refresh_reuses_ids_force_is_idempotent_and_retired_chunks_reappear() -> None:
+    brain = _brain()
+    source_id = "partial-id-reuse"
+    url = f"{SITE}/partial-id-reuse.md"
+    stable = "A stable service description that remains byte-for-byte identical. " * 3
+    original = "The original pricing explanation for this specific service. " * 3
+    changed = "A revised pricing explanation for this specific service. " * 3
+    first_body = f"# Site\n\n## Services\n{stable}\n\n## Pricing\n{original}\n"
+    changed_body = f"# Site\n\n## Services\n{stable}\n\n## Pricing\n{changed}\n"
+
+    first = ingest_source(
+        brain,
+        source_id=source_id,
+        url=url,
+        fetcher=FakeDocumentFetcher({url: first_body}),
+        embedding_port=FakeEmbeddingPort(),
+    )
+    assert first.chunks == 2
+    first_rows = brain.session.scalars(
+        select(KnowledgeChunkRow).where(KnowledgeChunkRow.source_id == source_id)
+    ).all()
+    first_by_title = {row.title: (row.id, row.chunk_id) for row in first_rows}
+
+    refreshed = ingest_source(
+        brain,
+        source_id=source_id,
+        url=url,
+        fetcher=FakeDocumentFetcher({url: changed_body}),
+        embedding_port=FakeEmbeddingPort(),
+    )
+    assert refreshed.chunks == 2
+    changed_rows = brain.session.scalars(
+        select(KnowledgeChunkRow).where(KnowledgeChunkRow.source_id == source_id)
+    ).all()
+    assert len(changed_rows) == 3
+    stable_row = next(row for row in changed_rows if row.title == "Services")
+    assert (stable_row.id, stable_row.chunk_id, stable_row.status) == (
+        *first_by_title["Services"],
+        "active",
+    )
+    original_row = next(row for row in changed_rows if original.strip() in row.text)
+    revised_row = next(row for row in changed_rows if changed.strip() in row.text)
+    assert original_row.status == "retired"
+    assert revised_row.status == "active"
+
+    forced = ingest_source(
+        brain,
+        source_id=source_id,
+        url=url,
+        fetcher=FakeDocumentFetcher({url: changed_body}),
+        embedding_port=FakeEmbeddingPort(),
+        force=True,
+    )
+    assert forced.chunks == 2
+    assert len(
+        brain.session.scalars(
+            select(KnowledgeChunkRow).where(KnowledgeChunkRow.source_id == source_id)
+        ).all()
+    ) == 3
+
+    restored = ingest_source(
+        brain,
+        source_id=source_id,
+        url=url,
+        fetcher=FakeDocumentFetcher({url: first_body}),
+        embedding_port=FakeEmbeddingPort(),
+    )
+    assert restored.chunks == 2
+    restored_rows = brain.session.scalars(
+        select(KnowledgeChunkRow).where(KnowledgeChunkRow.source_id == source_id)
+    ).all()
+    assert len(restored_rows) == 3
+    assert next(row for row in restored_rows if row.chunk_id == original_row.chunk_id).status == (
+        "active"
+    )
+    assert next(row for row in restored_rows if row.chunk_id == revised_row.chunk_id).status == (
+        "retired"
+    )
+
+
+def test_chunk_id_collision_with_another_source_fails_before_retiring_active_rows() -> None:
+    brain = _brain()
+    shared_id = "chk_cross_source_collision"
+    first = KnowledgeChunk(
+        chunk_id=shared_id,
+        source_id="collision-source-a",
+        category=KnowledgeCategory.SERVICE,
+        title="Services",
+        text="A source-owned knowledge chunk with enough useful content.",
+        url=f"{SITE}/a.md",
+        ordinal=0,
+        content_hash="hash-a",
+    )
+    brain.replace_knowledge_chunks(source_id=first.source_id, chunks=[(first, None)])
+    colliding = first.model_copy(
+        update={
+            "source_id": "collision-source-b",
+            "text": "Different evidence must not take over the same citation identifier.",
+            "url": f"{SITE}/b.md",
+            "content_hash": "hash-b",
+        }
+    )
+
+    with pytest.raises(ValueError, match="already belongs to another source"):
+        brain.replace_knowledge_chunks(
+            source_id=colliding.source_id, chunks=[(colliding, None)]
+        )
+
+    row = brain.session.scalar(
+        select(KnowledgeChunkRow).where(KnowledgeChunkRow.chunk_id == shared_id)
+    )
+    assert row is not None
+    assert row.source_id == first.source_id
+    assert row.status == "active"
 
 
 def test_one_failing_source_does_not_abort_the_others() -> None:
