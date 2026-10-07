@@ -1,10 +1,12 @@
 <#
 Upload Mia's settings to Secret Manager (secret `mia-env`). It prints key names only.
 
--FromAws copies production exactly as it runs today: the plain environment of the live ECS
+-FromAws is historical migration tooling: it imports the plain environment of the live ECS
 task definition `mia` plus every secret it maps from Secrets Manager `mia/prod`. Values go
 straight from the AWS CLI into gcloud in memory; nothing is written to disk or printed.
 -EnvFile uploads a KEY=value file instead. -Set adds or overrides keys ($null removes one).
+-PatchSecret reads the current GCP secret directly into memory and merges only -Set. It
+preserves every other setting, does not read an env file and never prints secret values.
 
 Dropped, because the VM owns them: MIA_DATABASE_URL, MIA_BUILD_SHA, AWS_*, POSTGRES_*, PG*.
 
@@ -12,24 +14,54 @@ Usage:
   .\ops\gcp\push-settings.ps1 -ProjectId <id> -FromAws
   .\ops\gcp\push-settings.ps1 -ProjectId <id> -FromAws -Set @{ MIA_LOG_LEVEL = "DEBUG" }
   .\ops\gcp\push-settings.ps1 -ProjectId <id> -EnvFile .\prod.env
+  .\ops\gcp\push-settings.ps1 -ProjectId <id> -PatchSecret -Set @{ MIA_LOG_LEVEL = "DEBUG" }
 Then, on a running VM: sudo mia settings
 #>
 param(
     [Parameter(Mandatory = $true)] [string]$ProjectId,
     [switch]$FromAws,
     [string]$EnvFile,
+    [switch]$PatchSecret,
     [string]$AwsRegion = "eu-north-1",
     [string]$TaskFamily = "mia",
     [hashtable]$Set = @{}
 )
 
 . "$PSScriptRoot\common.ps1"
+. "$PSScriptRoot\settings-lib.ps1"
 
-if ($FromAws -eq [bool]$EnvFile) { throw "pass exactly one of -FromAws or -EnvFile" }
-$VmOwned = '^(MIA_DATABASE_URL|MIA_BUILD_SHA|AWS_\w+|POSTGRES_\w+|PG\w+)$'
+if ($PatchSecret -and ($FromAws -or $EnvFile)) {
+    throw "-PatchSecret cannot be combined with -FromAws or -EnvFile"
+}
+if ($PatchSecret -and $Set.Count -eq 0) {
+    throw "-PatchSecret requires at least one -Set entry"
+}
+if (-not $PatchSecret -and ($FromAws -eq [bool]$EnvFile)) {
+    throw "pass exactly one of -FromAws or -EnvFile"
+}
 $settings = [ordered]@{}
 
-if ($FromAws) {
+if ($PatchSecret) {
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $current = (& gcloud secrets versions access latest --secret=mia-env "--project=$ProjectId" 2>$null | Out-String)
+        $readExit = $LASTEXITCODE
+    } finally { $ErrorActionPreference = $previous }
+    if ($readExit -ne 0) {
+        throw "cannot read the current mia-env secret (exit $readExit)"
+    }
+    $baselineLines = @(Merge-MiaSettings -Current $current -Set @{})
+    $baselineNames = @($baselineLines | ForEach-Object {
+        if ($_ -match '^([A-Za-z_][A-Za-z0-9_]*)=') { $Matches[1] }
+    })
+    foreach ($required in "MIA_ENV", "MIA_PUBLIC_BASE_URL", "MIA_TELEGRAM_BOT_TOKEN") {
+        if ($required -notin $baselineNames) {
+            throw "current mia-env secret is missing $required"
+        }
+    }
+    $lines = @(Merge-MiaSettings -Current $current -Set $Set)
+} elseif ($FromAws) {
     # The revision the live service runs, not merely the newest registered one.
     $service = (Invoke-AwsJson ecs describe-services --cluster $TaskFamily --services $TaskFamily --region $AwsRegion).services | Select-Object -First 1
     $taskDefinition = if ($service -and $service.taskDefinition) { $service.taskDefinition } else { $TaskFamily }
@@ -67,26 +99,30 @@ if ($FromAws) {
     }
 }
 
-foreach ($entry in $Set.GetEnumerator()) {
-    if ($null -eq $entry.Value) { $settings.Remove($entry.Key) } else { $settings[$entry.Key] = [string]$entry.Value }
+if (-not $PatchSecret) {
+    $current = [System.Collections.Generic.List[string]]::new()
+    $dropped = @()
+    foreach ($name in @($settings.Keys)) {
+        if ($name -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') { throw "invalid setting name" }
+        if ($name -match $script:MiaVmOwnedSetting) { $dropped += $name; continue }
+        $value = [string]$settings[$name]
+        Assert-MiaSettingValue $value
+        $current.Add("$name=$value")
+    }
+    $lines = @(Merge-MiaSettings -Current ($current -join "`n") -Set $Set)
 }
 
-$lines = [System.Collections.Generic.List[string]]::new()
-$dropped = @()
-foreach ($name in @($settings.Keys)) {
-    if ($name -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') { throw "invalid setting name" }
-    if ($name -match $VmOwned) { $dropped += $name; continue }
-    $value = [string]$settings[$name]
-    if ($value -match "[`r`n`0]") { throw "$name must be single-line text" }
-    $lines.Add("$name=$value")
-}
-
+$names = @($lines | ForEach-Object { if ($_ -match '^([A-Za-z_][A-Za-z0-9_]*)=') { $Matches[1] } })
 foreach ($required in "MIA_ENV", "MIA_PUBLIC_BASE_URL", "MIA_TELEGRAM_BOT_TOKEN") {
-    if (-not ($lines | Where-Object { $_.StartsWith("$required=") })) { throw "$required is missing from settings" }
+    if ($required -notin $names) { throw "$required is missing from settings" }
 }
 
-Write-Host "Uploading $($lines.Count) settings (VM-owned, dropped: $($dropped -join ', ')):"
-$lines | ForEach-Object { "  " + $_.Split("=", 2)[0] } | Sort-Object | Write-Host
+$source = if ($PatchSecret) { "the current secret plus patches" } else { "the selected source" }
+Write-Host "Uploading $($names.Count) settings from ${source}:"
+$names | Sort-Object | ForEach-Object {
+    $suffix = if ($Set.ContainsKey($_)) { " (set)" } else { "" }
+    Write-Host "  $_$suffix"
+}
 
 $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 $previous = $ErrorActionPreference

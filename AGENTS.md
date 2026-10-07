@@ -5,7 +5,8 @@ Read this, then `HANDOFF.md` (current state), then `MIA_V2.md` (what exists), th
 
 ## Boundaries — not negotiable
 
-- Never read `.env`. Secrets live in AWS Secrets Manager; only names go in `.env.example`.
+- Never read `.env`. Current production settings live in GCP Secret Manager `mia-env`;
+  only names go in `.env.example`. AWS references are historical migration tooling.
 - No production mutation, key change or live external write without the user's say-so.
 - Owner access is by numeric Telegram ID only. A username never grants access.
 - Website visitors get public knowledge and their own session — never owner tools,

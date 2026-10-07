@@ -61,40 +61,24 @@ with `uv run mia-migrate`; production never runs `create_all`.
 
 ## Deploy
 
-Production is ECS Fargate — cluster and service `mia`, region `eu-north-1`, images in
-ECR repository `mia`. Secrets come from Secrets Manager. Never copy `.env` anywhere.
+Production runs on the GCP VM `mia` in `me-west1-a`. Settings come from Secret Manager
+`mia-env`; PostgreSQL and runtime database credentials stay on the VM. Never copy `.env`.
+The complete runbook is `ops/gcp/README.md`.
 
-1. Merge to `master` and wait for **Mia v2 checks** to pass on the exact SHA.
-2. From a clean checkout at that SHA:
-   ```bash
-   git archive $SHA | docker build -f deploy/Dockerfile \
-     --provenance=false --sbom=false --platform linux/amd64 \
-     --build-arg MIA_BUILD_SHA=$SHA -t <ecr>/mia:v2-$SHA -
+1. Merge to `master` and wait for **Mia v2 checks** on the exact SHA.
+2. Pause scheduled jobs and create a verified database backup.
+3. For a narrow setting change, preserve the full live secret:
+   ```powershell
+   .\ops\gcp\push-settings.ps1 -ProjectId mia-assafweb -PatchSecret -Set @{ KEY = "value" }
    ```
-   The flags matter: `deploy_ecs_revision.py` rejects OCI image indexes, which is what
-   a default Docker 29 build produces.
-3. Push, then read the digest from `aws ecr describe-images`.
-4. `uv run python scripts/deploy_ecs_revision.py --v2-release --image-uri <ecr>/mia@<digest> --sha $SHA`
-   It verifies the image label and env match `$SHA` through the ECR API (no local Docker
-   needed), requires `HEAD == $SHA` with a clean tree, and registers the next `mia:N`.
-5. **Apply migrations BEFORE updating the service.** This step is easy to skip and nothing
-   catches it:
-   ```bash
-   uv run python scripts/run_ecs_migration.py --task-definition mia:N
+4. From a clean checkout, deploy the exact SHA:
+   ```powershell
+   .\ops\gcp\deploy.ps1 -ProjectId mia-assafweb -Ref $SHA
    ```
-   It runs `mia-migrate` from the image in **that** task definition, so it only sees the `.sql`
-   files baked into the new image. Run it against the currently-serving revision and it applies
-   nothing and exits 0. Confirm each new file appears under `applied` in the printed summary,
-   not `already` or `skipped`. Re-running is safe (ledger + savepointed duplicate tolerance).
-6. `aws ecs update-service --cluster mia --service mia --task-definition mia:N`, wait stable.
-7. Re-pin scheduler `mia-due-scan` to `mia:N`. Leave `mia-reconcile` disabled. Nothing does
-   this automatically and forgetting it fails silently.
-8. Confirm `https://mia.assafweb.com/health` reports `deployment.commit_sha == $SHA`, every
-   field non-null, and `/health/ready` returns 200. **Do not judge a deploy by `/health/live`** —
-   both the ALB target group and the ECS container check probe it, and it returns 200 without
-   touching the database. If step 5 was skipped, `schema_ready()` fails, `/health` goes all-null,
-   `/health/ready` returns 503 and the scheduled workers die on their first ORM read, while ECS
-   reports a healthy, stable deployment throughout.
+   The VM builds that commit, fetches settings, runs `mia-migrate`, and starts the app only
+   after migration succeeds.
+5. Confirm `/health` reports the exact SHA, `/health/ready` returns 200, and `sudo mia status`
+   shows the expected HTTPS and job state before resuming jobs.
 
-Rollback is `update-service` to the previous revision. Machine-specific gotchas
-(Docker Desktop, the credential helper, `aws login` expiry) are in `HANDOFF.md`.
+Historical AWS deploy evidence and gotchas remain in `HANDOFF.md`; they are not the current
+production procedure.

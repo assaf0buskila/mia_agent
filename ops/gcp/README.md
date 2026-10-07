@@ -61,7 +61,8 @@ webhook and runs the first knowledge ingest.
 | Task | Command |
 | --- | --- |
 | Deploy a new commit | `.\ops\gcp\deploy.ps1 -ProjectId mia-assafweb` (optionally `-Ref <branch>`) |
-| Change a setting | `.\ops\gcp\push-settings.ps1 -ProjectId mia-assafweb -EnvFile <file>` or `-FromAws -Set @{ KEY = "value" }`, then `sudo mia settings` |
+| Patch live settings | `.\ops\gcp\push-settings.ps1 -ProjectId mia-assafweb -PatchSecret -Set @{ KEY = "value" }` preserves every other `mia-env` value, then `sudo mia settings` |
+| Replace all settings | `.\ops\gcp\push-settings.ps1 -ProjectId mia-assafweb -EnvFile <complete-file>`, then `sudo mia settings` |
 | Health and timers | `sudo mia status` |
 | Logs | `sudo mia logs app` (or `postgres`, `migrate`, `caddy`) |
 | Run a job now | `sudo mia job mia-due-scan` / `sudo mia job mia-ingest-knowledge` |
@@ -77,6 +78,8 @@ Open a shell with `gcloud compute ssh mia --zone me-west1-a --project mia-assafw
 - **HTTPS waits for DNS.** `mia https enable` only after `mia.assafweb.com` resolves to the
   VM, or Caddy's certificate request fails and backs off.
 - **`$` in settings** is quoted by `mia settings` so Compose does not interpolate it.
+- **Use `-PatchSecret` for one-key changes.** `-EnvFile` and the historical `-FromAws`
+  modes replace the complete secret payload; a partial file would discard other settings.
 - **Line endings.** `.gitattributes` keeps `ops/gcp/vm/*` LF; the VM runs them with bash.
 - **The first deploy builds on the VM** (a few minutes). The VM keeps the last three builds.
 - **Telegram caches the webhook IP.** After a DNS move, Telegram kept delivering to the old AWS address (`last_error_message: Connection timed out`). Fix: re-set the webhook with `ip_address=34.165.183.186` (see `..\\mia-telegram-check.sh` next to the repo).
