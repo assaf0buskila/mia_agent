@@ -1,5 +1,13 @@
 # Mia handoff — 2026-09-17
 
+## Current operational override — GCP
+
+Mia's current deployment path is the GCP VM documented in `ops/gcp/README.md`. Production
+settings live in GCP Secret Manager `mia-env`; patch one or more keys with
+`ops/gcp/push-settings.ps1 -PatchSecret -Set` so every unmentioned value is preserved.
+The AWS production and deploy material below records the September state and remains useful
+history, but it is not the current operational path.
+
 Section 0 is the current state for the next session. The sections after it are older handoffs and
 still hold — the deploy gotchas especially.
 

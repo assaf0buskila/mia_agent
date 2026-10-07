@@ -617,6 +617,58 @@ class CrmService:
         )
 
     @_autoflushing
+    def capture_form_lead(
+        self,
+        fields: Mapping[str, Any],
+        *,
+        source_id: str,
+        submitted_at: str,
+        summary: str,
+        recipient_ids: Sequence[str] = (),
+    ) -> CaptureResult:
+        """Capture one deterministic AssafWeb form event without a model turn.
+
+        ``form:<source_id>`` is a CRM ownership scope only.  This method does not
+        create a website session, canonical chat event, AI run, or provider request.
+        Delivery remains asynchronous through the existing CRM outbox.
+        """
+        safe_source_id = source_id.strip()
+        if not safe_source_id or len(safe_source_id) > 36:
+            raise CrmError("form source_id is required and must be at most 36 characters")
+        safe_summary = summary.strip()[:MAX_FIELD_CHARS]
+        conversation_id = f"form:{safe_source_id}"
+        source_ref = f"assafweb-form:{safe_source_id}"
+
+        intents = tuple(
+            DestinationIntent(
+                destination="telegram",
+                payload={
+                    "recipient_id": str(recipient_id),
+                    "text": safe_summary,
+                    "conversation_id": conversation_id,
+                    "receipt_key": f"crm:{conversation_id}:{recipient_id}",
+                },
+                dedupe_key=f"telegram:crm:{conversation_id}:{recipient_id}",
+            )
+            for recipient_id in recipient_ids
+            if str(recipient_id).strip()
+        )
+        return self.capture(
+            fields,
+            writer=WRITER_PUBLIC,
+            source_ref=source_ref,
+            conversation_id=conversation_id,
+            activity=ActivityInput(
+                channel="form",
+                action="contact_captured",
+                result=safe_summary,
+                occurred_at=submitted_at,
+                source_ref=f"{source_ref}:activity",
+            ),
+            destination_intents=intents,
+        )
+
+    @_autoflushing
     def refresh_pending_site_brief(
         self,
         *,
