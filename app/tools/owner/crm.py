@@ -18,6 +18,15 @@ from app.surfaces.crm import (
 from app.surfaces.owner_crm_intent import is_explicit_owner_crm_write_intent
 from app.tools.owner.types import ToolContext, ToolResult, _crm_spreadsheet_id
 
+_MAX_CONFLICT_GROUPS = 25
+_MAX_CONFLICT_VALUE_CHARS = 160
+
+
+def _bounded_conflict_value(value: str) -> str:
+    if len(value) <= _MAX_CONFLICT_VALUE_CHARS:
+        return value
+    return value[: _MAX_CONFLICT_VALUE_CHARS - 1] + "…"
+
 
 def _crm_workspace_missing(ctx: ToolContext, port: object) -> bool:
     """True only when the CRM tabs are positively confirmed absent.
@@ -230,18 +239,36 @@ def _crm_conflicts(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     if problem:
         return ToolResult(ok=False, error=problem)
     contact_id = str(args.get("contact_id") or "").strip() or None
-    conflicts = CrmService(ctx.store.session, timezone=ctx.timezone()).list_conflicts(
+    groups = CrmService(ctx.store.session, timezone=ctx.timezone()).list_conflict_groups(
         contact_id=contact_id
     )
-    if not conflicts:
+    if not groups:
         return ToolResult(ok=True, text="No unresolved CRM conflicts.")
+    visible = groups[:_MAX_CONFLICT_GROUPS]
+    omitted = len(groups) - len(visible)
+    header = (
+        f"Unresolved CRM conflict groups (showing {len(visible)} of {len(groups)}; "
+        "repeated observations are grouped):"
+    )
+    if omitted:
+        header += f" {omitted} additional groups omitted."
     return ToolResult(
         ok=True,
-        text="Unresolved CRM conflicts:\n"
+        text=header
+        + "\n"
         + "\n".join(
-            f"- {item.id} contact={item.contact_id} field={item.field_name or '-'} "
-            f"database={item.database_value!r} sheet={item.sheet_value!r}"
-            for item in conflicts
+            f"- {group.representative.id} type={group.representative.issue_type} "
+            f"contact={group.representative.contact_id or '-'} "
+            f"field={group.representative.field_name or '-'} "
+            f"observations={group.observations} "
+            f"database={_bounded_conflict_value(group.representative.database_value)!r} "
+            f"sheet={_bounded_conflict_value(group.representative.sheet_value)!r}"
+            + (
+                " reference=missing-contact (not a field-value resolution)"
+                if group.representative.issue_type == "missing_contact"
+                else ""
+            )
+            for group in visible
         ),
     )
 
