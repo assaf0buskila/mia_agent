@@ -1930,6 +1930,78 @@ def test_crm_conflict_read_and_resolution_are_bound_to_exact_revision() -> None:
         session.close()
 
 
+def test_crm_conflict_read_groups_history_and_bounds_owner_output() -> None:
+    store, session = _store()
+    try:
+        for ordinal in range(5):
+            session.add(
+                CrmIssueRow(
+                    id=f"issue-history-{ordinal}",
+                    contact_id="crm_missing_history",
+                    issue_type="missing_contact",
+                    details_json='{"row":2}',
+                    status="open",
+                    created_at=f"2026-09-27T00:00:0{ordinal}+00:00",
+                )
+            )
+        session.add(
+            CrmIssueRow(
+                id="issue-history-row-3",
+                contact_id="crm_missing_history",
+                issue_type="missing_contact",
+                details_json='{"row":3}',
+                status="open",
+                created_at="2026-09-27T00:01:00+00:00",
+            )
+        )
+        for ordinal in range(30):
+            session.add(
+                CrmIssueRow(
+                    id=f"issue-distinct-{ordinal:02d}",
+                    contact_id=f"crm_distinct_{ordinal:02d}",
+                    issue_type=f"probe_{ordinal:02d}",
+                    status="open",
+                    created_at=f"2026-09-28T00:00:{ordinal:02d}+00:00",
+                )
+            )
+        session.flush()
+        ctx = ToolContext(
+            store=store,
+            brain=BrainStore(session),
+            settings=Settings(_env_file=None),
+            principal=_owner(),
+            embedding_port=FakeEmbeddingPort(),
+            source_ref=f"tg:{uuid4().hex}",
+            owner_text="List CRM conflicts",
+            sheets=FakeSheetsPort(),
+        )
+
+        listing = _crm_conflicts(ctx, {"contact_id": None})
+
+        assert listing.ok is True
+        assert "showing 25 of 32" in listing.text
+        assert "7 additional groups omitted" in listing.text
+        assert "issue-history-0" in listing.text
+        assert "issue-history-row-3" in listing.text
+        assert "type=missing_contact" in listing.text
+        assert "observations=5" in listing.text
+        history_lines = [
+            line
+            for line in listing.text.splitlines()
+            if "type=missing_contact" in line
+        ]
+        assert len(history_lines) == 2
+        assert any("issue-history-0" in line and "observations=5" in line for line in history_lines)
+        assert any(
+            "issue-history-row-3" in line and "observations=1" in line
+            for line in history_lines
+        )
+        assert "reference=missing-contact (not a field-value resolution)" in listing.text
+        assert sum(line.startswith("- ") for line in listing.text.splitlines()) == 25
+    finally:
+        session.close()
+
+
 def test_composio_rebound_connection_invalidates_exact_approval(monkeypatch) -> None:
     store, session = _store()
 

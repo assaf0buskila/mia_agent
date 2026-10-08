@@ -176,6 +176,12 @@ class ConflictView:
 
 
 @dataclass(frozen=True)
+class ConflictGroupView:
+    representative: ConflictView
+    observations: int
+
+
+@dataclass(frozen=True)
 class SheetImportResult:
     rows_seen: int = 0
     contacts_created: int = 0
@@ -878,6 +884,45 @@ class CrmService:
         return [self._conflict_view(row) for row in self.session.scalars(statement).all()]
 
     @_autoflushing
+    def list_conflict_groups(
+        self, *, contact_id: str | None = None, unresolved_only: bool = True
+    ) -> list[ConflictGroupView]:
+        """Group exact stored observations for bounded owner-facing presentation.
+
+        ``list_conflicts`` remains the lossless ID-level API used by resolution and
+        approval revalidation. This projection includes raw details and resolution
+        state in its key, so observations that look alike in ``ConflictView`` are not
+        collapsed when their evidence differs.
+        """
+        statement = select(CrmIssueRow).order_by(CrmIssueRow.created_at, CrmIssueRow.id)
+        if contact_id:
+            statement = statement.where(self._issue_contact_predicate(contact_id))
+        if unresolved_only:
+            statement = statement.where(CrmIssueRow.status.in_(("open", "resolving")))
+        grouped: dict[tuple[str, ...], tuple[CrmIssueRow, int]] = {}
+        for row in self.session.scalars(statement).all():
+            key = (
+                row.contact_id,
+                row.issue_type,
+                row.field_name,
+                row.base_value,
+                row.database_value,
+                row.sheet_value,
+                row.details_json,
+                row.status,
+                row.resolution,
+                row.resolved_at,
+            )
+            representative, count = grouped.get(key, (row, 0))
+            grouped[key] = (representative, count + 1)
+        return [
+            ConflictGroupView(
+                representative=self._conflict_view(representative), observations=count
+            )
+            for representative, count in grouped.values()
+        ]
+
+    @_autoflushing
     def resolve_conflict(
         self,
         conflict_id: str,
@@ -1565,6 +1610,29 @@ class CrmService:
         sheet_value: str = "",
         details: Mapping[str, Any] | None = None,
     ) -> str:
+        # Keep exact-observation lookup and insert atomic on PostgreSQL even if a
+        # future caller reaches this private helper without an already-locked entrypoint.
+        self._lock_projection_effects()
+        details_json = _json(details or {})
+        existing = self.session.scalars(
+            select(CrmIssueRow)
+            .where(
+                CrmIssueRow.contact_id == contact_id,
+                CrmIssueRow.issue_type == issue_type,
+                CrmIssueRow.field_name == field_name,
+                CrmIssueRow.base_value == base_value,
+                CrmIssueRow.database_value == database_value,
+                CrmIssueRow.sheet_value == sheet_value,
+                CrmIssueRow.details_json == details_json,
+                CrmIssueRow.status == "open",
+            )
+            .order_by(CrmIssueRow.created_at, CrmIssueRow.id)
+        ).first()
+        if existing is not None:
+            # Historical databases may already contain many copies. Keep every audit
+            # row, but reuse one exact open observation and repair its contact link.
+            self._link_issue_contact(existing.id, contact_id)
+            return existing.id
         issue_id = _new_id("issue")
         self.session.add(
             CrmIssueRow(
@@ -1575,7 +1643,7 @@ class CrmService:
                 base_value=base_value,
                 database_value=database_value,
                 sheet_value=sheet_value,
-                details_json=_json(details or {}),
+                details_json=details_json,
                 status="open",
                 created_at=self._now(),
             )

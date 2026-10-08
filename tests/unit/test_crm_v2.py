@@ -32,7 +32,7 @@ from app.services.crm_v2 import (
     CrmService,
 )
 from app.workers.crm_delivery import CrmDeliveryWorker
-from sqlalchemy import create_engine, event, select, text
+from sqlalchemy import create_engine, delete, event, select, text
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -930,6 +930,117 @@ def test_new_issue_is_flushed_before_its_contact_link_is_added(
         session.commit()
 
 
+def test_missing_contact_reuses_historical_exact_open_issue_without_deleting_history(
+    sessions: sessionmaker[Session],
+) -> None:
+    missing_id = "crm_historical_missing"
+    with sessions() as session:
+        for ordinal in range(5):
+            session.add(
+                CrmIssueRow(
+                    id=f"issue_historical_{ordinal}",
+                    contact_id=missing_id,
+                    issue_type="missing_contact",
+                    details_json='{"row":2}',
+                    status="open",
+                    created_at=f"2026-09-{27 + ordinal // 2:02d}T00:00:0{ordinal}+00:00",
+                )
+            )
+        session.commit()
+
+        row = [""] * 14 + [missing_id]
+        first = CrmService(session).import_sheet_contact(row, row_number=2)
+        session.commit()
+        repeated = CrmService(session).import_sheet_contact(row, row_number=2)
+        session.commit()
+
+        assert first.issue_ids == ("issue_historical_0",)
+        assert repeated.issue_ids == first.issue_ids
+        historical = session.scalars(
+            select(CrmIssueRow).where(CrmIssueRow.contact_id == missing_id)
+        ).all()
+        assert len(historical) == 5
+        assert {issue.id for issue in historical} == {
+            f"issue_historical_{ordinal}" for ordinal in range(5)
+        }
+
+
+def test_missing_contact_changed_details_and_nonopen_observations_stay_distinct(
+    sessions: sessionmaker[Session],
+) -> None:
+    missing_id = "crm_missing_state_history"
+    row = [""] * 14 + [missing_id]
+    with sessions() as session:
+        service = CrmService(session)
+        row_two = service.import_sheet_contact(row, row_number=2)
+        row_three = service.import_sheet_contact(row, row_number=3)
+        session.commit()
+        assert row_two.issue_ids != row_three.issue_ids
+
+        resolving_id = row_three.issue_ids[0]
+        session.get(CrmIssueRow, resolving_id).status = "resolving"
+        session.commit()
+        observed_while_resolving = service.import_sheet_contact(row, row_number=3)
+        session.commit()
+        assert observed_while_resolving.issue_ids != (resolving_id,)
+        assert session.get(CrmIssueRow, resolving_id).status == "resolving"
+
+        resolved_id = observed_while_resolving.issue_ids[0]
+        session.get(CrmIssueRow, resolved_id).status = "resolved"
+        session.commit()
+        observed_after_resolution = service.import_sheet_contact(row, row_number=3)
+        session.commit()
+        assert observed_after_resolution.issue_ids not in {
+            (resolving_id,),
+            (resolved_id,),
+        }
+        assert session.get(CrmIssueRow, resolved_id).status == "resolved"
+        assert len(
+            session.scalars(
+                select(CrmIssueRow).where(CrmIssueRow.contact_id == missing_id)
+            ).all()
+        ) == 4
+
+
+def test_reused_open_issue_repairs_missing_existing_contact_link(
+    sessions: sessionmaker[Session],
+) -> None:
+    with sessions() as session:
+        service = CrmService(session)
+        created = service.capture(
+            {"phone": "0507070708"}, writer=WRITER_OWNER, source_ref="issue-link:seed"
+        )
+        assert created.contact is not None
+        issue_id = service._issue(
+            contact_id=created.contact.id,
+            issue_type="probe",
+            details={"observation": "same"},
+        )
+        session.commit()
+        session.execute(
+            delete(CrmIssueContactRow).where(
+                CrmIssueContactRow.issue_id == issue_id,
+                CrmIssueContactRow.contact_id == created.contact.id,
+            )
+        )
+        session.commit()
+
+        reused = service._issue(
+            contact_id=created.contact.id,
+            issue_type="probe",
+            details={"observation": "same"},
+        )
+        session.commit()
+
+        assert reused == issue_id
+        assert session.get(CrmIssueContactRow, (issue_id, created.contact.id)) is not None
+        assert len(
+            session.scalars(
+                select(CrmIssueRow).where(CrmIssueRow.issue_type == "probe")
+            ).all()
+        ) == 1
+
+
 class _DatabaseErrorSheets(FakeSheetsPort):
     def read_crm_contacts_chunk(self, *, start_row: int, limit: int = 100) -> list[list[str]]:
         from sqlalchemy.exc import OperationalError
@@ -1083,6 +1194,49 @@ def test_every_conversation_capture_keeps_a_scoped_contact_association(
         assert service.lookup_for_conversation("conversation-c") is None
         assert len(service.list_contact_conversations(first.contact.id)) == 2
         assert len(session.scalars(select(CrmContactConversationRow)).all()) == 2
+
+
+@pytest.mark.skipif(not os.getenv("MIA_TEST_POSTGRES_URL"), reason="test PostgreSQL DSN not set")
+def test_postgres_concurrent_identical_missing_contact_observation_creates_one_issue() -> None:
+    schema = f"test_crm_issue_dedupe_{uuid4().hex}"
+    admin = create_engine(os.environ["MIA_TEST_POSTGRES_URL"])
+    with admin.begin() as connection:
+        connection.execute(text(f'CREATE SCHEMA "{schema}"'))
+    engine = create_engine(
+        os.environ["MIA_TEST_POSTGRES_URL"],
+        connect_args={"options": f"-csearch_path={schema}"},
+    )
+    try:
+        Base.metadata.create_all(engine)
+        factory = sessionmaker(engine, expire_on_commit=False, autoflush=False)
+        barrier = Barrier(2)
+        missing_id = "crm_concurrent_missing"
+        row = [""] * 14 + [missing_id]
+
+        def observe() -> str:
+            with factory() as session:
+                barrier.wait(timeout=5)
+                result = CrmService(session).import_sheet_contact(row, row_number=2)
+                session.commit()
+                return result.issue_ids[0]
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            issue_ids = list(pool.map(lambda _index: observe(), range(2)))
+
+        assert issue_ids[0] == issue_ids[1]
+        with factory() as session:
+            issues = session.scalars(
+                select(CrmIssueRow).where(
+                    CrmIssueRow.contact_id == missing_id,
+                    CrmIssueRow.issue_type == "missing_contact",
+                )
+            ).all()
+            assert len(issues) == 1
+    finally:
+        engine.dispose()
+        with admin.begin() as connection:
+            connection.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
+        admin.dispose()
 
 
 @pytest.mark.skipif(not os.getenv("MIA_TEST_POSTGRES_URL"), reason="test PostgreSQL DSN not set")
