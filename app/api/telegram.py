@@ -171,6 +171,23 @@ async def _handle_callback(
             pass
     if callback["from"] not in owner_ids:
         return {"processed": 0, "ignored": True, "reason": "unauthorized"}
+    if callback.get("data", "").startswith("rm:"):
+        from html import escape
+
+        from app.tools.owner.reminders import handle_reminder_callback
+
+        if callback.get("chat_id") != callback["from"]:
+            return {"processed": 0, "ignored": True, "reason": "unauthorized"}
+        reply = handle_reminder_callback(callback=callback, store=LeadStore(db), settings=settings)
+        # Keep the original reminder keyboard available: Open Contact must not destroy
+        # Complete/Snooze. Mutations validate revision, so old buttons are harmless.
+        try:
+            await port.send(OutboundMessage(conversation_id=callback["from"],
+                text=escape(reply), channel="telegram", parse_mode="HTML",
+                idempotency_key=f"reminder-callback:{callback['callback_query_id']}"))
+        except (TelegramSendError, AdapterHttpError, RuntimeError):
+            return {"processed": 1, "sent": False}
+        return {"processed": 1, "sent": True}
     decision, token = parse_callback_token(callback.get("data", ""))
     if not decision or not token:
         return {"processed": 0, "ignored": True, "reason": "unrecognized_callback"}

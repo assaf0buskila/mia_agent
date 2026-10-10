@@ -40,6 +40,10 @@ SLOW_HOUSE_TOOLS = frozenset(
 
 OWNER_HOUSE_TOOLS: frozenset[str] = frozenset(
     {
+        "reminder_create",
+        "reminder_list",
+        "reminder_change",
+        "reminder_snapshot",
         "search_memory",
         "search_knowledge",
         "refresh_website_knowledge",

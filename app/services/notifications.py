@@ -39,6 +39,8 @@ def deliver_owner_telegram(
     transport: Callable[[str, str], None] | None = None,
     parse_mode: str | None = None,
     recipient_ids: tuple[str, ...] | None = None,
+    reply_markup: dict | None = None,
+    conservative_errors: bool = False,
 ) -> OwnerTelegramDelivery:
     """Send a notification to every numeric owner, isolating recipient failures."""
     token = settings.telegram_bot_token.strip()
@@ -72,12 +74,13 @@ def deliver_owner_telegram(
                         "text": text,
                         "link_preview_options": {"is_disabled": True},
                         **({"parse_mode": parse_mode} if parse_mode else {}),
+                        **({"reply_markup": reply_markup} if reply_markup else {}),
                     },
                 )
             except httpx.HTTPError:
                 ambiguous.append(chat_id)
                 continue
-            status = _telegram_delivery_status(response)
+            status = _telegram_delivery_status(response, conservative_errors=conservative_errors)
             if status is True:
                 delivered.append(chat_id)
             elif status is False:
@@ -89,8 +92,14 @@ def deliver_owner_telegram(
     )
 
 
-def _telegram_delivery_status(response: httpx.Response) -> bool | None:
+def _telegram_delivery_status(
+    response: httpx.Response, *, conservative_errors: bool = False
+) -> bool | None:
     """Return accepted/rejected/ambiguous without guessing after a malformed response."""
+    # Internal exact-time reminders preserve gateway/server uncertainty. Existing
+    # daily due-scan callers retain their historical behavior by default.
+    if conservative_errors and (response.status_code >= 500 or response.status_code == 408):
+        return None
     if response.status_code >= 400:
         return False
     try:

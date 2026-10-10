@@ -108,6 +108,18 @@ async def run_owner_loop(
     stamp_correlation(incoming, correlation_id)
     store.save_canonical_event(provider=provider, event=incoming)
     reply = ""
+    if provider == "telegram" and channel is Channel.TELEGRAM:
+        from app.tools.owner.reminders import handle_reminder_message
+
+        reply = (
+            handle_reminder_message(
+                item=item,
+                principal=Principal.owner(source="telegram", actor_id=item["from"]),
+                store=store,
+                settings=settings,
+            )
+            or ""
+        )
     task_type = OwnerTaskType.NOTE
     crm_wrote = False
     turn_approval_ids: list[str] = []
@@ -455,6 +467,7 @@ def _talk_with_optional_agent(
             demo_active=demo_mode_active(settings),
             source_ref=item.get("id", ""),
             now=datetime.now(UTC),
+            private_owner_chat=item.get("chat_id", item["from"]) == item["from"],
             deadline_at=deadline_at,
             input_source=item.get("source") or "text",
             usage=usage,

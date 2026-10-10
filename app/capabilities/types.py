@@ -38,6 +38,10 @@ class Principal:
     source: str
     actor_id: str = ""
 
+    def is_owner(self) -> bool:
+        """Inspect the entry point's immutable trust, without widening it."""
+        return self.graph is GraphName.OWNER
+
     @classmethod
     def owner(cls, *, source: str, actor_id: str = "") -> Principal:
         """Only after the caller has proven owner identity (numeric allowlist)."""
