@@ -574,7 +574,12 @@ def run_owner_agent(
         "guessed to be a read. Calendar requests have no extra conversation grammar "
         "or local business-hours rule beyond permission and valid provider data."
     )
-    definitions = tool_definitions(allow_memory_writes=ctx.settings.memory_write_enabled)
+    definitions = tool_definitions(
+        allow_memory_writes=ctx.settings.memory_write_enabled,
+        allow_reminders=(
+            ctx.settings.reminders_enabled and getattr(ctx, "private_owner_chat", False)
+        ),
+    )
 
     def finish(
         *, text: str = "", completed: bool, completion: str, error: str, steps_used: int

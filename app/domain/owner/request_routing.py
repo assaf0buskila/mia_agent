@@ -43,6 +43,17 @@ def is_pending_approvals_request(text: str) -> bool:
 
 _TOOL_GROUPS: tuple[tuple[str, frozenset[str]], ...] = (
     (
+        "תזכורות פנימיות לבעלים",
+        frozenset(
+            {
+                "reminder_create",
+                "reminder_list",
+                "reminder_change",
+                "reminder_snapshot",
+            }
+        ),
+    ),
+    (
         "זיכרון וידע",
         frozenset(
             {

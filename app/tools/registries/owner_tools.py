@@ -80,6 +80,12 @@ from app.tools.owner.operations import (
     _website_conversations,
     _weekly_brief,
 )
+from app.tools.owner.reminders import (
+    _reminder_change,
+    _reminder_create,
+    _reminder_list,
+    _reminder_snapshot,
+)
 from app.tools.owner.research import _research_search
 from app.tools.owner.sheets import (
     _sheet_args,
@@ -128,6 +134,46 @@ _ORDER: list[str] = []
 def _register(spec: ToolSpec) -> None:
     _REGISTRY[spec.name] = spec
     _ORDER.append(spec.name)
+
+
+for _name, _handler, _description in (
+    (
+        "reminder_create",
+        _reminder_create,
+        "Save an internal owner-only PostgreSQL reminder from the exact current Telegram message. "
+        "Server parses Asia/Jerusalem time and resolves CRM. Never use Calendar or outreach. "
+        "Ask for a full request if date/time or contact is ambiguous. Confirm only tool success.",
+    ),
+    ("reminder_list", _reminder_list, "List internal reminders with canonical IDs and revisions."),
+    (
+        "reminder_snapshot",
+        _reminder_snapshot,
+        "Read-only owner reminder counts and upcoming tasks for AssafWeb OS.",
+    ),
+):
+    _register(ToolSpec(name=_name, description=_description, parameters=_NO_ARGS, handler=_handler))
+
+_register(
+    ToolSpec(
+        name="reminder_change",
+        handler=_reminder_change,
+        description="Complete, cancel, snooze or reschedule an explicitly named internal reminder. "
+        "Use its current revision. Snooze defaults to 15 minutes. No external writes.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "reminder_id": {"type": "string"},
+                "revision": {"type": "integer"},
+                "action": {
+                    "type": "string",
+                    "enum": ["complete", "cancel", "snooze", "reschedule"],
+                },
+            },
+            "required": ["reminder_id", "revision", "action"],
+            "additionalProperties": False,
+        },
+    )
+)
 
 
 _register(
@@ -1049,7 +1095,9 @@ def get_tool(name: str) -> ToolSpec | None:
     return _REGISTRY.get(name)
 
 
-def tool_definitions(*, allow_memory_writes: bool = True) -> list[dict[str, Any]]:
+def tool_definitions(
+    *, allow_memory_writes: bool = True, allow_reminders: bool = False
+) -> list[dict[str, Any]]:
     """Chat Completions `tools` payload for the registry."""
     definitions: list[dict[str, Any]] = []
     for name in _ORDER:
@@ -1058,6 +1106,8 @@ def tool_definitions(*, allow_memory_writes: bool = True) -> list[dict[str, Any]
         if name == "crm_operational_health":
             continue
         spec = _REGISTRY[name]
+        if name.startswith("reminder_") and not allow_reminders:
+            continue
         if spec.writes_memory and not allow_memory_writes:
             continue
         definitions.append(

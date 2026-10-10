@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from contextlib import contextmanager
 from time import perf_counter
 from typing import Literal
@@ -147,6 +148,10 @@ async def _send_transcription_failure_reply(
     )
 
 
+def _is_reminder_callback(data: str) -> bool:
+    return re.fullmatch(r"rm:(complete|snooze|contact):([a-f0-9]{32}):(\d{1,8})", data) is not None
+
+
 async def _handle_callback(
     *,
     callback: dict[str, str],
@@ -176,6 +181,29 @@ async def _handle_callback(
             await answer(callback["callback_query_id"])
         except (TelegramSendError, AdapterHttpError, RuntimeError):
             pass
+    if _is_reminder_callback(callback.get("data", "")):
+        from html import escape
+
+        from app.tools.owner.reminders import handle_reminder_callback
+
+        if db is None:
+            raise RuntimeError("recognized reminder callback requires a database session")
+        reply = handle_reminder_callback(callback=callback, store=LeadStore(db), settings=settings)
+        # Keep the original reminder keyboard available: Open Contact must not destroy
+        # Complete/Snooze. Mutations validate revision, so old buttons are harmless.
+        try:
+            await port.send(
+                OutboundMessage(
+                    conversation_id=callback["from"],
+                    text=escape(reply),
+                    channel="telegram",
+                    parse_mode="HTML",
+                    idempotency_key=f"reminder-callback:{callback['callback_query_id']}",
+                )
+            )
+        except (TelegramSendError, AdapterHttpError, RuntimeError):
+            return {"processed": 1, "sent": False}
+        return {"processed": 1, "sent": True}
     decision, token = parse_callback_token(callback.get("data", ""))
     if not decision or not token:
         return {"processed": 0, "ignored": True, "reason": "unrecognized_callback"}
@@ -358,7 +386,8 @@ async def receive_webhook(
     if callback is not None:
         callback_is_private = is_valid_telegram_owner_context(callback, owner_ids)
         decision, token = parse_callback_token(callback.get("data", ""))
-        if not callback_is_private or not decision or not token:
+        recognized = bool(decision and token) or _is_reminder_callback(callback.get("data", ""))
+        if not callback_is_private or not recognized:
             return await _handle_callback(
                 callback=callback,
                 port=port,

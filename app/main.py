@@ -260,13 +260,18 @@ async def lifespan(_app: FastAPI):
     from app.workers.crm_runtime import start_crm_runtime
 
     runtime = start_crm_runtime(get_settings(), get_session_factory())
+    from app.workers.reminders import start_reminder_runtime
+
+    reminder_runtime = start_reminder_runtime(get_settings(), get_session_factory())
     try:
         yield
     finally:
-        if runtime is not None:
+        for active_runtime in (runtime, reminder_runtime):
+            if active_runtime is None:
+                continue
             import asyncio
 
-            stop_event, thread = runtime
+            stop_event, thread = active_runtime
             stop_event.set()
             await asyncio.to_thread(thread.join, 15)
 
