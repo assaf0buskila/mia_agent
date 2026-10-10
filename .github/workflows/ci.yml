@@ -87,7 +87,8 @@ jobs:
     timeout-minutes: 15
     services:
       postgres:
-        image: postgres:16
+        # The combined full suite includes reminder/vector fixtures. Keep PostgreSQL 16.
+        image: pgvector/pgvector:0.8.6-pg16-trixie
         env:
           POSTGRES_HOST_AUTH_METHOD: trust
           POSTGRES_DB: quick_lead_test
