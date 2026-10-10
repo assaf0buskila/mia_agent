@@ -149,7 +149,7 @@ def test_parse_callback_reads_from_by_key_not_attribute() -> None:
                 "id": "q1",
                 "from": {"id": 12345},
                 "data": "ok:apr_9",
-                "message": {"message_id": 55, "chat": {"id": 999}},
+                "message": {"message_id": 55, "chat": {"id": 999, "type": "private"}},
             },
         }
     )
@@ -158,6 +158,7 @@ def test_parse_callback_reads_from_by_key_not_attribute() -> None:
         "callback_query_id": "q1",
         "from": "12345",
         "chat_id": "999",
+        "chat_type": "private",
         "message_id": "55",
         "data": "ok:apr_9",
     }

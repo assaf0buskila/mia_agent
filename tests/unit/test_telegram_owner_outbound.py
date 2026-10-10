@@ -352,6 +352,7 @@ async def test_file_sqlite_crm_callback_syncs_before_decision_and_executes_once(
             "from": _OWNER_ID,
             "data": f"ok:{approval_token(proposal.approval_id)}",
             "chat_id": _OWNER_ID,
+            "chat_type": "private",
             "message_id": "44",
         }
 
@@ -419,7 +420,10 @@ def _callback_update(*, update_id: int, query_id: str, data: str) -> dict:
             "id": query_id,
             "from": {"id": int(_OWNER_ID)},
             "data": data,
-            "message": {"message_id": 44, "chat": {"id": int(_OWNER_ID)}},
+            "message": {
+                "message_id": 44,
+                "chat": {"id": int(_OWNER_ID), "type": "private"},
+            },
         },
     }
 
@@ -475,7 +479,7 @@ def test_approval_keyboard_callback_applies_the_decision(monkeypatch) -> None:
                             "data": f"ok:{token}",
                             "message": {
                                 "message_id": 44,
-                                "chat": {"id": int(_OWNER_ID)},
+                                "chat": {"id": int(_OWNER_ID), "type": "private"},
                             },
                         },
                     },
@@ -941,6 +945,7 @@ async def test_callback_edit_failure_falls_back_and_never_reruns_the_action(
             "from": _OWNER_ID,
             "data": f"ok:{approval_token(proposal.approval_id)}",
             "chat_id": _OWNER_ID,
+            "chat_type": "private",
             "message_id": "77",
         }
 
@@ -1052,7 +1057,10 @@ async def test_legacy_pending_row_renders_as_a_card_and_still_resolves(monkeypat
                             "id": "q-legacy-resolve",
                             "from": {"id": int(_OWNER_ID)},
                             "data": f"ok:{approval_token(row.approval_id)}",
-                            "message": {"message_id": 44, "chat": {"id": int(_OWNER_ID)}},
+                            "message": {
+                                "message_id": 44,
+                                "chat": {"id": int(_OWNER_ID), "type": "private"},
+                            },
                         },
                     },
                     headers={"X-Telegram-Bot-Api-Secret-Token": "tg-secret"},
