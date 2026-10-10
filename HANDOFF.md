@@ -1,5 +1,20 @@
 # Mia handoff — 2026-09-17
 
+## P0A reviewed feature branch — 2026-10-10
+
+AssafWeb OS P0A was implemented locally on branch `codex/mia-p0a-crm`, based on
+`660160d79002404e979dbfd88cf5d297e0055758`. Scope: sanitized read-only reconciliation,
+private owner CRM health, worker telemetry, and disabled-by-default new-input Israeli
+phone comparison. The owner subsequently authorized a clean commit, feature-branch
+push and Pull Request against `master`. Merge, deployment, production data/Sheets,
+cloud settings and external messages still require separate authorization.
+See `docs/P0A_CRM_RUNBOOK.md` and the separate `docs/P0B_WEBSITE_HANDOFF.md` specification.
+Final local suite: 2,647 passed with real disposable PostgreSQL; Ruff and widget checks
+passed. Independent HEAVY review approved local P0A without blocking findings. Exact
+evidence, known measurement limits and safe read-only execution are in the runbook.
+Phone policy remains disabled; no migration, deployment or historical repair occurred.
+The reviewed branch is prepared for a Pull Request; it is not a deployed revision.
+
 ## Current operational override — GCP
 
 Mia's current deployment path is the GCP VM documented in `ops/gcp/README.md`. Production

@@ -141,6 +141,30 @@ class CrmDeliveryWorker:
         return self._now_dt().isoformat()
 
     def run_once(self, *, force_import: bool = False, limit: int = MAX_BATCH) -> WorkerRun:
+        self._cycle_confirmed_sheet_projection = False
+        self._record_worker_state("crm_worker_heartbeat", "running")
+        try:
+            result = self._run_once(force_import=force_import, limit=limit)
+        except Exception:
+            self._record_worker_state("crm_worker_heartbeat", "failed")
+            raise
+        cycle_clean = not result.import_failed and not any(
+            (result.failed, result.unknown, result.conflicts)
+        )
+        self._record_worker_state(
+            "crm_worker_heartbeat",
+            "completed" if cycle_clean else "completed_with_failures",
+        )
+        self._record_worker_state("crm_last_completed_cycle", "recorded")
+        if cycle_clean:
+            self._record_worker_state("crm_last_successful_cycle", "recorded")
+        if result.confirmed:
+            self._record_worker_state("crm_last_successful_delivery", "recorded")
+        if self._cycle_confirmed_sheet_projection:
+            self._record_worker_state("crm_last_successful_sheets_projection", "recorded")
+        return result
+
+    def _run_once(self, *, force_import: bool, limit: int) -> WorkerRun:
         import_failed = False
         # A failed import only pauses Sheet-bound jobs. It must never stop Telegram
         # lead delivery, so database errors from the import session count here too.
@@ -180,6 +204,21 @@ class CrmDeliveryWorker:
             }[outcome]
             counts[key] += 1
         return WorkerRun(imported_rows=imported, import_failed=import_failed, **counts)
+
+    def _record_worker_state(self, key: str, value: str) -> None:
+        """Best-effort telemetry; failure cannot alter delivery or cause another send."""
+        try:
+            stamp = self._now()
+            with self._session_factory() as session:
+                state = session.get(CrmWorkerStateRow, key)
+                if state is None:
+                    state = CrmWorkerStateRow(key=key)
+                    session.add(state)
+                state.value = value
+                state.updated_at = stamp
+                session.commit()
+        except Exception:  # noqa: BLE001 - telemetry is never delivery-critical
+            _LOG.warning("crm worker telemetry unavailable key=%s", key)
 
     def run_forever(self, stop_event: Event) -> None:
         while not stop_event.is_set():
@@ -424,6 +463,8 @@ class CrmDeliveryWorker:
                 outcome = "failed"
             self._finish(session, job, outcome)
             session.commit()
+            if outcome == "confirmed" and job.destination in {"contacts", "activity"}:
+                self._cycle_confirmed_sheet_projection = True
             return outcome
 
     def _dispatch(
@@ -524,6 +565,8 @@ class CrmDeliveryWorker:
                     )
                 self._finish(session, job, outcome)
                 session.commit()
+                if outcome == "confirmed" and destination in {"contacts", "activity"}:
+                    self._cycle_confirmed_sheet_projection = True
                 outcomes.append(outcome)
         return outcomes
 

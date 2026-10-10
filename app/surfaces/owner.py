@@ -34,6 +34,7 @@ from app.domain.events import (
 from app.domain.owner.callbacks import approval_token
 from app.domain.owner.proposal_cards import pending_approval_cards, render_owner_approval_card
 from app.domain.owner.request_routing import (
+    is_crm_operational_health_request,
     is_pending_approvals_request,
     is_tool_inventory_request,
     owner_tool_inventory_reply,
@@ -119,6 +120,26 @@ async def run_owner_loop(
         reply = format_pending_approvals_ack(store)
     elif inventory_request:
         reply = owner_tool_inventory_reply()
+    elif is_crm_operational_health_request(owner_text):
+        # Both the entry allowlist and the configured numeric identity must agree.
+        # This command never imports Sheet edits, calls a model or sends an alert.
+        if _is_authorized_owner(
+            actor_id=item["from"], owner_ids=settings.telegram_owner_user_id_set()
+        ):
+            from app.services.crm_diagnostics import (
+                build_crm_diagnostics,
+                render_operational_health_he,
+            )
+            from app.services.phone_identity import normalize_new_input_phone
+
+            report = build_crm_diagnostics(
+                store.session,
+                phone_normalizer=normalize_new_input_phone,
+                recipient_ids=settings.telegram_owner_user_id_set(),
+            )
+            reply = render_operational_health_he(report)
+        else:
+            reply = "הכלי זמין רק לבעלים מאומתים."
     elif not reply:
         reply, crm_wrote = await asyncio.to_thread(
             lambda: _talk_with_optional_agent(

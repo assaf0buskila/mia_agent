@@ -31,6 +31,7 @@ from app.api.deps import get_db
 from app.core.config import get_settings
 from app.services.form_intake import (
     FormIntakeCaptureConflict,
+    FormIntakeInvalidPhone,
     FormIntakePayloadConflict,
     FormIntakeService,
 )
@@ -229,6 +230,9 @@ async def capture_form_lead(
     except FormIntakeCaptureConflict:
         db.rollback()
         return JSONResponse(status_code=409, content={"detail": "CRM identity conflict"})
+    except FormIntakeInvalidPhone:
+        db.rollback()
+        return JSONResponse(status_code=422, content={"detail": "invalid form lead"})
 
     return FormIntakeResponse(
         status=result.status,

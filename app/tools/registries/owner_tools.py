@@ -49,6 +49,7 @@ from app.tools.owner.composio import (
 )
 from app.tools.owner.crm import (
     _crm_conflicts,
+    _crm_operational_health,
     _crm_record_activity,
     _crm_resolve_conflict,
     _crm_search,
@@ -725,6 +726,20 @@ _register(
 )
 _register(
     ToolSpec(
+        name="crm_operational_health",
+        description=(
+            "Read a bounded private CRM operational summary from the database: worker "
+            "freshness, delivery queue counts, unresolved issue counts, form receipt "
+            "coverage, and notification receipt coverage. It never calls Sheets, syncs, "
+            "imports, creates tabs, or exposes customer values. Use only for an explicit "
+            "owner request about CRM operational health."
+        ),
+        parameters=_NO_ARGS,
+        handler=_crm_operational_health,
+    )
+)
+_register(
+    ToolSpec(
         name="crm_upsert",
         description=(
             "Upsert a Contacts row and append Activity on the locked CRM sheet. "
@@ -1038,6 +1053,10 @@ def tool_definitions(*, allow_memory_writes: bool = True) -> list[dict[str, Any]
     """Chat Completions `tools` payload for the registry."""
     definitions: list[dict[str, Any]] = []
     for name in _ORDER:
+        # Explicit CRM health commands use a deterministic authenticated route.
+        # Keep this diagnostic out of the normal model's growing tools payload.
+        if name == "crm_operational_health":
+            continue
         spec = _REGISTRY[name]
         if spec.writes_memory and not allow_memory_writes:
             continue

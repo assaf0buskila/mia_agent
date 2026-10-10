@@ -6,10 +6,12 @@ from dataclasses import asdict
 from typing import Any
 
 from app.domain.tools import AdapterHttpError
-from app.domain.two_state import is_sheets_health_ask
+from app.domain.two_state import is_sheets_health_ask, may_run, state_for
 from app.integrations.sheets import build_sheets_port
+from app.services.crm_diagnostics import build_crm_diagnostics, render_operational_health_he
 from app.services.crm_v2 import CONTACT_FIELDS, CrmError, CrmService
 from app.services.owner_actions import propose_owner_action, sync_owner_crm_sheet_in_session
+from app.services.phone_identity import normalize_new_input_phone
 from app.surfaces.crm import (
     ACTIVITY_TAB,
     CONTACTS_TAB,
@@ -74,6 +76,24 @@ def _crm_search(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
         ),
     )
 
+
+def _crm_operational_health(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
+    """Private, DB-only operational view; never syncs or calls Sheets."""
+    del args
+    actor_id = str(ctx.principal.actor_id or "")
+    if (
+        not may_run(state=state_for(ctx.principal), tool="crm_operational_health")
+        or not actor_id.isascii()
+        or not actor_id.isdigit()
+        or actor_id not in ctx.settings.telegram_owner_user_id_set()
+    ):
+        return ToolResult(ok=False, error="הכלי זמין רק לבעלים מאומתים.")
+    report = build_crm_diagnostics(
+        ctx.store.session,
+        phone_normalizer=normalize_new_input_phone,
+        recipient_ids=ctx.settings.telegram_owner_user_id_set(),
+    )
+    return ToolResult(ok=True, text=render_operational_health_he(report))
 
 
 def _crm_health_query(query: str) -> bool:

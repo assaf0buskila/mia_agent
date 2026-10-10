@@ -229,6 +229,22 @@ def test_capture_is_atomic_deterministic_and_uses_existing_outbox(intake_client)
         assert destinations == ["activity", "contacts", "telegram", "telegram"]
 
 
+@pytest.mark.parametrize("phone", ["+9720501234567", "+97250123456", "+9725012345678"])
+def test_enabled_phone_policy_rejects_malformed_israeli_number_atomically(
+    intake_client, monkeypatch, phone
+) -> None:
+    monkeypatch.setenv("MIA_CRM_ISRAELI_PHONE_NORMALIZATION_ENABLED", "true")
+    client, factory = intake_client
+    response = _post(client, _payload(phone_e164=phone))
+    assert response.status_code == 422
+    assert response.json() == {"detail": "invalid form lead"}
+    with factory() as session:
+        assert _count(session, CrmContactRow) == 0
+        assert _count(session, CrmActivityRow) == 0
+        assert _count(session, CrmFormIntakeReceiptRow) == 0
+        assert _count(session, CrmOutboxRow) == 0
+
+
 def test_form_telegram_receipt_is_bounded_and_replay_safe(intake_client) -> None:
     client, factory = intake_client
     assert _post(client, _payload()).status_code == 200
