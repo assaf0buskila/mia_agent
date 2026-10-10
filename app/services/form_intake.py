@@ -12,7 +12,7 @@ from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from app.db.models import CrmFormIntakeReceiptRow
-from app.services.crm_v2 import CrmService
+from app.services.crm_v2 import CrmPhoneInputInvalid, CrmPhoneNormalizationRequired, CrmService
 
 
 @dataclass(frozen=True)
@@ -28,6 +28,10 @@ class FormIntakePayloadConflict(ValueError):
 
 class FormIntakeCaptureConflict(RuntimeError):
     """CRM identity resolution did not produce one contact and Activity."""
+
+
+class FormIntakeInvalidPhone(ValueError):
+    """A new phone failed the enabled input policy; no receipt was committed."""
 
 
 class FormIntakeService:
@@ -70,13 +74,20 @@ class FormIntakeService:
                 activity_id=existing.activity_id,
             )
 
-        captured = self.crm.capture_form_lead(
-            fields,
-            source_id=source_id,
-            submitted_at=submitted_at,
-            summary=summary,
-            recipient_ids=recipient_ids,
-        )
+        try:
+            captured = self.crm.capture_form_lead(
+                fields,
+                source_id=source_id,
+                submitted_at=submitted_at,
+                summary=summary,
+                recipient_ids=recipient_ids,
+            )
+        except CrmPhoneInputInvalid as exc:
+            raise FormIntakeInvalidPhone("invalid phone") from exc
+        except CrmPhoneNormalizationRequired as exc:
+            raise FormIntakeCaptureConflict(
+                "phone normalization requires reviewed identity migration"
+            ) from exc
         if captured.contact is None or captured.activity is None or captured.issue_ids:
             raise FormIntakeCaptureConflict("CRM capture did not resolve one contact")
 

@@ -61,6 +61,9 @@ class Settings(BaseSettings):
     # it on.
     composio_discovery: bool = False
     crm_delivery_enabled: bool = False
+    # Off until a read-only identity report and separately approved migration establish
+    # that every persisted phone comparison key is compatible. Never rewrites history.
+    crm_israeli_phone_normalization_enabled: bool = False
     openai_api_key: str = Field(default="")
     openai_transcribe_model: str = Field(default="gpt-transcribe")
     openai_transcribe_fallback_model: str = Field(default="")

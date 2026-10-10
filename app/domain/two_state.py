@@ -78,6 +78,7 @@ OWNER_HOUSE_TOOLS: frozenset[str] = frozenset(
         "crm_upsert",
         "crm_record_activity",
         "crm_conflicts",
+        "crm_operational_health",
         "crm_resolve_conflict",
         "sheets_read",
         "sheets_update",

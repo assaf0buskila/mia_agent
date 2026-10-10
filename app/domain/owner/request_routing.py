@@ -25,8 +25,21 @@ _PENDING_APPROVAL_PATTERNS = (
 )
 
 
+def is_crm_operational_health_request(text: str) -> bool:
+    """Only a standalone operational-health command; mixed actions use normal routing."""
+    command = text.strip().rstrip("?!.").strip().casefold()
+    return command in {
+        "מצב crm",
+        "בדיקת crm",
+        "מצב תפעולי crm",
+        "crm health",
+        "crm_operational_health",
+    }
+
+
 def is_pending_approvals_request(text: str) -> bool:
     return any(pattern.search(text.strip()) for pattern in _PENDING_APPROVAL_PATTERNS)
+
 
 _TOOL_GROUPS: tuple[tuple[str, frozenset[str]], ...] = (
     (
@@ -87,6 +100,7 @@ _TOOL_GROUPS: tuple[tuple[str, frozenset[str]], ...] = (
                 "crm_upsert",
                 "crm_record_activity",
                 "crm_conflicts",
+                "crm_operational_health",
                 "crm_resolve_conflict",
                 "sheets_list_tabs",
                 "sheets_read",
