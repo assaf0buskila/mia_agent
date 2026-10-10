@@ -7,6 +7,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from app import __version__
 from app.api.form_intake import router as form_intake_router
+from app.api.quick_leads import router as quick_leads_router
 from app.api.telegram import router as telegram_router
 from app.api.website import router as website_router
 from app.brain.store import BrainStore
@@ -287,6 +288,7 @@ app.add_middleware(
 app.include_router(website_router)
 app.include_router(telegram_router)
 app.include_router(form_intake_router)
+app.include_router(quick_leads_router)
 
 _ROOT_LANDING_HTML = """<!DOCTYPE html>
 <html lang="he" dir="rtl">
