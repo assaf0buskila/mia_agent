@@ -59,6 +59,15 @@ _EXTENSION_BY_MIME = {
     "audio/x-wav": ".wav",
 }
 _GENERIC_CDN_MEDIA_TYPES = frozenset({"", "application/octet-stream"})
+_UNSUPPORTED_OWNER_MESSAGE_KEYS = frozenset(
+    {
+        "business_connection_id",
+        "guest_bot_caller_chat",
+        "guest_bot_caller_user",
+        "guest_query_id",
+        "sender_chat",
+    }
+)
 
 # Must be stated on every setWebhook call. Omitting it reuses the previous server-side
 # value, which silently drops button presses if it was ever narrowed to messages only.
@@ -470,12 +479,25 @@ def parse_telegram_update(payload: dict[str, Any]) -> dict[str, str] | None:
     message = payload.get("message") or payload.get("edited_message") or {}
     if not isinstance(message, dict):
         return None
-    user = message.get("from") or {}
-    chat = message.get("chat") or {}
-    user_id = str(user.get("id") or "")
-    chat_id = str(chat.get("id") or "") or user_id
-    if update_id is None or not user_id:
+    user = message.get("from")
+    chat = message.get("chat")
+    if not isinstance(user, dict) or not isinstance(chat, dict):
         return None
+    raw_user_id = user.get("id")
+    raw_chat_id = chat.get("id")
+    if (
+        update_id is None
+        or not isinstance(raw_user_id, int)
+        or isinstance(raw_user_id, bool)
+        or raw_user_id <= 0
+        or not isinstance(raw_chat_id, int)
+        or isinstance(raw_chat_id, bool)
+        or raw_chat_id <= 0
+        or any(key in message for key in _UNSUPPORTED_OWNER_MESSAGE_KEYS)
+    ):
+        return None
+    user_id = str(raw_user_id)
+    chat_id = str(raw_chat_id)
     text = str(message.get("text") or message.get("caption") or "")
     native_voice = message.get("voice")
     voice = native_voice or message.get("audio") or {}
@@ -494,6 +516,7 @@ def parse_telegram_update(payload: dict[str, Any]) -> dict[str, str] | None:
         "id": str(update_id),
         "from": user_id,
         "chat_id": chat_id,
+        "chat_type": chat.get("type") if isinstance(chat.get("type"), str) else "",
         "message_id": message_id,
         "text": text,
         "file_id": file_id,
@@ -515,23 +538,57 @@ def parse_telegram_callback(payload: dict[str, Any]) -> dict[str, str] | None:
     query = payload.get("callback_query")
     if update_id is None or not isinstance(query, dict):
         return None
-    user = query.get("from") or {}
-    user_id = str(user.get("id") or "")
-    query_id = str(query.get("id") or "")
-    if not user_id or not query_id:
+    if "inline_message_id" in query:
         return None
-    message = query.get("message") or {}
-    chat = message.get("chat") or {} if isinstance(message, dict) else {}
-    chat_id = str(chat.get("id") or "") or user_id
-    message_id = str(message.get("message_id") or "") if isinstance(message, dict) else ""
+    user = query.get("from")
+    if not isinstance(user, dict):
+        return None
+    raw_user_id = user.get("id")
+    if not isinstance(raw_user_id, int) or isinstance(raw_user_id, bool) or raw_user_id <= 0:
+        return None
+    user_id = str(raw_user_id)
+    query_id = str(query.get("id") or "")
+    if not query_id:
+        return None
+    message = query.get("message")
+    if not isinstance(message, dict):
+        return None
+    chat = message.get("chat")
+    if not isinstance(chat, dict):
+        return None
+    raw_chat_id = chat.get("id")
+    if (
+        not isinstance(raw_chat_id, int)
+        or isinstance(raw_chat_id, bool)
+        or raw_chat_id <= 0
+        or any(key in message for key in _UNSUPPORTED_OWNER_MESSAGE_KEYS)
+    ):
+        return None
+    chat_id = str(raw_chat_id)
+    message_id = str(message.get("message_id") or "")
     return {
         "id": str(update_id),
         "callback_query_id": query_id,
         "from": user_id,
         "chat_id": chat_id,
+        "chat_type": chat.get("type") if isinstance(chat.get("type"), str) else "",
         "message_id": message_id,
         "data": str(query.get("data") or ""),
     }
+
+
+def is_valid_telegram_owner_context(item: dict[str, str], owner_ids: set[str]) -> bool:
+    """Accept only an allowlisted human owner in that owner's private chat."""
+    sender = item.get("from", "")
+    return (
+        isinstance(sender, str)
+        and sender.isascii()
+        and sender.isdigit()
+        and int(sender) > 0
+        and sender in owner_ids
+        and item.get("chat_type") == "private"
+        and item.get("chat_id") == sender
+    )
 
 
 def build_telegram_port(settings: Settings) -> MessagePort:

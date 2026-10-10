@@ -88,6 +88,7 @@ async def test_kill_switch_crm_callback_keeps_pending_without_constructing_sheet
                 "from": "123",
                 "data": f"ok:{proposal.approval_id}",
                 "chat_id": "123",
+                "chat_type": "private",
                 "message_id": "1",
             },
             port=_CallbackPort(),

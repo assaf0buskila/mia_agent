@@ -109,7 +109,13 @@ async def test_kill_switch_worker_stops_before_voice_image_or_the_owner_loop(mon
     port = RecordingMessagePort()
 
     await telegram_owner.process_telegram_owner_update(
-        item={"id": event_id, "from": ACTOR, "chat_id": ACTOR, "text": "stop"},
+        item={
+            "id": event_id,
+            "from": ACTOR,
+            "chat_id": ACTOR,
+            "chat_type": "private",
+            "text": "stop",
+        },
         envelope_kind="audio",
         voice_file_id="voice-file",
         photo_file_id="photo-file",
@@ -152,7 +158,13 @@ async def test_worker_drain_after_reply_does_not_send_second_timeout(monkeypatch
     port = RecordingMessagePort()
     task = asyncio.create_task(
         telegram_owner.process_telegram_owner_update(
-            item={"id": event_id, "from": ACTOR, "chat_id": ACTOR, "text": "check"},
+            item={
+                "id": event_id,
+                "from": ACTOR,
+                "chat_id": ACTOR,
+                "chat_type": "private",
+                "text": "check",
+            },
             envelope_kind="text",
             voice_file_id=None,
             port=port,
@@ -182,7 +194,13 @@ async def test_worker_learning_exception_after_reply_does_not_emit_failure(monke
 
     port = RecordingMessagePort()
     await telegram_owner.process_telegram_owner_update(
-        item={"id": event_id, "from": ACTOR, "chat_id": ACTOR, "text": "check"},
+        item={
+            "id": event_id,
+            "from": ACTOR,
+            "chat_id": ACTOR,
+            "chat_type": "private",
+            "text": "check",
+        },
         envelope_kind="text",
         voice_file_id=None,
         port=port,
@@ -235,7 +253,13 @@ async def test_worker_cancellation_drains_owner_task_before_closing_db(monkeypat
     monkeypatch.setattr(telegram_owner, "get_session_factory", lambda: factory)
     task = asyncio.create_task(
         telegram_owner.process_telegram_owner_update(
-            item={"id": event_id, "from": ACTOR, "chat_id": ACTOR, "text": "check"},
+            item={
+                "id": event_id,
+                "from": ACTOR,
+                "chat_id": ACTOR,
+                "chat_type": "private",
+                "text": "check",
+            },
             envelope_kind="text",
             voice_file_id=None,
             port=RecordingMessagePort(),
@@ -328,7 +352,13 @@ async def test_v2_owner_turn_never_starts_passive_learning(monkeypatch) -> None:
     port = RecordingMessagePort()
     task = asyncio.create_task(
         telegram_owner.process_telegram_owner_update(
-            item={"id": event_id, "from": ACTOR, "chat_id": ACTOR, "text": "check"},
+            item={
+                "id": event_id,
+                "from": ACTOR,
+                "chat_id": ACTOR,
+                "chat_type": "private",
+                "text": "check",
+            },
             envelope_kind="text",
             voice_file_id=None,
             port=port,
@@ -354,7 +384,13 @@ async def test_typing_cleanup_error_after_accepted_reply_does_not_send_failure(m
     monkeypatch.setattr(telegram_owner, "_renew_typing", typing_error)
     port = RecordingMessagePort()
     await telegram_owner.process_telegram_owner_update(
-        item={"id": event_id, "from": ACTOR, "chat_id": ACTOR, "text": "check"},
+        item={
+            "id": event_id,
+            "from": ACTOR,
+            "chat_id": ACTOR,
+            "chat_type": "private",
+            "text": "check",
+        },
         envelope_kind="text",
         voice_file_id=None,
         port=port,
@@ -382,7 +418,13 @@ async def test_preloop_adapter_builder_failure_sends_one_failure(monkeypatch) ->
     monkeypatch.setattr(telegram_owner, "_renew_typing", preloop_failure)
     port = RecordingMessagePort()
     await telegram_owner.process_telegram_owner_update(
-        item={"id": event_id, "from": ACTOR, "chat_id": ACTOR, "text": "check"},
+        item={
+            "id": event_id,
+            "from": ACTOR,
+            "chat_id": ACTOR,
+            "chat_type": "private",
+            "text": "check",
+        },
         envelope_kind="text",
         voice_file_id=None,
         port=port,
