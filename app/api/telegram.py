@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from contextlib import contextmanager
 from time import perf_counter
 from typing import Literal
 
@@ -35,6 +36,7 @@ from app.integrations.sheets import build_sheets_port
 from app.integrations.telegram import (
     TelegramMediaError,
     TelegramSendError,
+    is_valid_telegram_owner_context,
     parse_telegram_callback,
     parse_telegram_update,
     validate_telegram_voice_media,
@@ -150,30 +152,35 @@ async def _handle_callback(
     callback: dict[str, str],
     port: MessagePort,
     owner_ids: set[str],
-    db: Session,
+    db: Session | None,
     settings,
 ) -> dict:
     """Resolve one inline-button press.
 
-    `answerCallbackQuery` runs first and unconditionally: the client shows a spinner until
-    it lands, so acknowledging before doing the work is what keeps the button feeling
-    instant. The allowlist is still enforced — a callback carries a `from` like any other
-    update and is not privileged.
+    Private owner context is validated before `answerCallbackQuery`; invalid callbacks
+    receive no acknowledgement or other provider operation. For a valid owner callback,
+    the acknowledgement runs before business work so the button feels instant.
 
     Callbacks can be replayed against a message whose buttons are already gone, so the
     decision path must stay idempotent; `decide_approval` is keyed on the approval id.
     """
+    if not is_valid_telegram_owner_context(callback, owner_ids):
+        _log.info(
+            "telegram_owner_context accepted=false kind=callback "
+            "reason=invalid_private_owner_context"
+        )
+        return {"processed": 0, "ignored": True, "reason": "invalid_owner_context"}
     answer = getattr(port, "answer_callback_query", None)
     if callable(answer):
         try:
             await answer(callback["callback_query_id"])
         except (TelegramSendError, AdapterHttpError, RuntimeError):
             pass
-    if callback["from"] not in owner_ids:
-        return {"processed": 0, "ignored": True, "reason": "unauthorized"}
     decision, token = parse_callback_token(callback.get("data", ""))
     if not decision or not token:
         return {"processed": 0, "ignored": True, "reason": "unrecognized_callback"}
+    if db is None:
+        raise RuntimeError("recognized owner callback requires a database session")
     store = LeadStore(db)
     crm_pre_synced = False
     crm_sync_failed = False
@@ -327,7 +334,6 @@ def _webhook_accepted(*, duplicate: bool, voice: bool = False) -> dict:
 async def receive_webhook(
     request: Request,
     background_tasks: BackgroundTasks,
-    db: Session = Depends(get_db),
     port: MessagePort = Depends(get_telegram_port),
     transcribe_port: TranscriptionPort = Depends(get_transcription_port),
     x_telegram_bot_api_secret_token: str = Header(default=""),
@@ -350,19 +356,45 @@ async def receive_webhook(
     # resolves and nothing in the logs.
     callback = parse_telegram_callback(payload)
     if callback is not None:
-        return await _handle_callback(
-            callback=callback,
-            port=port,
-            owner_ids=owner_ids,
-            db=db,
-            settings=settings,
+        callback_is_private = is_valid_telegram_owner_context(callback, owner_ids)
+        decision, token = parse_callback_token(callback.get("data", ""))
+        if not callback_is_private or not decision or not token:
+            return await _handle_callback(
+                callback=callback,
+                port=port,
+                owner_ids=owner_ids,
+                db=None,
+                settings=settings,
+            )
+        with contextmanager(get_db)() as db:
+            return await _handle_callback(
+                callback=callback,
+                port=port,
+                owner_ids=owner_ids,
+                db=db,
+                settings=settings,
+            )
+    if "callback_query" in payload:
+        _log.info(
+            "telegram_owner_context accepted=false kind=callback "
+            "reason=invalid_private_owner_context"
         )
+        return {"processed": 0, "ignored": True, "reason": "invalid_owner_context"}
     parsed = parse_telegram_update(payload)
     if parsed is None:
+        if "message" in payload or "edited_message" in payload:
+            _log.info(
+                "telegram_owner_context accepted=false kind=message "
+                "reason=invalid_private_owner_context"
+            )
+            return {"processed": 0, "ignored": True, "reason": "invalid_owner_context"}
         return {"processed": 0, "ignored": True}
-    if parsed["from"] not in owner_ids:
-        return {"processed": 0, "ignored": True, "reason": "unauthorized"}
-    store = LeadStore(db)
+    if not is_valid_telegram_owner_context(parsed, owner_ids):
+        _log.info(
+            "telegram_owner_context accepted=false kind=message "
+            "reason=invalid_private_owner_context"
+        )
+        return {"processed": 0, "ignored": True, "reason": "invalid_owner_context"}
     item = dict(parsed)
     voice = bool(item.get("file_id"))
     photo = bool(item.get("photo_file_id"))
@@ -372,21 +404,23 @@ async def receive_webhook(
         envelope_kind = "image"
     else:
         envelope_kind = webhook_envelope_kind(item)
-    if not store.claim_webhook(
-        provider="telegram",
-        provider_event_id=item["id"],
-        channel=Channel.TELEGRAM.value,
-        envelope_kind=envelope_kind,
-    ):
-        return _webhook_accepted(duplicate=True, voice=voice)
-    try:
-        db.commit()
-    except SQLAlchemyError:
-        db.rollback()
-        raise HTTPException(
-            status_code=503,
-            detail="telegram processing temporarily unavailable",
-        ) from None
+    with contextmanager(get_db)() as db:
+        store = LeadStore(db)
+        if not store.claim_webhook(
+            provider="telegram",
+            provider_event_id=item["id"],
+            channel=Channel.TELEGRAM.value,
+            envelope_kind=envelope_kind,
+        ):
+            return _webhook_accepted(duplicate=True, voice=voice)
+        try:
+            db.commit()
+        except SQLAlchemyError:
+            db.rollback()
+            raise HTTPException(
+                status_code=503,
+                detail="telegram processing temporarily unavailable",
+            ) from None
     background_tasks.add_task(
         process_telegram_owner_update,
         item=item,

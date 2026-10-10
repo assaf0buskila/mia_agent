@@ -1,8 +1,10 @@
 # AssafWeb OS: לכידת ליד מהירה
 
 מימוש backend מקומי עבור PWA עתידית. בסיס הפיתוח המקורי: `cbbd0a0614291ba706f853cc604021f1973cd56a`.
-בסיס ה־PR אחרי rebase: master ב־`27168610ec3e8cbd3aee836f70b00d6807743f6d`.
-ענף האינטגרציה: `codex/quick-lead-capture`. לא בוצעו מיזוג, פריסה או שינוי נתוני production.
+בסיס ה־PR המקורי אחרי rebase: master ב־`27168610ec3e8cbd3aee836f70b00d6807743f6d`.
+בסיס האינטגרציה הנוכחי: master ב־`a213c9a7fbdf5586e13cb38ffdbc4646f59c4541`,
+הכולל Telegram Owner Privacy מ־PR #96. ענף האינטגרציה: `codex/quick-lead-capture`.
+master שולב בענף התכונה בלבד; לא בוצעו מיזוג אל master, פריסה או שינוי נתוני production.
 היעד של 15–30 שניות הוא יעד
 לבדיקת שימוש באייפון אחרי בניית הממשק; אין כאן הוכחת ביצועים במכשיר.
 
@@ -230,7 +232,8 @@ PostgreSQL מחייבות `MIA_QUICK_LEAD_TEST_POSTGRES_URL` המצביע ל־lo
 
 ## בדיקות הכנה ל־PR
 
-אחרי rebase ל־master הרשום בראש המסמך: **84 בדיקות ממוקדות עברו** מול SQLite
+אחרי rebase לבסיס ה־PR המקורי `27168610ec3e8cbd3aee836f70b00d6807743f6d`:
+**84 בדיקות ממוקדות עברו** מול SQLite
 ו־PostgreSQL 16 זמני על loopback, כולל ולידציה משותפת ומדיניות טלפון פעילה במסד
 בדיקה קנוני. **2,731 בדיקות בסוויטה המלאה עברו, ללא דילוגים**, ב־156.34 שניות;
 911 אזהרות deprecation. Ruff לכל app/tests, בדיקות widget ו־diff check עברו.
@@ -239,15 +242,40 @@ PostgreSQL מחייבות `MIA_QUICK_LEAD_TEST_POSTGRES_URL` המצביע ל־lo
 test DSNs, נוסף לשער migration/pgvector הקיים. תוצאת CI על ה־commit המדויק תימסר
 ב־PR ובדוח הסופי. הקוד הסופי נבדק מחדש בביקורת עצמאית; זו אינה הוכחת שימוש במובייל.
 
-## נקודות אינטגרציה עם הענפים הנפרדים
+## בדיקות השילוב עם Privacy
 
-תמונת Git מקומית שנבדקה בקריאה בלבד ב־2026-10-11:
+על הקוד המשולב עם master ב־`a213c9a7fbdf5586e13cb38ffdbc4646f59c4541`:
 
-- Telegram Owner Privacy: ענף `codex/mia-telegram-owner-privacy`, HEAD
-  `27168610ec3e8cbd3aee836f70b00d6807743f6d`, עם שינויים לא committed ב־Telegram API,
-  transport, worker, בדיקות ו־CI. HEAD אינו מייצג את התיקון. החפיפה עם Quick Lead
-  היא `.github/workflows/ci.yml`; אין חפיפה ישירה בקבצי Quick Lead או ב־CRM.
-- Smart Reminders: ענף `codex/internal-smart-reminders`, HEAD
+- הסוויטה המלאה: **2,832 עברו, ללא דילוגים**, ב־165.50 שניות; 929 אזהרות deprecation.
+- רגרסיות Quick Lead, Telegram Privacy, due-scan, inbound/outbound, turn coalescing
+  וגבולות owner: **474 עברו, ללא דילוגים**, ב־98.55 שניות; 569 אזהרות deprecation.
+- בשתי הריצות הוגדרו שני test DSNs ל־PostgreSQL 16 זמני על loopback. בדיקות
+  Quick Lead כוללות HTTP, אימות ואישור, כפילות/התנגשות, מקביליות, retry וכשל commit;
+  Privacy כולל דחיית group/channel וזהויות פגומות לפני DB או שליחה;
+  due-scan כולל claim עמיד אחרי rollback ושליחה דרך מתאמים מדומים בלבד.
+- Ruff לכל app/tests, widget behavior/syntax, בדיקות הגדרות GCP ו־diff checks עברו.
+- הלוגים: `.cache/quick-lead-privacy-full.txt` ו־`.cache/quick-lead-privacy-regressions.txt`.
+
+ביקורת עצמאית חדשה בדקה את השילוב כולו מול שני ההורים ואת שני הלוגים: **PASS**,
+ללא חסמי שחרור. SHA ה־merge commit ו־CI על SHA זה יתועדו ב־PR #98. לא הוחלשה או הוסרה בדיקה ולא
+נדרש תיקון runtime במהלך השילוב. אלה בדיקות מקומיות, ללא production או קבלה במכשיר.
+
+## שילוב Telegram Owner Privacy ונקודות אינטגרציה
+
+שילוב master ב־2026-10-11, מעל Quick Lead ב־`6052b4556a3b6cd23093b87a9a4e63ba824f89a9`:
+
+- Telegram Owner Privacy: PR #96 כבר שולב ב־master ב־SHA הרשום בראש המסמך.
+  [CI של master](https://github.com/assaf0buskila/mia_agent/actions/runs/38093729757)
+  עבר על SHA זה בכל שלושת השערים. השילוב לענף Quick Lead הוא merge השומר את
+  ההיסטוריה; לא בוצע force-push. קבצי Telegram API, transport ו־worker זהים ל־master,
+  וקבצי המימוש של Quick Lead זהים לראש ה־PR המקורי. הרשאת Telegram עדיין מחייבת
+  מזהה בעלים מספרי וצ'אט private עם chat ID זהה למזהה השולח. נתיבי Quick Lead
+  ממשיכים לדרוש הוכחת אתר חתומה, allowlist מספרי, Origin ואישור נפרד לשמירה.
+- החפיפה ב־`.github/workflows/ci.yml` שולבה אוטומטית ונבדקה: בדיקות Privacy
+  ו־due-scan נשארו בשער PostgreSQL/pgvector, בדיקות widget נשארו בשער checks,
+  והסוויטה המלאה של Quick Lead נשארה בשער PostgreSQL 16 עם שני test DSNs.
+  בניית container תלויה בהצלחת כל שלושת שערי הבדיקות.
+- Smart Reminders: תמונת קריאה בלבד מוקדמת יותר של ענף `codex/internal-smart-reminders`, HEAD
   `0b8222c244dcc9ce0e336fc6861b53010983955d`, עם שינויים נוספים לא committed ב־worker,
   parsing, בדיקות ומסירה. גם כאן HEAD אינו גרסה סופית מאומתת. בדיקת commit בלבד
   מצביעה על חפיפה ב־`app/main.py` וב־CI: lifecycle של worker לעומת חיבור router של
@@ -259,13 +287,14 @@ test DSNs, נוסף לשער migration/pgvector הקיים. תוצאת CI על �
   בזמן שילוב יש לשמור את כל ה־routers, startup/shutdown של workers וכל שערי CI.
   שדה `follow_up_date` של Quick Lead נשאר נתון CRM ולא יוצר Reminder/Task, כך שאין
   כאן מקור שליחה חדש לתזכורות או ל־daily due-scan. אין migration חדשה ל־Quick Lead.
-- אחרי ששני הענפים יפורסמו עם SHA סופי ו־CI ירוק נדרשת בדיקה משותפת: privacy של
-  כניסה/שליחה ב־Telegram, כשל ואישור/retry של Quick Lead, וכללי worker/receipt/duplicate
-  של Reminders עם due-scan. לא נבדקו או מוזגו שלוש התכונות יחד במשימה זו.
+- Smart Reminders אינו משולב בענף זה ואינו תנאי להמשך PR #98. כש־PR שלו יהיה מוכן
+  עם SHA סופי ו־CI ירוק, תידרש בדיקה משותפת של שלוש התכונות: privacy של Telegram,
+  אישור/retry של Quick Lead, וכללי worker/receipt/duplicate של Reminders עם due-scan.
+  לא נבדקו או מוזגו שלוש התכונות יחד במשימה זו. לא נעשה שינוי ב־P0B.
 
-GO לבדיקת backend מבודדת אחרי בדיקות שחרור וביקורת; NO-GO להצגת PWA שימושית עד
-השלמת server-session ואימות באייפון. אינטגרציה משותפת תלויה בגרסאות המדויקות של
-שני הענפים האחרים. שום worktree אחר לא שונה.
+החלטת GO לשילוב backend ב־PR #98 מותנית בבדיקות וביקורת של הגרסה המשולבת וב־CI
+על SHA ה־commit המדויק; התוצאות יתועדו ב־PR. NO-GO להצגת PWA שימושית עד השלמת
+server-session ואימות באייפון. שום worktree אחר לא שונה.
 
 ## תכנית פריסה ו־rollback ב־GCP VM
 
@@ -276,8 +305,9 @@ GO לבדיקת backend מבודדת אחרי בדיקות שחרור וביקו
 הוראות ECS ב־README/HANDOFF ההיסטוריים אינן נוהל הפריסה של תכונה זו.
 
 1. אישור מפורש למיזוג ולפריסה, בנפרד. משימה זו מסתיימת אחרי PR ו־CI.
-2. לפני מיזוג: ביקורת עצמאית, CI ירוק ובדיקת ההתאמה עם ענף Smart Reminders.
-   אין להעתיק את קבציו או לכלול אותם ב־commit של תכונה זו.
+2. לפני מיזוג PR #98: ביקורת עצמאית ו־CI ירוק על השילוב עם master הנוכחי.
+   Smart Reminders ייבדק בנפרד כש־PR שלו יהיה מוכן; אין להמתין לו, להעתיק את קבציו
+   או לכלול אותם ב־commit של תכונה זו.
 3. לפני פריסה מורשית: לשמור SHA/tag נוכחיים ו־backup בעזרת `sudo mia backup`,
    ולפרוס מ־checkout נקי ב־SHA המדויק שעבר CI באמצעות
    `ops/gcp/deploy.ps1 -ProjectId mia-assafweb -Ref <approved-sha>`.
