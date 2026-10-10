@@ -39,7 +39,21 @@ def factory(tmp_path, request):
             f"sqlite:///{tmp_path / 'reminders.db'}",
             connect_args={"check_same_thread": False, "timeout": 20},
         )
-    Base.metadata.create_all(engine)
+    # The PostgreSQL schema is fresh. Do not let checkfirst see identically named
+    # migrated public tables through search_path and silently reuse their data.
+    Base.metadata.create_all(engine, checkfirst=request.param != "postgres")
+    if request.param == "postgres":
+        with engine.connect() as conn:
+            for table in ("owner_reminders", "owner_notification_recipient_claims"):
+                actual_schema = conn.scalar(
+                    text(
+                        "SELECT n.nspname FROM pg_class c "
+                        "JOIN pg_namespace n ON n.oid = c.relnamespace "
+                        "WHERE c.oid = to_regclass(:table)"
+                    ),
+                    {"table": table},
+                )
+                assert actual_schema == schema, "worker fixture reused public data"
     yield sessionmaker(engine, expire_on_commit=False)
     engine.dispose()
     if admin is not None:
