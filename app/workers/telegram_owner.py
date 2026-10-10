@@ -23,7 +23,6 @@ from app.api.inbound_common import (
     stt_latency_ms,
     transcript_duration_ms,
 )
-from app.api.owner import _is_authorized_owner
 from app.core.config import get_settings
 from app.core.errors import MiaError
 from app.core.logging import log_comm
@@ -37,6 +36,7 @@ from app.domain.events import (
 )
 from app.domain.tools import AdapterHttpError
 from app.integrations.base import MessagePort
+from app.integrations.telegram import is_valid_telegram_owner_context
 from app.integrations.transcribe import TranscriptionPort
 from app.surfaces.owner import run_owner_loop
 from app.surfaces.turn_coalesce import (
@@ -55,7 +55,8 @@ def _inbound_from_work(work: dict[str, str]) -> dict[str, str]:
     return {
         "id": work["id"],
         "from": work["from"],
-        "chat_id": work.get("chat_id") or work["from"],
+        "chat_id": work.get("chat_id") or "",
+        "chat_type": work.get("chat_type") or "",
         "message_id": work.get("message_id") or "",
         "text": work.get("text") or "",
         "owner_request_text": work.get("owner_request_text", work.get("text") or ""),
@@ -136,7 +137,17 @@ async def process_telegram_owner_update(
     owner_ids = settings.telegram_owner_user_id_set()
     # Authentication is the first decision. A global stop then exits before STT,
     # image download/vision, model, CRM, Gmail, or any provider adapter is built.
-    if not _is_authorized_owner(actor_id=item["from"], owner_ids=owner_ids):
+    if not is_valid_telegram_owner_context(item, owner_ids):
+        log_comm(
+            channel=Channel.TELEGRAM.value,
+            provider="telegram",
+            actor_type="owner",
+            direction="in",
+            external_message_id="",
+            policy_result="invalid_private_owner_context",
+            success=False,
+            automation_mode=settings.automation_mode.value,
+        )
         return
     deadline_at = monotonic() + settings.owner_turn_timeout_seconds
     delivery_state: dict[str, bool] = {}

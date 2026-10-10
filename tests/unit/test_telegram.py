@@ -569,7 +569,7 @@ def test_parse_telegram_audio_document_as_voice_input() -> None:
             "message": {
                 "message_id": 992,
                 "from": {"id": int(OWNER_ID)},
-                "chat": {"id": int(OWNER_ID)},
+                "chat": {"id": int(OWNER_ID), "type": "private"},
                 "document": {
                     "file_id": "audio-document-991",
                     "file_name": "voice-note.webm",
@@ -591,7 +591,7 @@ def test_audio_document_without_mime_keeps_filename_as_format_evidence() -> None
             "message": {
                 "message_id": 998,
                 "from": {"id": int(OWNER_ID)},
-                "chat": {"id": int(OWNER_ID)},
+                "chat": {"id": int(OWNER_ID), "type": "private"},
                 "document": {"file_id": "audio-document-997", "file_name": "owner.mp3"},
             },
         }
@@ -608,7 +608,7 @@ def test_non_audio_telegram_document_does_not_masquerade_as_voice() -> None:
             "message": {
                 "message_id": 994,
                 "from": {"id": int(OWNER_ID)},
-                "chat": {"id": int(OWNER_ID)},
+                "chat": {"id": int(OWNER_ID), "type": "private"},
                 "document": {
                     "file_id": "pdf-993",
                     "file_name": "brief.pdf",
@@ -628,7 +628,7 @@ def test_unsupported_audio_document_reaches_truthful_media_validation() -> None:
             "message": {
                 "message_id": 996,
                 "from": {"id": int(OWNER_ID)},
-                "chat": {"id": int(OWNER_ID)},
+                "chat": {"id": int(OWNER_ID), "type": "private"},
                 "document": {
                     "file_id": "unsupported-audio-995",
                     "file_name": "recording.vendor-codec",
@@ -876,7 +876,7 @@ def test_parse_telegram_photo_keeps_caption_and_file_id() -> None:
             "message": {
                 "message_id": 1002,
                 "from": {"id": int(OWNER_ID)},
-                "chat": {"id": int(OWNER_ID)},
+                "chat": {"id": int(OWNER_ID), "type": "private"},
                 "caption": "תראי את זה",
                 "photo": [
                     {"file_id": "small", "width": 90, "height": 90},
