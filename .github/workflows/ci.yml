@@ -81,9 +81,39 @@ jobs:
           tests/unit/test_reminder_postgres.py tests/unit/test_telegram_owner_privacy.py tests/unit/test_due_scan_worker.py
           --basetemp=.cache/pytest-postgres-ci
 
+  quick-leads-postgres:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: quick_lead_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d quick_lead_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      MIA_QUICK_LEAD_TEST_POSTGRES_URL: postgresql+psycopg://postgres@localhost:5432/quick_lead_test
+      MIA_TEST_POSTGRES_URL: postgresql+psycopg://postgres@localhost:5432/quick_lead_test
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.8.15"
+          python-version: "3.12"
+      - run: uv sync --frozen --group dev
+      - run: mkdir -p .cache
+      - name: Full suite with disposable PostgreSQL 16
+        run: uv run pytest --basetemp=.cache/pytest-quick-leads-ci
+
   container:
     runs-on: ubuntu-latest
-    needs: [checks, postgres]
+    needs: [checks, postgres, quick-leads-postgres]
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
