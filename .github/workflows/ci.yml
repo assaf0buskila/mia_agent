@@ -78,7 +78,8 @@ jobs:
           tests/unit/test_v2_migration_postgres.py
           tests/unit/test_website_v2_postgres.py tests/unit/test_reminders.py
           tests/unit/test_reminder_worker.py tests/unit/test_reminder_owner.py
-          tests/unit/test_reminder_postgres.py tests/unit/test_telegram_owner_privacy.py tests/unit/test_due_scan_worker.py
+          tests/unit/test_reminder_postgres.py tests/unit/test_reminder_telegram_boundary.py
+          tests/unit/test_telegram_owner_privacy.py tests/unit/test_due_scan_worker.py
           --basetemp=.cache/pytest-postgres-ci
 
   quick-leads-postgres:

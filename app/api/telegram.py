@@ -192,9 +192,15 @@ async def _handle_callback(
         # Keep the original reminder keyboard available: Open Contact must not destroy
         # Complete/Snooze. Mutations validate revision, so old buttons are harmless.
         try:
-            await port.send(OutboundMessage(conversation_id=callback["from"],
-                text=escape(reply), channel="telegram", parse_mode="HTML",
-                idempotency_key=f"reminder-callback:{callback['callback_query_id']}"))
+            await port.send(
+                OutboundMessage(
+                    conversation_id=callback["from"],
+                    text=escape(reply),
+                    channel="telegram",
+                    parse_mode="HTML",
+                    idempotency_key=f"reminder-callback:{callback['callback_query_id']}",
+                )
+            )
         except (TelegramSendError, AdapterHttpError, RuntimeError):
             return {"processed": 1, "sent": False}
         return {"processed": 1, "sent": True}

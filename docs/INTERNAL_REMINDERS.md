@@ -158,28 +158,33 @@ Use a Secure/HttpOnly/SameSite cookie, bounded session expiry/revocation, Origin
 checks for writes, and explicit immutable approval for CRM writes. Never store bot secrets
 or persistent Telegram proof in browser storage. Prove Safari and installed-PWA redirect,
 cookie continuity, logout/replay/CSRF behavior on a real iPhone before calling it usable.
-This reminder PR documents the boundary; it does not implement or merge Quick Lead.
+Quick Lead is inherited from current master; this reminder PR does not implement its
+future browser-session exchange.
 
 ## PR integration evidence
 
-Branch: `codex/internal-smart-reminders`. Original development base:
-`cbbd0a0614291ba706f853cc604021f1973cd56a`. Integration base after own-branch rebase:
-`27168610ec3e8cbd3aee836f70b00d6807743f6d`.
-The rebase retained all master additions; CI test-list and config adjacent additions
-needed manual union. No other feature branch was merged.
+Branch: `codex/internal-smart-reminders`. Current combined integration base:
+`e18518744119e50328a28f83b72447fb55b900cd` (Quick Lead #98 and Privacy #96).
+Master CI run `38094781776` passed before integration. The previously unfinished
+Privacy merge was completed, then current origin/master was merged normally, without
+force push or changes to another worktree.
 
-- Telegram Owner Privacy overlaps `app/api/telegram.py` and `.github/workflows/ci.yml`.
-  Its lazy DB path recognizes approval callbacks only; `rm:*` must also be recognized
-  before opening the DB. Private owner context must be verified before acknowledgement,
-  DB access or provider operations. Otherwise reminder callbacks receive `db=None`.
-  Keep both branches' CI checks. This is a combined-integration blocker until resolved
-  and tested in the designated integration branch, not by editing Privacy's worktree.
-- Quick Lead overlaps `app/main.py`: retain its router import/registration alongside
-  the reminder runtime lifespan. No direct reminder/CRM schema conflict was found.
-  Its inspected deployment notes still referred to ECS and its PWA session is incomplete;
-  those are requirements for that separate feature, not changes in this PR.
-- The PR can undergo isolated integration testing after exact-SHA CI passes. Combined
-  Privacy integration and live/iPhone acceptance remain gated as described above.
+- Telegram webhook validates the full private numeric-owner context before opening a
+  database session or acknowledging any callback, including `rm:*`. Recognized reminder
+  tokens use the lazy authorized DB path; malformed tokens do not open a session.
+  HTTP regressions cover rejection before DB/ACK/business and valid Complete/Snooze/
+  Contact actions with SQLite and disposable PostgreSQL, including replay revisions.
+- Quick Lead router, signed-login authentication, atomic persistence and associated
+  tests are inherited unchanged from master. Its standalone iPhone PWA session remains
+  explicitly incomplete and requires the secure server-session flow in
+  `docs/QUICK_LEAD_CAPTURE.md`; that limitation does not block backend integration.
+- CI preserves all master jobs (including the full Quick Lead PostgreSQL suite), GCP
+  checks and widget behavior, and adds reminder PostgreSQL and boundary regressions.
+- Reminder flags remain default-off. The existing daily due-scan worker and GCP timer
+  remain unchanged. Deployment and rollback requirements target the current GCP VM.
+- Final committed-SHA tests, combined independent review and CI are recorded in PR #97.
+  Production migrations, feature activation and real-phone delivery still require
+  separate owner approval. PR #97 must not be merged as part of this preparation.
 
 ## Verification evidence
 
@@ -245,4 +250,5 @@ Historical development results above do not substitute for that release gate.
 - `tests/unit/test_reminder_owner.py`
 - `tests/unit/test_reminder_worker.py`
 - `tests/unit/test_reminder_postgres.py`
+- `tests/unit/test_reminder_telegram_boundary.py`
 - `docs/INTERNAL_REMINDERS.md`
