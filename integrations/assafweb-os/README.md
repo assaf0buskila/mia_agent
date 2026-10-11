@@ -69,4 +69,3 @@ docker rm -f mia-owner-os-regression-test
 
 No migration/live deployment/feature enablement is authorized by this recipe.
 See ../../docs/OWNER_OS_LOCAL_INTEGRATION.md and the threat model for rollout gates.
-

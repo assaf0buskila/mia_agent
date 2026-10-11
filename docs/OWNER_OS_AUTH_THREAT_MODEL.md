@@ -59,4 +59,3 @@ after final fixes; its outcome is recorded in OWNER_OS_LOCAL_INTEGRATION.md.
 
 No production deployment, live migration, customer/provider call, DNS change,
 feature activation or merge is part of this work.
-
