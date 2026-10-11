@@ -113,9 +113,39 @@ jobs:
       - name: Full suite with disposable PostgreSQL 16
         run: uv run pytest --basetemp=.cache/pytest-quick-leads-ci
 
+  owner-os-postgres:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: owner_os_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d owner_os_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      MIA_OWNER_OS_TEST_POSTGRES_URL: postgresql+psycopg://postgres@localhost:5432/owner_os_test
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.8.15"
+          python-version: "3.12"
+      - run: uv sync --frozen --group dev
+      - run: mkdir -p .cache
+      # The mobile repository is private. Its actual browser/BFF integration runs
+      # in that repository's CI; this job needs no cross-repository credential.
+      - run: uv run pytest tests/unit/test_owner_os_postgres.py -k 'not frozen_frontend_bff' --basetemp=.cache/owner-os-ci
+
   container:
     runs-on: ubuntu-latest
-    needs: [checks, postgres, quick-leads-postgres]
+    needs: [checks, postgres, quick-leads-postgres, owner-os-postgres]
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7

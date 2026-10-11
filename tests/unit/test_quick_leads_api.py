@@ -168,11 +168,14 @@ def test_upstream_phone_policy_applies_to_capture_and_duplicate(api):
 @pytest.mark.parametrize("proof", [
     "", "{}", '{"id":"12345","id":"12345"}',
     login_proof(id="99999", username="owner"),
-    login_proof(auth_date=str(int(time.time()) - 601)),
-    login_proof(auth_date=str(int(time.time()) + 120)),
+    lambda: login_proof(auth_date=str(int(time.time()) - 601)),
+    lambda: login_proof(auth_date=str(int(time.time()) + 120)),
     login_proof().replace('"Owner"', '"Forged"'),
 ])
 def test_owner_auth_cannot_be_forged(api, proof):
+    # Generate time-bound negatives at execution, not collection: a long full
+    # suite must not age the future proof into the verifier's valid skew window.
+    proof = proof() if callable(proof) else proof
     client, factory, _settings = api
     result = client.post(
         f"{PREFIX}/proposals", json=lead(),

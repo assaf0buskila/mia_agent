@@ -1,5 +1,16 @@
 # MIA_V2.md — what Mia is, from the code
 
+## Local addition — Owner OS, 2026-10-11
+
+The separately gated `/v1/owner/auth/*` and `/v1/owner/os/*` routers integrate the
+existing standalone mobile UI with server-persisted owner sessions and canonical
+PostgreSQL contacts, activities and internal reminders. `MIA_OWNER_OS_ENABLED`
+and `MIA_OWNER_OS_ACTIONS_ENABLED` default false. There is no OAuth server,
+second CRM or browser-side provider credential. Prepared action adapters reuse
+existing approval/Quick Lead/reminder services. Details and live-evidence limits:
+`docs/OWNER_OS_LOCAL_INTEGRATION.md`. The historical production notes below do
+not describe this local addition.
+
 Updated 2026-09-11. Production (`/health`, 2026-09-14): commit `4b80f31`, `eu-north-1`.
 
 ## Two loops, one app

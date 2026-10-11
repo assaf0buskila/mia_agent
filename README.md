@@ -61,6 +61,12 @@ with `uv run mia-migrate`; production never runs `create_all`.
 
 ## Deploy
 
+The standalone AssafWeb OS owner integration is local and disabled by default.
+See [the integration contract and release gates](docs/OWNER_OS_LOCAL_INTEGRATION.md)
+and [the authentication threat model](docs/OWNER_OS_AUTH_THREAT_MODEL.md).
+Its PostgreSQL session migration and dedicated roles require separate approval;
+merged backend or mobile code is not evidence that the owner app is deployed.
+
 Production runs on the GCP VM `mia` in `me-west1-a`. Settings come from Secret Manager
 `mia-env`; PostgreSQL and runtime database credentials stay on the VM. Never copy `.env`.
 The complete runbook is `ops/gcp/README.md`.

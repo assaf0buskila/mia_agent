@@ -1,5 +1,19 @@
 # Mia handoff — 2026-09-17
 
+## Owner OS integration — local worktree, 2026-10-11
+
+Branch `codex/owner-os-integration`, base `9fc30581705e8d18f21f53fe28c6203909cdd050`.
+Standalone Telegram Login -> opaque PostgreSQL owner session -> canonical read-only
+Owner OS APIs, with a Node adapter for frozen mobile PR #59. Both feature gates
+default off. Quick Lead and reminder adapters are prepared, not activated.
+See `docs/OWNER_OS_LOCAL_INTEGRATION.md` and `docs/OWNER_OS_AUTH_THREAT_MODEL.md`
+for the exact endpoints, tests, permissions, frontend changes and release blockers.
+Public production health observed at 2026-10-11 09:20:36 UTC reports
+`a213c9a7fbdf5586e13cb38ffdbc4646f59c4541`, schema
+`20261008_assafweb_form_intake_receipts.sql`; master and deployment differ.
+No production mutation, migration, deployment, provider call, DNS change or merge
+was performed. Preserve this isolated worktree and the frozen mobile assets.
+
 ## P0A reviewed feature branch — 2026-10-10
 
 AssafWeb OS P0A was implemented locally on branch `codex/mia-p0a-crm`, based on

@@ -66,6 +66,19 @@ class Settings(BaseSettings):
     crm_israeli_phone_normalization_enabled: bool = False
     reminders_enabled: bool = False
     reminder_delivery_enabled: bool = False
+    # Private standalone owner app. Both gates stay off until a separate release.
+    owner_os_enabled: bool = False
+    owner_os_actions_enabled: bool = False
+    owner_os_origin: str = ""
+    owner_os_workspace_id: str = ""
+    owner_os_session_database_url: str = ""
+    owner_os_read_database_url: str = ""
+    owner_os_action_database_url: str = ""
+    owner_os_cursor_secret: str = ""
+    owner_os_session_ttl_seconds: int = Field(default=1800, gt=0, le=1800)
+    owner_os_session_scopes: str = (
+        "owner-os:read:contacts,owner-os:read:activities,owner-os:read:reminders"
+    )
     openai_api_key: str = Field(default="")
     openai_transcribe_model: str = Field(default="gpt-transcribe")
     openai_transcribe_fallback_model: str = Field(default="")
