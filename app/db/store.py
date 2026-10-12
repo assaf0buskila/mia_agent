@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 from typing import NamedTuple
 from uuid import uuid4
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import SQLAlchemyError
@@ -104,6 +104,7 @@ from app.domain.idempotency import (
     ALLOWLISTED_OPERATION_SCOPES,
     OPERATION_TTL_SECONDS,
     sanitize_operation_result,
+    sanitize_provider_write_result,
 )
 from app.domain.identity import ALLOWLISTED_LINK_REASONS
 from app.domain.kpis import COUNTABLE_EVENT_TYPES
@@ -2434,6 +2435,34 @@ class LeadStore:
             return False
         return True
 
+    def reclaim_completed_provider_write(self, *, scope: str, key: str) -> bool:
+        """Atomically roll a known-complete preparation claim to its next attempt."""
+        if not key or scope not in ALLOWLISTED_OPERATION_SCOPES:
+            return False
+        changed = self.session.execute(
+            update(IdempotencyRow)
+            .where(
+                IdempotencyRow.scope == scope,
+                IdempotencyRow.key == key,
+                IdempotencyRow.status == "completed",
+            )
+            .values(
+                status="provider_claimed",
+                created_at=datetime.now(UTC).isoformat(),
+                expires_at="",
+                result_json="{}",
+            )
+        )
+        if changed.rowcount != 1:
+            self.session.rollback()
+            return False
+        try:
+            self.session.commit()
+        except SQLAlchemyError:
+            self.session.rollback()
+            return False
+        return True
+
     def complete_provider_write(self, *, scope: str, key: str, result_json: str = "{}") -> bool:
         """Persist a known provider success without making an ambiguous claim retryable."""
         if not key or scope not in ALLOWLISTED_OPERATION_SCOPES:
@@ -2447,13 +2476,46 @@ class LeadStore:
         if existing is None or existing.status != "provider_claimed":
             return False
         existing.status = "completed"
-        existing.result_json = sanitize_operation_result(result_json)
+        existing.result_json = sanitize_provider_write_result(result_json)
         try:
             self.session.commit()
         except SQLAlchemyError:
             self.session.rollback()
             return False
         return True
+
+    def annotate_provider_write_claim(
+        self, *, scope: str, key: str, result_json: str
+    ) -> bool:
+        """Persist bounded recovery metadata before a claimed provider call."""
+        if not key or scope not in ALLOWLISTED_OPERATION_SCOPES:
+            return False
+        existing = self.session.scalars(
+            select(IdempotencyRow).where(
+                IdempotencyRow.scope == scope,
+                IdempotencyRow.key == key,
+            )
+        ).one_or_none()
+        if existing is None or existing.status != "provider_claimed":
+            return False
+        existing.result_json = sanitize_provider_write_result(result_json)
+        try:
+            self.session.commit()
+        except SQLAlchemyError:
+            self.session.rollback()
+            return False
+        return True
+
+    def get_provider_write_context(self, *, scope: str, key: str) -> str:
+        if not key or scope not in ALLOWLISTED_OPERATION_SCOPES:
+            return "{}"
+        existing = self.session.scalars(
+            select(IdempotencyRow).where(
+                IdempotencyRow.scope == scope,
+                IdempotencyRow.key == key,
+            )
+        ).one_or_none()
+        return existing.result_json if existing is not None else "{}"
 
     def mark_provider_write_pending_review(self, *, scope: str, key: str) -> None:
         """Keep an indeterminate provider outcome permanently out of auto-retry."""

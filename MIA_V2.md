@@ -7,7 +7,15 @@ one pinned Google Sheet through signed Apps Script calls. MIA can read and propo
 only the private numeric owner can approve via Telegram or authenticated OS. With
 this binding enabled, legacy owner business/CRM/Sheet writers and side-effecting
 CRM read-sync tools are refused before provider effects. Public website intake
-remains on its existing path. See `docs/ASSAF_OS_RELEASE_STATUS.md` for deployment
+remains canonical in PostgreSQL. Its existing at-most-once Telegram ping can include
+one server-bound lead preparation card: the owner first chooses the exact CRM path,
+then receives a separate 10-minute immutable approval card. Only that final approval
+can create the shared Sheet row. Contact values come from the captured conversation;
+the model may suggest only a bounded summary, next step, and path recommendation.
+Missing names or malformed numbers require an explicit owner correction, and an
+unknown path never defaults. The final callback revalidates the CRM source, pending
+Apps Script proposal, workbook binding, and absence of a matching Sheet phone/email.
+See `docs/ASSAF_OS_RELEASE_STATUS.md` for deployment
 evidence: current code tests are not live product acceptance.
 
 ## Local addition — Owner OS, 2026-10-11
@@ -69,10 +77,12 @@ number ("zero five two…", "אפס חמש שתיים…") is normalised to digi
 ## Delivery and CRM
 
 `app/services/crm_v2.py` owns contacts, identities, activity, sync snapshots and outbox
-rows. `app/workers/crm_delivery.py` polls every 5 seconds under DB leases: Sheet import →
-Telegram lead brief → Contacts/Activity sync. Google Sheets is an editable owner view:
-three-way merge per field; a same-field conflict pauses for the owner. The worker logs
-only failures, by design — success is silent, so proof of delivery is the Telegram message.
+rows. `app/workers/crm_delivery.py` polls every 5 seconds under DB leases. In legacy mode
+it runs Sheet import → Telegram lead brief → Contacts/Activity sync. When the shared
+Assaf OS binding is enabled it keeps PostgreSQL intake and Telegram delivery active but
+leaves the old Contacts/Activity jobs and history untouched; it neither imports from nor
+projects to that retired Sheet path. The worker logs only failures, by design — success
+is silent, so proof of delivery is the Telegram message or its durable receipt.
 
 ## Widget
 

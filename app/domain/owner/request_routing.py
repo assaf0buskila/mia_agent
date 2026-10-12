@@ -114,6 +114,8 @@ _TOOL_GROUPS: tuple[tuple[str, frozenset[str]], ...] = (
                 "assaf_os_snapshot",
                 "assaf_os_receipt",
                 "assaf_os_propose",
+                "assaf_os_lead_candidates",
+                "assaf_os_prepare_crm_lead",
             }
         ),
     ),

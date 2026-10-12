@@ -31,6 +31,9 @@ OPERATION_TTL_SECONDS = 300
 _MAX_RESULT_JSON_LEN = 512
 _MAX_EVENT_ID_LEN = 128
 _ALLOWLISTED_RESULT_KEYS = frozenset({"ok", "event_id"})
+_ALLOWLISTED_PROVIDER_RESULT_KEYS = frozenset(
+    {"ok", "event_id", "contact_id", "request_id", "approval_id", "proposal_id"}
+)
 
 
 def sanitize_operation_result(result_json: str) -> str:
@@ -50,6 +53,27 @@ def sanitize_operation_result(result_json: str) -> str:
         not isinstance(event_id, str) or len(event_id) > _MAX_EVENT_ID_LEN
     ):
         return "{}"
+    sanitized = json.dumps(parsed, separators=(",", ":"), sort_keys=True)
+    if len(sanitized) > _MAX_RESULT_JSON_LEN:
+        return "{}"
+    return sanitized
+
+
+def sanitize_provider_write_result(result_json: str) -> str:
+    """Keep only bounded opaque ids needed to recover an uncertain provider write."""
+    try:
+        parsed = json.loads(result_json)
+    except (json.JSONDecodeError, TypeError):
+        return "{}"
+    if not isinstance(parsed, dict) or set(parsed) - _ALLOWLISTED_PROVIDER_RESULT_KEYS:
+        return "{}"
+    if "ok" in parsed and not isinstance(parsed["ok"], bool):
+        return "{}"
+    for key, value in parsed.items():
+        if key == "ok":
+            continue
+        if not isinstance(value, str) or not value or len(value) > _MAX_EVENT_ID_LEN:
+            return "{}"
     sanitized = json.dumps(parsed, separators=(",", ":"), sort_keys=True)
     if len(sanitized) > _MAX_RESULT_JSON_LEN:
         return "{}"
@@ -78,6 +102,8 @@ class IdempotencyStore(Protocol):
     def get_operation_result(self, *, scope: str, key: str) -> str: ...
 
     def claim_provider_write(self, *, scope: str, key: str) -> bool: ...
+
+    def reclaim_completed_provider_write(self, *, scope: str, key: str) -> bool: ...
 
     def complete_provider_write(self, *, scope: str, key: str, result_json: str = "{}") -> bool: ...
 

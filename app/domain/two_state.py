@@ -111,6 +111,8 @@ OWNER_HOUSE_TOOLS: frozenset[str] = frozenset(
         "assaf_os_snapshot",
         "assaf_os_receipt",
         "assaf_os_propose",
+        "assaf_os_lead_candidates",
+        "assaf_os_prepare_crm_lead",
     }
 )
 

@@ -449,11 +449,95 @@ def _card_assaf_os(parameters: Mapping[str, Any], target: Mapping[str, Any]) -> 
             new = shown(key, after.get(key, changed[key]), after_currency)
             lines.append(f"{bold(label)}: {esc(old)} ← {esc(new)}")
         changes = "\n".join(lines)
+
+    provenance = target.get("contact_provenance")
+    provenance = provenance if isinstance(provenance, dict) else {}
+    provenance_lines = _kv_lines(
+        [
+            ("טלפון שנקלט", provenance.get("raw_phone"), True),
+            ("טלפון מנורמל", provenance.get("normalized_phone"), True),
+            ("אימייל שנקלט", provenance.get("raw_email"), True),
+            (
+                "תיקון בעלים",
+                (
+                    "כן"
+                    if any(
+                        provenance.get(key)
+                        for key in (
+                            "owner_corrected_name",
+                            "owner_corrected_phone",
+                            "owner_corrected_email",
+                        )
+                    )
+                    else None
+                ),
+                False,
+            ),
+        ]
+    )
     return _card(
         "עדכון בגיליון העסקי המשותף",
         fields,
         section("לפני ואחרי", changes) if changes else "",
+        section("מקור פרטי קשר", provenance_lines) if provenance_lines else "",
         note="האישור יעדכן את הרשומה המוצעת בגיליון המשותף לאחר בדיקת יעד חוזרת.",
+    )
+
+
+def _card_assaf_os_lead_prepare(
+    parameters: Mapping[str, Any], target: Mapping[str, Any]
+) -> str:
+    """Show captured identity and recommendation before the owner chooses a path."""
+    source = target.get("source") if isinstance(target.get("source"), dict) else {}
+    captured = source.get("captured") if isinstance(source.get("captured"), dict) else {}
+    raw = source.get("raw_fields") if isinstance(source.get("raw_fields"), dict) else {}
+    template = target.get("template") if isinstance(target.get("template"), dict) else {}
+    missing = (
+        template.get("missing_fields")
+        if isinstance(template.get("missing_fields"), list)
+        else []
+    )
+    raw_phone = str(raw.get("phone") or "")
+    normalized_phone = str(captured.get("phone") or "")
+    phone_value = normalized_phone
+    if raw_phone and normalized_phone and raw_phone != normalized_phone:
+        phone_value = f"{raw_phone} (נרמל ל-{normalized_phone})"
+    contact = _kv_lines(
+        [
+            ("שם", captured.get("name") or "חסר", False),
+            ("טלפון", phone_value or (raw_phone or "חסר"), True),
+            ("אימייל", captured.get("email") or raw.get("email") or "חסר", True),
+            ("מזהה מקור CRM", parameters.get("contact_id"), True),
+        ]
+    )
+    recommendation = _kv_lines(
+        [
+            ("מסלול מומלץ", template.get("recommended_path") or "unknown", False),
+            ("סיכום", template.get("summary") or "לא סופק", False),
+            ("צעד הבא", template.get("next_step") or "לא סופק", False),
+        ]
+    )
+    if missing:
+        labels = {
+            "name": "שם",
+            "phone_or_email": "טלפון או אימייל",
+            "phone_correction": "תיקון טלפון",
+        }
+        note = (
+            "חסרים פרטים: "
+            + ", ".join(labels.get(str(item), str(item)) for item in missing)
+            + ". יש להשיב למיה עם התיקון והמסלול; לא הוכנה הצעת כתיבה."
+        )
+    else:
+        note = (
+            "בחירת מסלול רק מכינה הצעה מדויקת. לאחר מכן יישלח כרטיס אישור נוסף; "
+            "רק אישור הכרטיס הבא יכול לכתוב לגיליון."
+        )
+    return _card(
+        "הכנת ליד לגיליון העסקי",
+        section("מקור שנקלט", contact),
+        section("המלצת מיה", recommendation),
+        note=note,
     )
 
 
@@ -582,6 +666,7 @@ _CARD_RENDERERS = {
     "business.save_project": lambda p, t: _card_business(p, t, "business.save_project"),
     "business.recover_receipt": lambda p, t: _card_business(p, t, "business.recover_receipt"),
     "assaf_os.approve": _card_assaf_os,
+    "assaf_os.lead.prepare": _card_assaf_os_lead_prepare,
 }
 
 

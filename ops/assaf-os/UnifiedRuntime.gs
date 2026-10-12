@@ -354,6 +354,32 @@ function assafOsInvalidateEntityCache_(workbook, entity) {
   delete ASSAF_OS_REQUEST_READ_CACHE.strict[entity]; delete ASSAF_OS_REQUEST_READ_CACHE.tolerant[entity];
 }
 
+function assafOsLeadPhoneIdentity_(value) {
+  var raw = String(value || "").trim();
+  if (!raw || !/^\+?[0-9][0-9 ().-]*$/.test(raw)) return "";
+  if ((raw.match(/\(/g) || []).length !== (raw.match(/\)/g) || []).length) return "";
+  var digits = raw.replace(/[^0-9]/g, "");
+  if (raw.charAt(0) === "+") {
+    if (!/^[1-9][0-9]{6,14}$/.test(digits) || /^9720/.test(digits)) return "";
+    if (/^9725/.test(digits) && !/^9725[0-9]{8}$/.test(digits)) return "";
+    return "+" + digits;
+  }
+  if (/^05/.test(digits)) return /^05[0-9]{8}$/.test(digits) ? "+972" + digits.slice(1) : "";
+  return /^[0-9]{7,15}$/.test(digits) ? digits : "";
+}
+
+function assafOsLeadContactDependencies_(workbook, recordId, candidate) {
+  if (!candidate) return [];
+  var phone = assafOsLeadPhoneIdentity_(candidate.phone), email = String(candidate.email || "").trim().toLowerCase();
+  if (!phone && !email) return [];
+  return assafOsReadEntity_(workbook, "leads").records.filter(function (lead) {
+    if (lead.lead_id === recordId) return false;
+    var samePhone = phone && assafOsLeadPhoneIdentity_(lead.phone) === phone;
+    var sameEmail = email && String(lead.email || "").trim().toLowerCase() === email;
+    return Boolean(samePhone || sameEmail);
+  });
+}
+
 function assafOsTarget_(workbook, entity, recordId, candidate) {
   if (entity === "promote_lead") {
     var lead = assafOsReadEntity_(workbook, "leads").byId[recordId] || null;
@@ -362,6 +388,7 @@ function assafOsTarget_(workbook, entity, recordId, candidate) {
   }
   var row = assafOsReadEntity_(workbook, entity).byId[recordId] || null;
   var result = row ? { revision: row.revision || 0, record: row, accepted: assafOsLatestAccepted_(workbook, entity, recordId) } : { revision: 0, record: null, accepted: null };
+  if (entity === "leads" && candidate) result.lead_contact_dependencies = assafOsLeadContactDependencies_(workbook, recordId, candidate);
   if (candidate && candidate.person_id) result.client_dependency = { record: assafOsReadEntity_(workbook, "clients").byId[candidate.person_id] || null, accepted: assafOsLatestAccepted_(workbook, "clients", candidate.person_id) };
   if (candidate && candidate.work_id && entity !== "works") result.work_dependency = { record: assafOsReadEntity_(workbook, "works").byId[candidate.work_id] || null, accepted: assafOsLatestAccepted_(workbook, "works", candidate.work_id) };
   if (entity === "payments" && candidate) {

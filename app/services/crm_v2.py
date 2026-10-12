@@ -626,6 +626,13 @@ class CrmService:
         never replay or suppress the first handoff.
         """
         safe_summary = summary.strip()[:MAX_FIELD_CHARS]
+        raw_source_fields = {
+            key: str(fields.get(key) or "").strip()[:MAX_FIELD_CHARS]
+            for key in (
+                "name", "phone", "email", "business", "summary", "next_step",
+                "want", "source", "date", "status",
+            )
+        }
         scope = "".join(ch for ch in ping_scope if ch.isalnum() or ch == "-")[:40]
         suffix = f":{scope}" if scope else ""
 
@@ -635,6 +642,10 @@ class CrmService:
                 "text": safe_summary,
                 "conversation_id": conversation_id,
                 "receipt_key": f"crm:{conversation_id}:{recipient_id}{suffix}",
+                "lead_source": {
+                    "source_ref": source_ref,
+                    "raw_fields": raw_source_fields,
+                },
             }
             if scope:
                 payload["ping_scope"] = scope
@@ -685,6 +696,13 @@ class CrmService:
         safe_summary = summary.strip()[:MAX_FIELD_CHARS]
         conversation_id = f"form:{safe_source_id}"
         source_ref = f"assafweb-form:{safe_source_id}"
+        raw_source_fields = {
+            key: str(fields.get(key) or "").strip()[:MAX_FIELD_CHARS]
+            for key in (
+                "name", "phone", "email", "business", "summary", "next_step",
+                "want", "source", "date", "status",
+            )
+        }
 
         intents = tuple(
             DestinationIntent(
@@ -694,6 +712,10 @@ class CrmService:
                     "text": safe_summary,
                     "conversation_id": conversation_id,
                     "receipt_key": f"crm:{conversation_id}:{recipient_id}",
+                    "lead_source": {
+                        "source_ref": source_ref,
+                        "raw_fields": raw_source_fields,
+                    },
                 },
                 dedupe_key=f"telegram:crm:{conversation_id}:{recipient_id}",
             )

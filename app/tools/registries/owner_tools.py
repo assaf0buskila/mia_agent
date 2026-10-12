@@ -33,7 +33,13 @@ from app.tools.owner.analytics import (
     _social_capabilities,
     _website_kpis,
 )
-from app.tools.owner.assaf_os import _assaf_os_propose, _assaf_os_receipt, _assaf_os_snapshot
+from app.tools.owner.assaf_os import (
+    _assaf_os_lead_candidates,
+    _assaf_os_prepare_crm_lead,
+    _assaf_os_propose,
+    _assaf_os_receipt,
+    _assaf_os_snapshot,
+)
 from app.tools.owner.brain import _list_known_entities, _remember, _search_knowledge, _search_memory
 from app.tools.owner.business_ledger import (
     _business_crm_leads,
@@ -195,7 +201,13 @@ _register(
             "Create one field-only pending Assaf OS change. This does not change a business "
             "row. It creates an exact Telegram approval for the numeric owner. request_id is "
             "the current immutable request id; input_json is a JSON object of schema input "
-            "fields only. Phone/email values must appear in the owner's current message."
+            "fields only. Lead fields are exactly name, phone, email, path "
+            "(לימוד|אוטומציה), status "
+            "(חדש|רלוונטי|לא רלוונטי|לא ענה|הפך ללקוח), and source_note; name/path/status "
+            "are required and a new lead normally starts as חדש. Phone/email values must "
+            "appear in the owner's current message; local 05 and explicit +972 forms are "
+            "equivalent only when deterministic phone validation proves it. A prepared "
+            "proposal is not an inserted row; only a committed approval receipt proves that."
         ),
         parameters={
             "type": "object",
@@ -222,6 +234,65 @@ _register(
             "additionalProperties": False,
         },
         handler=_assaf_os_propose,
+    )
+)
+
+_register(
+    ToolSpec(
+        name="assaf_os_lead_candidates",
+        description=(
+            "List up to 20 recent PostgreSQL CRM contacts eligible for owner-reviewed lead "
+            "preparation. Returns stable contact/conversation ids, source and booleans "
+            "for contact availability, never phone/email or chat text. Read only. Use when "
+            "Assaf asks which old website/form CRM rows can be prepared; never migrate all."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 20}},
+            "required": ["limit"],
+            "additionalProperties": False,
+        },
+        handler=_assaf_os_lead_candidates,
+    )
+)
+
+_register(
+    ToolSpec(
+        name="assaf_os_prepare_crm_lead",
+        description=(
+            "Prepare exactly one PostgreSQL CRM source row as a new Assaf OS lead. The server "
+            "loads phone/email from the selected contact/conversation; never copy or invent "
+            "them. path must be the owner's explicit לימוד or אוטומציה choice. status is fixed "
+            "to חדש. summary/next_step are bounded suggestions for source_note only. Supply "
+            "corrected_name/phone/email only when Assaf explicitly wrote that exact correction "
+            "in this message; blank means use captured source. The result is only a 10-minute "
+            "immutable Telegram proposal. Never say inserted until its receipt is committed."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "contact_id": {"type": "string"},
+                "conversation_id": {"type": ["string", "null"]},
+                "path": {"type": "string", "enum": ["לימוד", "אוטומציה"]},
+                "summary": {"type": ["string", "null"]},
+                "next_step": {"type": ["string", "null"]},
+                "corrected_name": {"type": ["string", "null"]},
+                "corrected_phone": {"type": ["string", "null"]},
+                "corrected_email": {"type": ["string", "null"]},
+            },
+            "required": [
+                "contact_id",
+                "conversation_id",
+                "path",
+                "summary",
+                "next_step",
+                "corrected_name",
+                "corrected_phone",
+                "corrected_email",
+            ],
+            "additionalProperties": False,
+        },
+        handler=_assaf_os_prepare_crm_lead,
     )
 )
 

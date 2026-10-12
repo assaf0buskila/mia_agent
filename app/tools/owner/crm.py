@@ -94,6 +94,7 @@ def _crm_operational_health(ctx: ToolContext, args: dict[str, Any]) -> ToolResul
         ctx.store.session,
         phone_normalizer=normalize_new_input_phone,
         recipient_ids=ctx.settings.telegram_owner_user_id_set(),
+        legacy_sheet_projection_enabled=not ctx.settings.assaf_os_enabled,
     )
     return ToolResult(ok=True, text=render_operational_health_he(report))
 

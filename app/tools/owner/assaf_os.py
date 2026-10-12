@@ -5,12 +5,14 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Mapping
 from typing import Any
 
 from pydantic import ValidationError
 
 from app.services.assaf_os import AssafOsError, AssafOsPort, ProposeRequest
 from app.services.owner_actions import propose_owner_action
+from app.services.phone_identity import normalize_new_input_phone
 from app.tools.owner.types import ToolContext, ToolResult
 
 
@@ -81,9 +83,9 @@ def _contact_provenance(ctx: ToolContext, request: ProposeRequest) -> bool:
     if isinstance(supplied_phone, str) and supplied_phone:
         if not re.fullmatch(r"\+?[0-9](?:[0-9 ().-]{6,}[0-9])", supplied_phone):
             return False
-        normalized = re.sub(r"\D", "", supplied_phone)
+        normalized = normalize_new_input_phone(supplied_phone)
         phones = {
-            re.sub(r"\D", "", match.group(0))
+            normalize_new_input_phone(match.group(0))
             for match in re.finditer(
                 r"(?<![A-Za-z0-9])\+?[0-9](?:[0-9 ().-]{6,}[0-9])(?![A-Za-z0-9])",
                 ctx.owner_text,
@@ -92,6 +94,92 @@ def _contact_provenance(ctx: ToolContext, request: ProposeRequest) -> bool:
         if not normalized or normalized not in phones:
             return False
     return True
+
+
+def _owner_correction_provenance(ctx: ToolContext, arguments: Mapping[str, Any]) -> bool:
+    name = str(arguments.get("corrected_name") or "").strip()
+    if name and name not in ctx.owner_text:
+        return False
+    phone = str(arguments.get("corrected_phone") or "").strip()
+    if phone:
+        candidate = normalize_new_input_phone(phone)
+        mentioned = {
+            normalize_new_input_phone(match.group(0))
+            for match in re.finditer(
+                r"(?<![A-Za-z0-9])\+?[0-9](?:[0-9 ().-]{6,}[0-9])(?![A-Za-z0-9])",
+                ctx.owner_text,
+            )
+        }
+        if not candidate or candidate not in mentioned:
+            return False
+    email = str(arguments.get("corrected_email") or "").strip().casefold()
+    if email:
+        mentioned_email = {
+            match.group(0).casefold()
+            for match in re.finditer(
+                r"(?<![A-Za-z0-9._%+\-])[A-Za-z0-9._%+\-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}(?![A-Za-z0-9._%+\-])",
+                ctx.owner_text,
+            )
+        }
+        if email not in mentioned_email:
+            return False
+    return True
+
+
+def _assaf_os_lead_candidates(ctx: ToolContext, arguments: dict[str, Any]) -> ToolResult:
+    if not assaf_os_enabled(ctx) or ctx.store is None:
+        return ToolResult(ok=False, error="assaf os is unavailable")
+    from app.services.assaf_os_leads import list_crm_lead_candidates
+
+    try:
+        limit = int(arguments.get("limit") or 10)
+        return ToolResult(
+            ok=True,
+            text=_json(list_crm_lead_candidates(ctx.store, limit=limit)),
+            evidence="crm_lead_candidates_without_contact_values",
+        )
+    except (TypeError, ValueError):
+        return ToolResult(ok=False, error="invalid_arguments")
+
+
+def _assaf_os_prepare_crm_lead(ctx: ToolContext, arguments: dict[str, Any]) -> ToolResult:
+    """Prepare one source-bound lead; contact values never come from model arguments."""
+    if not assaf_os_enabled(ctx) or ctx.store is None:
+        return ToolResult(ok=False, error="assaf os is unavailable")
+    if not _owner_correction_provenance(ctx, arguments):
+        return ToolResult(
+            ok=False,
+            error="correction must appear in the current owner message",
+        )
+    from app.services.assaf_os_leads import prepare_selected_crm_lead
+
+    try:
+        proposal = prepare_selected_crm_lead(
+            ctx.store,
+            settings=ctx.settings,
+            principal=ctx.principal,
+            contact_id=str(arguments.get("contact_id") or ""),
+            conversation_id=str(arguments.get("conversation_id") or ""),
+            path=str(arguments.get("path") or ""),
+            summary=str(arguments.get("summary") or ""),
+            next_step=str(arguments.get("next_step") or ""),
+            corrected_name=str(arguments.get("corrected_name") or ""),
+            corrected_phone=str(arguments.get("corrected_phone") or ""),
+            corrected_email=str(arguments.get("corrected_email") or ""),
+        )
+        return ToolResult(
+            ok=True,
+            text=(
+                "הוכנה הצעת ליד מדויקת. עדיין לא נכתבה רשומה; רק אישור הכרטיס "
+                "בטלגרם יכול לבצע את הכתיבה."
+            ),
+            approval_id=proposal.approval_id,
+            evidence="assaf_os_source_bound_lead_proposal",
+        )
+    except AssafOsError as exc:
+        return ToolResult(ok=False, error=exc.code)
+    except (KeyError, TypeError, ValueError, ValidationError):
+        return ToolResult(ok=False, error="invalid_arguments")
 
 
 def _assaf_os_propose(ctx: ToolContext, arguments: dict[str, Any]) -> ToolResult:

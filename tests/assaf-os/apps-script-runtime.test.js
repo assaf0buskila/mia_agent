@@ -43,6 +43,17 @@ test("dependent refund fingerprint prevents two pending refunds from over-refund
   assert.equal(h.workbook.getSheetByName("תקבולים").getDataRange().getValues().length, 3);
 });
 
+test("two pending new leads with equivalent contact cannot both commit", () => {
+  const h = createHarness();
+  const first = propose(h, "leads", { name: "דנה", phone: "+972502222222", path: "לימוד", status: "חדש", source_note: "site one" });
+  const second = propose(h, "leads", { name: "דנה שוב", phone: "050-222-2222", path: "אוטומציה", status: "חדש", source_note: "site two" });
+  assert.equal(approve(h, first).data.status, "committed");
+  const stale = approve(h, second);
+  assert.equal(stale.ok, true);
+  assert.equal(stale.data.status, "target_changed");
+  assert.equal(h.workbook.getSheetByName("לידים").getDataRange().getValues().length, 2);
+});
+
 test("original payment updates validate the reciprocal refund graph", () => {
   const h = createHarness(); h.addRecord("clients", client()); h.addRecord("works", work()); h.addRecord("payments", payment());
   h.addRecord("payments", { payment_id: "PAY_2", person_id: "PER_1", work_id: "WOR_1", path: "אוטומציה", date: "2026-10-02", actual_amount_ils: 6000, currency: "ILS", kind: "החזר", original_payment_id: "PAY_1", created_at: "2026-10-02T00:00:00.000Z", revision: 1, write_source: "משתמש", request_id: "EDIT_refund1" });

@@ -42,7 +42,12 @@ from app.integrations.telegram import (
     parse_telegram_update,
     validate_telegram_voice_media,
 )
-from app.integrations.telegram_format import owner_text, parse_callback_token
+from app.integrations.telegram_format import (
+    approval_keyboard,
+    owner_text,
+    parse_callback_token,
+    parse_lead_path_token,
+)
 from app.integrations.transcribe import TranscriptionError, TranscriptionPort
 from app.workers.telegram_owner import process_telegram_owner_update
 
@@ -181,6 +186,75 @@ async def _handle_callback(
             await answer(callback["callback_query_id"])
         except (TelegramSendError, AdapterHttpError, RuntimeError):
             pass
+    selected_path, preparation_token = parse_lead_path_token(callback.get("data", ""))
+    if selected_path and preparation_token:
+        if db is None:
+            raise RuntimeError("recognized lead path callback requires a database session")
+        from app.domain.owner.callbacks import approval_token
+        from app.domain.owner.proposal_cards import render_owner_approval_card
+        from app.services.assaf_os_leads import choose_lead_path
+
+        store = LeadStore(db)
+        choice = choose_lead_path(
+            store,
+            settings=settings,
+            principal=Principal.owner(source="telegram", actor_id=callback["from"]),
+            approval_id=preparation_token,
+            path=selected_path,
+        )
+        reply_text = {
+            "prepared": (
+                "המסלול נבחר והוכנה הצעה מדויקת. עדיין לא נכתבה רשומה; "
+                "יש לאשר את הכרטיס החדש."
+            ),
+            "needs_correction": (
+                "חסר שם או שפרט הקשר דורש תיקון. שלח למיה את התיקון ואת המסלול; "
+                "לא הוכנה הצעת כתיבה."
+            ),
+            "lead_already_exists": "כבר קיימת בגיליון רשומה עם אותו טלפון או אימייל.",
+            "source_changed": "מקור ה-CRM השתנה. לא הוכנה הצעה; צריך לבדוק מחדש.",
+            "unknown": (
+                "תוצאת הכנת ההצעה אינה ודאית. לא ניסיתי שוב; צריך לבדוק קבלה לפי "
+                "מזהה הבקשה המקורי."
+            ),
+            "expired": "בקשת ההכנה פגה. צריך להכין אותה מחדש.",
+            "already_handled": "בקשת ההכנה כבר טופלה ולא ביצעתי אותה שוב.",
+        }.get(choice.status, "לא הצלחתי להכין הצעת ליד. לא נכתבה רשומה.")
+        if choice.status == "prepared":
+            final_row = store.get_approval_by_approval_id(choice.approval_id)
+            card = render_owner_approval_card(final_row)
+            try:
+                await port.send(
+                    OutboundMessage(
+                        conversation_id=callback["chat_id"],
+                        text=owner_text(card, html=True),
+                        channel=Channel.TELEGRAM.value,
+                        idempotency_key=f"lead-final:{choice.approval_id}",
+                        parse_mode="HTML",
+                        reply_markup=approval_keyboard(approval_token(choice.approval_id)),
+                    )
+                )
+            except (TelegramSendError, AdapterHttpError, RuntimeError):
+                reply_text += " הכרטיס נשמר ברשימת האישורים הממתינים."
+        edit = getattr(port, "edit_message_text", None)
+        sent = False
+        if callable(edit) and callback.get("message_id"):
+            try:
+                await edit(
+                    chat_id=callback["chat_id"],
+                    message_id=callback["message_id"],
+                    text=owner_text(reply_text, html=True),
+                    parse_mode="HTML",
+                )
+                sent = True
+            except (TelegramSendError, AdapterHttpError, RuntimeError):
+                sent = False
+        return {
+            "processed": 1,
+            "decision": "lead_path",
+            "status": choice.status,
+            "sent": sent,
+        }
     if _is_reminder_callback(callback.get("data", "")):
         from html import escape
 
@@ -412,7 +486,12 @@ async def receive_webhook(
     if callback is not None:
         callback_is_private = is_valid_telegram_owner_context(callback, owner_ids)
         decision, token = parse_callback_token(callback.get("data", ""))
-        recognized = bool(decision and token) or _is_reminder_callback(callback.get("data", ""))
+        lead_path, lead_token = parse_lead_path_token(callback.get("data", ""))
+        recognized = (
+            bool(decision and token)
+            or bool(lead_path and lead_token)
+            or _is_reminder_callback(callback.get("data", ""))
+        )
         if not callback_is_private or not recognized:
             return await _handle_callback(
                 callback=callback,

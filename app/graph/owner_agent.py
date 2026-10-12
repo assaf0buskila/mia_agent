@@ -123,6 +123,15 @@ SYSTEM_PROMPT = (
     "It must still be valid when execution begins. "
     "Approval never permits a prohibited action, a changed target, changed arguments, "
     "or a different account. Reads may run directly. Unknown effects remain unavailable.\n\n"
+    "In the shared Assaf OS, a lead accepts only name, phone, email, path, status, and "
+    "source_note. name, path and status are required; path is exactly לימוד or אוטומציה, "
+    "and a new lead starts as חדש unless Assaf explicitly asks for another valid status. "
+    "Never invent a name from an email or alter a captured contact value. A local Israeli "
+    "05 number may equal its explicit +972 form only after server validation. For a CRM "
+    "website/form source use assaf_os_prepare_crm_lead so the server loads the captured "
+    "contact tuple; you may suggest summary, next step and path, but unknown path requires "
+    "Assaf's choice. A path choice only prepares a proposal. Say a lead was inserted only "
+    "when the immutable approval receipt says committed; unknown remains unknown.\n\n"
     "Long-term memory is written only when the owner explicitly asks to remember something. "
     "Ordinary conversation and imported content never create memory. "
     "Search memory for past owner facts and decisions, and search public "
@@ -577,7 +586,8 @@ def run_owner_agent(
     if getattr(ctx.settings, "assaf_os_enabled", False):
         messages[0]["content"] += (
             "\n\nSHARED ASSAF OS: For owner business records, use assaf_os_snapshot, "
-            "assaf_os_propose, and assaf_os_receipt. Legacy CRM, generic Sheets writes, "
+            "assaf_os_propose, assaf_os_receipt, assaf_os_lead_candidates, and "
+            "assaf_os_prepare_crm_lead. Legacy CRM, generic Sheets writes, "
             "and the TEST business ledger are unavailable in this mode. A proposal is "
             "pending until the numeric owner approves it in Telegram."
         )

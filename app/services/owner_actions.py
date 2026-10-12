@@ -331,10 +331,12 @@ def execute_owner_action(
     try:
         text = execute(kind, parameters)
     except OwnerActionTargetChanged:
-        store.fail_operation(scope="approval", key=operation_key)
+        store.release_operation(scope="approval", key=operation_key)
         return OwnerActionExecution("target_changed")
     except OwnerActionTerminal as exc:
-        store.fail_operation(scope="approval", key=operation_key)
+        # This exception is reserved for a signed provider result proving that no
+        # write committed, so this execution claim is safe to retire.
+        store.release_operation(scope="approval", key=operation_key)
         return OwnerActionExecution(exc.status)
     except Exception:  # provider may have applied the write before transport failed
         store.mark_provider_write_pending_review(scope="approval", key=operation_key)
@@ -460,13 +462,30 @@ def execute_approved_owner_action_with_adapters(
             # The server performs the pending-target read under the non-deciding MIA source.
             port = AssafOsPort(settings, principal.actor_id, actor_source="MIA")
             current = port.proposal(str(values["proposal_id"]))
-            return {
+            result = {
                 "proposal": current,
                 "proposal_digest": hashlib.sha256(_canonical(current).encode()).hexdigest(),
                 "workbook_id": settings.assaf_os_workbook_id,
                 "workspace_id": settings.assaf_os_workspace_id,
                 "mode": settings.assaf_os_mode,
             }
+            source_binding = envelope["target"].get("source_binding")
+            if isinstance(source_binding, dict):
+                from app.services.assaf_os_leads import (
+                    current_lead_duplicate_guard,
+                    current_source_binding,
+                )
+
+                result["source_binding"] = current_source_binding(store, source_binding)
+                result["contact_provenance"] = envelope["target"].get(
+                    "contact_provenance"
+                )
+                duplicate_guard = envelope["target"].get("duplicate_guard")
+                if isinstance(duplicate_guard, dict):
+                    result["duplicate_guard"] = current_lead_duplicate_guard(
+                        port.snapshot(), duplicate_guard
+                    )
+            return result
 
         def run(kind, values):
             del kind
@@ -483,7 +502,7 @@ def execute_approved_owner_action_with_adapters(
                 raise RuntimeError("unexpected Assaf OS decision result")
             return f"Assaf OS committed: {receipt.get('proposal_id', values['proposal_id'])}"
 
-        return execute_owner_action(
+        outcome = execute_owner_action(
             store,
             principal=principal,
             proposal_id=proposal_id,
@@ -493,6 +512,17 @@ def execute_approved_owner_action_with_adapters(
             current_target=target,
             execute=run,
         )
+        execution_key = f"{proposal_id}:execute"
+        if (
+            isinstance(envelope["target"].get("source_binding"), dict)
+            and outcome.status in {"target_changed", "expired", "rejected"}
+            and not store.get_provider_write_status(
+                scope="approval", key=execution_key
+            )
+        ):
+            row.result = f"terminal:{outcome.status}"
+            store.session.flush()
+        return outcome
     prepared: dict[str, Any] = {}
 
     def validate_schema(kind: str, parameters: Mapping[str, Any]) -> bool:
