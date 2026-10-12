@@ -87,6 +87,27 @@ _TOOL_GROUPS: tuple[tuple[str, frozenset[str]], ...] = (
         ),
     ),
     (
+        "פנקס עסקי TEST (כבוי כברירת מחדל)",
+        frozenset(
+            {
+                "business_overview",
+                "business_deals",
+                "business_payments",
+                "business_outstanding",
+                "business_expenses",
+                "business_projects",
+                "business_crm_leads",
+                "business_unhandled_leads",
+                "business_propose_deal",
+                "business_propose_schedule",
+                "business_propose_payment",
+                "business_propose_expense",
+                "business_propose_project",
+                "business_recover_receipt",
+            }
+        ),
+    ),
+    (
         "יומן ומייל",
         frozenset(
             {

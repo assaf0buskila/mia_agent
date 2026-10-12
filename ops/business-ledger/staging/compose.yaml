@@ -1,0 +1,114 @@
+name: assafweb-os-staging
+x-stage-env: &stage-env
+  OS_STAGE_HOST: ${OS_STAGE_HOST:?Set staging host}
+  OS_STAGE_ORIGIN: https://${OS_STAGE_HOST}
+  OS_STAGE_OWNER_IDS: ${OS_STAGE_OWNER_IDS:?Set numeric owners}
+  OS_STAGE_TELEGRAM_BOT_ID: ${OS_STAGE_PUBLIC_BOT_ID:?Set bot ID}
+  OS_STAGE_PUBLIC_BOT_ID: ${OS_STAGE_PUBLIC_BOT_ID:?Set bot ID}
+  OS_STAGE_WORKSPACE_ID: assafweb-staging
+  OS_STAGE_SESSION_TTL_SECONDS: '1800'
+  OS_STAGE_BUSINESS_TEST_ENABLED: ${OS_STAGE_BUSINESS_TEST_ENABLED:?Exact TEST opt-in required}
+  OS_STAGE_BUSINESS_WORKSPACE_ID: ${OS_STAGE_BUSINESS_WORKSPACE_ID:?Locked workspace required}
+  OS_STAGE_BUSINESS_WORKBOOK_ID: ${OS_STAGE_BUSINESS_WORKBOOK_ID:?Locked workbook required}
+  OS_STAGE_BUSINESS_SERVICE_URL: ${OS_STAGE_BUSINESS_SERVICE_URL:?Locked service required}
+  HTTPS_PROXY: http://172.29.22.3:8080
+  NO_PROXY: 127.0.0.1,localhost,postgres,mia
+x-hardened: &hardened
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  tmpfs: ['/tmp:size=32m,noexec,nosuid']
+  logging: {driver: local, options: {max-size: 1m, max-file: '2'}}
+services:
+  postgres:
+    image: pgvector/pgvector:0.8.6-pg16-trixie@sha256:c8483555ce48101872f888c1df8a895ff689d6c7c7a5f7ac266475f9dfe89e0b
+    restart: unless-stopped
+    environment: {POSTGRES_DB: owner_os_staging, POSTGRES_PASSWORD_FILE: /run/secrets/db_admin_password, POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256}
+    command: [postgres, -c, log_statement=none, -c, log_min_error_statement=panic, -c, log_parameter_max_length_on_error=0, -c, log_error_verbosity=terse, -c, max_connections=40, -c, shared_buffers=128MB]
+    secrets: [db_admin_password]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    networks: [database]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 512m
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U postgres -d owner_os_staging]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  bootstrap:
+    <<: *hardened
+    cap_add: [DAC_OVERRIDE]
+    image: __API_IMAGE__
+    user: '0:0'
+    profiles: [init]
+    environment: *stage-env
+    entrypoint: [python, -m, staging_runtime.bootstrap]
+    command: [init]
+    secrets: [db_admin_password, db_auth_password, db_read_password]
+    networks: [database]
+    mem_limit: 384m
+    depends_on: {postgres: {condition: service_healthy}}
+  mia:
+    <<: *hardened
+    image: __API_IMAGE__
+    restart: unless-stopped
+    environment: *stage-env
+    secrets: [db_auth_password, db_read_password, staging_telegram_bot_token, business_ledger_hmac_secret]
+    networks:
+      api: {}
+      database: {}
+      ledger_proxy: {ipv4_address: 172.29.22.2}
+    mem_limit: 384m
+    depends_on: {postgres: {condition: service_healthy}, ledger-proxy: {condition: service_started}}
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=7)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+  ledger-proxy:
+    <<: *hardened
+    image: __API_IMAGE__
+    restart: unless-stopped
+    environment: {}
+    entrypoint: [python, -m, staging_runtime.egress_proxy]
+    networks:
+      ledger_proxy: {ipv4_address: 172.29.22.3}
+      edge: {gw_priority: 1}
+    mem_limit: 64m
+  bff:
+    <<: *hardened
+    image: __BFF_IMAGE__
+    restart: unless-stopped
+    environment: {OS_STAGE_ORIGIN: 'https://${OS_STAGE_HOST}', OS_STAGE_PUBLIC_BOT_ID: '${OS_STAGE_PUBLIC_BOT_ID}', OS_STAGE_BOT_USERNAME: '${OS_STAGE_BOT_USERNAME}', OS_STAGE_BUSINESS_TEST_ENABLED: '${OS_STAGE_BUSINESS_TEST_ENABLED}'}
+    networks: [frontend]
+    mem_limit: 128m
+    healthcheck:
+      test: [CMD, node, -e, "require('http').get({host:'127.0.0.1',port:4176,headers:{Host:new URL(process.env.OS_STAGE_ORIGIN).host}},r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+  caddy:
+    <<: *hardened
+    image: caddy:2.11.4-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
+    restart: unless-stopped
+    cap_add: [NET_BIND_SERVICE]
+    environment: {OS_STAGE_HOST: '${OS_STAGE_HOST}'}
+    ports: ['80:80', '443:443']
+    volumes: [./Caddyfile:/etc/caddy/Caddyfile:ro, caddydata:/data, caddyconfig:/config]
+    networks: {edge: {}, frontend: {aliases: ['${OS_STAGE_HOST}']}, api: {ipv4_address: 172.29.21.2}}
+    mem_limit: 128m
+    depends_on: [mia, bff]
+networks:
+  edge: {}
+  frontend: {internal: true, driver_opts: {com.docker.network.bridge.gateway_mode_ipv4: isolated}}
+  api: {internal: true, driver_opts: {com.docker.network.bridge.gateway_mode_ipv4: isolated}, ipam: {config: [{subnet: 172.29.21.0/24}]}}
+  ledger_proxy: {internal: true, driver_opts: {com.docker.network.bridge.gateway_mode_ipv4: isolated}, ipam: {config: [{subnet: 172.29.22.0/24}]}}
+  database: {internal: true, driver_opts: {com.docker.network.bridge.gateway_mode_ipv4: isolated}}
+volumes: {pgdata: {}, caddydata: {}, caddyconfig: {}}
+secrets:
+  db_admin_password: {file: ./secrets/db_admin_password}
+  db_auth_password: {file: ./secrets/db_auth_password}
+  db_read_password: {file: ./secrets/db_read_password}
+  staging_telegram_bot_token: {file: ./secrets/staging_telegram_bot_token}
+  business_ledger_hmac_secret: {file: ./secrets/business_ledger_hmac_secret}

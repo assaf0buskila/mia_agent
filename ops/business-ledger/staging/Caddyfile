@@ -1,0 +1,32 @@
+{
+	admin off
+	log default { output discard }
+}
+{$OS_STAGE_HOST} {
+	header {
+		Strict-Transport-Security "max-age=86400"
+		Cache-Control "private, no-store"
+		X-Robots-Tag "noindex, nofollow"
+		Referrer-Policy "no-referrer"
+	}
+	request_body {
+		max_size 16KB
+	}
+	@owner_api path /v1/owner/auth/challenge /v1/owner/auth/login /v1/owner/auth/session /v1/owner/auth/logout /v1/owner/auth/revoke-all /v1/owner/os/today /v1/owner/os/contacts /v1/owner/os/contacts/* /v1/owner/os/reminders /v1/owner/os/business /v1/owner/os/business/finance /v1/owner/os/business/deals /v1/owner/os/business/schedules /v1/owner/os/business/payments /v1/owner/os/business/expenses /v1/owner/os/business/projects /v1/owner/os/business/receipts/*
+	handle @owner_api {
+		reverse_proxy mia:8000 {
+			header_up -Forwarded
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto https
+			header_up X-Forwarded-Host {$OS_STAGE_HOST}
+		}
+	}
+	handle {
+		reverse_proxy bff:4176 {
+			header_up -Forwarded
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Forwarded-Proto https
+			header_up X-Forwarded-Host {$OS_STAGE_HOST}
+		}
+	}
+}

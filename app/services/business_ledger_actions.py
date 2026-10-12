@@ -16,7 +16,7 @@ from uuid import NAMESPACE_URL, uuid5
 
 from pydantic import ValidationError
 
-from app.capabilities.types import GraphName, Principal
+from app.capabilities.types import Principal
 from app.core.config import MiaEnv
 from app.services.business_ledger import (
     BusinessLedger,
@@ -50,7 +50,7 @@ _WRITE_KINDS = KINDS - {"business.recover_receipt"}
 def business_enabled(settings: object, principal: Principal, *, private_owner_chat: bool) -> bool:
     """Independent fail-closed gate used before any store or provider access."""
     return bool(
-        principal.graph is GraphName.OWNER
+        principal.is_owner()
         and principal.source == "telegram"
         and private_owner_chat
         and principal.actor_id.isascii()

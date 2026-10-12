@@ -905,10 +905,18 @@ def test_cleanup():
     )
     rendered = result.stdout + result.stderr
     assert result.returncode == 1
-    assert rendered.count("sheet-readonly TEST failed:") == 3
-    assert "stage=setup code=unexpected" in rendered
-    assert "stage=launcher code=unexpected" in rendered
-    assert "stage=cleanup code=unexpected" in rendered
+    failures = set(
+        re.findall(
+            r"sheet-readonly TEST failed: stage=([a-z_]+) code=([a-z_]+)", rendered
+        )
+    )
+    assert failures == {
+        ("setup", "unexpected"),
+        ("launcher", "unexpected"),
+        ("cleanup", "unexpected"),
+    }
+    failed_tests = set(re.findall(r"^FAILED .*::(test_[a-z_]+)(?:\s|$)", rendered, re.M))
+    assert failed_tests == {"test_setup", "test_launcher", "test_cleanup"}
     assert sentinel not in rendered
 
 

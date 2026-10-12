@@ -7,6 +7,7 @@
 | MIA בייצור | `/health`: `a213c9a7fbdf5586e13cb38ffdbc4646f59c4541`; סכימה `20261008_assafweb_form_intake_receipts.sql` | שחרור Owner OS נפרד, migrations והרשאות באישור; אין פריסה במשימה זו |
 | MIA master | GitHub: `9fc30581705e8d18f21f53fe28c6203909cdd050`; Quick Lead #98 ותזכורות #97 מוזגו | מיזוג אינו ראיית הפעלה. writes/workers נשארים כבויים |
 | Owner API #99 | Draft, `18bf322c82c4a9000961e43b137ec38c7e23c1fa`; CI success run 38133636670 | חבילת ה־Business החדשה עדיין מקומית ומצריכה commit/push/CI באישור |
+| חבילת Business החדשה | נשמרה באישור הבעלים ב־Drafts [MIA #100](https://github.com/assaf0buskila/mia_agent/pull/100) ו־[אפליקציה #65](https://github.com/assaf0buskila/assaf-landingPage/pull/65), מעל #99 ו־#61 | CI ראשוני מצא פערים; תיקוני CI עברו בדיקות וסקירה מקומיות. יש לאמת CI ל־heads החדשים |
 | האפליקציה #59 / #61 | Drafts; #61 `ba1278d65d1b17b56ca06c95937c2a7593bc0bce`; שני workflows עברו | שינויי Business/Rubik חדשים עדיין מקומיים; אין merge ל־main הציבורי |
 | iPhone / GCP staging | ה־API הפרטי עדיין `18bf322…`, BFF בסיס `ba1278d…`; מסד staging סינתטי נפרד | פריסה פרטית של SHAs חדשים אחרי CI ואישור; קבלה חוזרת ב־Safari/Home Screen |
 | אתר → MIA | בדיקות חוזה 214/214; PR #64 מוזג ב־GitHub ל־`7825f8d80817b0e3f22adeb3f6c10dcd9f92d8eb`; שלושה קובצי בדיקות/דוח בלבד | הגדרות intake וגרסת האתר החיה לא אומתו; אין טענה לקבלת ליד חי או לפריסת Vercel |
@@ -24,12 +25,12 @@
 
 ראיות מקבילות: [דוח הרשאות](../../../../.codex-worktrees/mia-lead-owner-chain/.cache/pg-permissions-audit/READONLY_PERMISSIONS_REPORT.md) ו־[תוכנית קבלה חיה](../../../../.codex-worktrees/mia-lead-owner-chain/.cache/pg-permissions-audit/LIVE_ACCEPTANCE_PLAN.md); דוח האתר `docs/mia-form-contract-verification-2026-10-12.md` ב־PR #64. תוצאות מקומיות וסיכומי בדיקות נמצאים ב־`.cache/business-ledger-test/`; מפתחות/config אינם חלק מחבילת השחרור.
 
-חבילת GCP הקיימת מקבעת SHAs ישנים וכוללת surface פרטי של auth/read בלבד: `runtime/api.py`, `Caddyfile`, `runtime/settings.py` ו־`launch.mjs` אינם מחוברים לנתיבי Business. רשת ה־API פנימית ואינה מאפשרת גישה ל־Google TEST. לפני פריסה יש להכין ולבדוק התאמה מוגבלת של החבילה הקיימת: נתיבים קבועים, scopes כספיים לבעלים ב־TEST בלבד, קובץ HMAC פרטי בשליטת המפעיל וגישה מוגבלת לכתובת שירות TEST. אין להתיר Internet כללי ל־BFF, metadata, ייצור או providers אחרים. החלפת SHA לבדה אינה מספיקה. ההתאמה אינה פרוסה ואינה חבילת images מוכנה כרגע.
+חבילת GCP הפרוסה עדיין מקבעת SHAs ישנים וכוללת auth/read בלבד, עם רשת API פנימית. הוכנה התאמה מוגבלת ב־`staging/`: נתיבי Business קבועים, scopes לבעלים ב־TEST, סוד בקובץ שרת ונעילת הגיליון/השירות/ה־workspace הקיימים; proxy פנימי מוגבל לשני hosts רשמיים של Google על 443, ללא Internet כללי ל־BFF או למסד. ה־DNS וזמן המנהרה מוגבלים, כתובות פרטיות/metadata נדחות. עשר בדיקות מקומיות וסקירת אבטחה עצמאית עברו. ההתאמה אינה פרוסה; בניית images, בדיקת רשת/זיכרון/rollback ואריזה חתומה לפי hashes עדיין נדרשות אחרי CI ל־heads החדשים. החלפת SHA לבדה אינה מספיקה.
 
 ## סדר הסגירה
 
 1. הושלמו קריאת עריכת הגיליון דרך ה־BFF, סקירת הדלתא המשולבת ו־Ruff/widget/רגרסיות ממוקדות. חמש הרצות TEST בפועל עברו: A/B closeout, C, D, E ו־Sheet readonly. אין מדידת אחוז כיסוי שורות חדשה ואין טענה לריצת כל 2,993 הבדיקות על הדלתא החדשה; הקמפיין המלא הושלם לבסיס בלבד.
-2. באישור commit/push: להכין שני Draft PRs מבודדים, backend על #99 ו־frontend על #61, בלי force push או ערבוב עבודות אחרות; להריץ CI על ה־SHAs החדשים ולתקן כשל אמיתי.
+2. commit/push ופתיחת שני Draft PRs אושרו ובוצעו, בלי merge או force push. יש להשלים CI על ה־heads האחרונים; תיקוני רגרסיות CI ובדיקת logout ב־WebKit נבדקו עצמאית לפני ההרצה החוזרת.
 3. להכין את ההתאמה המוגבלת לחבילת staging הקיימת, לבדוק נתיבים/רשת/סודות/rollback ולקבל סקירה עצמאית. רק באישור פריסה פרטית להשתמש בחבילה וב־SHAs שעברו CI על VM ה־staging הקיים; אותו origin/bot נפרד, synthetic DB ו־TEST workbook. לשמור rollback `18bf322…` / `ba1278d…`; לבטל sessions בעת rollback. אין משאבים חדשים או הרשאות ייצור.
 4. לקבלת הבעלים: Safari ו־Home Screen, Telegram אמיתי, login/logout/expiry/revoke, CRM, כספים, preview/receipt/recovery; ללא Quick Lead/reminder/provider writes.
 5. רק אחר כך שער LIVE מפורש: migration/roles/auth/read על MIA הקנונית, חוזה Ledger LIVE שנבדק, מאגר כספים מתאים וראיית ליד חדש לגיטימי עם מזהים וקבלה. `synced` לבדו אינו הוכחת lease/CAS או מסירת הודעה. אין העתקת לקוחות ל־staging, replay היסטוריה או הרחבת הרשאות frontend.

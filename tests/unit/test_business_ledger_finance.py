@@ -386,6 +386,8 @@ def test_write_operation_set_is_explicit_and_receipt_recovery_remains_read_only(
         "record_payment",
         "record_expense",
         "save_project",
+        "save_crm_projection",
     }
     assert "receipt" not in port.WRITE_OPERATIONS
+    assert "crm_projection_receipt" not in port.WRITE_OPERATIONS
     assert json.dumps(sorted(port.WRITE_OPERATIONS))
