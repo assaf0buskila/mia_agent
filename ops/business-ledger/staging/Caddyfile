@@ -1,6 +1,8 @@
 {
 	admin off
-	log default { output discard }
+	log default {
+		output discard
+	}
 }
 {$OS_STAGE_HOST} {
 	header {
