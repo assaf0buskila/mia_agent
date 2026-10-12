@@ -1,0 +1,18 @@
+# Assaf OS live evidence — 2026-10-12
+
+## Deployed and observed
+
+- Shared workbook: `1T9Is3iJ_RlI8KndpTXYCfuTkVsMbncw3_0bAVze0RE4`, locale `he_IL`, timezone `Asia/Jerusalem`. Nine visible Hebrew tabs include the existing settings tab; eight old business tabs remain preserved but hidden, and five system tabs are hidden. Legacy records are excluded from new financial calculations and have not been migrated.
+- Existing bound Apps Script deployment is version 6, sourced from backend `ad1918345b17db83e2a24c6f387dc14feb0f5dee`; bundle SHA-256 `2fb7bc8cde4c6f481993943d57908d13b180f053b88bbf7ac2c265d43649be77`. Version 5 and legacy version 4 remain rollback references. The owner authorized background execution and publication; HMAC stays in Script Properties and existing MIA Secret Manager, never Cloudflare or browser assets.
+- One real installed `reconcileAssafOsEdit` spreadsheet edit trigger. Browser input created one clearly named connection-test task; before a signed read, the actual row already had a stable system ID, revision 1 and native-user source. No customer or financial test rows were inserted.
+- Subsequent signed schema passed in 4.66 seconds and snapshot in 9.35 seconds, with complete coverage for all seven entities, one task and zero issues. Invalid HMAC was rejected. Durations are one observed probe, not an availability guarantee.
+- Existing MIA service at `https://mia.assafweb.com` reports healthy SHA `2d9a6f7804620493ea8e90c84dcf882ea8ac70f3`; the shared binding and Google owner authentication are enabled. Direct real auth challenge returns 200. Existing PostgreSQL and paid MIA VM are reused; no new server was created. Old OS VM, boot disk and reserved IP removal are recorded in `CLEANUP_REPORT.md`.
+- Cloudflare `https://assaf-os.assaf-buskila10.workers.dev` serves seven exact reviewed asset hashes with private/no-store responses; unlisted paths and unauthenticated protected requests are rejected. Owner and HMAC/session secrets are absent from its public configuration. The reviewed native-fetch redirect fix at frontend `ed14756ae32615cb03b06a4b2add9cd82d0d5709` passed both exact-revision CI runs (38296146846 and 38296146852) and was deployed as active Cloudflare version `311d84ea`. The real edge auth challenge now returns 200 with private/no-store response. Dashboard bundle SHA-256 `cf53da86dc8052b2e52deef210614413e447d1324907186ef7858685e7306af7`. Owner Google account selection is pending in Chrome; the automatic popup click stalls.
+
+## Pending gates
+
+1. Real mapped-owner Google sign-in and OS snapshot display, then a real OS change visible in the same Sheet.
+2. Actual MIA proposal in the existing private Telegram chat, human approval there, durable receipt and the same resulting record in Sheet and OS. Synthetic CI Telegram context is not evidence of this live flow.
+3. Owner/device acceptance and a usable Google button appearance under the existing CSP. The new business tables contain no imported customer history; automatic ads reporting is outside the proven connection and recorded investment remains manual.
+
+Draft PRs remain unmerged: MIA #101 and owner frontend #67. Production source, later Apps Script source, CI and human acceptance are separate evidence layers. Native Sheet edits are not excluded by the script lock; no cross-channel atomic lock or guaranteed conflict-free concurrent editing is claimed.

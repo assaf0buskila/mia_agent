@@ -2,7 +2,7 @@
 
 ## Result
 
-The local shared Google Sheets/Apps Script runtime is implemented. It remains undeployed and has not contacted or changed Google, Cloudflare, MIA production, or the real workbook.
+The shared Google Sheets/Apps Script runtime is implemented and deployed to the existing workbook. The real edit trigger is authorized and an actual browser Sheet edit has been accepted with a system-generated ID, revision and source. Existing MIA is deployed and the shared connection is enabled. Cloudflare serves the reviewed product assets; its upstream connection fix passed exact-revision CI, was deployed and returned a real authentication challenge successfully. See `LIVE_STATUS.md` for current evidence and remaining acceptance checks.
 
 ## Implemented
 
@@ -19,16 +19,16 @@ The local shared Google Sheets/Apps Script runtime is implemented. It remains un
 
 ## Local verification
 
-- `node --test tests/assaf-os/sheet-core.test.js tests/assaf-os/runtime.test.js tests/assaf-os/apps-script-runtime.test.js`: **PASS — 52 passed, 0 failed**.
+- `node --test tests/assaf-os/sheet-core.test.js tests/assaf-os/runtime.test.js tests/assaf-os/apps-script-runtime.test.js`: **PASS — 64 passed, 0 failed** at backend `ad1918345b17db83e2a24c6f387dc14feb0f5dee`.
 - Node syntax checks for `schema.js`, `core.js`, `runtime.js`, `UnifiedSheets.gs`, and `UnifiedRuntime.gs`: **PASS**.
 - Test data is synthetic. Nineteen integration-style cases load the actual `.gs` operation dispatcher in a Node VM with Google-shaped Sheet, timezone-aware Date, formula, grid and Advanced Sheets batch mocks.
 
 ## Boundaries and unknowns
 
-- **UNKNOWN:** real Apps Script deployment, Advanced Sheets permissions, edit-trigger authorization, and real-workbook behavior.
-- **UNKNOWN:** final Cloudflare owner product and MIA/Telegram end-to-end integration until their separate changes are integrated and exercised.
+- **PASS:** existing Apps Script deployment version 6, Advanced Sheets service, edit-trigger authorization, actual native task acceptance, signed schema/snapshot and invalid-signature rejection.
+- **PENDING:** live Cloudflare owner sign-in, OS write/read acceptance and actual human Telegram approval through MIA.
 - **UNKNOWN:** physical owner/device acceptance.
 - Script locks do not exclude human workbook edits. Fingerprint conflicts surface for owner review; there is no cross-channel atomic lock.
 - Apps Script installation itself is not transactional. Preflight rejects known tab conflicts first. If a provider failure leaves exact-schema empty runtime tabs, it returns explicit partial-install diagnostics for operator inspection and manual cleanup; it does not overwrite or delete them.
 - Receipt recovery prevents automatic replay after an ambiguous approval result. A missing receipt remains unknown and must block a new write attempt.
-- No external send, customer outreach, secret write, deployment, trigger installation, commit, or push occurred in this implementation task.
+- The original local foundation stage performed no external mutations. The later owner-authorized deployment and cleanup are recorded in `LIVE_STATUS.md` and `CLEANUP_REPORT.md`; no real customer or financial test data has been inserted.
