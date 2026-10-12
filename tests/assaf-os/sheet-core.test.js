@@ -196,9 +196,43 @@ test("installer uses strict integer validation, neutral currency format, and res
   assert.equal(source.includes("₪#,##0.00"), false);
   assert.match(source, /removeEditors/);
   assert.match(source, /setDomainEdit\(false\)/);
-  assert.match(source, /field\.role === "input"\) applyValidation_/);
+  assert.match(source, /field\.role === "input"\) \{[\s\S]*applyValidation_/);
   assert.match(source, /type === "id" \|\| type === "text"/);
   assert.match(source, /setNumberFormat\("@"\)/);
+});
+
+test("native sheet UX adds Hebrew guidance, strict reference choices, and hides audit columns", () => {
+  const source = fs.readFileSync(path.join(__dirname, "../../ops/assaf-os/UnifiedSheets.gs"), "utf8");
+  const hidden = [], validation = {};
+  const builder = {
+    setAllowInvalid(value) { validation.allowInvalid = value; return this; },
+    setHelpText(value) { validation.help = value; return this; },
+    requireValueInList(values) { validation.values = values; return this; },
+    requireFormulaSatisfied(value) { validation.formula = value; return this; },
+    build() { return { ...validation }; },
+  };
+  const sandbox = {
+    AssafOsSchema: Schema,
+    SpreadsheetApp: { newDataValidation: () => Object.create(builder) },
+    assafOsReferenceChoices_: () => ["דנה ⟦PER_1⟧", "דנה ⟦PER_10⟧"],
+  };
+  vm.runInNewContext(source, sandbox, { filename: "UnifiedSheets.gs" });
+  const sourceKey = Schema.tab("expenses").fields.find((field) => field.key === "source_key");
+  assert.match(sandbox.assafOsHeaderNote_(sourceKey), /שדה חובה/);
+  assert.match(sandbox.assafOsHeaderNote_(sourceKey), /invoice-2026-001/);
+
+  const person = Schema.tab("works").fields.find((field) => field.key === "person_id");
+  const range = { setDataValidation(value) { validation.result = value; } };
+  sandbox.applyValidation_(range, person, 2, {});
+  assert.deepEqual(Array.from(validation.values), ["דנה ⟦PER_1⟧", "דנה ⟦PER_10⟧"]);
+  assert.equal(validation.allowInvalid, false);
+  assert.match(validation.help, /המזהה היציב/);
+
+  sandbox.assafOsHideAuditColumns_({ hideColumns(start, count) { hidden.push([start, count]); } }, Schema.tab("clients"));
+  assert.deepEqual(hidden, [[1, 1], [7, 5]]);
+  assert.match(source, /setNote\(assafOsHeaderNote_/);
+  const runtimeSource = fs.readFileSync(path.join(__dirname, "../../ops/assaf-os/UnifiedRuntime.gs"), "utf8");
+  assert.match(runtimeSource, /assafOsReconcileRow_\(workbook, tab, event\.range\.getRow\(\), "trigger"\);[\s\S]*assafOsRefreshReferenceValidationsSafely_\(workbook\)/);
 });
 
 test("client total is weighted across paths and never averages path rates", () => {

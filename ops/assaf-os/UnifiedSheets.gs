@@ -131,13 +131,18 @@ function configureSheet_(sheet, tab) {
   tab.fields.forEach(function (field, index) {
     var column = index + 1;
     var range = sheet.getRange(2, column, ASSAF_OS_INSTALL_ROWS - 1, 1);
+    sheet.getRange(1, column).setNote(assafOsHeaderNote_(field));
     applyFormat_(range, field.type);
-    if (field.role === "input") applyValidation_(range, field, column);
+    if (field.role === "input") {
+      applyValidation_(range, field, column, sheet.getParent());
+      if (field.required) range.setBackground("#fff7d6");
+    }
     if (field.role === "system" || field.role === "calculated") {
       protectRange_(range, "Assaf OS " + field.role + ": " + field.key);
       range.setBackground(field.role === "calculated" ? "#eef5fb" : "#f3f4f6");
     }
   });
+  assafOsHideAuditColumns_(sheet, tab);
   if (tab.kind === "calculated") protectRange_(sheet.getRange(1, 1, ASSAF_OS_INSTALL_ROWS, columnCount), "Assaf OS calculated sheet");
   sheet.autoResizeColumns(1, columnCount);
 }
@@ -153,17 +158,69 @@ function applyFormat_(range, type) {
   else if (type === "decimal") range.setNumberFormat("0.00");
 }
 
-function applyValidation_(range, field, column) {
+function applyValidation_(range, field, column, workbook) {
   var values = field.values || (field.enum ? AssafOsSchema.enums[field.enum] : null);
-  if (values && values.length) {
-    range.setDataValidation(SpreadsheetApp.newDataValidation().requireValueInList(values.slice(), true).setAllowInvalid(false).build());
+  var builder = SpreadsheetApp.newDataValidation().setAllowInvalid(false).setHelpText(assafOsHeaderNote_(field));
+  if (field.ref) {
+    var choices = typeof assafOsReferenceChoices_ === "function" && workbook ? assafOsReferenceChoices_(workbook, field) : [];
+    if (choices.length) builder.requireValueInList(choices, true);
+    else builder.requireFormulaSatisfied(field.required ? "=FALSE" : "=LEN(" + columnLetter_(column) + "2)=0");
+    range.setDataValidation(builder.build());
+  } else if (values && values.length) {
+    range.setDataValidation(builder.requireValueInList(values.slice(), true).build());
   } else if (field.type === "date") {
-    range.setDataValidation(SpreadsheetApp.newDataValidation().requireDate().setAllowInvalid(false).build());
+    range.setDataValidation(builder.requireDate().build());
   } else if (field.type === "integer") {
     var cell = columnLetter_(column) + "2";
-    range.setDataValidation(SpreadsheetApp.newDataValidation().requireFormulaSatisfied("=AND(ISNUMBER(" + cell + ")," + cell + ">=" + (field.minimum || 0) + ",INT(" + cell + ")=" + cell + ")").setAllowInvalid(false).build());
+    range.setDataValidation(builder.requireFormulaSatisfied("=AND(ISNUMBER(" + cell + ")," + cell + ">=" + (field.minimum || 0) + ",INT(" + cell + ")=" + cell + ")").build());
   } else if (field.type === "money_ils") {
-    range.setDataValidation(SpreadsheetApp.newDataValidation().requireNumberGreaterThanOrEqualTo(0).setAllowInvalid(false).build());
+    range.setDataValidation(builder.requireNumberGreaterThanOrEqualTo(0).build());
+  }
+}
+
+function refreshAssafOsReferenceValidations() {
+  var config = assafOsConfig_(), workbook = SpreadsheetApp.openById(config.workbook_id);
+  refreshAssafOsReferenceValidations_(workbook);
+  return { refreshed: true, workbook_id: config.workbook_id };
+}
+
+function refreshAssafOsReferenceValidations_(workbook) {
+  AssafOsSchema.tabs.filter(function (tab) { return tab.kind === "input"; }).forEach(function (tab) {
+    var sheet = workbook.getSheetByName(tab.name);
+    if (!sheet) return;
+    tab.fields.forEach(function (field, index) {
+      if (!field.ref || field.role !== "input") return;
+      var range = sheet.getRange(2, index + 1, Math.min(sheet.getMaxRows() - 1, ASSAF_OS_INSTALL_ROWS - 1), 1);
+      try { applyValidation_(range, field, index + 1, workbook); }
+      catch (error) {
+        var code = error && (error.assafOsCode || error.code);
+        if (["ambiguous_reference_id", "missing_reference_sheet"].indexOf(code) === -1) throw error;
+        applyValidation_(range, field, index + 1, null);
+      }
+    });
+  });
+}
+
+function assafOsHeaderNote_(field) {
+  var parts = [field.required ? "שדה חובה." : "שדה רשות."];
+  if (field.ref) parts.push("יש לבחור מהרשימה; המזהה היציב שבסוגריים נשמר גם כשיש שמות זהים.");
+  if (field.key === "source_key") parts.push("מזהה ייחודי ממסמך המקור, למשל invoice-2026-001; אותו מפתח מונע רישום כפול.");
+  else if (field.note) parts.push(field.note + (/[.!?]$/.test(field.note) ? "" : "."));
+  else if (field.type === "date") parts.push("דוגמה: 12/10/2026.");
+  else if (field.type === "money_ils") parts.push("דוגמה: 123.45; הסכום בגיליון הוא ביחידות מטבע מלאות.");
+  return parts.join(" ");
+}
+
+function assafOsHideAuditColumns_(sheet, tab) {
+  var hidden = tab.fields.map(function (field, index) {
+    return field.role === "system" && (/_id$/.test(field.key) || ["created_at", "updated_at", "revision", "write_source", "request_id", "calculated_at"].indexOf(field.key) !== -1) ? index + 1 : 0;
+  }).filter(function (column) { return column > 0; });
+  if (!hidden.length) return;
+  var start = hidden[0], previous = hidden[0];
+  for (var i = 1; i <= hidden.length; i += 1) {
+    if (i < hidden.length && hidden[i] === previous + 1) { previous = hidden[i]; continue; }
+    sheet.hideColumns(start, previous - start + 1);
+    if (i < hidden.length) { start = hidden[i]; previous = hidden[i]; }
   }
 }
 

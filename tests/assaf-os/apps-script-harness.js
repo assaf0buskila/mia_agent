@@ -22,12 +22,14 @@ class Range {
   getFormulas() { return Array.from({ length: this.rows }, (_, r) => Array.from({ length: this.columns }, (_, c) => this.sheet.formula(this.row + r, this.column + c))); }
   getSheet() { return this.sheet; }
   getRow() { return this.row; }
+  setDataValidation(rule) { this.sheet.validations.set(`${this.row}:${this.column}:${this.rows}`, rule); return this; }
 }
 
 class Sheet {
   constructor(workbook, id, name, headers, maxRows = 2001) {
     this.workbook = workbook; this.id = id; this.name = name; this.maxRows = maxRows;
     this.rows = [headers.slice()]; this.formulas = [headers.map(() => "")];
+    this.validations = new Map();
   }
   getName() { return this.name; }
   getSheetId() { return this.id; }
@@ -95,7 +97,18 @@ function createHarness(options = {}) {
     AssafOsSchema: Schema, AssafOsCore: Core, AssafOsRuntime: Runtime,
     ContentService: { MimeType: { JSON: "json" }, createTextOutput: (text) => ({ text, setMimeType() { return this; } }) },
     PropertiesService: { getScriptProperties: () => ({ getProperty: (key) => ({ ASSAF_OS_OWNER_ID: binding.owner_id, ASSAF_OS_WORKSPACE_ID: binding.workspace_id, ASSAF_OS_WORKBOOK_ID: binding.workbook_id, ASSAF_OS_MODE: binding.mode, ASSAF_OS_HMAC_SECRET: secret }[key] || null) }) },
-    SpreadsheetApp: { openById: (id) => { if (id !== binding.workbook_id) throw new Error("wrong_workbook"); return workbook; } },
+    SpreadsheetApp: {
+      openById: (id) => { if (id !== binding.workbook_id) throw new Error("wrong_workbook"); return workbook; },
+      newDataValidation: () => {
+        const rule = {};
+        return {
+          setAllowInvalid(value) { rule.allowInvalid = value; return this; }, setHelpText(value) { rule.help = value; return this; },
+          requireValueInList(values) { rule.values = values.slice(); return this; }, requireFormulaSatisfied(value) { rule.formula = value; return this; },
+          requireDate() { rule.kind = "date"; return this; }, requireNumberGreaterThanOrEqualTo(value) { rule.minimum = value; return this; },
+          build() { return { ...rule }; },
+        };
+      },
+    },
     LockService: { getScriptLock: () => ({ tryLock: () => true, releaseLock() {} }) },
     Sheets: { Spreadsheets: { batchUpdate: (body, id) => { if (id !== binding.workbook_id) throw new Error("wrong_workbook"); batches.push(body.requests); body.requests.forEach(applyRequest); } } },
     Utilities: {
@@ -109,6 +122,7 @@ function createHarness(options = {}) {
   };
   vm.createContext(context);
   vm.runInContext(fs.readFileSync("ops/assaf-os/UnifiedRuntime.gs", "utf8"), context, { filename: "UnifiedRuntime.gs" });
+  if (options.withSheets) vm.runInContext(fs.readFileSync("ops/assaf-os/UnifiedSheets.gs", "utf8"), context, { filename: "UnifiedSheets.gs" });
 
   function sign(request) { const payload = JSON.stringify(request); return { payload, signature: crypto.createHmac("sha256", secret).update(payload).digest("hex") }; }
   function call(request) {

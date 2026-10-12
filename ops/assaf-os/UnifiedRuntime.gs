@@ -164,6 +164,7 @@ function assafOsApprove_(workbook, request, config, requestHash, replay) {
   changes.push(assafOsCellRequest_(workbook.getSheetByName(ASSAF_OS_META.proposals.name), found.row, 13, now));
   changes.push(assafOsAppendRequest_(workbook.getSheetByName(ASSAF_OS_META.replay.name), [request.request_id, request.owner_id, request.operation, request.actor_source, requestHash, now]));
   Sheets.Spreadsheets.batchUpdate({ requests: changes }, config.workbook_id);
+  if (["clients", "works", "payments", "promote_lead"].indexOf(proposal.entity) !== -1) assafOsRefreshReferenceValidationsSafely_(workbook);
   return receipt;
 }
 
@@ -266,13 +267,13 @@ function assafOsWriteRecordRequests_(workbook, entity, record, revision, source,
   var persisted = Object.assign({}, record); persisted[idKey] = record[idKey]; persisted.revision = revision; persisted.write_source = source; persisted.request_id = requestId;
   if (tab.fields.some(function (f) { return f.key === "created_at"; }) && !persisted.created_at) persisted.created_at = now;
   if (tab.fields.some(function (f) { return f.key === "updated_at"; })) persisted.updated_at = now;
-  var row = state.rowById[persisted[idKey]] || Math.max(sheet.getLastRow() + 1, 2), values = assafOsRecordToRow_(tab, persisted);
+  var row = state.rowById[persisted[idKey]] || Math.max(sheet.getLastRow() + 1, 2), values = assafOsRecordToRow_(tab, persisted, workbook);
   var current = state.rowById[persisted[idKey]] ? sheet.getRange(row, 1, 1, tab.fields.length).getValues()[0] : tab.fields.map(function () { return ""; });
   var input = {}; inputFieldsFor_(tab).forEach(function (field) { input[field.key] = persisted[field.key] == null ? null : persisted[field.key]; });
   var snap = { entity: entity, record_id: persisted[idKey], revision: revision, input: input };
   var requests = [];
   tab.fields.forEach(function (field, index) { if (field.role !== "calculated" && AssafOsRuntime.stableStringify(current[index] === "" ? null : current[index]) !== AssafOsRuntime.stableStringify(values[index] === "" ? null : values[index])) requests.push(assafOsCellRequest_(sheet, row, index + 1, values[index])); });
-  requests.push(assafOsAppendRequest_(workbook.getSheetByName(ASSAF_OS_META.accepted.name), [entity, persisted[idKey], revision, assafOsSha_(AssafOsRuntime.stableStringify(input)), assafOsRawOwnedFingerprint_(tab, values), JSON.stringify(snap), now, source, requestId]));
+  requests.push(assafOsAppendRequest_(workbook.getSheetByName(ASSAF_OS_META.accepted.name), [entity, persisted[idKey], revision, assafOsSha_(AssafOsRuntime.stableStringify(input)), assafOsRawOwnedFingerprint_(tab, values, workbook), JSON.stringify(snap), now, source, requestId]));
   return requests;
 }
 
@@ -287,7 +288,7 @@ function assafOsReadEntity_(workbook, entity) {
   for (var i = 1; i < values.length; i += 1) {
     if (values[i].every(function (cell) { return cell === ""; })) continue;
     if ((formulas[i] || []).some(function (formula) { return formula !== ""; })) throw assafOsError_("formula_drift");
-    var record = assafOsRowToRecord_(tab, values[i]);
+    var record = assafOsRowToRecord_(tab, values[i], workbook);
     if (!record[idKey] || byId[record[idKey]]) throw assafOsError_("invalid_or_duplicate_record_id");
     records.push(record); byId[record[idKey]] = record; rowById[record[idKey]] = i + 1;
   }
@@ -305,7 +306,7 @@ function assafOsReadEntityTolerant_(workbook, entity) {
     if (values[i].every(function (cell) { return cell === ""; })) continue;
     try {
       if ((formulas[i] || []).some(function (formula) { return formula !== ""; })) throw assafOsError_("formula_drift");
-      var record = assafOsRowToRecord_(tab, values[i]);
+      var record = assafOsRowToRecord_(tab, values[i], workbook);
       if (!record[idKey] || seen[record[idKey]]) throw assafOsError_(seen[record[idKey]] ? "duplicate_record_id" : "invalid_record_id");
       seen[record[idKey]] = true; result.records.push(record);
     } catch (error) { result.coverage = "partial"; result.issues.push({ code: error.assafOsCode || error.code || "invalid_row", entity: entity, record_id: null }); }
@@ -397,7 +398,11 @@ function reconcileAssafOsEdit(event) {
   var sheet = event.range.getSheet(), tab = AssafOsSchema.tabs.filter(function (item) { return item.name === sheet.getName() && item.kind === "input" && item.key !== "settings"; })[0];
   if (!tab || event.range.getRow() <= 1) return;
   var lock = LockService.getScriptLock(); if (!lock.tryLock(5000)) return;
-  try { assafOsAssertHeaders_(sheet, tab); assafOsReconcileRow_(workbook, tab, event.range.getRow(), "trigger"); } finally { lock.releaseLock(); }
+  try {
+    assafOsAssertHeaders_(sheet, tab);
+    assafOsReconcileRow_(workbook, tab, event.range.getRow(), "trigger");
+    assafOsRefreshReferenceValidationsSafely_(workbook);
+  } finally { lock.releaseLock(); }
 }
 
 function reconcileAssafOsWorkbook() {
@@ -422,7 +427,14 @@ function assafOsReconcileAll_(workbook) {
     }
   });
   if (assafOsCanProject_(workbook)) Sheets.Spreadsheets.batchUpdate({ requests: assafOsProjectionRequests_(workbook, { entity: "tasks", record_id: null, after: {} }) }, workbook.getId());
+  assafOsRefreshReferenceValidationsSafely_(workbook);
   return result;
+}
+
+function assafOsRefreshReferenceValidationsSafely_(workbook) {
+  if (typeof refreshAssafOsReferenceValidations_ !== "function") return;
+  try { refreshAssafOsReferenceValidations_(workbook); }
+  catch (_) { if (typeof console !== "undefined" && console.warn) console.warn("assaf_os_reference_validation_refresh_failed"); }
 }
 
 function assafOsReconcileRow_(workbook, tab, rowNumber, source) {
@@ -432,29 +444,29 @@ function assafOsReconcileRow_(workbook, tab, rowNumber, source) {
   try {
     var formulas = sheet.getRange(rowNumber, 1, 1, tab.fields.length).getFormulas()[0];
     if (formulas.some(function (formula) { return formula !== ""; })) throw assafOsError_("formula_drift");
-    record = assafOsRowToRecord_(tab, row);
+    record = assafOsRowToRecord_(tab, row, workbook);
     originalRecordId = record[idKey] || null;
-    inputFieldsFor_(tab).forEach(function (field) { var index = tab.fields.indexOf(field), value = assafOsNativeValue_(field, row[index]); input[field.key] = value === "" ? null : value; });
+    inputFieldsFor_(tab).forEach(function (field) { var index = tab.fields.indexOf(field), value = assafOsNativeValue_(field, row[index]); input[field.key] = value === "" ? null : assafOsResolveReferenceValue_(workbook, field, value); });
     input = AssafOsRuntime.nativeToInput(entity, input); AssafOsRuntime.canonicalInput(entity, input, true);
     if (!record[idKey]) record[idKey] = assafOsNewRecordId_(entity);
     assafOsValidateDependencies_(workbook, entity, record);
-    if (entity === "payments") AssafOsRuntime.validatePaymentGraph(assafOsOtherRecords_(sheet, tab, rowNumber).filter(function (payment) { return !!payment.payment_id; }).concat([record]));
-    if (entity === "expenses") AssafOsRuntime.dedupeExpense(record, assafOsOtherRecords_(sheet, tab, rowNumber));
+    if (entity === "payments") AssafOsRuntime.validatePaymentGraph(assafOsOtherRecords_(workbook, sheet, tab, rowNumber).filter(function (payment) { return !!payment.payment_id; }).concat([record]));
+    if (entity === "expenses") AssafOsRuntime.dedupeExpense(record, assafOsOtherRecords_(workbook, sheet, tab, rowNumber));
   } catch (caught) { assafOsRecordIssue_(workbook, caught.assafOsCode || caught.code || "invalid_row", entity, originalRecordId, rowNumber); return "issue"; }
   var accepted = record[idKey] ? assafOsLatestAccepted_(workbook, entity, record[idKey]) : null;
   if (accepted && Number(record.revision) !== Number(accepted.revision)) { assafOsRecordIssue_(workbook, "system_column_drift", entity, record[idKey], rowNumber); return "issue"; }
   var inputFingerprint = assafOsSha_(AssafOsRuntime.stableStringify(input));
-  if (accepted && inputFingerprint === accepted.input_fingerprint && assafOsRawOwnedFingerprint_(tab, row) !== accepted.raw_fingerprint) { assafOsRecordIssue_(workbook, "system_column_drift", entity, record[idKey], rowNumber); return "issue"; }
+  if (accepted && inputFingerprint === accepted.input_fingerprint && assafOsRawOwnedFingerprint_(tab, row, workbook) !== accepted.raw_fingerprint) { assafOsRecordIssue_(workbook, "system_column_drift", entity, record[idKey], rowNumber); return "issue"; }
   if (accepted && inputFingerprint === accepted.input_fingerprint) { assafOsResolveIssue_(workbook, entity, rowNumber, record[idKey]); return "accepted"; }
   var id = record[idKey], revision = accepted ? accepted.revision + 1 : 1, now = new Date().toISOString();
   record[idKey] = id; record.revision = revision; record.write_source = "משתמש"; record.request_id = "EDIT_" + Utilities.getUuid().replace(/-/g, "");
   if (entity === "leads" && !record.person_id) record.person_id = assafOsNewRecordId_("persons");
   if (tab.fields.some(function (f) { return f.key === "created_at"; }) && !record.created_at) record.created_at = now;
   if (tab.fields.some(function (f) { return f.key === "updated_at"; })) record.updated_at = now;
-  var next = assafOsRecordToRow_(tab, record), snapshot = { entity: entity, record_id: id, revision: revision, input: input };
+  var next = assafOsRecordToRow_(tab, record, workbook), snapshot = { entity: entity, record_id: id, revision: revision, input: input };
   var requests = [];
   tab.fields.forEach(function (field, index) { if (field.role === "system" && AssafOsRuntime.stableStringify(row[index] === "" ? null : row[index]) !== AssafOsRuntime.stableStringify(next[index] === "" ? null : next[index])) requests.push(assafOsCellRequest_(sheet, rowNumber, index + 1, next[index])); });
-  requests.push(assafOsAppendRequest_(workbook.getSheetByName(ASSAF_OS_META.accepted.name), [entity, id, revision, inputFingerprint, assafOsRawOwnedFingerprint_(tab, next), JSON.stringify(snapshot), now, "משתמש", record.request_id]));
+  requests.push(assafOsAppendRequest_(workbook.getSheetByName(ASSAF_OS_META.accepted.name), [entity, id, revision, inputFingerprint, assafOsRawOwnedFingerprint_(tab, next, workbook), JSON.stringify(snapshot), now, "משתמש", record.request_id]));
   var openIssue = assafOsLatestIssue_(workbook, entity, rowNumber);
   if (openIssue && openIssue.status === "open") requests.push(assafOsAppendRequest_(workbook.getSheetByName(ASSAF_OS_META.issues.name), ["ISS_" + Utilities.getUuid().replace(/-/g, ""), now, openIssue.code, entity, id, rowNumber, "resolved"]));
   Sheets.Spreadsheets.batchUpdate({ requests: requests }, workbook.getId());
@@ -501,12 +513,55 @@ function assafOsVerifyMetadata_(workbook) {
   });
 }
 
-function assafOsRowToRecord_(tab, row) {
+function assafOsReferenceCatalog_(workbook, target) {
+  var tab = AssafOsSchema.tab(target), sheet = tab && workbook.getSheetByName(tab.name);
+  if (!tab || !sheet) throw assafOsError_("missing_reference_sheet");
+  var rows = sheet.getDataRange().getValues(), idKey = assafOsIdKey_(target), idIndex = tab.fields.findIndex(function (field) { return field.key === idKey; });
+  var revisionIndex = tab.fields.findIndex(function (field) { return field.key === "revision"; }), catalog = {}, clientNames = {};
+  if (target !== "clients") assafOsReferenceCatalog_(workbook, "clients").forEach(function (item) { clientNames[item.id] = item.primary; });
+  for (var i = 1; i < rows.length; i += 1) {
+    var id = rows[i][idIndex] == null ? "" : String(rows[i][idIndex]);
+    if (!id || (revisionIndex !== -1 && !(Number(rows[i][revisionIndex]) > 0))) continue;
+    if (catalog[id]) throw assafOsError_("ambiguous_reference_id");
+    var primary = "";
+    if (target === "clients") primary = rows[i][tab.fields.findIndex(function (field) { return field.key === "name"; })];
+    else if (target === "works") primary = rows[i][tab.fields.findIndex(function (field) { return field.key === "title"; })];
+    else if (target === "payments") {
+      var kind = rows[i][tab.fields.findIndex(function (field) { return field.key === "kind"; })];
+      if (kind !== "התקבל") continue;
+      var date = rows[i][tab.fields.findIndex(function (field) { return field.key === "date"; })];
+      primary = "תקבול " + assafOsReferenceText_(date);
+    }
+    var personIndex = tab.fields.findIndex(function (field) { return field.key === "person_id"; }), personId = personIndex === -1 ? "" : assafOsEmbeddedReferenceId_(rows[i][personIndex]);
+    var secondary = target === "clients" ? "" : (clientNames[personId] || personId);
+    catalog[id] = { id: id, primary: assafOsReferenceText_(primary) || "ללא שם", secondary: assafOsReferenceText_(secondary) };
+  }
+  return Object.keys(catalog).sort().map(function (id) { return catalog[id]; });
+}
+
+function assafOsReferenceText_(value) { return String(value == null ? "" : value).replace(/[\r\n\t]+/g, " ").replace(/[⟦⟧]/g, "").trim().slice(0, 100); }
+function assafOsEmbeddedReferenceId_(value) { var text = String(value == null ? "" : value), match = text.match(/ ⟦([^⟦⟧]+)⟧$/); return match ? match[1] : text; }
+function assafOsReferenceTarget_(field) { return field.ref ? String(field.ref).split(".")[0] : null; }
+function assafOsReferenceLabel_(item) { return item.primary + (item.secondary ? " · " + item.secondary : "") + " ⟦" + item.id + "⟧"; }
+function assafOsReferenceChoices_(workbook, field) { return assafOsReferenceCatalog_(workbook, assafOsReferenceTarget_(field)).map(assafOsReferenceLabel_); }
+function assafOsResolveReferenceValue_(workbook, field, value) {
+  if (!field.ref || value === null || value === "") return value;
+  var id = assafOsEmbeddedReferenceId_(value), matches = assafOsReferenceCatalog_(workbook, assafOsReferenceTarget_(field)).filter(function (item) { return item.id === id; });
+  if (matches.length !== 1) throw assafOsError_(matches.length > 1 ? "ambiguous_reference_id" : "unknown_reference");
+  return matches[0].id;
+}
+function assafOsDisplayReference_(workbook, field, value) {
+  var id = assafOsResolveReferenceValue_(workbook, field, value), item = assafOsReferenceCatalog_(workbook, assafOsReferenceTarget_(field)).filter(function (candidate) { return candidate.id === id; })[0];
+  return assafOsReferenceLabel_(item);
+}
+
+function assafOsRowToRecord_(tab, row, workbook) {
   var record = {};
   tab.fields.forEach(function (field, i) {
     var value = row[i];
     if (value === "") value = null;
     if (value instanceof Date) value = field.type === "date" ? Utilities.formatDate(value, ASSAF_OS_BUSINESS_TIMEZONE, "yyyy-MM-dd") : value.toISOString();
+    if (value !== null && field.ref && workbook) value = assafOsResolveReferenceValue_(workbook, field, value);
     if (field.type === "money_ils" && value !== null) value = AssafOsRuntime.majorToMinor(Number(value));
     record[field.key] = value;
   });
@@ -514,18 +569,18 @@ function assafOsRowToRecord_(tab, row) {
 }
 function assafOsNativeValue_(field, value) { if (!(value instanceof Date)) return value; if (field.type === "date") return Utilities.formatDate(value, ASSAF_OS_BUSINESS_TIMEZONE, "yyyy-MM-dd"); if (field.type === "datetime") return value.toISOString(); return value; }
 function assafOsAssertHeaders_(sheet, tab, supplied) { if (!sheet) throw assafOsError_("missing_entity_sheet"); var values = supplied || sheet.getRange(1, 1, 1, tab.fields.length).getValues()[0]; if (!values || values.length !== tab.fields.length || tab.fields.some(function (field, index) { return values[index] !== field.label; }) || sheet.getLastColumn() !== tab.fields.length) throw assafOsError_("header_drift"); }
-function assafOsRecordToRow_(tab, record) { return tab.fields.map(function (field) { var value = record[field.key]; if (field.type === "money_ils" && value != null) value = AssafOsRuntime.minorToMajor(value); return value == null ? "" : value; }); }
+function assafOsRecordToRow_(tab, record, workbook) { return tab.fields.map(function (field) { var value = record[field.key]; if (field.type === "money_ils" && value != null) value = AssafOsRuntime.minorToMajor(value); if (value != null && field.ref && workbook) value = assafOsDisplayReference_(workbook, field, value); return value == null ? "" : value; }); }
 function inputFieldsFor_(tab) { return tab.fields.filter(function (field) { return field.role === "input"; }); }
 function assafOsIdKey_(entity) { return entity === "clients" ? "person_id" : entity.replace(/s$/, "") + "_id"; }
 function assafOsNewRecordId_(entity) { return (entity === "clients" ? "PER" : entity.slice(0, 3).toUpperCase()) + "_" + Utilities.getUuid().replace(/-/g, ""); }
 function assafOsLatestAccepted_(workbook, entity, recordId) { var rows = workbook.getSheetByName(ASSAF_OS_META.accepted.name).getDataRange().getValues(), result = null; for (var i = 1; i < rows.length; i += 1) if (rows[i][0] === entity && rows[i][1] === recordId && (!result || Number(rows[i][2]) > result.revision)) result = { revision: Number(rows[i][2]), input_fingerprint: String(rows[i][3]), raw_fingerprint: String(rows[i][4]), row: rows[i] }; return result; }
-function assafOsRawOwnedFingerprint_(tab, row) { return assafOsSha_(AssafOsRuntime.stableStringify(tab.fields.map(function (field, index) { return field.role === "calculated" ? null : assafOsNativeValue_(field, row[index]); }))); }
+function assafOsRawOwnedFingerprint_(tab, row, workbook) { return assafOsSha_(AssafOsRuntime.stableStringify(tab.fields.map(function (field, index) { var value = field.role === "calculated" ? null : assafOsNativeValue_(field, row[index]); return value !== null && value !== "" && field.ref && workbook ? assafOsResolveReferenceValue_(workbook, field, value) : value; }))); }
 function assafOsRecordIssue_(workbook, code, entity, recordId, row) { var current = assafOsLatestIssue_(workbook, entity, row); if (current && current.status === "open" && current.code === code) return; var now = new Date().toISOString(); Sheets.Spreadsheets.batchUpdate({ requests: [assafOsAppendRequest_(workbook.getSheetByName(ASSAF_OS_META.issues.name), ["ISS_" + Utilities.getUuid().replace(/-/g, ""), now, code, entity, recordId || "", row, "open"])] }, workbook.getId()); }
 function assafOsLatestIssue_(workbook, entity, row) { var rows = workbook.getSheetByName(ASSAF_OS_META.issues.name).getDataRange().getValues(), result = null; for (var i = 1; i < rows.length; i += 1) if (rows[i][3] === entity && Number(rows[i][5]) === Number(row)) result = { code: String(rows[i][2]), record_id: rows[i][4] ? String(rows[i][4]) : null, status: String(rows[i][6]) }; return result; }
 function assafOsResolveIssue_(workbook, entity, row, recordId) { var issue = assafOsLatestIssue_(workbook, entity, row); if (!issue || issue.status !== "open") return; var now = new Date().toISOString(); Sheets.Spreadsheets.batchUpdate({ requests: [assafOsAppendRequest_(workbook.getSheetByName(ASSAF_OS_META.issues.name), ["ISS_" + Utilities.getUuid().replace(/-/g, ""), now, issue.code, entity, recordId || issue.record_id || "", row, "resolved"])] }, workbook.getId()); }
 function assafOsOpenIssues_(workbook) { var rows = workbook.getSheetByName(ASSAF_OS_META.issues.name).getDataRange().getValues(), latest = {}; for (var i = 1; i < rows.length; i += 1) latest[String(rows[i][3]) + "|" + String(rows[i][5])] = rows[i]; return Object.keys(latest).map(function (key) { return latest[key]; }).filter(function (row) { return row[6] === "open"; }).map(function (row) { return { code: String(row[2]), entity: String(row[3]), record_id: row[4] ? String(row[4]) : null }; }); }
 function assafOsFindBy_(sheet, column, value, withRow) { var rows = sheet.getDataRange().getValues(); for (var i = 1; i < rows.length; i += 1) if (String(rows[i][column]) === String(value)) return withRow ? { values: rows[i], row: i + 1 } : rows[i]; return null; }
-function assafOsOtherRecords_(sheet, tab, excludedRow) { var rows = sheet.getDataRange().getValues(), records = []; for (var i = 1; i < rows.length; i += 1) { if (i + 1 === excludedRow || rows[i].every(function (cell) { return cell === ""; })) continue; try { records.push(assafOsRowToRecord_(tab, rows[i])); } catch (_) {} } return records; }
+function assafOsOtherRecords_(workbook, sheet, tab, excludedRow) { var rows = sheet.getDataRange().getValues(), records = []; for (var i = 1; i < rows.length; i += 1) { if (i + 1 === excludedRow || rows[i].every(function (cell) { return cell === ""; })) continue; try { records.push(assafOsRowToRecord_(tab, rows[i], workbook)); } catch (_) {} } return records; }
 function assafOsAppendRequest_(sheet, values) { assafOsAssertAppendCapacity_(sheet, 1); return { appendCells: { sheetId: sheet.getSheetId(), rows: [{ values: values.map(assafOsExtendedValue_) }], fields: "userEnteredValue" } }; }
 function assafOsAssertAppendCapacity_(sheet, count) { if (sheet.getLastRow() + count > sheet.getMaxRows()) throw assafOsError_("metadata_capacity_exceeded"); }
 function assafOsRowRequest_(sheet, row, values) { return { updateCells: { range: { sheetId: sheet.getSheetId(), startRowIndex: row - 1, endRowIndex: row, startColumnIndex: 0, endColumnIndex: values.length }, rows: [{ values: values.map(assafOsExtendedValue_) }], fields: "userEnteredValue" } }; }

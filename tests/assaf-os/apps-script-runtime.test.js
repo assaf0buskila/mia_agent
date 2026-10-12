@@ -115,6 +115,63 @@ test("header drift prevents reconciliation writes and yields partial/unknown cov
   assert.equal(h.batches.length, before);
 });
 
+test("combined Apps Script keeps a duplicate-ID snapshot partial and disables affected pickers", () => {
+  const h = createHarness({ maxRows: 25, withSheets: true });
+  h.addRecord("clients", client());
+  h.addRecord("clients", { ...client(), name: "שם שני", request_id: "EDIT_duplicate" });
+  const response = h.call(h.request("snapshot", {}));
+  assert.equal(response.ok, true, JSON.stringify(response.data));
+  assert.equal(response.data.entity_coverage.clients, "partial");
+  const tab = h.Schema.tab("works"), personColumn = tab.fields.findIndex((field) => field.key === "person_id") + 1;
+  const validation = h.workbook.getSheetByName(tab.name).validations.get(`2:${personColumn}:24`);
+  assert.equal(validation.allowInvalid, false);
+  assert.equal(validation.formula, "=FALSE");
+  assert.equal(validation.values, undefined);
+});
+
+test("combined Apps Script refreshes work choices after an approved OS write", () => {
+  const h = createHarness({ maxRows: 25, withSheets: true });
+  h.addRecord("clients", client());
+  const proposal = propose(h, "works", { person_id: "PER_1", title: "עבודה מאושרת", path: "אוטומציה", status: "פעילה", currency: "ILS" });
+  const receipt = approve(h, proposal);
+  assert.equal(receipt.data.status, "committed");
+  const tab = h.Schema.tab("payments"), workColumn = tab.fields.findIndex((field) => field.key === "work_id") + 1;
+  const validation = h.workbook.getSheetByName(tab.name).validations.get(`2:${workColumn}:24`);
+  assert.ok(validation.values.some((value) => value.includes("עבודה מאושרת") && value.endsWith(`⟦${proposal.record_id}⟧`)));
+});
+
+test("combined Apps Script refreshes original-payment choices after approval", () => {
+  const h = createHarness({ maxRows: 25, withSheets: true });
+  h.addRecord("clients", client()); h.addRecord("works", work());
+  const proposal = propose(h, "payments", { person_id: "PER_1", work_id: "WOR_1", path: "אוטומציה", date: "2026-10-12", actual_amount_ils: 10000, currency: "ILS", kind: "התקבל" });
+  assert.equal(approve(h, proposal).data.status, "committed");
+  const tab = h.Schema.tab("payments"), originalColumn = tab.fields.findIndex((field) => field.key === "original_payment_id") + 1;
+  const validation = h.workbook.getSheetByName(tab.name).validations.get(`2:${originalColumn}:24`);
+  assert.ok(validation.values.some((value) => value.endsWith(`⟦${proposal.record_id}⟧`)));
+});
+
+test("combined Apps Script refreshes customer choices after a native edit trigger", () => {
+  const h = createHarness({ maxRows: 25, withSheets: true }), tab = h.Schema.tab("clients"), sheet = h.workbook.getSheetByName(tab.name);
+  h.addRecord("clients", { name: "לקוחה חדשה", status: "פעיל" });
+  h.context.reconcileAssafOsEdit({ range: sheet.getRange(2, 2) });
+  const personId = sheet.getDataRange().getValues()[1][0];
+  assert.match(personId, /^PER_/);
+  const workTab = h.Schema.tab("works"), personColumn = workTab.fields.findIndex((field) => field.key === "person_id") + 1;
+  const validation = h.workbook.getSheetByName(workTab.name).validations.get(`2:${personColumn}:24`);
+  assert.ok(validation.values.some((value) => value.includes("לקוחה חדשה") && value.endsWith(`⟦${personId}⟧`)));
+});
+
+test("post-commit picker refresh failure cannot turn a committed approval into failure", () => {
+  const h = createHarness({ maxRows: 25, withSheets: true });
+  h.addRecord("clients", client());
+  const proposal = propose(h, "works", { person_id: "PER_1", title: "נשארת מאושרת", path: "לימוד", status: "פעילה", currency: "ILS" });
+  h.context.refreshAssafOsReferenceValidations_ = () => { throw new Error("synthetic_ui_failure"); };
+  const receipt = approve(h, proposal);
+  assert.equal(receipt.ok, true, JSON.stringify(receipt.data));
+  assert.equal(receipt.data.status, "committed");
+  assert.ok(h.workbook.getSheetByName("עבודות").getDataRange().getValues().some((row) => row[2] === "נשארת מאושרת"));
+});
+
 test("first partial snapshot accepts an unrelated valid row without strict projection failure", () => {
   const h = createHarness({ maxRows: 25 });
   h.addRecord("clients", { name: "incomplete client" });
@@ -150,6 +207,37 @@ test("native client work payment and time rows receive stable IDs in dependency 
   assert.match(snapshot.data.records.time[0].time_id, /^TIM_/);
   assert.equal(snapshot.data.summary.monthly[0].paid_income_ils, 10000);
   assert.equal(snapshot.data.summary.monthly[0].recorded_minutes, 60);
+});
+
+test("actual Apps Script resolves readable native pickers to exact stable IDs", () => {
+  const h = createHarness({ maxRows: 30 });
+  h.addRecord("clients", client());
+  h.addRecord("clients", { ...client(), person_id: "PER_10", request_id: "EDIT_client10" });
+  const personField = h.Schema.tab("works").fields.find((field) => field.key === "person_id");
+  const choices = h.context.assafOsReferenceChoices_(h.workbook, personField);
+  assert.equal(choices.length, 2);
+  assert.ok(choices.some((value) => value.endsWith("⟦PER_1⟧")));
+  assert.ok(choices.some((value) => value.endsWith("⟦PER_10⟧")));
+  assert.equal(h.context.assafOsResolveReferenceValue_(h.workbook, personField, "תווית שלא סומכים עליה ⟦PER_10⟧"), "PER_10");
+
+  const chosen = choices.find((value) => value.endsWith("⟦PER_10⟧"));
+  h.addRecord("works", { person_id: chosen, title: "בחירה קריאה", path: "לימוד", status: "פעילה", currency: "ILS" });
+  let snapshot = h.call(h.request("snapshot", {}));
+  assert.equal(snapshot.data.records.works.find((row) => row.title === "בחירה קריאה").person_id, "PER_10");
+
+  const proposal = propose(h, "works", { person_id: "PER_1", title: "נכתבה מה־OS", path: "אוטומציה", status: "פעילה", currency: "ILS" });
+  assert.equal(approve(h, proposal).data.status, "committed");
+  const workTab = h.Schema.tab("works"), personIndex = workTab.fields.findIndex((field) => field.key === "person_id");
+  const written = h.workbook.getSheetByName(workTab.name).getDataRange().getValues().find((row) => row[2] === "נכתבה מה־OS");
+  assert.ok(String(written[personIndex]).endsWith("⟦PER_1⟧"));
+  assert.equal(h.context.assafOsRowToRecord_(workTab, written, h.workbook).person_id, "PER_1");
+
+  h.addRecord("works", { person_id: "דנה ⟦PER_100⟧", title: "מזהה דומה", path: "לימוד", status: "פעילה", currency: "ILS" });
+  h.addRecord("works", { person_id: "דנה", title: "כינוי לא ידוע", path: "לימוד", status: "פעילה", currency: "ILS" });
+  snapshot = h.call(h.request("snapshot", {}));
+  assert.equal(snapshot.data.records.works.filter((row) => ["מזהה דומה", "כינוי לא ידוע"].includes(row.title)).length, 0);
+  assert.ok(snapshot.data.issues.some((issue) => issue.entity === "works" && issue.code === "unknown_reference"));
+  assert.equal(h.workbook.getSheetByName("_assaf_os_issues").getDataRange().getValues().filter((row) => row[2] === "unknown_reference" && row[3] === "works").length, 2);
 });
 
 test("multiple fresh native payments and a following refund reconcile in one snapshot each", () => {
