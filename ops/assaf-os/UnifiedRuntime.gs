@@ -127,6 +127,7 @@ function assafOsPropose_(workbook, request, config, requestHash, replay) {
   var pRow = [proposal.proposal_id, proposal.request_id, proposal.owner_id, proposal.source, "pending", proposal.entity, proposal.record_id, proposal.expected_revision, proposal.target_fingerprint, JSON.stringify(proposal), created, expires, ""];
   var requests = [assafOsAppendRequest_(workbook.getSheetByName(ASSAF_OS_META.proposals.name), pRow), assafOsAppendRequest_(workbook.getSheetByName(ASSAF_OS_META.replay.name), [request.request_id, request.owner_id, request.operation, request.actor_source, requestHash, created])];
   Sheets.Spreadsheets.batchUpdate({ requests: requests }, config.workbook_id);
+  assafOsInvalidateMetadataCaches_(workbook, ["proposals", "replay"]);
   return assafOsPublicProposal_(proposal, config);
 }
 
@@ -171,6 +172,7 @@ function assafOsApprove_(workbook, request, config, requestHash, replay) {
   changes.push(assafOsCellRequest_(workbook.getSheetByName(ASSAF_OS_META.proposals.name), found.row, 13, now));
   changes.push(assafOsAppendRequest_(workbook.getSheetByName(ASSAF_OS_META.replay.name), [request.request_id, request.owner_id, request.operation, request.actor_source, requestHash, now]));
   Sheets.Spreadsheets.batchUpdate({ requests: changes }, config.workbook_id);
+  assafOsInvalidateMetadataCaches_(workbook, ["accepted", "proposals", "receipts", "replay"]);
   if (proposal.entity === "promote_lead") { assafOsInvalidateEntityCache_(workbook, "leads"); assafOsInvalidateEntityCache_(workbook, "clients"); }
   else assafOsInvalidateEntityCache_(workbook, proposal.entity);
   assafOsInvalidateEntityCache_(workbook, "clients"); assafOsInvalidateEntityCache_(workbook, "works");
@@ -202,6 +204,7 @@ function assafOsTerminalProposal_(workbook, found, proposal, status, request, co
     assafOsCellRequest_(workbook.getSheetByName(ASSAF_OS_META.proposals.name), found.row, 5, status), assafOsCellRequest_(workbook.getSheetByName(ASSAF_OS_META.proposals.name), found.row, 13, now),
     assafOsAppendRequest_(workbook.getSheetByName(ASSAF_OS_META.replay.name), [request.request_id, request.owner_id, request.operation, request.actor_source, requestHash, now]),
   ] }, config.workbook_id);
+  assafOsInvalidateMetadataCaches_(workbook, ["proposals", "receipts", "replay"]);
   return receipt;
 }
 
@@ -339,7 +342,7 @@ function assafOsReadEntityTolerant_(workbook, entity) {
   return assafOsStoreCachedEntity_("tolerant", entity, result);
 }
 
-function assafOsBeginRequestReadCache_(workbook) { ASSAF_OS_REQUEST_READ_CACHE = { workbook_id: workbook.getId(), sheets: {}, values: {}, strict: {}, tolerant: {} }; }
+function assafOsBeginRequestReadCache_(workbook) { if (!ASSAF_OS_REQUEST_READ_CACHE || ASSAF_OS_REQUEST_READ_CACHE.workbook_id !== workbook.getId()) ASSAF_OS_REQUEST_READ_CACHE = { workbook_id: workbook.getId(), sheets: {}, values: {}, strict: {}, tolerant: {} }; }
 function assafOsReadSheetOnce_(sheet) {
   var cache = ASSAF_OS_REQUEST_READ_CACHE, key = String(sheet.getSheetId());
   if (cache && cache.workbook_id === sheet.getParent().getId() && cache.sheets[key]) return cache.sheets[key];
@@ -368,6 +371,7 @@ function assafOsInvalidateEntityCache_(workbook, entity) {
 function assafOsInvalidateSheetCache_(workbook, sheet) {
   if (ASSAF_OS_REQUEST_READ_CACHE && ASSAF_OS_REQUEST_READ_CACHE.workbook_id === workbook.getId() && sheet) { delete ASSAF_OS_REQUEST_READ_CACHE.sheets[String(sheet.getSheetId())]; delete ASSAF_OS_REQUEST_READ_CACHE.values[String(sheet.getSheetId())]; }
 }
+function assafOsInvalidateMetadataCaches_(workbook, keys) { keys.forEach(function (key) { var spec = ASSAF_OS_META[key]; if (spec) assafOsInvalidateSheetCache_(workbook, workbook.getSheetByName(spec.name)); }); }
 
 function assafOsLeadPhoneIdentity_(value) {
   var raw = String(value || "").trim();
@@ -421,7 +425,7 @@ function assafOsSnapshot_(workbook, config) {
     var read = assafOsReadEntityTolerant_(workbook, entity);
     records[entity] = read.records; entityCoverage[entity] = read.coverage; issues = issues.concat(read.issues);
   });
-  var pending = workbook.getSheetByName(ASSAF_OS_META.proposals.name).getDataRange().getValues().slice(1).filter(function (row) { return row[4] === "pending" && Date.parse(row[11]) > Date.now(); }).map(function (row) { return assafOsPublicProposal_(JSON.parse(row[9]), config); });
+  var pending = assafOsReadValuesOnce_(workbook.getSheetByName(ASSAF_OS_META.proposals.name)).slice(1).filter(function (row) { return row[4] === "pending" && Date.parse(row[11]) > Date.now(); }).map(function (row) { return assafOsPublicProposal_(JSON.parse(row[9]), config); });
   issues = issues.filter(function (issue, index, all) { return all.findIndex(function (item) { return item.code === issue.code && item.entity === issue.entity && item.record_id === issue.record_id; }) === index; });
   keys.forEach(function (entity) { if (issues.some(function (issue) { return issue.entity === entity; }) && entityCoverage[entity] === "complete") entityCoverage[entity] = "partial"; });
   if (entityCoverage.payments !== "complete" || entityCoverage.time !== "complete") entityCoverage.works = entityCoverage.works === "unknown" ? "unknown" : "partial";
@@ -623,9 +627,13 @@ function assafOsVerifyMetadata_(workbook) {
   Object.keys(ASSAF_OS_META).forEach(function (key) {
     var spec = ASSAF_OS_META[key], sheet = workbook.getSheetByName(spec.name);
     if (!sheet) throw assafOsError_("runtime_not_installed");
-    var headers = sheet.getRange(1, 1, 1, spec.headers.length).getValues()[0];
+    var lastRow = sheet.getLastRow();
+    if (lastRow > ASSAF_OS_MAX_ROWS + 1) throw assafOsError_("metadata_capacity_exceeded");
+    var rows = sheet.getRange(1, 1, Math.max(lastRow, 1), spec.headers.length).getValues();
+    var headers = rows[0] || [];
     if (spec.headers.some(function (value, index) { return headers[index] !== value; })) throw assafOsError_("metadata_header_drift");
-    if (sheet.getLastRow() > ASSAF_OS_MAX_ROWS + 1) throw assafOsError_("metadata_capacity_exceeded");
+    var cache = ASSAF_OS_REQUEST_READ_CACHE, cacheKey = String(sheet.getSheetId());
+    if (cache && cache.workbook_id === workbook.getId()) cache.values[cacheKey] = rows;
   });
 }
 
