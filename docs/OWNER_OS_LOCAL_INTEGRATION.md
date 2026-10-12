@@ -110,9 +110,14 @@ cursor חתום קצר, קשור ל־owner/workspace/query/order/limit, פג א�
 
 תזכורות קנוניות עד 2,800 code points מקוצרות לתצוגת עד 500 יחידות UTF-16,
 עם … ו־metadata שמציין excerpt; הטקסט ב־DB לא משתנה. ה־UI הקפוא מציג את
-הקיצור אך אינו מציג עדיין את metadata המורחב. שדות לקוח ופעולה מעבר למגבלת
-התצוגה הקפואה או תוכן Unicode פגום נכשלים ב־503 source_unavailable, ללא החלפת ערך.
-תמיכה בתוכן ארוך יותר מחייבת שינוי חוזה נפרד.
+הקיצור אך אינו מציג עדיין את metadata המורחב. בשרשרת קליטת טופס AssafWeb,
+טקסט CRM קנוני עד 2,000 code points בשדות business, summary ו־Activity.result
+מוצג כקטע עם …, עד 160, 1,000 ו־2,000 יחידות UTF-16 בהתאמה. בלקוח השדות
+המקוצרים מפורטים ב־record_quality.text_excerpts וב־reason_codes; בפעילות מופיעים
+result_truncated, result_presentation=excerpt, full_result_available=false ו־reason_codes.
+הקבלה, מזהי הליד/הפעילות והטקסט ב־DB אינם משתנים. גבולות הקליטה וה־UI הקפוא
+נשארים כפי שהם; תוכן Unicode פגום או שדות אחרים מעבר למגבלה נכשלים ב־503
+source_unavailable. הצגת הטקסט המלא מעבר לגבולות האלה מחייבת שינוי חוזה נפרד.
 
 ## 5. תאימות Quick Lead ותזכורות
 

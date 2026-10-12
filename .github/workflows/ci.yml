@@ -36,6 +36,7 @@ jobs:
       - run: uv run ruff check app tests
       - run: node --check app/web/ask_mia.js
       - run: node tests/unit/widget_behavior.test.js
+      - run: node --test tests/business-ledger/*.test.js
       - run: uv run pytest --basetemp=.cache/pytest-ci
 
   postgres:
@@ -141,7 +142,10 @@ jobs:
       - run: mkdir -p .cache
       # The mobile repository is private. Its actual browser/BFF integration runs
       # in that repository's CI; this job needs no cross-repository credential.
-      - run: uv run pytest tests/unit/test_owner_os_postgres.py -k 'not frozen_frontend_bff' --basetemp=.cache/owner-os-ci
+      - run: >-
+          uv run pytest tests/unit/test_owner_os_postgres.py
+          tests/unit/test_form_intake_owner_os_postgres.py
+          -k 'not frozen_frontend_bff' --basetemp=.cache/owner-os-ci
 
   container:
     runs-on: ubuntu-latest

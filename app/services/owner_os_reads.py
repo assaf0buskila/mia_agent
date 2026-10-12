@@ -379,6 +379,15 @@ def _utf16_excerpt(value: str, maximum_units: int, field: str) -> tuple[str, boo
     return "".join(prefix) + "…", True
 
 
+def _crm_text_excerpt(value: object, maximum_units: int, field: str) -> tuple[str | None, bool]:
+    # CRM stores up to 2,000 Python code points. Presentation remains bounded by
+    # the existing Owner OS contract without discarding the canonical source.
+    stored = _bounded(value, 2_000, field, count_utf16_units=False)
+    if stored is None:
+        return None, False
+    return _utf16_excerpt(stored, maximum_units, field)
+
+
 def _utc_string(value: object, field: str) -> str:
     if isinstance(value, datetime):
         parsed = value
@@ -426,7 +435,7 @@ def _contact_dto(row: CrmContactRow, *, detail: bool = False) -> dict[str, objec
     name = _bounded(values.get("name"), 160, "name")
     phone = _bounded(values.get("phone"), 40, "phone")
     email = _bounded(values.get("email"), 320, "email")
-    business = _bounded(values.get("business"), 160, "business")
+    business, business_truncated = _crm_text_excerpt(values.get("business"), 160, "business")
     source = _bounded(values.get("source"), 160, "source")
     status = _bounded(values.get("status"), 160, "status")
     next_step = _bounded(values.get("next_step"), 2_000, "next_step")
@@ -469,7 +478,19 @@ def _contact_dto(row: CrmContactRow, *, detail: bool = False) -> dict[str, objec
     }
     if detail:
         result["need"] = _bounded(values.get("want"), 1_000, "need")
-        result["summary"] = _bounded(values.get("summary"), 1_000, "summary")
+        result["summary"], summary_truncated = _crm_text_excerpt(
+            values.get("summary"), 1_000, "summary"
+        )
+    else:
+        summary_truncated = False
+    excerpt_fields = [
+        field
+        for field, truncated in (("business", business_truncated), ("summary", summary_truncated))
+        if truncated
+    ]
+    if excerpt_fields:
+        reasons.extend(f"{field}_text_excerpt" for field in excerpt_fields)
+        result["record_quality"]["text_excerpts"] = excerpt_fields
     return result
 
 
@@ -509,16 +530,27 @@ def _next_action_dto(row: CrmContactRow) -> dict[str, object]:
 
 
 def _activity_dto(row: CrmActivityRow) -> dict[str, object]:
-    return {
+    presented_result, truncated = _crm_text_excerpt(row.result, 2_000, "result")
+    result: dict[str, object] = {
         "activity_id": _safe_id(row.id, "activity_id"),
         "contact_id": _safe_id(row.contact_id, "contact_id"),
         "occurred_at": _utc_string(row.occurred_at, "occurred_at"),
         "channel": _bounded(row.channel, 32, "channel"),
         "action": _bounded(row.action, 2_000, "action"),
-        "result": _bounded(row.result, 2_000, "result"),
+        "result": presented_result,
         "revision": None,
         "immutable_record": "unknown",
     }
+    if truncated:
+        result.update(
+            {
+                "result_truncated": True,
+                "result_presentation": "excerpt",
+                "full_result_available": False,
+                "reason_codes": ["activity_result_text_excerpt"],
+            }
+        )
+    return result
 
 
 def _reminder_dto(row: OwnerReminderRow) -> dict[str, object]:

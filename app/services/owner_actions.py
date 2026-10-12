@@ -399,6 +399,18 @@ def execute_approved_owner_action_with_adapters(
     if envelope is None:
         return OwnerActionExecution("unbound")
 
+    # Finance actions use the same durable approval/claim engine, but dispatch
+    # before constructing any unrelated Composio, CRM or Google provider.
+    if envelope["kind"].startswith("business."):
+        from app.services.business_ledger_actions import execute_business_action
+
+        return execute_business_action(
+            store,
+            settings=settings,
+            principal=principal,
+            proposal_id=proposal_id,
+        )
+
     prepared: dict[str, Any] = {}
 
     def validate_schema(kind: str, parameters: Mapping[str, Any]) -> bool:

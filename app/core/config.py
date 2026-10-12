@@ -69,6 +69,11 @@ class Settings(BaseSettings):
     # Private standalone owner app. Both gates stay off until a separate release.
     owner_os_enabled: bool = False
     owner_os_actions_enabled: bool = False
+    # Separate, TEST-only Sheets ledger. Never enables CRM or reminder writes.
+    business_ledger_test_enabled: bool = False
+    business_ledger_workspace_id: str = ""
+    business_ledger_script_url: str = ""
+    business_ledger_hmac_secret: str = Field(default="", repr=False)
     owner_os_origin: str = ""
     owner_os_workspace_id: str = ""
     owner_os_session_database_url: str = ""

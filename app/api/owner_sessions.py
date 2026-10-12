@@ -54,7 +54,9 @@ READ_SCOPES = frozenset(
     }
 )
 ACTION_SCOPES = frozenset({"quick_leads.create", "reminders.write"})
-KNOWN_SCOPES = READ_SCOPES | ACTION_SCOPES
+BUSINESS_READ_SCOPES = frozenset({"business-ledger:read"})
+BUSINESS_WRITE_SCOPES = frozenset({"business-ledger:write"})
+KNOWN_SCOPES = READ_SCOPES | ACTION_SCOPES | BUSINESS_READ_SCOPES | BUSINESS_WRITE_SCOPES
 
 _logger = logging.getLogger(__name__)
 
@@ -77,6 +79,8 @@ class OwnerSessionView(BaseModel):
     scopes: list[str]
     expires_at: datetime
     csrf_token: str = Field(repr=False)
+    # Non-credential namespace for pending UUID recovery; never exposes numeric ID.
+    business_binding: str | None = Field(default=None, repr=False)
 
 
 def _error(status_code: int, detail: str) -> HTTPException:
@@ -127,7 +131,22 @@ def _configured_scopes(settings: Settings) -> frozenset[str]:
     granted = requested & KNOWN_SCOPES
     if not getattr(settings, "owner_os_actions_enabled", False):
         granted -= ACTION_SCOPES
+    if not getattr(settings, "business_ledger_test_enabled", False) or settings.env.value == "prod":
+        granted -= BUSINESS_READ_SCOPES | BUSINESS_WRITE_SCOPES
     return granted
+
+
+def _business_binding(settings: Settings, owner_id: str) -> str | None:
+    if not ((BUSINESS_READ_SCOPES | BUSINESS_WRITE_SCOPES) & _configured_scopes(settings)):
+        return None
+    secret = settings.business_ledger_hmac_secret
+    if len(secret) < 32:
+        return None
+    identity = json.dumps(
+        ["business-ledger-recovery-v1", settings.owner_os_workspace_id, owner_id],
+        separators=(",", ":"),
+    )
+    return hmac.new(secret.encode(), identity.encode(), "sha256").hexdigest()
 
 
 def _session_ttl(settings: Settings) -> int:
@@ -476,7 +495,7 @@ def owner_mutation_scope(
     *,
     require_fresh_login: bool = False,
 ) -> Callable[..., OwnerSessionPrincipal]:
-    if scope not in ACTION_SCOPES:
+    if scope not in ACTION_SCOPES | BUSINESS_WRITE_SCOPES:
         raise ValueError("mutation scope must be a fixed action scope")
 
     def dependency(
@@ -611,6 +630,7 @@ async def login(
     _clear_cookie(response, CHALLENGE_COOKIE)
     return OwnerSessionView(
         scopes=sorted(issued.record.scopes),
+        business_binding=_business_binding(settings, issued.record.owner_id),
         expires_at=issued.record.expires_at,
         csrf_token=session_csrf_token(
             issued.cookie_token,
@@ -635,6 +655,7 @@ def session_status(
         raise _error(401, "owner_auth_required") from None
     return OwnerSessionView(
         scopes=sorted(principal.scopes),
+        business_binding=_business_binding(settings, principal.owner_id),
         expires_at=record.expires_at,
         csrf_token=session_csrf_token(cookie_token, secret=settings.telegram_bot_token),
     )

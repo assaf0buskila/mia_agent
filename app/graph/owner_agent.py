@@ -579,6 +579,11 @@ def run_owner_agent(
         allow_reminders=(
             ctx.settings.reminders_enabled and getattr(ctx, "private_owner_chat", False)
         ),
+        allow_business=(
+            ctx.settings.env.value == "test"
+            and ctx.settings.business_ledger_test_enabled
+            and getattr(ctx, "private_owner_chat", False)
+        ),
     )
 
     def finish(

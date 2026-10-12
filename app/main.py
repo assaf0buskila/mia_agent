@@ -8,6 +8,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from starlette.exceptions import HTTPException
 
 from app import __version__
+from app.api.business_ledger import router as business_ledger_router
 from app.api.form_intake import router as form_intake_router
 from app.api.owner_os import router as owner_os_router
 from app.api.owner_os_actions import router as owner_os_actions_router
@@ -303,6 +304,7 @@ app.include_router(quick_leads_router)
 app.include_router(owner_sessions_router)
 app.include_router(owner_os_router)
 app.include_router(owner_os_actions_router)
+app.include_router(business_ledger_router)
 app.add_middleware(OwnerOSBoundary)
 app.add_exception_handler(HTTPException, owner_http_error)
 app.add_exception_handler(RequestValidationError, owner_validation_error)

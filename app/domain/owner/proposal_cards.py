@@ -354,6 +354,98 @@ def _card_unknown(reason: str = "") -> str:
     return _card("פעולה", detail, "אפשר עדיין לאשר או לבטל דרך הכפתורים.")
 
 
+def _card_business(parameters: Mapping[str, Any], target: Mapping[str, Any], kind: str) -> str:
+    """Render every approved finance value while keeping endpoint/key hashes internal."""
+    title = {
+        "business.save_deal": "שמירת עסקה",
+        "business.save_schedule": "שמירת לוח חיובים",
+        "business.record_payment": "רישום תקבול ידני",
+        "business.record_expense": "רישום הוצאה",
+        "business.save_project": "שמירת פרויקט",
+        "business.recover_receipt": "בדיקת קבלה בלבד",
+    }[kind]
+    record = parameters.get("deal") or parameters.get("payment") or parameters.get("expense")
+    record = record or parameters.get("project") or {}
+    record = record if isinstance(record, dict) else {}
+
+    def shown(value: Any) -> Any:
+        if value is None:
+            return "ללא"
+        if value == "":
+            return "ריק"
+        if value is True:
+            return "כן"
+        if value is False:
+            return "לא"
+        return value
+
+    pairs: list[tuple[str, Any, bool]] = []
+
+    def add(source: Mapping[str, Any], key: str, label: str, mono: bool) -> None:
+        if key in source:
+            pairs.append((label, shown(source[key]), mono))
+
+    for key, label, mono in (
+        ("request_id", "מזהה בקשה", True),
+        ("expected_id", "מזהה רשומה צפוי", True),
+        ("expected_revision", "גרסה צפויה", True),
+        ("expected_charge_revision", "גרסת חיוב צפויה", True),
+        ("deal_id", "מזהה עסקה", True),
+        ("number_of_charges", "מספר חיובים", True),
+        ("first_due_date", "מועד חיוב ראשון", True),
+        ("confirmed_received", "אישור שהכסף התקבל", False),
+    ):
+        add(parameters, key, label, mono)
+    for key, label, mono in (
+        ("id", "מזהה רשומה", True),
+        ("charge_id", "מזהה חיוב", True),
+        ("project_id", "מזהה פרויקט", True),
+        ("title", "כותרת", False),
+        ("amount_minor", "סכום באגורות", True),
+        ("currency", "מטבע", True),
+        ("payment_plan", "תוכנית תשלום", False),
+        ("start_date", "תאריך התחלה", True),
+        ("status", "סטטוס", False),
+        ("received_at", "התקבל בתאריך", True),
+        ("occurred_on", "תאריך הוצאה", True),
+        ("deadline", "תאריך יעד", True),
+        ("notes", "הערות", False),
+    ):
+        add(record, key, label, mono)
+    body = _kv_lines(pairs)
+    charge_ids = parameters.get("charge_ids")
+    charges = ""
+    if isinstance(charge_ids, list):
+        charges = section("מזהי חיובים", "\n".join(code(isolate(str(item))) for item in charge_ids))
+    prospective = target.get("prospective_charges")
+    schedule = ""
+    if isinstance(prospective, list):
+        schedule = section(
+            "לוח חיובים מדויק",
+            "\n".join(
+                f"{code(isolate(str(item.get('id', ''))))} | "
+                f"{esc(str(item.get('due_date', '')))} | "
+                f"{esc(str(item.get('amount_minor', '')))} אגורות"
+                for item in prospective
+                if isinstance(item, dict)
+            ),
+        )
+    expected = _kv_lines(
+        [
+            ("יעד מאושר", target.get("record_id"), True),
+            ("גרסת יעד", target.get("expected_revision"), True),
+            ("סביבה", target.get("mode"), True),
+            ("מקור", target.get("source"), True),
+        ]
+    )
+    note = ""
+    if kind == "business.record_payment":
+        note = "האישור מאשר ידנית שהכסף התקבל; ללא אישור לא יירשם תקבול."
+    elif kind == "business.recover_receipt":
+        note = "הפעולה בודקת קבלה קיימת בלבד ואינה שולחת שוב את הכתיבה המקורית."
+    return _card(title, body, charges, schedule, expected, note=note)
+
+
 _CARD_RENDERERS = {
     "gmail.create_draft": _card_gmail_create_draft,
     "composio.write": _card_composio_write,
@@ -364,6 +456,12 @@ _CARD_RENDERERS = {
     "crm.resolve_conflict": _card_crm_resolve_conflict,
     "sheets.update": lambda p, t: _card_sheets_write(p, t, append=False),
     "sheets.append": lambda p, t: _card_sheets_write(p, t, append=True),
+    "business.save_deal": lambda p, t: _card_business(p, t, "business.save_deal"),
+    "business.save_schedule": lambda p, t: _card_business(p, t, "business.save_schedule"),
+    "business.record_payment": lambda p, t: _card_business(p, t, "business.record_payment"),
+    "business.record_expense": lambda p, t: _card_business(p, t, "business.record_expense"),
+    "business.save_project": lambda p, t: _card_business(p, t, "business.save_project"),
+    "business.recover_receipt": lambda p, t: _card_business(p, t, "business.recover_receipt"),
 }
 
 
