@@ -127,6 +127,13 @@ test("combined Apps Script keeps a duplicate-ID snapshot partial and disables af
   assert.equal(validation.allowInvalid, false);
   assert.equal(validation.formula, "=FALSE");
   assert.equal(validation.values, undefined);
+  h.workbook.getSheetByName("לקוחות").setRow(3, h.Schema.tab("clients").fields.map(() => ""));
+  h.resetMetrics();
+  const repaired = h.call(h.request("snapshot", {}));
+  assert.equal(repaired.ok, true, JSON.stringify(repaired.data));
+  const refreshed = h.workbook.getSheetByName(tab.name).validations.get(`2:${personColumn}:24`);
+  assert.ok(refreshed.values.some((value) => value.endsWith("⟦PER_1⟧")));
+  assert.ok(h.metrics().setDataValidation > 0);
 });
 
 test("combined Apps Script refreshes work choices after an approved OS write", () => {
@@ -159,17 +166,46 @@ test("combined Apps Script refreshes customer choices after a native edit trigge
   const workTab = h.Schema.tab("works"), personColumn = workTab.fields.findIndex((field) => field.key === "person_id") + 1;
   const validation = h.workbook.getSheetByName(workTab.name).validations.get(`2:${personColumn}:24`);
   assert.ok(validation.values.some((value) => value.includes("לקוחה חדשה") && value.endsWith(`⟦${personId}⟧`)));
+  sheet.setRow(2, tab.fields.map(() => ""));
+  h.resetMetrics();
+  h.context.reconcileAssafOsEdit({ range: sheet.getRange(2, 2) });
+  const afterDelete = h.workbook.getSheetByName(workTab.name).validations.get(`2:${personColumn}:24`);
+  assert.equal(afterDelete.formula, "=FALSE");
+  assert.ok(h.metrics().setDataValidation > 0);
 });
 
 test("post-commit picker refresh failure cannot turn a committed approval into failure", () => {
   const h = createHarness({ maxRows: 25, withSheets: true });
   h.addRecord("clients", client());
   const proposal = propose(h, "works", { person_id: "PER_1", title: "נשארת מאושרת", path: "לימוד", status: "פעילה", currency: "ILS" });
+  const realRefresh = h.context.refreshAssafOsReferenceValidations_;
   h.context.refreshAssafOsReferenceValidations_ = () => { throw new Error("synthetic_ui_failure"); };
   const receipt = approve(h, proposal);
   assert.equal(receipt.ok, true, JSON.stringify(receipt.data));
   assert.equal(receipt.data.status, "committed");
   assert.ok(h.workbook.getSheetByName("עבודות").getDataRange().getValues().some((row) => row[2] === "נשארת מאושרת"));
+  assert.equal(h.scriptProperties.ASSAF_OS_REFERENCE_VALIDATION_DIRTY, "true");
+  h.context.refreshAssafOsReferenceValidations_ = realRefresh;
+  h.resetMetrics();
+  const retry = h.call(h.request("snapshot", {}));
+  assert.equal(retry.ok, true, JSON.stringify(retry.data));
+  assert.ok(h.metrics().setDataValidation > 0);
+  assert.equal(h.scriptProperties.ASSAF_OS_REFERENCE_VALIDATION_DIRTY, undefined);
+});
+
+test("missing catalog fingerprint refreshes instead of blessing stale picker choices", () => {
+  const h = createHarness({ maxRows: 25, withSheets: true });
+  h.addRecord("clients", client());
+  assert.equal(h.call(h.request("snapshot", {})).ok, true);
+  const workTab = h.Schema.tab("works"), personColumn = workTab.fields.findIndex((field) => field.key === "person_id") + 1;
+  assert.ok(h.workbook.getSheetByName(workTab.name).validations.get(`2:${personColumn}:24`).values.some((value) => value.endsWith("⟦PER_1⟧")));
+  delete h.scriptProperties.ASSAF_OS_REFERENCE_VALIDATION_FINGERPRINT;
+  h.workbook.getSheetByName("לקוחות").setRow(2, h.Schema.tab("clients").fields.map(() => ""));
+  h.resetMetrics();
+  const response = h.call(h.request("snapshot", {}));
+  assert.equal(response.ok, true, JSON.stringify(response.data));
+  assert.equal(h.workbook.getSheetByName(workTab.name).validations.get(`2:${personColumn}:24`).formula, "=FALSE");
+  assert.ok(h.metrics().setDataValidation > 0);
 });
 
 test("first partial snapshot accepts an unrelated valid row without strict projection failure", () => {
@@ -376,4 +412,67 @@ test("MIA proposals approved by Telegram preserve per-work monthly time evidence
   assert.deepEqual({ income: ils.paid_income_ils, minutes: ils.recorded_minutes, hourly: ils.effective_hourly_ils, coverage: ils.coverage }, { income: 15000, minutes: 120, hourly: null, coverage: "partial" });
   assert.ok(ils.reason_codes.includes("missing_time"));
   assert.deepEqual({ income: eur.paid_income_ils, minutes: eur.recorded_minutes, hourly: eur.effective_hourly_ils, coverage: eur.coverage }, { income: 7000, minutes: 60, hourly: 7000, coverage: "complete" });
+});
+
+test("unchanged empty snapshot performs one raw read per sheet and no UI or projection writes", () => {
+  const h = createHarness({ maxRows: 2001, withSheets: true });
+  const initialized = h.context.refreshAssafOsReferenceValidations();
+  assert.equal(initialized.refreshed, true);
+  assert.ok(h.metrics().setDataValidation > 0);
+  assert.match(h.scriptProperties.ASSAF_OS_REFERENCE_VALIDATION_FINGERPRINT, /^[0-9a-f]{64}$/);
+  h.resetMetrics();
+  const response = h.call(h.request("snapshot", {}));
+  assert.equal(response.ok, true, JSON.stringify(response.data));
+  assert.deepEqual(response.data.records.clients, []);
+  assert.deepEqual(response.data.records.works, []);
+  assert.deepEqual(h.metrics(), {
+    getValues: 17, getFormulas: 8, getLastRow: 17, getLastColumn: 20,
+    getDataRange: 12, setDataValidation: 0, batchUpdate: 0,
+  });
+  assert.equal(h.context.ASSAF_OS_REQUEST_READ_CACHE, null);
+});
+
+test("unchanged populated snapshot keeps bounded reads and skips stable picker and projection writes", () => {
+  const h = createHarness({ maxRows: 2001, withSheets: true });
+  h.addRecord("clients", client()); h.addRecord("works", work()); h.addRecord("payments", payment());
+  const settled = h.call(h.request("snapshot", {}));
+  assert.equal(settled.ok, true, JSON.stringify(settled.data));
+  h.resetMetrics();
+  const response = h.call(h.request("snapshot", {}));
+  assert.equal(response.ok, true, JSON.stringify(response.data));
+  assert.equal(response.data.records.payments[0].payment_id, "PAY_1");
+  assert.equal(response.data.summary.monthly[0].paid_income_ils, 10000);
+  assert.deepEqual(h.metrics(), {
+    getValues: 23, getFormulas: 8, getLastRow: 23, getLastColumn: 26,
+    getDataRange: 18, setDataValidation: 0, batchUpdate: 0,
+  });
+});
+
+test("snapshot repairs calculated summary drift without refreshing stable native pickers", () => {
+  const h = createHarness({ maxRows: 30, withSheets: true });
+  h.addRecord("clients", client()); h.addRecord("works", work()); h.addRecord("payments", payment());
+  const settled = h.call(h.request("snapshot", {}));
+  assert.equal(settled.ok, true, JSON.stringify(settled.data));
+  const summaryTab = h.Schema.tab("summary"), summarySheet = h.workbook.getSheetByName(summaryTab.name);
+  const paidColumn = summaryTab.fields.findIndex((field) => field.key === "net_received_ils") + 1;
+  summarySheet.setCell(2, paidColumn, 999);
+  h.resetMetrics();
+  const repaired = h.call(h.request("snapshot", {}));
+  assert.equal(repaired.ok, true, JSON.stringify(repaired.data));
+  assert.equal(repaired.data.summary.monthly[0].paid_income_ils, 10000);
+  assert.equal(summarySheet.value(2, paidColumn), 100);
+  assert.equal(h.metrics().batchUpdate, 1);
+  assert.equal(h.metrics().setDataValidation, 0);
+});
+
+test("schema and snapshot reads do not consume replay capacity", () => {
+  const h = createHarness({ maxRows: 25 });
+  const replay = h.workbook.getSheetByName("_assaf_os_replay");
+  assert.equal(replay.getLastRow(), 1);
+  assert.equal(h.call(h.request("schema", {})).ok, true);
+  assert.equal(h.call(h.request("snapshot", {})).ok, true);
+  assert.equal(h.call(h.request("snapshot", {})).ok, true);
+  assert.equal(replay.getLastRow(), 1);
+  propose(h, "tasks", { title: "Replay is reserved for mutations", status: "לביצוע" });
+  assert.equal(replay.getLastRow(), 2);
 });

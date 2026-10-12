@@ -6,6 +6,9 @@ var ASSAF_OS_MAX_RESPONSE_BYTES = 262144;
 var ASSAF_OS_MAX_ROWS = 2000;
 var ASSAF_OS_PROPOSAL_TTL_MS = 10 * 60 * 1000;
 var ASSAF_OS_BUSINESS_TIMEZONE = "Asia/Jerusalem";
+var ASSAF_OS_REQUEST_READ_CACHE = null;
+var ASSAF_OS_REFERENCE_FINGERPRINT_PROPERTY = "ASSAF_OS_REFERENCE_VALIDATION_FINGERPRINT";
+var ASSAF_OS_REFERENCE_DIRTY_PROPERTY = "ASSAF_OS_REFERENCE_VALIDATION_DIRTY";
 var ASSAF_OS_META = {
   accepted: { name: "_assaf_os_accepted", headers: ["entity", "record_id", "revision", "input_fingerprint", "raw_fingerprint", "snapshot_json", "accepted_at", "source", "request_id"] },
   proposals: { name: "_assaf_os_proposals", headers: ["proposal_id", "request_id", "owner_id", "actor_source", "status", "entity", "record_id", "expected_revision", "target_fingerprint", "proposal_json", "created_at", "expires_at", "decided_at"] },
@@ -51,10 +54,12 @@ function assafOsConfig_() {
 }
 
 function assafOsRun_(request, config) {
+  ASSAF_OS_REQUEST_READ_CACHE = null;
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(5000)) throw assafOsError_("runtime_busy");
   try {
     var workbook = SpreadsheetApp.openById(config.workbook_id);
+    assafOsBeginRequestReadCache_(workbook);
     assafOsVerifyMetadata_(workbook);
     var replay = assafOsFindBy_(workbook.getSheetByName(ASSAF_OS_META.replay.name), 0, request.request_id);
     var requestHash = assafOsIdempotencyHash_(request);
@@ -68,7 +73,7 @@ function assafOsRun_(request, config) {
     if (request.operation === "approve") return assafOsApprove_(workbook, request, config, requestHash, replay);
     if (request.operation === "reject") return assafOsReject_(workbook, request, config, requestHash, replay);
     throw assafOsError_("invalid_operation");
-  } finally { lock.releaseLock(); }
+  } finally { ASSAF_OS_REQUEST_READ_CACHE = null; lock.releaseLock(); }
 }
 
 function assafOsSchema_(config) {
@@ -164,6 +169,9 @@ function assafOsApprove_(workbook, request, config, requestHash, replay) {
   changes.push(assafOsCellRequest_(workbook.getSheetByName(ASSAF_OS_META.proposals.name), found.row, 13, now));
   changes.push(assafOsAppendRequest_(workbook.getSheetByName(ASSAF_OS_META.replay.name), [request.request_id, request.owner_id, request.operation, request.actor_source, requestHash, now]));
   Sheets.Spreadsheets.batchUpdate({ requests: changes }, config.workbook_id);
+  if (proposal.entity === "promote_lead") { assafOsInvalidateEntityCache_(workbook, "leads"); assafOsInvalidateEntityCache_(workbook, "clients"); }
+  else assafOsInvalidateEntityCache_(workbook, proposal.entity);
+  assafOsInvalidateEntityCache_(workbook, "clients"); assafOsInvalidateEntityCache_(workbook, "works");
   if (["clients", "works", "payments", "promote_lead"].indexOf(proposal.entity) !== -1) assafOsRefreshReferenceValidationsSafely_(workbook);
   return receipt;
 }
@@ -225,8 +233,8 @@ function assafOsCommitRequests_(workbook, proposal, revision, requestId, now) {
 }
 
 function assafOsProjectionRequests_(workbook, proposal) {
-  var entities = ["clients", "works", "payments", "time", "expenses"], records = {};
-  entities.forEach(function (entity) { records[entity] = assafOsReadEntity_(workbook, entity).records.slice(); });
+  var entities = ["clients", "works", "payments", "time", "expenses"], records = {}, states = {};
+  entities.forEach(function (entity) { states[entity] = assafOsReadEntity_(workbook, entity); records[entity] = states[entity].records.slice(); });
   function replace(entity, record) {
     var key = assafOsIdKey_(entity), found = false;
     records[entity] = records[entity].map(function (current) { if (current[key] === record[key]) { found = true; return Object.assign({}, current, record); } return current; });
@@ -241,26 +249,37 @@ function assafOsProjectionRequests_(workbook, proposal) {
     var minutes = times.reduce(function (sum, row) { return sum + (row.minutes || 0); }, 0);
     var received = work.currency === "ILS" ? payments.filter(function (row) { return row.currency === "ILS"; }).reduce(function (sum, row) { return sum + (row.kind === "החזר" ? -row.actual_amount_ils : row.actual_amount_ils); }, 0) : null;
     works[work.work_id] = { received: received, minutes: minutes, hourly: received !== null && minutes > 0 ? Math.round(received * 60 / minutes) : null, foreign: payments.some(function (row) { return row.currency !== "ILS"; }) };
-    var sheet = workbook.getSheetByName(AssafOsSchema.tab("works").name), rowNumber = assafOsReadEntity_(workbook, "works").rowById[work.work_id];
+    var sheet = workbook.getSheetByName(AssafOsSchema.tab("works").name), rowNumber = states.works.rowById[work.work_id];
     if (!rowNumber && proposal.entity === "works" && proposal.record_id === work.work_id) rowNumber = Math.max(sheet.getLastRow() + 1, 2);
-    if (rowNumber) requests.push(assafOsRangeRequest_(sheet, rowNumber, 14, [received === null ? "" : AssafOsRuntime.minorToMajor(received), minutes / 60, works[work.work_id].hourly === null ? "" : AssafOsRuntime.minorToMajor(works[work.work_id].hourly), works[work.work_id].foreign]));
+    var desired = [received === null ? "" : AssafOsRuntime.minorToMajor(received), minutes / 60, works[work.work_id].hourly === null ? "" : AssafOsRuntime.minorToMajor(works[work.work_id].hourly), works[work.work_id].foreign];
+    var current = rowNumber && states.works.rows[rowNumber - 1] ? states.works.rows[rowNumber - 1].slice(13, 17) : [];
+    if (rowNumber && !assafOsProjectionValuesEqual_(current, desired)) requests.push(assafOsRangeRequest_(sheet, rowNumber, 14, desired));
   });
   records.clients.forEach(function (client) {
     var owned = records.works.filter(function (work) { return work.person_id === client.person_id && work.currency === "ILS"; });
     var learning = 0, automation = 0, minutes = 0, missing = false;
     owned.forEach(function (work) { var calc = works[work.work_id] || { received: 0, minutes: 0 }; if (work.path === "לימוד") learning += calc.received || 0; else automation += calc.received || 0; minutes += calc.minutes; if (calc.received && !calc.minutes) missing = true; });
     var total = learning + automation, hourly = !missing && minutes > 0 ? Math.round(total * 60 / minutes) : null;
-    var sheet = workbook.getSheetByName(AssafOsSchema.tab("clients").name), rowNumber = assafOsReadEntity_(workbook, "clients").rowById[client.person_id];
+    var sheet = workbook.getSheetByName(AssafOsSchema.tab("clients").name), rowNumber = states.clients.rowById[client.person_id];
     if (!rowNumber && ((proposal.entity === "clients" && proposal.record_id === client.person_id) || (proposal.entity === "promote_lead" && proposal.after.client.person_id === client.person_id))) rowNumber = Math.max(sheet.getLastRow() + 1, 2);
-    if (rowNumber) requests.push(assafOsRangeRequest_(sheet, rowNumber, 12, [AssafOsRuntime.minorToMajor(learning), AssafOsRuntime.minorToMajor(automation), AssafOsRuntime.minorToMajor(total), minutes / 60, hourly === null ? "" : AssafOsRuntime.minorToMajor(hourly), records.payments.some(function (row) { return row.person_id === client.person_id && row.currency !== "ILS" && row.kind !== "בוטל"; })]));
+    var desired = [AssafOsRuntime.minorToMajor(learning), AssafOsRuntime.minorToMajor(automation), AssafOsRuntime.minorToMajor(total), minutes / 60, hourly === null ? "" : AssafOsRuntime.minorToMajor(hourly), records.payments.some(function (row) { return row.person_id === client.person_id && row.currency !== "ILS" && row.kind !== "בוטל"; })];
+    var current = rowNumber && states.clients.rows[rowNumber - 1] ? states.clients.rows[rowNumber - 1].slice(11, 17) : [];
+    if (rowNumber && !assafOsProjectionValuesEqual_(current, desired)) requests.push(assafOsRangeRequest_(sheet, rowNumber, 12, desired));
   });
   var completeCoverage = { leads: "complete", clients: "complete", works: "complete", payments: "complete", time: "complete", expenses: "complete", tasks: "complete" };
   var summary = assafOsSummary_(records, completeCoverage, "complete"), summaryTab = AssafOsSchema.tab("summary"), summarySheet = workbook.getSheetByName(summaryTab.name);
-  var summaryRows = summary.monthly.map(function (row) { return ["business", row.month, "", "תזרים עסקי", "", row.currency, row.paid_income_ils === null ? "" : AssafOsRuntime.minorToMajor(row.paid_income_ils), row.recorded_minutes === null ? "" : row.recorded_minutes / 60, row.effective_hourly_ils === null ? "" : AssafOsRuntime.minorToMajor(row.effective_hourly_ils), row.reason_codes.indexOf("missing_time") !== -1, row.paid_expenses_ils === null ? "" : AssafOsRuntime.minorToMajor(row.paid_expenses_ils), row.net_cash_ils === null ? "" : AssafOsRuntime.minorToMajor(row.net_cash_ils), row.coverage, new Date().toISOString()]; });
-  requests.push({ repeatCell: { range: { sheetId: summarySheet.getSheetId(), startRowIndex: 1, endRowIndex: summarySheet.getMaxRows(), startColumnIndex: 0, endColumnIndex: summaryTab.fields.length }, cell: { userEnteredValue: null }, fields: "userEnteredValue" } });
-  summaryRows.forEach(function (row, index) { requests.push(assafOsRowRequest_(summarySheet, index + 2, row)); });
+  var summaryBusinessRows = summary.monthly.map(function (row) { return ["business", row.month, "", "תזרים עסקי", "", row.currency, row.paid_income_ils === null ? "" : AssafOsRuntime.minorToMajor(row.paid_income_ils), row.recorded_minutes === null ? "" : row.recorded_minutes / 60, row.effective_hourly_ils === null ? "" : AssafOsRuntime.minorToMajor(row.effective_hourly_ils), row.reason_codes.indexOf("missing_time") !== -1, row.paid_expenses_ils === null ? "" : AssafOsRuntime.minorToMajor(row.paid_expenses_ils), row.net_cash_ils === null ? "" : AssafOsRuntime.minorToMajor(row.net_cash_ils), row.coverage]; });
+  var summaryRaw = assafOsReadSheetOnce_(summarySheet), currentSummary = summaryRaw.values.slice(1), summaryMatches = currentSummary.length === summaryBusinessRows.length;
+  if (summaryMatches) summaryBusinessRows.forEach(function (row, index) { if (!assafOsProjectionValuesEqual_(currentSummary[index].slice(0, 13), row) || !currentSummary[index][13] || (summaryRaw.formulas[index + 1] || []).some(function (formula) { return formula !== ""; })) summaryMatches = false; });
+  if (!summaryMatches) {
+    var calculatedAt = new Date().toISOString(), summaryRows = summaryBusinessRows.map(function (row) { return row.concat([calculatedAt]); });
+    requests.push({ repeatCell: { range: { sheetId: summarySheet.getSheetId(), startRowIndex: 1, endRowIndex: summarySheet.getMaxRows(), startColumnIndex: 0, endColumnIndex: summaryTab.fields.length }, cell: { userEnteredValue: null }, fields: "userEnteredValue" } });
+    summaryRows.forEach(function (row, index) { requests.push(assafOsRowRequest_(summarySheet, index + 2, row)); });
+  }
   return requests;
 }
+
+function assafOsProjectionValuesEqual_(current, desired) { return AssafOsRuntime.stableStringify(current.map(function (value) { return value === "" ? null : value; })) === AssafOsRuntime.stableStringify(desired.map(function (value) { return value === "" ? null : value; })); }
 
 function assafOsWriteRecordRequests_(workbook, entity, record, revision, source, requestId, now) {
   var tab = AssafOsSchema.tab(entity), sheet = workbook.getSheetByName(tab.name), state = assafOsReadEntity_(workbook, entity), idKey = assafOsIdKey_(entity);
@@ -278,13 +297,15 @@ function assafOsWriteRecordRequests_(workbook, entity, record, revision, source,
 }
 
 function assafOsReadEntity_(workbook, entity) {
+  var cached = assafOsCachedEntity_("strict", entity);
+  if (cached) return cached;
   var tab = AssafOsSchema.tab(entity), sheet = tab && workbook.getSheetByName(tab.name);
   if (!tab || !sheet) throw assafOsError_("missing_entity_sheet");
-  var values = sheet.getDataRange().getValues();
+  var raw = assafOsReadSheetOnce_(sheet), values = raw.values;
   if (values.length > ASSAF_OS_MAX_ROWS + 1) throw assafOsError_("row_limit_exceeded");
-  assafOsAssertHeaders_(sheet, tab, values[0]);
+  assafOsAssertHeaders_(sheet, tab, values[0], raw.last_column);
   var records = [], byId = {}, rowById = {}, idKey = assafOsIdKey_(entity);
-  var formulas = sheet.getDataRange().getFormulas();
+  var formulas = raw.formulas;
   for (var i = 1; i < values.length; i += 1) {
     if (values[i].every(function (cell) { return cell === ""; })) continue;
     if ((formulas[i] || []).some(function (formula) { return formula !== ""; })) throw assafOsError_("formula_drift");
@@ -292,16 +313,18 @@ function assafOsReadEntity_(workbook, entity) {
     if (!record[idKey] || byId[record[idKey]]) throw assafOsError_("invalid_or_duplicate_record_id");
     records.push(record); byId[record[idKey]] = record; rowById[record[idKey]] = i + 1;
   }
-  return { records: records, byId: byId, rowById: rowById, rows: values };
+  return assafOsStoreCachedEntity_("strict", entity, { records: records, byId: byId, rowById: rowById, rows: values });
 }
 
 function assafOsReadEntityTolerant_(workbook, entity) {
+  var cached = assafOsCachedEntity_("tolerant", entity);
+  if (cached) return cached;
   var tab = AssafOsSchema.tab(entity), sheet = tab && workbook.getSheetByName(tab.name), result = { records: [], coverage: "complete", issues: [] };
   if (!tab || !sheet) return { records: [], coverage: "unknown", issues: [{ code: "missing_entity_sheet", entity: entity, record_id: null }] };
-  var values = sheet.getDataRange().getValues();
-  try { if (values.length > ASSAF_OS_MAX_ROWS + 1) throw assafOsError_("row_limit_exceeded"); assafOsAssertHeaders_(sheet, tab, values[0]); }
+  var raw = assafOsReadSheetOnce_(sheet), values = raw.values;
+  try { if (values.length > ASSAF_OS_MAX_ROWS + 1) throw assafOsError_("row_limit_exceeded"); assafOsAssertHeaders_(sheet, tab, values[0], raw.last_column); }
   catch (error) { return { records: [], coverage: "unknown", issues: [{ code: error.code || "header_drift", entity: entity, record_id: null }] }; }
-  var seen = {}, idKey = assafOsIdKey_(entity), formulas = sheet.getDataRange().getFormulas();
+  var seen = {}, idKey = assafOsIdKey_(entity), formulas = raw.formulas;
   for (var i = 1; i < values.length; i += 1) {
     if (values[i].every(function (cell) { return cell === ""; })) continue;
     try {
@@ -311,7 +334,24 @@ function assafOsReadEntityTolerant_(workbook, entity) {
       seen[record[idKey]] = true; result.records.push(record);
     } catch (error) { result.coverage = "partial"; result.issues.push({ code: error.assafOsCode || error.code || "invalid_row", entity: entity, record_id: null }); }
   }
-  return result;
+  return assafOsStoreCachedEntity_("tolerant", entity, result);
+}
+
+function assafOsBeginRequestReadCache_(workbook) { ASSAF_OS_REQUEST_READ_CACHE = { workbook_id: workbook.getId(), sheets: {}, strict: {}, tolerant: {} }; }
+function assafOsReadSheetOnce_(sheet) {
+  var cache = ASSAF_OS_REQUEST_READ_CACHE, key = String(sheet.getSheetId());
+  if (cache && cache.workbook_id === sheet.getParent().getId() && cache.sheets[key]) return cache.sheets[key];
+  var range = sheet.getDataRange(), raw = { values: range.getValues(), formulas: range.getFormulas(), last_column: sheet.getLastColumn() };
+  if (cache && cache.workbook_id === sheet.getParent().getId()) cache.sheets[key] = raw;
+  return raw;
+}
+function assafOsCachedEntity_(kind, entity) { return ASSAF_OS_REQUEST_READ_CACHE && ASSAF_OS_REQUEST_READ_CACHE[kind][entity] || null; }
+function assafOsStoreCachedEntity_(kind, entity, value) { if (ASSAF_OS_REQUEST_READ_CACHE) ASSAF_OS_REQUEST_READ_CACHE[kind][entity] = value; return value; }
+function assafOsInvalidateEntityCache_(workbook, entity) {
+  if (!ASSAF_OS_REQUEST_READ_CACHE || ASSAF_OS_REQUEST_READ_CACHE.workbook_id !== workbook.getId()) return;
+  var tab = AssafOsSchema.tab(entity), sheet = tab && workbook.getSheetByName(tab.name);
+  if (sheet) delete ASSAF_OS_REQUEST_READ_CACHE.sheets[String(sheet.getSheetId())];
+  delete ASSAF_OS_REQUEST_READ_CACHE.strict[entity]; delete ASSAF_OS_REQUEST_READ_CACHE.tolerant[entity];
 }
 
 function assafOsTarget_(workbook, entity, recordId, candidate) {
@@ -393,56 +433,87 @@ function assafOsSummary_(records, entityCoverage, overallCoverage) {
 }
 
 function reconcileAssafOsEdit(event) {
+  ASSAF_OS_REQUEST_READ_CACHE = null;
   var config = assafOsConfig_(), workbook = SpreadsheetApp.openById(config.workbook_id);
   if (!event || !event.range || event.range.getSheet().getParent().getId() !== config.workbook_id) return;
   var sheet = event.range.getSheet(), tab = AssafOsSchema.tabs.filter(function (item) { return item.name === sheet.getName() && item.kind === "input" && item.key !== "settings"; })[0];
   if (!tab || event.range.getRow() <= 1) return;
   var lock = LockService.getScriptLock(); if (!lock.tryLock(5000)) return;
   try {
+    assafOsBeginRequestReadCache_(workbook);
     assafOsAssertHeaders_(sheet, tab);
     assafOsReconcileRow_(workbook, tab, event.range.getRow(), "trigger");
-    assafOsRefreshReferenceValidationsSafely_(workbook);
-  } finally { lock.releaseLock(); }
+    if (["clients", "works", "payments"].indexOf(tab.key) !== -1) assafOsRefreshReferenceValidationsSafely_(workbook);
+  } finally { ASSAF_OS_REQUEST_READ_CACHE = null; lock.releaseLock(); }
 }
 
 function reconcileAssafOsWorkbook() {
+  ASSAF_OS_REQUEST_READ_CACHE = null;
   var config = assafOsConfig_(), workbook = SpreadsheetApp.openById(config.workbook_id), result = { accepted: 0, issues: 0 };
   var lock = LockService.getScriptLock(); if (!lock.tryLock(5000)) throw assafOsError_("runtime_busy");
   try {
     return assafOsReconcileAll_(workbook);
-  } finally { lock.releaseLock(); }
+  } finally { ASSAF_OS_REQUEST_READ_CACHE = null; lock.releaseLock(); }
 }
 
 function assafOsReconcileAll_(workbook) {
-  var result = { accepted: 0, issues: 0, header_issues: [] };
+  assafOsBeginRequestReadCache_(workbook);
+  var result = { accepted: 0, resolved: 0, issues: 0, header_issues: [] }, referenceChanged = false;
   var tabs = AssafOsSchema.tabs.filter(function (tab) { return tab.kind === "input" && tab.key !== "settings"; });
-  tabs.forEach(function (tab) { try { assafOsAssertHeaders_(workbook.getSheetByName(tab.name), tab); } catch (error) { result.header_issues.push({ code: error.code || "header_drift", entity: tab.key, record_id: null }); } });
+  tabs.forEach(function (tab) { try { var sheet = workbook.getSheetByName(tab.name), raw = assafOsReadSheetOnce_(sheet); assafOsAssertHeaders_(sheet, tab, raw.values[0], raw.last_column); } catch (error) { result.header_issues.push({ code: error.code || "header_drift", entity: tab.key, record_id: null }); } });
   if (result.header_issues.length) return result;
   tabs.forEach(function (tab) {
-    var sheet = workbook.getSheetByName(tab.name), last = Math.min(sheet.getLastRow(), ASSAF_OS_MAX_ROWS + 1);
+    var sheet = workbook.getSheetByName(tab.name), raw = assafOsReadSheetOnce_(sheet), last = Math.min(raw.values.length, ASSAF_OS_MAX_ROWS + 1);
     for (var row = 2; row <= last; row += 1) {
-      var status = assafOsReconcileRow_(workbook, tab, row, "read");
-      if (status === "accepted") result.accepted += 1;
+      var status = assafOsReconcileRow_(workbook, tab, row, "read", raw.values[row - 1], raw.formulas[row - 1] || []);
+      if (status === "accepted") { result.accepted += 1; if (["clients", "works", "payments"].indexOf(tab.key) !== -1) referenceChanged = true; }
+      else if (status === "resolved") result.resolved += 1;
       else if (status === "issue") result.issues += 1;
     }
   });
-  if (assafOsCanProject_(workbook)) Sheets.Spreadsheets.batchUpdate({ requests: assafOsProjectionRequests_(workbook, { entity: "tasks", record_id: null, after: {} }) }, workbook.getId());
-  assafOsRefreshReferenceValidationsSafely_(workbook);
+  if (assafOsCanProject_(workbook)) {
+    var requests = assafOsProjectionRequests_(workbook, { entity: "tasks", record_id: null, after: {} });
+    if (requests.length) {
+      Sheets.Spreadsheets.batchUpdate({ requests: requests }, workbook.getId());
+      assafOsInvalidateEntityCache_(workbook, "clients"); assafOsInvalidateEntityCache_(workbook, "works");
+    }
+  }
+  if (referenceChanged || assafOsReferenceValidationsNeedRefresh_(workbook)) assafOsRefreshReferenceValidationsSafely_(workbook);
   return result;
 }
 
 function assafOsRefreshReferenceValidationsSafely_(workbook) {
-  if (typeof refreshAssafOsReferenceValidations_ !== "function") return;
-  try { refreshAssafOsReferenceValidations_(workbook); }
-  catch (_) { if (typeof console !== "undefined" && console.warn) console.warn("assaf_os_reference_validation_refresh_failed"); }
+  if (typeof refreshAssafOsReferenceValidations_ !== "function") return false;
+  try { refreshAssafOsReferenceValidations_(workbook); assafOsMarkReferenceValidationsFresh_(workbook); return true; }
+  catch (_) { try { PropertiesService.getScriptProperties().setProperty(ASSAF_OS_REFERENCE_DIRTY_PROPERTY, "true"); } catch (_) {} if (typeof console !== "undefined" && console.warn) console.warn("assaf_os_reference_validation_refresh_failed"); return false; }
 }
 
-function assafOsReconcileRow_(workbook, tab, rowNumber, source) {
-  var sheet = workbook.getSheetByName(tab.name), row = sheet.getRange(rowNumber, 1, 1, tab.fields.length).getValues()[0];
+function assafOsReferenceCatalogFingerprint_(workbook) {
+  var payload = ["clients", "works", "payments"].map(function (entity) {
+    var tab = AssafOsSchema.tab(entity), raw = assafOsReadSheetOnce_(workbook.getSheetByName(tab.name));
+    var indexes = tab.fields.map(function (field, index) { return field.role === "calculated" ? -1 : index; }).filter(function (index) { return index !== -1; });
+    return { entity: entity, rows: raw.values.slice(1).map(function (row, index) { return { row: row, raw_index: index + 1 }; }).filter(function (item) { return item.row.some(function (cell) { return cell !== ""; }); }).map(function (item) { return indexes.map(function (index) { return [assafOsNativeValue_(tab.fields[index], item.row[index]), (raw.formulas[item.raw_index] || [])[index] || ""]; }); }) };
+  });
+  return assafOsSha_(AssafOsRuntime.stableStringify(payload));
+}
+function assafOsReferenceValidationsNeedRefresh_(workbook) {
+  var props = PropertiesService.getScriptProperties(), current = assafOsReferenceCatalogFingerprint_(workbook), stored = props.getProperty(ASSAF_OS_REFERENCE_FINGERPRINT_PROPERTY);
+  if (props.getProperty(ASSAF_OS_REFERENCE_DIRTY_PROPERTY) === "true") return true;
+  if (!stored) return true;
+  return stored !== current;
+}
+function assafOsMarkReferenceValidationsFresh_(workbook) {
+  var props = PropertiesService.getScriptProperties();
+  props.setProperty(ASSAF_OS_REFERENCE_FINGERPRINT_PROPERTY, assafOsReferenceCatalogFingerprint_(workbook));
+  props.deleteProperty(ASSAF_OS_REFERENCE_DIRTY_PROPERTY);
+}
+
+function assafOsReconcileRow_(workbook, tab, rowNumber, source, suppliedRow, suppliedFormulas) {
+  var sheet = workbook.getSheetByName(tab.name), row = suppliedRow || sheet.getRange(rowNumber, 1, 1, tab.fields.length).getValues()[0];
   if (row.every(function (cell) { return cell === ""; })) return "empty";
   var entity = tab.key, idKey = assafOsIdKey_(entity), record = null, originalRecordId = null, input = {};
   try {
-    var formulas = sheet.getRange(rowNumber, 1, 1, tab.fields.length).getFormulas()[0];
+    var formulas = suppliedFormulas || sheet.getRange(rowNumber, 1, 1, tab.fields.length).getFormulas()[0];
     if (formulas.some(function (formula) { return formula !== ""; })) throw assafOsError_("formula_drift");
     record = assafOsRowToRecord_(tab, row, workbook);
     originalRecordId = record[idKey] || null;
@@ -457,7 +528,7 @@ function assafOsReconcileRow_(workbook, tab, rowNumber, source) {
   if (accepted && Number(record.revision) !== Number(accepted.revision)) { assafOsRecordIssue_(workbook, "system_column_drift", entity, record[idKey], rowNumber); return "issue"; }
   var inputFingerprint = assafOsSha_(AssafOsRuntime.stableStringify(input));
   if (accepted && inputFingerprint === accepted.input_fingerprint && assafOsRawOwnedFingerprint_(tab, row, workbook) !== accepted.raw_fingerprint) { assafOsRecordIssue_(workbook, "system_column_drift", entity, record[idKey], rowNumber); return "issue"; }
-  if (accepted && inputFingerprint === accepted.input_fingerprint) { assafOsResolveIssue_(workbook, entity, rowNumber, record[idKey]); return "accepted"; }
+  if (accepted && inputFingerprint === accepted.input_fingerprint) return assafOsResolveIssue_(workbook, entity, rowNumber, record[idKey]) ? "resolved" : "unchanged";
   var id = record[idKey], revision = accepted ? accepted.revision + 1 : 1, now = new Date().toISOString();
   record[idKey] = id; record.revision = revision; record.write_source = "משתמש"; record.request_id = "EDIT_" + Utilities.getUuid().replace(/-/g, "");
   if (entity === "leads" && !record.person_id) record.person_id = assafOsNewRecordId_("persons");
@@ -470,7 +541,8 @@ function assafOsReconcileRow_(workbook, tab, rowNumber, source) {
   var openIssue = assafOsLatestIssue_(workbook, entity, rowNumber);
   if (openIssue && openIssue.status === "open") requests.push(assafOsAppendRequest_(workbook.getSheetByName(ASSAF_OS_META.issues.name), ["ISS_" + Utilities.getUuid().replace(/-/g, ""), now, openIssue.code, entity, id, rowNumber, "resolved"]));
   Sheets.Spreadsheets.batchUpdate({ requests: requests }, workbook.getId());
-  if (source !== "read" && assafOsCanProject_(workbook)) Sheets.Spreadsheets.batchUpdate({ requests: assafOsProjectionRequests_(workbook, { entity: entity, record_id: id, after: record }) }, workbook.getId());
+  assafOsInvalidateEntityCache_(workbook, entity);
+  if (source !== "read" && assafOsCanProject_(workbook)) { var projection = assafOsProjectionRequests_(workbook, { entity: entity, record_id: id, after: record }); if (projection.length) { Sheets.Spreadsheets.batchUpdate({ requests: projection }, workbook.getId()); assafOsInvalidateEntityCache_(workbook, "clients"); assafOsInvalidateEntityCache_(workbook, "works"); } }
   return "accepted";
 }
 
@@ -516,7 +588,7 @@ function assafOsVerifyMetadata_(workbook) {
 function assafOsReferenceCatalog_(workbook, target) {
   var tab = AssafOsSchema.tab(target), sheet = tab && workbook.getSheetByName(tab.name);
   if (!tab || !sheet) throw assafOsError_("missing_reference_sheet");
-  var rows = sheet.getDataRange().getValues(), idKey = assafOsIdKey_(target), idIndex = tab.fields.findIndex(function (field) { return field.key === idKey; });
+  var rows = assafOsReadSheetOnce_(sheet).values, idKey = assafOsIdKey_(target), idIndex = tab.fields.findIndex(function (field) { return field.key === idKey; });
   var revisionIndex = tab.fields.findIndex(function (field) { return field.key === "revision"; }), catalog = {}, clientNames = {};
   if (target !== "clients") assafOsReferenceCatalog_(workbook, "clients").forEach(function (item) { clientNames[item.id] = item.primary; });
   for (var i = 1; i < rows.length; i += 1) {
@@ -568,7 +640,7 @@ function assafOsRowToRecord_(tab, row, workbook) {
   return record;
 }
 function assafOsNativeValue_(field, value) { if (!(value instanceof Date)) return value; if (field.type === "date") return Utilities.formatDate(value, ASSAF_OS_BUSINESS_TIMEZONE, "yyyy-MM-dd"); if (field.type === "datetime") return value.toISOString(); return value; }
-function assafOsAssertHeaders_(sheet, tab, supplied) { if (!sheet) throw assafOsError_("missing_entity_sheet"); var values = supplied || sheet.getRange(1, 1, 1, tab.fields.length).getValues()[0]; if (!values || values.length !== tab.fields.length || tab.fields.some(function (field, index) { return values[index] !== field.label; }) || sheet.getLastColumn() !== tab.fields.length) throw assafOsError_("header_drift"); }
+function assafOsAssertHeaders_(sheet, tab, supplied, suppliedLastColumn) { if (!sheet) throw assafOsError_("missing_entity_sheet"); var values = supplied || sheet.getRange(1, 1, 1, tab.fields.length).getValues()[0], lastColumn = suppliedLastColumn == null ? sheet.getLastColumn() : suppliedLastColumn; if (!values || values.length !== tab.fields.length || tab.fields.some(function (field, index) { return values[index] !== field.label; }) || lastColumn !== tab.fields.length) throw assafOsError_("header_drift"); }
 function assafOsRecordToRow_(tab, record, workbook) { return tab.fields.map(function (field) { var value = record[field.key]; if (field.type === "money_ils" && value != null) value = AssafOsRuntime.minorToMajor(value); if (value != null && field.ref && workbook) value = assafOsDisplayReference_(workbook, field, value); return value == null ? "" : value; }); }
 function inputFieldsFor_(tab) { return tab.fields.filter(function (field) { return field.role === "input"; }); }
 function assafOsIdKey_(entity) { return entity === "clients" ? "person_id" : entity.replace(/s$/, "") + "_id"; }
@@ -577,10 +649,10 @@ function assafOsLatestAccepted_(workbook, entity, recordId) { var rows = workboo
 function assafOsRawOwnedFingerprint_(tab, row, workbook) { return assafOsSha_(AssafOsRuntime.stableStringify(tab.fields.map(function (field, index) { var value = field.role === "calculated" ? null : assafOsNativeValue_(field, row[index]); return value !== null && value !== "" && field.ref && workbook ? assafOsResolveReferenceValue_(workbook, field, value) : value; }))); }
 function assafOsRecordIssue_(workbook, code, entity, recordId, row) { var current = assafOsLatestIssue_(workbook, entity, row); if (current && current.status === "open" && current.code === code) return; var now = new Date().toISOString(); Sheets.Spreadsheets.batchUpdate({ requests: [assafOsAppendRequest_(workbook.getSheetByName(ASSAF_OS_META.issues.name), ["ISS_" + Utilities.getUuid().replace(/-/g, ""), now, code, entity, recordId || "", row, "open"])] }, workbook.getId()); }
 function assafOsLatestIssue_(workbook, entity, row) { var rows = workbook.getSheetByName(ASSAF_OS_META.issues.name).getDataRange().getValues(), result = null; for (var i = 1; i < rows.length; i += 1) if (rows[i][3] === entity && Number(rows[i][5]) === Number(row)) result = { code: String(rows[i][2]), record_id: rows[i][4] ? String(rows[i][4]) : null, status: String(rows[i][6]) }; return result; }
-function assafOsResolveIssue_(workbook, entity, row, recordId) { var issue = assafOsLatestIssue_(workbook, entity, row); if (!issue || issue.status !== "open") return; var now = new Date().toISOString(); Sheets.Spreadsheets.batchUpdate({ requests: [assafOsAppendRequest_(workbook.getSheetByName(ASSAF_OS_META.issues.name), ["ISS_" + Utilities.getUuid().replace(/-/g, ""), now, issue.code, entity, recordId || issue.record_id || "", row, "resolved"])] }, workbook.getId()); }
+function assafOsResolveIssue_(workbook, entity, row, recordId) { var issue = assafOsLatestIssue_(workbook, entity, row); if (!issue || issue.status !== "open") return false; var now = new Date().toISOString(); Sheets.Spreadsheets.batchUpdate({ requests: [assafOsAppendRequest_(workbook.getSheetByName(ASSAF_OS_META.issues.name), ["ISS_" + Utilities.getUuid().replace(/-/g, ""), now, issue.code, entity, recordId || issue.record_id || "", row, "resolved"])] }, workbook.getId()); return true; }
 function assafOsOpenIssues_(workbook) { var rows = workbook.getSheetByName(ASSAF_OS_META.issues.name).getDataRange().getValues(), latest = {}; for (var i = 1; i < rows.length; i += 1) latest[String(rows[i][3]) + "|" + String(rows[i][5])] = rows[i]; return Object.keys(latest).map(function (key) { return latest[key]; }).filter(function (row) { return row[6] === "open"; }).map(function (row) { return { code: String(row[2]), entity: String(row[3]), record_id: row[4] ? String(row[4]) : null }; }); }
 function assafOsFindBy_(sheet, column, value, withRow) { var rows = sheet.getDataRange().getValues(); for (var i = 1; i < rows.length; i += 1) if (String(rows[i][column]) === String(value)) return withRow ? { values: rows[i], row: i + 1 } : rows[i]; return null; }
-function assafOsOtherRecords_(workbook, sheet, tab, excludedRow) { var rows = sheet.getDataRange().getValues(), records = []; for (var i = 1; i < rows.length; i += 1) { if (i + 1 === excludedRow || rows[i].every(function (cell) { return cell === ""; })) continue; try { records.push(assafOsRowToRecord_(tab, rows[i], workbook)); } catch (_) {} } return records; }
+function assafOsOtherRecords_(workbook, sheet, tab, excludedRow) { var rows = assafOsReadSheetOnce_(sheet).values, records = []; for (var i = 1; i < rows.length; i += 1) { if (i + 1 === excludedRow || rows[i].every(function (cell) { return cell === ""; })) continue; try { records.push(assafOsRowToRecord_(tab, rows[i], workbook)); } catch (_) {} } return records; }
 function assafOsAppendRequest_(sheet, values) { assafOsAssertAppendCapacity_(sheet, 1); return { appendCells: { sheetId: sheet.getSheetId(), rows: [{ values: values.map(assafOsExtendedValue_) }], fields: "userEnteredValue" } }; }
 function assafOsAssertAppendCapacity_(sheet, count) { if (sheet.getLastRow() + count > sheet.getMaxRows()) throw assafOsError_("metadata_capacity_exceeded"); }
 function assafOsRowRequest_(sheet, row, values) { return { updateCells: { range: { sheetId: sheet.getSheetId(), startRowIndex: row - 1, endRowIndex: row, startColumnIndex: 0, endColumnIndex: values.length }, rows: [{ values: values.map(assafOsExtendedValue_) }], fields: "userEnteredValue" } }; }

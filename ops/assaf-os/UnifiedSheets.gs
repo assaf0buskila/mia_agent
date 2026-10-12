@@ -180,8 +180,13 @@ function applyValidation_(range, field, column, workbook) {
 
 function refreshAssafOsReferenceValidations() {
   var config = assafOsConfig_(), workbook = SpreadsheetApp.openById(config.workbook_id);
-  refreshAssafOsReferenceValidations_(workbook);
-  return { refreshed: true, workbook_id: config.workbook_id };
+  ASSAF_OS_REQUEST_READ_CACHE = null;
+  try {
+    assafOsBeginRequestReadCache_(workbook);
+    refreshAssafOsReferenceValidations_(workbook);
+    assafOsMarkReferenceValidationsFresh_(workbook);
+    return { refreshed: true, workbook_id: config.workbook_id };
+  } finally { ASSAF_OS_REQUEST_READ_CACHE = null; }
 }
 
 function refreshAssafOsReferenceValidations_(workbook) {

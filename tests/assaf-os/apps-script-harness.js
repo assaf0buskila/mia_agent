@@ -18,11 +18,11 @@ function cellValue(cell) {
 
 class Range {
   constructor(sheet, row, column, rows, columns) { this.sheet = sheet; this.row = row; this.column = column; this.rows = rows; this.columns = columns; }
-  getValues() { return Array.from({ length: this.rows }, (_, r) => Array.from({ length: this.columns }, (_, c) => this.sheet.value(this.row + r, this.column + c))); }
-  getFormulas() { return Array.from({ length: this.rows }, (_, r) => Array.from({ length: this.columns }, (_, c) => this.sheet.formula(this.row + r, this.column + c))); }
+  getValues() { this.sheet.workbook.metrics.getValues += 1; return Array.from({ length: this.rows }, (_, r) => Array.from({ length: this.columns }, (_, c) => this.sheet.value(this.row + r, this.column + c))); }
+  getFormulas() { this.sheet.workbook.metrics.getFormulas += 1; return Array.from({ length: this.rows }, (_, r) => Array.from({ length: this.columns }, (_, c) => this.sheet.formula(this.row + r, this.column + c))); }
   getSheet() { return this.sheet; }
   getRow() { return this.row; }
-  setDataValidation(rule) { this.sheet.validations.set(`${this.row}:${this.column}:${this.rows}`, rule); return this; }
+  setDataValidation(rule) { this.sheet.workbook.metrics.setDataValidation += 1; this.sheet.validations.set(`${this.row}:${this.column}:${this.rows}`, rule); return this; }
 }
 
 class Sheet {
@@ -35,9 +35,9 @@ class Sheet {
   getSheetId() { return this.id; }
   getParent() { return this.workbook; }
   getMaxRows() { return this.maxRows; }
-  getLastRow() { for (let i = this.rows.length - 1; i >= 0; i -= 1) if ((this.rows[i] || []).some((v) => v !== "" && v !== null)) return i + 1; return 0; }
-  getLastColumn() { return Math.max(0, ...this.rows.map((row) => { for (let i = row.length - 1; i >= 0; i -= 1) if (row[i] !== "" && row[i] !== null) return i + 1; return 0; })); }
-  getDataRange() { return new Range(this, 1, 1, Math.max(this.getLastRow(), 1), Math.max(this.getLastColumn(), 1)); }
+  getLastRow() { this.workbook.metrics.getLastRow += 1; for (let i = this.rows.length - 1; i >= 0; i -= 1) if ((this.rows[i] || []).some((v) => v !== "" && v !== null)) return i + 1; return 0; }
+  getLastColumn() { this.workbook.metrics.getLastColumn += 1; return Math.max(0, ...this.rows.map((row) => { for (let i = row.length - 1; i >= 0; i -= 1) if (row[i] !== "" && row[i] !== null) return i + 1; return 0; })); }
+  getDataRange() { this.workbook.metrics.getDataRange += 1; return new Range(this, 1, 1, Math.max(this.getLastRow(), 1), Math.max(this.getLastColumn(), 1)); }
   getRange(row, column, rows = 1, columns = 1) { return new Range(this, row, column, rows, columns); }
   value(row, column) { return (this.rows[row - 1] || [])[column - 1] ?? ""; }
   formula(row, column) { return (this.formulas[row - 1] || [])[column - 1] || ""; }
@@ -54,7 +54,8 @@ class Sheet {
 }
 
 class Workbook {
-  constructor(id) { this.id = id; this.sheets = new Map(); this.nextId = 1; }
+  constructor(id) { this.id = id; this.sheets = new Map(); this.nextId = 1; this.resetMetrics(); }
+  resetMetrics() { this.metrics = { getValues: 0, getFormulas: 0, getLastRow: 0, getLastColumn: 0, getDataRange: 0, setDataValidation: 0, batchUpdate: 0 }; }
   add(name, headers, maxRows) { const sheet = new Sheet(this, this.nextId++, name, headers, maxRows); this.sheets.set(name, sheet); return sheet; }
   getSheetByName(name) { return this.sheets.get(name) || null; }
   getId() { return this.id; }
@@ -63,6 +64,7 @@ class Workbook {
 function createHarness(options = {}) {
   const binding = { owner_id: "123456", workspace_id: "workspace-main", workbook_id: "Workbook_12345678901234567890", mode: options.mode || "TEST" };
   const secret = "h".repeat(40), workbook = new Workbook(binding.workbook_id), batches = [];
+  const scriptProperties = { ASSAF_OS_OWNER_ID: binding.owner_id, ASSAF_OS_WORKSPACE_ID: binding.workspace_id, ASSAF_OS_WORKBOOK_ID: binding.workbook_id, ASSAF_OS_MODE: binding.mode, ASSAF_OS_HMAC_SECRET: secret };
   Schema.tabs.forEach((tab) => workbook.add(tab.name, tab.fields.map((field) => field.label), options.maxRows || 2001));
   const meta = {
     accepted: ["entity", "record_id", "revision", "input_fingerprint", "raw_fingerprint", "snapshot_json", "accepted_at", "source", "request_id"],
@@ -96,7 +98,11 @@ function createHarness(options = {}) {
     Date, JSON, Math, Set, Map,
     AssafOsSchema: Schema, AssafOsCore: Core, AssafOsRuntime: Runtime,
     ContentService: { MimeType: { JSON: "json" }, createTextOutput: (text) => ({ text, setMimeType() { return this; } }) },
-    PropertiesService: { getScriptProperties: () => ({ getProperty: (key) => ({ ASSAF_OS_OWNER_ID: binding.owner_id, ASSAF_OS_WORKSPACE_ID: binding.workspace_id, ASSAF_OS_WORKBOOK_ID: binding.workbook_id, ASSAF_OS_MODE: binding.mode, ASSAF_OS_HMAC_SECRET: secret }[key] || null) }) },
+    PropertiesService: { getScriptProperties: () => ({
+      getProperty: (key) => scriptProperties[key] || null,
+      setProperty: (key, value) => { scriptProperties[key] = String(value); },
+      deleteProperty: (key) => { delete scriptProperties[key]; },
+    }) },
     SpreadsheetApp: {
       openById: (id) => { if (id !== binding.workbook_id) throw new Error("wrong_workbook"); return workbook; },
       newDataValidation: () => {
@@ -110,7 +116,7 @@ function createHarness(options = {}) {
       },
     },
     LockService: { getScriptLock: () => ({ tryLock: () => true, releaseLock() {} }) },
-    Sheets: { Spreadsheets: { batchUpdate: (body, id) => { if (id !== binding.workbook_id) throw new Error("wrong_workbook"); batches.push(body.requests); body.requests.forEach(applyRequest); } } },
+    Sheets: { Spreadsheets: { batchUpdate: (body, id) => { if (id !== binding.workbook_id) throw new Error("wrong_workbook"); workbook.metrics.batchUpdate += 1; batches.push(body.requests); body.requests.forEach(applyRequest); } } },
     Utilities: {
       Charset: { UTF_8: "UTF_8" }, DigestAlgorithm: { SHA_256: "SHA_256" },
       newBlob: (value) => ({ getBytes: () => [...Buffer.from(value, "utf8")] }),
@@ -121,8 +127,8 @@ function createHarness(options = {}) {
     },
   };
   vm.createContext(context);
-  vm.runInContext(fs.readFileSync("ops/assaf-os/UnifiedRuntime.gs", "utf8"), context, { filename: "UnifiedRuntime.gs" });
-  if (options.withSheets) vm.runInContext(fs.readFileSync("ops/assaf-os/UnifiedSheets.gs", "utf8"), context, { filename: "UnifiedSheets.gs" });
+  vm.runInContext(options.runtimeSource || fs.readFileSync("ops/assaf-os/UnifiedRuntime.gs", "utf8"), context, { filename: "UnifiedRuntime.gs" });
+  if (options.withSheets) vm.runInContext(options.sheetsSource || fs.readFileSync("ops/assaf-os/UnifiedSheets.gs", "utf8"), context, { filename: "UnifiedSheets.gs" });
 
   function sign(request) { const payload = JSON.stringify(request); return { payload, signature: crypto.createHmac("sha256", secret).update(payload).digest("hex") }; }
   function call(request) {
@@ -140,7 +146,7 @@ function createHarness(options = {}) {
     });
     const sheet = workbook.getSheetByName(tab.name); sheet.setRow(sheet.getLastRow() + 1, values); return sheet.getLastRow();
   }
-  return { binding, secret, workbook, context, batches, call, request, addRecord, Schema, Runtime };
+  return { binding, secret, workbook, context, batches, scriptProperties, call, request, addRecord, resetMetrics: () => workbook.resetMetrics(), metrics: () => ({ ...workbook.metrics }), Schema, Runtime };
 }
 
 module.exports = { createHarness };
