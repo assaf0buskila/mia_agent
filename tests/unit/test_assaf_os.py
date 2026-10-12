@@ -72,6 +72,7 @@ def _pending(config, source="MIA"):
         "mode": config.assaf_os_mode,
         "workbook_id": config.assaf_os_workbook_id,
         "workspace_id": config.assaf_os_workspace_id,
+        "approval_guard_version": 1,
         "status": "pending",
         "proposal_id": PROPOSAL,
         "request_id": REQUEST,
@@ -251,6 +252,17 @@ def test_browser_decision_binds_stable_request_id_to_proposal_before_post(monkey
         )
     assert mismatch.value.code == "decision_request_mismatch"
     assert [call["operation"] for call in calls] == ["proposal"]
+
+
+def test_old_script_proposal_without_approval_guard_fails_closed(monkeypatch):
+    config = settings()
+    old = _pending(config)
+    old.pop("approval_guard_version")
+    monkeypatch.setattr(port, "_post", lambda _url, body: signed(body, old, config))
+    adapter = port.AssafOsPort(config, auth.OWNER_ID, actor_source="MIA")
+    with pytest.raises(port.AssafOsError) as rejected:
+        adapter.proposal(PROPOSAL)
+    assert rejected.value.code == "source_unavailable"
 
 
 def test_kill_switch_blocks_mutation_before_transport(monkeypatch):

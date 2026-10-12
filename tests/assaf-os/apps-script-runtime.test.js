@@ -54,6 +54,17 @@ test("two pending new leads with equivalent contact cannot both commit", () => {
   assert.equal(h.workbook.getSheetByName("לידים").getDataRange().getValues().length, 2);
 });
 
+test("new lead proposal rejects an equivalent contact already committed", () => {
+  const h = createHarness();
+  const first = propose(h, "leads", { name: "דנה", phone: "+972502222222", path: "לימוד", status: "חדש", source_note: "site one" });
+  assert.equal(approve(h, first).data.status, "committed");
+  const requestId = "proposal-lead-existing-contact";
+  const duplicate = h.call(h.request("propose", { request_id: requestId, entity: "leads", record_id: null, expected_revision: 0, input: { name: "דנה שוב", phone: "050-222-2222", path: "אוטומציה", status: "חדש", source_note: "site two" } }, { request_id: requestId, actor_source: "MIA" }));
+  assert.equal(duplicate.ok, false);
+  assert.equal(duplicate.data.error.code, "lead_already_exists");
+  assert.equal(h.workbook.getSheetByName("לידים").getDataRange().getValues().length, 2);
+});
+
 test("original payment updates validate the reciprocal refund graph", () => {
   const h = createHarness(); h.addRecord("clients", client()); h.addRecord("works", work()); h.addRecord("payments", payment());
   h.addRecord("payments", { payment_id: "PAY_2", person_id: "PER_1", work_id: "WOR_1", path: "אוטומציה", date: "2026-10-02", actual_amount_ils: 6000, currency: "ILS", kind: "החזר", original_payment_id: "PAY_1", created_at: "2026-10-02T00:00:00.000Z", revision: 1, write_source: "משתמש", request_id: "EDIT_refund1" });
@@ -437,8 +448,8 @@ test("unchanged empty snapshot performs one raw read per sheet and no UI or proj
   assert.deepEqual(response.data.records.clients, []);
   assert.deepEqual(response.data.records.works, []);
   assert.deepEqual(h.metrics(), {
-    getValues: 17, getFormulas: 8, getLastRow: 17, getLastColumn: 20,
-    getDataRange: 12, setDataValidation: 0, batchUpdate: 0,
+    getValues: 16, getFormulas: 8, getLastRow: 16, getLastColumn: 19,
+    getDataRange: 11, setDataValidation: 0, batchUpdate: 0,
   });
   assert.equal(h.context.ASSAF_OS_REQUEST_READ_CACHE, null);
 });
@@ -454,8 +465,37 @@ test("unchanged populated snapshot keeps bounded reads and skips stable picker a
   assert.equal(response.data.records.payments[0].payment_id, "PAY_1");
   assert.equal(response.data.summary.monthly[0].paid_income_ils, 10000);
   assert.deepEqual(h.metrics(), {
-    getValues: 23, getFormulas: 8, getLastRow: 23, getLastColumn: 26,
-    getDataRange: 18, setDataValidation: 0, batchUpdate: 0,
+    getValues: 17, getFormulas: 8, getLastRow: 17, getLastColumn: 20,
+    getDataRange: 12, setDataValidation: 0, batchUpdate: 0,
+  });
+});
+
+test("five-lead fresh snapshot keeps metadata reads constant and performs no writes", () => {
+  const h = createHarness({ maxRows: 2001, withSheets: true });
+  for (let index = 0; index < 5; index += 1) {
+    const proposal = propose(h, "leads", { name: `Synthetic ${index}`, phone: `+9725022222${index}`, path: "לימוד", status: "חדש", source_note: "synthetic" }, null, 0, "MIA");
+    assert.equal(approve(h, proposal, "TELEGRAM_APPROVAL").data.status, "committed");
+  }
+  assert.equal(h.context.refreshAssafOsReferenceValidations().refreshed, true);
+  h.resetMetrics();
+  const response = h.call(h.request("snapshot", {}));
+  assert.equal(response.data.records.leads.length, 5);
+  assert.deepEqual(h.metrics(), {
+    getValues: 17, getFormulas: 8, getLastRow: 17, getLastColumn: 20,
+    getDataRange: 12, setDataValidation: 0, batchUpdate: 0,
+  });
+});
+
+test("guarded lead approval has a bounded service-call shape", () => {
+  const h = createHarness({ maxRows: 2001, withSheets: true });
+  const proposal = propose(h, "leads", { name: "Synthetic", phone: "+972502222222", path: "לימוד", status: "חדש", source_note: "synthetic" }, null, 0, "MIA");
+  assert.equal(proposal.approval_guard_version, 1);
+  h.resetMetrics();
+  const response = approve(h, proposal, "TELEGRAM_APPROVAL");
+  assert.equal(response.data.status, "committed");
+  assert.deepEqual(h.metrics(), {
+    getValues: 16, getFormulas: 7, getLastRow: 23, getLastColumn: 18,
+    getDataRange: 11, setDataValidation: 0, batchUpdate: 1,
   });
 });
 

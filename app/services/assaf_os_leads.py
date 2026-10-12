@@ -648,6 +648,7 @@ def _create_final_proposal(
         target = {
             "proposal": pending,
             "proposal_digest": _digest(pending),
+            "approval_guard_version": pending["approval_guard_version"],
             "workbook_id": settings.assaf_os_workbook_id,
             "workspace_id": settings.assaf_os_workspace_id,
             "mode": settings.assaf_os_mode,
@@ -847,6 +848,65 @@ def prepare_selected_crm_lead(
         corrected_name=corrected_name,
         corrected_phone=corrected_phone,
         corrected_email=corrected_email,
+    )
+
+
+def recover_expired_approved_crm_lead(
+    store,
+    *,
+    settings,
+    principal: Principal,
+    approval_id: str,
+    path: str,
+    summary: str,
+    next_step: str,
+) -> OwnerActionProposal:
+    """Prepare a fresh card only after signed proof that an old approval wrote nothing."""
+    row = store.get_approval_by_approval_id(approval_id)
+    envelope = read_owner_action(row)
+    if (
+        row is None
+        or envelope is None
+        or envelope.get("kind") != FINAL_KIND
+        or row.actor_id != principal.actor_id
+        or row.decision != DECISION_APPROVED
+        or str(row.executed_at or "").strip()
+        or str(row.result or "").startswith("terminal:")
+    ):
+        raise ValueError("recovery_not_eligible")
+    target = envelope["target"]
+    binding = target.get("source_binding")
+    parameters = envelope["parameters"]
+    if not isinstance(binding, dict):
+        raise ValueError("recovery_not_eligible")
+    current_binding = current_source_binding(store, binding)
+    if _json(current_binding) != _json(binding):
+        raise ValueError("source_changed")
+    port = AssafOsPort(settings, principal.actor_id, actor_source="MIA")
+    remote = port.proposal(str(parameters["proposal_id"]))
+    receipt = port.receipt(str(parameters["request_id"]))
+    if (
+        remote.get("approval_guard_version") != 1
+        or remote.get("proposal_id") != parameters["proposal_id"]
+        or remote.get("approval_request_id") != parameters["request_id"]
+        or remote.get("status") != "expired"
+        or receipt.get("status") != "unknown"
+        or receipt.get("request_id") != parameters["request_id"]
+        or receipt.get("reason_codes") != ["receipt_not_found"]
+    ):
+        raise ValueError("remote_no_write_unproven")
+    row.result = "terminal:remote_expired_no_receipt"
+    store.release_operation(scope="approval", key=f"{row.resource_id}:execute")
+    store.session.flush()
+    return prepare_selected_crm_lead(
+        store,
+        settings=settings,
+        principal=principal,
+        contact_id=str(binding["contact_id"]),
+        conversation_id=str(binding["conversation_id"]),
+        path=path,
+        summary=summary,
+        next_step=next_step,
     )
 
 

@@ -306,7 +306,10 @@ def execute_owner_action(
     if row.decision != DECISION_APPROVED:
         return OwnerActionExecution("not_approved")
     if str(row.executed_at or "").strip():
-        return OwnerActionExecution("already_handled")
+        return OwnerActionExecution(
+            "already_handled",
+            "הפעולה כבר בוצעה ואושרה לפי הקבלה השמורה.",
+        )
     moment = _aware(now)
     try:
         expiry = datetime.fromisoformat(row.expires_at.replace("Z", "+00:00"))
@@ -465,6 +468,7 @@ def execute_approved_owner_action_with_adapters(
             result = {
                 "proposal": current,
                 "proposal_digest": hashlib.sha256(_canonical(current).encode()).hexdigest(),
+                "approval_guard_version": current.get("approval_guard_version"),
                 "workbook_id": settings.assaf_os_workbook_id,
                 "workspace_id": settings.assaf_os_workspace_id,
                 "mode": settings.assaf_os_mode,
@@ -472,7 +476,6 @@ def execute_approved_owner_action_with_adapters(
             source_binding = envelope["target"].get("source_binding")
             if isinstance(source_binding, dict):
                 from app.services.assaf_os_leads import (
-                    current_lead_duplicate_guard,
                     current_source_binding,
                 )
 
@@ -482,9 +485,13 @@ def execute_approved_owner_action_with_adapters(
                 )
                 duplicate_guard = envelope["target"].get("duplicate_guard")
                 if isinstance(duplicate_guard, dict):
-                    result["duplicate_guard"] = current_lead_duplicate_guard(
-                        port.snapshot(), duplicate_guard
-                    )
+                    # Runtime guard v1 includes the same canonical phone/email
+                    # dependency set in the proposal fingerprint and rechecks it
+                    # under the Apps Script lock during approve. Keep the review
+                    # value immutable here; an older runtime has no guard version
+                    # and therefore fails the exact target comparison closed.
+                    if current.get("approval_guard_version") == 1:
+                        result["duplicate_guard"] = duplicate_guard
             return result
 
         def run(kind, values):

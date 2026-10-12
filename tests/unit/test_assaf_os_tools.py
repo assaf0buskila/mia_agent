@@ -64,6 +64,7 @@ def pending():
         "mode": "TEST",
         "workbook_id": "workbook_12345678901234567890",
         "workspace_id": "workspace-test",
+        "approval_guard_version": 1,
         "status": "pending",
         "proposal_id": "PR_12345678901234567890",
         "request_id": REQUEST,

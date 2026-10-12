@@ -28,6 +28,7 @@ from app.services.assaf_os_leads import (
     model_lead_template,
     prepare_lead_choice,
     prepare_selected_crm_lead,
+    recover_expired_approved_crm_lead,
     source_from_delivery_payload,
 )
 from app.services.owner_actions import (
@@ -154,6 +155,7 @@ def _pending(lead_input: dict[str, str]) -> dict:
         "mode": "TEST",
         "workbook_id": "workbook_12345678901234567890",
         "workspace_id": "workspace-test",
+        "approval_guard_version": 1,
         "status": "pending",
         "proposal_id": "PR_12345678901234567890",
         "request_id": "website-lead-request",
@@ -174,11 +176,13 @@ class FakeAssafOsPort:
     snapshot_rows: list[dict] = []
     current_proposal: dict = {}
     decisions: list[object] = []
+    snapshot_calls = 0
 
     def __init__(self, *_args, **_kwargs):
         pass
 
     def snapshot(self):
+        type(self).snapshot_calls += 1
         return {"records": {"leads": list(self.snapshot_rows)}}
 
     def propose(self, request):
@@ -504,7 +508,9 @@ def test_duplicate_guard_revalidates_native_sheet_state():
     assert current_lead_duplicate_guard(current, guard)["absent"] is False
 
 
-def test_final_approval_rechecks_sheet_duplicate_before_decide(lead_store, monkeypatch):
+def test_final_approval_uses_locked_runtime_duplicate_guard_without_snapshot(
+    lead_store, monkeypatch
+):
     from app.services import assaf_os as assaf_os_service
 
     FakeAssafOsPort.proposals = []
@@ -526,7 +532,47 @@ def test_final_approval_rechecks_sheet_duplicate_before_decide(lead_store, monke
     )
     row = lead_store.get_approval_by_approval_id(final.approval_id)
     row.decision = DECISION_APPROVED
-    FakeAssafOsPort.snapshot_rows = [{"phone": "050-222-2222", "email": ""}]
+    snapshots_before = FakeAssafOsPort.snapshot_calls
+    outcome = execute_approved_owner_action_with_adapters(
+        lead_store,
+        settings=_settings(),
+        principal=principal,
+        proposal_id=final.proposal_id,
+    )
+    assert outcome.status == "executed"
+    assert FakeAssafOsPort.snapshot_calls == snapshots_before
+    assert len(FakeAssafOsPort.decisions) == 1
+
+
+def test_final_approval_fails_closed_against_old_runtime_without_guard(
+    lead_store, monkeypatch
+):
+    from app.services import assaf_os as assaf_os_service
+
+    FakeAssafOsPort.proposals = []
+    FakeAssafOsPort.decisions = []
+    FakeAssafOsPort.snapshot_rows = []
+    monkeypatch.setattr(assaf_os_leads, "AssafOsPort", FakeAssafOsPort)
+    monkeypatch.setattr(assaf_os_service, "AssafOsPort", FakeAssafOsPort)
+    _seed_source(lead_store)
+    principal = Principal.owner(source="telegram", actor_id=OWNER)
+    final = prepare_selected_crm_lead(
+        lead_store,
+        settings=_settings(),
+        principal=principal,
+        contact_id="crm-contact-1",
+        conversation_id="site-current",
+        path="לימוד",
+        summary="",
+        next_step="",
+    )
+    row = lead_store.get_approval_by_approval_id(final.approval_id)
+    row.decision = DECISION_APPROVED
+    FakeAssafOsPort.current_proposal = {
+        key: value
+        for key, value in FakeAssafOsPort.current_proposal.items()
+        if key != "approval_guard_version"
+    }
     outcome = execute_approved_owner_action_with_adapters(
         lead_store,
         settings=_settings(),
@@ -912,6 +958,106 @@ def test_expired_final_proposal_allows_one_new_attempt(lead_store, monkeypatch):
     assert second.created is True
     assert second.approval_id != first.approval_id
     assert len(FakeAssafOsPort.proposals) == 2
+
+
+def test_expired_approved_no_write_evidence_requires_a_fresh_exact_card(
+    lead_store, monkeypatch
+):
+    class ExpiredNoWritePort(FakeAssafOsPort):
+        def proposal(self, _proposal_id):
+            return {**type(self).current_proposal, "status": "expired"}
+
+        def receipt(self, request_id):
+            return {
+                "status": "unknown",
+                "request_id": request_id,
+                "reason_codes": ["receipt_not_found"],
+            }
+
+    ExpiredNoWritePort.proposals = []
+    ExpiredNoWritePort.snapshot_rows = []
+    ExpiredNoWritePort.decisions = []
+    monkeypatch.setattr(assaf_os_leads, "AssafOsPort", ExpiredNoWritePort)
+    _seed_source(lead_store)
+    principal = Principal.owner(source="telegram", actor_id=OWNER)
+    first = prepare_selected_crm_lead(
+        lead_store,
+        settings=_settings(),
+        principal=principal,
+        contact_id="crm-contact-1",
+        conversation_id="site-current",
+        path="לימוד",
+        summary="",
+        next_step="",
+    )
+    old = lead_store.get_approval_by_approval_id(first.approval_id)
+    old.decision = DECISION_APPROVED
+    old.expires_at = "2020-01-01T00:00:00+00:00"
+    assert lead_store.claim_provider_write(
+        scope="approval", key=f"{first.proposal_id}:execute"
+    )
+    lead_store.mark_provider_write_pending_review(
+        scope="approval", key=f"{first.proposal_id}:execute"
+    )
+
+    fresh = recover_expired_approved_crm_lead(
+        lead_store,
+        settings=_settings(),
+        principal=principal,
+        approval_id=first.approval_id,
+        path="לימוד",
+        summary="fresh review",
+        next_step="",
+    )
+
+    assert fresh.created is True
+    assert fresh.approval_id != first.approval_id
+    assert old.decision == DECISION_APPROVED
+    assert old.result == "terminal:remote_expired_no_receipt"
+    assert lead_store.get_provider_write_status(
+        scope="approval", key=f"{first.proposal_id}:execute"
+    ) == ""
+    assert len(ExpiredNoWritePort.proposals) == 2
+
+
+def test_expired_approved_recovery_refuses_unproven_no_write(lead_store, monkeypatch):
+    class MissingReceiptProofPort(FakeAssafOsPort):
+        def proposal(self, _proposal_id):
+            return {**type(self).current_proposal, "status": "expired"}
+
+        def receipt(self, request_id):
+            return {"status": "committed", "request_id": request_id, "reason_codes": []}
+
+    MissingReceiptProofPort.proposals = []
+    MissingReceiptProofPort.snapshot_rows = []
+    monkeypatch.setattr(assaf_os_leads, "AssafOsPort", MissingReceiptProofPort)
+    _seed_source(lead_store)
+    principal = Principal.owner(source="telegram", actor_id=OWNER)
+    first = prepare_selected_crm_lead(
+        lead_store,
+        settings=_settings(),
+        principal=principal,
+        contact_id="crm-contact-1",
+        conversation_id="site-current",
+        path="לימוד",
+        summary="",
+        next_step="",
+    )
+    old = lead_store.get_approval_by_approval_id(first.approval_id)
+    old.decision = DECISION_APPROVED
+    old.expires_at = "2020-01-01T00:00:00+00:00"
+    with pytest.raises(ValueError, match="remote_no_write_unproven"):
+        recover_expired_approved_crm_lead(
+            lead_store,
+            settings=_settings(),
+            principal=principal,
+            approval_id=first.approval_id,
+            path="לימוד",
+            summary="fresh review",
+            next_step="",
+        )
+    assert old.result in {None, ""}
+    assert len(MissingReceiptProofPort.proposals) == 1
 
 
 def test_phone_provenance_allows_explicit_local_equivalence_but_rejects_invention():

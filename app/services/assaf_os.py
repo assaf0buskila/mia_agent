@@ -393,6 +393,7 @@ def _validate_result(
         _validate_summary(result["summary"])
     elif operation in {"propose", "proposal"}:
         required = set(binding) | {
+            "approval_guard_version",
             "status",
             "proposal_id",
             "request_id",
@@ -409,6 +410,7 @@ def _validate_result(
         }
         if (
             set(result) != required
+            or result["approval_guard_version"] != 1
             or result["status"]
             not in (
                 {"pending"}

@@ -6,6 +6,7 @@ var ASSAF_OS_MAX_RESPONSE_BYTES = 262144;
 var ASSAF_OS_MAX_ROWS = 2000;
 var ASSAF_OS_PROPOSAL_TTL_MS = 10 * 60 * 1000;
 var ASSAF_OS_BUSINESS_TIMEZONE = "Asia/Jerusalem";
+var ASSAF_OS_APPROVAL_GUARD_VERSION = 1;
 var ASSAF_OS_REQUEST_READ_CACHE = null;
 var ASSAF_OS_REFERENCE_FINGERPRINT_PROPERTY = "ASSAF_OS_REFERENCE_VALIDATION_FINGERPRINT";
 var ASSAF_OS_REFERENCE_DIRTY_PROPERTY = "ASSAF_OS_REFERENCE_VALIDATION_DIRTY";
@@ -117,6 +118,7 @@ function assafOsPropose_(workbook, request, config, requestHash, replay) {
       AssafOsSchema.tab(data.entity).fields.filter(function (field) { return field.immutableAfterCreate; }).forEach(function (field) { if (after[field.key] !== before[field.key]) throw assafOsError_("immutable_field_changed"); });
     }
     assafOsValidateDependencies_(workbook, data.entity, after);
+    if (data.entity === "leads" && data.record_id === null && assafOsLeadContactDependencies_(workbook, recordId, after).length) throw assafOsError_("lead_already_exists");
     if (data.entity === "payments") AssafOsRuntime.validatePaymentGraph(assafOsProspectivePayments_(workbook, after));
     if (data.entity === "expenses") AssafOsRuntime.dedupeExpense(after, assafOsReadEntity_(workbook, "expenses").records);
   }
@@ -220,7 +222,7 @@ function assafOsGetReceipt_(workbook, request, config) {
 }
 
 function assafOsPublicProposal_(proposal, config) {
-  return { api_version: AssafOsRuntime.API_VERSION, source: "google_sheets", actor_source: proposal.source, mode: config.mode, workbook_id: config.workbook_id, workspace_id: config.workspace_id, status: proposal.status, proposal_id: proposal.proposal_id, request_id: proposal.request_id, approval_request_id: proposal.approval_request_id, rejection_request_id: proposal.rejection_request_id, expires_at: proposal.expires_at, entity: proposal.entity, record_id: proposal.record_id, expected_revision: proposal.expected_revision, input: proposal.input, before: proposal.before, after: proposal.after };
+  return { api_version: AssafOsRuntime.API_VERSION, source: "google_sheets", actor_source: proposal.source, mode: config.mode, workbook_id: config.workbook_id, workspace_id: config.workspace_id, approval_guard_version: ASSAF_OS_APPROVAL_GUARD_VERSION, status: proposal.status, proposal_id: proposal.proposal_id, request_id: proposal.request_id, approval_request_id: proposal.approval_request_id, rejection_request_id: proposal.rejection_request_id, expires_at: proposal.expires_at, entity: proposal.entity, record_id: proposal.record_id, expected_revision: proposal.expected_revision, input: proposal.input, before: proposal.before, after: proposal.after };
 }
 
 function assafOsCommitRequests_(workbook, proposal, revision, requestId, now) {
@@ -337,13 +339,23 @@ function assafOsReadEntityTolerant_(workbook, entity) {
   return assafOsStoreCachedEntity_("tolerant", entity, result);
 }
 
-function assafOsBeginRequestReadCache_(workbook) { ASSAF_OS_REQUEST_READ_CACHE = { workbook_id: workbook.getId(), sheets: {}, strict: {}, tolerant: {} }; }
+function assafOsBeginRequestReadCache_(workbook) { ASSAF_OS_REQUEST_READ_CACHE = { workbook_id: workbook.getId(), sheets: {}, values: {}, strict: {}, tolerant: {} }; }
 function assafOsReadSheetOnce_(sheet) {
   var cache = ASSAF_OS_REQUEST_READ_CACHE, key = String(sheet.getSheetId());
   if (cache && cache.workbook_id === sheet.getParent().getId() && cache.sheets[key]) return cache.sheets[key];
   var range = sheet.getDataRange(), raw = { values: range.getValues(), formulas: range.getFormulas(), last_column: sheet.getLastColumn() };
   if (cache && cache.workbook_id === sheet.getParent().getId()) cache.sheets[key] = raw;
   return raw;
+}
+function assafOsReadValuesOnce_(sheet) {
+  var cache = ASSAF_OS_REQUEST_READ_CACHE, key = String(sheet.getSheetId());
+  if (cache && cache.workbook_id === sheet.getParent().getId()) {
+    if (cache.sheets[key]) return cache.sheets[key].values;
+    if (cache.values[key]) return cache.values[key];
+  }
+  var values = sheet.getDataRange().getValues();
+  if (cache && cache.workbook_id === sheet.getParent().getId()) cache.values[key] = values;
+  return values;
 }
 function assafOsCachedEntity_(kind, entity) { return ASSAF_OS_REQUEST_READ_CACHE && ASSAF_OS_REQUEST_READ_CACHE[kind][entity] || null; }
 function assafOsStoreCachedEntity_(kind, entity, value) { if (ASSAF_OS_REQUEST_READ_CACHE) ASSAF_OS_REQUEST_READ_CACHE[kind][entity] = value; return value; }
@@ -352,6 +364,9 @@ function assafOsInvalidateEntityCache_(workbook, entity) {
   var tab = AssafOsSchema.tab(entity), sheet = tab && workbook.getSheetByName(tab.name);
   if (sheet) delete ASSAF_OS_REQUEST_READ_CACHE.sheets[String(sheet.getSheetId())];
   delete ASSAF_OS_REQUEST_READ_CACHE.strict[entity]; delete ASSAF_OS_REQUEST_READ_CACHE.tolerant[entity];
+}
+function assafOsInvalidateSheetCache_(workbook, sheet) {
+  if (ASSAF_OS_REQUEST_READ_CACHE && ASSAF_OS_REQUEST_READ_CACHE.workbook_id === workbook.getId() && sheet) { delete ASSAF_OS_REQUEST_READ_CACHE.sheets[String(sheet.getSheetId())]; delete ASSAF_OS_REQUEST_READ_CACHE.values[String(sheet.getSheetId())]; }
 }
 
 function assafOsLeadPhoneIdentity_(value) {
@@ -569,6 +584,8 @@ function assafOsReconcileRow_(workbook, tab, rowNumber, source, suppliedRow, sup
   if (openIssue && openIssue.status === "open") requests.push(assafOsAppendRequest_(workbook.getSheetByName(ASSAF_OS_META.issues.name), ["ISS_" + Utilities.getUuid().replace(/-/g, ""), now, openIssue.code, entity, id, rowNumber, "resolved"]));
   Sheets.Spreadsheets.batchUpdate({ requests: requests }, workbook.getId());
   assafOsInvalidateEntityCache_(workbook, entity);
+  assafOsInvalidateSheetCache_(workbook, workbook.getSheetByName(ASSAF_OS_META.accepted.name));
+  assafOsInvalidateSheetCache_(workbook, workbook.getSheetByName(ASSAF_OS_META.issues.name));
   if (source !== "read" && assafOsCanProject_(workbook)) { var projection = assafOsProjectionRequests_(workbook, { entity: entity, record_id: id, after: record }); if (projection.length) { Sheets.Spreadsheets.batchUpdate({ requests: projection }, workbook.getId()); assafOsInvalidateEntityCache_(workbook, "clients"); assafOsInvalidateEntityCache_(workbook, "works"); } }
   return "accepted";
 }
@@ -672,13 +689,13 @@ function assafOsRecordToRow_(tab, record, workbook) { return tab.fields.map(func
 function inputFieldsFor_(tab) { return tab.fields.filter(function (field) { return field.role === "input"; }); }
 function assafOsIdKey_(entity) { return entity === "clients" ? "person_id" : entity.replace(/s$/, "") + "_id"; }
 function assafOsNewRecordId_(entity) { return (entity === "clients" ? "PER" : entity.slice(0, 3).toUpperCase()) + "_" + Utilities.getUuid().replace(/-/g, ""); }
-function assafOsLatestAccepted_(workbook, entity, recordId) { var rows = workbook.getSheetByName(ASSAF_OS_META.accepted.name).getDataRange().getValues(), result = null; for (var i = 1; i < rows.length; i += 1) if (rows[i][0] === entity && rows[i][1] === recordId && (!result || Number(rows[i][2]) > result.revision)) result = { revision: Number(rows[i][2]), input_fingerprint: String(rows[i][3]), raw_fingerprint: String(rows[i][4]), row: rows[i] }; return result; }
+function assafOsLatestAccepted_(workbook, entity, recordId) { var rows = assafOsReadValuesOnce_(workbook.getSheetByName(ASSAF_OS_META.accepted.name)), result = null; for (var i = 1; i < rows.length; i += 1) if (rows[i][0] === entity && rows[i][1] === recordId && (!result || Number(rows[i][2]) > result.revision)) result = { revision: Number(rows[i][2]), input_fingerprint: String(rows[i][3]), raw_fingerprint: String(rows[i][4]), row: rows[i] }; return result; }
 function assafOsRawOwnedFingerprint_(tab, row, workbook) { return assafOsSha_(AssafOsRuntime.stableStringify(tab.fields.map(function (field, index) { var value = field.role === "calculated" ? null : assafOsNativeValue_(field, row[index]); return value !== null && value !== "" && field.ref && workbook ? assafOsResolveReferenceValue_(workbook, field, value) : value; }))); }
-function assafOsRecordIssue_(workbook, code, entity, recordId, row) { var current = assafOsLatestIssue_(workbook, entity, row); if (current && current.status === "open" && current.code === code) return; var now = new Date().toISOString(); Sheets.Spreadsheets.batchUpdate({ requests: [assafOsAppendRequest_(workbook.getSheetByName(ASSAF_OS_META.issues.name), ["ISS_" + Utilities.getUuid().replace(/-/g, ""), now, code, entity, recordId || "", row, "open"])] }, workbook.getId()); }
-function assafOsLatestIssue_(workbook, entity, row) { var rows = workbook.getSheetByName(ASSAF_OS_META.issues.name).getDataRange().getValues(), result = null; for (var i = 1; i < rows.length; i += 1) if (rows[i][3] === entity && Number(rows[i][5]) === Number(row)) result = { code: String(rows[i][2]), record_id: rows[i][4] ? String(rows[i][4]) : null, status: String(rows[i][6]) }; return result; }
-function assafOsResolveIssue_(workbook, entity, row, recordId) { var issue = assafOsLatestIssue_(workbook, entity, row); if (!issue || issue.status !== "open") return false; var now = new Date().toISOString(); Sheets.Spreadsheets.batchUpdate({ requests: [assafOsAppendRequest_(workbook.getSheetByName(ASSAF_OS_META.issues.name), ["ISS_" + Utilities.getUuid().replace(/-/g, ""), now, issue.code, entity, recordId || issue.record_id || "", row, "resolved"])] }, workbook.getId()); return true; }
-function assafOsOpenIssues_(workbook) { var rows = workbook.getSheetByName(ASSAF_OS_META.issues.name).getDataRange().getValues(), latest = {}; for (var i = 1; i < rows.length; i += 1) latest[String(rows[i][3]) + "|" + String(rows[i][5])] = rows[i]; return Object.keys(latest).map(function (key) { return latest[key]; }).filter(function (row) { return row[6] === "open"; }).map(function (row) { return { code: String(row[2]), entity: String(row[3]), record_id: row[4] ? String(row[4]) : null }; }); }
-function assafOsFindBy_(sheet, column, value, withRow) { var rows = sheet.getDataRange().getValues(); for (var i = 1; i < rows.length; i += 1) if (String(rows[i][column]) === String(value)) return withRow ? { values: rows[i], row: i + 1 } : rows[i]; return null; }
+function assafOsRecordIssue_(workbook, code, entity, recordId, row) { var sheet = workbook.getSheetByName(ASSAF_OS_META.issues.name), current = assafOsLatestIssue_(workbook, entity, row); if (current && current.status === "open" && current.code === code) return; var now = new Date().toISOString(); Sheets.Spreadsheets.batchUpdate({ requests: [assafOsAppendRequest_(sheet, ["ISS_" + Utilities.getUuid().replace(/-/g, ""), now, code, entity, recordId || "", row, "open"])] }, workbook.getId()); assafOsInvalidateSheetCache_(workbook, sheet); }
+function assafOsLatestIssue_(workbook, entity, row) { var rows = assafOsReadValuesOnce_(workbook.getSheetByName(ASSAF_OS_META.issues.name)), result = null; for (var i = 1; i < rows.length; i += 1) if (rows[i][3] === entity && Number(rows[i][5]) === Number(row)) result = { code: String(rows[i][2]), record_id: rows[i][4] ? String(rows[i][4]) : null, status: String(rows[i][6]) }; return result; }
+function assafOsResolveIssue_(workbook, entity, row, recordId) { var sheet = workbook.getSheetByName(ASSAF_OS_META.issues.name), issue = assafOsLatestIssue_(workbook, entity, row); if (!issue || issue.status !== "open") return false; var now = new Date().toISOString(); Sheets.Spreadsheets.batchUpdate({ requests: [assafOsAppendRequest_(sheet, ["ISS_" + Utilities.getUuid().replace(/-/g, ""), now, issue.code, entity, recordId || issue.record_id || "", row, "resolved"])] }, workbook.getId()); assafOsInvalidateSheetCache_(workbook, sheet); return true; }
+function assafOsOpenIssues_(workbook) { var rows = assafOsReadValuesOnce_(workbook.getSheetByName(ASSAF_OS_META.issues.name)), latest = {}; for (var i = 1; i < rows.length; i += 1) latest[String(rows[i][3]) + "|" + String(rows[i][5])] = rows[i]; return Object.keys(latest).map(function (key) { return latest[key]; }).filter(function (row) { return row[6] === "open"; }).map(function (row) { return { code: String(row[2]), entity: String(row[3]), record_id: row[4] ? String(row[4]) : null }; }); }
+function assafOsFindBy_(sheet, column, value, withRow) { var rows = assafOsReadValuesOnce_(sheet); for (var i = 1; i < rows.length; i += 1) if (String(rows[i][column]) === String(value)) return withRow ? { values: rows[i], row: i + 1 } : rows[i]; return null; }
 function assafOsOtherRecords_(workbook, sheet, tab, excludedRow) { var rows = assafOsReadSheetOnce_(sheet).values, records = []; for (var i = 1; i < rows.length; i += 1) { if (i + 1 === excludedRow || rows[i].every(function (cell) { return cell === ""; })) continue; try { records.push(assafOsRowToRecord_(tab, rows[i], workbook)); } catch (_) {} } return records; }
 function assafOsAppendRequest_(sheet, values) { assafOsAssertAppendCapacity_(sheet, 1); return { appendCells: { sheetId: sheet.getSheetId(), rows: [{ values: values.map(assafOsExtendedValue_) }], fields: "userEnteredValue" } }; }
 function assafOsAssertAppendCapacity_(sheet, count) { if (sheet.getLastRow() + count > sheet.getMaxRows()) throw assafOsError_("metadata_capacity_exceeded"); }

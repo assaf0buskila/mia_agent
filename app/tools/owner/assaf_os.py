@@ -233,6 +233,7 @@ def _assaf_os_propose(ctx: ToolContext, arguments: dict[str, Any]) -> ToolResult
             target={
                 "proposal": pending,
                 "proposal_digest": hashlib.sha256(_json(pending).encode()).hexdigest(),
+                "approval_guard_version": pending["approval_guard_version"],
                 "workbook_id": ctx.settings.assaf_os_workbook_id,
                 "workspace_id": ctx.settings.assaf_os_workspace_id,
                 "mode": ctx.settings.assaf_os_mode,
