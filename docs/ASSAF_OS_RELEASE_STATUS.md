@@ -1,5 +1,17 @@
 # Assaf OS release preparation — 2026-10-12
 
+Current deployment and remaining acceptance are recorded in
+`ops/assaf-os/LIVE_STATUS.md` (updated 13 October). MIA lead approval integration
+is deployed at `cb977017c037bb6a7c6738edb821452049e5d3bf`; Script version 7,
+Cloudflare, mapped-owner Google login and the native/OS round trip are live.
+One human Telegram-approved synthetic lead is verified in the shared Sheet and
+OS. Four of the five real legacy learning leads are imported after human approval;
+the fifth is approved but unexecuted and expired. Phone/contact actions and read
+refresh are deployed at frontend 209f516 / Cloudflare 3c5524bd, with actual rendering
+acceptance still pending. The independently reviewed latency fix is prepared for
+Script-first deployment. Complete browser/form and owner/device acceptance remain pending. The preparation snapshot below is historical; its
+disabled-gate and not-yet-deployed statements are not current operational status.
+
 The owner selected Cloudflare for the OS, one existing Google Sheets workbook
 for business data, and Apps Script for the shared record/approval service. Direct
 Sheet edits, OS edits, and MIA proposals use the same workbook. The owner explicitly
