@@ -210,6 +210,44 @@ class OwnerSessionStore:
             expires_at=expires_at,
         )
 
+    def validate_pending_challenge(
+        self,
+        *,
+        challenge_cookie: str,
+        challenge_csrf: str,
+        now: datetime | None = None,
+    ) -> None:
+        """Read-only preflight before expensive external identity verification.
+
+        This deliberately does not consume the challenge. ``create_session`` performs
+        the authoritative consume in the same transaction as proof/session persistence.
+        """
+        if (
+            not challenge_cookie
+            or not challenge_csrf
+            or len(challenge_cookie) > 256
+            or len(challenge_csrf) > 256
+        ):
+            raise OwnerSessionReplay("challenge rejected")
+        moment = self._now(now)
+        pending = self.session.execute(
+            text(
+                """
+                SELECT challenge_hash
+                FROM owner_os_login_challenges
+                WHERE challenge_hash = :challenge_hash
+                  AND consumed_at IS NULL
+                  AND expires_at >= :now
+                """
+            ),
+            {
+                "challenge_hash": challenge_hash(challenge_cookie, challenge_csrf),
+                "now": moment,
+            },
+        ).first()
+        if pending is None:
+            raise OwnerSessionReplay("challenge rejected")
+
     def create_session(
         self,
         *,

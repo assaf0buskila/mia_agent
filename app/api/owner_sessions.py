@@ -18,10 +18,16 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
+from starlette.concurrency import run_in_threadpool
 
 from app.api.quick_leads import verify_owner_login
 from app.core.config import Settings, get_settings
 from app.db.session import sqlalchemy_database_url
+from app.services.owner_google_login import (
+    GoogleJwksUnavailable,
+    GoogleOwnerLoginDenied,
+    verify_google_owner_token,
+)
 from app.services.owner_sessions import (
     MAX_SESSION_TTL_SECONDS,
     OwnerSessionDenied,
@@ -72,6 +78,12 @@ class OwnerLoginBody(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     login_proof: str = Field(min_length=1, max_length=4096, repr=False)
+
+
+class GoogleOwnerLoginBody(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    id_token: str = Field(min_length=1, max_length=6144, repr=False)
 
 
 class OwnerSessionView(BaseModel):
@@ -157,6 +169,41 @@ def _session_ttl(settings: Settings) -> int:
     if configured <= 0:
         raise _error(503, "owner_auth_unavailable")
     return min(configured, MAX_SESSION_TTL_SECONDS)
+
+
+def _session_secret(settings: Settings) -> str:
+    dedicated = settings.owner_os_session_secret
+    if dedicated:
+        if len(dedicated) < 32:
+            raise _error(503, "owner_auth_unavailable")
+        return dedicated
+    if settings.owner_os_google_enabled:
+        raise _error(503, "owner_auth_unavailable")
+    return settings.telegram_bot_token
+
+
+def _google_owner_id(settings: Settings) -> str:
+    if not settings.owner_os_google_enabled:
+        raise _error(404, "not_found")
+    owner_id = settings.owner_os_google_owner_id.strip()
+    if (
+        not settings.owner_os_google_client_id.strip()
+        or not settings.owner_os_google_subject.strip()
+        or not owner_id.isascii()
+        or not owner_id.isdigit()
+        or owner_id not in settings.telegram_owner_user_id_set()
+    ):
+        raise _error(503, "owner_auth_unavailable")
+    _session_secret(settings)
+    _feature_settings(settings)
+    return owner_id
+
+
+def require_google_owner_settings(
+    settings: Settings = Depends(get_settings),
+) -> str:
+    """Resolve the fixed mapping before the route opens a DB or reaches Google."""
+    return _google_owner_id(settings)
 
 
 @lru_cache(maxsize=4)
@@ -421,6 +468,29 @@ async def _bounded_login_body(request: Request) -> OwnerLoginBody:
         raise _error(422, "invalid_login_request") from None
 
 
+async def _bounded_google_login_body(request: Request) -> GoogleOwnerLoginBody:
+    content_type = request.headers.get("content-type", "").partition(";")[0].strip().lower()
+    if content_type != "application/json":
+        raise _error(415, "application_json_required")
+    content_length = request.headers.get("content-length", "")
+    if content_length:
+        try:
+            length = int(content_length)
+        except ValueError:
+            raise _error(400, "invalid_content_length") from None
+        if length < 0 or length > MAX_BODY_BYTES:
+            raise _error(413, "request_body_too_large")
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > MAX_BODY_BYTES:
+            raise _error(413, "request_body_too_large")
+    try:
+        return GoogleOwnerLoginBody.model_validate_json(bytes(body))
+    except ValidationError:
+        raise _error(422, "invalid_login_request") from None
+
+
 def _proof_fields(login_proof: str) -> tuple[str, datetime]:
     """Extract only fields already authenticated by verify_owner_login."""
     try:
@@ -510,7 +580,7 @@ def owner_mutation_scope(
         if not valid_session_csrf(
             cookie_token,
             csrf_token or "",
-            secret=settings.telegram_bot_token,
+            secret=_session_secret(settings),
         ):
             raise _error(403, "csrf_denied")
         if require_fresh_login:
@@ -533,6 +603,26 @@ def owner_mutation_scope(
         return principal
 
     return dependency
+
+
+def _issue_session_view(
+    response: Response,
+    issued,
+    *,
+    settings: Settings,
+) -> OwnerSessionView:
+    ttl = _session_ttl(settings)
+    _cookie(response, SESSION_COOKIE, issued.cookie_token, max_age=ttl)
+    _clear_cookie(response, CHALLENGE_COOKIE)
+    return OwnerSessionView(
+        scopes=sorted(issued.record.scopes),
+        business_binding=_business_binding(settings, issued.record.owner_id),
+        expires_at=issued.record.expires_at,
+        csrf_token=session_csrf_token(
+            issued.cookie_token,
+            secret=_session_secret(settings),
+        ),
+    )
 
 
 @router.get("/challenge")
@@ -625,18 +715,88 @@ async def login(
         _logger.warning("owner_auth reason=login_persist_failed")
         raise _error(503, "owner_auth_unavailable") from None
 
-    ttl = _session_ttl(settings)
-    _cookie(response, SESSION_COOKIE, issued.cookie_token, max_age=ttl)
-    _clear_cookie(response, CHALLENGE_COOKIE)
-    return OwnerSessionView(
-        scopes=sorted(issued.record.scopes),
-        business_binding=_business_binding(settings, issued.record.owner_id),
-        expires_at=issued.record.expires_at,
-        csrf_token=session_csrf_token(
-            issued.cookie_token,
-            secret=settings.telegram_bot_token,
-        ),
-    )
+    return _issue_session_view(response, issued, settings=settings)
+
+
+@router.post("/google/login", response_model=OwnerSessionView)
+async def google_login(
+    request: Request,
+    response: Response,
+    csrf_token: Annotated[str | None, Header(alias=CSRF_HEADER)] = None,
+    owner_id: str = Depends(require_google_owner_settings),
+    settings: Settings = Depends(get_settings),
+    db: Session = Depends(get_owner_session_db),
+) -> OwnerSessionView:
+    # Check the default-off gate and static identity binding before DB/JWKS effects.
+    _require_origin(request, settings)
+    _no_store(response)
+    body = await _bounded_google_login_body(request)
+    challenge_cookie = _request_cookie(request, CHALLENGE_COOKIE)
+    previous_cookie = _request_cookie(request, SESSION_COOKIE)
+    try:
+        OwnerSessionStore(db).record_auth_attempt(
+            "login",
+            limit=LOGIN_RATE_LIMIT,
+            window_seconds=AUTH_RATE_WINDOW_SECONDS,
+        )
+        db.commit()
+    except OwnerSessionRateLimited:
+        db.rollback()
+        raise _error(429, "rate_limited") from None
+    except SQLAlchemyError:
+        db.rollback()
+        _logger.warning("owner_auth reason=google_login_rate_persist_failed")
+        raise _error(503, "owner_auth_unavailable") from None
+    try:
+        OwnerSessionStore(db).validate_pending_challenge(
+            challenge_cookie=challenge_cookie,
+            challenge_csrf=csrf_token or "",
+        )
+    except (OwnerSessionDenied, OwnerSessionReplay):
+        raise _error(401, "owner_auth_required") from None
+    except SQLAlchemyError:
+        db.rollback()
+        _logger.warning("owner_auth reason=google_challenge_lookup_failed")
+        raise _error(503, "owner_auth_unavailable") from None
+    try:
+        verified = await run_in_threadpool(
+            verify_google_owner_token,
+            body.id_token,
+            client_id=settings.owner_os_google_client_id.strip(),
+            expected_subject=settings.owner_os_google_subject.strip(),
+            owner_id=owner_id,
+            nonce=csrf_token or "",
+        )
+    except GoogleOwnerLoginDenied:
+        raise _error(401, "owner_auth_required") from None
+    except GoogleJwksUnavailable:
+        _logger.warning("owner_auth reason=google_jwks_unavailable")
+        raise _error(503, "owner_auth_unavailable") from None
+    scopes = _configured_scopes(settings) - ACTION_SCOPES
+    _, workspace_id = _feature_settings(settings)
+    if not scopes:
+        raise _error(503, "owner_auth_unavailable")
+    try:
+        issued = OwnerSessionStore(db).create_session(
+            owner_id=verified.owner_id,
+            workspace_id=workspace_id,
+            scopes=scopes,
+            proof_hash=verified.proof_hash,
+            proof_authenticated_at=verified.authenticated_at,
+            challenge_cookie=challenge_cookie,
+            challenge_csrf=csrf_token or "",
+            previous_cookie=previous_cookie,
+            ttl_seconds=_session_ttl(settings),
+        )
+        db.commit()
+    except (OwnerSessionDenied, OwnerSessionReplay):
+        db.rollback()
+        raise _error(401, "owner_auth_required") from None
+    except SQLAlchemyError:
+        db.rollback()
+        _logger.warning("owner_auth reason=google_login_persist_failed")
+        raise _error(503, "owner_auth_unavailable") from None
+    return _issue_session_view(response, issued, settings=settings)
 
 
 @router.get("/session", response_model=OwnerSessionView)
@@ -657,7 +817,7 @@ def session_status(
         scopes=sorted(principal.scopes),
         business_binding=_business_binding(settings, principal.owner_id),
         expires_at=record.expires_at,
-        csrf_token=session_csrf_token(cookie_token, secret=settings.telegram_bot_token),
+        csrf_token=session_csrf_token(cookie_token, secret=_session_secret(settings)),
     )
 
 
@@ -672,7 +832,7 @@ def _session_mutation_principal(
     if not valid_session_csrf(
         cookie_token,
         csrf_token,
-        secret=settings.telegram_bot_token,
+        secret=_session_secret(settings),
     ):
         raise _error(403, "csrf_denied")
     try:
