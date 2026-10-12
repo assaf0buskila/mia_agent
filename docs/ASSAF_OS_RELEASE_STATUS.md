@@ -31,7 +31,7 @@ staging VM. No new server is part of this release.
 
 - Full backend suite: 3,087 passed, 108 skipped. Skipped disposable PostgreSQL
   coverage must run in CI; it is not production acceptance.
-- Apps Script suite: 49 passed, including 16 executed actual `.gs` lifecycle tests
+- Apps Script suite: 52 passed, including 19 executed actual `.gs` lifecycle tests
   with Google-shaped Date, formula, grid, batch and native-edit behavior.
 - Frontend/Worker suite: 117 passed. Actual Script-to-frontend cross-contract test
   passed separately. Independent HEAVY corrected-delta review passed.

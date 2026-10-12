@@ -243,3 +243,49 @@ test("calculated sheet clear stays inside the real grid and transport money rema
   assert.equal(response.data.summary.monthly[0].paid_income_ils, 10000);
   assert.equal(response.data.summary.monthly[0].currency, "ILS");
 });
+
+test("native monthly hourly stays null when one paid work has no time", () => {
+  const h = createHarness({ maxRows: 25 }); h.addRecord("clients", client());
+  h.addRecord("works", work());
+  h.addRecord("works", { work_id: "WOR_2", person_id: "PER_1", title: "Second ILS", path: "אוטומציה", status: "פעילה", currency: "ILS", created_at: "2026-10-01T00:00:00.000Z", updated_at: "2026-10-01T00:00:00.000Z", revision: 1, write_source: "משתמש", request_id: "EDIT_work2" });
+  h.addRecord("works", { work_id: "WOR_3", person_id: "PER_1", title: "EUR work", path: "לימוד", status: "פעילה", currency: "EUR", created_at: "2026-10-01T00:00:00.000Z", updated_at: "2026-10-01T00:00:00.000Z", revision: 1, write_source: "משתמש", request_id: "EDIT_work3" });
+  h.addRecord("payments", payment());
+  h.addRecord("payments", { payment_id: "PAY_2", person_id: "PER_1", work_id: "WOR_2", path: "אוטומציה", date: "2026-10-01", actual_amount_ils: 5000, currency: "ILS", kind: "התקבל", created_at: "2026-10-01T00:00:00.000Z", revision: 1, write_source: "משתמש", request_id: "EDIT_payment2" });
+  h.addRecord("payments", { payment_id: "PAY_3", person_id: "PER_1", work_id: "WOR_3", path: "לימוד", date: "2026-10-01", actual_amount_ils: 7000, currency: "EUR", kind: "התקבל", created_at: "2026-10-01T00:00:00.000Z", revision: 1, write_source: "משתמש", request_id: "EDIT_payment3" });
+  h.addRecord("time", { time_id: "TIM_1", person_id: "PER_1", work_id: "WOR_1", path: "אוטומציה", date: "2026-10-01", minutes: 120, status: "פעיל", created_at: "2026-10-01T00:00:00.000Z", revision: 1, write_source: "משתמש", request_id: "EDIT_time1" });
+  h.addRecord("time", { time_id: "TIM_2", person_id: "PER_1", work_id: "WOR_3", path: "לימוד", date: "2026-10-01", minutes: 60, status: "פעיל", created_at: "2026-10-01T00:00:00.000Z", revision: 1, write_source: "משתמש", request_id: "EDIT_time2" });
+  const response = h.call(h.request("snapshot", {}));
+  assert.equal(response.ok, true, JSON.stringify(response.data));
+  const ils = response.data.summary.monthly.find((row) => row.currency === "ILS"), eur = response.data.summary.monthly.find((row) => row.currency === "EUR");
+  assert.equal(ils.paid_income_ils, 15000); assert.equal(ils.recorded_minutes, 120); assert.equal(ils.effective_hourly_ils, null); assert.equal(ils.coverage, "partial"); assert.ok(ils.reason_codes.includes("missing_time"));
+  assert.equal(eur.paid_income_ils, 7000); assert.equal(eur.recorded_minutes, 60); assert.equal(eur.effective_hourly_ils, 7000); assert.equal(eur.coverage, "complete");
+});
+
+test("offsetting work cash cannot hide actual monthly missing-time evidence", () => {
+  const h = createHarness({ maxRows: 25 }); h.addRecord("clients", client()); h.addRecord("works", work());
+  h.addRecord("works", { work_id: "WOR_2", person_id: "PER_1", title: "Refund work", path: "אוטומציה", status: "פעילה", currency: "ILS", created_at: "2026-09-01T00:00:00.000Z", updated_at: "2026-09-01T00:00:00.000Z", revision: 1, write_source: "משתמש", request_id: "EDIT_work2" });
+  h.addRecord("payments", payment());
+  h.addRecord("payments", { payment_id: "PAY_OLD", person_id: "PER_1", work_id: "WOR_2", path: "אוטומציה", date: "2026-09-20", actual_amount_ils: 10000, currency: "ILS", kind: "התקבל", created_at: "2026-09-20T00:00:00.000Z", revision: 1, write_source: "משתמש", request_id: "EDIT_old" });
+  h.addRecord("payments", { payment_id: "PAY_REF", person_id: "PER_1", work_id: "WOR_2", path: "אוטומציה", date: "2026-10-03", actual_amount_ils: 10000, currency: "ILS", kind: "החזר", original_payment_id: "PAY_OLD", created_at: "2026-10-03T00:00:00.000Z", revision: 1, write_source: "משתמש", request_id: "EDIT_ref" });
+  h.addRecord("time", { time_id: "TIM_2", person_id: "PER_1", work_id: "WOR_2", path: "אוטומציה", date: "2026-10-03", minutes: 60, status: "פעיל", created_at: "2026-10-03T00:00:00.000Z", revision: 1, write_source: "משתמש", request_id: "EDIT_time2" });
+  const response = h.call(h.request("snapshot", {})), october = response.data.summary.monthly.find((row) => row.month === "2026-10" && row.currency === "ILS");
+  assert.equal(october.paid_income_ils, 0); assert.equal(october.recorded_minutes, 60); assert.equal(october.effective_hourly_ils, null); assert.equal(october.coverage, "partial"); assert.ok(october.reason_codes.includes("missing_time"));
+});
+
+test("MIA proposals approved by Telegram preserve per-work monthly time evidence", () => {
+  const h = createHarness({ maxRows: 40 }); h.addRecord("clients", client());
+  function commit(entity, input) { const proposal = propose(h, entity, input, null, 0, "MIA"); const receipt = approve(h, proposal, "TELEGRAM_APPROVAL"); assert.equal(receipt.data.status, "committed"); return proposal.record_id; }
+  const work1 = commit("works", { person_id: "PER_1", title: "Paid with hours", path: "לימוד", status: "פעילה", currency: "ILS" });
+  const work2 = commit("works", { person_id: "PER_1", title: "Paid without hours", path: "לימוד", status: "פעילה", currency: "ILS" });
+  const work3 = commit("works", { person_id: "PER_1", title: "Foreign paid", path: "אוטומציה", status: "פעילה", currency: "EUR" });
+  commit("payments", { person_id: "PER_1", work_id: work1, path: "לימוד", date: "2026-10-12", actual_amount_ils: 10000, currency: "ILS", kind: "התקבל" });
+  commit("payments", { person_id: "PER_1", work_id: work2, path: "לימוד", date: "2026-10-12", actual_amount_ils: 5000, currency: "ILS", kind: "התקבל" });
+  commit("payments", { person_id: "PER_1", work_id: work3, path: "אוטומציה", date: "2026-10-12", actual_amount_ils: 7000, currency: "EUR", kind: "התקבל" });
+  commit("time", { person_id: "PER_1", work_id: work1, path: "לימוד", date: "2026-10-12", minutes: 120, status: "פעיל" });
+  commit("time", { person_id: "PER_1", work_id: work3, path: "אוטומציה", date: "2026-10-12", minutes: 60, status: "פעיל" });
+  const response = h.call(h.request("snapshot", {}));
+  const ils = response.data.summary.monthly.find((row) => row.currency === "ILS"), eur = response.data.summary.monthly.find((row) => row.currency === "EUR");
+  assert.deepEqual({ income: ils.paid_income_ils, minutes: ils.recorded_minutes, hourly: ils.effective_hourly_ils, coverage: ils.coverage }, { income: 15000, minutes: 120, hourly: null, coverage: "partial" });
+  assert.ok(ils.reason_codes.includes("missing_time"));
+  assert.deepEqual({ income: eur.paid_income_ils, minutes: eur.recorded_minutes, hourly: eur.effective_hourly_ils, coverage: eur.coverage }, { income: 7000, minutes: 60, hourly: 7000, coverage: "complete" });
+});

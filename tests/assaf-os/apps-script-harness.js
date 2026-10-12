@@ -4,6 +4,7 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const vm = require("node:vm");
 const Schema = require("../../ops/assaf-os/schema.js");
+const Core = require("../../ops/assaf-os/core.js");
 const Runtime = require("../../ops/assaf-os/runtime.js");
 
 function cellValue(cell) {
@@ -91,7 +92,7 @@ function createHarness(options = {}) {
   let uuid = 1;
   const context = {
     Date, JSON, Math, Set, Map,
-    AssafOsSchema: Schema, AssafOsRuntime: Runtime,
+    AssafOsSchema: Schema, AssafOsCore: Core, AssafOsRuntime: Runtime,
     ContentService: { MimeType: { JSON: "json" }, createTextOutput: (text) => ({ text, setMimeType() { return this; } }) },
     PropertiesService: { getScriptProperties: () => ({ getProperty: (key) => ({ ASSAF_OS_OWNER_ID: binding.owner_id, ASSAF_OS_WORKSPACE_ID: binding.workspace_id, ASSAF_OS_WORKBOOK_ID: binding.workbook_id, ASSAF_OS_MODE: binding.mode, ASSAF_OS_HMAC_SECRET: secret }[key] || null) }) },
     SpreadsheetApp: { openById: (id) => { if (id !== binding.workbook_id) throw new Error("wrong_workbook"); return workbook; } },

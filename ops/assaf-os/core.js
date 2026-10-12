@@ -72,6 +72,28 @@
   function emptyGroup(record) {
     return { person_id: record.person_id, path: record.path, month: monthOf(record.date), currency: record.currency, net_received_agorot: 0, total_minutes: 0 };
   }
+
+  function paidWorkTimeEvidence(payments, times, works, scope) {
+    const workById = new Map(works.map(function (work) { return [work.work_id, work]; })), workCash = new Map();
+    function inScope(record, currency) {
+      return monthOf(record.date) === scope.month && currency === scope.currency &&
+        (scope.person_id === undefined || record.person_id === scope.person_id) &&
+        (scope.path === undefined || record.path === scope.path);
+    }
+    payments.forEach(function (record) {
+      if (record.kind === "בוטל" || !inScope(record, record.currency)) return;
+      workCash.set(record.work_id, safeAdd(workCash.get(record.work_id) || 0, record.kind === "החזר" ? -record.amount_agorot : record.amount_agorot));
+    });
+    const scopedTimes = times.filter(function (record) {
+      const work = workById.get(record.work_id);
+      return record.status !== "בוטל" && work && inScope(record, work.currency);
+    });
+    const totalMinutes = scopedTimes.reduce(function (sum, record) { return safeAdd(sum, record.minutes); }, 0);
+    const missingTime = Array.from(workCash.entries()).some(function (entry) {
+      return entry[1] !== 0 && !scopedTimes.some(function (record) { return record.work_id === entry[0] && record.minutes > 0; });
+    });
+    return { total_minutes: totalMinutes, missing_time: missingTime };
+  }
   function weightedHourly(cash, minutes) {
     if (cash === null || minutes === null || minutes === 0) return null;
     const hourly = Math.round((cash / minutes) * 60);
@@ -134,15 +156,7 @@
 
     function groupHasMissingWorkTime(group) {
       if (cov.time !== "complete") return true;
-      const workCash = new Map();
-      payments.forEach(function (record) {
-        if (record.kind === "בוטל" || record.person_id !== group.person_id || record.path !== group.path || record.currency !== group.currency || monthOf(record.date) !== group.month) return;
-        workCash.set(record.work_id, safeAdd(workCash.get(record.work_id) || 0, record.kind === "החזר" ? -record.amount_agorot : record.amount_agorot));
-      });
-      return Array.from(workCash.entries()).some(function (entry) {
-        if (entry[1] === 0) return false;
-        return !times.some(function (record) { return record.status !== "בוטל" && record.work_id === entry[0] && monthOf(record.date) === group.month && record.minutes > 0; });
-      });
+      return paidWorkTimeEvidence(payments, times, works, { person_id: group.person_id, path: group.path, month: group.month, currency: group.currency }).missing_time;
     }
     const clientById = new Map(clients.map(function (record) { return [record.person_id, record]; }));
     const rows = Array.from(groups.values()).map(function (group) {
@@ -280,5 +294,5 @@
     return { kind: args.existing_client ? "already_promoted" : "commit", person_id: personId, lead_patch: { status: "הפך ללקוח" }, client: args.existing_client || { person_id: personId, status: "פעיל" }, receipt: receipt };
   }
 
-  return Object.freeze({ snapshot: snapshot, decidePromotion: decidePromotion, stableStringify: stableStringify, canonicalPayment: canonicalPayment, canonicalTime: canonicalTime, canonicalExpense: canonicalExpense });
+  return Object.freeze({ snapshot: snapshot, decidePromotion: decidePromotion, stableStringify: stableStringify, canonicalPayment: canonicalPayment, canonicalTime: canonicalTime, canonicalExpense: canonicalExpense, paidWorkTimeEvidence: paidWorkTimeEvidence });
 });

@@ -374,12 +374,18 @@ function assafOsSummary_(records, entityCoverage, overallCoverage) {
     var income = entityCoverage.payments === "complete" ? value.income : null;
     var expenses = entityCoverage.expenses === "complete" ? value.expenses : null;
     var minutes = entityCoverage.time === "complete" && entityCoverage.works === "complete" ? value.minutes : null;
+    var evidence = minutes === null ? null : AssafOsCore.paidWorkTimeEvidence(
+      records.payments.map(function (payment) { return { payment_id: payment.payment_id, person_id: payment.person_id, work_id: payment.work_id, path: payment.path, date: payment.date, amount_agorot: payment.actual_amount_ils, currency: payment.currency, kind: payment.kind, original_payment_id: payment.original_payment_id }; }),
+      records.time.map(function (entry) { return { time_id: entry.time_id, person_id: entry.person_id, work_id: entry.work_id, path: entry.path, date: entry.date, minutes: entry.minutes, status: entry.status }; }),
+      records.works.map(function (work) { return { work_id: work.work_id, person_id: work.person_id, path: work.path, currency: work.currency }; }),
+      { month: value.month, currency: value.currency }
+    );
     if (income === null) reasons.push("payments_coverage_partial");
     if (expenses === null) reasons.push("expenses_coverage_partial");
     if (minutes === null) reasons.push("time_coverage_partial");
-    else if (minutes === 0 && income !== null && income !== 0) reasons.push("missing_time");
+    else if (evidence.missing_time || (income !== null && income !== 0 && minutes === 0)) reasons.push("missing_time");
     var net = income === null || expenses === null ? null : income - expenses;
-    var hourly = income !== null && minutes !== null && minutes > 0 ? Math.round(income * 60 / minutes) : null;
+    var hourly = income !== null && minutes !== null && minutes > 0 && !evidence.missing_time ? Math.round(income * 60 / minutes) : null;
     return { month: value.month, currency: value.currency, paid_income_ils: income, paid_expenses_ils: expenses, net_cash_ils: net, recorded_minutes: minutes, effective_hourly_ils: hourly, coverage: reasons.length ? "partial" : "complete", reason_codes: reasons };
   });
   return { coverage: overallCoverage, monthly: monthly };

@@ -13,15 +13,15 @@ The local shared Google Sheets/Apps Script runtime is implemented. It remains un
 - one Advanced Sheets batch for field-limited approved business changes, accepted journal, protected calculations, proposal state, replay record, and receipt;
 - input-only schema validation, exact minor/native money conversion, complete original/refund graph constraints, expense source deduplication, stable-person lead promotion, and row/size bounds;
 - installed-edit-trigger and coverage-aware snapshot-read reconciliation for complete native edits, with exact header/formula checks, `Asia/Jerusalem` Date normalization, validated in-memory ID allocation, shared approval/read/trigger semantic projection gates, nullable unsafe calculations, field-limited system writes, revisions, accepted snapshots, and visible issues;
-- monthly paid ILS expenses/net cash summary and protected client/work calculations;
+- monthly paid expenses/net cash and per-paid-work time evidence, with known minutes retained but unsafe hourly rates null when any paid work lacks time;
 - additive compatibility for the existing exact two-column Hebrew `הגדרות` sheet while preserving all other tabs/data;
 - no-argument configured preflight/install wrappers, non-secret `TEST`/`LIVE` binding configuration, and explicit partial-install diagnostics without automatic cleanup or overwrite.
 
 ## Local verification
 
-- `node --test tests/assaf-os/sheet-core.test.js tests/assaf-os/runtime.test.js tests/assaf-os/apps-script-runtime.test.js`: **PASS — 49 passed, 0 failed**.
+- `node --test tests/assaf-os/sheet-core.test.js tests/assaf-os/runtime.test.js tests/assaf-os/apps-script-runtime.test.js`: **PASS — 52 passed, 0 failed**.
 - Node syntax checks for `schema.js`, `core.js`, `runtime.js`, `UnifiedSheets.gs`, and `UnifiedRuntime.gs`: **PASS**.
-- Test data is synthetic. Sixteen integration-style cases load the actual `.gs` operation dispatcher in a Node VM with Google-shaped Sheet, timezone-aware Date, formula, grid and Advanced Sheets batch mocks.
+- Test data is synthetic. Nineteen integration-style cases load the actual `.gs` operation dispatcher in a Node VM with Google-shaped Sheet, timezone-aware Date, formula, grid and Advanced Sheets batch mocks.
 
 ## Boundaries and unknowns
 
