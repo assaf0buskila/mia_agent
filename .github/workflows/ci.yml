@@ -37,6 +37,8 @@ jobs:
       - run: node --check app/web/ask_mia.js
       - run: node tests/unit/widget_behavior.test.js
       - run: node --test tests/business-ledger/*.test.js
+      - run: node --test tests/assaf-os/*.test.js
+      - run: uv run ruff check ops/assaf-os/provision_auth.py
       - run: uv run pytest ops/business-ledger/staging/tests --basetemp=.cache/staging-overlay-ci
       - name: Validate pinned staging HTTPS configuration without network
         run: >-

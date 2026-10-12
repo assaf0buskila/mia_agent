@@ -574,6 +574,13 @@ def run_owner_agent(
         "guessed to be a read. Calendar requests have no extra conversation grammar "
         "or local business-hours rule beyond permission and valid provider data."
     )
+    if getattr(ctx.settings, "assaf_os_enabled", False):
+        messages[0]["content"] += (
+            "\n\nSHARED ASSAF OS: For owner business records, use assaf_os_snapshot, "
+            "assaf_os_propose, and assaf_os_receipt. Legacy CRM, generic Sheets writes, "
+            "and the TEST business ledger are unavailable in this mode. A proposal is "
+            "pending until the numeric owner approves it in Telegram."
+        )
     definitions = tool_definitions(
         allow_memory_writes=ctx.settings.memory_write_enabled,
         allow_reminders=(
@@ -582,7 +589,11 @@ def run_owner_agent(
         allow_business=(
             ctx.settings.env.value == "test"
             and ctx.settings.business_ledger_test_enabled
+            and not getattr(ctx.settings, "assaf_os_enabled", False)
             and getattr(ctx, "private_owner_chat", False)
+        ),
+        allow_assaf_os=(
+            ctx.settings.assaf_os_enabled and getattr(ctx, "private_owner_chat", False)
         ),
     )
 

@@ -227,9 +227,31 @@
       const target = record.path === "משותף" ? shared : byPath[record.path];
       target[record.currency] = safeAdd(target[record.currency] || 0, record.amount_agorot);
     });
+    let monthly = null;
+    if (cov.payments === "complete" && cov.expenses === "complete") {
+      const monthlyMap = new Map();
+      function monthlyRow(month, currencyCode) {
+        const key = month + "|" + currencyCode;
+        if (!monthlyMap.has(key)) monthlyMap.set(key, { month: month, currency: currencyCode, paid_income_agorot: 0, paid_expenses_agorot: 0, net_cash_agorot: 0 });
+        return monthlyMap.get(key);
+      }
+      payments.forEach(function (record) {
+        if (record.kind === "בוטל") return;
+        const target = monthlyRow(monthOf(record.date), record.currency);
+        target.paid_income_agorot = safeAdd(target.paid_income_agorot, record.kind === "החזר" ? -record.amount_agorot : record.amount_agorot);
+      });
+      expenses.forEach(function (record) {
+        if (record.payment_status !== "שולם" || record.source_type !== "תשלום בפועל") return;
+        const target = monthlyRow(monthOf(record.date), record.currency);
+        target.paid_expenses_agorot = safeAdd(target.paid_expenses_agorot, record.amount_agorot);
+      });
+      monthly = Array.from(monthlyMap.values()).map(function (record) { record.net_cash_agorot = safeAdd(record.paid_income_agorot, -record.paid_expenses_agorot); return record; })
+        .sort(function (a, b) { return (a.month + "|" + a.currency).localeCompare(b.month + "|" + b.currency); });
+    }
     return {
       schema_version: "assaf-os-unified.v1", observed_at: raw.observed_at, coverage: Object.assign({}, cov), rows: rows, client_totals: clientTotals, client_rollups: clientRollups, work_rollups: workRollups,
       costs: cov.expenses === "complete" ? { scope: "all_time", by_path_agorot: byPath, shared_unallocated_agorot: shared, excluded_ad_usage_records: excludedAdUsage } : null,
+      monthly: monthly,
       reason_codes: cov.expenses === "unknown" ? ["expenses_coverage_unknown"] : [],
     };
   }

@@ -139,7 +139,7 @@ test("request ids cannot be replayed for another promotion payload", () => {
   assert.deepEqual(result, { kind: "conflict", reason_code: "request_id_reused" });
 });
 
-test("installer defaults to preflight and performs no cloud mutation", () => {
+test("installer defaults to preflight while declaring the explicit installable edit trigger", () => {
   const source = fs.readFileSync(path.join(__dirname, "../../ops/assaf-os/UnifiedSheets.gs"), "utf8");
   let inserts = 0;
   const workbook = {
@@ -157,7 +157,24 @@ test("installer defaults to preflight and performs no cloud mutation", () => {
   assert.equal(result.ready, true);
   assert.equal(inserts, 0);
   assert.equal(source.includes("function doPost"), false);
-  assert.equal(source.includes("newTrigger"), false);
+  assert.equal(source.includes("newTrigger(\"reconcileAssafOsEdit\")"), true);
+});
+
+test("preflight diagnoses exact-schema empty partial-install tabs without overwriting them", () => {
+  const source = fs.readFileSync(path.join(__dirname, "../../ops/assaf-os/UnifiedSheets.gs"), "utf8");
+  const tab = Schema.tab("summary"), headers = tab.fields.map((field) => field.label);
+  const sheet = { getName: () => tab.name, getLastRow: () => 1, getLastColumn: () => headers.length, getRange: () => ({ getValues: () => [headers] }) };
+  const workbook = { getSheets: () => [sheet], getSheetByName: (name) => name === tab.name ? sheet : null };
+  const sandbox = { AssafOsSchema: Schema, ASSAF_OS_META: {}, SpreadsheetApp: { openById: () => workbook }, LockService: { getScriptLock: () => ({ tryLock: () => true, releaseLock() {} }) } };
+  vm.runInNewContext(source, sandbox, { filename: "UnifiedSheets.gs" });
+  const result = sandbox.preflightUnifiedWorkbook("12345678901234567890", Schema.installConfirmation);
+  assert.equal(result.ready, false);
+  assert.equal(result.partial_installation, true);
+  assert.deepEqual(JSON.parse(JSON.stringify(result.partial_installation_diagnostics)), [{ name: tab.name, exact_headers: true, data_rows: 0, recoverable_empty_created_tab: true }]);
+  assert.match(result.recovery_instruction, /never deletes or overwrites/);
+  assert.match(source, /function preflightConfiguredUnifiedWorkbook\(\)/);
+  assert.match(source, /function installConfiguredUnifiedWorkbook\(\)/);
+  assert.match(source, /mode !== "TEST" && mode !== "LIVE"/);
 });
 
 test("duplicate external expense source keys fail closed", () => {
@@ -296,5 +313,17 @@ test("refunds require a matching original receipt and cannot cumulatively exceed
   const otherWork = { work_id: "W_002", person_id: "P_001", path: "לימוד", agreed_amount_agorot: null, currency: "ILS", status: "פעילה" };
   const mismatch = Object.assign({}, orphan, { original_payment_id: "PAY_1", work_id: "W_002", path: "לימוד" });
   assert.throws(() => Core.snapshot(base({ works: [base().works[0], otherWork], payments: [original, mismatch] })), /refund_original_mismatch/);
+});
+
+test("monthly paid expenses and net cash use actual paid records only", () => {
+  const result = Core.snapshot(base({
+    payments: [{ payment_id: "PAY_1", person_id: "P_001", work_id: "W_001", path: "אוטומציה", date: "2026-10-02", amount_agorot: 10000, currency: "ILS", kind: "התקבל" }],
+    expenses: [
+      { expense_id: "EXP_1", date: "2026-10-03", path: "משותף", amount_agorot: 2500, currency: "ILS", payment_status: "שולם", source_type: "תשלום בפועל", source_key: "invoice-1" },
+      { expense_id: "EXP_2", date: "2026-10-04", path: "משותף", amount_agorot: 9999, currency: "ILS", payment_status: "לא שולם", source_type: "תשלום בפועל", source_key: "invoice-2" },
+      { expense_id: "EXP_3", date: "2026-10-05", path: "משותף", amount_agorot: 9999, currency: "ILS", payment_status: "שולם", source_type: "דיווח שימוש בפלטפורמה", source_key: "ads-1" },
+    ],
+  }));
+  assert.deepEqual(result.monthly, [{ month: "2026-10", currency: "ILS", paid_income_agorot: 10000, paid_expenses_agorot: 2500, net_cash_agorot: 7500 }]);
 });
 

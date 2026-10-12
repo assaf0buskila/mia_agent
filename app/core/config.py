@@ -74,6 +74,14 @@ class Settings(BaseSettings):
     owner_os_google_subject: str = Field(default="", repr=False)
     owner_os_google_owner_id: str = Field(default="", repr=False)
     owner_os_session_secret: str = Field(default="", repr=False)
+    # One pinned Apps Script port for the shared Assaf OS workbook. Independent
+    # from the legacy CRM and the synthetic TEST business-ledger adapter.
+    assaf_os_enabled: bool = False
+    assaf_os_script_url: str = ""
+    assaf_os_workbook_id: str = ""
+    assaf_os_workspace_id: str = ""
+    assaf_os_hmac_secret: str = Field(default="", repr=False)
+    assaf_os_mode: Literal["TEST", "LIVE"] = "TEST"
     # Separate, TEST-only Sheets ledger. Never enables CRM or reminder writes.
     business_ledger_test_enabled: bool = False
     business_ledger_workspace_id: str = ""

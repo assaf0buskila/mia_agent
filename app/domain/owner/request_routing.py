@@ -108,6 +108,16 @@ _TOOL_GROUPS: tuple[tuple[str, frozenset[str]], ...] = (
         ),
     ),
     (
+        "Assaf OS משותף (כבוי כברירת מחדל)",
+        frozenset(
+            {
+                "assaf_os_snapshot",
+                "assaf_os_receipt",
+                "assaf_os_propose",
+            }
+        ),
+    ),
+    (
         "יומן ומייל",
         frozenset(
             {

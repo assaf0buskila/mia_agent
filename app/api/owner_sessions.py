@@ -62,7 +62,16 @@ READ_SCOPES = frozenset(
 ACTION_SCOPES = frozenset({"quick_leads.create", "reminders.write"})
 BUSINESS_READ_SCOPES = frozenset({"business-ledger:read"})
 BUSINESS_WRITE_SCOPES = frozenset({"business-ledger:write"})
-KNOWN_SCOPES = READ_SCOPES | ACTION_SCOPES | BUSINESS_READ_SCOPES | BUSINESS_WRITE_SCOPES
+ASSAF_OS_READ_SCOPES = frozenset({"assaf-os:read"})
+ASSAF_OS_WRITE_SCOPES = frozenset({"assaf-os:propose", "assaf-os:approve"})
+KNOWN_SCOPES = (
+    READ_SCOPES
+    | ACTION_SCOPES
+    | BUSINESS_READ_SCOPES
+    | BUSINESS_WRITE_SCOPES
+    | ASSAF_OS_READ_SCOPES
+    | ASSAF_OS_WRITE_SCOPES
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -145,19 +154,26 @@ def _configured_scopes(settings: Settings) -> frozenset[str]:
         granted -= ACTION_SCOPES
     if not getattr(settings, "business_ledger_test_enabled", False) or settings.env.value == "prod":
         granted -= BUSINESS_READ_SCOPES | BUSINESS_WRITE_SCOPES
+    if not getattr(settings, "assaf_os_enabled", False):
+        granted -= ASSAF_OS_READ_SCOPES | ASSAF_OS_WRITE_SCOPES
     return granted
 
 
 def _business_binding(settings: Settings, owner_id: str) -> str | None:
-    if not ((BUSINESS_READ_SCOPES | BUSINESS_WRITE_SCOPES) & _configured_scopes(settings)):
+    scopes = _configured_scopes(settings)
+    if (BUSINESS_READ_SCOPES | BUSINESS_WRITE_SCOPES) & scopes:
+        secret = settings.business_ledger_hmac_secret
+        namespace = "business-ledger-recovery-v1"
+        workspace_id = settings.owner_os_workspace_id
+    elif (ASSAF_OS_READ_SCOPES | ASSAF_OS_WRITE_SCOPES) & scopes:
+        secret = settings.assaf_os_hmac_secret
+        namespace = "assaf-os-recovery-v1"
+        workspace_id = settings.assaf_os_workspace_id
+    else:
         return None
-    secret = settings.business_ledger_hmac_secret
-    if len(secret) < 32:
+    if len(secret) < 32 or not workspace_id:
         return None
-    identity = json.dumps(
-        ["business-ledger-recovery-v1", settings.owner_os_workspace_id, owner_id],
-        separators=(",", ":"),
-    )
+    identity = json.dumps([namespace, workspace_id, owner_id], separators=(",", ":"))
     return hmac.new(secret.encode(), identity.encode(), "sha256").hexdigest()
 
 
@@ -565,7 +581,7 @@ def owner_mutation_scope(
     *,
     require_fresh_login: bool = False,
 ) -> Callable[..., OwnerSessionPrincipal]:
-    if scope not in ACTION_SCOPES | BUSINESS_WRITE_SCOPES:
+    if scope not in ACTION_SCOPES | BUSINESS_WRITE_SCOPES | ASSAF_OS_WRITE_SCOPES:
         raise ValueError("mutation scope must be a fixed action scope")
 
     def dependency(

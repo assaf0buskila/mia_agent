@@ -59,6 +59,7 @@ def business_enabled(settings: object, principal: Principal, *, private_owner_ch
         and getattr(settings, "env", None) == MiaEnv.TEST
         and bool(getattr(settings, "owner_os_enabled", False))
         and bool(getattr(settings, "business_ledger_test_enabled", False))
+        and not bool(getattr(settings, "assaf_os_enabled", False))
         and not bool(getattr(settings, "kill_switch", False))
     )
 

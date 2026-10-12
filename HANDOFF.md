@@ -1,5 +1,15 @@
 # Mia handoff — 2026-09-17
 
+## Active owner product — 2026-10-12
+
+The owner reopened the OS and selected Cloudflare + one editable Google Sheets
+workbook + Apps Script, with MIA approval in Telegram. The existing MIA VM stays;
+the additional old OS VM/disk/IP were removed. This overrides historical owner-OS
+UI freeze and PostgreSQL business-authority assumptions for this new owner product,
+without silently migrating public website CRM intake. Current implementation,
+permission approvals, exact verification and remaining live gates are recorded in
+`docs/ASSAF_OS_RELEASE_STATUS.md` and `ops/assaf-os/CONTRACT.md`.
+
 ## Owner OS integration — local worktree, 2026-10-11
 
 Branch `codex/owner-os-integration`, base `9fc30581705e8d18f21f53fe28c6203909cdd050`.

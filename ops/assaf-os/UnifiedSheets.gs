@@ -1,7 +1,7 @@
-/* global AssafOsSchema, SpreadsheetApp, LockService, Session */
+/* global ASSAF_OS_META, AssafOsSchema, SpreadsheetApp, LockService, Session, ScriptApp, PropertiesService */
 "use strict";
 
-var ASSAF_OS_INSTALL_ROWS = 1000;
+var ASSAF_OS_INSTALL_ROWS = 2001;
 
 /**
  * Safe default entrypoint. It never mutates unless applyChanges is exactly true.
@@ -12,6 +12,30 @@ function setupUnifiedWorkbook(workbookId, schemaConfirmation, applyChanges) {
   return preflightUnifiedWorkbook(workbookId, schemaConfirmation);
 }
 
+function preflightConfiguredUnifiedWorkbook() {
+  var props = PropertiesService.getScriptProperties();
+  return preflightUnifiedWorkbook(props.getProperty("ASSAF_OS_WORKBOOK_ID"), AssafOsSchema.installConfirmation);
+}
+
+function installConfiguredUnifiedWorkbook() {
+  var props = PropertiesService.getScriptProperties();
+  return installUnifiedWorkbook(props.getProperty("ASSAF_OS_WORKBOOK_ID"), props.getProperty("ASSAF_OS_INSTALL_CONFIRMATION"));
+}
+
+function configureAssafOsBinding(workbookId, workspaceId, ownerId, mode) {
+  assertInstallerArguments_(workbookId, AssafOsSchema.installConfirmation);
+  if (typeof workspaceId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(workspaceId)) throw installerError_("invalid_workspace_id");
+  if (typeof ownerId !== "string" || !/^[1-9][0-9]{0,19}$/.test(ownerId)) throw installerError_("invalid_owner_id");
+  if (mode !== "TEST" && mode !== "LIVE") throw installerError_("invalid_mode");
+  PropertiesService.getScriptProperties().setProperties({ ASSAF_OS_WORKBOOK_ID: workbookId, ASSAF_OS_WORKSPACE_ID: workspaceId, ASSAF_OS_OWNER_ID: ownerId, ASSAF_OS_MODE: mode }, false);
+  return { workbook_id: workbookId, workspace_id: workspaceId, owner_id: ownerId, mode: mode, hmac_secret_configured: Boolean(PropertiesService.getScriptProperties().getProperty("ASSAF_OS_HMAC_SECRET")) };
+}
+
+function configureAssafOsBindingFromUserProperties() {
+  var props = PropertiesService.getUserProperties();
+  return configureAssafOsBinding(props.getProperty("ASSAF_OS_SETUP_WORKBOOK_ID"), props.getProperty("ASSAF_OS_SETUP_WORKSPACE_ID"), props.getProperty("ASSAF_OS_SETUP_OWNER_ID"), props.getProperty("ASSAF_OS_SETUP_MODE"));
+}
+
 function preflightUnifiedWorkbook(workbookId, schemaConfirmation) {
   assertInstallerArguments_(workbookId, schemaConfirmation);
   var workbook = SpreadsheetApp.openById(workbookId);
@@ -19,15 +43,33 @@ function preflightUnifiedWorkbook(workbookId, schemaConfirmation) {
     return { name: sheet.getName(), lastRow: sheet.getLastRow(), lastColumn: sheet.getLastColumn() };
   });
   var desired = AssafOsSchema.tabs.map(function (tab) { return tab.name; });
-  var conflicts = existing.filter(function (sheet) { return desired.indexOf(sheet.name) !== -1; });
+  var metadataNames = typeof ASSAF_OS_META === "object" ? Object.keys(ASSAF_OS_META).map(function (key) { return ASSAF_OS_META[key].name; }) : [];
+  var settings = typeof workbook.getSheetByName === "function" ? workbook.getSheetByName("הגדרות") : null, compatibleSettings = false;
+  if (settings) {
+    var settingsHeaders = settings.getRange(1, 1, 1, Math.max(settings.getLastColumn(), 2)).getValues()[0];
+    compatibleSettings = settingsHeaders[0] === "מפתח" && settingsHeaders[1] === "ערך" && settingsHeaders.slice(2).every(function (value, i) { return value === "" || value === AssafOsSchema.headers("settings")[i + 2]; });
+  }
+  var conflicts = existing.filter(function (sheet) { return metadataNames.indexOf(sheet.name) !== -1 || (desired.indexOf(sheet.name) !== -1 && !(sheet.name === "הגדרות" && compatibleSettings)); });
+  var recovery = conflicts.map(function (conflict) {
+    var sheet = workbook.getSheetByName(conflict.name), tab = AssafOsSchema.tabs.filter(function (item) { return item.name === conflict.name; })[0];
+    var metaKey = Object.keys(ASSAF_OS_META).filter(function (key) { return ASSAF_OS_META[key].name === conflict.name; })[0];
+    var expected = tab ? tab.fields.map(function (field) { return field.label; }) : (metaKey ? ASSAF_OS_META[metaKey].headers : []);
+    var actual = expected.length ? sheet.getRange(1, 1, 1, expected.length).getValues()[0] : [];
+    var exactHeaders = expected.length > 0 && sheet.getLastColumn() === expected.length && expected.every(function (value, index) { return actual[index] === value; });
+    return { name: conflict.name, exact_headers: exactHeaders, data_rows: Math.max(sheet.getLastRow() - 1, 0), recoverable_empty_created_tab: exactHeaders && sheet.getLastRow() <= 1 };
+  });
   return {
     mode: "DRY_RUN",
     workbook_id: workbookId,
     schema_version: AssafOsSchema.version,
     ready: conflicts.length === 0,
     existing_sheets: existing,
-    sheets_to_create: desired,
+    sheets_to_create: desired.concat(metadataNames),
     conflicts: conflicts,
+    compatible_legacy_settings: compatibleSettings,
+    partial_installation: conflicts.length > 0 && recovery.some(function (item) { return item.recoverable_empty_created_tab; }),
+    partial_installation_diagnostics: recovery,
+    recovery_instruction: recovery.some(function (item) { return item.recoverable_empty_created_tab; }) ? "Inspect the listed exact-schema empty tabs. Remove only explicitly confirmed installer-created empty tabs, then rerun preflight. This function never deletes or overwrites them." : null,
     warnings: existing.some(function (sheet) { return sheet.lastRow > 0 || sheet.lastColumn > 0; })
       ? ["Existing unrelated sheets remain untouched; verify this is the intended dedicated workbook."] : [],
   };
@@ -43,12 +85,31 @@ function installUnifiedWorkbook(workbookId, schemaConfirmation) {
     var workbook = SpreadsheetApp.openById(workbookId);
     var created = [];
     AssafOsSchema.tabs.forEach(function (tab) {
+      if (tab.key === "settings" && check.compatible_legacy_settings) {
+        var legacy = workbook.getSheetByName(tab.name);
+        if (legacy.getMaxColumns() < tab.fields.length) legacy.insertColumnsAfter(legacy.getMaxColumns(), tab.fields.length - legacy.getMaxColumns());
+        legacy.getRange(1, 3, 1, tab.fields.length - 2).setValues([tab.fields.slice(2).map(function (field) { return field.label; })]);
+        legacy.setRightToLeft(true); legacy.setFrozenRows(1);
+        created.push(tab.name + ":extended");
+        return;
+      }
       // A second lookup immediately before creation closes the operator/race window.
       if (workbook.getSheetByName(tab.name)) throw installerError_("target_tab_already_exists");
       var sheet = workbook.insertSheet(tab.name, workbook.getNumSheets());
       configureSheet_(sheet, tab);
       created.push(tab.name);
     });
+    Object.keys(ASSAF_OS_META).forEach(function (key) {
+      var spec = ASSAF_OS_META[key];
+      if (workbook.getSheetByName(spec.name)) throw installerError_("metadata_tab_already_exists");
+      var sheet = workbook.insertSheet(spec.name, workbook.getNumSheets());
+      if (sheet.getMaxColumns() < spec.headers.length) sheet.insertColumnsAfter(sheet.getMaxColumns(), spec.headers.length - sheet.getMaxColumns());
+      if (sheet.getMaxRows() < ASSAF_OS_INSTALL_ROWS) sheet.insertRowsAfter(sheet.getMaxRows(), ASSAF_OS_INSTALL_ROWS - sheet.getMaxRows());
+      sheet.getRange(1, 1, 1, spec.headers.length).setValues([spec.headers]);
+      sheet.hideSheet(); protectRange_(sheet.getRange(1, 1, sheet.getMaxRows(), spec.headers.length), "Assaf OS internal metadata");
+      created.push(spec.name);
+    });
+    installAssafOsEditTrigger_(workbookId);
     workbook.setActiveSheet(workbook.getSheetByName("סיכום"));
     workbook.moveActiveSheet(1);
     return { mode: "INSTALLED", workbook_id: workbookId, schema_version: AssafOsSchema.version, created_sheets: created, untouched_existing_sheets: check.existing_sheets.map(function (sheet) { return sheet.name; }) };
@@ -129,4 +190,10 @@ function assertInstallerArguments_(workbookId, schemaConfirmation) {
 }
 
 function installerError_(code) { var error = new Error(code); error.code = code; return error; }
+
+function installAssafOsEditTrigger_(workbookId) {
+  var existing = ScriptApp.getProjectTriggers().filter(function (trigger) { return trigger.getHandlerFunction() === "reconcileAssafOsEdit"; });
+  if (existing.length > 1) throw installerError_("duplicate_edit_trigger");
+  if (existing.length === 0) ScriptApp.newTrigger("reconcileAssafOsEdit").forSpreadsheet(workbookId).onEdit().create();
+}
 

@@ -226,7 +226,11 @@ async def _handle_callback(
             "crm.activity",
             "crm.resolve_conflict",
         }:
-            if settings.kill_switch:
+            if getattr(settings, "assaf_os_enabled", False):
+                # Unified mode rejects this legacy action in owner_actions. Do not
+                # pre-read or initialize the old CRM Sheet before that policy gate.
+                pass
+            elif settings.kill_switch:
                 # The callback acknowledgement/edit is operational, but an approval
                 # callback must not initialize or read Sheets while writes are stopped.
                 # Leave the owner action pending so it can be retried after recovery.
@@ -305,7 +309,29 @@ async def _handle_callback(
             "already_handled": "הפעולה כבר טופלה או ממתינה לבדיקה. לא ביצעתי שוב.",
             "unknown": "תוצאת הפעולה אינה ודאית וממתינה לבדיקה. לא ביצעתי שוב.",
             "expired": "האישור פג. צריך להכין בקשת אישור חדשה.",
+            "rejected": "ההצעה כבר נדחתה ולא בוצעה.",
+            "policy_denied": "מתג העצירה פעיל. הפעולה לא בוצעה.",
         }.get(outcome.status, "הפעולה לא בוצעה.")
+    if resolved is not None and decision == "reject":
+        rejected_row = store.get_approval_by_approval_id(token)
+        from app.services.owner_actions import read_owner_action, reject_assaf_os_owner_action
+
+        rejected_envelope = read_owner_action(rejected_row)
+        if rejected_envelope is not None and rejected_envelope.get("kind") == "assaf_os.approve":
+            rejected = reject_assaf_os_owner_action(
+                store,
+                settings=settings,
+                principal=Principal.owner(source="telegram", actor_id=callback["from"]),
+                proposal_id=rejected_row.resource_id,
+            )
+            reply_text = rejected.text or {
+                "already_handled": "הדחייה כבר טופלה.",
+                "unknown": "תוצאת הדחייה אינה ודאית וממתינה לבדיקה. לא שלחתי שוב.",
+                "committed": "ההצעה כבר אושרה ובוצעה, ולכן לא ניתן לדחות אותה.",
+                "expired": "ההצעה פגה ולא בוצעה.",
+                "target_changed": "היעד השתנה וההצעה לא בוצעה.",
+                "policy_denied": "מתג העצירה פעיל. הדחייה לא נשלחה לגיליון.",
+            }.get(rejected.status, reply_text)
     # Every branch above either interpolates only server-escaped HTML (bold()/code()
     # from resolve_owner_callback_result) or a fixed Hebrew literal, except
     # outcome.text, which can carry a provider-echoed value (see

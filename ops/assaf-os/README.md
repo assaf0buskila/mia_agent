@@ -1,26 +1,43 @@
-# Assaf OS — unified Sheet foundation
+# Assaf OS — shared Google Sheets runtime
 
-This directory contains a local, undeployed foundation for one dedicated Google Sheets workbook:
+This directory is the local, undeployed Apps Script runtime for the one existing Assaf OS workbook. It does not create a parallel ledger or import the legacy `עסקאות` tabs as income.
 
-- `schema.js` is the canonical Hebrew schema shared by Node and Apps Script. It marks every field as user input, calculated, or system-owned and keeps one stable `person_id` across lead promotion.
-- `core.js` validates transport records in integer agorot and produces pure monthly snapshots by person, path, and currency, plus all-time work and client rollups. Client ILS hourly value is total ILS cash divided by all recorded minutes on ILS work; it is never an average of path rates. It never treats agreed work value or ad-platform usage as received cash.
-- `UnifiedSheets.gs` is an operator-only installer. `setupUnifiedWorkbook(id, confirmation)` and `preflightUnifiedWorkbook(...)` are dry-run only. The mutating `installUnifiedWorkbook(...)` requires the exact workbook ID and confirmation `ASSAF_OS_UNIFIED_V1`.
+## Files and deployment order
 
-The installer creates new tabs only. If any target tab already exists, it refuses the entire install before changing anything. Existing unrelated sheets and their data remain untouched. It adds no trigger, endpoint, secret, formula, sample row, remote synchronization, or automated send.
+The bound Apps Script project contains `schema.js`, `core.js`, `runtime.js`, `UnifiedSheets.gs`, `UnifiedRuntime.gs`, and `appsscript.json`. The Advanced Sheets v4 service must be enabled. An operator may call `configureAssafOsBinding(workbookId, workspaceId, ownerId, mode)` to pin the non-secret `TEST` or `LIVE` binding, then run `preflightConfiguredUnifiedWorkbook()` from the Apps Script editor. Installation remains separately gated by the exact `ASSAF_OS_INSTALL_CONFIRMATION` Script Property and `installConfiguredUnifiedWorkbook()`. The explicit-argument `setupUnifiedWorkbook(...)` and `installUnifiedWorkbook(...)` entry points remain available. No code in this repository performs a remote install or deployment, and no secret is accepted by the binding helper.
 
-Amounts shown in Sheets are human-readable currency values. Any future OS/MIA transport must convert once at the boundary to safe integer agorot and must keep each currency separate. The current core groups financial results by currency and leaves shared costs unallocated.
+The installer preserves all unrelated tabs and rows. A legacy two-column `הגדרות` sheet is accepted only when its first two headers are exactly `מפתח`, `ערך`; the installer appends the canonical description/update columns and preserves every existing setting row. Other canonical-name conflicts stop the install before any mutation. If an earlier provider failure left exact-schema empty runtime tabs, preflight reports `partial_installation` with per-tab diagnostics and a manual recovery instruction; it never silently deletes or overwrites them. Five protected hidden sheets hold accepted snapshots, proposals, receipts, replay claims, and sanitized issues. The installer creates one installable `onEdit` trigger for `reconcileAssafOsEdit`.
 
-Identifiers, phone numbers, email addresses and other text inputs are installed with plain-text formatting before use, preserving leading zeroes. Refunds must reference the original received-payment ID; the core rejects missing, mismatched, pre-dated, or cumulatively excessive refunds. Expense totals are explicitly `all_time`; they are not presented as monthly figures.
+Required Script Properties (names only; values and secrets never belong in the sheet or logs):
 
-## Current boundary
+- `ASSAF_OS_OWNER_ID` — one numeric allowlisted owner.
+- `ASSAF_OS_WORKSPACE_ID` — exact server workspace binding.
+- `ASSAF_OS_WORKBOOK_ID` — exact workbook binding.
+- `ASSAF_OS_MODE` — exactly `TEST` or `LIVE`.
+- `ASSAF_OS_HMAC_SECRET` — at least 32 characters.
 
-This is a foundation slice, not a complete operating system. `לקוחות` and `עבודות` define protected calculated columns, and `core.js` supplies the corresponding rollup values, but no Sheet formulas or synchronizer populate those cells yet. The calculated `סיכום` tab is also an empty protected projection target. Direct row edits do not yet receive IDs, revisions, immutable-field enforcement, approval receipts, or conflict reconciliation. The existing legacy raw-cell-drift rule therefore remains the safe rule: an integration must fail closed until migration and direct-edit reconciliation are implemented and tested. Apps Script protections reduce accidental edits but are not an authorization boundary.
+## Signed operations
 
-No web API is included. Future MIA/OS writes must use the existing exact, immutable, expiring proposal and approval model, revalidate the target, and persist idempotent receipts before this workbook can be called synchronized.
+`doPost` accepts only `{payload,signature}`. Both request and response use a lowercase UTF-8 HMAC-SHA256 signature. The strict signed request contains `api_version`, `operation`, `actor_source`, numeric owner, workspace, workbook, request ID, epoch timestamp, and operation data. It rejects stale timestamps, unexpected keys, wrong bindings, oversized bodies, reused request IDs, and invalid actors. `MIA` may read and propose. Only `OS` or the server's verified `TELEGRAM_APPROVAL` callback context may approve or reject. The model never approves.
 
-Run local tests without Google access:
+Supported operations are `schema`, `snapshot`, `propose`, `proposal`, `approve`, `reject`, and `receipt`. Proposals are immutable, owner-bound, request-idempotent, and expire after ten minutes. Each proposal has stable approval and rejection request UUIDs shared by the browser and Telegram approval paths. Proposal creation writes metadata only. Approval reloads the stored proposal and compares its revision and exact raw/dependency fingerprint, then repeats dependency, refund, currency and source-deduplication validation; replacement values in the approval call are impossible. One Advanced Sheets `batchUpdate` commits field-limited business changes, accepted snapshots, calculated projections, proposal state, replay claim, and receipt. An ambiguous response is recovered with a fresh signed transport request whose `data.request_id` is the original decision ID. Cross-channel repeat approval returns the original receipt and cannot commit twice.
+
+Transport money is integer minor units. Native input cells are readable major units and are converted exactly once. More than two decimal places fails. Refunds require the original received payment, matching person/work/path/currency, a non-earlier date, and a cumulative total no larger than the receipt. The complete original/refund graph is validated again at approval, so changing an original payment cannot invalidate already accepted refunds. Expenses deduplicate the pair `source_type` + `source_key`.
+
+## Native edits and calculations
+
+The edit trigger and snapshot read reconciliation accept complete valid owner input rows, normalize native Google Date cells in the pinned `Asia/Jerusalem` business timezone, allocate stable IDs in memory before semantic validation, increment revisions, and append accepted snapshots. No ID or other system value is written until every row validation passes. Exact header and formula checks run before row mutation. Header changes, formulas, invalid input, duplicate IDs, metadata/system edits, and incomplete rows create sanitized issues and make snapshot coverage partial or unknown. Read reconciliation inspects every row before attempting a projection, while approval, trigger and read paths share the same canonical-input, dependency, refund-graph, expense-dedup and coverage projection gate. One invalid row therefore cannot abort acceptance of an unrelated valid row or refresh financial calculations from invalid data. Unsafe dependent calculated fields are returned as null under partial coverage. Reconciliation writes only system cells that changed. It does not execute proposals or send externally.
+
+Customer and work protected columns are recomputed from receipts and time. All API money, including calculated fields, is integer minor units; native Sheet display cells remain major units. Snapshot coverage is reported overall and per entity. `summary.monthly` is always an array; incomplete payment, expense, work or time coverage produces nullable metrics and reason codes rather than false zeroes. Foreign currencies remain separate. Agreed work values and ad-platform usage reports are excluded from paid cash. Legacy tabs are untouched and excluded from runtime snapshots.
+
+Apps Script locks serialize script writers only. They cannot lock a human editing the workbook. Revision plus raw fingerprint checks detect a conflict, but a simultaneous owner edit can still race with a provider write. Such a conflict requires owner review; the runtime does not silently overwrite or retry.
+
+## Local evidence
+
+Run without Google access:
 
 ```powershell
-node --test tests/assaf-os/sheet-core.test.js
+node --test tests/assaf-os/sheet-core.test.js tests/assaf-os/runtime.test.js tests/assaf-os/apps-script-runtime.test.js
 ```
 
+The VM tests use synthetic rows and Google-shaped mocked Apps Script services. `apps-script-runtime.test.js` loads the actual `.gs` runtime without replacing its operation dispatcher and covers proposal/approval/receipt recovery, cross-channel replay binding, dependent and reciprocal refund integrity, promotion journaling, Jerusalem date boundaries, complete, multi-row and mixed-validity native payment flows, approval-time invalid-finance projection blocking, canonical native input gates, partial-first-read behavior, formula/header handling, field-limited reconciliation, money conversion and grid bounds. They prove local behavior only. Google deployment, real workbook installation, trigger authorization, Cloudflare integration, MIA end-to-end behavior, and owner/device acceptance remain unverified until separately executed.

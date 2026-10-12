@@ -1,27 +1,34 @@
-# Foundation status — 2026-10-12
+# Shared runtime status — 2026-10-12
 
 ## Result
 
-Local foundation is implemented and **not deployed**. It defines one canonical Hebrew workbook schema, pure financial/time snapshot calculations, lead-to-client promotion semantics, and an explicit operator-only installer.
+The local shared Google Sheets/Apps Script runtime is implemented. It remains undeployed and has not contacted or changed Google, Cloudflare, MIA production, or the real workbook.
 
-## Evidence
+## Implemented
 
-- `node --test tests/assaf-os/sheet-core.test.js`: **PASS — 23 passed, 0 failed**.
-- `node --check ops/assaf-os/schema.js`: **PASS**.
-- `node --check ops/assaf-os/core.js`: **PASS**.
-- `git diff --check`: **PASS for this slice**; the command emitted only an unrelated existing `uv.lock` line-ending warning.
-- Independent HEAVY review first found four issues (protection permissions, misleading fixed ₪ formatting, fractional-minute validation, unsafe hourly overflow). All four were fixed. Re-review: **PASS**, including independent mock probes of protection, validation, and number formatting.
+- strict inbound and outbound HMAC envelopes with pinned numeric owner, workspace, workbook, and `TEST`/`LIVE` mode;
+- server-bound `OS`, `MIA`, and decision-only `TELEGRAM_APPROVAL` actor contexts;
+- schema, snapshot, proposal, proposal lookup, approval, rejection, and receipt operations;
+- immutable ten-minute proposals with stable browser/Telegram decision IDs, revision/raw target and dependency revalidation, payload-bound cross-channel replay claims, and durable receipts;
+- one Advanced Sheets batch for field-limited approved business changes, accepted journal, protected calculations, proposal state, replay record, and receipt;
+- input-only schema validation, exact minor/native money conversion, complete original/refund graph constraints, expense source deduplication, stable-person lead promotion, and row/size bounds;
+- installed-edit-trigger and coverage-aware snapshot-read reconciliation for complete native edits, with exact header/formula checks, `Asia/Jerusalem` Date normalization, validated in-memory ID allocation, shared approval/read/trigger semantic projection gates, nullable unsafe calculations, field-limited system writes, revisions, accepted snapshots, and visible issues;
+- monthly paid ILS expenses/net cash summary and protected client/work calculations;
+- additive compatibility for the existing exact two-column Hebrew `הגדרות` sheet while preserving all other tabs/data;
+- no-argument configured preflight/install wrappers, non-secret `TEST`/`LIVE` binding configuration, and explicit partial-install diagnostics without automatic cleanup or overwrite.
 
-No test contacted Google or changed a workbook. No trigger, web endpoint, external send, secret, deployment, commit, or push was created.
+## Local verification
 
-## Known limitations / gates
+- `node --test tests/assaf-os/sheet-core.test.js tests/assaf-os/runtime.test.js tests/assaf-os/apps-script-runtime.test.js`: **PASS — 49 passed, 0 failed**.
+- Node syntax checks for `schema.js`, `core.js`, `runtime.js`, `UnifiedSheets.gs`, and `UnifiedRuntime.gs`: **PASS**.
+- Test data is synthetic. Sixteen integration-style cases load the actual `.gs` operation dispatcher in a Node VM with Google-shaped Sheet, timezone-aware Date, formula, grid and Advanced Sheets batch mocks.
 
-- Google Sheets runtime behavior is **UNKNOWN** until an operator explicitly runs preflight and a controlled install against the exact intended workbook ID.
-- The installer is fail-closed when a target tab already exists and never overwrites existing tabs or data. Apps Script has no cross-sheet transaction, so an unexpected provider failure during first installation can leave a partial set of newly created empty tabs; rerun then refuses until an operator inspects the workbook.
-- `לקוחות` and `עבודות` now contain explicit protected calculated rollup columns, including ILS-only money labels and foreign-currency flags. `core.js` calculates their source values, but no Sheet formula or synchronizer populates those cells yet. `סיכום` is likewise an empty protected calculated projection.
-- Direct edits are not yet synchronized with OS/MIA: IDs, revisions, immutable fields, conflict handling, approval receipts, and edit-trigger reconciliation remain to be implemented and tested.
-- The schema records `write_source` and `request_id`, while `core.js` provides promotion replay semantics. There is no write API. Any future MIA write still requires an exact, immutable, expiring approved proposal and target revalidation.
-- Raw-cell drift remains fail-closed. No migration or compatibility claim is made for the legacy ledger.
-- Ads platform usage is retained as source data only and is excluded from paid expense totals. Agreed work value is never counted as received income.
-- Multi-currency rows stay separated. Shared costs stay unallocated.
+## Boundaries and unknowns
 
+- **UNKNOWN:** real Apps Script deployment, Advanced Sheets permissions, edit-trigger authorization, and real-workbook behavior.
+- **UNKNOWN:** final Cloudflare owner product and MIA/Telegram end-to-end integration until their separate changes are integrated and exercised.
+- **UNKNOWN:** physical owner/device acceptance.
+- Script locks do not exclude human workbook edits. Fingerprint conflicts surface for owner review; there is no cross-channel atomic lock.
+- Apps Script installation itself is not transactional. Preflight rejects known tab conflicts first. If a provider failure leaves exact-schema empty runtime tabs, it returns explicit partial-install diagnostics for operator inspection and manual cleanup; it does not overwrite or delete them.
+- Receipt recovery prevents automatic replay after an ambiguous approval result. A missing receipt remains unknown and must block a new write attempt.
+- No external send, customer outreach, secret write, deployment, trigger installation, commit, or push occurred in this implementation task.

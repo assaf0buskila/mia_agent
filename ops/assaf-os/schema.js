@@ -15,6 +15,7 @@
     client_status: Object.freeze(["פעיל", "לא פעיל"]),
     task_status: Object.freeze(["לביצוע", "בתהליך", "ממתין", "בוצע", "בוטל"]),
     work_status: Object.freeze(["מתוכננת", "פעילה", "הושלמה", "בוטלה"]),
+    time_status: Object.freeze(["פעיל", "בוטל"]),
     payment_kind: Object.freeze(["התקבל", "החזר", "בוטל"]),
     payment_status: Object.freeze(["שולם", "לא שולם", "בוטל"]),
     expense_source: Object.freeze(["תשלום בפועל", "דיווח שימוש בפלטפורמה"]),
@@ -31,6 +32,7 @@
     {
       key: "summary", name: "סיכום", kind: "calculated", frozenRows: 1,
       fields: [
+        f("summary_scope", "סוג סיכום", "text", "calculated"),
         f("month", "חודש", "month", "calculated"),
         f("person_id", "מזהה אדם", "id", "calculated"),
         f("client_name", "לקוח", "text", "calculated"),
@@ -40,6 +42,8 @@
         f("hours", "שעות מתועדות", "decimal", "calculated"),
         f("weighted_hourly_ils", "הכנסה משוקללת לשעה", "money_ils", "calculated"),
         f("missing_time", "חסר דיווח זמן", "boolean", "calculated"),
+        f("paid_expenses_ils", "הוצאות ששולמו בחודש", "money_ils", "calculated"),
+        f("net_cash_ils", "תזרים נטו בחודש", "money_ils", "calculated"),
         f("coverage", "כיסוי נתונים", "text", "system"),
         f("calculated_at", "חושב בתאריך", "datetime", "system"),
       ],
@@ -121,7 +125,7 @@
         f("path", "מסלול", "enum", "input", { enum: "path", required: true, immutableAfterCreate: true }),
         f("date", "תאריך", "date", "input", { required: true }),
         f("minutes", "דקות עבודה", "integer", "input", { required: true, minimum: 0, note: "כולל הכנה ותמיכה" }),
-        f("description", "תיאור", "text", "input"), f("status", "סטטוס", "text", "input"),
+        f("description", "תיאור", "text", "input"), f("status", "סטטוס", "enum", "input", { enum: "time_status", required: true }),
         f("created_at", "נוצר בתאריך", "datetime", "system"), f("revision", "גרסה", "integer", "system"),
         f("write_source", "מקור כתיבה", "enum", "system", { enum: "source" }), f("request_id", "מזהה בקשה", "id", "system"),
       ],

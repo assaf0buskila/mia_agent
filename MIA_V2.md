@@ -1,5 +1,15 @@
 # MIA_V2.md — what Mia is, from the code
 
+## Active shared Assaf OS — 2026-10-12
+
+The new default-off shared adapter exposes schema/snapshot/proposals/receipts for
+one pinned Google Sheet through signed Apps Script calls. MIA can read and propose;
+only the private numeric owner can approve via Telegram or authenticated OS. With
+this binding enabled, legacy owner business/CRM/Sheet writers and side-effecting
+CRM read-sync tools are refused before provider effects. Public website intake
+remains on its existing path. See `docs/ASSAF_OS_RELEASE_STATUS.md` for deployment
+evidence: current code tests are not live product acceptance.
+
 ## Local addition — Owner OS, 2026-10-11
 
 The separately gated `/v1/owner/auth/*` and `/v1/owner/os/*` routers integrate the

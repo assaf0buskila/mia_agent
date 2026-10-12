@@ -48,6 +48,48 @@ from app.services.owner_actions import read_owner_action
 _NOT_EXECUTED = "עדיין לא בוצע."
 _MAX_CARD_VALUE_CHARS = 300
 _DEFAULT_TIMEZONE = "Asia/Jerusalem"
+_MAX_TELEGRAM_APPROVAL_CARD_CHARS = 3_800
+
+_ASSAF_OS_ENTITY_LABELS = {
+    "leads": "ליד",
+    "clients": "לקוח",
+    "works": "עבודה",
+    "payments": "תקבול",
+    "time": "דיווח זמן",
+    "expenses": "הוצאה",
+    "tasks": "משימה",
+    "promote_lead": "הפיכת ליד ללקוח",
+}
+_ASSAF_OS_FIELD_LABELS = {
+    "name": "שם",
+    "phone": "טלפון",
+    "email": "אימייל",
+    "path": "מסלול",
+    "status": "סטטוס",
+    "source_note": "הערת מקור",
+    "notes": "הערות",
+    "person_id": "מזהה אדם",
+    "title": "כותרת",
+    "start_date": "תאריך התחלה",
+    "agreed_amount_ils": "סכום מוסכם",
+    "currency": "מטבע",
+    "work_id": "מזהה עבודה",
+    "date": "תאריך",
+    "actual_amount_ils": "סכום בפועל",
+    "kind": "סוג",
+    "original_payment_id": "מזהה תקבול מקורי",
+    "minutes": "דקות",
+    "description": "תיאור",
+    "category": "קטגוריה",
+    "platform": "פלטפורמה",
+    "vendor": "ספק",
+    "amount_ils": "סכום",
+    "payment_status": "מצב תשלום",
+    "source_type": "סוג מקור",
+    "source_key": "מפתח מקור",
+    "due_date": "תאריך יעד",
+}
+_ASSAF_OS_MONEY_FIELDS = {"agreed_amount_ils", "actual_amount_ils", "amount_ils"}
 
 _CONTACT_FIELD_LABELS: dict[str, str] = {
     "name": "שם",
@@ -354,6 +396,83 @@ def _card_unknown(reason: str = "") -> str:
     return _card("פעולה", detail, "אפשר עדיין לאשר או לבטל דרך הכפתורים.")
 
 
+def _card_assaf_os(parameters: Mapping[str, Any], target: Mapping[str, Any]) -> str:
+    proposal = target.get("proposal") if isinstance(target.get("proposal"), dict) else {}
+    changed = proposal.get("input") if isinstance(proposal.get("input"), dict) else {}
+    entity = str(proposal.get("entity") or "")
+    before = proposal.get("before") if isinstance(proposal.get("before"), dict) else {}
+    after = proposal.get("after") if isinstance(proposal.get("after"), dict) else {}
+    before_currency = str(before.get("currency") or "ILS")
+    after_currency = str(after.get("currency") or changed.get("currency") or before_currency)
+
+    def shown(key: str, value: Any, currency: str) -> str:
+        if value is None:
+            return "ללא"
+        if value == "":
+            return "ריק"
+        if value is True:
+            return "כן"
+        if value is False:
+            return "לא"
+        if key in _ASSAF_OS_MONEY_FIELDS and type(value) is int:
+            major = f"{value / 100:,.2f}"
+            return f"{major} ₪" if currency == "ILS" else f"{major} {currency}"
+        return str(value)
+
+    fields = _kv_lines(
+        [
+            ("סוג עדכון", _ASSAF_OS_ENTITY_LABELS.get(entity, entity), False),
+            ("רשומה", proposal.get("record_id") or "חדשה", True),
+            ("גרסה צפויה", proposal.get("expected_revision"), True),
+            ("מזהה הצעה", parameters.get("proposal_id"), True),
+            ("בתוקף עד", proposal.get("expires_at"), True),
+        ]
+    )
+    changes = ""
+    if entity == "promote_lead":
+        lead = after.get("lead") if isinstance(after.get("lead"), dict) else {}
+        client = after.get("client") if isinstance(after.get("client"), dict) else {}
+        promotion_pairs = [
+            ("מזהה אדם", client.get("person_id") or lead.get("person_id"), True),
+            ("מזהה ליד", proposal.get("record_id") or lead.get("lead_id"), True),
+            ("שם", client.get("name") or lead.get("name"), False),
+            ("טלפון", client.get("phone") or lead.get("phone"), True),
+            ("אימייל", client.get("email") or lead.get("email"), True),
+            ("סטטוס לקוח", client.get("status"), False),
+        ]
+        changes = _kv_lines(promotion_pairs)
+    else:
+        lines = []
+        for key in changed:
+            label = _ASSAF_OS_FIELD_LABELS.get(key, key)
+            old = shown(key, before.get(key), before_currency) if before else "לא קיים"
+            new = shown(key, after.get(key, changed[key]), after_currency)
+            lines.append(f"{bold(label)}: {esc(old)} ← {esc(new)}")
+        changes = "\n".join(lines)
+    return _card(
+        "עדכון בגיליון העסקי המשותף",
+        fields,
+        section("לפני ואחרי", changes) if changes else "",
+        note="האישור יעדכן את הרשומה המוצעת בגיליון המשותף לאחר בדיקת יעד חוזרת.",
+    )
+
+
+def assaf_os_proposal_is_reviewable(envelope: Mapping[str, Any]) -> bool:
+    """True only when Telegram can show the complete, untruncated proposal card."""
+    try:
+        parameters = envelope.get("parameters")
+        target = envelope.get("target")
+        if not isinstance(parameters, dict) or not isinstance(target, dict):
+            return False
+        proposal = target.get("proposal")
+        if not isinstance(proposal, dict):
+            return False
+        card = _card_assaf_os(parameters, target)
+        return bool(card) and len(card) <= _MAX_TELEGRAM_APPROVAL_CARD_CHARS
+    except Exception:  # noqa: BLE001 - malformed proposals must fail closed
+        return False
+
+
 def _card_business(parameters: Mapping[str, Any], target: Mapping[str, Any], kind: str) -> str:
     """Render every approved finance value while keeping endpoint/key hashes internal."""
     title = {
@@ -462,6 +581,7 @@ _CARD_RENDERERS = {
     "business.record_expense": lambda p, t: _card_business(p, t, "business.record_expense"),
     "business.save_project": lambda p, t: _card_business(p, t, "business.save_project"),
     "business.recover_receipt": lambda p, t: _card_business(p, t, "business.recover_receipt"),
+    "assaf_os.approve": _card_assaf_os,
 }
 
 
