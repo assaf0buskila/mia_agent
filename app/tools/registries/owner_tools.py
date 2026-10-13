@@ -34,6 +34,7 @@ from app.tools.owner.analytics import (
     _website_kpis,
 )
 from app.tools.owner.assaf_os import (
+    _assaf_os_follow_up,
     _assaf_os_lead_candidates,
     _assaf_os_prepare_crm_lead,
     _assaf_os_propose,
@@ -185,10 +186,25 @@ _register(
 )
 _register(
     ToolSpec(
+        name="assaf_os_follow_up",
+        description=(
+            "Read a compact source-backed follow-up check for new shared-Sheet leads and "
+            "open/waiting tasks. Returns stable ids, revisions, observation time, coverage "
+            "and omission counts. Recommendations are suggestions only; no proposal or send. "
+            "Unknown evidence stays unknown; no recorded items never proves all work done."
+        ),
+        parameters=_NO_ARGS,
+        handler=_assaf_os_follow_up,
+    )
+)
+_register(
+    ToolSpec(
         name="assaf_os_receipt",
         description=(
             "Read the immutable Assaf OS receipt for the original request id. Use this "
-            "after an unknown proposal/approval outcome; never submit a replacement id."
+            "after an unknown approval outcome; never submit a replacement id. Returns an "
+            "explicit completed/blocked/unknown check and suggested next action. Completed "
+            "proves only that exact historical write, never task or business completion."
         ),
         parameters=_string_arg("request_id", "The exact original Assaf OS request id."),
         handler=_assaf_os_receipt,
