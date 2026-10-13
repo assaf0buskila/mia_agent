@@ -72,7 +72,7 @@
   var sendAfterHandoff = false;
   var burstParts = [];
   var burstTimer = 0;
-  var BURST_MS = 800;
+  var BURST_MS = 200;
   // Only populated from the server's config response. Never infer a destination
   // from a Mia reply, a page link, or visitor text.
   var configuredWhatsAppUrl = '';
