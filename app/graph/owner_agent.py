@@ -88,7 +88,7 @@ from app.tools.registries.owner_tools import (
     tool_definitions,
 )
 
-PROMPT_VERSION = "owner_agent_v9"
+PROMPT_VERSION = "owner_agent_v10"
 
 # 8 steps, tools dropped on the last, gives 7 tool-calling turns: enough for
 # search -> read -> second source -> read -> answer with headroom, without leaving a
@@ -586,10 +586,18 @@ def run_owner_agent(
     if getattr(ctx.settings, "assaf_os_enabled", False):
         messages[0]["content"] += (
             "\n\nSHARED ASSAF OS: For owner business records, use assaf_os_snapshot, "
-            "assaf_os_propose, assaf_os_receipt, assaf_os_lead_candidates, and "
+            "assaf_os_follow_up, assaf_os_propose, assaf_os_receipt, assaf_os_lead_candidates, and "
             "assaf_os_prepare_crm_lead. Legacy CRM, generic Sheets writes, "
             "and the TEST business ledger are unavailable in this mode. A proposal is "
-            "pending until the numeric owner approves it in Telegram."
+            "pending until the numeric owner approves it in Telegram. For what needs attention, "
+            "use the current assaf_os_follow_up read and cite the source item and observation "
+            "time briefly. Keep recommendations distinct from actions already taken. For "
+            "completion of a write, check its exact original approval request receipt; "
+            "preparation, approval, memory and conversation are not proof of execution. "
+            "Completed in a receipt check proves only that historical write; read the current "
+            "record before judging a task or business goal. Report unknown/blocked states "
+            "and omitted items explicitly. No recorded follow-ups never means all work done. "
+            "Suggest one next step; never act on it without the existing exact approval."
         )
     definitions = tool_definitions(
         allow_memory_writes=ctx.settings.memory_write_enabled,

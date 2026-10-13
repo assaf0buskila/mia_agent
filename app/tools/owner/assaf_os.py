@@ -10,10 +10,16 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from app.services.assaf_os import AssafOsError, AssafOsPort, ProposeRequest
+from app.domain.owner.assaf_os_follow_up import (
+    FOLLOW_UP_MAX_CHARS,
+    follow_up_check,
+    receipt_check,
+    unknown_check,
+)
+from app.services.assaf_os import REQUEST_PATTERN, AssafOsError, AssafOsPort, ProposeRequest
 from app.services.owner_actions import propose_owner_action
 from app.services.phone_identity import normalize_new_input_phone
-from app.tools.owner.types import ToolContext, ToolResult
+from app.tools.owner.types import OUTCOME_PARTIAL, ToolContext, ToolResult
 
 
 def assaf_os_enabled(ctx: ToolContext) -> bool:
@@ -53,16 +59,47 @@ def _assaf_os_receipt(ctx: ToolContext, arguments: dict[str, Any]) -> ToolResult
     if not assaf_os_enabled(ctx):
         return ToolResult(ok=False, error="assaf os is unavailable")
     request_id = arguments.get("request_id")
-    if not isinstance(request_id, str):
+    if not isinstance(request_id, str) or not re.fullmatch(REQUEST_PATTERN, request_id):
         return ToolResult(ok=False, error="invalid_arguments")
     try:
+        check = receipt_check(_port(ctx).receipt(request_id), request_id, now=ctx.now)
         return ToolResult(
             ok=True,
-            text=_json(_port(ctx).receipt(request_id)),
+            text=_json(check),
+            outcome=OUTCOME_PARTIAL if check["state"] == "unknown" else "",
             evidence="assaf_os_signed_receipt",
         )
     except AssafOsError as exc:
-        return ToolResult(ok=False, error=exc.code)
+        check = unknown_check("exact_historical_write_only", exc.code)
+        check["source"] = {"kind": "assaf_os_receipt_read_failed", "request_id": request_id}
+        check["next_action"] = "query_original_receipt_without_replaying_mutation"
+        return ToolResult(
+            ok=False, error=exc.code,
+            text=_json(check),
+        )
+
+
+def _assaf_os_follow_up(ctx: ToolContext, arguments: dict[str, Any]) -> ToolResult:
+    if not assaf_os_enabled(ctx):
+        return ToolResult(ok=False, error="assaf os is unavailable")
+    if arguments:
+        return ToolResult(ok=False, error="invalid_arguments")
+    try:
+        check = follow_up_check(_port(ctx).snapshot())
+        rendered = _json(check)
+        if len(rendered) > FOLLOW_UP_MAX_CHARS:
+            check = unknown_check("shared_sheet_new_leads_and_open_tasks", "output_limit")
+            rendered = _json(check)
+        return ToolResult(
+            ok=True, text=rendered, max_chars=FOLLOW_UP_MAX_CHARS,
+            outcome=OUTCOME_PARTIAL if check["state"] == "unknown" else "",
+            evidence="assaf_os_signed_snapshot",
+        )
+    except AssafOsError as exc:
+        return ToolResult(
+            ok=False, error=exc.code,
+            text=_json(unknown_check("shared_sheet_new_leads_and_open_tasks", exc.code)),
+        )
 
 
 def _contact_provenance(ctx: ToolContext, request: ProposeRequest) -> bool:
