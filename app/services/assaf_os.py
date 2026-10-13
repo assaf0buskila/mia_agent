@@ -5,9 +5,13 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import math
 import re
 import time
+from collections import OrderedDict
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from threading import Lock
 from typing import Any, Literal
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
@@ -34,6 +38,24 @@ OPERATIONS = frozenset(
 )
 UNCERTAIN_OPERATIONS = frozenset({"propose", "approve", "reject"})
 RECORD_ENTITIES = ("leads", "clients", "works", "payments", "time", "expenses", "tasks")
+_APPROVAL_GUARD_VERSION = 1
+_DECISION_BINDING_CACHE_MAX = 256
+_DECISION_BINDING_CACHE_LEASE_SECONDS = 60.0
+_DecisionBindingKey = tuple[str, str, str, str, str, bytes, str, int, str]
+
+
+@dataclass(frozen=True, slots=True)
+class _DecisionBinding:
+    approval_request_id: str
+    rejection_request_id: str
+    signed_expires_at: float
+    inserted_wall: float
+    inserted_monotonic: float
+    monotonic_deadline: float
+
+
+_DECISION_BINDINGS: OrderedDict[_DecisionBindingKey, _DecisionBinding] = OrderedDict()
+_DECISION_BINDINGS_LOCK = Lock()
 
 # Copied from the checked-in schema contract. System/calculated keys are accepted on
 # reads, while proposals use INPUT_FIELDS only.
@@ -471,6 +493,117 @@ def _validate_result(
     return result
 
 
+def _decision_binding_key(
+    settings: Settings, owner_id: str, proposal_id: str
+) -> _DecisionBindingKey:
+    secret_fingerprint = hashlib.sha256(settings.assaf_os_hmac_secret.encode()).digest()
+    return (
+        owner_id,
+        settings.assaf_os_workspace_id,
+        settings.assaf_os_workbook_id,
+        settings.assaf_os_mode,
+        settings.assaf_os_script_url,
+        secret_fingerprint,
+        API_VERSION,
+        _APPROVAL_GUARD_VERSION,
+        proposal_id,
+    )
+
+
+def _remember_decision_binding(
+    settings: Settings, owner_id: str, proposal: dict[str, Any]
+) -> None:
+    guard_version = proposal.get("approval_guard_version")
+    if (
+        proposal.get("status") != "pending"
+        or type(guard_version) is not int
+        or guard_version != _APPROVAL_GUARD_VERSION
+    ):
+        return
+    try:
+        proposal_id = proposal["proposal_id"]
+        approval_request_id = proposal["approval_request_id"]
+        rejection_request_id = proposal["rejection_request_id"]
+        expires_at = datetime.fromisoformat(str(proposal["expires_at"]).replace("Z", "+00:00"))
+        if (
+            not isinstance(proposal_id, str)
+            or not isinstance(approval_request_id, str)
+            or not isinstance(rejection_request_id, str)
+            or re.fullmatch(ID_PATTERN, proposal_id) is None
+            or re.fullmatch(REQUEST_PATTERN, approval_request_id) is None
+            or re.fullmatch(REQUEST_PATTERN, rejection_request_id) is None
+            or expires_at.tzinfo is None
+        ):
+            return
+        inserted_wall = time.time()
+        inserted_monotonic = time.monotonic()
+        signed_expires_at = expires_at.timestamp()
+        remaining = signed_expires_at - inserted_wall
+        if not all(
+            math.isfinite(value)
+            for value in (inserted_wall, inserted_monotonic, signed_expires_at, remaining)
+        ) or remaining <= 0:
+            return
+        monotonic_deadline = inserted_monotonic + min(
+            remaining, _DECISION_BINDING_CACHE_LEASE_SECONDS
+        )
+        if not math.isfinite(monotonic_deadline):
+            return
+        entry = _DecisionBinding(
+            approval_request_id=approval_request_id,
+            rejection_request_id=rejection_request_id,
+            signed_expires_at=signed_expires_at,
+            inserted_wall=inserted_wall,
+            inserted_monotonic=inserted_monotonic,
+            monotonic_deadline=monotonic_deadline,
+        )
+        key = _decision_binding_key(settings, owner_id, proposal_id)
+    except (KeyError, OSError, OverflowError, TypeError, ValueError):
+        return
+    with _DECISION_BINDINGS_LOCK:
+        _DECISION_BINDINGS.pop(key, None)
+        _DECISION_BINDINGS[key] = entry
+        while len(_DECISION_BINDINGS) > _DECISION_BINDING_CACHE_MAX:
+            _DECISION_BINDINGS.popitem(last=False)
+
+
+def _decision_binding(
+    settings: Settings, owner_id: str, proposal_id: str
+) -> tuple[str, str] | None:
+    key = _decision_binding_key(settings, owner_id, proposal_id)
+    with _DECISION_BINDINGS_LOCK:
+        entry = _DECISION_BINDINGS.get(key)
+    if entry is None:
+        return None
+    wall_now = time.time()
+    monotonic_now = time.monotonic()
+    invalid = (
+        not math.isfinite(wall_now)
+        or not math.isfinite(monotonic_now)
+        or wall_now < entry.inserted_wall
+        or monotonic_now < entry.inserted_monotonic
+        or wall_now >= entry.signed_expires_at
+        or monotonic_now >= entry.monotonic_deadline
+    )
+    if invalid:
+        with _DECISION_BINDINGS_LOCK:
+            if _DECISION_BINDINGS.get(key) is entry:
+                _DECISION_BINDINGS.pop(key, None)
+        return None
+    return (entry.approval_request_id, entry.rejection_request_id)
+
+
+def _forget_decision_binding(settings: Settings, owner_id: str, proposal_id: str) -> None:
+    key = _decision_binding_key(settings, owner_id, proposal_id)
+    with _DECISION_BINDINGS_LOCK:
+        _DECISION_BINDINGS.pop(key, None)
+
+
+def _clear_assaf_os_decision_binding_cache() -> None:
+    with _DECISION_BINDINGS_LOCK:
+        _DECISION_BINDINGS.clear()
+
+
 class AssafOsPort:
     def __init__(self, settings: Settings, owner_id: str, *, actor_source: ActorSource):
         if (
@@ -603,10 +736,19 @@ class AssafOsPort:
         return self._call("snapshot", {})
 
     def propose(self, request: ProposeRequest) -> dict[str, Any]:
-        return self._call("propose", request.model_dump(mode="json"), request_id=request.request_id)
+        proposal = self._call(
+            "propose", request.model_dump(mode="json"), request_id=request.request_id
+        )
+        _remember_decision_binding(self.settings, self.owner_id, proposal)
+        return proposal
 
     def proposal(self, proposal_id: str) -> dict[str, Any]:
-        return self._call("proposal", {"proposal_id": proposal_id})
+        proposal = self._call("proposal", {"proposal_id": proposal_id})
+        if proposal["status"] == "pending" and proposal["proposal_id"] == proposal_id:
+            _remember_decision_binding(self.settings, self.owner_id, proposal)
+        else:
+            _forget_decision_binding(self.settings, self.owner_id, proposal_id)
+        return proposal
 
     def decide(
         self, operation: Literal["approve", "reject"], proposal_id: str, request: DecisionRequest
@@ -617,12 +759,17 @@ class AssafOsPort:
         # immutable remote proposal before issuing the one non-retried decision
         # POST, so a valid id cannot be paired with a different proposal path.
         if self.actor_source == "OS":
-            proposal = self.proposal(proposal_id)
-            expected_key = (
-                "approval_request_id" if operation == "approve" else "rejection_request_id"
-            )
-            if proposal.get(expected_key) != request.request_id:
+            binding = _decision_binding(self.settings, self.owner_id, proposal_id)
+            if binding is None:
+                proposal = self.proposal(proposal_id)
+                binding = (
+                    proposal["approval_request_id"],
+                    proposal["rejection_request_id"],
+                )
+            expected = binding[0 if operation == "approve" else 1]
+            if not hmac.compare_digest(expected, request.request_id):
                 raise AssafOsError("decision_request_mismatch", 409)
+        _forget_decision_binding(self.settings, self.owner_id, proposal_id)
         return self._call(
             operation,
             {"proposal_id": proposal_id, "request_id": request.request_id},
