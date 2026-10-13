@@ -1,5 +1,84 @@
 # Local PostgreSQL transaction prototypes
 
+## Adapter and synthetic import-shadow milestone
+
+The next isolated branch, `codex/os-primary-shadow-adapter-local`, starts from the
+reviewed seven-entity commit `5fcce60abb44c1c770f0650dda3a134b2ea38cc0`. Its bounded
+scope, ownership and gates are in `STAGE2_MILESTONE_PLAN.md`; final evidence and
+benchmark limits are in `STAGE2_VALIDATION.md`. Both prior prototype worktrees remain
+intact. This milestone has no runtime registration, provider access, live route,
+production migration, real source loader, authority switch or external mirror.
+
+`app/prototypes/assaf_os_adapter.py` is an explicitly disabled-by-default facade
+over `LocalLedgerPrimary`. An injected server authorization callback must return a
+fresh `TrustedOwnerContext` for every operation: numeric owner, workspace, authority
+epoch, channel, exact scopes, aware expiry, mutation policy and browser verification
+facts. They cannot come from a client payload. The current context is synthetic
+contract input, not authentication proof. Real sessions, Telegram callbacks,
+Origin/CSRF, source revalidation and production policy integration remain later work.
+
+The facade exposes `contract`, `snapshot`, `propose`, `decide` and `receipt`.
+It uses the existing `assaf-os:read`, `assaf-os:propose`, `assaf-os:approve` scopes.
+MIA may read/propose but cannot decide. Approval/rejection requires an explicit
+owner decision; the adapter and ledger default-off gates both remain active.
+Contract version is `assaf-os.primary-local.v1`, with honest PostgreSQL source,
+workspace/epoch/version fields and a separate pending mirror status. Proposal
+creation is not a verified business commit. Lost acknowledgement produces sanitized
+`AdapterError('inconclusive', decision_id=<exact UUID>)`; recover by reading that
+same receipt. Do not retry automatically or mint another ID. Receipt recovery can
+continue under an authorized read scope after mutation policy closes. Exact proposal
+replay also survives expiry of an unchanged outer approval deadline.
+
+`app/prototypes/assaf_os_shadow_import.py` has independent `ShadowBase` tables and
+only staging/read/reconciliation APIs. It cannot expose inherited business
+transaction methods or write business rows, approval receipts or outbox events.
+`initialize_local_schema`, `stage`, `read_shadow` and `reconcile` retain the default-off,
+numeric-owner, loopback database prefix and disposable marker boundaries. The
+`synthetic:` source namespace labels fixtures; it does not prove that arbitrary
+user data is synthetic, and this module provides no file or real-export loader.
+
+Synthetic batch headers bind schema version, source ID/epoch, workspace/authority
+epoch, observation time, UUID and seven-entity coverage. Each original row retains
+its ID/revision and source/accepted input digests, accepted revision, synthetic native
+acceptance kind and source snapshot version. No human approval is fabricated.
+The fixed fixture in `assaf_os_synthetic.py` includes all seven entities, legacy-form
+IDs, two currencies, a refund, an estimated expense excluded from paid cash, and
+missing-time hourly nulls.
+
+Staging is bounded to 2,000 rows and 16 MiB JSON per batch, with depth/node/header
+integer limits checked before database checkout. Safely representable invalid rows
+and provenance stay inspectable with quarantine reason codes; non-JSON, NUL or
+oversized headers/payloads are rejected before staging. Chunk rows, provenance,
+issues and checkpoints commit atomically. A crash after a committed chunk resumes
+the exact immutable batch; changed payload under the same batch ID is refused.
+Empty batches complete with an explicit zero-row checkpoint.
+
+Resume, reads and reconciliation verify the immutable original payload, stored
+headers, row/provenance hashes and counts, exact checkpoint ordinals, and authority
+epoch. Chunk/reconciliation transactions hold workspace locks; read-only shadow
+reads use REPEATABLE READ. Corruption is refused rather than accepted. Reconciliation
+exposes counts, IDs/revisions, input/coverage hashes, required references, per-currency
+money/refunds, deterministic summaries, issues and manifest digest. Promoted leads
+require their client; unpromoted lead identities can legitimately precede a client.
+Unknown/partial coverage remains visible and blocks acceptance.
+
+`status='accepted'` means the synthetic shadow batch passed local validation. It is
+not an owner business approval, production import, authority activation or backup.
+`read_shadow` returns raw staged rows, including safely stored quarantined rows;
+consumers must check the reconciliation manifest before using them as accepted input.
+Production export signatures, historical approvals/receipts/replay journals and raw
+Sheet/formula/header evidence are outside this synthetic milestone.
+
+`scripts/benchmark_assaf_os_local.py --run-synthetic --samples 15` measures bounded
+sequential synthetic adapter writes through fresh verification, first-page snapshots,
+and twelve-row shadow stage/reconcile. It checks accepted manifests, exact counts
+and known financial totals before counting success. Results go to the ignored
+`.cache/stage2-benchmark.json`; the final reviewed sample is saved beside the
+validation report. It excludes human think time and environment setup, uses a
+synthetic authorization callback, and measures no browser, WAN, live authentication,
+mirror delivery or production SLO. Reproduce only with the disposable local setup
+below and cached dependencies.
+
 ## Seven-entity extension, local only
 
 The extension is isolated in `codex/os-primary-seven-entities-local`, based on the

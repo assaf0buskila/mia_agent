@@ -1,0 +1,106 @@
+{
+  "mode": "synthetic_local_only",
+  "samples_per_operation": 15,
+  "warmup_per_operation": 3,
+  "timing": "wall-clock; propose+approve+freshverify; human think time excluded",
+  "operations": {
+    "clients_propose_approve_verify": {
+      "n": 15,
+      "p50_ms": 67.581,
+      "p95_ms": 401.682,
+      "p99_ms": 401.682,
+      "max_ms": 401.682,
+      "method": "nearest_rank"
+    },
+    "expenses_propose_approve_verify": {
+      "n": 15,
+      "p50_ms": 64.827,
+      "p95_ms": 298.58,
+      "p99_ms": 298.58,
+      "max_ms": 298.58,
+      "method": "nearest_rank"
+    },
+    "leads_propose_approve_verify": {
+      "n": 15,
+      "p50_ms": 73.841,
+      "p95_ms": 243.333,
+      "p99_ms": 243.333,
+      "max_ms": 243.333,
+      "method": "nearest_rank"
+    },
+    "payments_received_propose_approve_verify": {
+      "n": 15,
+      "p50_ms": 70.717,
+      "p95_ms": 415.872,
+      "p99_ms": 415.872,
+      "max_ms": 415.872,
+      "method": "nearest_rank"
+    },
+    "payments_refund_propose_approve_verify": {
+      "n": 15,
+      "p50_ms": 66.608,
+      "p95_ms": 289.895,
+      "p99_ms": 289.895,
+      "max_ms": 289.895,
+      "method": "nearest_rank"
+    },
+    "shadow_reconcile_12_rows": {
+      "n": 15,
+      "p50_ms": 17.427,
+      "p95_ms": 56.883,
+      "p99_ms": 56.883,
+      "max_ms": 56.883,
+      "method": "nearest_rank"
+    },
+    "shadow_stage_12_rows": {
+      "n": 15,
+      "p50_ms": 50.958,
+      "p95_ms": 485.556,
+      "p99_ms": 485.556,
+      "max_ms": 485.556,
+      "method": "nearest_rank"
+    },
+    "snapshot_first_page": {
+      "n": 15,
+      "p50_ms": 15.344,
+      "p95_ms": 96.265,
+      "p99_ms": 96.265,
+      "max_ms": 96.265,
+      "method": "nearest_rank"
+    },
+    "tasks_propose_approve_verify": {
+      "n": 15,
+      "p50_ms": 65.348,
+      "p95_ms": 500.923,
+      "p99_ms": 500.923,
+      "max_ms": 500.923,
+      "method": "nearest_rank"
+    },
+    "time_propose_approve_verify": {
+      "n": 15,
+      "p50_ms": 69.211,
+      "p95_ms": 257.449,
+      "p99_ms": 257.449,
+      "max_ms": 257.449,
+      "method": "nearest_rank"
+    },
+    "works_propose_approve_verify": {
+      "n": 15,
+      "p50_ms": 65.995,
+      "p95_ms": 152.334,
+      "p99_ms": 152.334,
+      "max_ms": 152.334,
+      "method": "nearest_rank"
+    }
+  },
+  "failures": [],
+  "failure_count": 0,
+  "limits": [
+    "loopback PostgreSQL 16.15 in cached Docker; one CPU and 512 MiB cap",
+    "sequential synthetic operations; 4 connection pool; no concurrent load",
+    "synthetic context callback; no browser, WAN or real authentication latency",
+    "schema/environment setup and fixture construction excluded; database already warm",
+    "small samples; p95/p99 often equal max; no production SLO inference",
+    "ledger grows by 8 records per iteration; each shadow batch 12 rows; no mirror"
+  ]
+}
