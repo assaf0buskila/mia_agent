@@ -573,3 +573,51 @@ test("schema and snapshot reads do not consume replay capacity", () => {
   propose(h, "tasks", { title: "Replay is reserved for mutations", status: "לביצוע" });
   assert.equal(replay.getLastRow(), 2);
 });
+
+test("request reference catalogs are copy-safe and avoid repeated parsing", () => {
+  const h = createHarness();
+  h.addRecord("clients", { ...client(), name: "Original client" });
+  h.addRecord("works", work());
+  h.context.assafOsBeginRequestReadCache_(h.workbook);
+  const first = h.context.assafOsReferenceCatalog_(h.workbook, "works");
+  first[0].primary = "Mutated title";
+  first.push({ id: "WOR_FAKE", primary: "Fake", secondary: "Fake" });
+  h.resetMetrics();
+  const second = h.context.assafOsReferenceCatalog_(h.workbook, "works");
+  assert.deepEqual(Array.from(second, (item) => ({ ...item })), [{ id: "WOR_1", primary: work().title, secondary: "Original client" }]);
+  assert.deepEqual(h.metrics(), {
+    getValues: 0, getFormulas: 0, getLastRow: 0, getLastColumn: 0,
+    getDataRange: 0, setDataValidation: 0, batchUpdate: 0, batchGet: 0,
+  });
+});
+
+test("entity and reference-sheet invalidation clear every parsed reference catalog", () => {
+  const h = createHarness();
+  h.addRecord("clients", { ...client(), name: "Before" });
+  h.addRecord("works", work());
+  h.context.assafOsBeginRequestReadCache_(h.workbook);
+  assert.equal(h.context.assafOsReferenceCatalog_(h.workbook, "works")[0].secondary, "Before");
+  const clients = h.workbook.getSheetByName(h.Schema.tab("clients").name);
+  const nameColumn = h.Schema.tab("clients").fields.findIndex((field) => field.key === "name") + 1;
+  clients.setCell(2, nameColumn, "After entity invalidation");
+  h.context.assafOsInvalidateEntityCache_(h.workbook, "clients");
+  assert.equal(h.context.assafOsReferenceCatalog_(h.workbook, "works")[0].secondary, "After entity invalidation");
+  clients.setCell(2, nameColumn, "After sheet invalidation");
+  h.context.assafOsInvalidateSheetCache_(h.workbook, clients);
+  assert.equal(h.context.assafOsReferenceCatalog_(h.workbook, "works")[0].secondary, "After sheet invalidation");
+});
+
+test("direct reference-catalog callers cannot reuse or populate a different workbook cache", () => {
+  const primary = createHarness();
+  const foreign = createHarness();
+  foreign.workbook.id = "Workbook_98765432109876543210";
+  primary.addRecord("clients", { ...client(), name: "Primary workbook" });
+  foreign.addRecord("clients", { ...client(), name: "Foreign workbook" });
+  primary.context.assafOsBeginRequestReadCache_(primary.workbook);
+  assert.equal(primary.context.assafOsReferenceCatalog_(primary.workbook, "clients")[0].primary, "Primary workbook");
+  assert.equal(primary.context.assafOsReferenceCatalog_(foreign.workbook, "clients")[0].primary, "Foreign workbook");
+  const foreignNameColumn = foreign.Schema.tab("clients").fields.findIndex((field) => field.key === "name") + 1;
+  foreign.workbook.getSheetByName(foreign.Schema.tab("clients").name).setCell(2, foreignNameColumn, "Foreign changed");
+  assert.equal(primary.context.assafOsReferenceCatalog_(foreign.workbook, "clients")[0].primary, "Foreign changed");
+  assert.equal(primary.context.assafOsReferenceCatalog_(primary.workbook, "clients")[0].primary, "Primary workbook");
+});

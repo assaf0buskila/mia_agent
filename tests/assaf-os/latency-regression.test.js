@@ -7,6 +7,12 @@ const path = require("node:path");
 const { createHarness } = require("./apps-script-harness.js");
 
 const CURRENT_SOURCE = fs.readFileSync("ops/assaf-os/UnifiedRuntime.gs", "utf8");
+const REFERENCE_CACHE_LOOKUP_PATTERN = /function assafOsCachedReferenceCatalog_\(workbook, target\) \{[\s\S]*?\n\}/;
+assert.match(CURRENT_SOURCE, REFERENCE_CACHE_LOOKUP_PATTERN, "reference catalog lookup must be replaceable");
+const UNCACHED_REFERENCE_SOURCE = CURRENT_SOURCE.replace(
+  REFERENCE_CACHE_LOOKUP_PATTERN,
+  "function assafOsCachedReferenceCatalog_(workbook, target) { return null; }",
+);
 const LEGACY_METADATA_PRELOAD = `function assafOsVerifyMetadata_(workbook) {
   Object.keys(ASSAF_OS_META).forEach(function (key) {
     var spec = ASSAF_OS_META[key], sheet = workbook.getSheetByName(spec.name);
@@ -118,6 +124,37 @@ function runPair(name, setup, invoke) {
     service_read_call_reduction: readCalls(baselineMetrics) - readCalls(currentMetrics),
   };
 }
+
+function runReferenceCachePair(name, setup, invoke) {
+  const current = createHarness({ maxRows: 2001, runtimeSource: CURRENT_SOURCE, withSheets: true });
+  const uncached = createHarness({ maxRows: 2001, runtimeSource: UNCACHED_REFERENCE_SOURCE, withSheets: true });
+  setup(current); setup(uncached);
+  const currentResponse = invoke(current), uncachedResponse = invoke(uncached);
+  assert.deepEqual(normalize(currentResponse), normalize(uncachedResponse), `${name}: response changed`);
+  const currentState = workbookState(current), uncachedState = workbookState(uncached);
+  assert.deepEqual(currentState, uncachedState, `${name}: workbook effects changed at ${JSON.stringify(firstDifference(currentState, uncachedState))}`);
+}
+
+test("request reference catalog caching preserves representative read and mutation semantics", () => {
+  runReferenceCachePair("stable snapshot", seedDependencies, (h) => h.call(h.request("snapshot", {})));
+  runReferenceCachePair("refund approval", seedDependencies, (h) => {
+    const input = { person_id: "PER_1", work_id: "WOR_1", path: payment().path, date: "2026-10-03", actual_amount_ils: 2000, currency: "ILS", kind: "\u05d4\u05d7\u05d6\u05e8", original_payment_id: "PAY_1", notes: "synthetic" };
+    const proposal = propose(h, "payments", input, null, 0, "reference-cache-refund");
+    assert.equal(proposal.status, "pending");
+    const result = approve(h, proposal);
+    assert.equal(result.ok, true, JSON.stringify(result.data));
+    assert.equal(result.data.status, "committed");
+    return result;
+  });
+  runReferenceCachePair("lead promotion approval", (h) => h.addRecord("leads", lead()), (h) => {
+    const proposal = propose(h, "promote_lead", {}, "LEA_1", 1, "reference-cache-promotion");
+    assert.equal(proposal.status, "pending");
+    const result = approve(h, proposal);
+    assert.equal(result.ok, true, JSON.stringify(result.data));
+    assert.equal(result.data.status, "committed");
+    return result;
+  });
+});
 
 test("current metadata batch read preserves all operation semantics and reduces service reads", () => {
   const matrix = [];

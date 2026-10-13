@@ -342,7 +342,7 @@ function assafOsReadEntityTolerant_(workbook, entity) {
   return assafOsStoreCachedEntity_("tolerant", entity, result);
 }
 
-function assafOsBeginRequestReadCache_(workbook) { if (!ASSAF_OS_REQUEST_READ_CACHE || ASSAF_OS_REQUEST_READ_CACHE.workbook_id !== workbook.getId()) ASSAF_OS_REQUEST_READ_CACHE = { workbook_id: workbook.getId(), sheets: {}, values: {}, strict: {}, tolerant: {} }; }
+function assafOsBeginRequestReadCache_(workbook) { if (!ASSAF_OS_REQUEST_READ_CACHE || ASSAF_OS_REQUEST_READ_CACHE.workbook_id !== workbook.getId()) ASSAF_OS_REQUEST_READ_CACHE = { workbook_id: workbook.getId(), sheets: {}, values: {}, strict: {}, tolerant: {}, reference_catalogs: {} }; }
 function assafOsReadSheetOnce_(sheet) {
   var cache = ASSAF_OS_REQUEST_READ_CACHE, key = String(sheet.getSheetId());
   if (cache && cache.workbook_id === sheet.getParent().getId() && cache.sheets[key]) return cache.sheets[key];
@@ -362,14 +362,38 @@ function assafOsReadValuesOnce_(sheet) {
 }
 function assafOsCachedEntity_(kind, entity) { return ASSAF_OS_REQUEST_READ_CACHE && ASSAF_OS_REQUEST_READ_CACHE[kind][entity] || null; }
 function assafOsStoreCachedEntity_(kind, entity, value) { if (ASSAF_OS_REQUEST_READ_CACHE) ASSAF_OS_REQUEST_READ_CACHE[kind][entity] = value; return value; }
+function assafOsCopyReferenceCatalog_(catalog) { return catalog.map(function (item) { return { id: item.id, primary: item.primary, secondary: item.secondary }; }); }
+function assafOsCachedReferenceCatalog_(workbook, target) {
+  var cache = ASSAF_OS_REQUEST_READ_CACHE;
+  if (!cache || cache.workbook_id !== workbook.getId() || !Object.prototype.hasOwnProperty.call(cache.reference_catalogs, target)) return null;
+  return assafOsCopyReferenceCatalog_(cache.reference_catalogs[target]);
+}
+function assafOsStoreReferenceCatalog_(workbook, target, catalog) {
+  var cache = ASSAF_OS_REQUEST_READ_CACHE, stored = assafOsCopyReferenceCatalog_(catalog);
+  if (cache && cache.workbook_id === workbook.getId()) cache.reference_catalogs[target] = stored;
+  return assafOsCopyReferenceCatalog_(stored);
+}
+function assafOsInvalidateReferenceCatalogs_(workbook) {
+  var cache = ASSAF_OS_REQUEST_READ_CACHE;
+  if (cache && cache.workbook_id === workbook.getId()) cache.reference_catalogs = {};
+}
+function assafOsIsReferenceSheet_(sheet) {
+  if (!sheet) return false;
+  var name = sheet.getName();
+  return ["clients", "works", "payments"].some(function (entity) { return AssafOsSchema.tab(entity).name === name; });
+}
 function assafOsInvalidateEntityCache_(workbook, entity) {
   if (!ASSAF_OS_REQUEST_READ_CACHE || ASSAF_OS_REQUEST_READ_CACHE.workbook_id !== workbook.getId()) return;
   var tab = AssafOsSchema.tab(entity), sheet = tab && workbook.getSheetByName(tab.name);
   if (sheet) delete ASSAF_OS_REQUEST_READ_CACHE.sheets[String(sheet.getSheetId())];
   delete ASSAF_OS_REQUEST_READ_CACHE.strict[entity]; delete ASSAF_OS_REQUEST_READ_CACHE.tolerant[entity];
+  assafOsInvalidateReferenceCatalogs_(workbook);
 }
 function assafOsInvalidateSheetCache_(workbook, sheet) {
-  if (ASSAF_OS_REQUEST_READ_CACHE && ASSAF_OS_REQUEST_READ_CACHE.workbook_id === workbook.getId() && sheet) { delete ASSAF_OS_REQUEST_READ_CACHE.sheets[String(sheet.getSheetId())]; delete ASSAF_OS_REQUEST_READ_CACHE.values[String(sheet.getSheetId())]; }
+  if (ASSAF_OS_REQUEST_READ_CACHE && ASSAF_OS_REQUEST_READ_CACHE.workbook_id === workbook.getId() && sheet) {
+    delete ASSAF_OS_REQUEST_READ_CACHE.sheets[String(sheet.getSheetId())]; delete ASSAF_OS_REQUEST_READ_CACHE.values[String(sheet.getSheetId())];
+    if (assafOsIsReferenceSheet_(sheet)) assafOsInvalidateReferenceCatalogs_(workbook);
+  }
 }
 function assafOsInvalidateMetadataCaches_(workbook, keys) { keys.forEach(function (key) { var spec = ASSAF_OS_META[key]; if (spec) assafOsInvalidateSheetCache_(workbook, workbook.getSheetByName(spec.name)); }); }
 
@@ -645,6 +669,8 @@ function assafOsVerifyMetadata_(workbook) {
 }
 
 function assafOsReferenceCatalog_(workbook, target) {
+  var cached = assafOsCachedReferenceCatalog_(workbook, target);
+  if (cached !== null) return cached;
   var tab = AssafOsSchema.tab(target), sheet = tab && workbook.getSheetByName(tab.name);
   if (!tab || !sheet) throw assafOsError_("missing_reference_sheet");
   var rows = assafOsReadSheetOnce_(sheet).values, idKey = assafOsIdKey_(target), idIndex = tab.fields.findIndex(function (field) { return field.key === idKey; });
@@ -667,7 +693,7 @@ function assafOsReferenceCatalog_(workbook, target) {
     var secondary = target === "clients" ? "" : (clientNames[personId] || personId);
     catalog[id] = { id: id, primary: assafOsReferenceText_(primary) || "ללא שם", secondary: assafOsReferenceText_(secondary) };
   }
-  return Object.keys(catalog).sort().map(function (id) { return catalog[id]; });
+  return assafOsStoreReferenceCatalog_(workbook, target, Object.keys(catalog).sort().map(function (id) { return catalog[id]; }));
 }
 
 function assafOsReferenceText_(value) { return String(value == null ? "" : value).replace(/[\r\n\t]+/g, " ").replace(/[⟦⟧]/g, "").trim().slice(0, 100); }
