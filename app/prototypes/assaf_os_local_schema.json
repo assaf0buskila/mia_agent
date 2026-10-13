@@ -1,0 +1,86 @@
+{
+  "source": "ops/assaf-os/schema.js",
+  "version": "assaf-os-unified.v1",
+  "enums": {
+    "path": ["לימוד", "אוטומציה"],
+    "lead_status": ["חדש", "רלוונטי", "לא רלוונטי", "לא ענה", "הפך ללקוח"],
+    "client_status": ["פעיל", "לא פעיל"],
+    "task_status": ["לביצוע", "בתהליך", "ממתין", "בוצע", "בוטל"],
+    "work_status": ["מתוכננת", "פעילה", "הושלמה", "בוטלה"],
+    "time_status": ["פעיל", "בוטל"],
+    "payment_kind": ["התקבל", "החזר", "בוטל"],
+    "payment_status": ["שולם", "לא שולם", "בוטל"],
+    "expense_source": ["תשלום בפועל", "דיווח שימוש בפלטפורמה"],
+    "source": ["משתמש", "OS", "MIA"],
+    "currency": ["ILS", "USD", "EUR", "GBP"],
+    "shared_path": ["לימוד", "אוטומציה", "משותף"]
+  },
+  "entities": {
+    "leads": [
+      {"key": "name", "type": "text", "role": "input", "required": true},
+      {"key": "phone", "type": "text", "role": "input", "required": false},
+      {"key": "email", "type": "text", "role": "input", "required": false},
+      {"key": "path", "type": "enum", "role": "input", "required": true, "enum": "path"},
+      {"key": "status", "type": "enum", "role": "input", "required": true, "enum": "lead_status"},
+      {"key": "source_note", "type": "text", "role": "input", "required": false}
+    ],
+    "clients": [
+      {"key": "name", "type": "text", "role": "input", "required": true},
+      {"key": "phone", "type": "text", "role": "input", "required": false},
+      {"key": "email", "type": "text", "role": "input", "required": false},
+      {"key": "status", "type": "enum", "role": "input", "required": true, "enum": "client_status"},
+      {"key": "notes", "type": "text", "role": "input", "required": false}
+    ],
+    "works": [
+      {"key": "person_id", "type": "id", "role": "input", "required": true, "ref": "clients.person_id"},
+      {"key": "title", "type": "text", "role": "input", "required": true},
+      {"key": "path", "type": "enum", "role": "input", "required": true, "enum": "path", "immutableAfterCreate": true},
+      {"key": "start_date", "type": "date", "role": "input", "required": false},
+      {"key": "status", "type": "enum", "role": "input", "required": true, "enum": "work_status"},
+      {"key": "agreed_amount_ils", "type": "money_ils", "role": "input", "required": false},
+      {"key": "currency", "type": "enum", "role": "input", "required": false, "enum": "currency"}
+    ],
+    "payments": [
+      {"key": "person_id", "type": "id", "role": "input", "required": true, "ref": "clients.person_id"},
+      {"key": "work_id", "type": "id", "role": "input", "required": true, "ref": "works.work_id"},
+      {"key": "path", "type": "enum", "role": "input", "required": true, "enum": "path", "immutableAfterCreate": true},
+      {"key": "date", "type": "date", "role": "input", "required": true},
+      {"key": "actual_amount_ils", "type": "money_ils", "role": "input", "required": true},
+      {"key": "currency", "type": "enum", "role": "input", "required": true, "enum": "currency"},
+      {"key": "kind", "type": "enum", "role": "input", "required": true, "enum": "payment_kind"},
+      {"key": "original_payment_id", "type": "id", "role": "input", "required": false, "ref": "payments.payment_id"},
+      {"key": "notes", "type": "text", "role": "input", "required": false}
+    ],
+    "time": [
+      {"key": "person_id", "type": "id", "role": "input", "required": true, "ref": "clients.person_id"},
+      {"key": "work_id", "type": "id", "role": "input", "required": true, "ref": "works.work_id"},
+      {"key": "path", "type": "enum", "role": "input", "required": true, "enum": "path", "immutableAfterCreate": true},
+      {"key": "date", "type": "date", "role": "input", "required": true},
+      {"key": "minutes", "type": "integer", "role": "input", "required": true, "minimum": 0},
+      {"key": "description", "type": "text", "role": "input", "required": false},
+      {"key": "status", "type": "enum", "role": "input", "required": true, "enum": "time_status"}
+    ],
+    "expenses": [
+      {"key": "date", "type": "date", "role": "input", "required": true},
+      {"key": "category", "type": "text", "role": "input", "required": true},
+      {"key": "platform", "type": "enum", "role": "input", "required": true, "values": ["Google Ads", "Meta", "אחר"]},
+      {"key": "path", "type": "enum", "role": "input", "required": true, "enum": "shared_path"},
+      {"key": "vendor", "type": "text", "role": "input", "required": false},
+      {"key": "amount_ils", "type": "money_ils", "role": "input", "required": true},
+      {"key": "currency", "type": "enum", "role": "input", "required": true, "enum": "currency"},
+      {"key": "payment_status", "type": "enum", "role": "input", "required": true, "enum": "payment_status"},
+      {"key": "source_type", "type": "enum", "role": "input", "required": true, "enum": "expense_source"},
+      {"key": "source_key", "type": "text", "role": "input", "required": true},
+      {"key": "notes", "type": "text", "role": "input", "required": false}
+    ],
+    "tasks": [
+      {"key": "title", "type": "text", "role": "input", "required": true},
+      {"key": "person_id", "type": "id", "role": "input", "required": false, "ref": "clients.person_id"},
+      {"key": "work_id", "type": "id", "role": "input", "required": false, "ref": "works.work_id"},
+      {"key": "path", "type": "enum", "role": "input", "required": false, "enum": "path"},
+      {"key": "status", "type": "enum", "role": "input", "required": true, "enum": "task_status"},
+      {"key": "due_date", "type": "date", "role": "input", "required": false},
+      {"key": "notes", "type": "text", "role": "input", "required": false}
+    ]
+  }
+}
