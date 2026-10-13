@@ -34,8 +34,9 @@ from app.integrations.llm_client import (
     tool_result_message,
 )
 from app.services.crm_v2 import WRITER_PUBLIC, CrmError, CrmService
+from app.surfaces.site_public import site_opening
 
-SITE_PROMPT_VERSION = "site_v2_v2"
+SITE_PROMPT_VERSION = "site_v2_v3"
 _LOG = logging.getLogger(__name__)
 
 # The site client is the OpenAI Responses API with reasoning enabled, and there
@@ -96,6 +97,13 @@ _GREETING_ONLY = re.compile(
     re.I,
 )
 _GREETING_MAX_CHARS = 60
+_FAST_GREETINGS = frozenset({
+    "hi", "hello", "hey", "hiya", "howdy", "good morning", "good evening",
+    "good afternoon", "what's up", "whats up", "how are you", "היי", "הי",
+    "שלום", "אהלן", "אהלאן", "הלו", "בוקר טוב", "ערב טוב", "צהריים טובים",
+    "מה נשמע", "מה קורה", "מה המצב", "מה העניינים", "מה חדש", "מהקורה",
+    "מהנשמע", "מהמצב", "מהעניינים",
+})
 
 
 _SELF_DESCRIPTION = re.compile(
@@ -257,12 +265,39 @@ _CONTACT_REFUSAL = re.compile(
 # unmistakable refusal, so it should carry only the unmistakable ones.
 
 _DELIVERY_QUESTION = re.compile(
-    r"(did (?:you|it).{0,35}(?:save|store|send|deliver|forward)|"
-    r"(?:were|are|have) (?:my )?(?:details|contact|email|phone).{0,35}"
+    r"(?:did (?:you|it) (?:save|store|send|deliver|forward) "
+    r"(?:(?:my|the) )?(?:details|contact details|email|phone|number|it|them)"
+    r"(?: to assaf)?|"
+    r"(?:were|are) (?:my )?(?:details|contact details|email|phone|number) "
     r"(?:saved|stored|sent|delivered|forwarded)|"
-    r"(?:save|delivery|contact) status|"
-    r"(?:האם|מה מצב).{0,45}(?:נשמר|נשלח|הועבר|פרטי|מייל|אימייל|טלפון)|"
-    r"(?:הפרטים|המייל|האימייל|הטלפון).{0,35}(?:נשמר|נשלח|הועבר|הגיע))",
+    r"have (?:my )?(?:details|contact details|email|phone|number) been "
+    r"(?:saved|stored|sent|delivered|forwarded)|"
+    r"(?:what(?:'s| is)|check|show) (?:my )?(?:save|delivery|contact) status|"
+    r"האם(?: כבר)? (?:הפרטים|פרטי הקשר|המייל|האימייל|הטלפון)(?: שלי)? "
+    r"(?:נשמרו?|נשלחו?|הועברו?|הגיעו?)|"
+    r"האם(?: כבר)? (?:שמרתם|שלחתם|העברתם) (?:את )?"
+    r"(?:הפרטים|פרטי הקשר|המייל|האימייל|הטלפון)(?: לאסף)?|"
+    r"מה מצב (?:שמירת |שליחת |העברת )?"
+    r"(?:הפרטים|פרטי הקשר|המייל|האימייל|הטלפון)|"
+    r"(?:הפרטים|פרטי הקשר|המייל|האימייל|הטלפון) "
+    r"(?:נשמרו?|נשלחו?|הועברו?|הגיעו?))",
+    re.I,
+)
+_ACK_ONLY = re.compile(
+    r"^(?:תודה(?: רבה)?|תודה לך|בשמחה|סבבה|מעולה|הבנתי|אוקיי|אוקי|"
+    r"ok(?:ay)?|thanks|thank you)[\s!.,?\u05be-]*$",
+    re.I,
+)
+_CONTACT_DECLINE = re.compile(
+    r"(?:לא (?:רוצה|מעוניין|מעוניינת|צריך|צריכה).{0,35}(?:להשאיר|פרטי קשר|טלפון|מייל|אימייל)|"
+    r"בלי (?:פרטי קשר|טלפון|מייל|אימייל)|"
+    r"(?:do not|don't|dont) (?:want|need).{0,35}(?:contact|phone|email|details)|"
+    r"no thanks.{0,25}(?:contact|phone|email|details))",
+    re.I,
+)
+_AVAILABILITY_QUESTION = re.compile(
+    r"(?:מתי|באילו (?:ימים|שעות)|איזה (?:יום|מועד)).{0,35}(?:נוח|זמינ|לדבר|שיחה)|"
+    r"(?:when|what (?:day|time)).{0,35}(?:convenient|available|talk|call)",
     re.I,
 )
 _NARRATIVE_VALIDATION_TOOL = function_tool(
@@ -354,6 +389,11 @@ class SiteV2State:
     update_scopes: list[str] = field(default_factory=list)
     # Set once a post-capture reply has asked for a phone, so the ask happens once.
     phone_requested: bool = False
+    # Durable conversation-policy facts. Older rows load with safe defaults and can
+    # recover an invitation/availability question from their retained transcript.
+    contact_invited: bool = False
+    contact_declined: bool = False
+    availability_requested: bool = False
 
 
 @dataclass(frozen=True)
@@ -370,16 +410,31 @@ class _SiteTurnClient:
     def __init__(self, client: Any, *, timeout: float) -> None:
         self._client = client
         self._deadline = monotonic() + timeout
+        self.timings_ms: dict[str, float] = {}
+        self.call_counts: dict[str, int] = {}
 
     def enabled(self) -> bool:
         return self._client.enabled()
 
-    def complete(self, **kwargs: Any):
+    def complete(self, *, stage: str = "generation", **kwargs: Any):
         remaining = self._deadline - monotonic()
         if remaining <= 0:
             raise LlmError("website model deadline exceeded")
         kwargs["timeout"] = remaining
-        return self._client.complete(**kwargs)
+        started = monotonic()
+        self.call_counts[stage] = self.call_counts.get(stage, 0) + 1
+        try:
+            return self._client.complete(**kwargs)
+        finally:
+            elapsed = (monotonic() - started) * 1000
+            self.timings_ms[stage] = self.timings_ms.get(stage, 0.0) + elapsed
+
+
+def _complete(client: Any, *, stage: str, **kwargs: Any):
+    """Record a stage for website turns while keeping pure helpers usable in isolation."""
+    if isinstance(client, _SiteTurnClient):
+        return client.complete(stage=stage, **kwargs)
+    return client.complete(**kwargs)
 
 
 def _now() -> str:
@@ -440,8 +495,12 @@ def _load_state(row: SiteV2SessionRow) -> SiteV2State:
     delivery_jobs = (
         raw.get("delivery_job_ids") if isinstance(raw.get("delivery_job_ids"), list) else []
     )
+    retained_turns = [item for item in turns[-MAX_HISTORY_TURNS:] if isinstance(item, dict)]
+    mia_text = "\n".join(
+        str(item.get("text") or "") for item in retained_turns if item.get("role") == "mia"
+    )
     return SiteV2State(
-        turns=[item for item in turns[-MAX_HISTORY_TURNS:] if isinstance(item, dict)],
+        turns=retained_turns,
         page={str(k): str(v) for k, v in page.items()},
         contact={str(k): str(v) for k, v in contact.items()},
         business_context=str(raw.get("business_context") or "")[:1000],
@@ -476,6 +535,10 @@ def _load_state(row: SiteV2SessionRow) -> SiteV2State:
             )
             if isinstance(item, str) and item
         ][:5],
+        contact_invited=bool(raw.get("contact_invited")) or bool(_CONTACT_INVITE.search(mia_text)),
+        contact_declined=bool(raw.get("contact_declined")),
+        availability_requested=bool(raw.get("availability_requested"))
+        or bool(_AVAILABILITY_QUESTION.search(mia_text)),
     )
 
 
@@ -583,7 +646,9 @@ def _classified_consent(
         f"SERVER_EXTRACTED_CONTACT={json.dumps(contact_value, ensure_ascii=False)}"
     )
     try:
-        response = client.complete(
+        response = _complete(
+            client,
+            stage="consent",
             # A system-only message list becomes an empty `input` array on the
             # Responses API (system content routes to `instructions`, never `input`)
             # and the request is rejected before any generation happens. This is why
@@ -790,6 +855,7 @@ def _actual_contact(
         # that parked number alive, and a bland "ok thanks" two turns later captured it
         # through the readback path -- a contact taken from someone who had just refused.
         state.pending_contact = {}
+        state.contact_declined = True
         if supplied_phone or supplied_email:
             _LOG.warning("site contact skipped reason=explicit_refusal")
         return {}
@@ -822,6 +888,8 @@ def _actual_contact(
             _settle_pending_contact(
                 state, readback_verdict, phone=supplied_phone, email=supplied_email
             )
+            if readback_verdict.decision == "refused":
+                state.contact_declined = True
             return {}
     else:
         contact_value = supplied_phone or supplied_email
@@ -844,6 +912,8 @@ def _actual_contact(
             _settle_pending_contact(
                 state, verdict, phone=supplied_phone, email=supplied_email
             )
+            if verdict.decision == "refused":
+                state.contact_declined = True
             _LOG.warning(
                 "site contact not captured verdict=%s resolved=%s parked=%s "
                 "had_invitation=%s kind=%s",
@@ -882,47 +952,47 @@ def _system_prompt(
     has_phone: bool = False,
     phone_requested: bool = False,
     availability_known: bool = False,
+    contact_invited: bool = False,
+    contact_declined: bool = False,
+    availability_requested: bool = False,
 ) -> str:
     """The website sales prompt. Flags are server-computed facts, never model claims.
 
-    ``contact_invited_recently`` stops the invitation from repeating turn after turn (the
-    live transcript asked for "טלפון או אימייל" in three of four replies);
-    ``has_phone``, ``phone_requested`` and ``availability_known`` shape the single
-    post-capture follow-up, so the phone is asked for at most once.
+    The durable flags stop invitations and optional availability questions from
+    restarting after they leave the short transcript window. Legacy parameters remain
+    accepted because stored sessions and focused tests may still supply them.
     """
+    already_invited = contact_invited or contact_invited_recently
     invite_rule = (
-        "- כבר הזמנת להשאיר פרטים באחת ההודעות האחרונות. בתשובה הזו אל תזמיני שוב;\n"
-        "  תני ערך ושאלת גילוי אחת בלבד.\n"
-        if contact_invited_recently and not saved
+        "- המבקר כבר הוזמן להשאיר פרטים או סירב. אל תזמיני שוב בשיחה הזו.\n"
+        if (already_invited or contact_declined) and not saved
         else ""
     )
     if saved:
         follow_ups = []
-        if not has_phone and not phone_requested:
+        if not availability_known and not availability_requested:
             follow_ups.append(
-                "בקשי פעם אחת ובעדינות גם טלפון, למשל: \"אם נוח, אפשר להשאיר גם טלפון "
-                "לשיחה קצרה.\""
+                "אם זמינות לשיחה באמת מקדמת את הבקשה, אפשר לשאול עליה פעם אחת בלבד."
             )
-        if not availability_known:
-            follow_ups.append("שאלי פעם אחת מתי נוח לדבר עם אסף (ימים ושעות).")
         after_saved = (
             "- אחרי שמירה: אל תכתבי שום דבר על שמירה, העברה או מסירה; השרת מציג זאת.\n"
             "  כשהמבקר מוסר ימים או שעות לשיחה, או פרט חדש על העסק, קראי שוב ל-submit_lead\n"
             "  עם השדות שהתעדכנו (availability וכו'), ואל תשאלי שוב על מה שכבר נמסר.\n"
-            "  הודי בקצרה במשפט אחד. "
+            "  אימייל תקין מספיק; אל תבקשי טלפון כברירת מחדל. הודי בקצרה במשפט אחד. "
             + (" ".join(follow_ups) + " " if follow_ups else "")
             + "אם יש שאלות נוספות, המשיכי לענות.\n"
         )
     else:
         after_saved = ""
-    return f"""את מיה, נציגת המכירות באתר של אסף. נהלי השיחה:
-- כתבי בעברית טבעית וקצרה (2 עד 4 משפטים) והתאימי לשפת המבקר.
+    return f"""את מיה, עוזרת ה-AI של אסף באתר. נהלי השיחה:
+- בתשובה רגילה כתבי 1 עד 3 משפטים קצרים, בערך 25 עד 50 מילים בעברית, והתאימי
+  לשפת המבקר. כשהמבקר מבקש במפורש פירוט, אפשר להרחיב במידה הנדרשת.
 - אל תניחי מגדר. עד שהמבקר מציג את עצמו, פני בלשון רבים או ניטרלית
   ("אפשר", "תוכלו", "אם מתאים לכם"), ואחר כך לפי מה שעולה מדבריו.
-- תני ערך קונקרטי מהר, מותאם למה שהמבקר תיאר על העסק שלו.
-- גילוי: עד שנשמרו פרטי קשר, סיימי את התשובה בשאלת גילוי אחת קצרה שעוד לא נענתה,
-  לפי הסדר: סוג העסק וגודלו, הבעיה המרכזית, היקף הפניות או העבודה, ערוצים וכלים
-  קיימים, לוח זמנים, ומי מחליט. שאלה אחת בלבד, ואף פעם לא על מה שכבר נאמר.
+- עני קודם לצורך שהמבקר כתב ותני ערך שימושי מיד. אל תפתחי שאלון ואל תדרשי מעבר
+  על רשימת נושאים. שאלי רק שאלה אחת שמשנה את הצעד הבא, ורק אם היא נחוצה.
+- בכל תשובה מותר לכל היותר אחד: שאלה אחת או קריאה אחת לפעולה. לעולם לא שניהם.
+- אחרי שכבר עלה צורך ממשי, ברכה או תודה ממשיכות מאותה נקודה ואינן פותחות תפריט מחדש.
 - מחיר: כל פרויקט מתומחר אישית לפי ההיקף. הסבירי שאסף נותן הצעה מותאמת אחרי שיחת
   אפיון קצרה. אל תמציאי מספרים ואל תכתבי "אין לי מחיר מאומת".
 - יכולת, לקוח, מדד ותאריך מותרים רק אם הם מופיעים בעובדות הציבוריות למטה.
@@ -932,8 +1002,8 @@ def _system_prompt(
 - אין לך גישה לחשבון הבעלים, לזיכרון פרטי, ל-CRM או לכל כלי בעלים.
 - סטטוס שמירה ומשלוח נקבע רק בשרת. אל תטעני שפרטים נשמרו או נמסרו בעצמך.
 - הזמנה להשאיר פרטים: כשהמבקר מראה עניין אמיתי (שאל על מחיר, על התאמה לעסק שלו או
-  ביקש המשך), הזמיני אותו פעם אחת, במשפט טבעי אחד בסוף התשובה, להשאיר טלפון (עדיף)
-  או אימייל לשיחת אפיון קצרה עם אסף. לא בהודעה הראשונה, לא כתנאי לערך, ולא שוב אם
+  ביקש המשך), אפשר להזמין אותו פעם אחת, במשפט טבעי אחד בסוף התשובה, להשאיר טלפון
+  או אימייל לשיחת אפיון קצרה עם אסף. אימייל תקין מספיק. לא בהודעה הראשונה, לא כתנאי לערך, ולא שוב אם
   סירב או כבר השאיר.
 {invite_rule}- כשהמבקר משאיר פרטי קשר, קראי ל-submit_lead. בשדות business, need, timeline, budget
   ו-availability כתבי סיכום קצר בעברית של מה שהמבקר אמר בפועל על העסק שלו (לא ציטוט,
@@ -995,6 +1065,76 @@ def _status_message(status: str, *, hebrew: bool) -> str:
     return pair[0 if hebrew else 1]
 
 
+def _is_pure_status_question(text: str) -> bool:
+    """Recognise a status-only turn without swallowing a price/contact/business request."""
+    stripped = text.strip()
+    match = _DELIVERY_QUESTION.search(stripped)
+    if match is None:
+        return False
+    remainder = stripped[:match.start()] + stripped[match.end():]
+    return bool(re.fullmatch(r"[\s!.,?\u05be-]*", remainder))
+
+
+def _is_fast_greeting(text: str) -> bool:
+    """Linear whole-phrase greeting check; short contextual answers stay on the full path."""
+    if len(text) > _GREETING_MAX_CHARS:
+        return False
+    normalized = re.sub(r"[\s!.,?~\u05be-]+", " ", text.strip().casefold()).strip()
+    return normalized in _FAST_GREETINGS
+
+
+def _fast_path_kind(text: str) -> str:
+    stripped = text.strip()
+    if _is_pure_status_question(stripped):
+        return "status"
+    if _is_fast_greeting(stripped):
+        return "greeting"
+    if _ACK_ONLY.fullmatch(stripped):
+        return "acknowledgement"
+    return ""
+
+
+def _has_conversation_need(state: SiteV2State) -> bool:
+    if state.business_context:
+        return True
+    return any(
+        item.get("role") == "visitor"
+        and not _is_uninformative_business_text(str(item.get("text") or ""))
+        for item in state.turns
+    )
+
+
+def _safe_context_reply(state: SiteV2State, *, hebrew: bool) -> str:
+    """Server-owned fallback that keeps continuity without making a capability/effect claim."""
+    if hebrew:
+        if _has_conversation_need(state) or state.captured:
+            return "קיבלתי. אפשר להמשיך מאותה נקודה ולחדד מה חשוב לכם עכשיו."
+        return site_opening()
+    if _has_conversation_need(state) or state.captured:
+        return "Got it. We can continue from the same point and focus on what matters now."
+    return "Hi, I'm Mia, Assaf's AI assistant. How can I help?"
+
+
+def _fast_path_reply(
+    state: SiteV2State, *, kind: str, delivery_status: str, hebrew: bool
+) -> str:
+    if kind == "status":
+        return _status_message(delivery_status, hebrew=hebrew)
+    if kind == "greeting" and not _has_conversation_need(state) and not state.captured:
+        return site_opening() if hebrew else "Hi, I'm Mia, Assaf's AI assistant. How can I help?"
+    if hebrew:
+        return (
+            "היי, אני כאן. אפשר להמשיך מאותה נקודה."
+            if kind == "greeting"
+            else "בשמחה. אפשר להמשיך מאותה נקודה כשתרצו."
+        )
+    return (
+        "Hi, I'm here. We can continue from the same point."
+        if kind == "greeting"
+        else "You're welcome. We can continue from the same point whenever you like."
+    )
+
+
 def _narrative_is_safe(client: Any, *, reply: str, visitor_text: str) -> bool:
     """Assess every proposed narrative using an isolated, non-executing classifier.
 
@@ -1005,7 +1145,9 @@ def _narrative_is_safe(client: Any, *, reply: str, visitor_text: str) -> bool:
     if not reply or not client.enabled():
         return False
     try:
-        response = client.complete(
+        response = _complete(
+            client,
+            stage="narrative_validation",
             messages=[
                 {
                     "role": "system",
@@ -1061,7 +1203,9 @@ def _validated_narrative(
         return reply
     # Regeneration has no callable actions, and is validated again before display.
     try:
-        corrected = client.complete(
+        corrected = _complete(
+            client,
+            stage="narrative_rewrite",
             messages=[
                 *messages,
                 {"role": "assistant", "content": reply},
@@ -1350,6 +1494,9 @@ def run_site_v2_turn(
     email: str = "",
     date: str = "",
 ) -> SiteV2Reply:
+    turn_started = monotonic()
+    retrieval_ms = 0.0
+    turn_reason = "generated"
     row = require_site_credential(db, session_id, credential, lock=True)
     if row.active_message_id != client_message_id:
         raise HTTPException(status_code=409, detail="message claim lost")
@@ -1374,6 +1521,8 @@ def run_site_v2_turn(
         email=email,
         date=date,
     )
+    if _CONTACT_DECLINE.search(text):
+        state.contact_declined = True
     captured = False
     updated = False
     contact_update: _ContactUpdate | None = None
@@ -1425,39 +1574,51 @@ def run_site_v2_turn(
     )
     hebrew = bool(re.search(r"[\u0590-\u05ff]", text))
     status_question = bool(_DELIVERY_QUESTION.search(text))
+    fast_kind = _fast_path_kind(text) if not contact and not updated and not captured else ""
 
-    knowledge = _knowledge(settings, db, text)
-    messages = [
-        {
-            "role": "system",
-            "content": _system_prompt(
-                captured or state.captured,
-                delivery_status,
-                contact_invited_recently=_recently_invited(state),
-                has_phone=bool(state.contact.get("phone")),
-                phone_requested=state.phone_requested,
-                availability_known=bool(
-                    state.brief.get("availability") or state.contact.get("date")
-                ),
-            ),
-        },
-        {"role": "user", "content": _context_message(state, knowledge)},
-    ]
-    messages.extend(
-        {
-            "role": "assistant" if item.get("role") == "mia" else "user",
-            "content": item.get("text", ""),
-        }
-        for item in state.turns[-MAX_HISTORY_TURNS:]
-    )
-    messages.append({"role": "user", "content": text})
-    if status_question:
-        reply = _status_message(delivery_status, hebrew=hebrew)
+    if fast_kind:
+        turn_reason = f"fast_{fast_kind}"
+        reply = _fast_path_reply(
+            state, kind=fast_kind, delivery_status=delivery_status, hebrew=hebrew
+        )
     elif not client.enabled():
-        reply = "לא הצלחתי לענות כרגע. אפשר לנסות שוב בעוד רגע."
+        turn_reason = "model_disabled"
+        reply = _safe_context_reply(state, hebrew=hebrew)
     else:
+        retrieval_started = monotonic()
+        knowledge = _knowledge(settings, db, text)
+        retrieval_ms = (monotonic() - retrieval_started) * 1000
+        messages = [
+            {
+                "role": "system",
+                "content": _system_prompt(
+                    captured or state.captured,
+                    delivery_status,
+                    contact_invited_recently=_recently_invited(state),
+                    has_phone=bool(state.contact.get("phone")),
+                    phone_requested=state.phone_requested,
+                    availability_known=bool(
+                        state.brief.get("availability") or state.contact.get("date")
+                    ),
+                    contact_invited=state.contact_invited,
+                    contact_declined=state.contact_declined,
+                    availability_requested=state.availability_requested,
+                ),
+            },
+            {"role": "user", "content": _context_message(state, knowledge)},
+        ]
+        messages.extend(
+            {
+                "role": "assistant" if item.get("role") == "mia" else "user",
+                "content": item.get("text", ""),
+            }
+            for item in state.turns[-MAX_HISTORY_TURNS:]
+        )
+        messages.append({"role": "user", "content": text})
         try:
-            response = client.complete(
+            response = _complete(
+                client,
+                stage="generation",
                 messages=messages,
                 tools=[_SUBMIT_LEAD_TOOL],
                 tool_choice="auto",
@@ -1485,7 +1646,9 @@ def run_site_v2_turn(
                             },
                         )
                     )
-                response = client.complete(
+                response = _complete(
+                    client,
+                    stage="continuation",
                     messages=messages, max_completion_tokens=_REPLY_MAX_OUTPUT_TOKENS
                 )
                 if contact_update is not None and had_submit_lead_call:
@@ -1519,14 +1682,16 @@ def run_site_v2_turn(
                 client, reply=reply, visitor_text=text, messages=messages
             )
         except LlmError:
-            reply = "לא הצלחתי לענות כרגע. אפשר לנסות שוב בעוד רגע."
+            turn_reason = "llm_error"
+            reply = _safe_context_reply(state, hebrew=hebrew)
     if captured or status_question:
         authoritative = _status_message(delivery_status, hebrew=hebrew)
-        reply = (
-            f"{authoritative} {reply}".strip()
-            if captured and reply
-            else authoritative
-        )
+        if fast_kind == "status":
+            reply = authoritative
+        elif reply:
+            reply = f"{authoritative} {reply}".strip()
+        else:
+            reply = authoritative
     elif updated:
         note = "הפרטים עודכנו." if hebrew else "Your details are updated."
         reply = f"{note} {reply}".strip()
@@ -1534,7 +1699,8 @@ def run_site_v2_turn(
         # Typically the narrative validator rejected both the reply and its rewrite.
         # Logged because on a contact turn this greeting reads as ignoring the visitor.
         _LOG.warning("site reply empty fallback")
-        reply = "איך אפשר לעזור?" if hebrew else "How can I help?"
+        turn_reason = "narrative_fallback"
+        reply = _safe_context_reply(state, hebrew=hebrew)
     next_action = "contact_saved" if captured else "answer"
     whatsapp_url = None
     if captured and settings.whatsapp_click_to_chat.strip():
@@ -1547,6 +1713,10 @@ def run_site_v2_turn(
         and _PHONE_WORD.search(reply)
     ):
         state.phone_requested = True
+    if _CONTACT_INVITE.search(reply):
+        state.contact_invited = True
+    if _AVAILABILITY_QUESTION.search(reply):
+        state.availability_requested = True
     state.turns.extend(
         ({"role": "visitor", "text": text[:4000]}, {"role": "mia", "text": reply[:4000]})
     )
@@ -1597,6 +1767,27 @@ def run_site_v2_turn(
     message_row.response_json = json.dumps(result_payload, ensure_ascii=False)
     message_row.updated_at = stamp
     db.flush()
+    total_ms = (monotonic() - turn_started) * 1000
+    _LOG.info(
+        "WEBSITE turn reason=%s total_ms=%.1f retrieval_ms=%.1f "
+        "consent_ms=%.1f generation_ms=%.1f continuation_ms=%.1f "
+        "narrative_validation_ms=%.1f narrative_rewrite_ms=%.1f "
+        "consent_calls=%d generation_calls=%d continuation_calls=%d "
+        "narrative_validation_calls=%d narrative_rewrite_calls=%d",
+        turn_reason,
+        total_ms,
+        retrieval_ms,
+        client.timings_ms.get("consent", 0.0),
+        client.timings_ms.get("generation", 0.0),
+        client.timings_ms.get("continuation", 0.0),
+        client.timings_ms.get("narrative_validation", 0.0),
+        client.timings_ms.get("narrative_rewrite", 0.0),
+        client.call_counts.get("consent", 0),
+        client.call_counts.get("generation", 0),
+        client.call_counts.get("continuation", 0),
+        client.call_counts.get("narrative_validation", 0),
+        client.call_counts.get("narrative_rewrite", 0),
+    )
     return SiteV2Reply(reply, next_action, delivery_status, whatsapp_url)
 
 

@@ -20,6 +20,7 @@ import httpx
 from app.core.errors import MiaError
 from app.core.models import model_chain
 from app.core.owner_timing import owner_stage
+from app.integrations.site_http import get_site_http_client
 
 OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions"
 OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses"
@@ -727,9 +728,14 @@ def _llm_error_class(error: LlmError) -> str:
     return "request_failed"
 
 
-def build_site_client(settings: Any) -> LlmModelChain:
+def build_site_client(
+    settings: Any, *, http_client: httpx.Client | None = None
+) -> LlmModelChain:
     """Purpose-specific website chain: OpenAI Responses, then Gemini compatibility."""
     timeout = settings.llm_request_timeout_seconds
+    # Website turns build a small purpose chain per request. Reuse only the stateless,
+    # thread-safe HTTP pool; model selection and fallback state stay request-local.
+    transport = http_client or get_site_http_client()
     clients: list[LlmClient] = [
         LlmClient(
             api_key=settings.openai_api_key,
@@ -737,6 +743,7 @@ def build_site_client(settings: Any) -> LlmModelChain:
             url=OPENAI_RESPONSES_URL,
             timeout=timeout,
             reasoning_effort=settings.sales_reasoning_effort,
+            client=transport,
         )
         for name in model_chain(settings.sales_model, settings.sales_fallback_model)
     ]
@@ -748,6 +755,7 @@ def build_site_client(settings: Any) -> LlmModelChain:
                 url=GEMINI_CHAT_URL,
                 timeout=timeout,
                 reasoning_effort=settings.sales_reasoning_effort,
+                client=transport,
             )
         )
     return LlmModelChain(clients)

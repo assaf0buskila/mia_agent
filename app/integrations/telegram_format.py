@@ -495,6 +495,34 @@ def approval_keyboard(
     }
 
 
+def lead_path_keyboard(token: str) -> dict:
+    """A preparation choice only; neither button is a business-write approval."""
+    return {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "📚 לימוד",
+                    "callback_data": callback_data(f"lp:l:{token}"),
+                },
+                {
+                    "text": "⚙️ אוטומציה",
+                    "callback_data": callback_data(f"lp:a:{token}"),
+                },
+            ]
+        ]
+    }
+
+
+def parse_lead_path_token(data: str) -> tuple[str, str]:
+    """Return an exact Hebrew path and preparation token, or empty values."""
+    if not isinstance(data, str):
+        return "", ""
+    match = re.fullmatch(r"lp:(l|a):([A-Za-z0-9_-]{1,48})", data)
+    if match is None:
+        return "", ""
+    return ("לימוד" if match.group(1) == "l" else "אוטומציה", match.group(2))
+
+
 def parse_callback_token(data: str) -> tuple[str, str]:
     """Split `ok:<token>` / `no:<token>` into `(decision, token)`.
 

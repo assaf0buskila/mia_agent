@@ -17,6 +17,7 @@ POSTGRES_ONLY = frozenset(
         "20260901_approval_resource_id_varchar80.sql",
         "20260901_linkedin_approval_parameters_text.sql",
         "20260901_owner_brief_drop_campaign_columns.sql",
+        "20261011_owner_os_sessions.sql",
     }
 )
 

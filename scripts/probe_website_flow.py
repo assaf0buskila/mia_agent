@@ -6,11 +6,41 @@ Run: uv run python scripts/probe_website_flow.py
 
 from __future__ import annotations
 
+import os
 import sys
+from uuid import uuid4
 
-from app.db.session import init_db
-from app.main import app
-from fastapi.testclient import TestClient
+# This probe is deliberately synthetic. Test mode prevents dotenv loading, and every
+# inherited database/provider setting that could escape the process is replaced before
+# importing the app.
+_SYNTHETIC_ENV = {
+    "MIA_ENV": "test",
+    "MIA_DATABASE_URL": "sqlite:///:memory:",
+    "MIA_CRM_V2_ENABLED": "false",
+    "MIA_SALES_MODEL": "",
+    "MIA_SALES_FALLBACK_MODEL": "",
+    "MIA_OPENAI_API_KEY": "",
+    "MIA_GEMINI_API_KEY": "",
+    "MIA_SALES_GEMINI_MODEL": "",
+    "MIA_OPENAI_TRANSCRIBE_FALLBACK_MODEL": "",
+    "MIA_TELEGRAM_BOT_TOKEN": "",
+    "MIA_TELEGRAM_WEBHOOK_SECRET": "",
+    "MIA_TELEGRAM_OWNER_USER_IDS": "",
+    "MIA_COMPOSIO_API_KEY": "",
+    "MIA_COMPOSIO_USER_ID": "",
+    "MIA_COMPOSIO_WEBHOOK_SECRET": "",
+    "MIA_COMPOSIO_DISCOVERY": "false",
+    "MIA_GMAIL_SEND": "false",
+    "MIA_META_WRITE": "false",
+    "MIA_WHATSAPP_ACCESS_TOKEN": "",
+    "MIA_WHATSAPP_APP_SECRET": "",
+    "MIA_WHATSAPP_VERIFY_TOKEN": "",
+}
+os.environ.update(_SYNTHETIC_ENV)
+
+from app.db.session import init_db  # noqa: E402
+from app.main import app  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
 
 CONVERSATIONS: dict[str, list[str]] = {
     "shoes_he": [
@@ -65,7 +95,7 @@ def main() -> int:
             for text in messages:
                 body = client.post(
                     f"/v1/website/sessions/{session_id}/messages",
-                    json={"text": text},
+                    json={"text": text, "client_message_id": f"probe-{uuid4().hex}"},
                     headers=headers,
                 ).json()
                 print(f"  > {text}")

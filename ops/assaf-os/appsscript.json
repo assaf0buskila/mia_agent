@@ -1,0 +1,11 @@
+{
+  "timeZone": "Asia/Jerusalem",
+  "dependencies": {
+    "enabledAdvancedServices": [
+      { "userSymbol": "Sheets", "version": "v4", "serviceId": "sheets" }
+    ]
+  },
+  "exceptionLogging": "NONE",
+  "runtimeVersion": "V8",
+  "webapp": { "access": "ANYONE_ANONYMOUS", "executeAs": "USER_DEPLOYING" }
+}

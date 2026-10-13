@@ -74,8 +74,13 @@ def _forbidden(message: str):
 
 
 def _nonprivate_payload(kind: str, chat_type: str | None) -> dict:
-    if kind in {"callback_approve", "callback_reject"}:
-        payload = _callback_update("ok:apr_1" if kind.endswith("approve") else "no:apr_1")
+    if kind in {"callback_approve", "callback_reject", "callback_lead_path"}:
+        data = {
+            "callback_approve": "ok:apr_1",
+            "callback_reject": "no:apr_1",
+            "callback_lead_path": "lp:l:apr_1",
+        }[kind]
+        payload = _callback_update(data)
         chat = {"id": -100991 if chat_type in {"group", "supergroup", "channel"} else int(OWNER)}
         if chat_type is not None:
             chat["type"] = chat_type
@@ -98,10 +103,16 @@ def _nonprivate_payload(kind: str, chat_type: str | None) -> dict:
 
 
 def _rejected_http_payload(kind: str) -> dict:
-    if kind in {"callback_approve", "callback_reject", "callback_unrecognized"}:
+    if kind in {
+        "callback_approve",
+        "callback_reject",
+        "callback_lead_path",
+        "callback_unrecognized",
+    }:
         data = {
             "callback_approve": "ok:apr_1",
             "callback_reject": "no:apr_1",
+            "callback_lead_path": "lp:a:apr_1",
             "callback_unrecognized": "invalid",
         }[kind]
         return _callback_update(data)
@@ -126,6 +137,7 @@ def _rejected_http_payload(kind: str) -> dict:
         "photo",
         "callback_approve",
         "callback_reject",
+        "callback_lead_path",
         "callback_unrecognized",
     ],
 )
@@ -246,7 +258,15 @@ def test_rejected_webhook_secret_never_opens_a_database_session(
 
 @pytest.mark.parametrize(
     "kind",
-    ["text", "edited_text", "voice", "photo", "callback_approve", "callback_reject"],
+    [
+        "text",
+        "edited_text",
+        "voice",
+        "photo",
+        "callback_approve",
+        "callback_reject",
+        "callback_lead_path",
+    ],
 )
 @pytest.mark.parametrize("chat_type", ["group", "supergroup", "channel", "unknown", None])
 def test_authorized_owner_group_updates_stop_before_claim_or_callback_ack(

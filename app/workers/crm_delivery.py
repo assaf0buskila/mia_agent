@@ -123,6 +123,7 @@ class CrmDeliveryWorker:
         allowed_telegram_recipient_ids: frozenset[str] = frozenset(),
         worker_id: str | None = None,
         now: Callable[[], datetime] | None = None,
+        legacy_sheet_projection_enabled: bool = True,
     ) -> None:
         self._session_factory = session_factory
         self._sheets = sheets
@@ -132,6 +133,7 @@ class CrmDeliveryWorker:
         )
         self.worker_id = worker_id or f"crm-worker-{uuid4().hex[:12]}"
         self._clock = now or (lambda: datetime.now(UTC))
+        self._legacy_sheet_projection_enabled = legacy_sheet_projection_enabled
 
     def _now_dt(self) -> datetime:
         value = self._clock()
@@ -168,21 +170,25 @@ class CrmDeliveryWorker:
         import_failed = False
         # A failed import only pauses Sheet-bound jobs. It must never stop Telegram
         # lead delivery, so database errors from the import session count here too.
-        try:
-            imported = self.sync_from_sheets(force=force_import)
-        except (
-            AdapterHttpError,
-            AdapterResponseError,
-            OSError,
-            RuntimeError,
-            SQLAlchemyError,
-            TypeError,
-            ValueError,
-        ):
-            imported = 0
-            import_failed = True
+        imported = 0
+        if self._legacy_sheet_projection_enabled:
+            try:
+                imported = self.sync_from_sheets(force=force_import)
+            except (
+                AdapterHttpError,
+                AdapterResponseError,
+                OSError,
+                RuntimeError,
+                SQLAlchemyError,
+                TypeError,
+                ValueError,
+            ):
+                import_failed = True
         self._recover_expired_leases()
-        reconciled = self._reconcile_unknown(limit=max(1, min(limit, MAX_BATCH)))
+        reconciled = self._reconcile_unknown(
+            limit=max(1, min(limit, MAX_BATCH)),
+            telegram_only=not self._legacy_sheet_projection_enabled,
+        )
         counts = {
             "claimed": 0,
             "confirmed": reconciled.count("confirmed"),
@@ -191,7 +197,10 @@ class CrmDeliveryWorker:
             "conflicts": reconciled.count("conflict"),
         }
         for _ in range(max(1, min(limit, MAX_BATCH))):
-            job_id = self._claim_one(skip_contacts=import_failed)
+            job_id = self._claim_one(
+                skip_contacts=import_failed,
+                telegram_only=not self._legacy_sheet_projection_enabled,
+            )
             if job_id is None:
                 break
             counts["claimed"] += 1
@@ -343,7 +352,9 @@ class CrmDeliveryWorker:
             )
             session.commit()
 
-    def _claim_one(self, *, skip_contacts: bool = False) -> str | None:
+    def _claim_one(
+        self, *, skip_contacts: bool = False, telegram_only: bool = False
+    ) -> str | None:
         now = self._now()
         lease_until = (self._now_dt() + timedelta(seconds=LEASE_SECONDS)).isoformat()
         with self._session_factory() as session:
@@ -368,6 +379,8 @@ class CrmDeliveryWorker:
                 )
             if skip_contacts:
                 statement = statement.where(CrmOutboxRow.destination != "contacts")
+            if telegram_only:
+                statement = statement.where(CrmOutboxRow.destination == "telegram")
             cursor: tuple[str, str] | None = None
             while True:
                 page = statement
@@ -494,13 +507,15 @@ class CrmDeliveryWorker:
             return self._telegram_handler(payload, reconcile_only)
         return "failed"
 
-    def _reconcile_unknown(self, *, limit: int) -> list[DeliveryOutcome]:
+    def _reconcile_unknown(
+        self, *, limit: int, telegram_only: bool = False
+    ) -> list[DeliveryOutcome]:
         with self._session_factory() as session:
+            statement = select(CrmOutboxRow.id).where(CrmOutboxRow.status == "unknown")
+            if telegram_only:
+                statement = statement.where(CrmOutboxRow.destination == "telegram")
             ids = session.scalars(
-                select(CrmOutboxRow.id)
-                .where(CrmOutboxRow.status == "unknown")
-                .order_by(CrmOutboxRow.last_attempt_at, CrmOutboxRow.id)
-                .limit(limit)
+                statement.order_by(CrmOutboxRow.last_attempt_at, CrmOutboxRow.id).limit(limit)
             ).all()
         outcomes: list[DeliveryOutcome] = []
         for job_id in ids:

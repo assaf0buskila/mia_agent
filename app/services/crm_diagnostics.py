@@ -344,7 +344,9 @@ def _issue_summary(
     }
 
 
-def _outbox_summary(session: Session, now: datetime) -> dict[str, Any]:
+def _outbox_summary(
+    session: Session, now: datetime, *, legacy_sheet_projection_enabled: bool = True
+) -> dict[str, Any]:
     counts = {
         destination: {status: 0 for status in _OUTBOX_STATUSES} for destination in _DESTINATIONS
     }
@@ -371,6 +373,9 @@ def _outbox_summary(session: Session, now: datetime) -> dict[str, Any]:
         "by_destination": counts,
         "oldest_undelivered_age_seconds": oldest,
         "oldest_undelivered_known": oldest_known,
+        "inactive_destinations": (
+            [] if legacy_sheet_projection_enabled else ["contacts", "activity"]
+        ),
     }
 
 
@@ -670,6 +675,7 @@ def build_crm_diagnostics(
     max_items: int = MAX_REPORT_ITEMS,
     phone_normalizer: Callable[[str], str] | None = None,
     recipient_ids: Sequence[str] | set[str] | frozenset[str] | None = None,
+    legacy_sheet_projection_enabled: bool = True,
 ) -> dict[str, Any]:
     """Return a deterministic sanitized snapshot without flushing or mutating data."""
     bounded_rows = max(1, min(int(max_rows), MAX_DIAGNOSTIC_ROWS))
@@ -856,7 +862,11 @@ def build_crm_diagnostics(
             projected_fields=projected_fields,
             max_items=bounded_items,
         )
-        outbox = _outbox_summary(session, observed_at)
+        outbox = _outbox_summary(
+            session,
+            observed_at,
+            legacy_sheet_projection_enabled=legacy_sheet_projection_enabled,
+        )
         form_intake, form_intents = _form_summary(session, max_items=bounded_items)
         notifications = _notification_summary(
             session,
@@ -1009,7 +1019,15 @@ def render_operational_health_he(report: Mapping[str, Any], *, max_chars: int = 
                 f"{status}={int(counts.get(status) or 0)}" for status in _OUTBOX_STATUSES
             )
             age_text = f"{int(age)} שניות" if age is not None else "לא ידוע"
-            lines.append(f"- תור {destination}: {status_text}; הוותיק שלא הושלם: {age_text}")
+            inactive = outbox.get("inactive_destinations")
+            if isinstance(inactive, list) and destination in inactive:
+                lines.append(
+                    f"- תור {destination}: שמור אך מושבת לטובת Assaf OS; {status_text}"
+                )
+            else:
+                lines.append(
+                    f"- תור {destination}: {status_text}; הוותיק שלא הושלם: {age_text}"
+                )
     for kind in ("contacts", "activity"):
         sheet = sheets.get(kind) if isinstance(sheets, Mapping) else None
         if isinstance(sheet, Mapping):

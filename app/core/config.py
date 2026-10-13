@@ -66,6 +66,37 @@ class Settings(BaseSettings):
     crm_israeli_phone_normalization_enabled: bool = False
     reminders_enabled: bool = False
     reminder_delivery_enabled: bool = False
+    # Private standalone owner app. Both gates stay off until a separate release.
+    owner_os_enabled: bool = False
+    owner_os_actions_enabled: bool = False
+    owner_os_google_enabled: bool = False
+    owner_os_google_client_id: str = ""
+    owner_os_google_subject: str = Field(default="", repr=False)
+    owner_os_google_owner_id: str = Field(default="", repr=False)
+    owner_os_session_secret: str = Field(default="", repr=False)
+    # One pinned Apps Script port for the shared Assaf OS workbook. Independent
+    # from the legacy CRM and the synthetic TEST business-ledger adapter.
+    assaf_os_enabled: bool = False
+    assaf_os_script_url: str = ""
+    assaf_os_workbook_id: str = ""
+    assaf_os_workspace_id: str = ""
+    assaf_os_hmac_secret: str = Field(default="", repr=False)
+    assaf_os_mode: Literal["TEST", "LIVE"] = "TEST"
+    # Separate, TEST-only Sheets ledger. Never enables CRM or reminder writes.
+    business_ledger_test_enabled: bool = False
+    business_ledger_workspace_id: str = ""
+    business_ledger_script_url: str = ""
+    business_ledger_hmac_secret: str = Field(default="", repr=False)
+    owner_os_origin: str = ""
+    owner_os_workspace_id: str = ""
+    owner_os_session_database_url: str = ""
+    owner_os_read_database_url: str = ""
+    owner_os_action_database_url: str = ""
+    owner_os_cursor_secret: str = ""
+    owner_os_session_ttl_seconds: int = Field(default=1800, gt=0, le=1800)
+    owner_os_session_scopes: str = (
+        "owner-os:read:contacts,owner-os:read:activities,owner-os:read:reminders"
+    )
     openai_api_key: str = Field(default="")
     openai_transcribe_model: str = Field(default="gpt-transcribe")
     openai_transcribe_fallback_model: str = Field(default="")

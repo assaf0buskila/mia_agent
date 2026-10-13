@@ -1,12 +1,20 @@
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from sqlalchemy.exc import SQLAlchemyError
+from starlette.exceptions import HTTPException
 
 from app import __version__
+from app.api.assaf_os import router as assaf_os_router
+from app.api.business_ledger import router as business_ledger_router
 from app.api.form_intake import router as form_intake_router
+from app.api.owner_os import router as owner_os_router
+from app.api.owner_os_actions import router as owner_os_actions_router
+from app.api.owner_os_boundary import OwnerOSBoundary, owner_http_error, owner_validation_error
+from app.api.owner_sessions import router as owner_sessions_router
 from app.api.quick_leads import router as quick_leads_router
 from app.api.telegram import router as telegram_router
 from app.api.website import router as website_router
@@ -294,6 +302,14 @@ app.include_router(website_router)
 app.include_router(telegram_router)
 app.include_router(form_intake_router)
 app.include_router(quick_leads_router)
+app.include_router(owner_sessions_router)
+app.include_router(owner_os_router)
+app.include_router(owner_os_actions_router)
+app.include_router(business_ledger_router)
+app.include_router(assaf_os_router)
+app.add_middleware(OwnerOSBoundary)
+app.add_exception_handler(HTTPException, owner_http_error)
+app.add_exception_handler(RequestValidationError, owner_validation_error)
 
 _ROOT_LANDING_HTML = """<!DOCTYPE html>
 <html lang="he" dir="rtl">

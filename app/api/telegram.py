@@ -12,6 +12,7 @@ from typing import Literal
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
 from app.api.deps import get_db, get_telegram_port, get_transcription_port
 from app.api.inbound_common import outbound_reply
@@ -22,6 +23,7 @@ from app.core.outbound import send_inbound_reply
 from app.core.webhooks import verify_telegram_secret
 from app.db.store import LeadStore
 from app.domain.ai_runs import elapsed_ms
+from app.domain.approvals import DECISION_APPROVED, DECISION_REJECTED
 from app.domain.events import Channel, webhook_envelope_kind
 from app.domain.gmail.drafts import execute_approved_gmail_send
 from app.domain.owner.calendar_writes import execute_approved_calendar_change
@@ -42,7 +44,12 @@ from app.integrations.telegram import (
     parse_telegram_update,
     validate_telegram_voice_media,
 )
-from app.integrations.telegram_format import owner_text, parse_callback_token
+from app.integrations.telegram_format import (
+    approval_keyboard,
+    owner_text,
+    parse_callback_token,
+    parse_lead_path_token,
+)
 from app.integrations.transcribe import TranscriptionError, TranscriptionPort
 from app.workers.telegram_owner import process_telegram_owner_update
 
@@ -152,6 +159,74 @@ def _is_reminder_callback(data: str) -> bool:
     return re.fullmatch(r"rm:(complete|snooze|contact):([a-f0-9]{32}):(\d{1,8})", data) is not None
 
 
+async def _answer_owner_callback(port: MessagePort, callback_id: str, *, text: str = "") -> None:
+    answer = getattr(port, "answer_callback_query", None)
+    if callable(answer):
+        try:
+            if text:
+                await answer(callback_id, text=text)
+            else:
+                await answer(callback_id)
+        except (TelegramSendError, AdapterHttpError, RuntimeError):
+            pass
+
+
+async def _execute_assaf_os_owner_decision(
+    *, settings, actor_id: str, proposal_id: str, decision: str
+):
+    """Run the blocking signed provider decision with a thread-owned DB session."""
+
+    def execute():
+        from app.db.session import get_session_factory
+        from app.services.owner_actions import (
+            OwnerActionExecution,
+            execute_approved_owner_action_with_adapters,
+            reject_assaf_os_owner_action,
+        )
+
+        session = get_session_factory()()
+        try:
+            thread_store = LeadStore(session)
+            principal = Principal.owner(source="telegram", actor_id=actor_id)
+            operation_key = f"{proposal_id}:{'execute' if decision == 'approve' else 'reject'}"
+            if thread_store.get_provider_write_status(
+                scope="approval", key=operation_key
+            ) in {"provider_claimed", "pending_review"}:
+                return OwnerActionExecution("unknown")
+            if decision == "approve":
+                outcome = execute_approved_owner_action_with_adapters(
+                    thread_store,
+                    settings=settings,
+                    principal=principal,
+                    proposal_id=proposal_id,
+                )
+            else:
+                outcome = reject_assaf_os_owner_action(
+                    thread_store,
+                    settings=settings,
+                    principal=principal,
+                    proposal_id=proposal_id,
+                )
+            session.commit()
+            return outcome
+        except Exception:
+            session.rollback()
+            # A preflight transport failure happens before execute_owner_action can
+            # create its effect claim. Make that uncertainty sticky as well: the
+            # already-approved callback must not become a blind provider retry.
+            thread_store = LeadStore(session)
+            if thread_store.claim_provider_write(scope="approval", key=operation_key):
+                thread_store.mark_provider_write_pending_review(
+                    scope="approval", key=operation_key
+                )
+            session.commit()
+            return OwnerActionExecution("unknown")
+        finally:
+            session.close()
+
+    return await run_in_threadpool(execute)
+
+
 async def _handle_callback(
     *,
     callback: dict[str, str],
@@ -163,8 +238,9 @@ async def _handle_callback(
     """Resolve one inline-button press.
 
     Private owner context is validated before `answerCallbackQuery`; invalid callbacks
-    receive no acknowledgement or other provider operation. For a valid owner callback,
-    the acknowledgement runs before business work so the button feels instant.
+    receive no acknowledgement or other provider operation. Assaf OS decisions are
+    durably committed locally before a truthful progress acknowledgement clears the
+    Telegram spinner, and before slow remote verification or writing begins.
 
     Callbacks can be replayed against a message whose buttons are already gone, so the
     decision path must stay idempotent; `decide_approval` is keyed on the approval id.
@@ -175,12 +251,87 @@ async def _handle_callback(
             "reason=invalid_private_owner_context"
         )
         return {"processed": 0, "ignored": True, "reason": "invalid_owner_context"}
-    answer = getattr(port, "answer_callback_query", None)
-    if callable(answer):
-        try:
-            await answer(callback["callback_query_id"])
-        except (TelegramSendError, AdapterHttpError, RuntimeError):
-            pass
+    callback_decision, callback_token = parse_callback_token(callback.get("data", ""))
+    deferred_assaf_os_ack = False
+    if callback_decision and callback_token and db is not None:
+        from app.services.owner_actions import read_owner_action
+
+        pending = LeadStore(db).get_approval_by_approval_id(callback_token)
+        envelope = read_owner_action(pending)
+        deferred_assaf_os_ack = bool(
+            envelope is not None and envelope.get("kind") == "assaf_os.approve"
+        )
+    if not deferred_assaf_os_ack:
+        await _answer_owner_callback(port, callback["callback_query_id"])
+    selected_path, preparation_token = parse_lead_path_token(callback.get("data", ""))
+    if selected_path and preparation_token:
+        if db is None:
+            raise RuntimeError("recognized lead path callback requires a database session")
+        from app.domain.owner.callbacks import approval_token
+        from app.domain.owner.proposal_cards import render_owner_approval_card
+        from app.services.assaf_os_leads import choose_lead_path
+
+        store = LeadStore(db)
+        choice = choose_lead_path(
+            store,
+            settings=settings,
+            principal=Principal.owner(source="telegram", actor_id=callback["from"]),
+            approval_id=preparation_token,
+            path=selected_path,
+        )
+        reply_text = {
+            "prepared": (
+                "המסלול נבחר והוכנה הצעה מדויקת. עדיין לא נכתבה רשומה; "
+                "יש לאשר את הכרטיס החדש."
+            ),
+            "needs_correction": (
+                "חסר שם או שפרט הקשר דורש תיקון. שלח למיה את התיקון ואת המסלול; "
+                "לא הוכנה הצעת כתיבה."
+            ),
+            "lead_already_exists": "כבר קיימת בגיליון רשומה עם אותו טלפון או אימייל.",
+            "source_changed": "מקור ה-CRM השתנה. לא הוכנה הצעה; צריך לבדוק מחדש.",
+            "unknown": (
+                "תוצאת הכנת ההצעה אינה ודאית. לא ניסיתי שוב; צריך לבדוק קבלה לפי "
+                "מזהה הבקשה המקורי."
+            ),
+            "expired": "בקשת ההכנה פגה. צריך להכין אותה מחדש.",
+            "already_handled": "בקשת ההכנה כבר טופלה ולא ביצעתי אותה שוב.",
+        }.get(choice.status, "לא הצלחתי להכין הצעת ליד. לא נכתבה רשומה.")
+        if choice.status == "prepared":
+            final_row = store.get_approval_by_approval_id(choice.approval_id)
+            card = render_owner_approval_card(final_row)
+            try:
+                await port.send(
+                    OutboundMessage(
+                        conversation_id=callback["chat_id"],
+                        text=owner_text(card, html=True),
+                        channel=Channel.TELEGRAM.value,
+                        idempotency_key=f"lead-final:{choice.approval_id}",
+                        parse_mode="HTML",
+                        reply_markup=approval_keyboard(approval_token(choice.approval_id)),
+                    )
+                )
+            except (TelegramSendError, AdapterHttpError, RuntimeError):
+                reply_text += " הכרטיס נשמר ברשימת האישורים הממתינים."
+        edit = getattr(port, "edit_message_text", None)
+        sent = False
+        if callable(edit) and callback.get("message_id"):
+            try:
+                await edit(
+                    chat_id=callback["chat_id"],
+                    message_id=callback["message_id"],
+                    text=owner_text(reply_text, html=True),
+                    parse_mode="HTML",
+                )
+                sent = True
+            except (TelegramSendError, AdapterHttpError, RuntimeError):
+                sent = False
+        return {
+            "processed": 1,
+            "decision": "lead_path",
+            "status": choice.status,
+            "sent": sent,
+        }
     if _is_reminder_callback(callback.get("data", "")):
         from html import escape
 
@@ -204,7 +355,7 @@ async def _handle_callback(
         except (TelegramSendError, AdapterHttpError, RuntimeError):
             return {"processed": 1, "sent": False}
         return {"processed": 1, "sent": True}
-    decision, token = parse_callback_token(callback.get("data", ""))
+    decision, token = callback_decision, callback_token
     if not decision or not token:
         return {"processed": 0, "ignored": True, "reason": "unrecognized_callback"}
     if db is None:
@@ -226,7 +377,11 @@ async def _handle_callback(
             "crm.activity",
             "crm.resolve_conflict",
         }:
-            if settings.kill_switch:
+            if getattr(settings, "assaf_os_enabled", False):
+                # Unified mode rejects this legacy action in owner_actions. Do not
+                # pre-read or initialize the old CRM Sheet before that policy gate.
+                pass
+            elif settings.kill_switch:
                 # The callback acknowledgement/edit is operational, but an approval
                 # callback must not initialize or read Sheets while writes are stopped.
                 # Leave the owner action pending so it can be retried after recovery.
@@ -257,6 +412,47 @@ async def _handle_callback(
             principal=Principal.owner(source="telegram", actor_id=callback["from"]),
         )
         reply_text = resolved.text
+    if deferred_assaf_os_ack:
+        desired = DECISION_APPROVED if decision == "approve" else DECISION_REJECTED
+        decided = store.get_approval_by_approval_id(token)
+        decision_claimed = decided is not None and decided.decision == desired
+        try:
+            db.commit()
+        except SQLAlchemyError:
+            db.rollback()
+            await _answer_owner_callback(
+                port,
+                callback["callback_query_id"],
+                text="האישור לא נקלט. אפשר לנסות שוב.",
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="owner approval temporarily unavailable",
+            ) from None
+        progress_text = (
+            "האישור נקלט. בודק קבלה לפני עדכון סופי…"
+            if decision_claimed and decision == "approve"
+            else (
+                "הדחייה נקלטה. בודק קבלה לפני עדכון סופי…"
+                if decision_claimed
+                else "האישור אינו תקף ולא יבוצע."
+            )
+        )
+        await _answer_owner_callback(
+            port, callback["callback_query_id"], text=progress_text
+        )
+        if decision_claimed and callback.get("message_id"):
+            edit_progress = getattr(port, "edit_message_text", None)
+            if callable(edit_progress):
+                try:
+                    await edit_progress(
+                        chat_id=callback["chat_id"],
+                        message_id=callback["message_id"],
+                        text=owner_text(progress_text, html=True),
+                        parse_mode="HTML",
+                    )
+                except (TelegramSendError, AdapterHttpError, RuntimeError):
+                    pass
     if resolved is not None and resolved.gmail_draft_id_to_send is not None:
         reply_text = execute_approved_gmail_send(
             store=store,
@@ -291,21 +487,59 @@ async def _handle_callback(
             kill_switch=settings.kill_switch,
         )
     if resolved is not None and resolved.owner_action_resource_id_to_execute is not None:
-        from app.services.owner_actions import execute_approved_owner_action_with_adapters
+        if deferred_assaf_os_ack:
+            outcome = await _execute_assaf_os_owner_decision(
+                settings=settings,
+                actor_id=callback["from"],
+                proposal_id=resolved.owner_action_resource_id_to_execute,
+                decision="approve",
+            )
+        else:
+            from app.services.owner_actions import execute_approved_owner_action_with_adapters
 
-        outcome = execute_approved_owner_action_with_adapters(
-            store,
-            settings=settings,
-            principal=Principal.owner(source="telegram", actor_id=callback["from"]),
-            proposal_id=resolved.owner_action_resource_id_to_execute,
-            crm_pre_synced=crm_pre_synced,
-        )
+            outcome = execute_approved_owner_action_with_adapters(
+                store,
+                settings=settings,
+                principal=Principal.owner(source="telegram", actor_id=callback["from"]),
+                proposal_id=resolved.owner_action_resource_id_to_execute,
+                crm_pre_synced=crm_pre_synced,
+            )
         reply_text = outcome.text or {
             "target_changed": "היעד השתנה. צריך להכין בקשת אישור חדשה.",
             "already_handled": "הפעולה כבר טופלה או ממתינה לבדיקה. לא ביצעתי שוב.",
             "unknown": "תוצאת הפעולה אינה ודאית וממתינה לבדיקה. לא ביצעתי שוב.",
             "expired": "האישור פג. צריך להכין בקשת אישור חדשה.",
+            "rejected": "ההצעה כבר נדחתה ולא בוצעה.",
+            "policy_denied": "מתג העצירה פעיל. הפעולה לא בוצעה.",
         }.get(outcome.status, "הפעולה לא בוצעה.")
+    if resolved is not None and decision == "reject":
+        rejected_row = store.get_approval_by_approval_id(token)
+        from app.services.owner_actions import read_owner_action, reject_assaf_os_owner_action
+
+        rejected_envelope = read_owner_action(rejected_row)
+        if rejected_envelope is not None and rejected_envelope.get("kind") == "assaf_os.approve":
+            if deferred_assaf_os_ack:
+                rejected = await _execute_assaf_os_owner_decision(
+                    settings=settings,
+                    actor_id=callback["from"],
+                    proposal_id=rejected_row.resource_id,
+                    decision="reject",
+                )
+            else:
+                rejected = reject_assaf_os_owner_action(
+                    store,
+                    settings=settings,
+                    principal=Principal.owner(source="telegram", actor_id=callback["from"]),
+                    proposal_id=rejected_row.resource_id,
+                )
+            reply_text = rejected.text or {
+                "already_handled": "הדחייה כבר טופלה.",
+                "unknown": "תוצאת הדחייה אינה ודאית וממתינה לבדיקה. לא שלחתי שוב.",
+                "committed": "ההצעה כבר אושרה ובוצעה, ולכן לא ניתן לדחות אותה.",
+                "expired": "ההצעה פגה ולא בוצעה.",
+                "target_changed": "היעד השתנה וההצעה לא בוצעה.",
+                "policy_denied": "מתג העצירה פעיל. הדחייה לא נשלחה לגיליון.",
+            }.get(rejected.status, reply_text)
     # Every branch above either interpolates only server-escaped HTML (bold()/code()
     # from resolve_owner_callback_result) or a fixed Hebrew literal, except
     # outcome.text, which can carry a provider-echoed value (see
@@ -386,7 +620,12 @@ async def receive_webhook(
     if callback is not None:
         callback_is_private = is_valid_telegram_owner_context(callback, owner_ids)
         decision, token = parse_callback_token(callback.get("data", ""))
-        recognized = bool(decision and token) or _is_reminder_callback(callback.get("data", ""))
+        lead_path, lead_token = parse_lead_path_token(callback.get("data", ""))
+        recognized = (
+            bool(decision and token)
+            or bool(lead_path and lead_token)
+            or _is_reminder_callback(callback.get("data", ""))
+        )
         if not callback_is_private or not recognized:
             return await _handle_callback(
                 callback=callback,
