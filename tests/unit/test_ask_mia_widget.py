@@ -343,7 +343,9 @@ def test_widget_stitches_message_bursts() -> None:
     source = _source()
     send = _function_body(source, "sendMessage")
     flush = _function_body(source, "flushBurst")
-    assert "BURST_MS = 800" in source
+    # Keep a short coalescing window for rapid fragments while the behavioral harness
+    # below this static contract proves order, one joined POST, and stable retry IDs.
+    assert "BURST_MS = 200" in source
     assert "burstParts.push(text)" in send
     assert "if (busy) return;" not in send
     assert "burstParts.join(' ')" in flush

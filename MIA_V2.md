@@ -49,8 +49,15 @@ with a hashed credential (`X-Mia-Session-Credential` header) and posts messages 
 `app/surfaces/site_v2.py:run_site_v2_turn`. The model sees public knowledge
 (`app/brain`; sources are `llms.txt`, `llms-full.txt`, `pricing.md`) and the session —
 nothing else. Its only tool is `submit_lead`. `next_action` is `answer` or
-`contact_saved`. Every reply passes a narrative validator that fails closed on any claim
-about saving or delivery; there is one rewrite attempt, after which the reply is dropped.
+`contact_saved`. Every model-generated narrative passes a validator that fails closed on any claim
+about saving or delivery; there is one rewrite attempt, then a safe server-owned fallback.
+Pure greetings, acknowledgements and explicit delivery-status-only queries use server-owned
+replies and skip model generation and knowledge retrieval. Mixed business/contact messages
+retain the full path. Invitation, refusal and availability-question flags persist in session
+JSON. The prompt requests short, useful answers and at most one optional question or invitation,
+with a consistent AI identity. Website requests reuse a dedicated HTTP pool; stage metrics
+contain timings and counts only. See `docs/WEBSITE_CONVERSATION_RELEASE.md` for release evidence
+and limits.
 
 ## Contact capture — what turns a chat into a lead
 
