@@ -624,12 +624,19 @@ function assafOsCanProject_(workbook, proposal) {
 }
 
 function assafOsVerifyMetadata_(workbook) {
-  Object.keys(ASSAF_OS_META).forEach(function (key) {
+  var metadata = Object.keys(ASSAF_OS_META).map(function (key) {
     var spec = ASSAF_OS_META[key], sheet = workbook.getSheetByName(spec.name);
     if (!sheet) throw assafOsError_("runtime_not_installed");
     var lastRow = sheet.getLastRow();
     if (lastRow > ASSAF_OS_MAX_ROWS + 1) throw assafOsError_("metadata_capacity_exceeded");
-    var rows = sheet.getRange(1, 1, Math.max(lastRow, 1), spec.headers.length).getValues();
+    return { spec: spec, sheet: sheet, row_count: Math.max(lastRow, 1), range: "'" + spec.name + "'!A1:" + String.fromCharCode(64 + spec.headers.length) + Math.max(lastRow, 1) };
+  });
+  var response = Sheets.Spreadsheets.Values.batchGet(workbook.getId(), { ranges: metadata.map(function (item) { return item.range; }), majorDimension: "ROWS", valueRenderOption: "UNFORMATTED_VALUE", dateTimeRenderOption: "FORMATTED_STRING" });
+  if (!response || response.spreadsheetId !== workbook.getId() || !Array.isArray(response.valueRanges) || response.valueRanges.length !== metadata.length) throw assafOsError_("metadata_read_invalid");
+  metadata.forEach(function (item, position) {
+    var spec = item.spec, sheet = item.sheet, values = response.valueRanges[position].values || [];
+    if (!Array.isArray(values) || values.length > item.row_count || values.some(function (row) { return !Array.isArray(row) || row.length > spec.headers.length; })) throw assafOsError_("metadata_read_invalid");
+    var rows = Array.from({ length: item.row_count }, function (_, row) { return Array.from({ length: spec.headers.length }, function (_, column) { var value = values[row] && values[row][column]; return value == null ? "" : value; }); });
     var headers = rows[0] || [];
     if (spec.headers.some(function (value, index) { return headers[index] !== value; })) throw assafOsError_("metadata_header_drift");
     var cache = ASSAF_OS_REQUEST_READ_CACHE, cacheKey = String(sheet.getSheetId());

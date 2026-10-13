@@ -1,5 +1,12 @@
 # Assaf OS live evidence — 2026-10-13
 
+## Local latency and form usability work — 13 October 2026
+
+- Owner requested a full latency audit, bottom refresh, in-form work-list repair and explicit approval progress/expiry. Local fixes batch five metadata reads into one bounded Sheets `batchGet`, reuse only the session schema for at most five minutes, retain the current page while refreshing, preserve form drafts and revisions, add reference-list refresh and related record creation, and disable expired approvals. Unknown decision receipts still block new writes and are never auto-replayed or cleared.
+- Local evidence: 24 Script paths produced identical normalized responses and workbook effects against the exact previous metadata function. Each replaces five metadata reads with one; matrix counted reads are 774 versus 678. These are synthetic counts, not live elapsed times. All 78 Script tests and 148 frontend tests passed. Independent HEAVY review passed after five concrete UI failures were repaired and covered by new behavioral tests. Seven asset hashes and dashboard build passed. Local Chrome selected a work, filled its client/path/currency, retained input during refresh and showed proposal progress against an isolated in-memory Script harness.
+- Current code changes are LOCAL; no runtime deployment, live latency claim or financial write is recorded by this section. Direct connector range reads found an approved expense and a separate expired pending expense with no receipt/row, plus valid client/work rows. No private input values or IDs are recorded here. The requested six-payment correction is still a human approval task.
+- Prioritized plan and measurement/release boundaries are in `docs/ASSAF_OS_FINISH_PLAN.md`. Existing live release/history below remains separate from this local work.
+
 ## Latest owner acceptance — fifth lead complete
 
 - The owner explicitly requested one new card, approved it in the private Telegram chat and reported completion. A fresh exact-card read verified numeric-owner approval, executed PostgreSQL state and the completed execution claim, the exact signed committed proposal/decision receipt, and exactly one matching learning lead in the shared Sheet snapshot. There are now five real learning leads, zero test tasks, complete coverage, zero issues and no retained canonical test IDs. Earlier four-lead/expired-card observations below are historical.

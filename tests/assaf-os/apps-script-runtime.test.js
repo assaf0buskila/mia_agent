@@ -448,8 +448,8 @@ test("unchanged empty snapshot performs one raw read per sheet and no UI or proj
   assert.deepEqual(response.data.records.clients, []);
   assert.deepEqual(response.data.records.works, []);
   assert.deepEqual(h.metrics(), {
-    getValues: 13, getFormulas: 8, getLastRow: 13, getLastColumn: 16,
-    getDataRange: 8, setDataValidation: 0, batchUpdate: 0,
+    getValues: 8, getFormulas: 8, getLastRow: 13, getLastColumn: 16,
+    getDataRange: 8, setDataValidation: 0, batchUpdate: 0, batchGet: 1,
   });
   assert.equal(h.context.ASSAF_OS_REQUEST_READ_CACHE, null);
 });
@@ -465,8 +465,8 @@ test("unchanged populated snapshot keeps bounded reads and skips stable picker a
   assert.equal(response.data.records.payments[0].payment_id, "PAY_1");
   assert.equal(response.data.summary.monthly[0].paid_income_ils, 10000);
   assert.deepEqual(h.metrics(), {
-    getValues: 13, getFormulas: 8, getLastRow: 13, getLastColumn: 16,
-    getDataRange: 8, setDataValidation: 0, batchUpdate: 0,
+    getValues: 8, getFormulas: 8, getLastRow: 13, getLastColumn: 16,
+    getDataRange: 8, setDataValidation: 0, batchUpdate: 0, batchGet: 1,
   });
 });
 
@@ -481,8 +481,8 @@ test("five-lead fresh snapshot keeps metadata reads constant and performs no wri
   const response = h.call(h.request("snapshot", {}));
   assert.equal(response.data.records.leads.length, 5);
   assert.deepEqual(h.metrics(), {
-    getValues: 13, getFormulas: 8, getLastRow: 13, getLastColumn: 16,
-    getDataRange: 8, setDataValidation: 0, batchUpdate: 0,
+    getValues: 8, getFormulas: 8, getLastRow: 13, getLastColumn: 16,
+    getDataRange: 8, setDataValidation: 0, batchUpdate: 0, batchGet: 1,
   });
 });
 
@@ -494,8 +494,8 @@ test("guarded lead approval has a bounded service-call shape", () => {
   const response = approve(h, proposal, "TELEGRAM_APPROVAL");
   assert.equal(response.data.status, "committed");
   assert.deepEqual(h.metrics(), {
-    getValues: 12, getFormulas: 7, getLastRow: 19, getLastColumn: 14,
-    getDataRange: 7, setDataValidation: 0, batchUpdate: 1,
+    getValues: 7, getFormulas: 7, getLastRow: 19, getLastColumn: 14,
+    getDataRange: 7, setDataValidation: 0, batchUpdate: 1, batchGet: 1,
   });
 });
 
