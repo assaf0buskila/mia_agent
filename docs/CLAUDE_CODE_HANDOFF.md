@@ -1,5 +1,7 @@
 # Claude Code handoff — Assaf OS
 
+> **Historical checkpoint.** The sections down to "Claude Code progress" record the Codex state at 16:46 UTC on 2026-10-14. The worktree table, "no lookup code edited, no tests run" and the backlog's "no creation UUID lookup" are superseded by the progress section further down. This branch is pushed as `claude/os-creation-request-lookup` (assaf0buskila/mia_agent#107), stacked on `codex/os-readonly-export-local` (#106).
+
 Checkpoint: 2026-10-14 16:46 UTC. The owner approved the architecture direction and is considering Claude Code because Codex allowance is low. Claude Code has not been launched or contacted. Stop substantial implementation and broad test runs until the owner starts the next executor.
 
 ## Scope and safety

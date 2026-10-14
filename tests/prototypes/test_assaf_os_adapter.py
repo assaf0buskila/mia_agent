@@ -597,6 +597,13 @@ def test_creation_result_accepts_each_exact_status_decision_pair():
             id="rejected-under-approval-id",
         ),
         pytest.param(
+            _creation_response(
+                "target_changed", {"request_id": REJECTION, "status": "target_changed"},
+                past_expiry=None,
+            ),
+            id="target-changed-under-rejection-id",
+        ),
+        pytest.param(
             _creation_response("pending", {"request_id": APPROVAL, "status": "committed"}),
             id="pending-with-decision",
         ),

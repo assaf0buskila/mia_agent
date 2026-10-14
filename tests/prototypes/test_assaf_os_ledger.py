@@ -22,7 +22,12 @@ from app.prototypes.assaf_os_ledger import (
     Payment,
     _envelope,
 )
-from app.prototypes.assaf_os_primary import LocalBinding, LocalPrimaryError, LocalPrincipal
+from app.prototypes.assaf_os_primary import (
+    LocalBinding,
+    LocalPrimaryError,
+    LocalPrincipal,
+    _digest,
+)
 from sqlalchemy import create_engine, func, select, update
 from sqlalchemy.orm import Session
 
@@ -839,6 +844,30 @@ def test_creation_request_fails_closed_on_inconsistent_decision_receipt(ledger, 
     assert lookup(ledger, p["request_id"])["decision"]["status"] == "committed"
     with Session(ledger.engine) as s, s.begin():
         tamper(s, ledger.binding.workspace_id, p)
+    code("primary_verification_failed", lambda: ledger.creation_request(OWNER, p["request_id"]))
+
+
+@pytest.mark.parametrize("forged", ["committed", "target_changed"])
+def test_creation_request_rejects_approval_outcome_under_rejection_id(ledger, forged):
+    p = propose(ledger, "tasks")
+    ledger.decide(OWNER, p["proposal_id"], p["rejection_id"], "reject")
+    ws = ledger.binding.workspace_id
+    with Session(ledger.engine) as s, s.begin():
+        s.get(LedgerProposal, (ws, p["proposal_id"])).status = forged
+        s.get(LedgerReceipt, (ws, p["rejection_id"])).status = forged
+    code("primary_verification_failed", lambda: ledger.creation_request(OWNER, p["request_id"]))
+
+
+@pytest.mark.parametrize(("column", "value"), [("owner_id", "99"), ("epoch", 2)])
+def test_creation_request_owner_and_epoch_checks_hold_with_a_consistent_digest(
+    ledger, column, value
+):
+    p = propose(ledger, "tasks")
+    with Session(ledger.engine) as s, s.begin():
+        row = s.get(LedgerProposal, (ledger.binding.workspace_id, p["proposal_id"]))
+        setattr(row, column, value)
+        # A rewritten digest isolates the owner/epoch clauses from the envelope check.
+        row.envelope_digest = _digest(_envelope(row))
     code("primary_verification_failed", lambda: ledger.creation_request(OWNER, p["request_id"]))
 
 
