@@ -8,6 +8,8 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException
 
+from app.core.owner_timing import RequestTiming
+
 PREFIXES = ("/v1/owner/auth", "/v1/owner/os")
 
 
@@ -57,15 +59,22 @@ class OwnerOSBoundary:
         if scope.get("query_string", b"") and scope["path"].startswith("/v1/owner/auth"):
             return await error_response(400, "invalid_query")(scope, receive, send)
 
+        timing = RequestTiming()
+
         async def private_send(message):
             if message["type"] == "http.response.start":
+                # Only our allow-listed value may leave; drop anything a handler set itself.
                 headers = [(k, v) for k, v in message.get("headers", [])
-                           if k.lower() not in {b"cache-control", b"vary"}]
+                           if k.lower() not in {b"cache-control", b"vary", b"server-timing"}]
                 message["headers"] = headers + [
                     (b"cache-control", b"private, no-store"), (b"vary", b"Cookie, Origin"),
                     (b"x-content-type-options", b"nosniff"),
                     (b"referrer-policy", b"no-referrer"),
                 ]
+                # Empty unless authentication succeeded, and always empty on 401/403.
+                server_timing = timing.header(message["status"])
+                if server_timing:
+                    message["headers"].append((b"server-timing", server_timing.encode("ascii")))
             await send(message)
 
         if scope["method"] == "POST":
@@ -104,8 +113,9 @@ class OwnerOSBoundary:
                 return await original_receive()
 
             receive = buffered_receive
-        try:
-            await self.app(scope, receive, private_send)
-        except Exception:
-            # Never include SQL parameters, credentials, PII or exception messages.
-            await error_response(503, "source_unavailable")(scope, receive, private_send)
+        with timing.activate():
+            try:
+                await self.app(scope, receive, private_send)
+            except Exception:
+                # Never include SQL parameters, credentials, PII or exception messages.
+                await error_response(503, "source_unavailable")(scope, receive, private_send)

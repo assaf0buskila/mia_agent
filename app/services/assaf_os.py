@@ -21,6 +21,7 @@ from uuid import uuid4
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.core.config import Settings
+from app.core.owner_timing import owner_phase
 
 API_VERSION = "assaf-os.v1"
 SCHEMA_VERSION = "assaf-os-unified.v1"
@@ -663,33 +664,38 @@ class AssafOsPort:
         ).encode()
         if len(body) > MAX_BODY_BYTES:
             raise AssafOsError("validation_error", 422)
+        # Server-Timing "script" is the Apps Script round trip; "verify" is the local signature,
+        # envelope and result validation. Both are silent outside an owner OS request.
+        stage = "os_commit" if operation in UNCERTAIN_OPERATIONS else "os_read"
         try:
-            raw = _post(self.settings.assaf_os_script_url, body)
-            wrapper = json.loads(raw)
-            if not isinstance(wrapper, dict) or set(wrapper) != {"payload", "signature"}:
-                raise ValueError
-            response_payload, signature = wrapper["payload"], wrapper["signature"]
-            if (
-                not isinstance(response_payload, str)
-                or not isinstance(signature, str)
-                or not re.fullmatch(r"[0-9a-f]{64}", signature)
-                or not hmac.compare_digest(
-                    signature,
-                    hmac.new(secret, response_payload.encode(), hashlib.sha256).hexdigest(),
-                )
-            ):
-                raise ValueError
-            response = json.loads(response_payload)
-            expected = {key: value for key, value in request_value.items() if key != "data"}
-            if (
-                not isinstance(response, dict)
-                or set(response) != set(expected) | {"mode", "ok", "data"}
-                or response.get("mode") != self.settings.assaf_os_mode
-                or any(response.get(key) != value for key, value in expected.items())
-                or type(response.get("ok")) is not bool
-                or not isinstance(response.get("data"), dict)
-            ):
-                raise ValueError
+            with owner_phase("script", stage):
+                raw = _post(self.settings.assaf_os_script_url, body)
+            with owner_phase("verify", "os_verify"):
+                wrapper = json.loads(raw)
+                if not isinstance(wrapper, dict) or set(wrapper) != {"payload", "signature"}:
+                    raise ValueError
+                response_payload, signature = wrapper["payload"], wrapper["signature"]
+                if (
+                    not isinstance(response_payload, str)
+                    or not isinstance(signature, str)
+                    or not re.fullmatch(r"[0-9a-f]{64}", signature)
+                    or not hmac.compare_digest(
+                        signature,
+                        hmac.new(secret, response_payload.encode(), hashlib.sha256).hexdigest(),
+                    )
+                ):
+                    raise ValueError
+                response = json.loads(response_payload)
+                expected = {key: value for key, value in request_value.items() if key != "data"}
+                if (
+                    not isinstance(response, dict)
+                    or set(response) != set(expected) | {"mode", "ok", "data"}
+                    or response.get("mode") != self.settings.assaf_os_mode
+                    or any(response.get(key) != value for key, value in expected.items())
+                    or type(response.get("ok")) is not bool
+                    or not isinstance(response.get("data"), dict)
+                ):
+                    raise ValueError
         except AssafOsError as exc:
             if operation in UNCERTAIN_OPERATIONS and exc.status >= 500:
                 raise AssafOsError("unknown", 503) from None
@@ -723,7 +729,8 @@ class AssafOsPort:
             )
             raise AssafOsError(code, status)
         try:
-            return _validate_result(operation, response["data"], self.settings, data)
+            with owner_phase("verify", "os_verify"):
+                return _validate_result(operation, response["data"], self.settings, data)
         except (KeyError, TypeError, ValueError):
             raise AssafOsError(
                 "unknown" if operation in UNCERTAIN_OPERATIONS else "source_unavailable"

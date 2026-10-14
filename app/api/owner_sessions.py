@@ -22,6 +22,7 @@ from starlette.concurrency import run_in_threadpool
 
 from app.api.quick_leads import verify_owner_login
 from app.core.config import Settings, get_settings
+from app.core.owner_timing import mark_owner_authenticated, owner_phase
 from app.db.session import sqlalchemy_database_url
 from app.services.owner_google_login import (
     GoogleJwksUnavailable,
@@ -252,9 +253,11 @@ def get_owner_session_db(
         raise _error(503, "owner_auth_unavailable") from None
     try:
         try:
-            db.execute(text("SET LOCAL statement_timeout = '5s'"))
-            db.execute(text("SET LOCAL lock_timeout = '5s'"))
-            _validate_runtime_role(db)
+            # Server-Timing "db": connection checkout plus the per-request role-posture audit.
+            with owner_phase("db", "os_auth"):
+                db.execute(text("SET LOCAL statement_timeout = '5s'"))
+                db.execute(text("SET LOCAL lock_timeout = '5s'"))
+                _validate_runtime_role(db)
         except HTTPException:
             raise
         except SQLAlchemyError:
@@ -549,17 +552,21 @@ def require_owner_session(
     settings: Settings,
 ) -> OwnerSessionPrincipal:
     """Validate origin, opaque session, current owner allowlist/scopes/workspace."""
-    _require_origin(request, settings)
-    cookie_token = _request_cookie(request, SESSION_COOKIE)
-    try:
-        record = OwnerSessionStore(db).authenticate(cookie_token)
-    except OwnerSessionDenied:
-        raise _error(401, "owner_auth_required") from None
-    except SQLAlchemyError:
-        db.rollback()
-        _logger.warning("owner_auth reason=session_lookup_failed")
-        raise _error(503, "owner_auth_unavailable") from None
-    return _record_principal(record, settings=settings, required_scope=scope)
+    with owner_phase("auth", "os_auth"):
+        _require_origin(request, settings)
+        cookie_token = _request_cookie(request, SESSION_COOKIE)
+        try:
+            record = OwnerSessionStore(db).authenticate(cookie_token)
+        except OwnerSessionDenied:
+            raise _error(401, "owner_auth_required") from None
+        except SQLAlchemyError:
+            db.rollback()
+            _logger.warning("owner_auth reason=session_lookup_failed")
+            raise _error(503, "owner_auth_unavailable") from None
+        principal = _record_principal(record, settings=settings, required_scope=scope)
+    # Server-Timing may be sent from here on (never for a 401/403 envelope).
+    mark_owner_authenticated()
+    return principal
 
 
 def owner_scope(scope: str) -> Callable[..., OwnerSessionPrincipal]:
@@ -702,27 +709,30 @@ async def login(
         _logger.warning("owner_auth reason=login_rate_persist_failed")
         raise _error(503, "owner_auth_unavailable") from None
     try:
-        verified = verify_owner_login(body.login_proof, settings)
+        with owner_phase("auth", "os_auth"):
+            verified = verify_owner_login(body.login_proof, settings)
     except HTTPException:
         raise _error(401, "owner_auth_required") from None
+    mark_owner_authenticated()
     proof_hash, proof_authenticated_at = _proof_fields(body.login_proof)
     scopes = _configured_scopes(settings)
     _, workspace_id = _feature_settings(settings)
     if not scopes:
         raise _error(503, "owner_auth_unavailable")
     try:
-        issued = OwnerSessionStore(db).create_session(
-            owner_id=verified.actor_id,
-            workspace_id=workspace_id,
-            scopes=scopes,
-            proof_hash=proof_hash,
-            proof_authenticated_at=proof_authenticated_at,
-            challenge_cookie=challenge_cookie,
-            challenge_csrf=csrf_token or "",
-            previous_cookie=previous_cookie,
-            ttl_seconds=_session_ttl(settings),
-        )
-        db.commit()
+        with owner_phase("auth", "os_auth"):
+            issued = OwnerSessionStore(db).create_session(
+                owner_id=verified.actor_id,
+                workspace_id=workspace_id,
+                scopes=scopes,
+                proof_hash=proof_hash,
+                proof_authenticated_at=proof_authenticated_at,
+                challenge_cookie=challenge_cookie,
+                challenge_csrf=csrf_token or "",
+                previous_cookie=previous_cookie,
+                ttl_seconds=_session_ttl(settings),
+            )
+            db.commit()
     except (OwnerSessionDenied, OwnerSessionReplay):
         db.rollback()
         raise _error(401, "owner_auth_required") from None
@@ -775,36 +785,39 @@ async def google_login(
         _logger.warning("owner_auth reason=google_challenge_lookup_failed")
         raise _error(503, "owner_auth_unavailable") from None
     try:
-        verified = await run_in_threadpool(
-            verify_google_owner_token,
-            body.id_token,
-            client_id=settings.owner_os_google_client_id.strip(),
-            expected_subject=settings.owner_os_google_subject.strip(),
-            owner_id=owner_id,
-            nonce=csrf_token or "",
-        )
+        with owner_phase("auth", "os_auth"):
+            verified = await run_in_threadpool(
+                verify_google_owner_token,
+                body.id_token,
+                client_id=settings.owner_os_google_client_id.strip(),
+                expected_subject=settings.owner_os_google_subject.strip(),
+                owner_id=owner_id,
+                nonce=csrf_token or "",
+            )
     except GoogleOwnerLoginDenied:
         raise _error(401, "owner_auth_required") from None
     except GoogleJwksUnavailable:
         _logger.warning("owner_auth reason=google_jwks_unavailable")
         raise _error(503, "owner_auth_unavailable") from None
+    mark_owner_authenticated()
     scopes = _configured_scopes(settings) - ACTION_SCOPES
     _, workspace_id = _feature_settings(settings)
     if not scopes:
         raise _error(503, "owner_auth_unavailable")
     try:
-        issued = OwnerSessionStore(db).create_session(
-            owner_id=verified.owner_id,
-            workspace_id=workspace_id,
-            scopes=scopes,
-            proof_hash=verified.proof_hash,
-            proof_authenticated_at=verified.authenticated_at,
-            challenge_cookie=challenge_cookie,
-            challenge_csrf=csrf_token or "",
-            previous_cookie=previous_cookie,
-            ttl_seconds=_session_ttl(settings),
-        )
-        db.commit()
+        with owner_phase("auth", "os_auth"):
+            issued = OwnerSessionStore(db).create_session(
+                owner_id=verified.owner_id,
+                workspace_id=workspace_id,
+                scopes=scopes,
+                proof_hash=verified.proof_hash,
+                proof_authenticated_at=verified.authenticated_at,
+                challenge_cookie=challenge_cookie,
+                challenge_csrf=csrf_token or "",
+                previous_cookie=previous_cookie,
+                ttl_seconds=_session_ttl(settings),
+            )
+            db.commit()
     except (OwnerSessionDenied, OwnerSessionReplay):
         db.rollback()
         raise _error(401, "owner_auth_required") from None
@@ -826,7 +839,8 @@ def session_status(
     principal = require_owner_session(request, None, db=db, settings=settings)
     cookie_token = _request_cookie(request, SESSION_COOKIE)
     try:
-        record = OwnerSessionStore(db).authenticate(cookie_token)
+        with owner_phase("auth", "os_auth"):
+            record = OwnerSessionStore(db).authenticate(cookie_token)
     except (OwnerSessionDenied, SQLAlchemyError):
         raise _error(401, "owner_auth_required") from None
     return OwnerSessionView(
@@ -852,7 +866,8 @@ def _session_mutation_principal(
     ):
         raise _error(403, "csrf_denied")
     try:
-        record = OwnerSessionStore(db).authenticate(cookie_token)
+        with owner_phase("auth", "os_auth"):
+            record = OwnerSessionStore(db).authenticate(cookie_token)
     except OwnerSessionDenied:
         raise _error(401, "owner_auth_required") from None
     return principal, record
