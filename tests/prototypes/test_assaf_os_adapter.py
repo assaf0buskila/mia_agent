@@ -522,6 +522,114 @@ def test_creation_request_rechecks_session_scope_and_authority_every_call(adapte
     assert adapter.creation_request(request)["status"] == "pending"
 
 
+def _creation_response(status="pending", decision=None, past_expiry=False, **proposal):
+    approval_id, rejection_id = proposal.pop("ids", (APPROVAL, REJECTION))
+    return {
+        "primary_source": "postgresql",
+        "workspace_id": "synthetic_workspace",
+        "authority_epoch": 1,
+        "verified_primary": True,
+        "observed_version": 3,
+        "past_expiry": past_expiry,
+        "decision": decision,
+        "proposal": {
+            "workspace_id": "synthetic_workspace",
+            "proposal_id": "PRO_" + "a" * 32,
+            "request_id": FAKE_REQUEST,
+            "owner_id": str(OWNER),
+            "epoch": 1,
+            "approval_id": approval_id,
+            "rejection_id": rejection_id,
+            "status": status,
+        }
+        | proposal,
+    }
+
+
+FAKE_REQUEST = str(uuid4())
+APPROVAL = "1" * 8 + "-1111-4111-8111-" + "1" * 12
+REJECTION = "2" * 8 + "-2222-4222-8222-" + "2" * 12
+
+
+class ScriptedLedger:
+    binding = SimpleNamespace(
+        workspace_id="synthetic_workspace", owner_id=str(OWNER), authority_epoch=1
+    )
+
+    def __init__(self, response):
+        self.response = response
+
+    def creation_request(self, principal, request_id):
+        return self.response
+
+
+def test_creation_result_accepts_each_exact_status_decision_pair():
+    pairs = [
+        ("committed", APPROVAL),
+        ("target_changed", APPROVAL),
+        ("rejected", REJECTION),
+        ("expired", APPROVAL),
+        ("expired", REJECTION),
+    ]
+    for status, decision_id in pairs:
+        response = _creation_response(
+            status, {"request_id": decision_id, "status": status}, past_expiry=None
+        )
+        adapter = LocalPrimaryAdapter(ScriptedLedger(response), context, enabled=True)
+        assert adapter.creation_request(FAKE_REQUEST)["decision"]["request_id"] == decision_id
+    adapter = LocalPrimaryAdapter(ScriptedLedger(_creation_response()), context, enabled=True)
+    assert adapter.creation_request(FAKE_REQUEST)["status"] == "pending"
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        pytest.param(
+            _creation_response(
+                "committed", {"request_id": REJECTION, "status": "committed"}, past_expiry=None
+            ),
+            id="committed-under-rejection-id",
+        ),
+        pytest.param(
+            _creation_response(
+                "rejected", {"request_id": APPROVAL, "status": "rejected"}, past_expiry=None
+            ),
+            id="rejected-under-approval-id",
+        ),
+        pytest.param(
+            _creation_response("pending", {"request_id": APPROVAL, "status": "committed"}),
+            id="pending-with-decision",
+        ),
+        pytest.param(
+            _creation_response("committed", None, past_expiry=None), id="terminal-no-decision"
+        ),
+        pytest.param(
+            _creation_response(
+                "committed", {"request_id": APPROVAL, "status": "rejected"}, past_expiry=None
+            ),
+            id="decision-status-disagrees",
+        ),
+        pytest.param(
+            _creation_response(
+                "committed", {"request_id": APPROVAL, "status": "committed"}, past_expiry=True
+            ),
+            id="terminal-with-expiry-flag",
+        ),
+        pytest.param(_creation_response(past_expiry=None), id="pending-without-expiry-flag"),
+        pytest.param(_creation_response(workspace_id="other_workspace"), id="foreign-workspace"),
+        pytest.param(_creation_response(owner_id="99"), id="wrong-owner"),
+        pytest.param(_creation_response(epoch=2), id="wrong-epoch"),
+        pytest.param(_creation_response(request_id=str(uuid4())), id="other-request"),
+        pytest.param(_creation_response(ids=(APPROVAL, APPROVAL)), id="same-decision-ids"),
+        pytest.param(_creation_response(status="consumed"), id="unknown-status"),
+    ],
+)
+def test_creation_result_rejects_inconsistent_primary_responses(response):
+    adapter = LocalPrimaryAdapter(ScriptedLedger(response), context, enabled=True)
+    failure = error_code("inconclusive", lambda: adapter.creation_request(FAKE_REQUEST))
+    assert failure.request_id == FAKE_REQUEST
+
+
 def test_creation_request_tamper_is_inconclusive_not_unknown(adapter_setup):
     from app.prototypes.assaf_os_ledger import LedgerProposal
     from sqlalchemy.orm import Session

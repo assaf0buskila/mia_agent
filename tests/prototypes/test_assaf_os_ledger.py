@@ -1,5 +1,6 @@
 """Synthetic real-PostgreSQL acceptance for seven-entity atomic transactions."""
 
+import json
 import os
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
@@ -19,6 +20,7 @@ from app.prototypes.assaf_os_ledger import (
     LedgerWorkspace,
     LocalLedgerPrimary,
     Payment,
+    _envelope,
 )
 from app.prototypes.assaf_os_primary import LocalBinding, LocalPrimaryError, LocalPrincipal
 from sqlalchemy import create_engine, func, select, update
@@ -557,6 +559,25 @@ def ledger_state(ledger):
         workspace = s.get(LedgerWorkspace, ws)
         return {
             "counts": counts(ledger),
+            "records": {
+                name: sorted(
+                    (r.record_id, r.revision, json.dumps(r.inputs, sort_keys=True))
+                    for r in s.scalars(select(model).where(model.workspace_id == ws))
+                )
+                for name, model in MODELS.items()
+            },
+            "envelopes": sorted(
+                json.dumps(_envelope(r) | {"status": r.status}, sort_keys=True)
+                for r in s.scalars(select(LedgerProposal).where(LedgerProposal.workspace_id == ws))
+            ),
+            "events": sorted(
+                json.dumps([r.event_id, r.decision_id, r.body], sort_keys=True)
+                for r in s.scalars(select(LedgerEvent).where(LedgerEvent.workspace_id == ws))
+            ),
+            "receipt_records": sorted(
+                json.dumps([r.request_id, r.records], sort_keys=True)
+                for r in s.scalars(select(LedgerReceipt).where(LedgerReceipt.workspace_id == ws))
+            ),
             "workspace": (
                 workspace.owner_id,
                 workspace.epoch,
@@ -645,6 +666,7 @@ def test_creation_request_reports_terminal_status_and_exact_decision(ledger, sta
     found = lookup(ledger, p["request_id"])
     assert found["proposal"] == p | {"status": status}
     assert found["decision"] == {"request_id": decision_id, "status": status}
+    assert found["past_expiry"] is None
     assert found["observed_version"] == receipt["observed_version"]
     # The pointer is only a pointer: verified truth still comes from the receipt read.
     assert ledger.receipt(OWNER, found["decision"]["request_id"]) == receipt
@@ -700,9 +722,12 @@ def test_creation_request_refuses_malformed_input_and_principals_before_checkout
             )
         disabled = LocalLedgerPrimary(ledger.engine, ledger.binding)
         code("prototype_disabled", lambda: disabled.creation_request(OWNER, str(uuid4())))
+        assert checkouts == []
+        # Positive control: the listener does observe a valid lookup.
+        ledger.creation_request(OWNER, str(uuid4()))
+        assert checkouts
     finally:
         event.remove(ledger.engine, "checkout", checkout)
-    assert checkouts == []
 
 
 def test_creation_request_is_readable_from_every_owner_channel(ledger):
@@ -774,3 +799,65 @@ def test_concurrent_lookup_sees_one_snapshot_and_never_blocks_decision(ledger, m
     assert after["proposal"]["status"] == "committed"
     assert after["decision"] == {"request_id": p["approval_id"], "status": "committed"}
     assert after["observed_version"] == 1
+
+
+def _proposal_status(s, ws, p, status):
+    s.get(LedgerProposal, (ws, p["proposal_id"])).status = status
+
+
+def _receipt_status(s, ws, p, status):
+    s.get(LedgerReceipt, (ws, p["approval_id"])).status = status
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        pytest.param(
+            lambda s, ws, p: _proposal_status(s, ws, p, "pending"), id="pending-with-receipt"
+        ),
+        pytest.param(
+            lambda s, ws, p: (
+                _proposal_status(s, ws, p, "rejected"),
+                _receipt_status(s, ws, p, "rejected"),
+            ),
+            id="rejected-under-approval-id",
+        ),
+        pytest.param(
+            lambda s, ws, p: setattr(s.get(LedgerReceipt, (ws, p["approval_id"])), "epoch", 2),
+            id="receipt-epoch",
+        ),
+        pytest.param(
+            lambda s, ws, p: setattr(s.get(LedgerWorkspace, ws), "version", 0),
+            id="workspace-behind-receipt",
+        ),
+        pytest.param(lambda s, ws, p: _receipt_status(s, ws, p, "expired"), id="status-disagrees"),
+    ],
+)
+def test_creation_request_fails_closed_on_inconsistent_decision_receipt(ledger, tamper):
+    p = propose(ledger, "tasks")
+    approve(ledger, p)
+    assert lookup(ledger, p["request_id"])["decision"]["status"] == "committed"
+    with Session(ledger.engine) as s, s.begin():
+        tamper(s, ledger.binding.workspace_id, p)
+    code("primary_verification_failed", lambda: ledger.creation_request(OWNER, p["request_id"]))
+
+
+def test_creation_request_transaction_is_read_only_repeatable_read(ledger, monkeypatch):
+    from sqlalchemy import text
+
+    p = propose(ledger, "tasks")
+    read_workspace = ledger._read_workspace
+    seen = []
+
+    def observed(s):
+        seen.append(
+            (
+                s.execute(text("SHOW transaction_read_only")).scalar(),
+                s.execute(text("SHOW transaction_isolation")).scalar(),
+            )
+        )
+        return read_workspace(s)
+
+    monkeypatch.setattr(ledger, "_read_workspace", observed)
+    assert ledger.creation_request(OWNER, p["request_id"])["proposal"]["status"] == "pending"
+    assert seen == [("on", "repeatable read")]

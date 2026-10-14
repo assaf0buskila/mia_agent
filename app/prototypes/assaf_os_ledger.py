@@ -872,7 +872,8 @@ class LocalLedgerPrimary(LocalTaskPrimary):
                         "verified_primary": True,
                         "observed_version": workspace.version,
                         "proposal": _envelope(row) | {"status": row.status},
-                        "past_expiry": now >= row.expires_at,
+                        # Only meaningful while undecided; terminal outcomes come from receipts.
+                        "past_expiry": now >= row.expires_at if row.status == "pending" else None,
                         "decision": decision,
                     }
                 )

@@ -410,7 +410,6 @@ class LocalPrimaryAdapter:
             or raw.get("verified_primary") is not True
             or type(raw.get("observed_version")) is not int
             or raw["observed_version"] < 0
-            or type(raw.get("past_expiry")) is not bool
             or type(proposal) is not dict
             or type(proposal.get("proposal_id")) is not str
             or _PROPOSAL_ID_RE.fullmatch(proposal["proposal_id"]) is None
@@ -427,22 +426,28 @@ class LocalPrimaryAdapter:
             }
         ):
             raise ValueError("invalid creation response")
-        decision_ids = {
-            _canonical_uuid(proposal.get("approval_id"), "invalid_primary_response"),
-            _canonical_uuid(proposal.get("rejection_id"), "invalid_primary_response"),
-        }
-        if len(decision_ids) != 2:
+        approval_id = _canonical_uuid(proposal.get("approval_id"), "invalid_primary_response")
+        rejection_id = _canonical_uuid(proposal.get("rejection_id"), "invalid_primary_response")
+        if approval_id == rejection_id:
             raise ValueError("invalid creation response")
         if proposal["status"] == "pending":
-            if decision is not None:
-                raise ValueError("pending proposal with decision")
-        elif (
-            type(decision) is not dict
-            or set(decision) != {"request_id", "status"}
-            or decision["request_id"] not in decision_ids
-            or decision["status"] != proposal["status"]
-        ):
-            raise ValueError("terminal proposal without exact decision")
+            if decision is not None or type(raw.get("past_expiry")) is not bool:
+                raise ValueError("invalid pending creation response")
+        else:
+            allowed = {
+                "committed": {approval_id},
+                "target_changed": {approval_id},
+                "rejected": {rejection_id},
+                "expired": {approval_id, rejection_id},
+            }[proposal["status"]]
+            if (
+                raw.get("past_expiry") is not None
+                or type(decision) is not dict
+                or set(decision) != {"request_id", "status"}
+                or decision["request_id"] not in allowed
+                or decision["status"] != proposal["status"]
+            ):
+                raise ValueError("terminal proposal without exact decision")
         result = deepcopy(raw)
         result.update(self._base(context))
         result.update(
