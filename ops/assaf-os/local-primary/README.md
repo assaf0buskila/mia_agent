@@ -1,5 +1,52 @@
 # Local PostgreSQL transaction prototypes
 
+## Creation-request lookup (read-only recovery), local only
+
+Branch `codex/os-primary-creation-recovery-local`, from export-preparation commit
+`ef161ae`. A Save whose creation acknowledgement was lost is recovered by reading,
+never by replaying the POST or minting a new request ID.
+
+- `LocalLedgerPrimary.creation_request(principal, request_id)` runs in a REPEATABLE
+  READ, `SET TRANSACTION READ ONLY` transaction with no row locks. It re-verifies the
+  workspace binding and summaries, plus the proposal's owner, epoch and envelope
+  digest. It returns the immutable proposal envelope with its stored status,
+  `past_expiry` (pending only; `None` once decided) and an exact decision pointer
+  `{request_id, status}`. The pointer comes from the receipt in the same snapshot.
+  - Allowed decision IDs per terminal status: committed/target_changed → `approval_id`;
+    rejected → `rejection_id`; expired → either.
+  - A pending proposal with a receipt, a terminal proposal without its exact receipt,
+    or an epoch/version disagreement fails closed as `primary_verification_failed`.
+  - A missing row is `unknown`. That means "not proven", never "never happened".
+- `LocalPrimaryAdapter.creation_request(request_id)` validates the UUID before
+  authorization. It takes a fresh `assaf-os:read` context, so it still works while
+  mutation policy and browser verification are closed, and still enforces session
+  expiry, scope, numeric owner, workspace and epoch. It re-checks the response shape
+  and per-status decision IDs, and maps verification or unexpected failures to
+  `AdapterError('inconclusive', request_id=<exact UUID>)`.
+- Reads never expire, consume or transition a proposal, and never write
+  receipts/audit/outbox/epoch. A pending proposal past its expiry is reported as-is;
+  only an explicit decision records `expired`. The pointer is not commit proof:
+  verified truth still comes from `receipt(decision_id)`.
+- Decision IDs are returned to any owner channel that holds read scope (OS, MIA,
+  TELEGRAM_APPROVAL). This widens visibility only. `decide` still requires approve
+  scope, open mutation policy, OS browser verification, a non-MIA channel and an
+  explicit owner decision.
+- Still not done: no route, no browser/MIA transport, no server session/CSRF
+  integration, no activation.
+
+Evidence on disposable loopback PostgreSQL 16 (`assaf_os_local_creation_lookup`, port
+56211). States are `LOCAL_TESTED` only:
+- **Focused suite:** `tests/prototypes/test_assaf_os_ledger.py` +
+  `test_assaf_os_adapter.py`. 20 new or extended tests were red before implementation;
+  the round-1 review then added more. The final focused count is recorded in the
+  handoff.
+- **Mutation check:** six deliberate breakages, each caught: the decision-ID map,
+  receipt version, receipt epoch, removed READ ONLY, the adapter's ID map, and a
+  read-side expiry write.
+- **Concurrency:** a real-PG test holds a lookup snapshot open while a decision commits
+  unblocked, then sees the pre-decision state, never a mix.
+- **Independent review:** round 1 returned PASS_WITH_NITS; its fixes are in `ecec72e`.
+
 ## Adapter and synthetic import-shadow milestone
 
 The next isolated branch, `codex/os-primary-shadow-adapter-local`, starts from the
@@ -17,7 +64,8 @@ facts. They cannot come from a client payload. The current context is synthetic
 contract input, not authentication proof. Real sessions, Telegram callbacks,
 Origin/CSRF, source revalidation and production policy integration remain later work.
 
-The facade exposes `contract`, `snapshot`, `propose`, `decide` and `receipt`.
+The facade exposes `contract`, `snapshot`, `propose`, `decide`, `receipt` and
+`creation_request` (see the section above).
 It uses the existing `assaf-os:read`, `assaf-os:propose`, `assaf-os:approve` scopes.
 MIA may read/propose but cannot decide. Approval/rejection requires an explicit
 owner decision; the adapter and ledger default-off gates both remain active.
