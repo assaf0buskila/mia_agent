@@ -548,3 +548,229 @@ def test_foreign_key_constraints_bind_workspace_even_bypassing_service(ledger):
                 updated_at=NOW,
             )
         )
+
+
+def ledger_state(ledger):
+    """Every durable value a read could disturb, not only row counts."""
+    ws = ledger.binding.workspace_id
+    with Session(ledger.engine) as s:
+        workspace = s.get(LedgerWorkspace, ws)
+        return {
+            "counts": counts(ledger),
+            "workspace": (
+                workspace.owner_id,
+                workspace.epoch,
+                workspace.version,
+                workspace.summaries,
+            ),
+            "proposals": sorted(
+                (r.proposal_id, r.request_id, r.status, r.expires_at, r.envelope_digest)
+                for r in s.scalars(select(LedgerProposal).where(LedgerProposal.workspace_id == ws))
+            ),
+            "receipts": sorted(
+                (r.request_id, r.proposal_id, r.status, r.version, r.epoch)
+                for r in s.scalars(select(LedgerReceipt).where(LedgerReceipt.workspace_id == ws))
+            ),
+            "outbox": sorted(
+                (r.event_id, r.version, r.status)
+                for r in s.scalars(select(LedgerOutbox).where(LedgerOutbox.workspace_id == ws))
+            ),
+        }
+
+
+def lookup(ledger, request_id, principal=OWNER):
+    before = ledger_state(ledger)
+    result = ledger.creation_request(principal, request_id)
+    assert ledger_state(ledger) == before
+    return result
+
+
+def test_creation_request_recovers_lost_creation_ack_without_second_proposal(ledger, monkeypatch):
+    request = str(uuid4())
+    original = ledger.propose
+
+    def lost_ack(*args, **kwargs):
+        original(*args, **kwargs)
+        raise ConnectionError("synthetic-creation-ack-loss")
+
+    monkeypatch.setattr(ledger, "propose", lost_ack)
+    with pytest.raises(ConnectionError):
+        ledger.propose(OWNER, request, "tasks", data("tasks"))
+    monkeypatch.setattr(ledger, "propose", original)
+    proposals = ledger_state(ledger)["proposals"]
+    assert len(proposals) == 1
+
+    found = lookup(ledger, request)
+    proposal = found["proposal"]
+    assert found["primary_source"] == "postgresql"
+    assert found["workspace_id"] == ledger.binding.workspace_id
+    assert found["authority_epoch"] == 1
+    assert found["verified_primary"] is True
+    assert found["observed_version"] == 0
+    assert found["past_expiry"] is False
+    assert found["decision"] is None
+    assert proposal["request_id"] == request
+    assert proposal["status"] == "pending"
+    assert proposal["proposal_id"] == proposals[0][0]
+    # An exact replay returns the identical immutable envelope and decision IDs.
+    assert ledger.propose(OWNER, request, "tasks", data("tasks")) == proposal
+    assert ledger_state(ledger)["proposals"] == proposals
+    assert approve(ledger, proposal)["receipt"]["status"] == "committed"
+
+
+@pytest.mark.parametrize(
+    ("status", "decision"),
+    [
+        ("committed", "approve"),
+        ("rejected", "reject"),
+        ("expired", "approve"),
+        ("expired", "reject"),
+        ("target_changed", "approve"),
+    ],
+)
+def test_creation_request_reports_terminal_status_and_exact_decision(ledger, status, decision):
+    if status == "target_changed":
+        task = create(ledger, "tasks")
+        edit = {"record_id": task["task_id"], "expected_revision": 1}
+        p = propose(ledger, "tasks", data("tasks", title="first edit"), **edit)
+        approve(ledger, propose(ledger, "tasks", data("tasks", title="competing edit"), **edit))
+    else:
+        p = propose(ledger, "tasks", approval_expires_at=NOW + timedelta(seconds=30))
+    if status == "expired":
+        ledger.clock = lambda: NOW + timedelta(seconds=30)
+    decision_id = p["approval_id"] if decision == "approve" else p["rejection_id"]
+    receipt = ledger.decide(OWNER, p["proposal_id"], decision_id, decision)
+    assert receipt["receipt"]["status"] == status
+
+    found = lookup(ledger, p["request_id"])
+    assert found["proposal"] == p | {"status": status}
+    assert found["decision"] == {"request_id": decision_id, "status": status}
+    assert found["observed_version"] == receipt["observed_version"]
+    # The pointer is only a pointer: verified truth still comes from the receipt read.
+    assert ledger.receipt(OWNER, found["decision"]["request_id"]) == receipt
+
+
+def test_pending_past_expiry_is_reported_but_never_expired_by_a_read(ledger):
+    p = propose(ledger, "tasks", approval_expires_at=NOW + timedelta(seconds=30))
+    ledger.clock = lambda: NOW + timedelta(seconds=30)
+    found = lookup(ledger, p["request_id"])
+    assert found["proposal"]["status"] == "pending"
+    assert found["past_expiry"] is True
+    assert found["decision"] is None
+    # Only an explicit decision may record expiry.
+    assert approve(ledger, p)["receipt"]["status"] == "expired"
+
+
+def test_unknown_creation_request_stays_unknown(ledger):
+    p = propose(ledger, "tasks")
+    unknown = str(uuid4())
+    assert lookup(ledger, unknown) == {
+        "status": "unknown",
+        "request_id": unknown,
+        "verified_primary": False,
+    }
+    # Decision IDs are not creation request IDs.
+    assert lookup(ledger, p["approval_id"])["status"] == "unknown"
+    other = LocalLedgerPrimary(
+        ledger.engine,
+        LocalBinding("other_" + uuid4().hex, "12345"),
+        enabled=True,
+        clock=lambda: NOW,
+    )
+    other.initialize_local_schema()
+    assert lookup(other, p["request_id"])["status"] == "unknown"
+
+
+def test_creation_request_refuses_malformed_input_and_principals_before_checkout(ledger):
+    from sqlalchemy import event
+
+    checkouts = []
+
+    def checkout(*args):
+        checkouts.append(1)
+
+    event.listen(ledger.engine, "checkout", checkout)
+    try:
+        for bad in ("not-a-uuid", str(uuid4()).upper(), None, 7, ""):
+            code("invalid_request_id", lambda bad=bad: ledger.creation_request(OWNER, bad))
+        for principal in (None, {}, LocalPrincipal("99", "OS"), LocalPrincipal(12345, "OS")):
+            code(
+                "owner_required",
+                lambda principal=principal: ledger.creation_request(principal, str(uuid4())),
+            )
+        disabled = LocalLedgerPrimary(ledger.engine, ledger.binding)
+        code("prototype_disabled", lambda: disabled.creation_request(OWNER, str(uuid4())))
+    finally:
+        event.remove(ledger.engine, "checkout", checkout)
+    assert checkouts == []
+
+
+def test_creation_request_is_readable_from_every_owner_channel(ledger):
+    p = propose(ledger, "tasks")
+    for principal in (OWNER, MODEL, TELEGRAM):
+        found = lookup(ledger, p["request_id"], principal)
+        assert found["proposal"]["proposal_id"] == p["proposal_id"]
+
+
+def test_creation_request_fails_closed_on_owner_epoch_envelope_or_status_tamper(ledger):
+    p = propose(ledger, "tasks")
+    ws = ledger.binding.workspace_id
+    for column, value in (("owner_id", "99"), ("epoch", 2), ("approval_id", str(uuid4()))):
+        with Session(ledger.engine) as s, s.begin():
+            row = s.get(LedgerProposal, (ws, p["proposal_id"]))
+            original = getattr(row, column)
+            setattr(row, column, value)
+        code(
+            "primary_verification_failed",
+            lambda: ledger.creation_request(OWNER, p["request_id"]),
+        )
+        with Session(ledger.engine) as s, s.begin():
+            setattr(s.get(LedgerProposal, (ws, p["proposal_id"])), column, original)
+    assert lookup(ledger, p["request_id"])["proposal"] == p
+    with Session(ledger.engine) as s, s.begin():
+        s.get(LedgerProposal, (ws, p["proposal_id"])).status = "committed"
+    # A terminal status without its exact receipt is not believable.
+    code("primary_verification_failed", lambda: ledger.creation_request(OWNER, p["request_id"]))
+    with Session(ledger.engine) as s, s.begin():
+        s.execute(
+            update(LedgerWorkspace).where(LedgerWorkspace.workspace_id == ws).values(epoch=2)
+        )
+    code("authority_changed", lambda: ledger.creation_request(OWNER, p["request_id"]))
+
+
+def test_concurrent_lookup_sees_one_snapshot_and_never_blocks_decision(ledger, monkeypatch):
+    import threading
+
+    p = propose(ledger, "tasks")
+    read_workspace = ledger._read_workspace
+    snapshot_taken, decided = threading.Event(), threading.Event()
+    lookup_thread = {}
+
+    def paused(s):
+        result = read_workspace(s)
+        if threading.get_ident() == lookup_thread.get("id"):
+            snapshot_taken.set()
+            assert decided.wait(timeout=20)
+        return result
+
+    monkeypatch.setattr(ledger, "_read_workspace", paused)
+
+    def run_lookup():
+        lookup_thread["id"] = threading.get_ident()
+        return ledger.creation_request(OWNER, p["request_id"])
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        future = pool.submit(run_lookup)
+        assert snapshot_taken.wait(timeout=20)
+        # The open read-only snapshot holds no row locks, so the decision completes now.
+        receipt = pool.submit(approve, ledger, p).result(timeout=20)
+        decided.set()
+        during = future.result(timeout=20)
+    assert receipt["receipt"]["status"] == "committed"
+    assert during["proposal"]["status"] == "pending"
+    assert during["decision"] is None
+    assert during["observed_version"] == 0
+    after = ledger.creation_request(OWNER, p["request_id"])
+    assert after["proposal"]["status"] == "committed"
+    assert after["decision"] == {"request_id": p["approval_id"], "status": "committed"}
+    assert after["observed_version"] == 1

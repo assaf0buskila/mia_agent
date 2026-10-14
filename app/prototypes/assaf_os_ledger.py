@@ -808,6 +808,75 @@ class LocalLedgerPrimary(LocalTaskPrimary):
                     }
                 )
 
+    def creation_request(self, principal: LocalPrincipal, request_id: str) -> dict:
+        """Read-only recovery of a proposal by its creation request ID.
+
+        Never expires, consumes or replays anything. A missing row is ``unknown``, not
+        proof the creation never committed. Decision truth stays with ``receipt``.
+        """
+        self._require_owner(principal)
+        _uuid(request_id)
+        now = self._now()
+        with self.engine.connect().execution_options(isolation_level="REPEATABLE READ") as c:
+            with c.begin(), Session(bind=c) as s:
+                s.execute(text("SET TRANSACTION READ ONLY"))
+                workspace, _ = self._read_workspace(s)
+                row = s.scalar(
+                    select(LedgerProposal).where(
+                        LedgerProposal.workspace_id == self.binding.workspace_id,
+                        LedgerProposal.request_id == request_id,
+                    )
+                )
+                if row is None:
+                    return {
+                        "status": "unknown",
+                        "request_id": request_id,
+                        "verified_primary": False,
+                    }
+                if (
+                    row.owner_id != principal.owner_id
+                    or row.epoch != workspace.epoch
+                    or _digest(_envelope(row)) != row.envelope_digest
+                ):
+                    raise LocalPrimaryError("primary_verification_failed")
+                receipt = s.scalar(
+                    select(LedgerReceipt).where(
+                        LedgerReceipt.workspace_id == self.binding.workspace_id,
+                        LedgerReceipt.proposal_id == row.proposal_id,
+                    )
+                )
+                if receipt is None:
+                    if row.status != "pending":
+                        raise LocalPrimaryError("primary_verification_failed")
+                    decision = None
+                else:
+                    allowed = {
+                        "committed": {row.approval_id},
+                        "target_changed": {row.approval_id},
+                        "rejected": {row.rejection_id},
+                        "expired": {row.approval_id, row.rejection_id},
+                    }
+                    if (
+                        receipt.status != row.status
+                        or receipt.request_id not in allowed.get(receipt.status, ())
+                        or receipt.epoch != row.epoch
+                        or receipt.version > workspace.version
+                    ):
+                        raise LocalPrimaryError("primary_verification_failed")
+                    decision = {"request_id": receipt.request_id, "status": receipt.status}
+                return _copy(
+                    {
+                        "primary_source": "postgresql",
+                        "workspace_id": self.binding.workspace_id,
+                        "authority_epoch": workspace.epoch,
+                        "verified_primary": True,
+                        "observed_version": workspace.version,
+                        "proposal": _envelope(row) | {"status": row.status},
+                        "past_expiry": now >= row.expires_at,
+                        "decision": decision,
+                    }
+                )
+
     def snapshot(self, principal: LocalPrincipal, *, limit: int = 100, after: dict | None = None):
         self._require_owner(principal)
         if type(limit) is not int or not 1 <= limit <= 200:

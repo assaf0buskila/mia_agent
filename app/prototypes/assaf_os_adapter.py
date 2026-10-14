@@ -367,6 +367,95 @@ class LocalPrimaryAdapter:
         except Exception:
             raise AdapterError("inconclusive", decision_id=request_id) from None
 
+    def creation_request(self, request_id: str) -> dict[str, Any]:
+        """Recover a lost creation acknowledgement by reading, never by replaying the POST."""
+        request_id = _canonical_uuid(request_id, "invalid_request_id")
+        context, principal = self._context("assaf-os:read")
+        try:
+            raw = self._ledger.creation_request(principal, request_id)
+            return self._creation_result(raw, context, request_id)
+        except LocalPrimaryError as exc:
+            if exc.code == "primary_verification_failed":
+                raise AdapterError("inconclusive", request_id=request_id) from None
+            raise self._local_error(exc) from None
+        except Exception:
+            raise AdapterError("inconclusive", request_id=request_id) from None
+
+    def _creation_result(
+        self,
+        raw: Any,
+        context: TrustedOwnerContext,
+        request_id: str,
+    ) -> dict[str, Any]:
+        if type(raw) is not dict:
+            raise ValueError("invalid creation response")
+        if raw.get("status") == "unknown":
+            if raw.get("request_id") != request_id or raw.get("verified_primary") is not False:
+                raise ValueError("invalid unknown creation response")
+            return self._base(context) | {
+                "status": "unknown",
+                "request_id": request_id,
+                "observed_version": None,
+                "commit_version": None,
+                "verified_primary": False,
+                "verified_receipt": False,
+                "mirror": {"status": "pending", "separate": True},
+            }
+
+        proposal, decision = raw.get("proposal"), raw.get("decision")
+        if (
+            raw.get("primary_source") != PRIMARY_SOURCE
+            or raw.get("workspace_id") != context.workspace
+            or raw.get("authority_epoch") != context.authority_epoch
+            or raw.get("verified_primary") is not True
+            or type(raw.get("observed_version")) is not int
+            or raw["observed_version"] < 0
+            or type(raw.get("past_expiry")) is not bool
+            or type(proposal) is not dict
+            or type(proposal.get("proposal_id")) is not str
+            or _PROPOSAL_ID_RE.fullmatch(proposal["proposal_id"]) is None
+            or proposal.get("request_id") != request_id
+            or proposal.get("workspace_id") != context.workspace
+            or proposal.get("owner_id") != str(context.numeric_owner)
+            or proposal.get("epoch") != context.authority_epoch
+            or proposal.get("status") not in {
+                "pending",
+                "committed",
+                "rejected",
+                "expired",
+                "target_changed",
+            }
+        ):
+            raise ValueError("invalid creation response")
+        decision_ids = {
+            _canonical_uuid(proposal.get("approval_id"), "invalid_primary_response"),
+            _canonical_uuid(proposal.get("rejection_id"), "invalid_primary_response"),
+        }
+        if len(decision_ids) != 2:
+            raise ValueError("invalid creation response")
+        if proposal["status"] == "pending":
+            if decision is not None:
+                raise ValueError("pending proposal with decision")
+        elif (
+            type(decision) is not dict
+            or set(decision) != {"request_id", "status"}
+            or decision["request_id"] not in decision_ids
+            or decision["status"] != proposal["status"]
+        ):
+            raise ValueError("terminal proposal without exact decision")
+        result = deepcopy(raw)
+        result.update(self._base(context))
+        result.update(
+            {
+                "status": proposal["status"],
+                "request_id": request_id,
+                "commit_version": None,
+                "verified_receipt": False,
+                "mirror": {"status": "not_required", "separate": True},
+            }
+        )
+        return result
+
     def _receipt_result(
         self,
         raw: Any,

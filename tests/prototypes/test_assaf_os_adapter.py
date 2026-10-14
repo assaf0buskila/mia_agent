@@ -75,6 +75,7 @@ def test_default_off_refuses_before_authorize_or_ledger_call():
         lambda: adapter.propose(str(uuid4()), "tasks", task_input()),
     )
     error_code("adapter_disabled", lambda: adapter.receipt(str(uuid4())))
+    error_code("adapter_disabled", lambda: adapter.creation_request(str(uuid4())))
 
     assert authorizations == []
     assert ledger.calls == []
@@ -147,6 +148,8 @@ def test_public_malformed_values_fail_before_authorization_or_checkout():
     error_code("invalid_page_limit", lambda: adapter.snapshot(limit=True))
     error_code("invalid_page_cursor", lambda: adapter.snapshot(after={"tasks": "!"}))
     error_code("invalid_request_id", lambda: adapter.receipt("not-a-uuid"))
+    for bad in ("not-a-uuid", str(uuid4()).upper(), None, 7):
+        error_code("invalid_request_id", lambda bad=bad: adapter.creation_request(bad))
     error_code(
         "invalid_input_shape",
         lambda: adapter.propose(str(uuid4()), "tasks", []),
@@ -172,7 +175,7 @@ def test_context_fields_are_not_public_operation_arguments():
         "mutation_allowed",
         "browser_mutation_verified",
     }
-    for method in ("snapshot", "propose", "decide", "receipt"):
+    for method in ("snapshot", "propose", "decide", "receipt", "creation_request"):
         parameters = inspect.signature(getattr(LocalPrimaryAdapter, method)).parameters
         assert prohibited.isdisjoint(parameters)
 
@@ -404,8 +407,16 @@ def test_unknown_decision_outcomes_never_leak_exception_details():
         def decide(self, *args, **kwargs):
             raise RuntimeError("database host and secret diagnostic")
 
+        creation_request = decide
+
     decision_id = str(uuid4())
     adapter = LocalPrimaryAdapter(ExplodingLedger(), context, enabled=True)
+    creation_id = str(uuid4())
+    lookup_failure = error_code(
+        "inconclusive", lambda: adapter.creation_request(creation_id)
+    )
+    assert lookup_failure.request_id == creation_id
+    assert "database" not in str(lookup_failure)
     failure = error_code(
         "inconclusive",
         lambda: adapter.decide(
@@ -416,3 +427,109 @@ def test_unknown_decision_outcomes_never_leak_exception_details():
         decision_id=decision_id,
     )
     assert "database" not in str(failure)
+
+
+def test_creation_request_recovers_lost_creation_ack_with_policy_closed(
+    adapter_setup, monkeypatch
+):
+    adapter, ledger, state = adapter_setup
+    request = str(uuid4())
+    original_propose = ledger.propose
+
+    def lost_ack(*args, **kwargs):
+        original_propose(*args, **kwargs)
+        raise ConnectionError("synthetic detail must not escape")
+
+    monkeypatch.setattr(ledger, "propose", lost_ack)
+    failure = error_code("inconclusive", lambda: adapter.propose(request, "tasks", task_input()))
+    assert failure.request_id == request
+    monkeypatch.setattr(ledger, "propose", original_propose)
+
+    # Recovery is a read: it works while mutation policy and browser verification are closed.
+    state["context"] = replace(
+        state["context"], mutation_allowed=False, browser_mutation_verified=False
+    )
+    found = adapter.creation_request(request)
+    assert found["api_version"] == API_VERSION
+    assert found["primary_source"] == "postgresql"
+    assert found["workspace_id"] == state["context"].workspace
+    assert found["authority_epoch"] == 1
+    assert found["status"] == "pending"
+    assert found["request_id"] == request
+    assert found["verified_primary"] is True
+    assert found["verified_receipt"] is False
+    assert found["observed_version"] == 0
+    assert found["commit_version"] is None
+    assert found["past_expiry"] is False
+    assert found["decision"] is None
+    assert found["mirror"] == {"status": "not_required", "separate": True}
+    proposal = found["proposal"]
+    assert proposal["request_id"] == request
+
+    state["context"] = replace(
+        state["context"], mutation_allowed=True, browser_mutation_verified=True
+    )
+    replay = adapter.propose(request, "tasks", task_input())
+    assert {k: replay[k] for k in proposal} == proposal
+    receipt = adapter.decide(
+        proposal["proposal_id"], proposal["approval_id"], explicit_owner_decision=True
+    )
+    decided = adapter.creation_request(request)
+    assert decided["status"] == "committed"
+    assert decided["decision"] == {"request_id": proposal["approval_id"], "status": "committed"}
+    assert adapter.receipt(decided["decision"]["request_id"]) == receipt
+
+
+def test_creation_request_unknown_stays_unknown(adapter_setup):
+    adapter, _, state = adapter_setup
+    unknown = str(uuid4())
+    result = adapter.creation_request(unknown)
+    assert result == {
+        "api_version": API_VERSION,
+        "primary_source": "postgresql",
+        "workspace_id": state["context"].workspace,
+        "authority_epoch": 1,
+        "status": "unknown",
+        "request_id": unknown,
+        "observed_version": None,
+        "commit_version": None,
+        "verified_primary": False,
+        "verified_receipt": False,
+        "mirror": {"status": "pending", "separate": True},
+    }
+
+
+def test_creation_request_rechecks_session_scope_and_authority_every_call(adapter_setup):
+    adapter, _, state = adapter_setup
+    request = str(uuid4())
+    adapter.propose(request, "tasks", task_input())
+    calls = state["calls"]
+    assert adapter.creation_request(request)["status"] == "pending"
+    assert state["calls"] == calls + 1
+    good = state["context"]
+    expired = datetime.now(UTC) - timedelta(seconds=1)
+    refusals = [
+        ("authentication_expired", replace(good, auth_expires_at=expired)),
+        ("scope_denied", replace(good, scopes=frozenset({"assaf-os:propose"}))),
+        ("authority_changed", replace(good, numeric_owner=99)),
+        ("authority_changed", replace(good, workspace="other_workspace")),
+        ("authority_changed", replace(good, authority_epoch=2)),
+    ]
+    for expected, bad in refusals:
+        state["context"] = bad
+        error_code(expected, lambda: adapter.creation_request(request))
+    state["context"] = good
+    assert adapter.creation_request(request)["status"] == "pending"
+
+
+def test_creation_request_tamper_is_inconclusive_not_unknown(adapter_setup):
+    from app.prototypes.assaf_os_ledger import LedgerProposal
+    from sqlalchemy.orm import Session
+
+    adapter, ledger, _ = adapter_setup
+    request = str(uuid4())
+    proposal = adapter.propose(request, "tasks", task_input())
+    with Session(ledger.engine) as s, s.begin():
+        s.get(LedgerProposal, (ledger.binding.workspace_id, proposal["proposal_id"])).epoch = 2
+    failure = error_code("inconclusive", lambda: adapter.creation_request(request))
+    assert failure.request_id == request
