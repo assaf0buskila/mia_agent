@@ -9,6 +9,7 @@ import math
 import re
 import time
 from collections import OrderedDict
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from threading import Lock
@@ -43,6 +44,27 @@ _APPROVAL_GUARD_VERSION = 1
 _DECISION_BINDING_CACHE_MAX = 256
 _DECISION_BINDING_CACHE_LEASE_SECONDS = 60.0
 _DecisionBindingKey = tuple[str, str, str, str, str, bytes, str, int, str]
+# Each budget covers one whole Script call, including its one 302 follow. The Script's lock hold
+# does not depend on how long MIA waits, so a longer read budget means fewer 11-14 s snapshots
+# thrown away. The tests assert these from the argument _post receives.
+_SCRIPT_BUDGET_SECONDS: dict[str, float] = {
+    "schema": 15.0,
+    "proposal": 15.0,
+    "receipt": 15.0,
+    "snapshot": 25.0,
+    "propose": 25.0,
+    "approve": 25.0,
+    "reject": 25.0,
+}
+# A cold approve/reject reads the proposal first (at most 10 s), then the decide gets
+# min(25 s, 30 s - time since decide() began), so the pair ends inside the Worker's 35 s.
+_DECIDE_PREREAD_SECONDS = 10.0
+_DECIDE_TOTAL_SECONDS = 30.0
+# The validated schema only changes when the Script is republished, and a republish is always
+# followed by a MIA restart, so it is cached per process for at most a day.
+_SCHEMA_CACHE_MAX = 8
+_SCHEMA_CACHE_TTL_SECONDS = 24 * 60 * 60.0
+_SchemaCacheKey = tuple[str, str, str, str, str, bytes, str, str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +79,17 @@ class _DecisionBinding:
 
 _DECISION_BINDINGS: OrderedDict[_DecisionBindingKey, _DecisionBinding] = OrderedDict()
 _DECISION_BINDINGS_LOCK = Lock()
+
+
+@dataclass(frozen=True, slots=True)
+class _CachedSchema:
+    result: dict[str, Any]
+    inserted_monotonic: float
+    monotonic_deadline: float
+
+
+_SCHEMA_CACHE: OrderedDict[_SchemaCacheKey, _CachedSchema] = OrderedDict()
+_SCHEMA_CACHE_LOCK = Lock()
 
 # Copied from the checked-in schema contract. System/calculated keys are accepted on
 # reads, while proposals use INPUT_FIELDS only.
@@ -249,6 +282,17 @@ class DecisionRequest(StrictModel):
     request_id: str = Field(pattern=REQUEST_PATTERN)
 
 
+class _ScriptTimeout(AssafOsError):
+    """The Script call outlived its budget.
+
+    _post raises it with the public code source_unavailable. _call renames it
+    timeout_<operation> for the stage log only and maps it to the unchanged public code.
+    """
+
+    def __init__(self) -> None:
+        super().__init__("source_unavailable")
+
+
 class _NoRedirect(HTTPRedirectHandler):
     """Expose the one redirect so _post can enforce one shared time budget."""
 
@@ -265,14 +309,21 @@ def _read_response(response) -> bytes:
     return result
 
 
-def _post(url: str, body: bytes) -> bytes:
+def _timed_out(error: BaseException) -> bool:
+    # A connect timeout reaches the caller wrapped in URLError, a read timeout does not.
+    return isinstance(error, TimeoutError) or (
+        isinstance(error, URLError) and isinstance(error.reason, TimeoutError)
+    )
+
+
+def _post(url: str, body: bytes, budget: float) -> bytes:
     request = Request(
         url,
         data=body,
         headers={"Content-Type": "application/json", "Accept": "application/json"},
         method="POST",
     )
-    deadline = time.monotonic() + 15
+    deadline = time.monotonic() + budget
     opener = build_opener(_NoRedirect())
     try:
         try:
@@ -294,13 +345,15 @@ def _post(url: str, body: bytes) -> bytes:
                 raise AssafOsError("source_unavailable") from None
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise AssafOsError("source_unavailable") from None
+                raise _ScriptTimeout from None
             follow = Request(location, headers={"Accept": "application/json"}, method="GET")
             with opener.open(follow, timeout=remaining) as response:
                 return _read_response(response)
     except AssafOsError:
         raise
-    except (HTTPError, URLError, TimeoutError, OSError, ValueError):
+    except (HTTPError, URLError, TimeoutError, OSError, ValueError) as error:
+        if _timed_out(error):
+            raise _ScriptTimeout from None
         raise AssafOsError("source_unavailable") from None
 
 
@@ -605,6 +658,53 @@ def _clear_assaf_os_decision_binding_cache() -> None:
         _DECISION_BINDINGS.clear()
 
 
+def _schema_cache_key(settings: Settings, owner_id: str) -> _SchemaCacheKey:
+    return (
+        owner_id,
+        settings.assaf_os_workspace_id,
+        settings.assaf_os_workbook_id,
+        settings.assaf_os_mode,
+        settings.assaf_os_script_url,
+        hashlib.sha256(settings.assaf_os_hmac_secret.encode()).digest(),
+        API_VERSION,
+        SCHEMA_VERSION,
+    )
+
+
+def _cached_schema(key: _SchemaCacheKey) -> dict[str, Any] | None:
+    now = time.monotonic()
+    if not math.isfinite(now):
+        return None
+    with _SCHEMA_CACHE_LOCK:
+        entry = _SCHEMA_CACHE.get(key)
+        if entry is None:
+            return None
+        if now < entry.inserted_monotonic or now >= entry.monotonic_deadline:
+            del _SCHEMA_CACHE[key]
+            return None
+        _SCHEMA_CACHE.move_to_end(key)
+    return deepcopy(entry.result)
+
+
+def _remember_schema(key: _SchemaCacheKey, result: dict[str, Any]) -> None:
+    # Only a result that already passed _validate_result("schema") reaches this point.
+    now = time.monotonic()
+    deadline = now + _SCHEMA_CACHE_TTL_SECONDS
+    if not math.isfinite(now) or not math.isfinite(deadline):
+        return
+    entry = _CachedSchema(deepcopy(result), now, deadline)
+    with _SCHEMA_CACHE_LOCK:
+        _SCHEMA_CACHE.pop(key, None)
+        _SCHEMA_CACHE[key] = entry
+        while len(_SCHEMA_CACHE) > _SCHEMA_CACHE_MAX:
+            _SCHEMA_CACHE.popitem(last=False)
+
+
+def _clear_assaf_os_schema_cache() -> None:
+    with _SCHEMA_CACHE_LOCK:
+        _SCHEMA_CACHE.clear()
+
+
 class AssafOsPort:
     def __init__(self, settings: Settings, owner_id: str, *, actor_source: ActorSource):
         if (
@@ -631,7 +731,12 @@ class AssafOsPort:
         self.settings, self.owner_id, self.actor_source = settings, owner_id, actor_source
 
     def _call(
-        self, operation: str, data: dict[str, Any], *, request_id: str | None = None
+        self,
+        operation: str,
+        data: dict[str, Any],
+        *,
+        request_id: str | None = None,
+        budget: float | None = None,
     ) -> dict[str, Any]:
         if operation not in OPERATIONS or (
             operation in {"approve", "reject"}
@@ -664,12 +769,18 @@ class AssafOsPort:
         ).encode()
         if len(body) > MAX_BODY_BYTES:
             raise AssafOsError("validation_error", 422)
+        budget = _SCRIPT_BUDGET_SECONDS[operation] if budget is None else budget
         # Server-Timing "script" is the Apps Script round trip; "verify" is the local signature,
         # envelope and result validation. Both are silent outside an owner OS request.
         stage = "os_commit" if operation in UNCERTAIN_OPERATIONS else "os_read"
         try:
             with owner_phase("script", stage):
-                raw = _post(self.settings.assaf_os_script_url, body)
+                try:
+                    raw = _post(self.settings.assaf_os_script_url, body, budget)
+                except _ScriptTimeout as timeout:
+                    # The stage log records reason=timeout_<operation>, a fixed code only.
+                    timeout.code = f"timeout_{operation}"
+                    raise
             with owner_phase("verify", "os_verify"):
                 wrapper = json.loads(raw)
                 if not isinstance(wrapper, dict) or set(wrapper) != {"payload", "signature"}:
@@ -696,6 +807,11 @@ class AssafOsPort:
                     or not isinstance(response.get("data"), dict)
                 ):
                     raise ValueError
+        except _ScriptTimeout:
+            # Public codes are unchanged: source_unavailable for reads, unknown for writes.
+            raise AssafOsError(
+                "unknown" if operation in UNCERTAIN_OPERATIONS else "source_unavailable"
+            ) from None
         except AssafOsError as exc:
             if operation in UNCERTAIN_OPERATIONS and exc.status >= 500:
                 raise AssafOsError("unknown", 503) from None
@@ -737,7 +853,13 @@ class AssafOsPort:
             ) from None
 
     def schema(self) -> dict[str, Any]:
-        return self._call("schema", {})
+        key = _schema_cache_key(self.settings, self.owner_id)
+        cached = _cached_schema(key)
+        if cached is not None:
+            return cached
+        result = self._call("schema", {})
+        _remember_schema(key, result)
+        return result
 
     def snapshot(self) -> dict[str, Any]:
         return self._call("snapshot", {})
@@ -749,8 +871,8 @@ class AssafOsPort:
         _remember_decision_binding(self.settings, self.owner_id, proposal)
         return proposal
 
-    def proposal(self, proposal_id: str) -> dict[str, Any]:
-        proposal = self._call("proposal", {"proposal_id": proposal_id})
+    def proposal(self, proposal_id: str, *, budget: float | None = None) -> dict[str, Any]:
+        proposal = self._call("proposal", {"proposal_id": proposal_id}, budget=budget)
         if proposal["status"] == "pending" and proposal["proposal_id"] == proposal_id:
             _remember_decision_binding(self.settings, self.owner_id, proposal)
         else:
@@ -760,15 +882,18 @@ class AssafOsPort:
     def decide(
         self, operation: Literal["approve", "reject"], proposal_id: str, request: DecisionRequest
     ) -> dict[str, Any]:
+        started = time.monotonic()
         if self.settings.kill_switch:
             raise AssafOsError("kill_switch", 403)
+        budget: float | None = None  # None: _call applies the operation's own 25 s
         # Browser input supplies only the stable decision id. Bind it to the
         # immutable remote proposal before issuing the one non-retried decision
         # POST, so a valid id cannot be paired with a different proposal path.
         if self.actor_source == "OS":
             binding = _decision_binding(self.settings, self.owner_id, proposal_id)
+            cold = binding is None
             if binding is None:
-                proposal = self.proposal(proposal_id)
+                proposal = self.proposal(proposal_id, budget=_DECIDE_PREREAD_SECONDS)
                 binding = (
                     proposal["approval_request_id"],
                     proposal["rejection_request_id"],
@@ -776,11 +901,19 @@ class AssafOsPort:
             expected = binding[0 if operation == "approve" else 1]
             if not hmac.compare_digest(expected, request.request_id):
                 raise AssafOsError("decision_request_mismatch", 409)
+            if cold:
+                # The pre-read and the decide share one 30 s allowance. With none left, the
+                # decision is refused before anything is dispatched.
+                remaining = _DECIDE_TOTAL_SECONDS - (time.monotonic() - started)
+                if not remaining > 0:
+                    raise AssafOsError("source_unavailable")
+                budget = min(_SCRIPT_BUDGET_SECONDS[operation], remaining)
         _forget_decision_binding(self.settings, self.owner_id, proposal_id)
         return self._call(
             operation,
             {"proposal_id": proposal_id, "request_id": request.request_id},
             request_id=request.request_id,
+            budget=budget,
         )
 
     def receipt(self, request_id: str) -> dict[str, Any]:
