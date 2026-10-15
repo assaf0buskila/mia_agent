@@ -31,6 +31,25 @@ SUITE_STEP = "Prototype ledger suite on PostgreSQL 16"
 MARKER_STEP = "Mark the database disposable"
 GUARD_STEP = "Skip guard"
 
+# The suite and guard commands exactly as frozen in V2_WAVE2_CONTRACTS.md section 5. A block
+# scalar keeps one trailing newline, so each constant ends with "\n".
+SUITE_RUN = (
+    "rc=0\n"
+    "uv run pytest tests/prototypes -rs --basetemp=.cache/os-ledger-ci "
+    "> .cache/os-ledger.log 2>&1 || rc=$?\n"
+    "cat .cache/os-ledger.log\n"
+    "exit $rc\n"
+)
+GUARD_RUN = (
+    'test -s .cache/os-ledger.log || { echo "::error::no pytest log"; exit 1; }\n'
+    "if grep -Eq '^SKIPPED|[0-9]+ skipped' .cache/os-ledger.log; then\n"
+    '  echo "::error::tests/prototypes skipped a case '
+    'while MIA_OS_LOCAL_PROTOTYPE_URL is set"; exit 1\n'
+    "fi\n"
+    "grep -Eq '[0-9]+ passed' .cache/os-ledger.log || "
+    '{ echo "::error::no passing summary"; exit 1; }\n'
+)
+
 # Real pytest -rs output shapes: the "SKIPPED" short-summary line and the final summary line.
 PASSED = "........ [100%]\n238 passed in 20.96s\n"
 SKIPPED_LINE = (
@@ -101,6 +120,17 @@ def test_job_matches_the_frozen_contract() -> None:
     for flag in ("--health-interval 5s", "--health-timeout 5s", "--health-retries 10"):
         assert flag in health
     assert job["env"] == {"MIA_OS_LOCAL_PROTOTYPE_URL": URL}
+
+
+def test_suite_step_is_the_frozen_contract_command_exactly() -> None:
+    # Fragment checks are not enough. Appending -k, --deselect or a narrower path still passes
+    # them, and the skip guard stays green too, because a deselected case is not a skipped one.
+    assert _step(SUITE_STEP)["run"] == SUITE_RUN
+
+
+def test_guard_step_is_the_frozen_contract_command_exactly() -> None:
+    # The guard regex is frozen. Widening it to cover "deselected" would be a contract change.
+    assert _step(GUARD_STEP)["run"] == GUARD_RUN
 
 
 def test_ci_url_passes_the_real_disposable_ledger_guard() -> None:
