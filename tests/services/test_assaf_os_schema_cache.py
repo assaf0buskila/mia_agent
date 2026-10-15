@@ -391,11 +391,29 @@ def test_concurrent_callers_never_exceed_the_bound_or_return_a_foreign_schema(mo
         assert result["workbook_id"] == base.assaf_os_workbook_id
         return result["workspace_id"]
 
+    # Stress: 20 keys rotate through an 8-entry LRU, so steady state is (by design) almost all
+    # misses. This phase only proves the bound holds and no caller gets a foreign schema.
     with ThreadPoolExecutor(max_workers=8) as executor:
         results = list(executor.map(exercise, range(400)))
     assert len(results) == 400
     assert len(port._SCHEMA_CACHE) <= port._SCHEMA_CACHE_MAX
-    assert 20 <= len(script.calls) < 400, "the cache absorbed most of the traffic"
+    assert 20 <= len(script.calls) <= 400
+
+    # Locality: 6 fresh keys fit in the cache, so after each key's first fetch the cache must
+    # absorb the traffic. Concurrent first misses of one key are bounded by the worker count.
+    def warm(index):
+        workspace = 100 + index % 6
+        result = _port(_workspace(base, workspace)).schema()
+        assert result["workspace_id"] == f"workspace-{workspace:03d}"
+        return result["workspace_id"]
+
+    before = len(script.calls)
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        warm_results = list(executor.map(warm, range(400)))
+    fetched = len(script.calls) - before
+    assert len(warm_results) == 400
+    assert len(port._SCHEMA_CACHE) <= port._SCHEMA_CACHE_MAX
+    assert 6 <= fetched <= 6 * 8, f"the cache absorbed the repeat traffic (fetched {fetched})"
 
 
 # --------------------------------------------------------------------- the owner OS route
