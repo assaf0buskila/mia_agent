@@ -1,6 +1,9 @@
 """Private-route HTTP bounds and sanitized errors; public surfaces are unchanged."""
 
 import json
+import logging
+import re
+from contextlib import nullcontext
 from uuid import uuid4
 
 from fastapi.exception_handlers import http_exception_handler, request_validation_exception_handler
@@ -9,19 +12,34 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException
 
 from app.core.owner_timing import RequestTiming
+from app.core.owner_write import WriteDispatch, current_write_dispatch
 
 PREFIXES = ("/v1/owner/auth", "/v1/owner/os")
+_WRITE_ROUTE = re.compile(r"/v1/owner/os/unified/proposals(?:/[^/]+/(approve|reject))?")
+_LOG = logging.getLogger("mia.owner_write")
 
 
 def private_path(path: str) -> bool:
     return any(path == p or path.startswith(p + "/") for p in PREFIXES)
 
 
-def error_response(status: int, code: str) -> JSONResponse:
+def error_response(status: int, code: str, *, write_unknown: bool = False) -> JSONResponse:
+    error = {"code": code, "retryable": status in {429, 503, 504}}
+    dispatch = current_write_dispatch()
+    if dispatch is not None and 400 <= status < 600:
+        not_started = not write_unknown and dispatch.not_started
+        if not_started:
+            error["write_outcome"] = "not_started"
+        # Signed Script error codes are still external input: never log arbitrary text.
+        reason = code if re.fullmatch(r"[a-z][a-z0-9_]{1,47}", code) else "error"
+        _LOG.info(
+            "owner_os_write op=%s outcome=%s reason=%s",
+            dispatch.operation, "not_started" if not_started else "unknown", reason,
+        )
     return JSONResponse(
         status_code=status,
         content={"api_version": "owner-os.v1", "request_id": uuid4().hex,
-                 "error": {"code": code, "retryable": status in {429, 503, 504}}},
+                 "error": error},
         headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff",
                  "Referrer-Policy": "no-referrer", "Vary": "Cookie, Origin"},
     )
@@ -56,6 +74,12 @@ class OwnerOSBoundary:
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http" or not private_path(scope["path"]):
             return await self.app(scope, receive, send)
+        match = _WRITE_ROUTE.fullmatch(scope["path"]) if scope["method"] == "POST" else None
+        context = WriteDispatch(match.group(1) or "propose").activate() if match else nullcontext()
+        with context:
+            return await self._handle(scope, receive, send)
+
+    async def _handle(self, scope, receive, send):
         if scope.get("query_string", b"") and scope["path"].startswith("/v1/owner/auth"):
             return await error_response(400, "invalid_query")(scope, receive, send)
 
@@ -118,4 +142,6 @@ class OwnerOSBoundary:
                 await self.app(scope, receive, private_send)
             except Exception:
                 # Never include SQL parameters, credentials, PII or exception messages.
-                await error_response(503, "source_unavailable")(scope, receive, private_send)
+                await error_response(503, "source_unavailable", write_unknown=True)(
+                    scope, receive, private_send
+                )
