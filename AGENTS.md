@@ -34,6 +34,7 @@ Read this, then `HANDOFF.md` (current state), then `MIA_V2.md` (what exists), th
   Before deleting anything, re-grep for callers **and** for dotted-string references —
   `monkeypatch.setattr("a.b.c", …)`, capability `port="…"` — which import-greps miss.
 - Deploy only from a clean checkout at the exact CI-green SHA. Procedure in `README.md`.
+- Claude and GPT co-work through GitHub issues and PRs, with cross-agent review: `docs/COWORK.md`.
 - Do not infer live model, voice or delivery quality from mocked tests. Prove it against
   production and read the reason-code logs.
 
