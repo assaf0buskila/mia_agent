@@ -206,7 +206,7 @@ def main() -> None:
     original_post = port._post
     current: Responder | None = None
 
-    def dispatch(url: str, body: bytes) -> bytes:
+    def dispatch(url: str, body: bytes, _budget: float) -> bytes:
         assert current is not None
         return current(url, body)
 
@@ -218,6 +218,7 @@ def main() -> None:
         samples: list[dict[str, object]] = []
         for sample in range(1, SAMPLES + 1):
             port._clear_assaf_os_decision_binding_cache()
+            port._clear_assaf_os_schema_cache()  # every sample measures a cold schema call
             value = config()
             current = Responder(value)
             adapter = port.AssafOsPort(value, OWNER_ID, actor_source=actor_source)
@@ -306,6 +307,7 @@ def main() -> None:
         )
     finally:
         port._clear_assaf_os_decision_binding_cache()
+        port._clear_assaf_os_schema_cache()
         port._post = original_post
 
     output = args.output.resolve()

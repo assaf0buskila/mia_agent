@@ -193,7 +193,7 @@ def test_actual_schema_and_nullable_monthly_summary_shape_are_accepted(monkeypat
     }
     responses = iter((schema, snapshot))
     monkeypatch.setattr(
-        port, "_post", lambda _url, body: signed(body, next(responses), config)
+        port, "_post", lambda _url, body, _budget: signed(body, next(responses), config)
     )
     adapter = port.AssafOsPort(config, auth.OWNER_ID, actor_source="OS")
     assert "summary_scope" in {f["key"] for f in adapter.schema()["tabs"][0]["fields"]}
@@ -204,7 +204,7 @@ def test_receipt_lookup_uses_fresh_transport_id_and_preserves_logical_id(monkeyp
     config = settings()
     captured = {}
 
-    def respond(_url, body):
+    def respond(_url, body, _budget):
         request = json.loads(json.loads(body)["payload"])
         captured.update(request)
         result = {
@@ -233,7 +233,7 @@ def test_receipt_lookup_uses_fresh_transport_id_and_preserves_logical_id(monkeyp
 def test_actual_committed_receipt_with_reason_codes_is_accepted(monkeypatch):
     config = settings()
 
-    def respond(_url, body):
+    def respond(_url, body, _budget):
         request = json.loads(json.loads(body)["payload"])
         result = {
             "api_version": "assaf-os.v1",
@@ -263,7 +263,7 @@ def test_browser_decision_binds_stable_request_id_to_proposal_before_post(monkey
     config = settings()
     calls = []
 
-    def respond(_url, body):
+    def respond(_url, body, _budget):
         request = json.loads(json.loads(body)["payload"])
         calls.append(request)
         assert request["operation"] == "proposal"
@@ -285,7 +285,7 @@ def test_validated_propose_makes_browser_approve_and_reject_single_call(monkeypa
     config = settings()
     calls = []
 
-    def respond(_url, body):
+    def respond(_url, body, _budget):
         request = json.loads(json.loads(body)["payload"])
         calls.append(request["operation"])
         result = (
@@ -329,7 +329,7 @@ def test_browser_decision_cache_miss_keeps_guard_get_and_wrong_uuid_never_posts(
     config = settings()
     calls = []
 
-    def respond(_url, body):
+    def respond(_url, body, _budget):
         request = json.loads(json.loads(body)["payload"])
         calls.append(request["operation"])
         result = (
@@ -512,7 +512,7 @@ def test_cache_concurrency_is_atomic_and_transport_runs_without_cache_lock(monke
 
     port._remember_decision_binding(config, auth.OWNER_ID, base)
 
-    def respond(_url, body):
+    def respond(_url, body, _budget):
         acquired = port._DECISION_BINDINGS_LOCK.acquire(blocking=False)
         assert acquired
         port._DECISION_BINDINGS_LOCK.release()
@@ -534,7 +534,7 @@ def test_terminal_and_unknown_decisions_do_not_leave_reusable_binding(monkeypatc
     binding = _pending(config, "OS")
     port._remember_decision_binding(config, auth.OWNER_ID, binding)
 
-    def terminal(_url, body):
+    def terminal(_url, body, _budget):
         request = json.loads(json.loads(body)["payload"])
         calls.append(request["operation"])
         return signed(body, _decision_result(config, request, status="committed"), config)
@@ -552,7 +552,7 @@ def test_terminal_and_unknown_decisions_do_not_leave_reusable_binding(monkeypatc
     port._remember_decision_binding(config, auth.OWNER_ID, binding)
     calls.clear()
 
-    def unavailable(_url, body):
+    def unavailable(_url, body, _budget):
         request = json.loads(json.loads(body)["payload"])
         calls.append(request["operation"])
         raise port.AssafOsError("source_unavailable")
@@ -610,7 +610,7 @@ def test_old_script_proposal_without_approval_guard_fails_closed(monkeypatch):
     config = settings()
     old = _pending(config)
     old.pop("approval_guard_version")
-    monkeypatch.setattr(port, "_post", lambda _url, body: signed(body, old, config))
+    monkeypatch.setattr(port, "_post", lambda _url, body, _budget: signed(body, old, config))
     adapter = port.AssafOsPort(config, auth.OWNER_ID, actor_source="MIA")
     with pytest.raises(port.AssafOsError) as rejected:
         adapter.proposal(PROPOSAL)
@@ -644,7 +644,7 @@ def test_signed_response_binding_tamper_is_rejected(monkeypatch, field, value):
     monkeypatch.setattr(
         port,
         "_post",
-        lambda _url, body: signed(
+        lambda _url, body, _budget: signed(
             body, _pending(config), config, mutate=lambda inner: inner.update({field: value})
         ),
     )
@@ -666,7 +666,7 @@ def test_bad_signature_and_lost_propose_response_are_unknown(monkeypatch):
     monkeypatch.setattr(
         port,
         "_post",
-        lambda _url, body: signed(body, _pending(config), config, valid_signature=False),
+        lambda _url, body, _budget: signed(body, _pending(config), config, valid_signature=False),
     )
     adapter = port.AssafOsPort(config, auth.OWNER_ID, actor_source="MIA")
     change = port.ProposeRequest(
@@ -690,7 +690,7 @@ def test_bad_signature_and_lost_propose_response_are_unknown(monkeypatch):
 def test_real_session_scope_origin_csrf_and_removed_owner(sessions, monkeypatch):
     config, calls = settings(), []
 
-    def respond(_url, body):
+    def respond(_url, body, _budget):
         request = json.loads(json.loads(body)["payload"])
         calls.append(request)
         result = _schema(config) if request["operation"] == "schema" else _pending(config, "OS")

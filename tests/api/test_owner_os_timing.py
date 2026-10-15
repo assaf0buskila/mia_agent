@@ -63,7 +63,7 @@ def _pending(config):
 
 
 def _transport(config, *, delay: float = 0.0, calls: list | None = None):
-    def respond(_url, body):
+    def respond(_url, body, _budget):
         request = json.loads(json.loads(body)["payload"])
         operation = request["operation"]
         if calls is not None:
@@ -343,7 +343,7 @@ def test_authenticated_error_envelopes_carry_the_header(sessions, monkeypatch) -
         assert mismatch.json()["error"]["code"] == "decision_request_mismatch"
         assert {"auth", "script", "verify"} <= set(_timing(mismatch))
 
-        def unavailable(_url, _body):
+        def unavailable(_url, _body, _budget):
             time.sleep(0.03)
             raise port.AssafOsError("source_unavailable")
 
@@ -512,8 +512,8 @@ def test_timings_do_not_accumulate_across_requests(sessions, monkeypatch) -> Non
     config = assaf.settings()
     slow = {"delay": 0.12}
 
-    def respond(url, body):
-        return _transport(config, delay=slow["delay"])(url, body)
+    def respond(url, body, _budget):
+        return _transport(config, delay=slow["delay"])(url, body, _budget)
 
     monkeypatch.setattr(port, "_post", respond)
     with _browser(sessions, config) as browser:
@@ -594,7 +594,7 @@ def test_sentinel_never_reaches_logs_or_headers(sessions, monkeypatch, caplog) -
             responses.append(browser.get("/v1/owner/os/probe-crash", headers=ORIGIN))
             responses.append(browser.get("/v1/owner/os/probe-header", headers=ORIGIN))
 
-            def explode(_url, _body):
+            def explode(_url, _body, _budget):
                 raise RuntimeError(f"transport failed for {SENTINEL}")
 
             monkeypatch.setattr(port, "_post", explode)

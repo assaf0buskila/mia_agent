@@ -163,3 +163,13 @@ def _website_origin_and_limiter(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(TestClient, "request", request)
 
 
+@pytest.fixture(autouse=True)
+def _assaf_os_schema_cache_is_per_test() -> None:
+    """The port caches its validated schema per process; tests must not inherit each other's."""
+    from app.services import assaf_os
+
+    assaf_os._clear_assaf_os_schema_cache()
+    yield
+    assaf_os._clear_assaf_os_schema_cache()
+
+
