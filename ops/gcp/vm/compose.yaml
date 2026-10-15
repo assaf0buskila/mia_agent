@@ -51,7 +51,7 @@ services:
     entrypoint: ["python", "-m", "app.workers.os_ledger"]
     # runtime.env must contain V2-14a's demoted MAIN app DSN. The privileged ledger
     # migration DSN lives in a root-owned file mounted into this service only.
-    env_file: [/etc/mia/runtime.env, /etc/mia/os-ledger-migrate.env]
+    env_file: [/etc/mia/os-ledger-migrate.env, /etc/mia/runtime.env]
     restart: "no"
 
   app:

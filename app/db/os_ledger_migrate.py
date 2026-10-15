@@ -71,7 +71,10 @@ def apply_ledger_migrations(engine: Engine, *, main_role: str | None = None) -> 
             raise ValueError("ledger_owner_unsafe")
         if conn.scalar(text(
             "SELECT EXISTS(SELECT 1 FROM pg_auth_members "
-            "WHERE member='assaf_os_owner'::regrole)"
+            "WHERE member='assaf_os_owner'::regrole OR "
+            "(roleid='assaf_os_owner'::regrole AND NOT "
+            "(member=session_user::regrole AND admin_option "
+            "AND NOT set_option AND NOT inherit_option)))"
         )):
             raise ValueError("ledger_owner_membership_unsafe")
         conn.execute(text("CREATE SCHEMA IF NOT EXISTS assaf_os AUTHORIZATION assaf_os_owner"))
@@ -84,7 +87,8 @@ def apply_ledger_migrations(engine: Engine, *, main_role: str | None = None) -> 
         conn.execute(text("SET LOCAL ROLE assaf_os_owner"))
         conn.execute(text("SET LOCAL search_path = pg_catalog, assaf_os"))
         conn.execute(text(
-            "ALTER DEFAULT PRIVILEGES IN SCHEMA assaf_os REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC"
+            "ALTER DEFAULT PRIVILEGES FOR ROLE assaf_os_owner "
+            "REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC"
         ))
         conn.execute(text(
             "CREATE TABLE IF NOT EXISTS assaf_os.schema_migrations ("

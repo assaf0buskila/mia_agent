@@ -6,9 +6,20 @@ import os
 import re
 
 from sqlalchemy import create_engine
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.db.os_ledger_migrate import apply_ledger_migrations, validate_main_role
 from app.db.session import sqlalchemy_database_url
+
+REFUSAL_CODES = frozenset({
+    "postgres_required", "ledger_migrations_missing", "ledger_migration_not_allowlisted",
+    "ledger_migration_requires_lf", "ledger_owner_unsafe", "ledger_owner_membership_unsafe",
+    "ledger_schema_owner_unsafe", "ledger_migration_history_unknown",
+    "ledger_migration_digest_mismatch", "app_role_demote_required",
+    "app_role_database_owner_unsafe", "app_role_membership_unsafe",
+    "app_role_ledger_access_unsafe", "ledger_database_mismatch", "ledger_main_dsn_not_separate",
+    "app_role_impersonation_unsafe",
+})
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -30,9 +41,18 @@ def main(argv: list[str] | None = None) -> None:
         main_role = validate_main_role(engines[0], engines[1])
         summary = apply_ledger_migrations(engines[1], main_role=main_role)
         print(json.dumps(summary.model_dump()))
-    except Exception:
+    except Exception as exc:
         # No exception/provider text or connection URL is printed by this privileged job.
-        parser.exit(1, "ledger_migration_refused\n")
+        code = ""
+        if isinstance(exc, ValueError) and len(exc.args) == 1:
+            candidate = exc.args[0]
+            if isinstance(candidate, str) and candidate in REFUSAL_CODES:
+                code = candidate
+        elif isinstance(exc, SQLAlchemyError):
+            candidate = getattr(getattr(exc, "orig", None), "sqlstate", None)
+            if isinstance(candidate, str) and re.fullmatch(r"[0-9A-Z]{5}", candidate):
+                code = candidate
+        parser.exit(1, "ledger_migration_refused" + (f":{code}" if code else "") + "\n")
     finally:
         for engine in engines:
             engine.dispose()

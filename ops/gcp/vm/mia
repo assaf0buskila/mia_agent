@@ -210,6 +210,13 @@ case "$cmd" in
       || die "usage: mia os-ledger migrate --approved-sha <sha>"
     [[ "$3" =~ ^[0-9a-f]{40}$ ]] || die "exact approved SHA required"
     [ -f /opt/mia/tag.env ] || die "not deployed yet"
+    [ -f /etc/mia/os-ledger-migrate.env ] || die "ledger migration env file required"
+    # Refuse other keys before Compose can substitute the main DSN or approval SHA.
+    # Keep this file single-line-per-value; multiline values fail closed too.
+    awk '
+      /^[[:space:]]*(#|$)/ { next }
+      !/^[[:space:]]*MIA_OS_LEDGER_MIGRATION_DATABASE_URL=/ { exit 1 }
+    ' /etc/mia/os-ledger-migrate.env || die "ledger migration env keys refused"
     compose --profile os-ledger run --rm --no-deps -T os-ledger-migrate "$@"
     ;;
   telegram-webhook)

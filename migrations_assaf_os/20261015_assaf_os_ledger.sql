@@ -267,7 +267,7 @@ CREATE TABLE assaf_os.os_proposals (
     expected_revision BIGINT NOT NULL CHECK (expected_revision >= 0),
     mutations JSONB NOT NULL CHECK (jsonb_typeof(mutations) = 'array'),
     dependency_digest VARCHAR(64) NOT NULL,
-    source VARCHAR(32) NOT NULL,
+    source VARCHAR(32) NOT NULL CHECK (source ~ '^[A-Z][A-Z0-9_]{1,31}$'),
     credential_id VARCHAR(128),
     kind VARCHAR(24) NOT NULL CHECK
         (kind IN ('proposal', 'owner_direct', 'owner_undo', 'statement_batch', 'import')),

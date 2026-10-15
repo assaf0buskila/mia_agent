@@ -410,9 +410,10 @@ def test_existing_owner_os_roles_still_pass_after_ledger_migration(os_pg):
 
 
 def test_main_dsn_demote_gate_and_privilege_drift(ledger_db, monkeypatch, capsys):
-    from app.db.os_ledger_migrate import validate_main_role
+    from app.db.os_ledger_migrate import apply_ledger_migrations, validate_main_role
     from app.workers import os_ledger
 
+    apply_ledger_migrations(ledger_db)
     with pytest.raises(ValueError, match="not_separate"):
         validate_main_role(ledger_db, ledger_db)
     role = "ledger_main_" + uuid4().hex[:12]
@@ -545,7 +546,9 @@ def test_default_privilege_leak_rolls_back_before_commit(ledger_db, monkeypatch,
         with pytest.raises(SystemExit) as result:
             os_ledger.main(["migrate", "--approved-sha", "a" * 40])
         assert result.value.code == 1
-        assert capsys.readouterr().err == "ledger_migration_refused\n"
+        assert capsys.readouterr().err == (
+            "ledger_migration_refused:app_role_ledger_access_unsafe\n"
+        )
         with ledger_db.connect() as conn:
             assert conn.scalar(text("SELECT to_regnamespace('assaf_os')")) is None
     finally:
@@ -559,3 +562,80 @@ def test_default_privilege_leak_rolls_back_before_commit(ledger_db, monkeypatch,
             ))
             conn.execute(text(f"DROP OWNED BY {role}"))
             conn.execute(text(f"DROP ROLE {role}"))
+
+
+def test_entrypoint_reports_allowlisted_refusal(ledger_db, monkeypatch, capsys):
+    from app.workers import os_ledger
+
+    monkeypatch.setenv("MIA_BUILD_SHA", "a" * 40)
+    for name in ("MIA_DATABASE_URL", "MIA_OS_LEDGER_MIGRATION_DATABASE_URL"):
+        monkeypatch.setenv(name, ledger_db.url.render_as_string())
+    with pytest.raises(SystemExit) as result:
+        os_ledger.main(["migrate", "--approved-sha", "a" * 40])
+    assert result.value.code == 1
+    assert capsys.readouterr().err == "ledger_migration_refused:ledger_main_dsn_not_separate\n"
+
+
+@pytest.mark.parametrize("grant", [
+    "", "WITH ADMIN TRUE, SET FALSE, INHERIT FALSE",
+    "WITH ADMIN FALSE, SET FALSE, INHERIT FALSE",
+])
+def test_owner_granted_to_another_login_is_refused(ledger_db, grant):
+    from app.db.os_ledger_migrate import apply_ledger_migrations
+
+    apply_ledger_migrations(ledger_db)
+    role = "ledger_member_" + uuid4().hex[:12]
+    with ledger_db.begin() as conn:
+        conn.execute(text(f"CREATE ROLE {role} LOGIN NOINHERIT"))
+        conn.execute(text(f"GRANT assaf_os_owner TO {role} {grant}"))
+    try:
+        with pytest.raises(ValueError, match="^ledger_owner_membership_unsafe$"):
+            apply_ledger_migrations(ledger_db)
+    finally:
+        with ledger_db.begin() as conn:
+            conn.execute(text(f"REVOKE assaf_os_owner FROM {role}"))
+            conn.execute(text(f"DROP ROLE {role}"))
+
+
+def test_owner_admin_only_grant_to_migration_session_is_allowed(ledger_db):
+    from app.db.os_ledger_migrate import apply_ledger_migrations
+
+    apply_ledger_migrations(ledger_db)
+    with ledger_db.begin() as conn:
+        assert not conn.scalar(text(
+            "SELECT EXISTS(SELECT 1 FROM pg_auth_members "
+            "WHERE roleid='assaf_os_owner'::regrole AND member=session_user::regrole)"
+        ))
+        conn.execute(text(
+            "GRANT assaf_os_owner TO postgres WITH ADMIN TRUE, SET FALSE, INHERIT FALSE"
+        ))
+    try:
+        assert apply_ledger_migrations(ledger_db).already == [MIGRATION]
+    finally:
+        with ledger_db.begin() as conn:
+            conn.execute(text("REVOKE assaf_os_owner FROM postgres"))
+
+
+def test_future_owner_functions_have_no_public_execute(ledger_db):
+    from app.db.os_ledger_migrate import apply_ledger_migrations
+
+    apply_ledger_migrations(ledger_db)
+    with ledger_db.connect() as conn, conn.begin():
+        conn.execute(text("SET LOCAL ROLE assaf_os_owner"))
+        conn.execute(text(
+            "CREATE FUNCTION assaf_os.r1_private_function() RETURNS integer "
+            "LANGUAGE sql AS 'SELECT 1'"
+        ))
+        assert not conn.scalar(text(
+            "SELECT EXISTS(SELECT 1 FROM pg_proc p, "
+            "LATERAL aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) a "
+            "WHERE p.oid='assaf_os.r1_private_function()'::regprocedure "
+            "AND a.grantee=0 AND a.privilege_type='EXECUTE')"
+        ))
+        conn.rollback()
+
+
+@pytest.mark.parametrize("source", ["assistant_api", "Assistant_API", "ASSISTANT api", "A", "_OS"])
+def test_proposal_source_cannot_bypass_assistant_guards(migrated, source):
+    with pytest.raises(SQLAlchemyError), migrated.begin_nested():
+        proposal(migrated, source=source, kind="proposal", status="committed")

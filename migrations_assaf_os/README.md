@@ -79,7 +79,7 @@ and normal migration directory remain unchanged.
 `tests/db/test_assaf_os_ledger_migration.py` resets only the explicitly named loopback
 `mia_ledger_test`, executes the actual normal worker twice with no ledger schema,
 then exercises the explicit migration, guards and all three existing Owner OS role
-validators. CI's `os-ledger-postgres` job uses PostgreSQL 16 and gates the container
+validators. CI's `os-ledger-migration-postgres` job uses PostgreSQL 16 and gates the container
 job. Local red/green evidence lives under ignored `.cache/`.
 
 Binding owner choices outside this schema chunk remain: sessions 12 hours idle /

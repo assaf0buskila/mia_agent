@@ -247,16 +247,23 @@ jobs:
           c=psycopg.connect('postgresql://postgres@localhost:5432/mia_ledger_test', autocommit=True);
           c.execute('CREATE DATABASE owner_os_test'); c.close()"
       - name: Normal migration isolation and explicit ledger migration contracts
-        run: >-
-          uv run pytest tests/db/test_assaf_os_ledger_migration.py
-          --basetemp=.cache/os-ledger-ci > .cache/os-ledger-ci.log 2>&1
-      - name: Show ledger evidence
+        run: |
+          rc=0
+          uv run pytest tests/db/test_assaf_os_ledger_migration.py -rs --basetemp=.cache/os-ledger-ci > .cache/os-ledger-ci.log 2>&1 || rc=$?
+          cat .cache/os-ledger-ci.log
+          exit $rc
+      - name: Skip guard
         if: always()
-        run: cat .cache/os-ledger-ci.log
+        run: |
+          test -s .cache/os-ledger-ci.log || { echo "::error::no pytest log"; exit 1; }
+          if grep -Eq '^SKIPPED|[0-9]+ skipped' .cache/os-ledger-ci.log; then
+            echo "::error::tests/db skipped a case while ledger PostgreSQL URLs are set"; exit 1
+          fi
+          grep -Eq '[0-9]+ passed' .cache/os-ledger-ci.log || { echo "::error::no passing summary"; exit 1; }
 
   container:
     runs-on: ubuntu-latest
-    needs: [checks, postgres, quick-leads-postgres, owner-os-postgres, os-ledger-postgres]
+    needs: [checks, postgres, quick-leads-postgres, owner-os-postgres, os-ledger-postgres, os-ledger-migration-postgres]
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -264,6 +271,10 @@ jobs:
           persist-credentials: false
       - run: python scripts/assert_origin_bind.py
       - run: docker build -f deploy/Dockerfile --build-arg MIA_BUILD_SHA="${{ github.sha }}" -t mia:ci .
+      - name: Ledger migration image smoke
+        run: >-
+          docker run --rm --entrypoint python mia:ci -c
+          'from app.db.os_ledger_migrate import migration_scripts; migration_scripts()'
       - name: Nonroot startup smoke
         run: |
           docker run --rm -d --name mia-ci -p 127.0.0.1:8000:8000 -e MIA_ENV=test -e MIA_DATABASE_URL=sqlite:///:memory: mia:ci
