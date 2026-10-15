@@ -214,6 +214,46 @@ jobs:
           fi
           grep -Eq '[0-9]+ passed' .cache/os-ledger.log || { echo "::error::no passing summary"; exit 1; }
 
+  os-ledger-migration-postgres:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: mia_ledger_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d mia_ledger_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      MIA_OS_LEDGER_TEST_POSTGRES_URL: postgresql+psycopg://postgres@localhost:5432/mia_ledger_test
+      MIA_OWNER_OS_TEST_POSTGRES_URL: postgresql+psycopg://postgres@localhost:5432/owner_os_test
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.8.15"
+          python-version: "3.12"
+      - run: uv sync --frozen --group dev
+      - run: mkdir -p .cache
+      - name: Prepare isolated Owner OS posture database
+        run: >-
+          uv run python -c "import psycopg;
+          c=psycopg.connect('postgresql://postgres@localhost:5432/mia_ledger_test', autocommit=True);
+          c.execute('CREATE DATABASE owner_os_test'); c.close()"
+      - name: Normal migration isolation and explicit ledger migration contracts
+        run: >-
+          uv run pytest tests/db/test_assaf_os_ledger_migration.py
+          --basetemp=.cache/os-ledger-ci > .cache/os-ledger-ci.log 2>&1
+      - name: Show ledger evidence
+        if: always()
+        run: cat .cache/os-ledger-ci.log
+
   container:
     runs-on: ubuntu-latest
     needs: [checks, postgres, quick-leads-postgres, owner-os-postgres, os-ledger-postgres]

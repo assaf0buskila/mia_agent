@@ -18,6 +18,8 @@ POSTGRES_ONLY = frozenset(
         "20260901_linkedin_approval_parameters_text.sql",
         "20260901_owner_brief_drop_campaign_columns.sql",
         "20261011_owner_os_sessions.sql",
+        # Registered as PostgreSQL-only, but kept OUT of this runner's directory.
+        "20261015_assaf_os_ledger.sql",
     }
 )
 

@@ -13,6 +13,8 @@ usage: sudo mia <command>
   jobs pause|resume|status
                         scheduled jobs (due-scan every 15 min, knowledge ingest hourly)
   job <name>            run one job now: mia-due-scan | mia-ingest-knowledge
+  os-ledger migrate --approved-sha <sha>
+                        explicitly apply ledger schema after owner go and V2-14a
   telegram-webhook      register https://<public url>/v1/telegram/webhook with Telegram
   go-live               after DNS points here: https enable, jobs resume, webhook, first ingest
   restore <dump>        replace the database with a pg_dump custom-format file
@@ -138,7 +140,7 @@ EOF
 
 cmd="${1:-}"; shift || true
 case "$cmd" in
-  deploy|settings|https|restore|go-live)
+  deploy|settings|https|restore|go-live|os-ledger)
     exec 9>/var/lock/mia-state.lock
     flock -n 9 || die "another Mia operation is already running"
     ;;
@@ -202,6 +204,13 @@ case "$cmd" in
     exec 8>"/var/lock/mia-job-$name.lock"
     flock -n 8 || { echo "mia: $name is already running"; exit 0; }
     compose run --rm --no-deps -T app "$name"
+    ;;
+  os-ledger)
+    [ "$#" -eq 3 ] && [ "$1" = migrate ] && [ "$2" = --approved-sha ] \
+      || die "usage: mia os-ledger migrate --approved-sha <sha>"
+    [[ "$3" =~ ^[0-9a-f]{40}$ ]] || die "exact approved SHA required"
+    [ -f /opt/mia/tag.env ] || die "not deployed yet"
+    compose --profile os-ledger run --rm --no-deps -T os-ledger-migrate "$@"
     ;;
   telegram-webhook)
     compose run --rm --no-deps -T app mia-telegram-webhook
