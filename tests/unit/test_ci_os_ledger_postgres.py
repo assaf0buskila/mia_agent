@@ -31,6 +31,11 @@ SUITE_STEP = "Prototype ledger suite on PostgreSQL 16"
 MARKER_STEP = "Mark the database disposable"
 GUARD_STEP = "Skip guard"
 
+# Every key the job and its steps may carry. Anything else, such as continue-on-error, a step
+# env or an extra `if`, can leave the skip guard green over a failing or skipped suite.
+JOB_KEYS = {"runs-on", "timeout-minutes", "services", "env", "steps"}
+STEP_KEYS = {"name", "run", "uses", "with", "if"}
+
 # The suite and guard commands exactly as frozen in V2_WAVE2_CONTRACTS.md section 5. A block
 # scalar keeps one trailing newline, so each constant ends with "\n".
 SUITE_RUN = (
@@ -120,6 +125,32 @@ def test_job_matches_the_frozen_contract() -> None:
     for flag in ("--health-interval 5s", "--health-timeout 5s", "--health-retries 10"):
         assert flag in health
     assert job["env"] == {"MIA_OS_LOCAL_PROTOTYPE_URL": URL}
+
+
+def test_job_and_steps_carry_no_key_that_could_hide_a_failure() -> None:
+    # Pinning chosen keys and the two run texts leaves room for `continue-on-error` on the job or
+    # on the suite step, or an `if: false`: the guard would then see a log with no skip and a
+    # passing summary, and the job would go green over failing ledger tests.
+    job = _job()
+    assert set(job) == JOB_KEYS
+    steps = job["steps"]
+    for step in steps:
+        assert set(step) <= STEP_KEYS, f"unexpected step keys {sorted(set(step) - STEP_KEYS)}"
+        assert ("uses" in step) != ("run" in step), "a step runs a command or uses an action"
+        assert "uses" in step or "with" not in step
+    assert [step["name"] for step in steps if "if" in step] == [GUARD_STEP]
+    assert [step["if"] for step in steps if "if" in step] == ["always()"]
+    # The whole sequence is pinned, so an inserted or reordered step is a deliberate test change.
+    labels = [step.get("name") or step.get("run") or step["uses"].split("@")[0] for step in steps]
+    assert labels == [
+        "actions/checkout",
+        "astral-sh/setup-uv",
+        "uv sync --frozen --group dev",
+        "mkdir -p .cache",
+        MARKER_STEP,
+        SUITE_STEP,
+        GUARD_STEP,
+    ]
 
 
 def test_suite_step_is_the_frozen_contract_command_exactly() -> None:
