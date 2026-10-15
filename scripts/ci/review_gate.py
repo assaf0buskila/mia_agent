@@ -41,13 +41,17 @@ PASS_VERDICTS = frozenset({"PASS", "PASS_WITH_NITS"})
 VERDICTS = PASS_VERDICTS | {"FAIL", "NEEDS_CHANGES"}
 DESCRIPTION_LIMIT = 140  # GitHub rejects a longer status description with 422.
 
-_HTML_COMMENT = re.compile(r"<!--.*?(?:-->|\Z)", re.S)
+# On one line outside a fence: a backtick code span (its text is literal) or an HTML comment opener.
+_CODE_SPAN_OR_COMMENT = re.compile(
+    r"(?P<code>(?<!`)(?P<ticks>`+)(?!`).+?(?<!`)(?P=ticks)(?!`))|(?P<comment><!--)"
+)
 _FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 _HEADING = re.compile(r"^ {0,3}#{1,6}[ \t]+(.*?)[ \t#]*$")
 _CHUNK = re.compile(r"V2-\d{2}")
 _RUN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@-]{2,99}")
-_EVIDENCE_LINE = re.compile(r"[-*][ \t]+\S.*:[ \t]*(?:" + "|".join(EVIDENCE_STATES) + ")")
-_PERCENT = re.compile(r"%|\bpercent", re.I)
+# One state per line, and the capability before it may not contain a colon.
+_EVIDENCE_LINE = re.compile(r"[-*][ \t]+[^:\s][^:]*:[ \t]*(?:" + "|".join(EVIDENCE_STATES) + ")")
+_PERCENT = re.compile(r"%|\bper ?cent\b", re.I)
 _BRANCH_AGENT = re.compile(r"(claude|codex)/")
 _REPO = re.compile(r"[\w.-]+/[\w.-]+")
 _PR_NUMBER = re.compile(r"[1-9]\d{0,9}")
@@ -71,22 +75,54 @@ class _Verdict:
     order: tuple[str, int]
 
 
+def _strip_comments(line: str, in_comment: bool) -> tuple[str, bool]:
+    """Drop HTML comments from one line outside a fence. Returns the kept text and whether a
+    comment is still open at the end of the line. ``<!--`` inside a backtick code span is literal
+    text, so it opens nothing. A span is matched on one line only; an unpaired backtick is not one.
+    """
+    kept: list[str] = []
+    pos = 0
+    while True:
+        if in_comment:
+            end = line.find("-->", pos)
+            if end < 0:
+                return "".join(kept), True
+            pos, in_comment = end + 3, False
+            continue
+        found = _CODE_SPAN_OR_COMMENT.search(line, pos)
+        if found is None:
+            kept.append(line[pos:])
+            return "".join(kept), False
+        if found.group("code"):
+            kept.append(line[pos : found.end()])
+        else:
+            kept.append(line[pos : found.start()])
+            in_comment = True
+        pos = found.end()
+
+
 def _visible(text: str | None) -> str:
-    """Keep what a reader sees as ordinary text: no HTML comments, no fenced code blocks."""
+    """Keep what a reader sees as ordinary text: no HTML comments, no fenced code blocks.
+
+    Fences are found first, line by line, so ``<!--`` inside a fence is literal; and a fence
+    opener inside an HTML comment is just hidden text. An unclosed comment or fence hides the rest.
+    """
     text = (text or "").replace("\r\n", "\n").replace("\r", "\n")
     kept: list[str] = []
     fence: str | None = None
-    for line in _HTML_COMMENT.sub("", text).split("\n"):
-        opening = _FENCE.match(line)
-        if fence is None:
-            if opening:
-                fence = opening.group(1)
-            else:
-                kept.append(line)
+    in_comment = False
+    for line in text.split("\n"):
+        if fence is not None:
+            stripped = line.strip()
+            if stripped and set(stripped) == {fence[0]} and len(stripped) >= len(fence):
+                fence = None
             continue
-        stripped = line.strip()
-        if stripped and set(stripped) == {fence[0]} and len(stripped) >= len(fence):
-            fence = None
+        opening = None if in_comment else _FENCE.match(line)
+        if opening:
+            fence = opening.group(1)
+            continue
+        visible, in_comment = _strip_comments(line, in_comment)
+        kept.append(visible)
     return "\n".join(kept)
 
 
@@ -253,11 +289,20 @@ def run(
             comments=comments,
             allowed_reviewers=allowed_reviewers,
         )
+        _publish(api, repo, sha, decision.state, decision.reason, target_url)
     except Exception:
-        # Fail closed: a stale success on this SHA must not outlive a gate that cannot evaluate.
-        _publish(api, repo, sha, "error", "review-gate could not evaluate; see the run", target_url)
+        # Fail closed once the head SHA is known: an older success on this SHA must not outlive a
+        # gate that could not evaluate or publish. Best effort (the API may be what is failing);
+        # the job still goes red, and the original error is the one that surfaces. Before the PR
+        # is read there is no SHA to write to, so that failure only turns the job red.
+        try:
+            _publish(
+                api, repo, sha, "error", "review-gate could not finish; see the run", target_url
+            )
+        except Exception as exc:
+            note = f"could not write the error status ({type(exc).__name__})"
+            print(f"{CONTEXT}: {note}", file=sys.stderr)
         raise
-    _publish(api, repo, sha, decision.state, decision.reason, target_url)
     print(f"{CONTEXT} {decision.state} for {sha[:7]}: {decision.reason}")
     return decision
 

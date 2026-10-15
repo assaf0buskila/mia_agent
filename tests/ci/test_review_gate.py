@@ -12,6 +12,7 @@ from __future__ import annotations
 import io
 import json
 import re
+import subprocess
 from pathlib import Path
 from urllib.error import HTTPError
 
@@ -254,6 +255,35 @@ def test_a_verdict_after_a_closed_fence_counts() -> None:
     assert decide([comment(text)]).passed
 
 
+def test_a_comment_marker_inside_code_does_not_hide_what_follows() -> None:
+    inline = "The PR removes the `<!--` hack and the ``<!--`` one.\n\n" + verdict_text()
+    fenced = "Quoted from the diff:\n```html\n<!-- hack\n```\n" + verdict_text()
+    tilde = "~~~\n<!--\n~~~\n" + verdict_text()
+    for text in (inline, fenced, tilde):
+        assert decide([comment(text)]).passed, text
+
+
+def test_a_pr_body_that_quotes_a_comment_marker_in_code_still_reads_its_evidence() -> None:
+    inline = pr_body().replace("Adds the review gate.", "Removes the `<!--` hack.")
+    fenced = pr_body().replace("Adds the review gate.", "```html\n<!--\n```")
+    for body in (inline, fenced):
+        assert decide([comment()], body=body).passed, body
+
+
+def test_a_real_html_comment_still_hides_its_text_after_a_stray_backtick() -> None:
+    # An unpaired backtick is not a code span, so the marker after it opens a real comment.
+    stray = "a stray ` tick <!--\n" + verdict_text() + "\n-->\n"
+    assert_fails(decide([comment(stray)]), "no reviewer verdict")
+    # A comment closed on the same line hides only itself.
+    inline = "Reviewer-Agent: codex\nReviewer-Run: codex-job-7f3a2c\nHead-SHA: " + HEAD
+    assert decide([comment(inline + "\nVerdict: PASS <!-- fine -->")]).passed
+    assert_fails(decide([comment(inline + "\n<!-- Verdict: PASS -->")]), "no reviewer verdict")
+
+
+def test_a_fence_opener_inside_an_html_comment_is_just_hidden_text() -> None:
+    assert decide([comment("<!--\n```\n-->\n" + verdict_text())]).passed
+
+
 def test_crlf_bodies_are_read_like_lf_bodies() -> None:
     assert decide([comment(verdict_text().replace("\n", "\r\n"))]).passed
     assert decide([comment()], body=pr_body().replace("\n", "\r\n")).passed
@@ -343,10 +373,16 @@ def test_several_capabilities_each_carry_their_own_state() -> None:
         "- cowork queue: LOCAL_TESTED 90%",
         "- cowork queue: LOCAL_TESTED (90% of cases)",
         "- cowork queue: ninety percent",
+        "- cowork queue: ninety per cent",
     ],
 )
 def test_a_percentage_in_the_evidence_section_fails(line: str) -> None:
     assert_fails(decide([comment()], body=pr_body(evidence=(line,))), "percentage")
+
+
+def test_the_word_percentile_is_not_a_percentage() -> None:
+    evidence = ("- p95 percentile latency: LOCAL_TESTED",)
+    assert decide([comment()], body=pr_body(evidence=evidence)).passed
 
 
 @pytest.mark.parametrize(
@@ -355,6 +391,7 @@ def test_a_percentage_in_the_evidence_section_fails(line: str) -> None:
         "- cowork queue: DONE",
         "- cowork queue: local_tested",
         "- cowork queue: LOCAL_TESTED, DEPLOYED",
+        "- cowork queue: LOCAL_TESTED: DEPLOYED",
         "- cowork queue: LOCAL_TESTED (pytest passed)",
         "- cowork queue",
         "- <capability>: <STATE>",
@@ -404,10 +441,18 @@ def test_every_body_problem_is_reported_not_only_the_first() -> None:
 class FakeApi:
     """Stands in for GitHubApi: the PR comes from here, so the head SHA is read at run time."""
 
-    def __init__(self, pr: dict, comments: list[dict], *, comments_error: Exception | None = None):
+    def __init__(
+        self,
+        pr: dict,
+        comments: list[dict],
+        *,
+        comments_error: Exception | None = None,
+        post_errors: list[Exception] | None = None,
+    ):
         self.pr = pr
         self.comments = comments
         self.comments_error = comments_error
+        self.post_errors = list(post_errors or [])  # raised by the first POSTs, in order
         self.paths: list[str] = []
         self.posts: list[tuple[str, dict]] = []
 
@@ -422,6 +467,8 @@ class FakeApi:
         return self.comments
 
     def post_json(self, path: str, payload: dict) -> dict:
+        if self.post_errors:
+            raise self.post_errors.pop(0)
         self.posts.append((path, payload))
         return {}
 
@@ -437,9 +484,7 @@ def pull(
 
 
 def publish(api: FakeApi, **kwargs):
-    return review_gate.run(
-        api, repo="owner/repo", number=7, allowed_reviewers=ALLOWED, **kwargs
-    )
+    return review_gate.run(api, repo="owner/repo", number=7, allowed_reviewers=ALLOWED, **kwargs)
 
 
 def test_status_is_written_to_the_head_sha_the_api_reports_now() -> None:
@@ -487,6 +532,24 @@ def test_an_unreadable_comment_list_publishes_error_and_still_fails_the_job() ->
     assert path == f"/repos/owner/repo/statuses/{HEAD}"
     assert payload["state"] == "error"
     assert payload["context"] == "review-gate"
+
+
+def test_a_failed_final_publish_still_tries_to_write_an_error_status() -> None:
+    # A transient 5xx on the verdict POST must not leave an older success alive on this SHA.
+    api = FakeApi(pull(), [comment()], post_errors=[RuntimeError("503 on publish")])
+    with pytest.raises(RuntimeError, match="503 on publish"):
+        publish(api)
+    [(path, payload)] = api.posts
+    assert path == f"/repos/owner/repo/statuses/{HEAD}"
+    assert payload["state"] == "error"
+    assert payload["context"] == "review-gate"
+
+
+def test_when_even_the_error_status_cannot_be_written_the_first_failure_surfaces() -> None:
+    api = FakeApi(pull(), [comment()], post_errors=[RuntimeError("first"), RuntimeError("second")])
+    with pytest.raises(RuntimeError, match="^first$"):
+        publish(api)
+    assert api.posts == []
 
 
 def test_a_missing_pr_body_is_read_as_empty() -> None:
@@ -830,8 +893,89 @@ def test_agents_md_has_one_pointer_line_to_the_cowork_doc() -> None:
     assert any("The author never reviews their own work" in line for line in lines)
 
 
-def test_new_files_use_lf_line_endings() -> None:
-    for path in (WORKFLOW, PR_TEMPLATE, ISSUE_TEMPLATE, COWORK, AGENTS_MD):
-        assert b"\r" not in path.read_bytes(), path
-    script = ROOT / "scripts" / "ci" / "review_gate.py"
-    assert b"\r" not in script.read_bytes()
+def test_cowork_doc_records_the_open_decisions_and_the_stale_status_caveat() -> None:
+    text = COWORK.read_text(encoding="utf-8")
+    lowered = text.lower()
+    # A red `evaluate` job can leave an older status on the SHA; say so and say how to clear it.
+    assert "stale" in lowered
+    assert "re-run" in lowered
+    # Turning protection on makes every PR to master follow the cross-agent rule; Assaf decides.
+    assert "CLAUDE.md" in text
+    assert "every pull request" in lowered or "every pr" in lowered
+    # The gate script that grades a PR is the PR's own copy until the checkout moves to the base.
+    assert "its own copy" in lowered
+    assert "create the missing" in lowered
+
+
+# ---------------------------------------------------------------- committed line endings
+
+# Whether a file is checked out with LF or CRLF depends on the machine (core.autocrlf=true on
+# Windows writes CRLF to the working tree), so the bytes on disk say nothing about what was
+# committed. The index does: `git ls-files --eol` reports it as `i/<eol>`.
+LF_FILES = (
+    WORKFLOW,
+    PR_TEMPLATE,
+    ISSUE_TEMPLATE,
+    COWORK,
+    AGENTS_MD,
+    ROOT / "scripts" / "ci" / "review_gate.py",
+)
+
+
+def parse_index_eol(listing: str) -> dict[str, str]:
+    """Map path -> line ending recorded in the index, from `git ls-files --eol` output."""
+    found: dict[str, str] = {}
+    for line in listing.splitlines():
+        match = re.fullmatch(r"i/(\S+)\s+w/\S+\s+attr/[^\t]*\t(.+)", line.rstrip("\r"))
+        if match:
+            found[match.group(2)] = match.group(1)
+    return found
+
+
+def git_index_eol(paths: tuple[Path, ...]) -> dict[str, str] | None:
+    """Index line endings for paths, or None when ROOT is not the top of a git work tree."""
+    relative = [path.relative_to(ROOT).as_posix() for path in paths]
+    try:
+        prefix = subprocess.run(
+            ["git", "-C", str(ROOT), "rev-parse", "--show-prefix"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        listing = subprocess.run(
+            ["git", "-C", str(ROOT), "ls-files", "--eol", "--", *relative],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if prefix.returncode != 0 or prefix.stdout.strip() or listing.returncode != 0:
+        return None  # no git, not a work tree, or ROOT is only a folder inside another repo
+    return parse_index_eol(listing.stdout)
+
+
+def test_the_eol_listing_parser_reads_lf_crlf_and_mixed_index_entries() -> None:
+    listing = (
+        "i/lf    w/crlf  attr/                 \tdocs/COWORK.md\n"
+        "i/crlf  w/crlf  attr/text eol=lf      \t.github/workflows/review-gate.yml\r\n"
+        "i/mixed w/lf    attr/                 \tAGENTS.md\n"
+        "i/none  w/none  attr/                 \ttests/ci/__init__.py\n"
+        "not a listing line\n"
+    )
+    assert parse_index_eol(listing) == {
+        "docs/COWORK.md": "lf",
+        ".github/workflows/review-gate.yml": "crlf",
+        "AGENTS.md": "mixed",
+        "tests/ci/__init__.py": "none",
+    }
+
+
+def test_committed_files_use_lf_line_endings() -> None:
+    eol = git_index_eol(LF_FILES)
+    if eol is None:
+        pytest.skip("not a git work tree, so the committed line endings cannot be read")
+    for path in LF_FILES:
+        relative = path.relative_to(ROOT).as_posix()
+        assert relative in eol, f"{relative} is not tracked by git"
+        assert eol[relative] == "lf", f"{relative} is committed with {eol[relative]} line endings"
