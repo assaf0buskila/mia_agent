@@ -212,6 +212,7 @@ class Settings(BaseSettings):
     owner_os_session_database_url: str = ""
     owner_os_read_database_url: str = ""
     owner_os_action_database_url: str = ""
+    owner_os_ledger_database_url: str = Field(default="", repr=False)
     owner_os_cursor_secret: str = ""
     owner_os_session_ttl_seconds: int = Field(default=1800, gt=0, le=1800)
     owner_os_session_scopes: str = (

@@ -14,7 +14,7 @@ MIGRATIONS = ("20261015_assaf_os_ledger.sql",)
 OWNER_ROLE = "assaf_os_owner"
 # V2-15 must provision a separate NOINHERIT login and validate its exact grant map.
 RUNTIME_ROLE = "assaf_os_ledger"
-RUNTIME_DSN_ENV = "MIA_OS_LEDGER_DATABASE_URL"
+RUNTIME_DSN_ENV = "MIA_OWNER_OS_LEDGER_DATABASE_URL"
 TABLES = frozenset({
     "os_workspaces", "os_authority", "os_leads", "os_clients", "os_works", "os_payments",
     "os_time", "os_expenses", "os_tasks", "os_proposals", "os_receipts", "os_events",
