@@ -17,10 +17,23 @@ from app.core.owner_write import WriteDispatch, current_write_dispatch
 PREFIXES = ("/v1/owner/auth", "/v1/owner/os")
 _WRITE_ROUTE = re.compile(r"/v1/owner/os/unified/proposals(?:/[^/]+/(approve|reject))?")
 _LOG = logging.getLogger("mia.owner_write")
+# Body caps per route (V2_PG_CONTRACTS.md §10.5); every other private body keeps 16 KiB.
+_DEFAULT_BODY_CAP = 16_384
+_BODY_CAPS = (
+    (re.compile(r"/v1/owner/os/unified/statement-batches"), 131_072),
+    (re.compile(r"/v1/owner/auth/step-up"), 8_192),
+)
 
 
 def private_path(path: str) -> bool:
     return any(path == p or path.startswith(p + "/") for p in PREFIXES)
+
+
+def body_cap(path: str) -> int:
+    for route, cap in _BODY_CAPS:
+        if route.fullmatch(path):
+            return cap
+    return _DEFAULT_BODY_CAP
 
 
 def error_response(status: int, code: str, *, write_unknown: bool = False) -> JSONResponse:
@@ -101,7 +114,9 @@ class OwnerOSBoundary:
                     message["headers"].append((b"server-timing", server_timing.encode("ascii")))
             await send(message)
 
-        if scope["method"] == "POST":
+        # Every non-GET body is buffered, capped and checked before any handler runs.
+        if scope["method"] != "GET":
+            cap = body_cap(scope["path"])
             chunks = []
             size = 0
             while True:
@@ -110,7 +125,7 @@ class OwnerOSBoundary:
                     return
                 chunk = message.get("body", b"")
                 size += len(chunk)
-                if size > 16_384:
+                if size > cap:
                     return await error_response(413, "validation_error")(scope, receive, send)
                 chunks.append(chunk)
                 if not message.get("more_body", False):
