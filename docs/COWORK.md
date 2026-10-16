@@ -110,9 +110,13 @@ Verdict fields must be ordinary Markdown text. Fenced examples (including indent
 only look like closing fences), blockquotes and their lazy paragraph continuations, and HTML
 comments do not count. A `<!--` inside fenced code or a backtick code span is literal. Put a real
 verdict after a valid fence ending or a blank line ending a quoted paragraph.
-If an HTML comment leaves its list or quote before closing, the remaining review text is ignored.
-The parser supports the plain-line format above, not every Markdown layout; ambiguous layouts
-may be ignored. A separate comment containing just the four verdict lines avoids that ambiguity.
+If an HTML comment leaves its list or quote before closing, or a non-block comment remains open
+at the end of a line, the remaining review text is ignored.
+The parser supports the plain-line format above, not every Markdown layout; unusual layouts may
+be ignored or misread and are treated fail-closed where detected. Multiline backtick code spans
+are not tracked and may expose verdict-shaped lines that GitHub renders as inline code.
+The supported form is a separate comment containing only the plain verdict lines plus the
+Evidence section.
 
 ## Owner actions (Assaf, not done by agents)
 

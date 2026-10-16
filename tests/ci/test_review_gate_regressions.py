@@ -218,6 +218,47 @@ def test_genuine_verdicts_after_valid_markdown_block_endings_count(prefix: str) 
     assert decide([comment(prefix + verdict_text())]).passed
 
 
+def test_tight_numbered_sibling_fence_keeps_verdict_hidden() -> None:
+    indented = "\n".join("   " + line for line in (verdict_text() + "\n## Evidence").splitlines())
+    text = "1. Finding\n2. ~~~text\n" + indented + "\n   ~~~"
+    assert_fails(decide([comment(text)]), "no reviewer verdict")
+
+
+def test_tight_numbered_sibling_quote_keeps_lazy_verdict_hidden() -> None:
+    text = "1. Finding\n2. > Example\n" + verdict_text() + "\n## Evidence"
+    assert_fails(decide([comment(text)]), "no reviewer verdict")
+
+
+def test_noninterrupting_numbered_marker_keeps_lazy_quote_verdict_hidden() -> None:
+    text = "> Example\n2. Finding\n" + verdict_text() + "\n## Evidence"
+    assert_fails(decide([comment(text)]), "no reviewer verdict")
+
+
+def test_thematic_break_before_indented_fence_keeps_verdict_hidden() -> None:
+    text = "* * *\n  ~~~\n" + verdict_text() + "\n## Evidence\n  ~~~"
+    assert_fails(decide([comment(text)]), "no reviewer verdict")
+
+
+def test_inline_unclosed_comment_cannot_hide_a_real_fence() -> None:
+    text = "x <!--\n~~~\n-->\n" + verdict_text() + "\n## Evidence"
+    assert_fails(decide([comment(text)]), "no reviewer verdict")
+
+
+@pytest.mark.parametrize("first_comment", ["<!--\n-->", "<!-- closed -->"])
+def test_reopened_inline_comment_cannot_hide_a_real_fence(first_comment: str) -> None:
+    text = first_comment + " x <!--\n~~~\n-->\n" + verdict_text() + "\n## Evidence"
+    assert_fails(decide([comment(text)]), "no reviewer verdict")
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    ["1. Finding\n2. Finding\n\n", "* * *\n", "<!-- closed -->\n"],
+    ids=["tight-numbered-list", "thematic-break", "closed-html-comment"],
+)
+def test_genuine_verdict_after_list_break_or_comment_counts(prefix: str) -> None:
+    assert decide([comment(prefix + verdict_text() + "\n## Evidence")]).passed
+
+
 class ChangingPullApi(FakeApi):
     def __init__(self, pulls: list[dict], comments: list[dict], **kwargs) -> None:
         super().__init__(pulls[0], comments, **kwargs)

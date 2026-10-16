@@ -50,6 +50,7 @@ _BLOCK_QUOTE = re.compile(r"^ {0,3}>[ \t]?(.*)$")
 _HTML_COMMENT_BLOCK = re.compile(r"^ {0,3}<!--")
 _LIST_ITEM = re.compile(r"^ {0,3}(?P<marker>[-+*]|\d{1,9}[.)])(?:[ \t]+(?P<content>.*)|$)")
 _INTERRUPTING_LIST = re.compile(r"^ {0,3}(?:[-+*]|1[.)])[ \t]+\S")
+_THEMATIC_BREAK = re.compile(r" {0,3}(?:(?:\* *){3,}|(?:- *){3,}|(?:_ *){3,})")
 _HEADING = re.compile(r"^ {0,3}#{1,6}[ \t]+(.*?)[ \t#]*$")
 _CHUNK = re.compile(r"V2-\d{2}")
 _RUN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@-]{2,99}")
@@ -145,6 +146,8 @@ def _new_containers(
     """Open any alternating sequence of list items and block quotes."""
     content = line
     while True:
+        if _THEMATIC_BREAK.fullmatch(content):
+            return content
         quote = _BLOCK_QUOTE.match(content)
         if quote is not None:
             containers.append(("quote", 0))
@@ -173,7 +176,7 @@ def _interrupts_paragraph(line: str) -> bool:
         or _BLOCK_QUOTE.match(line)
         # Only a nonempty list item starting at 1 can interrupt a paragraph.
         or _INTERRUPTING_LIST.match(line)
-        or re.fullmatch(r" {0,3}(?:(?:\* *){3,}|(?:- *){3,}|(?:_ *){3,})", line)
+        or _THEMATIC_BREAK.fullmatch(line)
     )
 
 
@@ -198,7 +201,12 @@ def _visible(text: str | None) -> str:
         parsed = line.expandtabs(4)
         matched, content = _match_containers(parsed, containers)
         if matched < len(containers):
-            lazy = paragraph and content.strip() and not _interrupts_paragraph(content)
+            lazy = (
+                paragraph
+                and content.strip()
+                and not _interrupts_paragraph(content)
+                and not (containers[matched][0] == "list" and _LIST_ITEM.match(content))
+            )
             if not lazy:
                 if in_comment:
                     # An out-of-container --> may render as escaped text, leaving
@@ -215,6 +223,9 @@ def _visible(text: str | None) -> str:
             continue
         if in_comment:
             visible, in_comment = _strip_comments(content if quoted else line, True)
+            if in_comment and "-->" in content:
+                # The block comment closed, but a new inline comment stayed open.
+                break
             if not quoted:
                 kept.append(visible)
             continue
@@ -241,6 +252,10 @@ def _visible(text: str | None) -> str:
                 _, in_comment = _strip_comments(content, False)
             continue
         visible, in_comment = _strip_comments(line, False)
+        if in_comment and (not _HTML_COMMENT_BLOCK.match(content) or "-->" in content):
+            # Inline or literal openers can hide a real fence from this scanner.
+            # Stop before a later --> could expose the fenced verdict fields.
+            break
         kept.append(visible)
     return "\n".join(kept)
 
