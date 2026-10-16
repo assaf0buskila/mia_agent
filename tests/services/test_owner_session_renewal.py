@@ -385,6 +385,49 @@ def test_expired_rows_are_denied_at_expiry(factory, t0) -> None:
             )
 
 
+def test_authenticate_refuses_rows_at_or_before_the_owner_revocation_epoch(factory, t0) -> None:
+    """Contract erratum 2: a revoked or restored cookie dies at once, not after its idle window."""
+
+    def epoch(db: Session, at: datetime) -> None:
+        db.execute(text("DELETE FROM owner_os_revocations"))
+        db.execute(
+            text("INSERT INTO owner_os_revocations (owner_id, revoked_before) VALUES (:o, :r)"),
+            {"o": OWNER, "r": at},
+        )
+        db.commit()
+
+    def refused(db: Session, token: str, at: datetime) -> None:
+        with pytest.raises(svc.OwnerSessionDenied):
+            svc.OwnerSessionStore(db).authenticate(token, now=at)
+        db.rollback()
+
+    with factory() as db:
+        first = _login(db, t0, auth_at=t0 - timedelta(seconds=100))
+        successor = _renew(db, first.cookie_token, t0 + timedelta(seconds=1000))
+        later = t0 + timedelta(seconds=1001)
+        # created_at exactly at the epoch: "at or before" is refused.
+        epoch(db, t0 + timedelta(seconds=1000))
+        refused(db, successor.cookie_token, later)
+        # The row was created after the epoch, but its chain started before it.
+        epoch(db, t0 + timedelta(seconds=500))
+        refused(db, successor.cookie_token, later)
+        # Chain and row are after the epoch, but the proof time is not.
+        epoch(db, t0 - timedelta(seconds=50))
+        refused(db, successor.cookie_token, later)
+        # Strictly before every timestamp of the row: allowed again.
+        epoch(db, t0 - timedelta(seconds=101))
+        assert _use(db, successor.cookie_token, later).owner_id == OWNER
+        # Nothing was revoked or rotated by these denials.
+        assert _row(db, successor.cookie_token)["revoked_at"] is None
+
+        # Legacy rows have no chain timestamps: created_at decides.
+        _legacy(db, "legacy-cookie", created_at=t0, expires_at=t0 + timedelta(seconds=1800))
+        epoch(db, t0)
+        refused(db, "legacy-cookie", t0 + timedelta(seconds=10))
+        epoch(db, t0 - timedelta(seconds=1))
+        assert _use(db, "legacy-cookie", t0 + timedelta(seconds=10)).chain_id is None
+
+
 # --------------------------------------------------------------------------- renew
 
 

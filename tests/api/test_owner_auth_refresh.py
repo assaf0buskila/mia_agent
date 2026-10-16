@@ -140,6 +140,14 @@ def _secret(settings) -> str:
     return api._session_secret(settings)
 
 
+def _assert_max_age(attributes, expires_at: datetime, sent: datetime, answered: datetime) -> int:
+    """Max-Age = expires_at - (clock when Set-Cookie was built), floored, never the row age."""
+    max_age = int(attributes["max-age"])
+    assert int((expires_at - answered).total_seconds()) <= max_age
+    assert max_age <= int((expires_at - sent).total_seconds())
+    return max_age
+
+
 # ------------------------------------------------------------------ success contract
 
 
@@ -149,7 +157,9 @@ def test_refresh_rotates_cookie_and_csrf_and_returns_exactly_the_contract_body(s
         logged = auth._login(client)
         old = client.cookies.get(SESSION_COOKIE)
         status = client.get(SESSION, headers=ORIGIN).json()
+        sent = datetime.now(UTC)
         response = _refresh(client, logged["csrf_token"])
+        answered = datetime.now(UTC)
         assert response.status_code == 200, response.text
         new = client.cookies.get(SESSION_COOKIE)
         after = client.get(SESSION, headers=ORIGIN)
@@ -170,8 +180,9 @@ def test_refresh_rotates_cookie_and_csrf_and_returns_exactly_the_contract_body(s
     assert attributes["secure"] is None and attributes["httponly"] is None
 
     row = _row(sessions, new)
-    lifetime = int((row["expires_at"] - row["created_at"]).total_seconds())
-    assert int(attributes["max-age"]) == lifetime == 43_200
+    assert row["expires_at"] - row["created_at"] == timedelta(seconds=43_200)
+    # Max-Age is expires_at minus the clock when Set-Cookie was built.
+    _assert_max_age(attributes, row["expires_at"], sent, answered)
     assert _iso(body["expires_at"]) == row["expires_at"]
     assert _iso(body["renew_after"]) == min(
         row["created_at"] + timedelta(seconds=900), row["expires_at"]
@@ -394,25 +405,84 @@ def test_login_and_session_expose_renew_after_and_a_rotated_row_is_due(sessions)
     assert due < row["created_at"] + timedelta(seconds=900)
 
 
+def _session_cookie_attributes(response) -> dict[str, str | None]:
+    values = [
+        value for value in response.headers.get_list("set-cookie")
+        if value.startswith(SESSION_COOKIE + "=")
+    ]
+    assert len(values) == 1
+    attributes: dict[str, str | None] = {}
+    for part in values[0].split(";")[1:]:
+        key, separator, raw = part.strip().partition("=")
+        attributes[key.lower()] = raw if separator else None
+    return attributes
+
+
+def _slow(monkeypatch, name: str, seconds: float) -> None:
+    """Delay the response after the store call, before Set-Cookie is built."""
+    import time
+
+    original = getattr(svc.OwnerSessionStore, name)
+
+    def delayed(self, *args, **kwargs):
+        result = original(self, *args, **kwargs)
+        time.sleep(seconds)
+        return result
+
+    monkeypatch.setattr(svc.OwnerSessionStore, name, delayed)
+
+
 def test_login_cookie_max_age_is_the_idle_window(sessions) -> None:
     settings = auth._settings()
     settings.owner_os_session_idle_seconds = 3_600
     with _browser(sessions, settings) as client:
         challenge = client.get("/v1/owner/auth/challenge", headers=ORIGIN).json()
+        sent = datetime.now(UTC)
         response = client.post(
             "/v1/owner/auth/login",
             headers={**ORIGIN, "X-CSRF-Token": challenge["csrf_token"]},
             json={"login_proof": auth._proof()},
         )
+        answered = datetime.now(UTC)
     assert response.status_code == 200
-    session_cookies = [
-        value for value in response.headers.get_list("set-cookie")
-        if value.startswith(SESSION_COOKIE + "=")
-    ]
-    assert len(session_cookies) == 1
-    assert "Max-Age=3600" in session_cookies[0]
     row = _rows(sessions)[0]
     assert row["expires_at"] - row["created_at"] == timedelta(seconds=3_600)
+    _assert_max_age(_session_cookie_attributes(response), row["expires_at"], sent, answered)
+
+
+def test_a_delayed_login_response_shortens_max_age(sessions, monkeypatch) -> None:
+    _slow(monkeypatch, "create_session", 2.2)
+    with _browser(sessions, auth._settings()) as client:
+        challenge = client.get("/v1/owner/auth/challenge", headers=ORIGIN).json()
+        sent = datetime.now(UTC)
+        response = client.post(
+            "/v1/owner/auth/login",
+            headers={**ORIGIN, "X-CSRF-Token": challenge["csrf_token"]},
+            json={"login_proof": auth._proof()},
+        )
+        answered = datetime.now(UTC)
+    assert response.status_code == 200
+    row = _rows(sessions)[0]
+    max_age = _assert_max_age(
+        _session_cookie_attributes(response), row["expires_at"], sent, answered
+    )
+    lifetime = int((row["expires_at"] - row["created_at"]).total_seconds())
+    assert max_age <= lifetime - 2, "the cookie must not outlive the server session"
+
+
+def test_a_delayed_refresh_response_shortens_max_age(sessions, monkeypatch) -> None:
+    with _browser(sessions, auth._settings()) as client:
+        csrf = auth._login(client)["csrf_token"]
+        _slow(monkeypatch, "renew", 2.2)
+        sent = datetime.now(UTC)
+        response = _refresh(client, csrf)
+        answered = datetime.now(UTC)
+        new = client.cookies.get(SESSION_COOKIE)
+    assert response.status_code == 200
+    successor = _row(sessions, new)
+    max_age = _assert_max_age(_set_cookie(response)[2], successor["expires_at"], sent, answered)
+    lifetime = int((successor["expires_at"] - successor["created_at"]).total_seconds())
+    assert max_age <= lifetime - 2
 
 
 def test_logout_from_a_predecessor_in_grace_revokes_the_whole_chain(sessions) -> None:
@@ -483,21 +553,25 @@ def test_refresh_logs_carry_no_credentials(sessions, caplog) -> None:
         assert secret not in caplog.text
 
 
-def test_max_age_is_expires_at_minus_now_near_the_absolute_cap(sessions) -> None:
+def test_max_age_is_expires_at_minus_now_near_the_absolute_cap(sessions, monkeypatch) -> None:
     with _browser(sessions, auth._settings()) as client:
         csrf = auth._login(client)["csrf_token"]
         old = client.cookies.get(SESSION_COOKIE)
         row = _row(sessions, old)
         started = row["created_at"] - timedelta(seconds=1_209_600 - 1_000)
         _update(sessions, old, chain_started_at=started)
+        # A slow response near the cap: the cookie must still end at the cap, not later.
+        _slow(monkeypatch, "renew", 2.2)
+        sent = datetime.now(UTC)
         response = _refresh(client, csrf)
+        answered = datetime.now(UTC)
         new = client.cookies.get(SESSION_COOKIE)
     assert response.status_code == 200
     successor = _row(sessions, new)
     cap = started + timedelta(seconds=1_209_600)
     assert successor["expires_at"] == cap == _iso(response.json()["expires_at"])
-    max_age = int(_set_cookie(response)[2]["max-age"])
-    assert max_age == int((cap - successor["created_at"]).total_seconds())
+    max_age = _assert_max_age(_set_cookie(response)[2], cap, sent, answered)
+    assert max_age <= int((cap - successor["created_at"]).total_seconds()) - 2
     assert 0 < max_age <= 1_000
     assert _iso(response.json()["renew_after"]) == min(
         successor["created_at"] + timedelta(seconds=900), cap
@@ -551,6 +625,70 @@ def test_an_image_without_the_chain_columns_fails_closed() -> None:
         assert read.status_code == 503
     finally:
         engine.dispose()
+
+
+# ------------------------------------------- revocation epoch (contract erratum 2)
+
+
+def _insert_legacy(factory, token: str, *, owner: str = auth.OWNER_ID,
+                   workspace: str = auth.WORKSPACE) -> None:
+    """A pre-V2-08 row, exactly as the previous image inserted it (no chain columns)."""
+    now = datetime.now(UTC)
+    with factory() as db:
+        db.execute(
+            text(
+                "INSERT INTO owner_os_sessions (session_hash, owner_id, workspace_id,"
+                " login_proof_hash, scopes, expires_at, revoked_at, created_at)"
+                " VALUES (:h, :o, :w, :p, 'owner-os:read:contacts', :e, NULL, :c)"
+            ),
+            {"h": _hash(token), "o": owner, "w": workspace, "p": "c" * 64,
+             "e": now + timedelta(minutes=25), "c": now - timedelta(minutes=5)},
+        )
+        db.commit()
+
+
+@pytest.mark.parametrize("epoch", ["revoke_all_then_restore", "restore_epoch"])
+@pytest.mark.parametrize("kind", ["chain", "legacy"])
+def test_a_cookie_at_or_before_revoked_before_is_refused_everywhere(sessions, kind, epoch) -> None:
+    settings = auth._settings()
+    with _browser(sessions, settings) as client:
+        if kind == "chain":
+            csrf = auth._login(client)["csrf_token"]
+            cookie = client.cookies.get(SESSION_COOKIE)
+        else:
+            cookie = "legacy-restored-cookie"
+            _insert_legacy(sessions, cookie)
+            _use_cookie(client, cookie)
+            csrf = svc.session_csrf_token(cookie, secret=_secret(settings))
+        assert client.get(SESSION, headers=ORIGIN).status_code == 200, "live before the epoch"
+        if epoch == "revoke_all_then_restore":
+            revoked = client.post(
+                "/v1/owner/auth/revoke-all", headers={**ORIGIN, "X-CSRF-Token": csrf}
+            )
+            assert revoked.status_code == 204
+            # A backup restored afterwards brings the rows back without revoked_at.
+            with sessions() as db:
+                db.execute(text("UPDATE owner_os_sessions SET revoked_at = NULL"))
+                db.commit()
+        else:
+            # The restore runbook (V2-10) moves the owner's epoch to the restore time.
+            with sessions() as db:
+                db.execute(
+                    text("INSERT INTO owner_os_revocations (owner_id, revoked_before)"
+                         " VALUES (:o, :r)"),
+                    {"o": auth.OWNER_ID, "r": datetime.now(UTC)},
+                )
+                db.commit()
+        _use_cookie(client, cookie)
+        status = client.get(SESSION, headers=ORIGIN)
+        read = client.get("/read", headers=ORIGIN)
+        refresh = _refresh(client, csrf)
+    for response in (status, read, refresh):
+        assert response.status_code == 401, response.text
+        assert _code(response) == "owner_auth_required"
+        assert "server-timing" not in response.headers
+    _assert_cleared(refresh)
+    assert all(r["successor_hash"] is None for r in _rows(sessions))
 
 
 # ------------------------------------------------------------------ PostgreSQL
@@ -681,3 +819,45 @@ def test_pg_new_image_without_the_chain_columns_fails_closed() -> None:
     for response in (status, refresh):
         assert (response.status_code, _code(response)) == (503, "owner_auth_unavailable")
     assert read.status_code == 503
+
+
+@pytest.mark.parametrize("kind", ["chain", "legacy"])
+def test_pg_a_cookie_at_or_before_revoked_before_is_refused_everywhere(os_pg, kind) -> None:
+    client, settings, engine, _urls = os_pg
+    if kind == "chain":
+        csrf = pg.login(client)
+        cookie = client.cookies.get(SESSION_COOKIE)
+    else:
+        cookie = "legacy-restored-cookie"
+        now = datetime.now(UTC)
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO owner_os_sessions (session_hash, owner_id, workspace_id,"
+                    " login_proof_hash, scopes, expires_at, revoked_at, created_at)"
+                    " VALUES (:h, :o, 'assafweb', :p, 'owner-os:read:contacts', :e, NULL, :c)"
+                ),
+                {"h": _hash(cookie), "o": pg.OWNER, "p": "d" * 64,
+                 "e": now + timedelta(minutes=25), "c": now - timedelta(minutes=5)},
+            )
+        _use_cookie(client, cookie, PG_HOST)
+        csrf = svc.session_csrf_token(cookie, secret=_secret(settings))
+    assert client.get(pg.OS_API + "/contacts").status_code == 200, "live before the epoch"
+    revoked = client.post(pg.AUTH + "/revoke-all", headers={"X-CSRF-Token": csrf})
+    assert revoked.status_code == 204
+    # Restoring an older backup brings the rows back without revoked_at.
+    with engine.begin() as conn:
+        conn.execute(text("UPDATE owner_os_sessions SET revoked_at = NULL"))
+    _use_cookie(client, cookie, PG_HOST)
+    status = client.get(pg.AUTH + "/session")
+    read = client.get(pg.OS_API + "/contacts")
+    refresh = client.post(pg.AUTH + "/refresh", headers={"X-CSRF-Token": csrf})
+    for response in (status, read, refresh):
+        assert response.status_code == 401, response.text
+        assert "server-timing" not in response.headers
+    assert _code(status) == _code(refresh) == "owner_auth_required"
+    _assert_cleared(refresh)
+    with engine.connect() as conn:
+        assert conn.scalar(
+            text("SELECT count(*) FROM owner_os_sessions WHERE successor_hash IS NOT NULL")
+        ) == 0

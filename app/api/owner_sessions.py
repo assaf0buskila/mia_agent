@@ -657,8 +657,12 @@ def owner_mutation_scope(
 
 
 def _cookie_max_age(record: OwnerSessionRecord) -> int:
-    """expires_at - now, where now is the issue time (created_at) of the new row."""
-    return max(0, int((record.expires_at - record.created_at).total_seconds()))
+    """expires_at minus the clock now, while Set-Cookie is built, floored.
+
+    Not the row's age: a slow response must not let the browser keep the cookie past the
+    server-side expiry (or past the chain's absolute cap).
+    """
+    return max(0, int((record.expires_at - datetime.now(UTC)).total_seconds()))
 
 
 def _issue_session_view(

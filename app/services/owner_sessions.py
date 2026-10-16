@@ -38,6 +38,9 @@ _SESSION_COLUMNS = (
     "chain_id, chain_started_at, authenticated_at, first_used_at, rotated_at, grace_until, "
     "successor_hash"
 )
+_PREFIXED_SESSION_COLUMNS = ", ".join(
+    "s." + column.strip() for column in _SESSION_COLUMNS.split(",")
+)
 
 
 class OwnerSessionDenied(PermissionError):
@@ -179,6 +182,20 @@ def _record(
         authenticated_at=_optional_utc(row["authenticated_at"]),
         rotated_at=rotated_at,
     )
+
+
+def _predates_revocation(row: Mapping[str, Any]) -> bool:
+    """True when the owner's revoked_before is at or after the row's own timestamps.
+
+    Every row is checked by created_at (a legacy row has nothing else). A chain row is also
+    checked by chain_started_at and authenticated_at, so no successor outlives an epoch that
+    its chain or proof predates.
+    """
+    epoch = _optional_utc(row["revoked_before"])
+    if epoch is None:
+        return False
+    moments = [row["created_at"], row["chain_started_at"], row["authenticated_at"]]
+    return any(_utc(value) <= epoch for value in moments if value is not None)
 
 
 def _valid_windows(idle_seconds: int, absolute_seconds: int) -> bool:
@@ -553,6 +570,8 @@ class OwnerSessionStore:
     ) -> OwnerSessionRecord:
         """Contract rules, on every route: select by hash with no state filter, then
         1. a missing or revoked row is denied,
+        1a. (erratum 2) a row created at or before the owner's revoked_before is denied, and a
+            chain row also when chain_started_at or authenticated_at is at or before it,
         2. a rotated row at or past its grace revokes (and commits) its whole chain, denied,
         3. a row at or past expires_at is denied,
         4. otherwise allowed, and first_used_at is set once (the caller commits it).
@@ -562,8 +581,19 @@ class OwnerSessionStore:
             raise OwnerSessionDenied("session required")
         moment = self._now(now)
         hashed = credential_hash(cookie_token, purpose="session")
-        row = self._session_row(hashed)
+        row = self.session.execute(
+            text(
+                f"SELECT {_PREFIXED_SESSION_COLUMNS}, r.revoked_before "
+                "FROM owner_os_sessions s "
+                "LEFT JOIN owner_os_revocations r ON r.owner_id = s.owner_id "
+                "WHERE s.session_hash = :session_hash"
+            ),
+            {"session_hash": hashed},
+        ).mappings().first()
         if row is None or row["revoked_at"] is not None:
+            raise OwnerSessionDenied("session rejected")
+        if _predates_revocation(row):
+            # Revoke-all, or a restore that moved the epoch: no write, just refuse.
             raise OwnerSessionDenied("session rejected")
         if row["rotated_at"] is not None:
             grace_until = _optional_utc(row["grace_until"])
