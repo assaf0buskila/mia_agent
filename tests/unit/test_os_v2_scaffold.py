@@ -678,3 +678,54 @@ def test_head_and_options_are_buffered_like_any_non_get(method):
         headers={"content-type": "application/json"},
     )
     assert over.status_code == 413
+
+
+E1_REV_SIGNATURES = {
+    "insert_import_batch": (
+        "(self, *, batch_id: 'str', authority_epoch: 'int', source_digest: 'str', "
+        "source_binding: 'str', provenance: 'Mapping[str, Any]') -> 'None'"
+    ),
+    "insert_import_rows": "(self, batch_id: 'str', rows: 'Sequence[ImportRow]') -> 'int'",
+    "set_import_status": (
+        "(self, batch_id: 'str', status: 'ImportStatus', *, "
+        "quarantine: 'Mapping[str, Any] | None' = None) -> 'None'"
+    ),
+    "live_ids": "(self, entity: 'Entity') -> 'frozenset[str]'",
+}
+
+
+def test_erratum_e1_rev_signatures_are_pinned():
+    import inspect
+
+    for method, expected in E1_REV_SIGNATURES.items():
+        assert str(inspect.signature(getattr(api.LedgerTx, method))) == expected, method
+
+
+@pytest.mark.parametrize(
+    ("name", "raw", "parsed"),
+    [
+        ("assaf_os_authority_epoch", str(2**63 - 1), 2**63 - 1),
+        ("os_mirror_spreadsheet_id", " sheet-1 ", "sheet-1"),
+        ("os_statement_pepper", "א" * 16, "א" * 16),  # 32 bytes in UTF-8
+        ("os_step_up_secret", "", ""),
+    ],
+)
+def test_boundary_values_are_kept_without_a_flag(name, raw, parsed):
+    assert getattr(Settings(_env_file=None, **{name: raw}), name) == parsed
+    assert config.os_config_coerced() is False
+
+
+def test_a_non_conforming_route_name_logs_a_fixed_op(caplog):
+    caplog.set_level(logging.INFO, logger="mia.os_v2")
+    inner = FastAPI()
+    inner.add_exception_handler(api.LedgerError, ledger_error_handler)
+
+    async def fail():
+        raise api.LedgerError("ledger_unavailable")
+
+    inner.add_api_route("/v1/owner/os/unified/x", fail, methods=["POST"], name="Bad Name; drop")
+    assert TestClient(inner).post("/v1/owner/os/unified/x").status_code == 503
+    messages = [r.getMessage() for r in caplog.records if r.name == "mia.os_v2"]
+    assert messages == [
+        "os_v2 op=route outcome=ledger_unavailable reason=ledger_unavailable write=True"
+    ]
