@@ -96,25 +96,91 @@ def _msys(path: Path) -> str:
 # --- static facts ---------------------------------------------------------------------------
 
 
-def test_the_owned_pattern_keeps_vm_owned_names_out_of_mia_env():
+# Names the VM owns: the main and ledger DSNs, the ledger family, the posture.
+VM_OWNED = (
+    "MIA_DATABASE_URL",
+    "POSTGRES_PASSWORD",
+    "PGHOST",
+    "MIA_OWNER_OS_LEDGER_DATABASE_URL",
+    "MIA_OS_LEDGER_MIGRATION_DATABASE_URL",
+    "MIA_OS_LEDGER_DATABASE_URL",
+    "MIA_APP_ROLE_POSTURE",
+)
+# Owner OS settings that provision_auth.py wrote into mia-env and that must keep coming from it
+# (E10): the enable flags, the Google keys, the session secret and DSN, the origin.
+FROM_MIA_ENV = (
+    "MIA_OWNER_OS_ENABLED",
+    "MIA_OWNER_OS_ACTIONS_ENABLED",
+    "MIA_OWNER_OS_GOOGLE_ENABLED",
+    "MIA_OWNER_OS_GOOGLE_CLIENT_ID",
+    "MIA_OWNER_OS_GOOGLE_SUBJECT",
+    "MIA_OWNER_OS_GOOGLE_OWNER_ID",
+    "MIA_OWNER_OS_SESSION_SECRET",
+    "MIA_OWNER_OS_SESSION_DATABASE_URL",
+    "MIA_OWNER_OS_ORIGIN",
+    "MIA_OWNER_OS_WORKSPACE_ID",
+    "MIA_OWNER_OS_SESSION_SCOPES",
+    "MIA_OPENAI_API_KEY",
+)
+
+
+def test_the_owned_pattern_is_exactly_the_ledger_family_and_the_posture():
     match = re.search(r'owned = re\.compile\(r"(.+?)"\)', SCRIPT)
     assert match, "fetch_settings has no owned pattern"
+    assert match.group(1) == (
+        r"^(MIA_DATABASE_URL|POSTGRES_\w+|PG\w+"
+        r"|MIA_OWNER_OS_LEDGER_\w+|MIA_OS_LEDGER_\w+|MIA_APP_ROLE_POSTURE)\s*="
+    )
     owned = re.compile(match.group(1))
-    for name in (
-        "MIA_DATABASE_URL",
-        "POSTGRES_PASSWORD",
-        "PGHOST",
-        "MIA_OWNER_OS_LEDGER_DATABASE_URL",
-        "MIA_OWNER_OS_SESSION_DATABASE_URL",
-        "MIA_OWNER_OS_ENABLED",
-        "MIA_OS_LEDGER_MIGRATION_DATABASE_URL",
-        "MIA_OS_LEDGER_DATABASE_URL",
-        "MIA_APP_ROLE_POSTURE",
-    ):
+    for name in VM_OWNED:
         assert owned.match(f"{name}=x"), name
         assert owned.match(f"{name} = x"), name
-    for name in ("MIA_OPENAI_API_KEY", "MIA_OWNERSHIP", "MIA_OS_LEDGERS", "MIA_APP_ROLE_POSTURES"):
+    near_misses = ("MIA_OWNERSHIP", "MIA_OS_LEDGERS", "MIA_APP_ROLE_POSTURES", "MIA_OWNER_OS_LEDGE")
+    for name in (*FROM_MIA_ENV, *near_misses):
         assert not owned.match(f"{name}=x"), name
+
+
+def test_fetch_settings_strips_the_vm_owned_keys_and_keeps_every_other_owner_os_key(tmp_path):
+    """The real filter loop of `mia settings`, run on a fake Secret Manager payload."""
+    import base64
+    import json
+    from unittest import mock
+
+    source = re.search(r"fetch_settings\(\) \{\n  python3 - <<'PY'\n(.*?)\nPY\n", SCRIPT, re.DOTALL)
+    assert source, "fetch_settings has no inline python"
+    code = source.group(1).replace("/etc/mia/settings.env", _posix(tmp_path / "settings.env"))
+    secret = "\n".join([
+        *(f"{name}=value-{number}" for number, name in enumerate((*VM_OWNED, *FROM_MIA_ENV))),
+        "export MIA_OWNER_OS_LEDGER_RETENTION_DATABASE_URL=export-prefixed",
+        "export MIA_OWNER_OS_ORIGIN=https://exported.example",
+    ])
+
+    class Reply:
+        def __init__(self, body: bytes):
+            self.body = body
+
+        def read(self):
+            return self.body
+
+    def urlopen(request, timeout=0):
+        url = request.full_url
+        if "secretmanager" in url:
+            payload = {"payload": {"data": base64.b64encode(secret.encode()).decode()}}
+            return Reply(json.dumps(payload).encode())
+        if url.endswith("service-accounts/default/token"):
+            return Reply(json.dumps({"access_token": "t"}).encode())
+        return Reply(b"project-x")
+
+    with mock.patch("urllib.request.urlopen", urlopen):
+        exec(compile(code, "mia-fetch-settings", "exec"), {"__name__": "__main__"})
+    kept = {
+        line.split("=", 1)[0]
+        for line in (tmp_path / "settings.env").read_text(encoding="utf-8").splitlines()
+    }
+    assert kept == {*FROM_MIA_ENV}  # MIA_OWNER_OS_ORIGIN survives with and without `export `
+    for name in VM_OWNED:
+        assert name not in kept, name
+    assert "MIA_OWNER_OS_LEDGER_RETENTION_DATABASE_URL" not in kept
 
 
 def test_every_dump_leaves_the_statement_batch_line_detail_out():
@@ -157,7 +223,8 @@ def test_the_ledger_reapply_runs_the_deployed_script_in_the_deployed_image():
         "compose --profile os-ledger run --rm --no-deps -T --user root",
         # the script is the one deployed with the image's source, mounted at its repo path
         '-v "$script:/app/ops/assaf-os/provision_ledger.py:ro"',
-        "-v /etc/mia:/etc/mia",
+        # E10: a restore never writes a VM-owned file, so /etc/mia is read-only in the container
+        "-v /etc/mia:/etc/mia:ro",
         "--entrypoint sh os-ledger-migrate",
         "provision_ledger.py --target mia-vm --mode reapply --apply --approved-sha "
         '"$MIA_BUILD_SHA"',
@@ -478,6 +545,7 @@ docker() {
     ps) echo "cid-${2:-x}" ;;
     run)
       local entry="" user=""
+      export V210_ETC_MIA_READONLY=0
       while [ "$#" -gt 0 ]; do
         case "$1" in
           --rm|--no-deps|-T) shift ;;
@@ -487,6 +555,7 @@ docker() {
             case "$2" in
               *:/app/ops/assaf-os/provision_ledger.py:ro)
                 export V210_LEDGER_SCRIPT="${2%:/app/ops/assaf-os/provision_ledger.py:ro}" ;;
+              /etc/mia:/etc/mia:ro) export V210_ETC_MIA_READONLY=1 ;;
             esac
             shift 2 ;;
           *) break ;;
@@ -662,7 +731,7 @@ class Drill:
     # -- the real restore arm
 
     def restore(self, dump: Path, *, fail: str = "", skip_post_step: bool = False,
-                dsn_role: str = "mia_app", runtime_extra: str = ""):
+                dsn_role: str = "mia_app", runtime_extra: str = "", rw_mount: bool = False):
         t = self.tmp
         (t / "demote").mkdir(exist_ok=True)
         (t / "bin").mkdir(exist_ok=True)
@@ -691,6 +760,9 @@ class Drill:
         arm = _localize(_arm("restore"), vm_paths(t))
         if skip_post_step:
             arm = arm.replace("post_restore_reapply", ":")
+        if rw_mount:  # only to show that the read-only flag is what stops the restore
+            assert "-v /etc/mia:/etc/mia:ro" in text
+            text = text.replace("-v /etc/mia:/etc/mia:ro", "-v /etc/mia:/etc/mia")
         script = "\n".join([
             "set -euo pipefail", SHIM, text, f"set -- {_posix(dump)}", arm, "echo HARNESS_FINISHED",
         ])
@@ -874,3 +946,26 @@ def test_drill_a_database_from_before_the_demote_and_the_ledger_still_restores(d
     assert "mia: post-restore access_probe ok role=mia" in result.out
     assert result.started
     assert drill.scalar("mia", "SELECT count(*) FROM public.old_accounts") == "1"
+
+
+def test_drill_a_missing_ledger_runtime_role_stops_the_restore_because_etc_mia_is_read_only(drill):
+    """E10: a restore never writes a VM-owned file, so it cannot create the runtime role."""
+    dump = drill.dump("source.dump")
+    # roles are cluster-global: a fresh cluster has the dump's schema but not the login role
+    drill.psql("mia", "DROP OWNED BY assaf_os_ledger; DROP ROLE assaf_os_ledger;", user="mia")
+    role = "SELECT count(*) FROM pg_roles WHERE rolname = 'assaf_os_ledger'"
+    assert drill.scalar("postgres", role) == "0"
+
+    result = drill.restore(dump)
+    assert result.rc == 1 and not result.finished
+    assert "reason=ledger_reapply_failed" in result.err
+    assert not result.started
+    assert any("/etc/mia:/etc/mia:ro" in call for call in result.calls)
+    # the refusal rolled the role creation back; nothing after the ledger step ran
+    assert drill.scalar("postgres", role) == "0"
+    assert not any("read -r PGPASSWORD" in call for call in result.calls)
+
+    # the read-only flag is what stopped it: the same restore with a writable /etc/mia creates it
+    retry = drill.restore(dump, rw_mount=True)
+    assert retry.rc == 0 and retry.finished, retry.err + retry.out
+    assert drill.scalar("postgres", role) == "1"

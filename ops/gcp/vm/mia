@@ -62,10 +62,12 @@ try:
 except urllib.error.HTTPError as error:
     sys.exit(f"mia: cannot read secret mia-env (HTTP {error.code}); run ops/gcp/push-settings.ps1")
 data = json.loads(response.read())["payload"]["data"]
-# VM-owned names never come from mia-env: the DSNs and the posture live in /etc/mia/runtime.env.
-# Every MIA_OWNER_OS_* name is dropped here, so a key of that family that is still only in mia-env
-# (provision_auth.py wrote some there) must be in runtime.env before this script is deployed.
-owned = re.compile(r"^(MIA_DATABASE_URL|POSTGRES_\w+|PG\w+|MIA_OWNER_OS_\w+|MIA_OS_LEDGER_\w+|MIA_APP_ROLE_POSTURE)\s*=")
+# VM-owned names never come from mia-env: the ledger DSNs and the posture live in the VM-owned
+# /etc/mia/runtime.env and /etc/mia/os-ledger-migrate.env. Only the ledger family is owned here
+# (MIA_OWNER_OS_LEDGER_*, MIA_OS_LEDGER_*, MIA_APP_ROLE_POSTURE). The rest of MIA_OWNER_OS_*
+# (the enable flags, the Google keys, the session secret and DSN that provision_auth.py wrote into
+# mia-env) stays settable from mia-env and must not be added to this pattern.
+owned = re.compile(r"^(MIA_DATABASE_URL|POSTGRES_\w+|PG\w+|MIA_OWNER_OS_LEDGER_\w+|MIA_OS_LEDGER_\w+|MIA_APP_ROLE_POSTURE)\s*=")
 assignment = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
 lines = []
 for raw in base64.b64decode(data).decode("utf-8").splitlines():
@@ -187,7 +189,11 @@ restore_demote_reapply() {
 
 # Step 2, V2-15 r2: assaf_os gets its owner, its revokes and its exact grants back. The script is
 # the one deployed with the running image, mounted into that image, run as root because it reads
-# and may stage /etc/mia/runtime.env. A database without assaf_os has nothing to repair.
+# /etc/mia/runtime.env. /etc/mia is mounted READ-ONLY: a restore never writes a VM-owned file, so
+# a ledger runtime role that is missing (a fresh cluster) cannot be created here. The script then
+# refuses, the transaction rolls back and the restore stops: provision it explicitly first
+# (provision_ledger.py --mode provision, per the runbook). A database without assaf_os has
+# nothing to repair.
 restore_ledger_reapply() {
   local present tag script
   present="$(restore_sql mia -c "SELECT to_regnamespace('assaf_os') IS NOT NULL")" \
@@ -207,7 +213,7 @@ restore_ledger_reapply() {
       !/^MIA_OS_LEDGER_MIGRATION_DATABASE_URL=('\''[^'\'']*'\''|"[^"]*"|[^[:space:]'\''"]+)[[:space:]]*$/ { exit 1 }
     ' /etc/mia/os-ledger-migrate.env || restore_fail ledger_reapply_unavailable
   compose --profile os-ledger run --rm --no-deps -T --user root \
-    -v "$script:/app/ops/assaf-os/provision_ledger.py:ro" -v /etc/mia:/etc/mia \
+    -v "$script:/app/ops/assaf-os/provision_ledger.py:ro" -v /etc/mia:/etc/mia:ro \
     --entrypoint sh os-ledger-migrate \
     -c 'exec python /app/ops/assaf-os/provision_ledger.py --target mia-vm --mode reapply --apply --approved-sha "$MIA_BUILD_SHA"' \
     || restore_fail ledger_reapply_failed

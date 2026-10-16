@@ -16,8 +16,10 @@ real file. This stand-in keeps the interface and the statement ORDER of the real
             grants, then validate (including V2-14's real _validate_main_role_catalog).
 
 Differences from the real file, all deliberate: a two-table, two-function schema; the grant map is
-three lines; no password staging in runtime.env; the pinned port comes from V210_STANDIN_PORT (the
-disposable server) instead of 5432; V210_STANDIN_FAIL=1 forces a refusal after the plan ran.
+three lines; no password staging in runtime.env, only the failure of that write when the caller says
+/etc/mia is read-only (V210_ETC_MIA_READONLY=1, set by the drill from the mount flag); the pinned
+port comes from V210_STANDIN_PORT (the disposable server) instead of 5432; V210_STANDIN_FAIL=1
+forces a refusal after the plan ran.
 Delete this file when r2 merges and point tests/ops/test_restore_reapply.py at the real script.
 """
 
@@ -177,6 +179,12 @@ def apply(mode: str) -> tuple[str, ...]:
                     continue  # adopt it; keep its password
                 conn.exec_driver_sql(statement)
                 executed.append(statement)
+                if created and created.group(1) == RUNTIME and (
+                    os.environ.get("V210_ETC_MIA_READONLY") == "1"
+                ):
+                    # The real script stages the new role's DSN in /etc/mia/runtime.env before
+                    # commit. On a read-only mount that write fails and the transaction rolls back.
+                    raise ValueError("runtime_env_not_writable")
             validate(conn, main_role=main_role)
             if os.environ.get("V210_STANDIN_FAIL") == "1":
                 raise ValueError("forced_refusal")

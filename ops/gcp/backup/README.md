@@ -159,11 +159,19 @@ Details that matter:
   `sql/app-role-demote.sql`). `--reapply` tolerates `assaf_os` PUBLIC EXECUTE; step 2 clears it.
 - Step 2 runs `/opt/mia/src/<MIA_TAG>/ops/assaf-os/provision_ledger.py`, the script deployed with the
   running image, mounted at `/app/ops/assaf-os/provision_ledger.py` into `os-ledger-migrate` as root
-  with `/etc/mia` mounted. The approved SHA is the image's own `MIA_BUILD_SHA`. It creates a missing
-  role without touching an existing password, re-owns `assaf_os` and its objects to `assaf_os_owner`,
-  revokes, re-creates the owner's default ACL, re-applies the exact grants and runs
-  `validate_ledger_catalog`. It needs `/etc/mia/os-ledger-migrate.env` (the same single key
-  `mia os-ledger` accepts).
+  (it reads `/etc/mia/runtime.env`). **`/etc/mia` is mounted read-only (`:ro`):** a restore never
+  writes a VM-owned file. The approved SHA is the image's own `MIA_BUILD_SHA`. It never changes an
+  existing role's password, re-owns `assaf_os` and its objects to `assaf_os_owner`, revokes,
+  re-creates the owner's default ACL, re-applies the exact grants and runs `validate_ledger_catalog`.
+  It needs `/etc/mia/os-ledger-migrate.env` (the same single key `mia os-ledger` accepts). A ledger
+  runtime role that does not exist cannot be created here, because creating it stages its DSN in
+  `runtime.env`: the script refuses, its transaction rolls back and the restore stops with
+  `ledger_reapply_failed`. Provision it explicitly first (`provision_ledger.py --mode provision`,
+  V2-15 runbook), then run `mia restore` again.
+- `mia settings` and `mia deploy` drop `MIA_OWNER_OS_LEDGER_*`, `MIA_OS_LEDGER_*` and
+  `MIA_APP_ROLE_POSTURE` from `mia-env`: the ledger DSNs and the posture are VM-owned. The other
+  `MIA_OWNER_OS_*` settings (enable flags, Google keys, session secret and DSN, origin) still come
+  from `mia-env`.
 - Step 4 mirrors what a logout-everywhere does, for every owner id that has a session, a login proof
   or a revocation row: `revoked_before` only moves forward (`GREATEST`), and open sessions get
   `revoked_at`. The owner-auth database is not part of this restore, but the data its sessions act on
@@ -187,15 +195,16 @@ Reason codes (stderr, a fixed set; nothing else is printed about the cause):
 | `app_role_reapply_unavailable` | `mia_app` exists but `/opt/mia/app-role-demote/app_role_demote.py` or `sql/app-role-demote.sql` is missing. Reinstall them from the approved source (V2-14a runbook). |
 | `app_role_reapply_failed` | the helper failed. It prints its own `reason=app_role_...` line just above. |
 | `ledger_reapply_unavailable` | the restored database has `assaf_os`, but `MIA_TAG` in `/opt/mia/tag.env` is unusable, the deployed `provision_ledger.py` is missing under `/opt/mia/src/<tag>/`, or `/etc/mia/os-ledger-migrate.env` is missing or holds another key. |
-| `ledger_reapply_failed` | `provision_ledger.py` refused or could not run (it prints only `ledger_provision_refused` or `ledger_owner_go_sha_required`). Usual causes: the image has no 40-hex `MIA_BUILD_SHA`, `mia_app` is missing, `/etc/mia/runtime.env` does not hold a valid ledger DSN for an existing role. |
+| `ledger_reapply_failed` | `provision_ledger.py` refused or could not run (it prints only `ledger_provision_refused` or `ledger_owner_go_sha_required`). Usual causes: the image has no 40-hex `MIA_BUILD_SHA`, `mia_app` is missing, `/etc/mia/runtime.env` does not hold a valid ledger DSN for an existing role, or the ledger runtime role does not exist (`/etc/mia` is read-only here: provision it explicitly, then restore again). |
 | `main_dsn_invalid` | `/etc/mia/runtime.env` does not hold exactly one canonical `MIA_DATABASE_URL`. |
 | `main_role_validation_failed` | the real validator rejected the main role (unsafe attribute, database owner, membership, or access to `assaf_os`), or the DSN does not authenticate. |
 | `owner_session_revoke_failed` | the owner-auth database could not be updated, or only some of its tables exist. |
 | `app_role_access_probe_failed` | the main DSN role cannot SELECT or INSERT on an application table (permission denied, or no application table at all). The restore is not usable. |
 
-Fresh cluster (a new VM with no `mia_app`): step 1 skips and step 2 cannot find the main role, so a
-dump that contains `assaf_os` stops at `ledger_reapply_failed`. Recreate the roles first (V2-14a
-`stage`, then V2-15 provision), then run `mia restore` again.
+Fresh cluster (a new VM with no `mia_app`, or with `mia_app` but no ledger runtime role): a dump
+that contains `assaf_os` stops at `ledger_reapply_failed`. Step 2 pins the main role and may not
+create the runtime role. Recreate the roles explicitly first (V2-14a `stage`, then V2-15
+provision), then run `mia restore` again.
 
 ### On Assaf's PC: the drill uses `ledger_posture.py`
 
