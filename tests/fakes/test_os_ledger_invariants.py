@@ -673,3 +673,16 @@ def test_abandon_drafts_are_pending_owner_direct_rows_until_finished(env):
         assert tx.proposal_by_request(request_id) == proposal and proposal.status == "pending"
         assert proposal.kind == "owner_direct" and proposal.mutations == ()
         assert direct_draft(tx, [task()], rid(), 30).kind == proposal.kind
+
+
+def test_fake_expiry_without_the_restored_code_stays_out_of_scope(env):
+    """§22 E7 caveat. The fake cannot see V2-26's batch lines, so it trusts the reason code
+    ``restored_without_detail`` for "no batch lines". PG checks zero ``os_statement_batch_lines``
+    rows as well. Without that code, a not-overdue batch of the current epoch is refused."""
+    from tests.services.os_ledger.conformance.test_admission import expire_batch, pending_batch
+
+    batch = pending_batch(env)
+    for codes in ((), ("credential_revoked",)):
+        with pytest.raises(AssertionError, match="ledger_invariant:expire_scope"):
+            expire_batch(env, batch, reason_codes=codes)
+    assert expire_batch(env, batch, reason_codes=("restored_without_detail",)).status == "expired"
