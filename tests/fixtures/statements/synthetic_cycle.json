@@ -1,0 +1,306 @@
+{
+  "_comment": "SYNTHETIC ONLY. Invented merchants, amounts and dates. Never copy a real statement line here.",
+  "workspace": "ws_synthetic",
+  "october": {
+    "schema": "statement-batch.v1",
+    "client_batch_id": "0b6f7a52-3c1d-4e8a-9f20-5d1c7e4b9a01",
+    "account_label": "Synthetic Business Card",
+    "charge_date": "2026-10-15",
+    "lines": [
+      {
+        "txn_date": "2026-09-17",
+        "merchant_display": "CLAUDE.AI SUBSCRIPTION",
+        "amount_minor": 7500,
+        "kind": "charge",
+        "currency": "ILS",
+        "original_amount_minor": 2000,
+        "original_currency": "USD",
+        "suggested_tag": "business",
+        "suggested_category": "כלי AI",
+        "suggested_path": "משותף",
+        "is_subscription": true,
+        "confidence": 0.95
+      },
+      {
+        "txn_date": "2026-09-18",
+        "merchant_display": "OPENAI *CHATGPT SUBSCR",
+        "amount_minor": 7400,
+        "kind": "charge",
+        "currency": "ILS",
+        "original_amount_minor": 2000,
+        "original_currency": "USD",
+        "suggested_tag": "business",
+        "suggested_category": "כלי AI",
+        "suggested_path": "משותף",
+        "is_subscription": true,
+        "confidence": 0.93
+      },
+      {
+        "txn_date": "2026-09-20",
+        "merchant_display": "X.AI GROK",
+        "amount_minor": 3700,
+        "kind": "charge",
+        "currency": "ILS",
+        "original_amount_minor": 1000,
+        "original_currency": "USD",
+        "suggested_tag": "business",
+        "suggested_category": "כלי AI",
+        "is_subscription": true,
+        "confidence": 0.8
+      },
+      {
+        "txn_date": "2026-09-22",
+        "merchant_display": "CAPCUT",
+        "amount_minor": 5500,
+        "kind": "charge",
+        "currency": "ILS",
+        "suggested_tag": "business",
+        "suggested_category": "עריכת וידאו",
+        "suggested_path": "אוטומציה",
+        "is_subscription": true,
+        "confidence": 0.9
+      },
+      {
+        "txn_date": "2026-09-23",
+        "merchant_display": "COFFEE CART DEMO",
+        "amount_minor": 1800,
+        "kind": "charge",
+        "currency": "ILS",
+        "suggested_tag": "business",
+        "suggested_category": "אירוח",
+        "confidence": 0.7
+      },
+      {
+        "txn_date": "2026-09-23",
+        "merchant_display": "COFFEE CART DEMO",
+        "amount_minor": 1800,
+        "kind": "charge",
+        "currency": "ILS",
+        "suggested_tag": "business",
+        "suggested_category": "אירוח",
+        "confidence": 0.7
+      },
+      {
+        "txn_date": "2026-09-25",
+        "merchant_display": "SUPERMARKET DEMO",
+        "amount_minor": 31250,
+        "kind": "charge",
+        "currency": "ILS",
+        "suggested_tag": "personal",
+        "confidence": 0.98
+      },
+      {
+        "txn_date": "2026-09-28",
+        "merchant_display": "PHARMACY DEMO",
+        "amount_minor": 8900,
+        "kind": "charge",
+        "currency": "ILS",
+        "suggested_tag": "personal",
+        "confidence": 0.97
+      },
+      {
+        "txn_date": "2026-09-30",
+        "merchant_display": "META ADS DEMO",
+        "amount_minor": 120000,
+        "kind": "charge",
+        "currency": "ILS",
+        "suggested_tag": "business",
+        "suggested_category": "פרסום",
+        "suggested_path": "אוטומציה",
+        "confidence": 0.9
+      },
+      {
+        "txn_date": "2026-10-02",
+        "merchant_display": "OFFICE SUPPLY DEMO",
+        "amount_minor": 24500,
+        "kind": "charge",
+        "currency": "ILS",
+        "installment": {"n": 1, "of": 3},
+        "suggested_tag": "business",
+        "suggested_category": "ציוד",
+        "confidence": 0.85
+      },
+      {
+        "txn_date": "2026-10-05",
+        "merchant_display": "OFFICE SUPPLY DEMO RETURN",
+        "amount_minor": 5000,
+        "kind": "credit",
+        "currency": "ILS",
+        "suggested_tag": "business",
+        "suggested_category": "ציוד",
+        "confidence": 0.85
+      },
+      {
+        "txn_date": "2026-10-08",
+        "merchant_display": "  מכולת   לדוגמה ",
+        "amount_minor": 4300,
+        "kind": "charge",
+        "currency": "ILS",
+        "suggested_tag": "personal",
+        "confidence": 0.96
+      }
+    ]
+  },
+  "november": {
+    "schema": "statement-batch.v1",
+    "client_batch_id": "5a2c9d1e-77b4-4f3a-8c61-0e9d2b7a4c02",
+    "account_label": "Synthetic Business Card",
+    "charge_date": "2026-11-15",
+    "lines": [
+      {
+        "txn_date": "2026-10-17",
+        "merchant_display": "CLAUDE.AI SUBSCRIPTION",
+        "amount_minor": 7500,
+        "kind": "charge",
+        "currency": "ILS",
+        "original_amount_minor": 2000,
+        "original_currency": "USD",
+        "suggested_tag": "business",
+        "suggested_category": "כלי AI",
+        "is_subscription": true,
+        "confidence": 0.95
+      },
+      {
+        "txn_date": "2026-10-18",
+        "merchant_display": "OPENAI *CHATGPT SUBSCR",
+        "amount_minor": 7800,
+        "kind": "charge",
+        "currency": "ILS",
+        "original_amount_minor": 2100,
+        "original_currency": "USD",
+        "suggested_tag": "business",
+        "suggested_category": "כלי AI",
+        "is_subscription": true,
+        "confidence": 0.93
+      },
+      {
+        "txn_date": "2026-10-22",
+        "merchant_display": "CAPCUT",
+        "amount_minor": 5500,
+        "kind": "charge",
+        "currency": "ILS",
+        "suggested_tag": "business",
+        "suggested_category": "עריכת וידאו",
+        "is_subscription": true,
+        "confidence": 0.9
+      },
+      {
+        "txn_date": "2026-10-29",
+        "merchant_display": "NEW TOOL DEMO",
+        "amount_minor": 2900,
+        "kind": "charge",
+        "currency": "ILS",
+        "suggested_tag": "business",
+        "suggested_category": "כלי AI",
+        "is_subscription": true,
+        "confidence": 0.75
+      },
+      {
+        "txn_date": "2026-10-30",
+        "merchant_display": "SUPERMARKET DEMO",
+        "amount_minor": 28000,
+        "kind": "charge",
+        "currency": "ILS",
+        "suggested_tag": "personal",
+        "confidence": 0.98
+      }
+    ]
+  },
+  "rules": [
+    {
+      "rule_id": "rule_claude",
+      "merchant_key": "claude ai subscription",
+      "match": "exact",
+      "tag": "business",
+      "category": "כלי AI",
+      "path": "משותף",
+      "is_subscription": true,
+      "label": "Claude",
+      "aliases": ["claude", "anthropic"]
+    },
+    {
+      "rule_id": "rule_chatgpt",
+      "merchant_key": "openai",
+      "match": "prefix",
+      "tag": "business",
+      "category": "כלי AI",
+      "path": "משותף",
+      "is_subscription": true,
+      "label": "ChatGPT",
+      "aliases": ["chatgpt"]
+    },
+    {
+      "rule_id": "rule_grok",
+      "merchant_key": "x ai grok",
+      "match": "exact",
+      "tag": "business",
+      "category": "כלי AI",
+      "is_subscription": true,
+      "label": "Grok",
+      "aliases": ["grok", "xai"]
+    },
+    {
+      "rule_id": "rule_capcut",
+      "merchant_key": "capcut",
+      "match": "exact",
+      "tag": "business",
+      "category": "עריכת וידאו",
+      "path": "אוטומציה",
+      "is_subscription": true,
+      "label": "CapCut"
+    },
+    {
+      "rule_id": "rule_meta_ads",
+      "merchant_key": "meta ads demo",
+      "match": "exact",
+      "tag": "business",
+      "category": "פרסום",
+      "path": "אוטומציה",
+      "platform": "Meta"
+    },
+    {
+      "rule_id": "rule_supermarket",
+      "merchant_key": "supermarket demo",
+      "match": "exact",
+      "tag": "personal"
+    }
+  ],
+  "manual_expenses": [
+    {
+      "expense_id": "exp-manual-claude",
+      "source_key": "manual:claude-sep",
+      "date": "2026-09-17",
+      "vendor": "Claude",
+      "amount_minor": 2000,
+      "currency": "USD",
+      "payment_status": "שולם"
+    },
+    {
+      "expense_id": "exp-manual-coffee-a",
+      "source_key": "manual:coffee-a",
+      "date": "2026-09-23",
+      "vendor": "Coffee Cart Demo",
+      "amount_minor": 1800,
+      "currency": "ILS",
+      "payment_status": "שולם"
+    },
+    {
+      "expense_id": "exp-manual-coffee-b",
+      "source_key": "manual:coffee-b",
+      "date": "2026-09-24",
+      "vendor": "coffee cart demo",
+      "amount_minor": 1800,
+      "currency": "ILS",
+      "payment_status": "שולם"
+    },
+    {
+      "expense_id": "exp-cash-tip",
+      "source_key": "cash:tip-sep",
+      "date": "2026-09-30",
+      "vendor": "Cash tip",
+      "amount_minor": 7400,
+      "currency": "ILS",
+      "payment_status": "שולם"
+    }
+  ]
+}
