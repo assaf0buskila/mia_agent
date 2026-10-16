@@ -491,7 +491,8 @@ def test_status_is_written_to_the_head_sha_the_api_reports_now() -> None:
     api = FakeApi(pull(sha=HEAD), [comment(verdict_text(sha=OLD))])
     decision = publish(api)
     assert not decision.passed
-    assert api.paths == ["/repos/owner/repo/pulls/7", "/repos/owner/repo/issues/7/comments"]
+    assert api.paths[:2] == ["/repos/owner/repo/pulls/7", "/repos/owner/repo/issues/7/comments"]
+    assert api.paths[2:] == ["/repos/owner/repo/pulls/7"]
     [(path, payload)] = api.posts
     assert path == f"/repos/owner/repo/statuses/{HEAD}"
     assert payload["context"] == "review-gate"
@@ -695,14 +696,17 @@ def job() -> dict:
 
 def test_workflow_runs_on_pull_request_updates_and_pr_comments_only() -> None:
     on = triggers()
-    assert set(on) == {"pull_request", "issue_comment"}
-    assert set(on["pull_request"]["types"]) == {"opened", "reopened", "synchronize", "edited"}
+    assert set(on) == {"pull_request_target", "issue_comment"}
+    assert set(on["pull_request_target"]["types"]) == {
+        "opened", "reopened", "synchronize", "edited"
+    }
+    assert on["pull_request_target"]["branches"] == ["master"]
     assert set(on["issue_comment"]["types"]) == {"created", "edited", "deleted"}
 
 
-def test_workflow_never_uses_the_privileged_triggers() -> None:
+def test_workflow_never_uses_untrusted_or_unrelated_triggers() -> None:
     text = WORKFLOW.read_text(encoding="utf-8")
-    for forbidden in ("pull_request_target", "workflow_run", "workflow_dispatch", "push:"):
+    for forbidden in ("pull_request:", "workflow_run", "workflow_dispatch", "push:"):
         assert forbidden not in text
 
 
@@ -724,7 +728,7 @@ def test_only_the_job_that_writes_the_status_has_a_write_permission() -> None:
 def test_job_is_limited_to_pull_requests_and_has_a_timeout() -> None:
     evaluate = job()
     assert evaluate["if"] == (
-        "github.event_name == 'pull_request' || github.event.issue.pull_request"
+        "github.event_name == 'pull_request_target' || github.event.issue.pull_request"
     )
     assert evaluate["runs-on"] == "ubuntu-latest"
     assert evaluate["timeout-minutes"] <= 10
@@ -752,7 +756,10 @@ def test_every_action_is_pinned_to_a_commit_sha_and_matches_ci() -> None:
     assert len(ci_checkout) == 1
     assert uses[0] in ci_checkout
     checkout = job()["steps"][0]
-    assert checkout["with"] == {"persist-credentials": False}
+    assert checkout["with"] == {
+        "ref": "${{ github.event.repository.default_branch }}",
+        "persist-credentials": False,
+    }
 
 
 def test_the_only_run_step_is_the_script_and_no_expression_reaches_a_shell() -> None:
@@ -902,8 +909,8 @@ def test_cowork_doc_records_the_open_decisions_and_the_stale_status_caveat() -> 
     # Turning protection on makes every PR to master follow the cross-agent rule; Assaf decides.
     assert "CLAUDE.md" in text
     assert "every pull request" in lowered or "every pr" in lowered
-    # The gate script that grades a PR is the PR's own copy until the checkout moves to the base.
-    assert "its own copy" in lowered
+    # The status writer executes trusted code; the PR cannot replace its own evaluator.
+    assert "only that trusted copy" in lowered
     assert "create the missing" in lowered
 
 

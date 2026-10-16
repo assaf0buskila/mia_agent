@@ -46,6 +46,10 @@ _CODE_SPAN_OR_COMMENT = re.compile(
     r"(?P<code>(?<!`)(?P<ticks>`+)(?!`).+?(?<!`)(?P=ticks)(?!`))|(?P<comment><!--)"
 )
 _FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+_BLOCK_QUOTE = re.compile(r"^ {0,3}>[ \t]?(.*)$")
+_HTML_COMMENT_BLOCK = re.compile(r"^ {0,3}<!--")
+_LIST_ITEM = re.compile(r"^ {0,3}(?P<marker>[-+*]|\d{1,9}[.)])(?:[ \t]+(?P<content>.*)|$)")
+_INTERRUPTING_LIST = re.compile(r"^ {0,3}(?:[-+*]|1[.)])[ \t]+\S")
 _HEADING = re.compile(r"^ {0,3}#{1,6}[ \t]+(.*?)[ \t#]*$")
 _CHUNK = re.compile(r"V2-\d{2}")
 _RUN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@-]{2,99}")
@@ -101,27 +105,142 @@ def _strip_comments(line: str, in_comment: bool) -> tuple[str, bool]:
         pos = found.end()
 
 
-def _visible(text: str | None) -> str:
-    """Keep what a reader sees as ordinary text: no HTML comments, no fenced code blocks.
+def _closes_fence(line: str, fence: str) -> bool:
+    return bool(re.fullmatch(rf" {{0,3}}{re.escape(fence[0])}{{{len(fence)},}}[ \t]*", line))
 
-    Fences are found first, line by line, so ``<!--`` inside a fence is literal; and a fence
-    opener inside an HTML comment is just hidden text. An unclosed comment or fence hides the rest.
+
+def _opens_fence(line: str) -> str | None:
+    opening = _FENCE.match(line)
+    if opening is None:
+        return None
+    fence = opening.group(1)
+    # A backtick in the info string makes this ordinary paragraph text.
+    if fence[0] == "`" and "`" in line[opening.end() :]:
+        return None
+    return fence
+
+
+def _match_containers(line: str, containers: list[tuple[str, int]]) -> tuple[int, str]:
+    """Consume existing containers in order, stopping at the first missing prefix."""
+    content = line
+    for index, (kind, indent) in enumerate(containers):
+        if kind == "quote":
+            quote = _BLOCK_QUOTE.match(content)
+            if quote is None:
+                return index, content
+            content = quote.group(1)
+        elif not content.strip():
+            # Blank lines may omit list indentation, but not enclosing quote markers.
+            content = ""
+        elif content.startswith(" " * indent):
+            content = content[indent:]
+        else:
+            return index, content
+    return len(containers), content
+
+
+def _new_containers(
+    line: str, containers: list[tuple[str, int]], *, paragraph: bool
+) -> str:
+    """Open any alternating sequence of list items and block quotes."""
+    content = line
+    while True:
+        quote = _BLOCK_QUOTE.match(content)
+        if quote is not None:
+            containers.append(("quote", 0))
+            content = quote.group(1)
+            paragraph = False
+            continue
+        item = _LIST_ITEM.match(content)
+        if item is None or (paragraph and not _INTERRUPTING_LIST.match(content)):
+            return content
+        indent = item.start("content")
+        # Five or more spaces after a list marker are one padding space followed by
+        # indented code, rather than an arbitrarily wide container prefix.
+        # Empty items also use one padding space, even when none is written.
+        if not item.group("content") or indent - item.end("marker") > 4:
+            indent = item.end("marker") + 1
+        containers.append(("list", indent))
+        content = content[indent:]
+        paragraph = False
+
+
+def _interrupts_paragraph(line: str) -> bool:
+    return bool(
+        _opens_fence(line)
+        or _HTML_COMMENT_BLOCK.match(line)
+        or _HEADING.match(line)
+        or _BLOCK_QUOTE.match(line)
+        # Only a nonempty list item starting at 1 can interrupt a paragraph.
+        or _INTERRUPTING_LIST.match(line)
+        or re.fullmatch(r" {0,3}(?:(?:\* *){3,}|(?:- *){3,}|(?:_ *){3,})", line)
+    )
+
+
+def _visible(text: str | None) -> str:
+    """Keep ordinary source text outside fenced blocks, HTML comments and quotes.
+
+    Containers outlive their child blocks. A missing container ends a fence
+    and the same line is processed again in the surviving parent. Only paragraphs
+    can continue lists or quotes lazily without their markers. This is a bounded block scanner,
+    not an inline Markdown renderer; kept lines retain their original list markers.
+    An open HTML comment leaving its container hides the rest of the input.
     """
     text = (text or "").replace("\r\n", "\n").replace("\r", "\n")
     kept: list[str] = []
+    containers: list[tuple[str, int]] = []
     fence: str | None = None
     in_comment = False
+    paragraph = False
     for line in text.split("\n"):
+        # Tabs advance to four-column stops in Markdown indentation. Preserve the
+        # original line for field/evidence extraction rather than exposing payloads.
+        parsed = line.expandtabs(4)
+        matched, content = _match_containers(parsed, containers)
+        if matched < len(containers):
+            lazy = paragraph and content.strip() and not _interrupts_paragraph(content)
+            if not lazy:
+                if in_comment:
+                    # An out-of-container --> may render as escaped text, leaving
+                    # the HTML comment open over every following verdict field.
+                    break
+                del containers[matched:]
+                fence = None
+                paragraph = False
+
+        quoted = any(kind == "quote" for kind, _ in containers)
         if fence is not None:
-            stripped = line.strip()
-            if stripped and set(stripped) == {fence[0]} and len(stripped) >= len(fence):
+            if _closes_fence(content, fence):
                 fence = None
             continue
-        opening = None if in_comment else _FENCE.match(line)
-        if opening:
-            fence = opening.group(1)
+        if in_comment:
+            visible, in_comment = _strip_comments(content if quoted else line, True)
+            if not quoted:
+                kept.append(visible)
             continue
-        visible, in_comment = _strip_comments(line, in_comment)
+
+        count = len(containers)
+        content = _new_containers(content, containers, paragraph=paragraph)
+        if len(containers) != count:
+            paragraph = False
+        quoted = any(kind == "quote" for kind, _ in containers)
+        opening = _opens_fence(content)
+        if opening:
+            fence = opening
+            paragraph = False
+            continue
+        # Indented code cannot begin inside a paragraph; otherwise it is not a
+        # paragraph that may continue a list or quote without its container prefix.
+        paragraph = bool(
+            content.strip()
+            and not _interrupts_paragraph(content)
+            and (paragraph or not content.startswith("    "))
+        )
+        if quoted:
+            if _HTML_COMMENT_BLOCK.match(content):
+                _, in_comment = _strip_comments(content, False)
+            continue
+        visible, in_comment = _strip_comments(line, False)
         kept.append(visible)
     return "\n".join(kept)
 
@@ -266,6 +385,16 @@ def _publish(
     api.post_json(f"/repos/{repo}/statuses/{sha}", payload)
 
 
+def _head_is_publishable(api: Any, repo: str, number: int, sha: str) -> bool:
+    """Re-read the PR immediately before a status write and reject a stale or closed target."""
+    current = api.get_json(f"/repos/{repo}/pulls/{number}")
+    current_sha = str((current.get("head") or {}).get("sha") or "")
+    if current.get("state") == "open" and current_sha == sha:
+        return True
+    print(f"{CONTEXT}: PR #{number} changed or closed; nothing to publish for {sha[:7]}")
+    return False
+
+
 def run(
     api: Any,
     *,
@@ -289,6 +418,8 @@ def run(
             comments=comments,
             allowed_reviewers=allowed_reviewers,
         )
+        if not _head_is_publishable(api, repo, number, sha):
+            return None
         _publish(api, repo, sha, decision.state, decision.reason, target_url)
     except Exception:
         # Fail closed once the head SHA is known: an older success on this SHA must not outlive a
@@ -296,9 +427,10 @@ def run(
         # the job still goes red, and the original error is the one that surfaces. Before the PR
         # is read there is no SHA to write to, so that failure only turns the job red.
         try:
-            _publish(
-                api, repo, sha, "error", "review-gate could not finish; see the run", target_url
-            )
+            if _head_is_publishable(api, repo, number, sha):
+                _publish(
+                    api, repo, sha, "error", "review-gate could not finish; see the run", target_url
+                )
         except Exception as exc:
             note = f"could not write the error status ({type(exc).__name__})"
             print(f"{CONTEXT}: {note}", file=sys.stderr)

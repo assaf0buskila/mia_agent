@@ -60,9 +60,20 @@ Verdict: PASS
 
 ## The review-gate status
 
-`.github/workflows/review-gate.yml` runs `scripts/ci/review_gate.py` on PR open, push, body edit
-and on PR comments. It reads the PR from the API at that moment and writes the commit status
-`review-gate` on the current head SHA. It is `success` only when all of these hold:
+`.github/workflows/review-gate.yml` uses `pull_request_target` for PR open, reopen, push and body
+edit events targeting `master` (the default branch), plus `issue_comment` for PR comment changes.
+The status-writing job explicitly checks out the repository's default branch with credentials
+not persisted, and executes only that trusted copy of `scripts/ci/review_gate.py`. It never checks
+out the PR head or merge ref, runs PR scripts, or installs dependencies from a PR. The checkout
+action is pinned to a commit SHA; permissions are only `contents: read`, `pull-requests: read`
+and `statuses: write`. PR bodies, branch names and comments are read as API data.
+
+The script evaluates the head SHA read from the API and re-reads the PR immediately before each
+status publication, including a best-effort `error` status. If the head changed or the PR closed,
+it skips publication; the new event or a re-run evaluates the new head. A failed freshness read
+cannot authorize a write. This is a pre-publication check, not an atomic GitHub compare-and-write:
+a push can still happen between the final read and POST, but a status always names the evaluated
+SHA and never transfers to a new head. The `review-gate` status is `success` only when:
 
 - the PR body has a valid `Chunk: V2-NN`, an `Author-Agent` and the other agent as
   `Reviewer-Agent`, and an `## Evidence` section of `- <capability>: <STATE>` bullets with no
@@ -72,29 +83,36 @@ and on PR comments. It reads the PR from the API at that moment and writes the c
 - that comment's `Reviewer-Agent` is not the `Author-Agent`, and the latest such verdict is
   `PASS` or `PASS_WITH_NITS`.
 
-Anything else is `failure`, and a gate that cannot evaluate writes `error`. The status and the
-workflow are called `review-gate`; the job is `evaluate`, so the two never share a name.
+An evaluated rejection is `failure`; a gate that cannot evaluate attempts `error` only after the
+same head check. The status and the workflow are called `review-gate`; the job is `evaluate`, so
+the two never share a name.
 
 A red `evaluate` job means the status on that SHA may be stale: the run could not read or write
 through the API, and the best-effort `error` status it then tries may not have landed either.
 Re-run the job before trusting the status.
 
-The PR that adds the gate cannot be retriggered by a comment, because comment events run the
-workflow from the default branch. After posting the verdict there, edit the PR body or re-run the
-workflow run. If a run fails with a 403 when it reads comments, add `issues: read` to the job's
-permissions in the workflow.
+The PR introducing the gate cannot bootstrap it: the trusted workflow and script must first
+exist on the default branch. Review that first installation through the existing human process
+and local tests. After it is installed, a PR event or comment runs the trusted publisher. If the
+default branch is renamed, update the `pull_request_target.branches` filter too.
 
 ## What this is not
 
-This is a process control, not security. Both agents push and comment as the same GitHub user, and
-the agent tags are self-attested by the session that posts them. Until branch protection is on,
-`gh pr merge` merges regardless of the status. Assaf's deploy go is the real gate.
+This is a process aid, not a security boundary. Both agents share the same GitHub login;
+`Reviewer-Agent` and `Reviewer-Run` are self-attested by the posting session.
+The run id is checked for syntax, not authenticated against a reviewer execution, so an author
+can claim the other agent's identity. Assaf accepted this limitation in issue #109. Trusted code
+execution prevents a PR from replacing the publisher, but does not prove independent review.
+Until branch protection is on, `gh pr merge` merges regardless of the status. Assaf's explicit
+deploy go remains required even when the status is green.
 
-Two limits to know. On `pull_request` events the workflow runs the checked-out PR's script, and on
-comment events the default branch's, so a PR that edits the gate is graded by its own copy until a
-follow-up makes `pull_request` runs check out the base SHA (impossible before the script exists on
-`master`). And a verdict comment is read as Markdown: one that is inside a code fence, a quote or
-an HTML comment does not count, while a `<!--` inside a fence or a backtick code span is literal.
+Verdict fields must be ordinary Markdown text. Fenced examples (including indented lines that
+only look like closing fences), blockquotes and their lazy paragraph continuations, and HTML
+comments do not count. A `<!--` inside fenced code or a backtick code span is literal. Put a real
+verdict after a valid fence ending or a blank line ending a quoted paragraph.
+If an HTML comment leaves its list or quote before closing, the remaining review text is ignored.
+The parser supports the plain-line format above, not every Markdown layout; ambiguous layouts
+may be ignored. A separate comment containing just the four verdict lines avoids that ambiguity.
 
 ## Owner actions (Assaf, not done by agents)
 

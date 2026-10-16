@@ -1,14 +1,17 @@
 name: Review gate
 
-# Publishes the `review-gate` commit status on a PR's current head SHA. It reads the PR from the
-# API every time, so a new push, an edited PR body or a new verdict comment is re-evaluated, and
-# re-running a failed run re-reads the same live state. A PR comment can only retrigger this once
-# the workflow is on the default branch; until then, re-run the pull_request run by hand.
-# Process control only: Claude and GPT push as the same GitHub user. Assaf's deploy go is the gate.
-# Rules and owner actions: docs/COWORK.md.
+# Process aid, not a security boundary: both agents share the same GitHub login. Reviewer-Agent
+# and Reviewer-Run are self-attested; this cannot authenticate an independent reviewer (#109).
+# The status-writing job executes only the trusted default branch's publisher, never PR code.
+# PR changes and comments are API data only. The publisher re-reads the head before each status
+# write and skips publication if it changed. Re-running reads live state again.
+# Both triggers require the trusted workflow/script to be installed on the default branch first;
+# the PR introducing this gate cannot bootstrap it by executing its own publisher.
+# Assaf's explicit deploy go is still required. Rules and owner actions: docs/COWORK.md.
 
 on:
-  pull_request:
+  pull_request_target:
+    branches: [master]
     types: [opened, reopened, synchronize, edited]
   issue_comment:
     types: [created, edited, deleted]
@@ -23,7 +26,7 @@ concurrency:
 jobs:
   # Not named review-gate, so the job's check run cannot be mistaken for the status context.
   evaluate:
-    if: github.event_name == 'pull_request' || github.event.issue.pull_request
+    if: github.event_name == 'pull_request_target' || github.event.issue.pull_request
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -35,6 +38,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
       - name: Evaluate and publish the commit status
         env:
