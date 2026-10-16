@@ -1,0 +1,1060 @@
+{
+  "api_version": "assaf-os.v2",
+  "authority_epoch": 1,
+  "enums": {
+    "client_status": [
+      "פעיל",
+      "לא פעיל"
+    ],
+    "currency": [
+      "ILS",
+      "USD",
+      "EUR",
+      "GBP"
+    ],
+    "expense_source": [
+      "תשלום בפועל",
+      "דיווח שימוש בפלטפורמה"
+    ],
+    "lead_status": [
+      "חדש",
+      "רלוונטי",
+      "לא רלוונטי",
+      "לא ענה",
+      "הפך ללקוח"
+    ],
+    "path": [
+      "לימוד",
+      "אוטומציה"
+    ],
+    "payment_kind": [
+      "התקבל",
+      "החזר",
+      "בוטל"
+    ],
+    "payment_status": [
+      "שולם",
+      "לא שולם",
+      "בוטל"
+    ],
+    "shared_path": [
+      "לימוד",
+      "אוטומציה",
+      "משותף"
+    ],
+    "source": [
+      "משתמש",
+      "OS",
+      "MIA"
+    ],
+    "task_status": [
+      "לביצוע",
+      "בתהליך",
+      "ממתין",
+      "בוצע",
+      "בוטל"
+    ],
+    "time_status": [
+      "פעיל",
+      "בוטל"
+    ],
+    "work_status": [
+      "מתוכננת",
+      "פעילה",
+      "הושלמה",
+      "בוטלה"
+    ]
+  },
+  "money_unit": "minor",
+  "schema_version": "assaf-os-unified.v1",
+  "source": "postgresql",
+  "tabs": [
+    {
+      "fields": [
+        {
+          "key": "summary_scope",
+          "label": "סוג סיכום",
+          "required": false,
+          "role": "calculated",
+          "type": "text"
+        },
+        {
+          "key": "month",
+          "label": "חודש",
+          "required": false,
+          "role": "calculated",
+          "type": "month"
+        },
+        {
+          "key": "person_id",
+          "label": "מזהה אדם",
+          "required": false,
+          "role": "calculated",
+          "type": "id"
+        },
+        {
+          "key": "client_name",
+          "label": "לקוח",
+          "required": false,
+          "role": "calculated",
+          "type": "text"
+        },
+        {
+          "enum": "path",
+          "key": "path",
+          "label": "מסלול",
+          "required": false,
+          "role": "calculated",
+          "type": "enum"
+        },
+        {
+          "enum": "currency",
+          "key": "currency",
+          "label": "מטבע",
+          "required": false,
+          "role": "calculated",
+          "type": "enum"
+        },
+        {
+          "key": "net_received_ils",
+          "label": "תקבולים נטו",
+          "required": false,
+          "role": "calculated",
+          "type": "money_ils"
+        },
+        {
+          "key": "hours",
+          "label": "שעות מתועדות",
+          "required": false,
+          "role": "calculated",
+          "type": "decimal"
+        },
+        {
+          "key": "weighted_hourly_ils",
+          "label": "הכנסה משוקללת לשעה",
+          "required": false,
+          "role": "calculated",
+          "type": "money_ils"
+        },
+        {
+          "key": "missing_time",
+          "label": "חסר דיווח זמן",
+          "required": false,
+          "role": "calculated",
+          "type": "boolean"
+        },
+        {
+          "key": "paid_expenses_ils",
+          "label": "הוצאות ששולמו בחודש",
+          "required": false,
+          "role": "calculated",
+          "type": "money_ils"
+        },
+        {
+          "key": "net_cash_ils",
+          "label": "תזרים נטו בחודש",
+          "required": false,
+          "role": "calculated",
+          "type": "money_ils"
+        },
+        {
+          "key": "coverage",
+          "label": "כיסוי נתונים",
+          "required": false,
+          "role": "system",
+          "type": "text"
+        },
+        {
+          "key": "calculated_at",
+          "label": "חושב בתאריך",
+          "required": false,
+          "role": "system",
+          "type": "datetime"
+        }
+      ],
+      "frozenRows": 1,
+      "key": "summary",
+      "kind": "calculated",
+      "name": "סיכום",
+      "order": 1
+    },
+    {
+      "fields": [
+        {
+          "key": "lead_id",
+          "label": "מזהה ליד",
+          "required": true,
+          "role": "system",
+          "stable": true,
+          "type": "id"
+        },
+        {
+          "key": "person_id",
+          "label": "מזהה אדם",
+          "note": "נשמר גם בהפיכה ללקוח",
+          "required": true,
+          "role": "system",
+          "stable": true,
+          "type": "id"
+        },
+        {
+          "key": "name",
+          "label": "שם",
+          "required": true,
+          "role": "input",
+          "type": "text"
+        },
+        {
+          "key": "phone",
+          "label": "טלפון",
+          "required": false,
+          "role": "input",
+          "type": "text"
+        },
+        {
+          "key": "email",
+          "label": "אימייל",
+          "required": false,
+          "role": "input",
+          "type": "text"
+        },
+        {
+          "enum": "path",
+          "key": "path",
+          "label": "מסלול",
+          "required": true,
+          "role": "input",
+          "type": "enum"
+        },
+        {
+          "enum": "lead_status",
+          "key": "status",
+          "label": "סטטוס",
+          "required": true,
+          "role": "input",
+          "type": "enum"
+        },
+        {
+          "key": "source_note",
+          "label": "מקור / הערה",
+          "required": false,
+          "role": "input",
+          "type": "text"
+        },
+        {
+          "key": "created_at",
+          "label": "נוצר בתאריך",
+          "required": false,
+          "role": "system",
+          "type": "datetime"
+        },
+        {
+          "key": "updated_at",
+          "label": "עודכן בתאריך",
+          "required": false,
+          "role": "system",
+          "type": "datetime"
+        },
+        {
+          "key": "revision",
+          "label": "גרסה",
+          "required": false,
+          "role": "system",
+          "type": "integer"
+        },
+        {
+          "enum": "source",
+          "key": "write_source",
+          "label": "מקור כתיבה",
+          "required": false,
+          "role": "system",
+          "type": "enum"
+        },
+        {
+          "key": "request_id",
+          "label": "מזהה בקשה",
+          "required": false,
+          "role": "system",
+          "type": "id"
+        }
+      ],
+      "frozenRows": 1,
+      "key": "leads",
+      "kind": "input",
+      "name": "לידים",
+      "order": 2
+    },
+    {
+      "fields": [
+        {
+          "key": "person_id",
+          "label": "מזהה אדם",
+          "required": true,
+          "role": "system",
+          "stable": true,
+          "type": "id",
+          "unique": true
+        },
+        {
+          "key": "name",
+          "label": "שם",
+          "required": true,
+          "role": "input",
+          "type": "text"
+        },
+        {
+          "key": "phone",
+          "label": "טלפון",
+          "required": false,
+          "role": "input",
+          "type": "text"
+        },
+        {
+          "key": "email",
+          "label": "אימייל",
+          "required": false,
+          "role": "input",
+          "type": "text"
+        },
+        {
+          "enum": "client_status",
+          "key": "status",
+          "label": "סטטוס",
+          "required": true,
+          "role": "input",
+          "type": "enum"
+        },
+        {
+          "key": "notes",
+          "label": "הערות",
+          "required": false,
+          "role": "input",
+          "type": "text"
+        },
+        {
+          "key": "created_at",
+          "label": "נוצר בתאריך",
+          "required": false,
+          "role": "system",
+          "type": "datetime"
+        },
+        {
+          "key": "updated_at",
+          "label": "עודכן בתאריך",
+          "required": false,
+          "role": "system",
+          "type": "datetime"
+        },
+        {
+          "key": "revision",
+          "label": "גרסה",
+          "required": false,
+          "role": "system",
+          "type": "integer"
+        },
+        {
+          "enum": "source",
+          "key": "write_source",
+          "label": "מקור כתיבה",
+          "required": false,
+          "role": "system",
+          "type": "enum"
+        },
+        {
+          "key": "request_id",
+          "label": "מזהה בקשה",
+          "required": false,
+          "role": "system",
+          "type": "id"
+        },
+        {
+          "key": "received_learning_ils",
+          "label": "תקבולים נטו — לימוד (₪ בלבד)",
+          "required": false,
+          "role": "calculated",
+          "type": "money_ils"
+        },
+        {
+          "key": "received_automation_ils",
+          "label": "תקבולים נטו — אוטומציה (₪ בלבד)",
+          "required": false,
+          "role": "calculated",
+          "type": "money_ils"
+        },
+        {
+          "key": "total_received_ils",
+          "label": "סה״כ תקבולים נטו (₪ בלבד)",
+          "required": false,
+          "role": "calculated",
+          "type": "money_ils"
+        },
+        {
+          "key": "recorded_hours",
+          "label": "שעות מתועדות",
+          "required": false,
+          "role": "calculated",
+          "type": "decimal"
+        },
+        {
+          "key": "hourly_ils",
+          "label": "הכנסה משוקללת לשעה (₪ בלבד)",
+          "note": "סה״כ תקבולים נטו חלקי סה״כ שעות; חסר זמן נשאר ריק",
+          "required": false,
+          "role": "calculated",
+          "type": "money_ils"
+        },
+        {
+          "key": "foreign_currency_flag",
+          "label": "קיימים תקבולים במטבע זר",
+          "required": false,
+          "role": "calculated",
+          "type": "boolean"
+        }
+      ],
+      "frozenRows": 1,
+      "key": "clients",
+      "kind": "input",
+      "name": "לקוחות",
+      "order": 3
+    },
+    {
+      "fields": [
+        {
+          "key": "work_id",
+          "label": "מזהה עבודה",
+          "required": true,
+          "role": "system",
+          "stable": true,
+          "type": "id",
+          "unique": true
+        },
+        {
+          "key": "person_id",
+          "label": "מזהה אדם",
+          "ref": "clients.person_id",
+          "required": true,
+          "role": "input",
+          "type": "id"
+        },
+        {
+          "key": "title",
+          "label": "שם העבודה",
+          "required": true,
+          "role": "input",
+          "type": "text"
+        },
+        {
+          "enum": "path",
+          "immutableAfterCreate": true,
+          "key": "path",
+          "label": "מסלול",
+          "required": true,
+          "role": "input",
+          "type": "enum"
+        },
+        {
+          "key": "start_date",
+          "label": "תאריך התחלה",
+          "required": false,
+          "role": "input",
+          "type": "date"
+        },
+        {
+          "enum": "work_status",
+          "key": "status",
+          "label": "סטטוס",
+          "required": true,
+          "role": "input",
+          "type": "enum"
+        },
+        {
+          "key": "agreed_amount_ils",
+          "label": "סכום מוסכם",
+          "note": "אופציונלי; אינו הכנסה בפועל",
+          "required": false,
+          "role": "input",
+          "type": "money_ils"
+        },
+        {
+          "enum": "currency",
+          "key": "currency",
+          "label": "מטבע",
+          "required": false,
+          "role": "input",
+          "type": "enum"
+        },
+        {
+          "key": "created_at",
+          "label": "נוצר בתאריך",
+          "required": false,
+          "role": "system",
+          "type": "datetime"
+        },
+        {
+          "key": "updated_at",
+          "label": "עודכן בתאריך",
+          "required": false,
+          "role": "system",
+          "type": "datetime"
+        },
+        {
+          "key": "revision",
+          "label": "גרסה",
+          "required": false,
+          "role": "system",
+          "type": "integer"
+        },
+        {
+          "enum": "source",
+          "key": "write_source",
+          "label": "מקור כתיבה",
+          "required": false,
+          "role": "system",
+          "type": "enum"
+        },
+        {
+          "key": "request_id",
+          "label": "מזהה בקשה",
+          "required": false,
+          "role": "system",
+          "type": "id"
+        },
+        {
+          "key": "received_ils",
+          "label": "תקבולים נטו לעבודה (₪ בלבד)",
+          "required": false,
+          "role": "calculated",
+          "type": "money_ils"
+        },
+        {
+          "key": "recorded_hours",
+          "label": "שעות מתועדות לעבודה",
+          "required": false,
+          "role": "calculated",
+          "type": "decimal"
+        },
+        {
+          "key": "hourly_ils",
+          "label": "הכנסה משוקללת לשעה (₪ בלבד)",
+          "note": "חסר זמן נשאר ריק",
+          "required": false,
+          "role": "calculated",
+          "type": "money_ils"
+        },
+        {
+          "key": "foreign_currency_flag",
+          "label": "קיימים תקבולים במטבע זר",
+          "required": false,
+          "role": "calculated",
+          "type": "boolean"
+        }
+      ],
+      "frozenRows": 1,
+      "key": "works",
+      "kind": "input",
+      "name": "עבודות",
+      "order": 4
+    },
+    {
+      "fields": [
+        {
+          "key": "payment_id",
+          "label": "מזהה תקבול",
+          "required": true,
+          "role": "system",
+          "stable": true,
+          "type": "id",
+          "unique": true
+        },
+        {
+          "key": "person_id",
+          "label": "מזהה אדם",
+          "ref": "clients.person_id",
+          "required": true,
+          "role": "input",
+          "type": "id"
+        },
+        {
+          "key": "work_id",
+          "label": "מזהה עבודה",
+          "ref": "works.work_id",
+          "required": true,
+          "role": "input",
+          "type": "id"
+        },
+        {
+          "enum": "path",
+          "immutableAfterCreate": true,
+          "key": "path",
+          "label": "מסלול",
+          "required": true,
+          "role": "input",
+          "type": "enum"
+        },
+        {
+          "key": "date",
+          "label": "תאריך",
+          "required": true,
+          "role": "input",
+          "type": "date"
+        },
+        {
+          "key": "actual_amount_ils",
+          "label": "סכום בפועל",
+          "required": true,
+          "role": "input",
+          "type": "money_ils"
+        },
+        {
+          "enum": "currency",
+          "key": "currency",
+          "label": "מטבע",
+          "required": true,
+          "role": "input",
+          "type": "enum"
+        },
+        {
+          "enum": "payment_kind",
+          "key": "kind",
+          "label": "סוג תקבול",
+          "required": true,
+          "role": "input",
+          "type": "enum"
+        },
+        {
+          "key": "original_payment_id",
+          "label": "מזהה תקבול מקורי להחזר",
+          "note": "חובה בהחזר; ריק בתקבול רגיל או מבוטל",
+          "ref": "payments.payment_id",
+          "required": false,
+          "role": "input",
+          "type": "id"
+        },
+        {
+          "key": "notes",
+          "label": "הערות",
+          "required": false,
+          "role": "input",
+          "type": "text"
+        },
+        {
+          "key": "created_at",
+          "label": "נוצר בתאריך",
+          "required": false,
+          "role": "system",
+          "type": "datetime"
+        },
+        {
+          "key": "revision",
+          "label": "גרסה",
+          "required": false,
+          "role": "system",
+          "type": "integer"
+        },
+        {
+          "enum": "source",
+          "key": "write_source",
+          "label": "מקור כתיבה",
+          "required": false,
+          "role": "system",
+          "type": "enum"
+        },
+        {
+          "key": "request_id",
+          "label": "מזהה בקשה",
+          "required": false,
+          "role": "system",
+          "type": "id"
+        }
+      ],
+      "frozenRows": 1,
+      "key": "payments",
+      "kind": "input",
+      "name": "תקבולים",
+      "order": 5
+    },
+    {
+      "fields": [
+        {
+          "key": "time_id",
+          "label": "מזהה דיווח",
+          "required": true,
+          "role": "system",
+          "stable": true,
+          "type": "id",
+          "unique": true
+        },
+        {
+          "key": "person_id",
+          "label": "מזהה אדם",
+          "ref": "clients.person_id",
+          "required": true,
+          "role": "input",
+          "type": "id"
+        },
+        {
+          "key": "work_id",
+          "label": "מזהה עבודה",
+          "ref": "works.work_id",
+          "required": true,
+          "role": "input",
+          "type": "id"
+        },
+        {
+          "enum": "path",
+          "immutableAfterCreate": true,
+          "key": "path",
+          "label": "מסלול",
+          "required": true,
+          "role": "input",
+          "type": "enum"
+        },
+        {
+          "key": "date",
+          "label": "תאריך",
+          "required": true,
+          "role": "input",
+          "type": "date"
+        },
+        {
+          "key": "minutes",
+          "label": "דקות עבודה",
+          "minimum": 0,
+          "note": "כולל הכנה ותמיכה",
+          "required": true,
+          "role": "input",
+          "type": "integer"
+        },
+        {
+          "key": "description",
+          "label": "תיאור",
+          "required": false,
+          "role": "input",
+          "type": "text"
+        },
+        {
+          "enum": "time_status",
+          "key": "status",
+          "label": "סטטוס",
+          "required": true,
+          "role": "input",
+          "type": "enum"
+        },
+        {
+          "key": "created_at",
+          "label": "נוצר בתאריך",
+          "required": false,
+          "role": "system",
+          "type": "datetime"
+        },
+        {
+          "key": "revision",
+          "label": "גרסה",
+          "required": false,
+          "role": "system",
+          "type": "integer"
+        },
+        {
+          "enum": "source",
+          "key": "write_source",
+          "label": "מקור כתיבה",
+          "required": false,
+          "role": "system",
+          "type": "enum"
+        },
+        {
+          "key": "request_id",
+          "label": "מזהה בקשה",
+          "required": false,
+          "role": "system",
+          "type": "id"
+        }
+      ],
+      "frozenRows": 1,
+      "key": "time",
+      "kind": "input",
+      "name": "שעות עבודה",
+      "order": 6
+    },
+    {
+      "fields": [
+        {
+          "key": "expense_id",
+          "label": "מזהה הוצאה",
+          "required": true,
+          "role": "system",
+          "stable": true,
+          "type": "id",
+          "unique": true
+        },
+        {
+          "key": "date",
+          "label": "תאריך",
+          "required": true,
+          "role": "input",
+          "type": "date"
+        },
+        {
+          "key": "category",
+          "label": "קטגוריה",
+          "required": true,
+          "role": "input",
+          "type": "text"
+        },
+        {
+          "key": "platform",
+          "label": "פלטפורמה",
+          "required": true,
+          "role": "input",
+          "type": "enum",
+          "values": [
+            "Google Ads",
+            "Meta",
+            "אחר"
+          ]
+        },
+        {
+          "enum": "shared_path",
+          "key": "path",
+          "label": "מסלול",
+          "required": true,
+          "role": "input",
+          "type": "enum"
+        },
+        {
+          "key": "vendor",
+          "label": "ספק",
+          "required": false,
+          "role": "input",
+          "type": "text"
+        },
+        {
+          "key": "amount_ils",
+          "label": "סכום",
+          "required": true,
+          "role": "input",
+          "type": "money_ils"
+        },
+        {
+          "enum": "currency",
+          "key": "currency",
+          "label": "מטבע",
+          "required": true,
+          "role": "input",
+          "type": "enum"
+        },
+        {
+          "enum": "payment_status",
+          "key": "payment_status",
+          "label": "סטטוס תשלום",
+          "required": true,
+          "role": "input",
+          "type": "enum"
+        },
+        {
+          "enum": "expense_source",
+          "key": "source_type",
+          "label": "סוג מקור",
+          "note": "שימוש במודעות אינו הוכחת תשלום",
+          "required": true,
+          "role": "input",
+          "type": "enum"
+        },
+        {
+          "key": "source_key",
+          "label": "מפתח מקור",
+          "required": true,
+          "role": "input",
+          "type": "text"
+        },
+        {
+          "key": "notes",
+          "label": "הערות",
+          "required": false,
+          "role": "input",
+          "type": "text"
+        },
+        {
+          "key": "created_at",
+          "label": "נוצר בתאריך",
+          "required": false,
+          "role": "system",
+          "type": "datetime"
+        },
+        {
+          "key": "revision",
+          "label": "גרסה",
+          "required": false,
+          "role": "system",
+          "type": "integer"
+        },
+        {
+          "enum": "source",
+          "key": "write_source",
+          "label": "מקור כתיבה",
+          "required": false,
+          "role": "system",
+          "type": "enum"
+        },
+        {
+          "key": "request_id",
+          "label": "מזהה בקשה",
+          "required": false,
+          "role": "system",
+          "type": "id"
+        }
+      ],
+      "frozenRows": 1,
+      "key": "expenses",
+      "kind": "input",
+      "name": "הוצאות והשקעות",
+      "order": 7
+    },
+    {
+      "fields": [
+        {
+          "key": "task_id",
+          "label": "מזהה משימה",
+          "required": true,
+          "role": "system",
+          "stable": true,
+          "type": "id",
+          "unique": true
+        },
+        {
+          "key": "title",
+          "label": "משימה",
+          "required": true,
+          "role": "input",
+          "type": "text"
+        },
+        {
+          "key": "person_id",
+          "label": "מזהה אדם",
+          "ref": "clients.person_id",
+          "required": false,
+          "role": "input",
+          "type": "id"
+        },
+        {
+          "key": "work_id",
+          "label": "מזהה עבודה",
+          "ref": "works.work_id",
+          "required": false,
+          "role": "input",
+          "type": "id"
+        },
+        {
+          "enum": "path",
+          "key": "path",
+          "label": "מסלול",
+          "required": false,
+          "role": "input",
+          "type": "enum"
+        },
+        {
+          "enum": "task_status",
+          "key": "status",
+          "label": "סטטוס",
+          "required": true,
+          "role": "input",
+          "type": "enum"
+        },
+        {
+          "key": "due_date",
+          "label": "תאריך יעד",
+          "required": false,
+          "role": "input",
+          "type": "date"
+        },
+        {
+          "key": "notes",
+          "label": "הערות",
+          "required": false,
+          "role": "input",
+          "type": "text"
+        },
+        {
+          "key": "created_at",
+          "label": "נוצר בתאריך",
+          "required": false,
+          "role": "system",
+          "type": "datetime"
+        },
+        {
+          "key": "updated_at",
+          "label": "עודכן בתאריך",
+          "required": false,
+          "role": "system",
+          "type": "datetime"
+        },
+        {
+          "key": "revision",
+          "label": "גרסה",
+          "required": false,
+          "role": "system",
+          "type": "integer"
+        },
+        {
+          "enum": "source",
+          "key": "write_source",
+          "label": "מקור כתיבה",
+          "required": false,
+          "role": "system",
+          "type": "enum"
+        },
+        {
+          "key": "request_id",
+          "label": "מזהה בקשה",
+          "required": false,
+          "role": "system",
+          "type": "id"
+        }
+      ],
+      "frozenRows": 1,
+      "key": "tasks",
+      "kind": "input",
+      "name": "משימות",
+      "order": 8
+    },
+    {
+      "fields": [
+        {
+          "key": "key",
+          "label": "מפתח",
+          "required": true,
+          "role": "system",
+          "type": "text",
+          "unique": true
+        },
+        {
+          "key": "value",
+          "label": "ערך",
+          "required": false,
+          "role": "input",
+          "type": "text"
+        },
+        {
+          "key": "description",
+          "label": "תיאור",
+          "required": false,
+          "role": "system",
+          "type": "text"
+        },
+        {
+          "key": "updated_at",
+          "label": "עודכן בתאריך",
+          "required": false,
+          "role": "system",
+          "type": "datetime"
+        }
+      ],
+      "frozenRows": 1,
+      "key": "settings",
+      "kind": "input",
+      "name": "הגדרות",
+      "order": 9
+    }
+  ],
+  "workspace_id": "test"
+}

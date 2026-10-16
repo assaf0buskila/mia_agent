@@ -1,0 +1,15 @@
+{
+  "api_version": "assaf-os.v2",
+  "authority_epoch": 1,
+  "mirror": {
+    "lag_s": 0,
+    "last_verified_at": "2026-10-16T11:59:30.000Z",
+    "state": "verified",
+    "verified_version": 1
+  },
+  "observed_version": 1,
+  "since": "1.2.0",
+  "source": "postgresql",
+  "unchanged": true,
+  "workspace_id": "test"
+}

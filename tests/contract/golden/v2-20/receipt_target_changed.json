@@ -1,0 +1,32 @@
+{
+  "actor_source": "OS",
+  "api_version": "assaf-os.v2",
+  "authority_epoch": 1,
+  "commit_version": 3,
+  "committed_at": null,
+  "kind": "proposal",
+  "observed_version": 3,
+  "proposal_id": "PRO_00000000000040008000000000001005",
+  "reason_codes": [],
+  "records": [
+    {
+      "entity": "tasks",
+      "record": {
+        "due_date": "2026-10-20",
+        "person_id": "PER_c1",
+        "revision": 2,
+        "status": "לביצוע",
+        "task_id": "TAS_t1",
+        "title": "שונה בינתיים",
+        "work_id": "WOR_w1"
+      }
+    }
+  ],
+  "request_id": "00000000-0000-4000-8000-000000001003",
+  "server_now": "2026-10-16T12:00:00.000Z",
+  "source": "postgresql",
+  "status": "target_changed",
+  "undo": null,
+  "undo_of": null,
+  "workspace_id": "test"
+}

@@ -47,6 +47,15 @@ jobs:
           caddy:2.11.4-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
           caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
       - run: uv run pytest --basetemp=.cache/pytest-ci
+      # The suite above fails when the export differs from the committed golden tree (section
+      # 10.4), so this uploads exactly what the export produces. The frontend vendors it by hash.
+      - name: Upload the contract golden fixtures
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: os-contract-golden-${{ github.sha }}
+          path: tests/contract/golden
+          if-no-files-found: error
+          retention-days: 30
 
   postgres:
     runs-on: ubuntu-latest

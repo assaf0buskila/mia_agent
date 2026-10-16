@@ -1,0 +1,57 @@
+{
+  "api_version": "assaf-os.v2",
+  "authority_epoch": 1,
+  "coverage": "complete",
+  "entity": "expenses",
+  "labels": {
+    "clients.person_id": {},
+    "works.work_id": {}
+  },
+  "mirror": {
+    "lag_s": 0,
+    "last_verified_at": "2026-10-16T11:59:30.000Z",
+    "state": "verified",
+    "verified_version": 1
+  },
+  "next_cursor": null,
+  "observed_at": "2026-10-16T12:00:00.000Z",
+  "observed_version": 1,
+  "pending_count": 0,
+  "records": [
+    {
+      "amount_ils": 45000,
+      "category": "פרסום",
+      "currency": "ILS",
+      "date": "2026-10-01",
+      "expense_id": "EXP_e1",
+      "path": "לימוד",
+      "payment_status": "שולם",
+      "platform": "Meta",
+      "revision": 1,
+      "source_key": "key-1",
+      "source_type": "תשלום בפועל",
+      "vendor": "Meta Platforms"
+    }
+  ],
+  "since": "1.2.0",
+  "source": "postgresql",
+  "summary": {
+    "coverage": "complete",
+    "monthly": [
+      {
+        "coverage": "complete",
+        "currency": "ILS",
+        "effective_hourly_ils": 400000,
+        "month": "2026-10",
+        "net_cash_ils": 555000,
+        "paid_expenses_ils": 45000,
+        "paid_income_ils": 600000,
+        "reason_codes": [],
+        "recorded_minutes": 90
+      }
+    ]
+  },
+  "total": 1,
+  "unchanged": false,
+  "workspace_id": "test"
+}
