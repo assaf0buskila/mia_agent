@@ -73,7 +73,7 @@ def apply_ledger_migrations(engine: Engine, *, main_role: str | None = None) -> 
             "SELECT EXISTS(SELECT 1 FROM pg_auth_members "
             "WHERE member='assaf_os_owner'::regrole OR "
             "(roleid='assaf_os_owner'::regrole AND NOT "
-            "(member=session_user::regrole AND admin_option "
+            "(member=(SELECT oid FROM pg_roles WHERE rolname = session_user) AND admin_option "
             "AND NOT set_option AND NOT inherit_option)))"
         )):
             raise ValueError("ledger_owner_membership_unsafe")

@@ -215,7 +215,7 @@ case "$cmd" in
     # Keep this file single-line-per-value; multiline values fail closed too.
     awk '
       /^[[:space:]]*(#|$)/ { next }
-      !/^[[:space:]]*MIA_OS_LEDGER_MIGRATION_DATABASE_URL=/ { exit 1 }
+      !/^MIA_OS_LEDGER_MIGRATION_DATABASE_URL=('\''[^'\'']*'\''|"[^"]*"|[^[:space:]'\''"]+)[[:space:]]*$/ { exit 1 }
     ' /etc/mia/os-ledger-migrate.env || die "ledger migration env keys refused"
     compose --profile os-ledger run --rm --no-deps -T os-ledger-migrate "$@"
     ;;

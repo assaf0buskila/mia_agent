@@ -121,6 +121,12 @@ def test_runtime_dsn_wins_over_migration_env_file():
     ("MIA_OS_LEDGER_MIGRATION_DATABASE_URL=x\nMIA_BUILD_SHA=secret\n", False),
     ("MIA_OS_LEDGER_MIGRATION_DATABASE_URL=x\nexport MIA_DATABASE_URL=secret\n", False),
     ("MIA_OS_LEDGER_MIGRATION_DATABASE_URL='x\nMIA_DATABASE_URL=secret'\n", False),
+    ("MIA_OS_LEDGER_MIGRATION_DATABASE_URL='postgresql://priv@127.0.0.1/mia' "
+     f"MIA_BUILD_SHA={'b' * 40}\n", False),
+    ('MIA_OS_LEDGER_MIGRATION_DATABASE_URL="postgresql://priv@127.0.0.1/mia" '
+     f"MIA_BUILD_SHA={'c' * 40}\n", False),
+    ("MIA_OS_LEDGER_MIGRATION_DATABASE_URL=postgresql://priv@127.0.0.1/mia "
+     f"MIA_BUILD_SHA={'d' * 40}\n", False),
     (None, False),
 ])
 def test_operator_refuses_unexpected_migration_file_keys(tmp_path, content, ok):

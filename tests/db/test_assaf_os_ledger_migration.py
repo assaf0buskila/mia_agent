@@ -52,6 +52,13 @@ def ledger_db():
     # This exact database is disposable. Reset it for the real fresh-worker proof.
     with engine.begin() as conn:
         assert 160000 <= int(conn.scalar(text("SHOW server_version_num"))) < 170000
+        if conn.scalar(text(
+            "SELECT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='assaf_os_owner')"
+        )):
+            conn.execute(text(
+                "ALTER DEFAULT PRIVILEGES FOR ROLE assaf_os_owner "
+                "GRANT EXECUTE ON FUNCTIONS TO PUBLIC"
+            ))
         conn.execute(text("DROP SCHEMA IF EXISTS assaf_os CASCADE"))
         conn.execute(text("DROP SCHEMA public CASCADE"))
         conn.execute(text("CREATE SCHEMA public"))
