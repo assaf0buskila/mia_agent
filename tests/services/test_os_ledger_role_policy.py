@@ -78,17 +78,31 @@ def provision():
 
 
 def sql_columns() -> dict[str, dict[str, bool]]:
-    """Column name -> generated, per CREATE TABLE block of the frozen V2-14 SQL."""
+    """Column name -> generated, per CREATE TABLE block of the frozen V2-14 SQL.
+
+    V2-14b: also the three allow-listed addendum files, in MIGRATIONS order, including
+    their ALTER TABLE ... ADD COLUMN lines (os_workspaces, os_receipts).
+    """
+    from app.db.os_ledger_migrate import MIGRATIONS
+
     tables: dict[str, dict[str, bool]] = {}
-    current = None
-    for line in SQL.read_text(encoding="utf-8").splitlines():
-        start = re.fullmatch(r"CREATE TABLE assaf_os\.(\w+) \(", line)
-        if start:
-            current = tables.setdefault(start.group(1), {})
-        elif current is not None and line.startswith(");"):
-            current = None
-        elif current is not None and (column := re.match(r"    ([a-z_][a-z0-9_]*) [A-Z]", line)):
-            current[column.group(1)] = "GENERATED ALWAYS" in line
+    for name in MIGRATIONS:
+        current = altered = None
+        for line in (SQL.parent / name).read_text(encoding="utf-8").splitlines():
+            start = re.fullmatch(r"CREATE TABLE assaf_os\.(\w+) \(", line)
+            alter = re.match(r"ALTER TABLE assaf_os\.(\w+)", line)
+            if start:
+                current = tables.setdefault(start.group(1), {})
+            elif current is not None and line.startswith(");"):
+                current = None
+            elif current is not None and (
+                column := re.match(r"    ([a-z_][a-z0-9_]*) [A-Z]", line)
+            ):
+                current[column.group(1)] = "GENERATED ALWAYS" in line
+            elif alter:
+                altered = alter.group(1)
+            elif altered and (added := re.match(r"    ADD COLUMN ([a-z_][a-z0-9_]*) ", line)):
+                tables[altered][added.group(1)] = "GENERATED ALWAYS" in line
     return tables
 
 
@@ -211,7 +225,7 @@ def test_provision_dry_run_exact_and_no_connection(name, mode, monkeypatch, caps
     assert creates == ([f"CREATE ROLE assaf_os_owner NOLOGIN {POSTURE};"] if mode == "reapply"
                        else []) + [
         f"CREATE ROLE assaf_os_ledger LOGIN {POSTURE};",
-        f"CREATE ROLE assaf_os_retention NOLOGIN {POSTURE};",
+        f"CREATE ROLE assaf_os_retention LOGIN {POSTURE};",  # V2-14b (§18.2)
     ]
     assert f"REVOKE TEMPORARY ON DATABASE {target.database} FROM PUBLIC;" in statements
     assert "ALTER SCHEMA assaf_os OWNER TO assaf_os_owner;" in statements
@@ -225,8 +239,13 @@ def test_provision_dry_run_exact_and_no_connection(name, mode, monkeypatch, caps
                 in statements)
     assert ("ALTER DEFAULT PRIVILEGES FOR ROLE assaf_os_owner "
             "REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;") in statements
-    for forbidden in ("DELETE", "TRUNCATE", "PASSWORD", "postgresql", "assaf_os_retention TO"):
+    for forbidden in ("TRUNCATE", "PASSWORD", "postgresql", "assaf_os_retention TO"):
         assert forbidden not in output
+    # V2-14b: DELETE exists only as the retention role's two §18.2 grants.
+    assert [line for line in statements if "DELETE" in line] == [
+        "GRANT DELETE, SELECT ON TABLE assaf_os.os_assistant_audit TO assaf_os_retention;",
+        "GRANT DELETE, SELECT ON TABLE assaf_os.os_statement_batch_lines TO assaf_os_retention;",
+    ]
 
 
 @pytest.mark.parametrize("args", [
@@ -315,7 +334,8 @@ def settle(admin, database):
     edge, PUBLIC without TEMP and role_policy.ledger_grant_statements() applied directly.
     """
     with admin.begin() as c:
-        for name, login in (("assaf_os_ledger", "LOGIN"), ("assaf_os_retention", "NOLOGIN")):
+        # V2-14b (§18.2): retention is LOGIN NOINHERIT with its purge grants.
+        for name, login in (("assaf_os_ledger", "LOGIN"), ("assaf_os_retention", "LOGIN")):
             if c.scalar(text("SELECT to_regrole(:name) IS NULL"), {"name": name}):
                 c.execute(text(f"CREATE ROLE {name} {login} {POSTURE}"))
         c.execute(text(f"REVOKE TEMPORARY ON DATABASE {database} FROM PUBLIC"))
@@ -1040,23 +1060,15 @@ def test_runtime_dml_matches_the_addendum_map(roles):
 
 def test_retention_runs_only_its_purge_and_backstop_deletes(roles):
     scope = "b.workspace_id='v214b'"
+    sql = policy().RETENTION_DELETE_SQL
+    bound = {"workspace_id": "v214b"}
     with roles[0].connect() as c, c.begin():
         _seed(c)
         c.execute(text("SET LOCAL ROLE assaf_os_retention"))
-        assert c.execute(text(
-            f"DELETE FROM assaf_os.os_statement_batch_lines b WHERE {scope} "
-            "AND b.purged_at IS NOT NULL"
-        )).rowcount == 2
+        assert c.execute(text(sql["purge"]), bound).rowcount == 2
         # The I11 backstop: expired more than a day ago, whatever purged_at says.
-        assert c.execute(text(
-            "DELETE FROM assaf_os.os_statement_batch_lines b USING assaf_os.os_proposals p "
-            f"WHERE {scope} AND p.workspace_id=b.workspace_id AND p.proposal_id=b.proposal_id "
-            "AND p.expires_at < now() - interval '1 day'"
-        )).rowcount == 1
-        assert c.execute(text(
-            "DELETE FROM assaf_os.os_assistant_audit WHERE workspace_id='v214b' "
-            "AND occurred_at < now() - interval '180 days'"
-        )).rowcount == 1
+        assert c.execute(text(sql["backstop"]), bound).rowcount == 1
+        assert c.execute(text(sql["audit"]), bound).rowcount == 1
         assert sorted(c.execute(text(
             "SELECT proposal_id, purged_at IS NULL FROM assaf_os.os_statement_batch_lines b "
             f"WHERE {scope}"
@@ -1122,6 +1134,125 @@ def test_retention_logs_in_as_itself_and_reads_only_its_columns(roles):
         retention.dispose()
 
 
+E6_WS, E6_OTHER = "v214b-e6", "v214b-e6-other"
+# (proposal, created, expires): statement_batch proposals around the 1-day backstop edge.
+E6_PROPOSALS = (
+    ("live", "now()", "now() + interval '1 day'"),
+    ("young", "now() - interval '6 days'", "now() - interval '23 hours'"),
+    ("edge", "now() - interval '7 days'", "now() - interval '1 day' + interval '5 minutes'"),
+    ("old", "now() - interval '8 days'", "now() - interval '1 day' - interval '5 minutes'"),
+)
+# (proposal, line key, purged)
+E6_LINES = (
+    ("live", "a", False), ("live", "b", True), ("young", "a", False), ("edge", "a", False),
+    ("old", "a", False), ("old", "b", True),
+)
+# (label, age) around the 180-day audit edge.
+E6_AUDIT = (
+    ("fresh", "0 days"), ("young", "179 days 23 hours 55 minutes"),
+    ("old", "180 days 5 minutes"),
+)
+
+
+def _e6_seed(c, workspace):
+    c.execute(text(
+        "INSERT INTO assaf_os.os_workspaces(workspace_id, owner_id, epoch) VALUES (:w, '123', 1)"
+    ), {"w": workspace})
+    for name, created, expires in E6_PROPOSALS:
+        c.execute(text(
+            "INSERT INTO assaf_os.os_proposals(workspace_id, proposal_id, request_id, "
+            "request_digest, envelope_digest, owner_id, epoch, approval_id, rejection_id, "
+            "entity, record_id, expected_revision, mutations, dependency_digest, source, kind, "
+            f"created_at, expires_at) VALUES (:w, :name, :request, :digest, :digest, '123', 1, "
+            f":approval, :rejection, 'statements', :statement, 0, '[]', :digest, "
+            f"'ASSISTANT_PASTE', 'statement_batch', {created}, {expires})"
+        ), {"w": workspace, "name": name, "request": uuid4(), "approval": uuid4(),
+            "rejection": uuid4(), "digest": "e" * 64, "statement": "STM_" + "a" * 32})
+    for proposal_id, key, purged in E6_LINES:
+        c.execute(text(
+            "INSERT INTO assaf_os.os_statement_batch_lines(workspace_id, proposal_id, line_key, "
+            "occurrence_index, detail, purged_at) VALUES (:w, :proposal, :key, 0, "
+            "CASE WHEN :purged THEN NULL ELSE '{\"line\": 1}'::jsonb END, "
+            "CASE WHEN :purged THEN now() END)"
+        ), {"w": workspace, "proposal": proposal_id, "key": key * 64, "purged": purged})
+    for label, age in E6_AUDIT:
+        c.execute(text(
+            "INSERT INTO assaf_os.os_assistant_audit(workspace_id, audit_id, occurred_at, "
+            f"operation, reason, ok, client_ip_hmac) VALUES (:w, :id, now() - interval '{age}', "
+            ":label, 'accepted', true, :ip)"
+        ), {"w": workspace, "id": uuid4(), "label": label, "ip": "f" * 64})
+
+
+def _e6_state(c):
+    return (
+        sorted(c.execute(text(
+            "SELECT workspace_id, proposal_id, left(line_key, 1), purged_at IS NULL "
+            "FROM assaf_os.os_statement_batch_lines WHERE workspace_id IN (:w, :x)"
+        ), {"w": E6_WS, "x": E6_OTHER}).all()),
+        sorted(c.execute(text(
+            "SELECT workspace_id, operation FROM assaf_os.os_assistant_audit "
+            "WHERE workspace_id IN (:w, :x)"
+        ), {"w": E6_WS, "x": E6_OTHER}).all()),
+        sorted(c.execute(text(
+            "SELECT workspace_id, proposal_id, status FROM assaf_os.os_proposals "
+            "WHERE workspace_id IN (:w, :x)"
+        ), {"w": E6_WS, "x": E6_OTHER}).all()),
+    )
+
+
+def test_e6_retention_job_deletes_nothing_outside_its_predicates(roles):
+    """§22 E6: the job's exact statements, run by the real retention login."""
+    admin = roles[0]
+    sql = policy().RETENTION_DELETE_SQL
+    assert set(sql) == {"purge", "backstop", "audit"}
+    # Fixed SQL: one bound parameter, literal windows, no other table touched.
+    for statement in sql.values():
+        assert re.findall(r":(\w+)", statement.replace("::", "")) == ["workspace_id"]
+        assert re.findall(r"DELETE FROM (assaf_os\.\w+)", statement)[0] in {
+            "assaf_os.os_statement_batch_lines", "assaf_os.os_assistant_audit",
+        }
+    retention = create_engine(admin.url.set(username="assaf_os_retention"))
+    try:
+        with admin.begin() as c:
+            for workspace in (E6_WS, E6_OTHER):
+                _e6_seed(c, workspace)
+        with admin.connect() as c:
+            before = _e6_state(c)
+        with retention.begin() as c:
+            assert c.scalar(text("SELECT current_user")) == "assaf_os_retention"
+            counts = {
+                name: c.execute(text(statement), {"workspace_id": E6_WS}).rowcount
+                for name, statement in sql.items()
+            }
+        assert counts == {"purge": 2, "backstop": 1, "audit": 1}
+        with admin.connect() as c:
+            lines, audit, proposals = _e6_state(c)
+        # Outside the predicates everything survives: unpurged lines of pending and of
+        # recently expired proposals (23 h, and 5 minutes short of a day), audit rows
+        # younger than 180 days, every proposal, and the whole other workspace.
+        assert lines == sorted(
+            [(E6_WS, p, k, True) for p, k in (("edge", "a"), ("live", "a"), ("young", "a"))]
+            + [row for row in before[0] if row[0] == E6_OTHER]
+        )
+        assert audit == sorted(
+            [(E6_WS, "fresh"), (E6_WS, "young")]
+            + [row for row in before[1] if row[0] == E6_OTHER]
+        )
+        assert proposals == before[2]
+        # A second run of the job finds nothing more.
+        with retention.begin() as c:
+            assert [c.execute(text(statement), {"workspace_id": E6_WS}).rowcount
+                    for statement in sql.values()] == [0, 0, 0]
+    finally:
+        retention.dispose()
+        with admin.begin() as c:
+            for table in ("os_statement_batch_lines", "os_assistant_audit", "os_proposals",
+                          "os_workspaces"):
+                c.execute(text(
+                    f"DELETE FROM assaf_os.{table} WHERE workspace_id IN (:w, :x)"
+                ), {"w": E6_WS, "x": E6_OTHER})
+
+
 @pytest.mark.parametrize("mutation", [
     "GRANT DELETE ON assaf_os.os_statement_batch_lines TO assaf_os_ledger",
     "GRANT DELETE ON assaf_os.os_assistant_audit TO assaf_os_ledger",
@@ -1182,6 +1313,16 @@ def test_retention_logs_in_as_itself_and_reads_only_its_columns(roles):
     "CREATE TABLE public.v214b_extra (id integer); "
     "GRANT DELETE ON public.v214b_extra TO assaf_os_retention",
     "ALTER TABLE assaf_os.os_statement_batch_lines OWNER TO assaf_os_retention",
+    # r2's footprint check, narrowed for retention to exactly its §18.2 ACL entries:
+    # anything else, here or on a shared object, still refuses.
+    "GRANT CONNECT ON DATABASE mia_ledger_test TO assaf_os_retention",
+    "GRANT CONNECT ON DATABASE postgres TO assaf_os_retention",
+    "GRANT CREATE ON TABLESPACE pg_default TO assaf_os_retention",
+    "SELECT lo_create(214214); GRANT SELECT ON LARGE OBJECT 214214 TO assaf_os_retention",
+    "SELECT lo_create(214215); ALTER LARGE OBJECT 214215 OWNER TO assaf_os_retention",
+    "GRANT SELECT (detail) ON assaf_os.os_statement_batch_lines TO assaf_os_retention "
+    "WITH GRANT OPTION",
+    "CREATE SCHEMA v214b_retention_schema AUTHORIZATION assaf_os_retention",
 ])
 def test_addendum_extra_or_missing_privilege_fails(roles, mutation):
     with roles[0].connect() as c, c.begin():

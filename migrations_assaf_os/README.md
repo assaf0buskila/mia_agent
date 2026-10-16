@@ -42,7 +42,11 @@ row. The grant map, including V2-14b's columns and the retention role, lives onl
 `app/services/os_ledger/role_policy.py` (contract section 18.2). Retention becomes a
 LOGIN NOINHERIT role with schema USAGE, SELECT and DELETE on `os_statement_batch_lines`
 and `os_assistant_audit`, and SELECT on five `os_proposals` columns. The runtime role
-still has no DELETE or TRUNCATE anywhere. `tests/db/test_assaf_os_ledger_addendum.py`
+still has no DELETE or TRUNCATE anywhere. `provision_ledger.py` (both modes, so also the
+§18.1 `--mode reapply` restore step) re-applies these grants, and V2-15's validator pins
+them exactly. Per §22 E6 the database does not enforce retention's row predicates: the
+os-retention job runs only `role_policy.RETENTION_DELETE_SQL`, and a test shows those
+statements delete nothing outside them. `tests/db/test_assaf_os_ledger_addendum.py`
 pins every column, key, CHECK and index, with a rejecting case for every CHECK.
 
 ## Explicit operator job and production gate

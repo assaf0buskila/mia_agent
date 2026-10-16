@@ -149,6 +149,29 @@ RETENTION_TABLE_PRIVILEGES: Mapping[str, frozenset[str]] = MappingProxyType({
 RETENTION_COLUMN_SELECTS: Mapping[str, tuple[str, ...]] = MappingProxyType({
     "os_proposals": ("workspace_id", "proposal_id", "kind", "status", "expires_at"),
 })
+# §22 E6: the database cannot enforce retention's row predicates (no RLS), so the
+# os-retention job runs exactly these fixed statements and no other SQL as the retention
+# role. The only bound parameter is :workspace_id; the windows are literals, so no caller
+# can widen them. V2-26's app/workers/os_retention.py must execute these constants.
+RETENTION_DELETE_SQL: Mapping[str, str] = MappingProxyType({
+    # Batch lines whose detail the runtime path already purged.
+    "purge": (
+        "DELETE FROM assaf_os.os_statement_batch_lines "
+        "WHERE workspace_id = :workspace_id AND purged_at IS NOT NULL"
+    ),
+    # The I11 backstop: lines of a proposal that expired more than a day ago, whatever
+    # purged_at says.
+    "backstop": (
+        "DELETE FROM assaf_os.os_statement_batch_lines AS b USING assaf_os.os_proposals AS p "
+        "WHERE b.workspace_id = :workspace_id AND p.workspace_id = b.workspace_id "
+        "AND p.proposal_id = b.proposal_id AND p.expires_at < now() - interval '1 day'"
+    ),
+    # Assistant audit rows are kept for 180 days (§17.2).
+    "audit": (
+        "DELETE FROM assaf_os.os_assistant_audit "
+        "WHERE workspace_id = :workspace_id AND occurred_at < now() - interval '180 days'"
+    ),
+})
 
 
 def addendum_grant_statements() -> tuple[str, ...]:
@@ -372,12 +395,33 @@ def _footprints(conn: Connection, main_role: str) -> None:
     # The runtime role appears in no ACL and owns nothing in ANY database or shared
     # object (tablespaces, other databases, parameters, large objects, types, ...),
     # except assaf_os objects (pinned exactly by _catalog) and CONNECT on this database.
-    # Retention appears nowhere at all.
-    _require(not conn.scalar(text(_INSIDE + """
+    # V2-14b: retention appears only as the grantee of its exact §18.2 ACL entries in
+    # this database (the assaf_os schema, its two tables, the five os_proposals
+    # columns); never as an owner, on a shared object or in another database.
+    retention = {
+        "retention_tables": sorted(RETENTION_TABLE_PRIVILEGES),
+        "column_tables": [t for t, cs in RETENTION_COLUMN_SELECTS.items() for _ in cs],
+        "column_names": [c for cs in RETENTION_COLUMN_SELECTS.values() for c in cs],
+    }
+    _require(not conn.scalar(text(_INSIDE + """,
+        retention_acl(classid, objid, objsubid) AS (
+            SELECT 'pg_namespace'::regclass::oid, oid, 0 FROM ns
+            UNION ALL SELECT 'pg_class'::regclass::oid, c.oid, 0 FROM pg_class c
+                WHERE c.relnamespace IN (SELECT oid FROM ns)
+                  AND c.relname = ANY(CAST(:retention_tables AS text[]))
+            UNION ALL SELECT 'pg_class'::regclass::oid, c.oid, a.attnum::int
+                FROM pg_class c JOIN pg_attribute a ON a.attrelid = c.oid
+                JOIN unnest(CAST(:column_tables AS text[]), CAST(:column_names AS text[]))
+                     AS g(relname, attname)
+                  ON g.relname = c.relname AND g.attname = a.attname
+                WHERE c.relnamespace IN (SELECT oid FROM ns))
         SELECT EXISTS(SELECT 1 FROM pg_shdepend s
         WHERE s.refclassid = 'pg_authid'::regclass
-          AND (s.refobjid = to_regrole(:retention) OR (
-               s.refobjid = to_regrole(:runtime) AND NOT (s.deptype = 'a' AND (
+          AND ((s.refobjid = to_regrole(:retention) AND NOT (s.deptype = 'a'
+                 AND s.dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
+                 AND (s.classid, s.objid, s.objsubid)
+                     IN (SELECT classid, objid, objsubid FROM retention_acl)))
+           OR (s.refobjid = to_regrole(:runtime) AND NOT (s.deptype = 'a' AND (
                  (s.dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
                   AND s.classid IN ('pg_namespace'::regclass, 'pg_class'::regclass,
                                     'pg_proc'::regclass)
@@ -385,7 +429,7 @@ def _footprints(conn: Connection, main_role: str) -> None:
                  OR (s.dbid = 0 AND s.classid = 'pg_database'::regclass
                      AND s.objid = (SELECT oid FROM pg_database
                                     WHERE datname = current_database())))))))
-    """), params))
+    """), params | retention))
     # r1 must-fix 3: SET / ALTER SYSTEM on a parameter (session_replication_role turns
     # off foreign keys and the assistant trigger) is granted to none of these or PUBLIC.
     _require(not conn.scalar(text("""
