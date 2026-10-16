@@ -378,14 +378,14 @@ def test_a_late_original_finds_the_abandoned_receipt(ledger):
     assert found.decision.status == "abandoned"
 
 
-@pytest.mark.parametrize("status", ("committed", "rejected", "expired", "target_changed",
-                                    "superseded"))
-def test_every_finish_writes_one_event_and_an_outbox_row_only_when_committed(ledger, status):
+@pytest.mark.parametrize("status", ("committed", "target_changed"))
+def test_a_direct_finish_writes_one_event_and_an_outbox_row_only_when_committed(ledger, status):
+    """A fused kind finishes only committed or target_changed (abandoned has its own test)."""
     request_id = rid()
     with ledger.transaction(ctx(), **OPEN_TX) as tx:
         mutations = [task()]
         proposal = tx.insert_proposal(direct_draft(tx, mutations, request_id, window_s(ledger)))
-        key = request_id if status in {"committed", "target_changed"} else proposal.rejection_id
+        key = request_id
         applied = ()
         if status == "committed":
             tx.apply(mutations, source="OS_DIRECT", request_id=request_id)

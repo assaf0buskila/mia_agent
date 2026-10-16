@@ -62,15 +62,33 @@ def _prepare(env: LedgerEnv) -> LedgerEnv:
 def build_pg_env(url: str) -> LedgerEnv:
     """V2-16 FILLS THIS IN. The conformance suite must then pass on PG unchanged.
 
-    Required, in this order (contract §6, §3.4):
+    Required, in this order (contract §6, §3.4, §5.5, V2-15 r2 ``role_policy.py``):
       1. apply the V2-14/14b migrations to the disposable database at ``url``;
       2. create the three ledger roles and apply ``role_policy.ledger_grant_statements()``
-         directly. NEVER call ``provision_ledger`` (its targets are pinned to 127.0.0.1:56215);
-      3. create a demoted test main role so the §5.5 guard passes, and connect as the runtime role;
-      4. build ``core.build_ledger(settings)`` where ``settings`` reads the ``Knobs``;
+         directly. NEVER call ``provision_ledger`` (its targets are pinned to 127.0.0.1:56215).
+         ``validate_ledger_role(..., migration_role=None)`` derives the migration identity, so the
+         fixture must also arrange these preconditions:
+           2a. ``GRANT assaf_os_owner TO <migration identity> WITH ADMIN TRUE, SET FALSE,
+               INHERIT FALSE``, with exactly one such member (zero or several is
+               ``ledger_role_denied``);
+           2b. ``REVOKE TEMP ON DATABASE <test db> FROM PUBLIC``;
+      3. create a demoted test main role, ``LOGIN NOSUPERUSER NOCREATEROLE NOCREATEDB
+         NOREPLICATION NOBYPASSRLS``, with no USAGE or other rights on ``assaf_os`` and no CREATE
+         or TEMP, so the §5.5 guard passes; connect as the runtime role;
+      4. build ``core.build_ledger(settings)`` where ``settings`` reads the ``Knobs``, and assert
+         that ``role_policy.validate_ledger_role(db, main_engine, migration_role=None)`` passes
+         BEFORE returning (a fixture that skips this proves nothing about the guard);
       5. return a ``LedgerEnv`` whose ``rows``/``version``/``now``/``advance`` run on the
-         privileged DSN (``advance`` shifts the clock the ledger uses for ``tx.now``).
+         privileged DSN. Conformance relies on two seams: V2-16 reads ``api.LIVE_IDS_LIMIT`` at
+         call time (the cases monkeypatch it instead of creating 100k rows), and it has a frozen,
+         injectable clock (``advance`` shifts the ``tx.now`` the ledger uses, and cases compare
+         ``deleted_at == ledger.now()``).
     ``role_policy`` lands with V2-15 and is absent on this base, so it is imported lazily here.
+
+    Counting rule: every case under ``conformance/`` that takes the ``ledger`` fixture counts
+    toward ``MIN_PG_CASES`` in ``test_pg_sentinel.py``. V2-24's §11.1 service tests are written
+    against this same fixture, so they MUST live under ``conformance/`` and raise that constant;
+    the sentinel recounts the directory and fails when the two disagree.
     """
     from app.services.os_ledger import role_policy  # noqa: F401  (lazy: absent before V2-15)
 

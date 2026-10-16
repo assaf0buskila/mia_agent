@@ -345,6 +345,12 @@ def fused_draft_for(tx, kind, request_id, window):
                              entity="tasks", record_id="TAS_fused", **common)
 
 
+def minted_proposal(env, context, window):
+    """A server-minted ``kind="proposal"`` row, created in a transaction of its own kind."""
+    with env.transaction(context, domain="core", kind="proposal") as tx:
+        return tx.insert_proposal(server_minted_draft(tx, window))
+
+
 def server_minted_draft(tx, window):
     return api.ProposalDraft(
         kind="proposal", source="OS", request_id=rid(), request_digest=api.digest({"p": 1}),
@@ -357,14 +363,22 @@ def server_minted_draft(tx, window):
 @pytest.mark.parametrize("kind", ("owner_direct", "owner_undo", "import"))
 def test_each_keyspace_collision_is_idempotency_mismatch_and_writes_nothing(ledger, kind, source):
     workspace = "ws-k" if kind == "import" else WORKSPACE
-    if kind == "import":
-        fresh_workspace(ledger, workspace)
-    context = ctx(workspace=workspace)
     window = window_s(ledger)
+    if kind == "import":
+        # An import needs core=shadow, but a proposal needs core=active: create the minted row
+        # while active, then fenced -> shadow (epoch 2; no non-import receipt exists yet).
+        fresh_workspace(ledger, workspace, core="active")
+        minted = minted_proposal(ledger, ctx(workspace=workspace), window)
+        for state in ("fenced", "shadow"):
+            ledger.transition(workspace, "core", state, expected_epoch=1, actor_owner_id=OWNER_ID)
+        ledger.knobs.settings_epoch = 2
+        context = ctx(workspace=workspace, epoch=2)
+    else:
+        context = ctx(workspace=workspace)
+        minted = minted_proposal(ledger, context, window)
     with ledger.transaction(context, domain="core", kind=kind) as tx:
         base_id = rid()
         base = tx.insert_proposal(fused_draft_for(tx, kind, base_id, window))
-        minted = tx.insert_proposal(server_minted_draft(tx, window))
     assert base.approval_id == base_id and base.rejection_id == rejection_of(base_id)
     colliding = {
         "fused_approval": base.approval_id,
@@ -384,15 +398,18 @@ def test_each_keyspace_collision_is_idempotency_mismatch_and_writes_nothing(ledg
     assert ledger.version(workspace) == before["version"]
 
 
-def test_a_receipt_key_blocks_a_fused_id(ledger):
+@pytest.mark.parametrize("decision", ("approve", "reject"))
+def test_a_receipt_key_of_a_decided_proposal_blocks_a_fused_id(ledger, decision):
     window = window_s(ledger)
-    with ledger.transaction(ctx(), domain="core", kind="owner_direct") as tx:
-        base = tx.insert_proposal(fused_draft_for(tx, "owner_direct", rid(), window))
-        receipt = tx.finish(base, status="rejected", receipt_request_id=base.rejection_id)
+    proposal = propose_task(ledger)
+    receipt = decide(ledger, proposal, decision).receipt
+    assert receipt.kind == "proposal" and ledger.rows("os_receipts")[0]["request_id"] == (
+        receipt.request_id)
+    before = counts(ledger)
     with ledger.transaction(ctx(), domain="core", kind="owner_direct") as tx:
         with pytest.raises(api.LedgerError, match="^idempotency_mismatch$"):
             tx.insert_proposal(fused_draft_for(tx, "owner_direct", receipt.request_id, window))
-    assert len(ledger.rows("os_proposals")) == 1
+    assert counts(ledger) == before
 
 
 def test_a_fresh_fused_id_does_not_collide(ledger):

@@ -8,6 +8,7 @@ from app.services.os_ledger import api
 from tests.fakes.os_ledger_builders import (
     commit_direct,
     commit_import,
+    counts,
     ctx,
     fresh_workspace,
     propose_task,
@@ -225,6 +226,42 @@ def test_a_pending_proposal_of_an_older_epoch_is_finished_expired_not_decided(le
     assert ledger.version() == version_before + 1
     assert ledger.rows("os_tasks") == [] and ledger.rows("os_outbox") == []
     assert len(ledger.rows("os_events")) == 1
+
+
+def to_epoch_two(ledger):
+    go(ledger, WORKSPACE, "fenced")
+    go(ledger, WORKSPACE, "restoring")
+    go(ledger, WORKSPACE, "active")  # bumps to epoch 2
+    ledger.knobs.settings_epoch = 2
+
+
+def test_a_decide_replay_never_returns_a_receipt_of_an_older_epoch(ledger):
+    proposal = propose_task(ledger)
+    to_epoch_two(ledger)
+    context = ctx(epoch=2)
+    first = ledger.decide(context, proposal.proposal_id, proposal.rejection_id, "reject")
+    assert first.receipt.status == "expired" and first.receipt.epoch == 1  # the call that made it
+    before = counts(ledger)
+    with pytest.raises(api.LedgerError, match="^authority_changed$"):
+        ledger.decide(context, proposal.proposal_id, proposal.rejection_id, "reject")
+    with pytest.raises(api.LedgerError, match="^already_decided$"):
+        ledger.decide(context, proposal.proposal_id, proposal.approval_id, "approve")
+    assert counts(ledger) == before
+
+
+def test_pending_lists_only_proposals_of_the_context_epoch(ledger):
+    old = propose_task(ledger)
+    assert [p.proposal_id for p in ledger.pending(ctx(), after=None, limit=10).items] == [
+        old.proposal_id]
+    to_epoch_two(ledger)
+    context = ctx(epoch=2)
+    assert ledger.pending(context, after=None, limit=10).items == ()
+    new = propose_task(ledger, context)
+    assert new.epoch == 2
+    assert [p.proposal_id for p in ledger.pending(context, after=None, limit=10).items] == [
+        new.proposal_id]
+    stored = next(r for r in ledger.rows("os_proposals") if r["proposal_id"] == old.proposal_id)
+    assert stored["status"] == "pending"  # reads never write: it waits for a decide
 
 
 def test_a_receipt_of_another_epoch_is_never_read_at_the_new_epoch(ledger):

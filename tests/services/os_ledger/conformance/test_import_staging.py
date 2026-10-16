@@ -2,7 +2,8 @@
 
 Rows are insert-only. A batch moves only along ``api.IMPORT_STATUS_EDGES``. The writers run only in
 a ``kind="import"`` transaction (core=shadow); anything else is ``invalid_transaction_kind``.
-``live_ids`` reads ``api.LIVE_IDS_LIMIT`` at call time, so a test patches the constant.
+``live_ids`` reads ``api.LIVE_IDS_LIMIT`` and ``api.FORK_DELETE_END_STATE`` at call time, so a
+test patches the limit; an implementation must not cache either.
 """
 
 from itertools import product
@@ -14,7 +15,10 @@ from tests.fakes.contexts import for_worker
 from tests.fakes.os_ledger_builders import (
     CLIENT_INACTIVE,
     EXPENSE_CANCELLED,
+    LEAD_CONVERTED,
+    LEAD_IRRELEVANT,
     PAYMENT_CANCELLED,
+    TASK_CANCELLED,
     TASK_DONE,
     TIME_CANCELLED,
     WORK_CANCELLED,
@@ -33,6 +37,7 @@ from tests.fakes.os_ledger_builders import (
     tombstone,
     work,
 )
+from tests.fakes.os_ledger_env import OWNER_ID, WORKSPACE
 
 IMPORT_WS = "ws-i"
 STATUSES = ("staged", "validated", "imported", "quarantined", "failed")
@@ -40,12 +45,19 @@ ILLEGAL = [pair for pair in product(STATUSES, STATUSES) if pair not in api.IMPOR
 QUARANTINE = {"reason": "unresolved_reference"}
 
 
-def worker():
-    return for_worker("import", workspace=IMPORT_WS)
+def worker(epoch=1):
+    return for_worker("import", workspace=IMPORT_WS, epoch=epoch)
 
 
-def import_tx(env):
-    return env.transaction(worker(), domain="core", kind="import")
+def import_tx(env, epoch=1):
+    return env.transaction(worker(epoch), domain="core", kind="import")
+
+
+def to_epoch_two(env):
+    """fenced -> shadow bumps the epoch (no non-import receipt exists); the knob follows."""
+    for state in ("active", "fenced", "shadow"):
+        env.transition(IMPORT_WS, "core", state, expected_epoch=1, actor_owner_id=OWNER_ID)
+    env.knobs.settings_epoch = 2
 
 
 @pytest.fixture
@@ -79,9 +91,9 @@ def batch(env, batch_id):
     return next(r for r in env.rows("os_import_batches") if r["batch_id"] == batch_id)
 
 
-def stage(env, rows=(), **kw):
+def stage(env, rows=(), *, ctx_epoch=1, **kw):
     args = batch_args(**kw)
-    with import_tx(env) as tx:
+    with import_tx(env, ctx_epoch) as tx:
         tx.insert_import_batch(**args)
         if rows:
             tx.insert_import_rows(args["batch_id"], list(rows))
@@ -212,6 +224,26 @@ def test_the_import_methods_refuse_every_other_transaction_kind(ledger, method, 
     assert ledger.rows("os_import_batches") == [] and ledger.rows("os_import_rows") == []
 
 
+@pytest.mark.parametrize("method", WRITERS)
+def test_the_import_methods_refuse_a_statement_batch_transaction(ledger, method):
+    ledger.transition(WORKSPACE, "statements", "active", expected_epoch=1, actor_owner_id=OWNER_ID)
+    before = counts(ledger)
+    with pytest.raises(api.LedgerError, match="^invalid_transaction_kind$"):
+        with ledger.transaction(ctx(), domain="statements", kind="statement_batch") as tx:
+            WRITERS[method](tx)
+    assert counts(ledger) == before
+    assert ledger.rows("os_import_batches") == [] and ledger.rows("os_import_rows") == []
+
+
+@pytest.mark.parametrize("method", WRITERS)
+def test_the_import_methods_are_outside_the_expiry_scope(ledger, method):
+    with pytest.raises(AssertionError, match="ledger_invariant:expire_scope"):
+        with ledger.transaction(for_worker("retention", workspace=WORKSPACE), domain="statements",
+                                kind="statement_batch", purpose="expire") as tx:
+            WRITERS[method](tx)
+    assert ledger.rows("os_import_batches") == [] and ledger.rows("os_import_rows") == []
+
+
 def test_the_import_methods_run_in_an_import_transaction(shadow):
     with import_tx(shadow) as tx:
         args = batch_args()
@@ -273,8 +305,20 @@ def test_the_batch_key_is_unique_per_epoch(shadow):
     stage(shadow, number=1, epoch=1)
     with invariant_violation(shadow, "import_batch_source_unique"):
         stage(shadow, number=1, epoch=1)
-    stage(shadow, number=1, epoch=2)  # the same source digest at another epoch is a new batch
+    to_epoch_two(shadow)
+    # The same source digest at the new epoch is a new batch.
+    stage(shadow, number=1, epoch=2, ctx_epoch=2)
     assert sorted(r["authority_epoch"] for r in shadow.rows("os_import_batches")) == [1, 2]
+
+
+@pytest.mark.parametrize("batch_epoch,ctx_epoch", [(2, 1), (1, 2), (3, 2)])
+def test_a_batch_must_name_the_epoch_of_the_context(shadow, batch_epoch, ctx_epoch):
+    if ctx_epoch == 2:
+        to_epoch_two(shadow)
+    before = len(shadow.rows("os_import_batches"))
+    with pytest.raises(api.LedgerError, match="^authority_changed$"):
+        stage(shadow, number=1, epoch=batch_epoch, ctx_epoch=ctx_epoch)
+    assert len(shadow.rows("os_import_batches")) == before
 
 
 def test_a_batch_id_is_unique(shadow):
@@ -300,8 +344,11 @@ def populated(shadow):
         payment("PAY_p1"), payment("PAY_p2", kind=PAYMENT_CANCELLED),
         time_entry("TIM_t1"), time_entry("TIM_t2", status=TIME_CANCELLED),
         task("TAS_a"), task("TAS_b", status=TASK_DONE), task("TAS_c"),
+        task("TAS_d", status=TASK_CANCELLED),
         expense("EXP_e1"), expense("EXP_e2", source_key="key-2", payment_status=EXPENSE_CANCELLED),
-        lead("LEA_l1")]
+        lead("LEA_l1"), lead("LEA_l2", person_id="PER_l2", phone="0521111111",
+                             status=LEAD_IRRELEVANT),
+        lead("LEA_l3", person_id="PER_l3", phone="0532222222", status=LEAD_CONVERTED)]
     commit_import(shadow, ctx(workspace=IMPORT_WS), first, api.digest({"m": 1}))
     tomb = tombstone("tasks", task("TAS_c").after)
     commit_import(shadow, ctx(workspace=IMPORT_WS), [tomb], api.digest({"m": 2}))
@@ -313,24 +360,30 @@ def live(env, entity):
         return tx.live_ids(entity)
 
 
-def test_live_ids_excludes_deleted_and_cancelled_records(populated):
-    assert live(populated, "tasks") == frozenset({"TAS_a"})
+def test_live_ids_excludes_tombstones_and_rows_in_their_fork_delete_end_state(populated):
+    """A row is excluded only when tombstoned or already in ``api.FORK_DELETE_END_STATE``.
+
+    Tasks have no end state (their delete is a tombstone), so a done and a status-cancelled task
+    are included; a cancelled expense is excluded; a converted lead is included.
+    """
+    assert live(populated, "tasks") == frozenset({"TAS_a", "TAS_b", "TAS_d"})
     assert live(populated, "payments") == frozenset({"PAY_p1"})
     assert live(populated, "works") == frozenset({"WOR_w1"})
     assert live(populated, "time") == frozenset({"TIM_t1"})
-    assert live(populated, "clients") == frozenset({"PER_c1", "PER_c2"})
-    assert live(populated, "expenses") == frozenset({"EXP_e1", "EXP_e2"})
-    assert live(populated, "leads") == frozenset({"LEA_l1"})
+    assert live(populated, "clients") == frozenset({"PER_c1"})
+    assert live(populated, "expenses") == frozenset({"EXP_e1"})
+    assert live(populated, "leads") == frozenset({"LEA_l1", "LEA_l3"})
     assert isinstance(live(populated, "tasks"), frozenset)
 
 
-def test_live_ids_agrees_with_api_is_live(populated):
-    with import_tx(populated) as tx:
-        for entity in api.ENTITIES:
-            ids = tx.live_ids(entity)
-            for record_id in ids:
-                record = tx.get(entity, record_id)
-                assert api.is_live(entity, record, deleted=False)
+def test_live_ids_reads_the_fork_delete_end_states_at_call_time(populated, monkeypatch):
+    """The one map is ``api.FORK_DELETE_END_STATE``; neither implementation may copy it."""
+    assert live(populated, "tasks") == frozenset({"TAS_a", "TAS_b", "TAS_d"})
+    changed = {**api.FORK_DELETE_END_STATE, "tasks": ("status", TASK_CANCELLED)}
+    monkeypatch.setattr(api, "FORK_DELETE_END_STATE", changed)
+    assert live(populated, "tasks") == frozenset({"TAS_a", "TAS_b"})
+    monkeypatch.setattr(api, "FORK_DELETE_END_STATE", {**changed, "tasks": None})
+    assert live(populated, "tasks") == frozenset({"TAS_a", "TAS_b", "TAS_d"})
 
 
 @pytest.mark.parametrize("entity", ("statements", "promote_lead", "", "Tasks", "os_tasks"))
@@ -341,11 +394,11 @@ def test_live_ids_refuses_an_entity_that_is_not_a_record_entity(populated, entit
 
 
 def test_live_ids_is_capped_per_entity(populated, monkeypatch):
+    monkeypatch.setattr(api, "LIVE_IDS_LIMIT", 3)
+    assert len(live(populated, "tasks")) == 3  # exactly at the cap
     monkeypatch.setattr(api, "LIVE_IDS_LIMIT", 2)
-    assert live(populated, "clients") == frozenset({"PER_c1", "PER_c2"})  # exactly at the cap
-    monkeypatch.setattr(api, "LIVE_IDS_LIMIT", 1)
     with pytest.raises(api.LedgerError, match="^local_record_limit$"):
-        live(populated, "clients")
+        live(populated, "tasks")
     assert live(populated, "works") == frozenset({"WOR_w1"})  # other entities have their own cap
 
 

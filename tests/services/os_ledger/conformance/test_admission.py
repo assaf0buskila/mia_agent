@@ -176,8 +176,8 @@ def worker():
     return for_worker("retention", workspace=WORKSPACE)
 
 
-def expire_batch(env, batch, **kw):
-    with env.transaction(worker(), domain="statements", kind="statement_batch",
+def expire_batch(env, batch, *, context=None, **kw):
+    with env.transaction(context or worker(), domain="statements", kind="statement_batch",
                          purpose="expire") as tx:
         stored = tx.proposal(batch.proposal_id)
         return tx.finish(stored, status="expired", receipt_request_id=stored.rejection_id, **kw)
@@ -245,17 +245,44 @@ def test_expire_scope_refuses_every_other_call(ledger, call):
             calls[call](tx)
 
 
-def test_expire_scope_allows_only_expired_finish_of_an_overdue_batch(ledger):
+def test_expire_scope_allows_only_the_expired_status(ledger):
     batch = pending_batch(ledger)
-    # Not overdue yet: the batch is still inside its seven days.
-    with pytest.raises(AssertionError, match="ledger_invariant:expire_scope"):
-        expire_batch(ledger, batch)
     ledger.advance(8 * 86400)
     with pytest.raises(AssertionError, match="ledger_invariant:expire_scope"):
         with ledger.transaction(worker(), domain="statements", kind="statement_batch",
                                 purpose="expire") as tx:
             stored = tx.proposal(batch.proposal_id)
             tx.finish(stored, status="rejected", receipt_request_id=stored.rejection_id)
+
+
+def test_expire_finishes_a_batch_without_detail_lines_before_its_expiry(ledger):
+    """§5.3 "or that has no batch lines" / §12.2 ``restored_without_detail``.
+
+    The conformance suite writes no batch lines, so every pending batch here has none. The batch
+    is still inside its seven days and in the current epoch.
+    """
+    batch = pending_batch(ledger)
+    before = ledger.version()
+    receipt = expire_batch(ledger, batch, reason_codes=("restored_without_detail",))
+    assert (receipt.status, receipt.kind) == ("expired", "statement_batch")
+    assert receipt.reason_codes == ("restored_without_detail",)
+    assert receipt.request_id == batch.rejection_id and receipt.epoch == 1
+    assert ledger.version() == before + 1
+    assert len(ledger.rows("os_events")) == 1 and ledger.rows("os_outbox") == []
+    stored = next(r for r in ledger.rows("os_proposals") if r["proposal_id"] == batch.proposal_id)
+    assert stored["status"] == "expired"
+
+
+def test_expire_finishes_a_batch_of_an_older_epoch(ledger):
+    """§12.2: ``expire_due`` also expires a pending batch of an older epoch (``epoch_changed``)."""
+    batch = pending_batch(ledger)
+    ledger.bump_epoch(WORKSPACE, expected_epoch=1)
+    ledger.knobs.settings_epoch = 2
+    worker_two = for_worker("retention", workspace=WORKSPACE, epoch=2)
+    receipt = expire_batch(ledger, batch, context=worker_two, reason_codes=("epoch_changed",))
+    assert receipt.status == "expired" and receipt.reason_codes == ("epoch_changed",)
+    assert receipt.epoch == 1 and receipt.request_id == batch.rejection_id
+    assert ledger.version() == 1
 
 
 def test_expire_scope_refuses_a_proposal_that_is_not_a_statement_batch(ledger):

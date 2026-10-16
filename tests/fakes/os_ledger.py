@@ -591,10 +591,11 @@ class FakeLedger:
                 raise api.LedgerError("decision_request_mismatch")
             previous = tx.receipt_for_proposal(proposal_id)
             if previous is not None:
-                # The same decision replays the stored receipt; another is a second decision.
+                # The same decision replays the stored receipt; another is a second decision. A
+                # replay is a read of an existing receipt, so it never crosses an epoch.
                 if previous.request_id != decision_id:
                     raise api.LedgerError("already_decided")
-                return self._result(tx, previous, any_epoch=True)
+                return self._result(tx, previous)
             status = "committed" if decision == "approve" else "rejected"
             reasons = ()
             if proposal.epoch != ctx.authority_epoch:
@@ -658,7 +659,10 @@ class _Tx:
             ref.entity, ref.record_id, include_deleted=include_deleted)) is not None}
 
     def find_expenses(self, *, ids=(), source_key_prefix=None, manual_window=None):
-        """Non-deleted expenses matching ANY given filter (§5.1 does not say how they combine)."""
+        """Non-deleted expenses matching ANY given filter (a UNION; no filter returns []).
+
+        §5.1 gives only the signature; the semantics are pinned by conformance (erratum E7 (c)).
+        """
         self._scope()
         found = []
         for row in self._table("os_expenses").values():
@@ -711,6 +715,7 @@ class _Tx:
 
     def insert_proposal(self, draft):
         self._scope()
+        _check(draft.kind == self.kind, "proposal_kind_mismatch")
         _check(draft.expected_revision >= 0, "proposal_revision")
         _check(draft.expires_at > self.now, "proposal_expiry")
         _check(_valid_uuid(draft.request_id), "proposal_request_id")
@@ -858,17 +863,25 @@ class _Tx:
     def finish(self, proposal, *, status, receipt_request_id, applied=(), undo_until=None,
                undo_of=None, reason_codes=()):
         if self.purpose == "expire":
-            # §5.3 allows a pending statement_batch past its expires_at; §12.2 also expires one
-            # of an older epoch. The "no batch lines" case needs the chunk-owned scratch layout.
+            # §5.3 allows a pending statement_batch past its expires_at "or that has no batch
+            # lines"; §12.2 adds one of an older epoch and names the no-lines case with the
+            # reason code restored_without_detail. The batch lines are chunk-owned (V2-26's
+            # scratch layout), so the fake trusts that reason code for "no lines".
+            restored = tuple(reason_codes) == ("restored_without_detail",)
             if not (proposal.kind == "statement_batch" and proposal.status == "pending"
                     and status == "expired"
-                    and (proposal.expires_at < self.now
+                    and (proposal.expires_at < self.now or restored
                          or proposal.epoch != self.ctx.authority_epoch)):
                 raise AssertionError("ledger_invariant:expire_scope")
         current = self._table("os_proposals").get(proposal.proposal_id)
         _check(current is not None and current.status == "pending", "finish_pending")
         _check(status in _TERMINAL, "receipt_status")
         _check(status != "abandoned" or proposal.kind == "owner_direct", "abandoned_kind")
+        # A fused kind (id = approval_id) finishes only committed or target_changed, plus
+        # abandoned for owner_direct: it has no late approve or reject and no supersede.
+        if proposal.kind in {"owner_direct", "owner_undo", "import"}:
+            _check(status in {"committed", "target_changed", "abandoned"},
+                   "receipt_fused_status")
         _check(len(reason_codes) <= 20, "receipt_reason_codes")
         _check((undo_of is not None) == (proposal.kind == "owner_undo"), "receipt_undo_kind")
         _check(undo_until is None or (proposal.kind == "owner_direct" and status == "committed"),
@@ -876,12 +889,15 @@ class _Tx:
         if proposal.kind == "owner_direct" and status == "committed":
             undo_until = self.now + timedelta(seconds=self.ledger.undo_window_s())
         _check(undo_until is None or undo_until > self.now, "receipt_undo_window")
-        # §5.3 receipt-key table.
+        # §5.3 receipt-key table. An expiry from expire_due (purpose="expire") or from an epoch
+        # change is keyed by the rejection_id; a late approve or reject by the id it supplied.
         allowed_keys = {
             "committed": {current.approval_id}, "target_changed": {current.approval_id},
             "abandoned": {current.approval_id}, "rejected": {current.rejection_id},
             "superseded": {current.rejection_id},
             "expired": {current.approval_id, current.rejection_id}}[status]
+        if status == "expired" and (self.purpose == "expire" or "epoch_changed" in reason_codes):
+            allowed_keys = {current.rejection_id}
         _check(receipt_request_id in allowed_keys, "receipt_key")
         receipts = self._table("os_receipts")
         _check(receipt_request_id not in receipts, "receipt_pk")
@@ -891,7 +907,18 @@ class _Tx:
         _check(undo_of is None or undo_of in receipts, "receipt_undo_fk")
         _check(undo_of is None or not any(r.undo_of == undo_of for r in receipts.values()),
                "receipt_undo_unique")
-        self.data["version"] += 1
+        events, outbox = self._table("os_events"), self._table("os_outbox")
+        version = self.data["version"] + 1
+        event_id = self.ledger.uuid4()
+        _check(event_id not in events, "event_pk")
+        _check(not any(e["decision_id"] == receipt_request_id for e in events.values()),
+               "event_decision_unique")
+        _check(not any(e["commit_version"] == version for e in events.values()),
+               "event_version_unique")
+        _check(status != "committed"
+               or not any(o["commit_version"] == version for o in outbox.values()),
+               "outbox_version_unique")
+        self.data["version"] = version
         self.data["pending_seq"] += 1
         refs = tuple({"entity": m.entity, "record_id": m.record_id,
                       "revision": m.after["revision"]} for m in applied)
@@ -902,9 +929,7 @@ class _Tx:
             self.now, undo_until, undo_of, tuple(reason_codes))
         self._table("os_proposals")[proposal.proposal_id] = replace(current, status=status)
         receipts[receipt_request_id] = receipt
-        event_id = self.ledger.uuid4()
-        _check(event_id not in self._table("os_events"), "event_pk")
-        self._table("os_events")[event_id] = dict(
+        events[event_id] = dict(
             workspace_id=self.ctx.workspace, event_id=event_id, decision_id=receipt_request_id,
             commit_version=self.data["version"], created_at=self.now,
             body={"status": status, "kind": proposal.kind,
@@ -913,7 +938,7 @@ class _Tx:
             body = {"authority_epoch": proposal.epoch, "refs": list(refs)}
             if proposal.kind == "import":
                 body.update(refs=[], full=True)
-            self._table("os_outbox")[event_id] = dict(
+            outbox[event_id] = dict(
                 workspace_id=self.ctx.workspace, event_id=event_id,
                 commit_version=self.data["version"], body=body, status="pending", attempts=0,
                 next_attempt_at=self.now, lease_owner=None, lease_generation=0, leased_at=None,
@@ -935,6 +960,8 @@ class _Tx:
         _check(_valid_uuid(batch_id), "import_batch_id")
         _check(batch_id not in batches, "import_batch_pk")
         _check(type(authority_epoch) is int and authority_epoch > 0, "import_batch_epoch")
+        if authority_epoch != self.ctx.authority_epoch:  # I12: never stage across epochs
+            raise api.LedgerError("authority_changed", reason="import_epoch_mismatch")
         _check(isinstance(source_digest, str) and 0 < len(source_digest) <= 64,
                "import_batch_source_digest")
         _check(isinstance(source_binding, str) and 0 < len(source_binding) <= 256,
@@ -1023,9 +1050,13 @@ class _Tx:
             raise api.LedgerError("invalid_transaction_kind")
         if entity not in api.ENTITIES:
             raise api.LedgerError("invalid_entity")
+        # Read at call time so the fake and PG cannot drift: a row is excluded only when it is
+        # tombstoned or already in its FORK-DELETE end state (tasks have none: tombstone only).
+        end = api.FORK_DELETE_END_STATE[entity]
         ids = frozenset(
             row["record_id"] for row in self._table("os_" + entity).values()
-            if api.is_live(entity, _wire(row, entity), deleted=row["deleted_at"] is not None))
+            if row["deleted_at"] is None and not (
+                end is not None and row["inputs"].get(end[0]) == end[1]))
         if len(ids) > api.LIVE_IDS_LIMIT:
             raise api.LedgerError("local_record_limit")
         return ids

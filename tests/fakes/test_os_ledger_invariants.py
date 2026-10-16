@@ -7,14 +7,14 @@ fake (hooks, internals, a patched domain validator) and so never run against PG.
 import ast
 import re
 from dataclasses import replace
-from datetime import date, timedelta
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
 from app.services.os_ledger import api
 
 from tests.fakes import os_ledger as fake_module
-from tests.fakes.contexts import for_worker, make_ctx
+from tests.fakes.contexts import for_worker
 from tests.fakes.os_ledger import FakeLedger
 from tests.fakes.os_ledger_builders import (
     PAYMENT_REFUND,
@@ -24,7 +24,6 @@ from tests.fakes.os_ledger_builders import (
     ctx,
     current,
     direct_draft,
-    expense,
     fresh_workspace,
     payment,
     propose_task,
@@ -190,9 +189,28 @@ def draft(tx, **changes):
       "expires_at": NOW + timedelta(days=8)}, "proposal_ttl"),
 ])
 def test_proposal_checks(fake, changes, name):
+    kind = changes.get("kind", "owner_direct")
+    domain = "statements" if kind == "statement_batch" else "core"
+    if kind == "statement_batch":
+        fake.transition(WORKSPACE, "statements", "active", expected_epoch=1,
+                        actor_owner_id=OWNER_ID)
     with violation(name):
-        with fake.transaction(ctx(), domain="core", kind="owner_direct") as tx:
+        with fake.transaction(ctx(), domain=domain, kind=kind) as tx:
             tx.insert_proposal(draft(tx, **changes))
+    assert fake.rows("os_proposals") == []
+
+
+@pytest.mark.parametrize("tx_kind,draft_kind", [
+    ("owner_direct", "proposal"), ("proposal", "owner_direct"), ("owner_undo", "owner_direct"),
+    ("owner_direct", "owner_undo"), ("owner_direct", "statement_batch"),
+    ("proposal", "import")])
+def test_a_draft_must_have_the_kind_of_its_transaction(fake, tx_kind, draft_kind):
+    source = {"proposal": "OS", "statement_batch": "ASSISTANT_PASTE",
+              "import": "IMPORT"}.get(draft_kind, "OS_DIRECT")
+    with violation("proposal_kind_mismatch"):
+        with fake.transaction(ctx(), domain="core", kind=tx_kind) as tx:
+            tx.insert_proposal(draft(tx, kind=draft_kind, source=source,
+                                     expires_at=tx.now + timedelta(seconds=30)))
     assert fake.rows("os_proposals") == []
 
 
@@ -221,7 +239,8 @@ def test_proposal_unique_invariants(fake, field, name):
     ({"status": "pending"}, "receipt_status"),
     ({"reason_codes": ["reason"] * 21}, "receipt_reason_codes"),
     ({"undo_of": rid()}, "receipt_undo_kind"),
-    ({"status": "rejected", "undo_until": NOW + timedelta(seconds=1)}, "receipt_undo_until_kind"),
+    ({"status": "target_changed", "undo_until": NOW + timedelta(seconds=1)},
+     "receipt_undo_until_kind"),
     ({"receipt_request_id": rid()}, "receipt_key"),
 ])
 def test_receipt_invariants(fake, changes, name):
@@ -232,19 +251,81 @@ def test_receipt_invariants(fake, changes, name):
             tx.finish(proposal, **args)
 
 
+def new_proposal(tx, kind):
+    source = {"proposal": "OS", "import": "IMPORT"}.get(kind, "OS_DIRECT")
+    return tx.insert_proposal(draft(tx, kind=kind, source=source,
+                                    entity="import" if kind == "import" else "tasks"))
+
+
 @pytest.mark.parametrize("status,key", [
-    ("committed", "approval_id"), ("target_changed", "approval_id"), ("abandoned", "approval_id"),
+    ("committed", "approval_id"), ("target_changed", "approval_id"),
     ("rejected", "rejection_id"), ("superseded", "rejection_id"),
     ("expired", "approval_id"), ("expired", "rejection_id")])
-def test_the_receipt_key_table_is_enforced_by_finish(fake, status, key):
+def test_the_receipt_key_table_for_a_decided_proposal(fake, status, key):
     other = {"approval_id": "rejection_id", "rejection_id": "approval_id"}[key]
-    with fake.transaction(ctx(), domain="core", kind="owner_direct") as tx:
-        proposal = tx.insert_proposal(draft(tx))
-        wrong = getattr(proposal, other)
-        if status != "expired":
+    with fake.transaction(ctx(), domain="core", kind="proposal") as tx:
+        proposal = new_proposal(tx, "proposal")
+        if status != "expired":  # a late approve or reject expires under the id it supplied
             with violation("receipt_key"):
-                tx.finish(proposal, status=status, receipt_request_id=wrong)
+                tx.finish(proposal, status=status, receipt_request_id=getattr(proposal, other))
         tx.finish(proposal, status=status, receipt_request_id=getattr(proposal, key))
+
+
+def test_an_epoch_changed_expiry_is_keyed_by_the_rejection_id(fake):
+    with fake.transaction(ctx(), domain="core", kind="proposal") as tx:
+        proposal = new_proposal(tx, "proposal")
+        with violation("receipt_key"):
+            tx.finish(proposal, status="expired", receipt_request_id=proposal.approval_id,
+                      reason_codes=("epoch_changed",))
+        tx.finish(proposal, status="expired", receipt_request_id=proposal.rejection_id,
+                  reason_codes=("epoch_changed",))
+
+
+def test_expiry_admission_is_keyed_by_the_rejection_id(env, fake):
+    env.transition(WORKSPACE, "statements", "active", expected_epoch=1, actor_owner_id=OWNER_ID)
+    with env.transaction(ctx(), domain="statements", kind="statement_batch") as tx:
+        batch = tx.insert_proposal(draft(
+            tx, kind="statement_batch", source="ASSISTANT_PASTE", entity="statements",
+            expires_at=tx.now + timedelta(days=1)))
+    env.advance(2 * 86400)
+    with env.transaction(for_worker("retention", workspace=WORKSPACE), domain="statements",
+                         kind="statement_batch", purpose="expire") as tx:
+        stored = tx.proposal(batch.proposal_id)
+        with violation("receipt_key"):
+            tx.finish(stored, status="expired", receipt_request_id=stored.approval_id)
+        tx.finish(stored, status="expired", receipt_request_id=stored.rejection_id)
+
+
+@pytest.mark.parametrize("kind,status", [
+    ("owner_direct", "committed"), ("owner_direct", "target_changed"),
+    ("owner_direct", "abandoned"), ("owner_undo", "committed"), ("owner_undo", "target_changed")])
+def test_a_fused_kind_is_finished_under_its_approval_id(fake, kind, status):
+    with fake.transaction(ctx(), domain="core", kind="owner_direct") as setup:
+        original = new_proposal(setup, "owner_direct")
+        setup.finish(original, status="committed", receipt_request_id=original.approval_id)
+    undo_of = original.approval_id if kind == "owner_undo" else None
+    with fake.transaction(ctx(), domain="core", kind=kind) as tx:
+        proposal = new_proposal(tx, kind)
+        with violation("receipt_key"):
+            tx.finish(proposal, status=status, receipt_request_id=proposal.rejection_id,
+                      undo_of=undo_of)
+        tx.finish(proposal, status=status, receipt_request_id=proposal.approval_id,
+                  undo_of=undo_of)
+
+
+@pytest.mark.parametrize("status", ("rejected", "expired", "superseded"))
+@pytest.mark.parametrize("kind", ("owner_direct", "owner_undo", "import"))
+def test_a_fused_kind_is_never_rejected_expired_or_superseded(fake, kind, status):
+    if kind == "import":
+        fresh_workspace(fake, "ws-i")
+        context = ctx(workspace="ws-i")
+    else:
+        context = ctx()
+    with fake.transaction(context, domain="core", kind=kind) as tx:
+        proposal = new_proposal(tx, kind)
+        for key in (proposal.approval_id, proposal.rejection_id):
+            with violation("receipt_fused_status"):
+                tx.finish(proposal, status=status, receipt_request_id=key)
 
 
 def test_finish_pending(fake):
@@ -273,9 +354,9 @@ def test_nonpositive_undo_window(fake):
 def test_receipt_primary_key_and_proposal_uniqueness(fake):
     # Both are redundant behind the unique decision ids and the pending precondition, so the
     # test tampers with the tables to reach them.
-    with fake.transaction(ctx(), domain="core", kind="owner_direct") as tx:
-        first = tx.insert_proposal(draft(tx))
-        second = tx.insert_proposal(draft(tx, record_id="TAS_two"))
+    with fake.transaction(ctx(), domain="core", kind="proposal") as tx:
+        first = tx.insert_proposal(draft(tx, kind="proposal", source="OS"))
+        second = tx.insert_proposal(draft(tx, kind="proposal", source="OS", record_id="TAS_two"))
         tx.finish(first, status="rejected", receipt_request_id=first.rejection_id)
         proposals = tx.data["tables"]["os_proposals"]
         proposals[second.proposal_id] = replace(second, rejection_id=first.rejection_id)
@@ -295,6 +376,32 @@ def test_event_primary_key(fake):
         fake.uuid4 = lambda: event_id
         with violation("event_pk"):
             tx.finish(second, status="abandoned", receipt_request_id=second.request_id)
+
+
+def event_row(**over):
+    return dict(workspace_id=WORKSPACE, event_id="tampered", decision_id=rid(), commit_version=99,
+                created_at=NOW, body={}) | over
+
+
+def test_events_and_outbox_rows_have_unique_decision_and_version_keys(fake):
+    # decision_id is behind the receipt primary key and commit_version behind the monotonic
+    # version, so the tables are tampered with to reach each key.
+    with fake.transaction(ctx(), domain="core", kind="owner_direct") as tx:
+        proposal = tx.insert_proposal(draft(tx))
+        tables = tx.data["tables"]
+        next_version = tx.data["version"] + 1
+        tables["os_events"]["tampered"] = event_row(decision_id=proposal.request_id)
+        with violation("event_decision_unique"):
+            tx.finish(proposal, status="abandoned", receipt_request_id=proposal.request_id)
+        tables["os_events"]["tampered"] = event_row(commit_version=next_version)
+        with violation("event_version_unique"):
+            tx.finish(proposal, status="abandoned", receipt_request_id=proposal.request_id)
+        tables["os_events"].clear()
+        tables["os_outbox"]["tampered"] = dict(commit_version=next_version, body={})
+        with violation("outbox_version_unique"):
+            tx.finish(proposal, status="committed", receipt_request_id=proposal.request_id)
+        # Nothing was written by the refused finishes.
+        assert tx.data["version"] == next_version - 1 and tables["os_receipts"] == {}
 
 
 def test_timestamps_cannot_run_backwards(env, fake):
@@ -557,37 +664,6 @@ def test_cursor_tokens_never_consume_the_uuid_source(env, fake):
     page = env.page(ctx(), "tasks", after=None, limit=1)
     assert page.next_cursor.startswith("fake:")
     assert re.fullmatch(r"fake:[A-Za-z0-9_-]+", page.next_cursor)
-
-
-def test_find_expenses_and_get_many(env):
-    commit_direct(env, ctx(), [expense("EXP_a", "stmt:1"), expense("EXP_b", "hand:1"),
-                               task("TAS_a")])
-    with env.transaction(ctx(), domain="core", kind="owner_direct") as tx:
-        assert [r["expense_id"] for r in tx.find_expenses(ids=["EXP_b"])] == ["EXP_b"]
-        assert [r["expense_id"] for r in tx.find_expenses(source_key_prefix="stmt:")] == ["EXP_a"]
-        window = (date(2026, 9, 30), date(2026, 10, 2))
-        assert len(tx.find_expenses(manual_window=window)) == 2
-        found = tx.get_many([api.RecordRef("tasks", "TAS_a"), api.RecordRef("tasks", "TAS_zz")])
-        assert list(found) == [api.RecordRef("tasks", "TAS_a")]
-
-
-def test_expire_admission_also_finishes_a_batch_of_an_older_epoch(env, fake):
-    env.transition(WORKSPACE, "statements", "active", expected_epoch=1, actor_owner_id=OWNER_ID)
-    with env.transaction(ctx(), domain="statements", kind="statement_batch") as tx:
-        batch = tx.insert_proposal(api.ProposalDraft(
-            kind="statement_batch", source="ASSISTANT_PASTE", request_id=rid(),
-            request_digest=api.digest({}), entity="statements", record_id="STM_" + "2" * 32,
-            expected_revision=0, mutations=(), dependency_digest=api.digest([]),
-            expires_at=tx.now + timedelta(days=1)))
-    env.bump_epoch(WORKSPACE, expected_epoch=1)
-    env.knobs.settings_epoch = 2
-    worker = make_ctx("WORKER", scopes={"retention"}, workspace=WORKSPACE, epoch=2)
-    with env.transaction(worker, domain="statements", kind="statement_batch",
-                         purpose="expire") as tx:
-        stored = tx.proposal(batch.proposal_id)
-        receipt = tx.finish(stored, status="expired", receipt_request_id=stored.rejection_id,
-                            reason_codes=["epoch_changed"])
-    assert receipt.epoch == 1 and receipt.reason_codes == ("epoch_changed",)
 
 
 def test_abandon_drafts_are_pending_owner_direct_rows_until_finished(env):
