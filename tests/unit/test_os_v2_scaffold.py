@@ -381,8 +381,8 @@ def test_os_workbook_is_subtracted_only_when_frozen_or_on_postgres():
     assert "os-book" in _allowed(assaf_os_backend="sheets", assaf_os_freeze=False)
     assert "os-book" not in _allowed(assaf_os_freeze=True)
     assert "os-book" not in _allowed(assaf_os_backend="postgres")
-    # An invalid backend coerces to sheets, so it never subtracts by itself.
-    assert "os-book" in _allowed(assaf_os_backend="postgresql")
+    # §22 E9: an invalid backend coerces, and a coerced value fails toward subtracting.
+    assert "os-book" not in _allowed(assaf_os_backend="postgresql")
     assert {"extra-1"} <= _allowed(assaf_os_freeze=True, os_mirror_spreadsheet_id="mirror-book")
 
 
