@@ -27,6 +27,12 @@ ROLE = "assaf_os_session"
 ORIGIN = "https://assaf-os.assaf-buskila10.workers.dev"
 WORKBOOK = "1T9Is3iJ_RlI8KndpTXYCfuTkVsMbncw3_0bAVze0RE4"
 GOOGLE_CLIENT = "268307387746-5lkr1hp68hm8movq4v9psq11qnucots8.apps.googleusercontent.com"
+# V2-08: mia-migrate only reaches the mia database. The live session table is in DATABASE.
+SESSION_CHAINS_SQL = (Path(__file__).resolve().parents[2]
+                      / "migrations/20261015_owner_os_session_chains.sql")
+CHAIN_COLUMNS = ("chain_id", "chain_started_at", "authenticated_at", "first_used_at",
+                 "rotated_at", "grace_until", "successor_hash")
+CHAIN_CONSTRAINTS = ("ck_owner_os_sessions_chain", "ck_owner_os_sessions_rotation")
 
 
 def fingerprint(values: dict[str, str]) -> str:
@@ -213,12 +219,97 @@ def verify_role_posture() -> None:
         raise RuntimeError("auth_role_posture_failed")
 
 
+def _migration_statements(sql: str) -> list[str]:
+    """Split exactly like app.db.migrate: on ';', dropping blank and '--' comment lines."""
+    statements = []
+    for chunk in sql.split(";"):
+        lines = [line for line in chunk.splitlines()
+                 if line.strip() and not line.strip().startswith("--")]
+        statement = "\n".join(lines).strip()
+        if statement:
+            statements.append(statement)
+    return statements
+
+
+def session_chains_sql() -> str:
+    """The V2-08 migration as one transaction whose constraints are added only when absent.
+
+    PostgreSQL has no ADD CONSTRAINT IF NOT EXISTS. psql runs these DO blocks as written, so a
+    re-run is a no-op. Only the expected additive statement shapes are accepted.
+    """
+    statements = _migration_statements(SESSION_CHAINS_SQL.read_text(encoding="utf-8"))
+    parts, columns, constraints = [], [], []
+    for statement in statements:
+        column = re.match(r"ALTER TABLE owner_os_sessions ADD COLUMN IF NOT EXISTS ([a-z_]+) "
+                          r"(VARCHAR\(64\)|TIMESTAMPTZ) NULL$", statement)
+        constraint = re.match(r"ALTER TABLE owner_os_sessions ADD CONSTRAINT "
+                              r"(ck_owner_os_sessions_[a-z]+) CHECK \(", statement)
+        if column:
+            columns.append(column.group(1))
+            parts.append(statement + ";")
+        elif statement == ("CREATE INDEX IF NOT EXISTS ix_owner_os_sessions_chain "
+                           "ON owner_os_sessions(chain_id)"):
+            parts.append(statement + ";")
+        elif constraint and "$" not in statement:
+            name = constraint.group(1)
+            constraints.append(name)
+            parts.append(
+                "DO $session_chains$\nBEGIN\n"
+                "  IF NOT EXISTS (SELECT 1 FROM pg_constraint\n"
+                "    WHERE conrelid = 'owner_os_sessions'::regclass\n"
+                f"      AND conname = '{name}') THEN\n"
+                f"{statement};\n"
+                "  END IF;\nEND\n$session_chains$;"
+            )
+        else:
+            raise RuntimeError("session_chains_migration_changed")
+    if tuple(columns) != CHAIN_COLUMNS or tuple(constraints) != CHAIN_CONSTRAINTS:
+        raise RuntimeError("session_chains_migration_changed")
+    return "BEGIN;\n" + "\n".join(parts) + "\nCOMMIT;\n"
+
+
+def session_chains_verification_queries() -> tuple[str, str]:
+    columns = ", ".join(f"'{name}'" for name in CHAIN_COLUMNS)
+    constraints = ", ".join(f"'{name}'" for name in CHAIN_CONSTRAINTS)
+    return (
+        "SELECT count(*) FROM information_schema.columns WHERE table_schema = current_schema()"
+        f" AND table_name = 'owner_os_sessions' AND is_nullable = 'YES'"
+        f" AND column_name IN ({columns})",
+        "SELECT count(*) FROM pg_constraint WHERE conrelid = 'owner_os_sessions'::regclass"
+        f" AND contype = 'c' AND convalidated AND conname IN ({constraints})",
+    )
+
+
+def migrate_session_chains(apply: bool = False) -> dict:
+    """Apply the V2-08 session-chain columns to DATABASE, before the new image starts.
+
+    Additive and nullable, so the running image keeps working. No grant changes: the runtime
+    role's table-level grants cover the new columns, which verify_role_posture() re-proves.
+    """
+    verify_vm()
+    sql = session_chains_sql()
+    plan = {"database": DATABASE, "migration": SESSION_CHAINS_SQL.name, "grants_changed": False}
+    if not apply:
+        return {"status": "session_chains_dry_run", **plan}
+    postgres(sql, DATABASE)
+    verification = ";\n".join(session_chains_verification_queries()) + ";\n"
+    rows = postgres(verification, DATABASE).strip().splitlines()
+    if rows != [str(len(CHAIN_COLUMNS)), str(len(CHAIN_CONSTRAINTS))]:
+        raise RuntimeError("session_chains_verification_failed")
+    verify_role_posture()
+    return {"status": "session_chains_applied", **plan, "role_posture": "pass"}
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--apply", action="store_true")
+    parser.add_argument("--migrate-session-chains", action="store_true",
+                        help="apply only the V2-08 session-chain columns to the auth database")
     arguments = parser.parse_args()
     try:
-        print(json.dumps(provision(arguments.apply), separators=(",", ":")))
+        result = (migrate_session_chains(arguments.apply) if arguments.migrate_session_chains
+                  else provision(arguments.apply))
+        print(json.dumps(result, separators=(",", ":")))
     except Exception as error:
         # No exception text/traceback: it may include DSNs, tokens or provider text.
         allowed = {"cli_unavailable", "command_failed", "duplicate_setting", "settings_incomplete",
@@ -226,7 +317,8 @@ if __name__ == "__main__":
                    "already_configured_do_not_rotate", "existing_auth_target_do_not_replace",
                    "auth_schema_verification_failed", "existing_vm_binding_changed",
                    "settings_baseline_changed", "settings_publish_verification_failed",
-                   "posture_verifier_changed", "auth_role_posture_failed"}
+                   "posture_verifier_changed", "auth_role_posture_failed",
+                   "session_chains_migration_changed", "session_chains_verification_failed"}
         code = (str(error) if type(error) is RuntimeError and str(error) in allowed
                 else "provisioning_failed_no_secret_output")
         print(json.dumps({"status": "failed", "reason": code}, separators=(",", ":")))

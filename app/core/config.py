@@ -1,9 +1,9 @@
 import os
 from enum import StrEnum
-from typing import Literal
+from typing import Literal, Self
 from urllib.parse import urlparse
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.core.models import model_chain
@@ -93,7 +93,12 @@ class Settings(BaseSettings):
     owner_os_read_database_url: str = ""
     owner_os_action_database_url: str = ""
     owner_os_cursor_secret: str = ""
+    # Declared only so the existing mia-env still validates. Nothing reads it since V2-08.
     owner_os_session_ttl_seconds: int = Field(default=1800, gt=0, le=1800)
+    # V2-08 sliding sessions: a renewal slides the idle window, never past the absolute cap
+    # measured from the chain's first login.
+    owner_os_session_idle_seconds: int = Field(default=43_200, ge=300, le=43_200)
+    owner_os_session_absolute_seconds: int = Field(default=1_209_600, ge=3_600, le=1_209_600)
     owner_os_session_scopes: str = (
         "owner-os:read:contacts,owner-os:read:activities,owner-os:read:reminders"
     )
@@ -164,6 +169,12 @@ class Settings(BaseSettings):
     apify_token: str = Field(default="")
     gsc_site_url: str = Field(default="")
     ga4_property_id: str = Field(default="")
+
+    @model_validator(mode="after")
+    def _owner_os_session_windows(self) -> Self:
+        if self.owner_os_session_absolute_seconds < self.owner_os_session_idle_seconds:
+            raise ValueError("owner_os_session_absolute_seconds must be at least the idle window")
+        return self
 
     def cors_origin_list(self) -> list[str]:
         return [item.strip() for item in self.cors_origins.split(",") if item.strip()]

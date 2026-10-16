@@ -8,17 +8,36 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import logging
 import secrets
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-MAX_SESSION_TTL_SECONDS = 30 * 60
+# V2-08 bounded sliding sessions. The settings carry the same bounds.
+MIN_IDLE_SECONDS = 300
+MAX_IDLE_SECONDS = 12 * 60 * 60
+MIN_ABSOLUTE_SECONDS = 60 * 60
+MAX_ABSOLUTE_SECONDS = 14 * 24 * 60 * 60
+# A rotated token stays valid this long for requests already in flight.
+GRACE_SECONDS = 60
+# A session becomes due for renewal this long after it was issued.
+RENEW_AGE_SECONDS = 900
 SESSION_TOKEN_BYTES = 32
 CHALLENGE_TOKEN_BYTES = 32
+CHAIN_ID_BYTES = 16
+
+_logger = logging.getLogger(__name__)
+_SESSION_COLUMNS = (
+    "owner_id, workspace_id, login_proof_hash, scopes, expires_at, revoked_at, created_at, "
+    "chain_id, chain_started_at, authenticated_at, first_used_at, rotated_at, grace_until, "
+    "successor_hash"
+)
 
 
 class OwnerSessionDenied(PermissionError):
@@ -33,6 +52,10 @@ class OwnerSessionRateLimited(OwnerSessionDenied):
     """The durable global auth-attempt budget was exhausted."""
 
 
+class OwnerSessionChainReuse(OwnerSessionDenied):
+    """A replaced token was presented. Its whole chain is already revoked and committed."""
+
+
 @dataclass(frozen=True)
 class OwnerSessionRecord:
     owner_id: str
@@ -41,6 +64,14 @@ class OwnerSessionRecord:
     expires_at: datetime
     workspace_id: str
     login_proof_hash: str
+    created_at: datetime
+    # min(created_at + RENEW_AGE, expires_at), or the check time on a rotated row.
+    renew_after: datetime
+    # NULL on a legacy (pre-V2-08) row, which can never be renewed.
+    chain_id: str | None
+    chain_started_at: datetime | None
+    authenticated_at: datetime | None
+    rotated_at: datetime | None
 
 
 @dataclass(frozen=True)
@@ -105,16 +136,141 @@ def _parse_scopes(value: str) -> frozenset[str]:
     return frozenset(item for item in value.split(",") if item)
 
 
+def _optional_utc(value: Any) -> datetime | None:
+    return None if value is None else _utc(value)
+
+
+def _renew_after(
+    *,
+    created_at: datetime,
+    expires_at: datetime,
+    rotated_at: datetime | None,
+    moment: datetime,
+) -> datetime:
+    if rotated_at is not None:
+        # A rotated predecessor (lost response) is due at once.
+        return moment
+    return min(created_at + timedelta(seconds=RENEW_AGE_SECONDS), expires_at)
+
+
+def _record(
+    row: Mapping[str, Any],
+    *,
+    session_hash: str,
+    moment: datetime,
+) -> OwnerSessionRecord:
+    created_at = _utc(row["created_at"])
+    expires_at = _utc(row["expires_at"])
+    rotated_at = _optional_utc(row["rotated_at"])
+    chain_id = row["chain_id"]
+    return OwnerSessionRecord(
+        owner_id=str(row["owner_id"]),
+        scopes=_parse_scopes(str(row["scopes"])),
+        session_hash=session_hash,
+        expires_at=expires_at,
+        workspace_id=str(row["workspace_id"]),
+        login_proof_hash=str(row["login_proof_hash"]),
+        created_at=created_at,
+        renew_after=_renew_after(
+            created_at=created_at, expires_at=expires_at, rotated_at=rotated_at, moment=moment
+        ),
+        chain_id=None if chain_id is None else str(chain_id),
+        chain_started_at=_optional_utc(row["chain_started_at"]),
+        authenticated_at=_optional_utc(row["authenticated_at"]),
+        rotated_at=rotated_at,
+    )
+
+
+def _valid_windows(idle_seconds: int, absolute_seconds: int) -> bool:
+    return (
+        MIN_IDLE_SECONDS <= idle_seconds <= MAX_IDLE_SECONDS
+        and MIN_ABSOLUTE_SECONDS <= absolute_seconds <= MAX_ABSOLUTE_SECONDS
+        and absolute_seconds >= idle_seconds
+    )
+
+
 class OwnerSessionStore:
-    """Transaction-scoped store. Callers must commit before issuing credentials."""
+    """Transaction-scoped store. Callers must commit before issuing credentials.
+
+    One exception: a presented token its browser had already replaced revokes the whole chain
+    and commits that revocation itself, so no caller's rollback can undo it.
+    """
 
     def __init__(self, session: Session) -> None:
         self.session = session
+        # Set by authenticate() when it wrote first_used_at. require_owner_session commits it.
+        self.first_use_recorded = False
+
+    def _is_postgres(self) -> bool:
+        return self.session.get_bind().dialect.name == "postgresql"
 
     def _now(self, supplied: datetime | None) -> datetime:
         if supplied is not None:
             return _utc(supplied)
         return _utc(self.session.execute(text("SELECT CURRENT_TIMESTAMP")).scalar_one())
+
+    def _clock(self, supplied: datetime | None) -> datetime:
+        """The wall clock after the owner lock, not the transaction's start time."""
+        if supplied is not None or not self._is_postgres():
+            return self._now(supplied)
+        return _utc(self.session.execute(text("SELECT clock_timestamp()")).scalar_one())
+
+    def _session_row(self, session_hash: str, *, for_update: bool = False):
+        lock = " FOR UPDATE" if for_update and self._is_postgres() else ""
+        return self.session.execute(
+            text(
+                f"SELECT {_SESSION_COLUMNS} FROM owner_os_sessions "
+                f"WHERE session_hash = :session_hash{lock}"
+            ),
+            {"session_hash": session_hash},
+        ).mappings().first()
+
+    def _revoke_chain(
+        self,
+        *,
+        session_hash: str,
+        chain_id: str | None,
+        owner_id: str,
+        moment: datetime,
+    ) -> None:
+        """Revoke every row of the chain, or only the row itself when it is legacy."""
+        if chain_id is None:
+            condition, values = "session_hash = :key", {"key": session_hash}
+        else:
+            condition, values = "chain_id = :key", {"key": chain_id}
+        self.session.execute(
+            text(
+                f"""
+                UPDATE owner_os_sessions
+                SET revoked_at = :now
+                WHERE owner_id = :owner_id
+                  AND revoked_at IS NULL
+                  AND {condition}
+                """
+            ),
+            {"now": moment, "owner_id": owner_id, **values},
+        )
+
+    def _deny_chain_reuse(
+        self,
+        *,
+        session_hash: str,
+        chain_id: str | None,
+        owner_id: str,
+        moment: datetime,
+    ) -> OwnerSessionChainReuse:
+        """Revoke and commit the whole chain, then return the denial for the caller to raise.
+
+        The owner lock serializes this with renew(), so a successor inserted concurrently is
+        committed (and therefore revoked here) before this UPDATE reads the chain.
+        """
+        self._lock_owner(owner_id)
+        self._revoke_chain(
+            session_hash=session_hash, chain_id=chain_id, owner_id=owner_id, moment=moment
+        )
+        self.session.commit()
+        _logger.warning("owner_auth reason=session_chain_reuse")
+        return OwnerSessionChainReuse("session chain reuse")
 
     def _lock_owner(self, owner_id: str) -> None:
         if self.session.get_bind().dialect.name == "postgresql":
@@ -262,11 +418,14 @@ class OwnerSessionStore:
         ttl_seconds: int,
         now: datetime | None = None,
     ) -> IssuedSession:
-        """Consume challenge + proof, revoke prior cookie, and insert atomically."""
+        """Consume challenge + proof, revoke the prior cookie's chain, and start a new chain.
+
+        ``ttl_seconds`` is the idle window: the first row of a chain expires at now + idle.
+        """
         if not owner_id.isascii() or not owner_id.isdigit() or not workspace_id or not scopes:
             raise OwnerSessionDenied("invalid owner session")
         moment = self._now(now)
-        ttl = max(1, min(ttl_seconds, MAX_SESSION_TTL_SECONDS))
+        ttl = max(1, min(ttl_seconds, MAX_IDLE_SECONDS))
         self._lock_owner(owner_id)
         revoked_before = self._revoked_before(owner_id)
         if _utc(proof_authenticated_at) <= revoked_before:
@@ -310,35 +469,28 @@ class OwnerSessionStore:
             raise OwnerSessionReplay("proof replayed") from exc
 
         if previous_cookie:
-            self.session.execute(
-                text(
-                    """
-                    UPDATE owner_os_sessions
-                    SET revoked_at = :now
-                    WHERE session_hash = :session_hash
-                      AND owner_id = :owner_id
-                      AND revoked_at IS NULL
-                    """
-                ),
-                {
-                    "now": moment,
-                    "session_hash": credential_hash(previous_cookie, purpose="session"),
-                    "owner_id": owner_id,
-                },
+            self._revoke_chain_of(
+                credential_hash(previous_cookie, purpose="session"),
+                owner_id=owner_id,
+                moment=moment,
             )
 
         cookie_token = secrets.token_urlsafe(SESSION_TOKEN_BYTES)
         hashed = credential_hash(cookie_token, purpose="session")
         expires_at = moment + timedelta(seconds=ttl)
+        chain_id = secrets.token_hex(CHAIN_ID_BYTES)
+        authenticated_at = _utc(proof_authenticated_at)
         self.session.execute(
             text(
                 """
                 INSERT INTO owner_os_sessions
                     (session_hash, owner_id, workspace_id, login_proof_hash, scopes,
-                     expires_at, revoked_at, created_at)
+                     expires_at, revoked_at, created_at, chain_id, chain_started_at,
+                     authenticated_at)
                 VALUES
                     (:session_hash, :owner_id, :workspace_id, :login_proof_hash, :scopes,
-                     :expires_at, NULL, :created_at)
+                     :expires_at, NULL, :created_at, :chain_id, :chain_started_at,
+                     :authenticated_at)
                 """
             ),
             {
@@ -349,6 +501,9 @@ class OwnerSessionStore:
                 "scopes": _scopes_text(scopes),
                 "expires_at": expires_at,
                 "created_at": moment,
+                "chain_id": chain_id,
+                "chain_started_at": moment,
+                "authenticated_at": authenticated_at,
             },
         )
         return IssuedSession(
@@ -360,7 +515,34 @@ class OwnerSessionStore:
                 expires_at=expires_at,
                 workspace_id=workspace_id,
                 login_proof_hash=proof_hash,
+                created_at=moment,
+                renew_after=_renew_after(
+                    created_at=moment, expires_at=expires_at, rotated_at=None, moment=moment
+                ),
+                chain_id=chain_id,
+                chain_started_at=moment,
+                authenticated_at=authenticated_at,
+                rotated_at=None,
             ),
+        )
+
+    def _revoke_chain_of(self, session_hash: str, *, owner_id: str, moment: datetime) -> None:
+        """Revoke the whole chain of one presented row (or just the row when it is legacy)."""
+        found = self.session.execute(
+            text(
+                """
+                SELECT chain_id
+                FROM owner_os_sessions
+                WHERE session_hash = :session_hash
+                  AND owner_id = :owner_id
+                """
+            ),
+            {"session_hash": session_hash, "owner_id": owner_id},
+        ).first()
+        if found is None:
+            return
+        self._revoke_chain(
+            session_hash=session_hash, chain_id=found[0], owner_id=owner_id, moment=moment
         )
 
     def authenticate(
@@ -369,52 +551,230 @@ class OwnerSessionStore:
         *,
         now: datetime | None = None,
     ) -> OwnerSessionRecord:
+        """Contract rules, on every route: select by hash with no state filter, then
+        1. a missing or revoked row is denied,
+        2. a rotated row at or past its grace revokes (and commits) its whole chain, denied,
+        3. a row at or past expires_at is denied,
+        4. otherwise allowed, and first_used_at is set once (the caller commits it).
+        """
+        self.first_use_recorded = False
         if not cookie_token or len(cookie_token) > 256:
             raise OwnerSessionDenied("session required")
         moment = self._now(now)
         hashed = credential_hash(cookie_token, purpose="session")
-        row = self.session.execute(
-            text(
-                """
-                SELECT owner_id, workspace_id, login_proof_hash, scopes, expires_at
-                FROM owner_os_sessions
-                WHERE session_hash = :session_hash
-                  AND revoked_at IS NULL
-                  AND expires_at > :now
-                """
-            ),
-            {"session_hash": hashed, "now": moment},
-        ).mappings().first()
-        if row is None:
+        row = self._session_row(hashed)
+        if row is None or row["revoked_at"] is not None:
             raise OwnerSessionDenied("session rejected")
-        expires_at = _utc(row["expires_at"])
-        return OwnerSessionRecord(
-            owner_id=str(row["owner_id"]),
-            scopes=_parse_scopes(str(row["scopes"])),
-            session_hash=hashed,
-            expires_at=expires_at,
-            workspace_id=str(row["workspace_id"]),
-            login_proof_hash=str(row["login_proof_hash"]),
-        )
+        if row["rotated_at"] is not None:
+            grace_until = _optional_utc(row["grace_until"])
+            if grace_until is None or moment >= grace_until:
+                raise self._deny_chain_reuse(
+                    session_hash=hashed,
+                    chain_id=row["chain_id"],
+                    owner_id=str(row["owner_id"]),
+                    moment=moment,
+                )
+        if moment >= _utc(row["expires_at"]):
+            raise OwnerSessionDenied("session rejected")
+        if row["first_used_at"] is None:
+            self.session.execute(
+                text(
+                    """
+                    UPDATE owner_os_sessions
+                    SET first_used_at = :now
+                    WHERE session_hash = :session_hash
+                      AND first_used_at IS NULL
+                    """
+                ),
+                {"now": moment, "session_hash": hashed},
+            )
+            self.first_use_recorded = True
+        return _record(row, session_hash=hashed, moment=moment)
 
-    def revoke_current(
+    def revoke_current_chain(
         self,
         *,
         session_hash: str,
         owner_id: str,
         now: datetime | None = None,
     ) -> None:
+        """Logout: revoke the presented row's whole chain, a predecessor in grace included."""
+        moment = self._now(now)
+        # Serialize with renew(): a successor it commits first is revoked here as well.
+        self._lock_owner(owner_id)
+        self._revoke_chain_of(session_hash, owner_id=owner_id, moment=moment)
+
+    def renew(
+        self,
+        cookie_token: str,
+        *,
+        idle_seconds: int,
+        absolute_seconds: int,
+        authorize: Callable[[OwnerSessionRecord], object],
+        now: datetime | None = None,
+    ) -> IssuedSession:
+        """Rotate the presented session into a successor of the same chain.
+
+        ``authorize`` re-checks the numeric owner allow-list and the workspace for the locked
+        row and raises to deny. The caller commits before it sends the new cookie.
+        """
+        if not cookie_token or len(cookie_token) > 256:
+            raise OwnerSessionDenied("session required")
+        if not _valid_windows(idle_seconds, absolute_seconds):
+            raise OwnerSessionDenied("invalid session window")
+        hashed = credential_hash(cookie_token, purpose="session")
+        owner = self.session.execute(
+            text("SELECT owner_id FROM owner_os_sessions WHERE session_hash = :session_hash"),
+            {"session_hash": hashed},
+        ).first()
+        if owner is None:
+            raise OwnerSessionDenied("session rejected")
+        self._lock_owner(str(owner[0]))
+        moment = self._clock(now)
+        row = self._session_row(hashed, for_update=True)
+        if row is None or str(row["owner_id"]) != str(owner[0]) or row["revoked_at"] is not None:
+            raise OwnerSessionDenied("session rejected")
+        if row["chain_id"] is None:
+            raise OwnerSessionDenied("legacy session cannot be renewed")
+        owner_id = str(row["owner_id"])
+        chain_id = str(row["chain_id"])
+        rotated_at = _optional_utc(row["rotated_at"])
+        grace_until = _optional_utc(row["grace_until"])
+        # Reuse detection comes first: a rotated row's expires_at is at most its grace_until,
+        # so the expiry check below would otherwise hide a token presented after its grace.
+        if rotated_at is not None and (grace_until is None or moment >= grace_until):
+            raise self._deny_chain_reuse(
+                session_hash=hashed, chain_id=chain_id, owner_id=owner_id, moment=moment
+            )
+        chain_started_at = _utc(row["chain_started_at"])
+        authenticated_at = _utc(row["authenticated_at"])
+        chain_cap = chain_started_at + timedelta(seconds=absolute_seconds)
+        revoked_before = self._revoked_before(owner_id)
+        if (
+            moment >= _utc(row["expires_at"])
+            or moment >= chain_cap
+            or chain_started_at <= revoked_before
+            or authenticated_at <= revoked_before
+        ):
+            raise OwnerSessionDenied("session rejected")
+        authorize(_record(row, session_hash=hashed, moment=moment))
+
+        if rotated_at is not None:
+            self._retire_unused_successor(
+                row, session_hash=hashed, chain_id=chain_id, owner_id=owner_id, moment=moment
+            )
+
+        new_token = secrets.token_urlsafe(SESSION_TOKEN_BYTES)
+        successor = credential_hash(new_token, purpose="session")
+        expires_at = min(moment + timedelta(seconds=idle_seconds), chain_cap)
+        # INSERT ... SELECT copies identity, proof and the scopes text byte for byte, so a
+        # renewal can never re-derive or widen what the login granted.
+        inserted = self.session.execute(
+            text(
+                """
+                INSERT INTO owner_os_sessions
+                    (session_hash, owner_id, workspace_id, login_proof_hash, scopes,
+                     expires_at, revoked_at, created_at, chain_id, chain_started_at,
+                     authenticated_at)
+                SELECT :successor, owner_id, workspace_id, login_proof_hash, scopes,
+                       :expires_at, NULL, :now, chain_id, chain_started_at, authenticated_at
+                FROM owner_os_sessions
+                WHERE session_hash = :presented
+                """
+            ),
+            {
+                "successor": successor,
+                "expires_at": expires_at,
+                "now": moment,
+                "presented": hashed,
+            },
+        )
+        if inserted.rowcount != 1:
+            raise OwnerSessionDenied("session rejected")
+        # The row is locked, so these equal COALESCE(rotated_at, now),
+        # COALESCE(grace_until, now + GRACE) and LEAST(expires_at, grace_until).
+        kept_rotated_at = rotated_at or moment
+        kept_grace_until = grace_until or moment + timedelta(seconds=GRACE_SECONDS)
         self.session.execute(
             text(
                 """
                 UPDATE owner_os_sessions
-                SET revoked_at = :now
-                WHERE session_hash = :session_hash
-                  AND owner_id = :owner_id
-                  AND revoked_at IS NULL
+                SET rotated_at = :rotated_at,
+                    grace_until = :grace_until,
+                    expires_at = :expires_at,
+                    successor_hash = :successor
+                WHERE session_hash = :presented
                 """
             ),
-            {"now": self._now(now), "session_hash": session_hash, "owner_id": owner_id},
+            {
+                "rotated_at": kept_rotated_at,
+                "grace_until": kept_grace_until,
+                "expires_at": min(_utc(row["expires_at"]), kept_grace_until),
+                "successor": successor,
+                "presented": hashed,
+            },
+        )
+        return IssuedSession(
+            cookie_token=new_token,
+            record=OwnerSessionRecord(
+                owner_id=owner_id,
+                scopes=_parse_scopes(str(row["scopes"])),
+                session_hash=successor,
+                expires_at=expires_at,
+                workspace_id=str(row["workspace_id"]),
+                login_proof_hash=str(row["login_proof_hash"]),
+                created_at=moment,
+                renew_after=_renew_after(
+                    created_at=moment, expires_at=expires_at, rotated_at=None, moment=moment
+                ),
+                chain_id=chain_id,
+                chain_started_at=chain_started_at,
+                authenticated_at=authenticated_at,
+                rotated_at=None,
+            ),
+        )
+
+    def _retire_unused_successor(
+        self,
+        row: Mapping[str, Any],
+        *,
+        session_hash: str,
+        chain_id: str,
+        owner_id: str,
+        moment: datetime,
+    ) -> None:
+        """A rotated row inside its grace: a lost response may retry, a replaced token may not."""
+        successor_hash = row["successor_hash"]
+        successor = (
+            None
+            if successor_hash is None
+            else self._session_row(str(successor_hash), for_update=True)
+        )
+        if (
+            successor is None
+            or successor["chain_id"] != chain_id
+            or successor["first_used_at"] is not None
+            or successor["rotated_at"] is not None
+        ):
+            # The browser had already replaced this token (or the chain is inconsistent).
+            raise self._deny_chain_reuse(
+                session_hash=session_hash, chain_id=chain_id, owner_id=owner_id, moment=moment
+            )
+        self.session.execute(
+            text(
+                """
+                UPDATE owner_os_sessions
+                SET rotated_at = :now,
+                    grace_until = :now,
+                    expires_at = :expires_at
+                WHERE session_hash = :successor
+                """
+            ),
+            {
+                "now": moment,
+                "expires_at": min(_utc(successor["expires_at"]), moment),
+                "successor": str(successor_hash),
+            },
         )
 
     def revoke_all_for_authenticated_owner(
