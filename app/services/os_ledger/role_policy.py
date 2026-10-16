@@ -1,9 +1,10 @@
-"""Exact V2-14 PostgreSQL grant map; callers must validate both real DSNs.
+"""Exact V2-14 PostgreSQL grant map and its fail-closed catalog validator.
 
-No activation or connection is performed on import. The catalog hook is for an
-operator transaction; runtime/preflight callers must use validate_ledger_role.
-Retention is reserved, NOLOGIN and unprivileged until its tables and a bounded
-scheduled purge interface land. No default grants are used for future tables.
+Nothing connects on import. validate_ledger_role is the V2_PG_CONTRACTS.md §5.5
+preflight (first connection, every 10 minutes and after a reconnect; never per
+request). validate_ledger_catalog is the operator transaction hook used by
+provisioning. Retention stays reserved, NOLOGIN and unprivileged until V2-14b adds
+its tables. No default privileges are granted for future tables.
 """
 
 from collections.abc import Mapping
@@ -18,23 +19,30 @@ from app.db.os_ledger_migrate import OWNER_ROLE, RUNTIME_ROLE, TABLES, _validate
 
 RETENTION_ROLE = "assaf_os_retention"
 DENIED = "ledger_role_denied"
+# pg_temp last: a session's temporary relation can never shadow a catalog name
+# (left out, pg_temp is searched FIRST for relations). Functions never resolve there.
+CATALOG_SEARCH_PATH = "SET LOCAL search_path = pg_catalog, pg_temp"
 
 TABLE_PRIVILEGES: Mapping[str, frozenset[str]] = MappingProxyType({
     name: frozenset({"SELECT"} if name == "os_authority" else {"SELECT", "INSERT"})
     for name in sorted(TABLES)
 })
-_RECORD_COLUMNS = (
-    "revision", "inputs", "business_date", "updated_at", "deleted_at", "deleted_by_request_id",
+# §18.2: every record table has these UPDATE columns plus its own typed columns.
+# Never updatable: workspace_id, record_id, created_at and the generated os_tasks.status.
+RECORD_UPDATE_COLUMNS = (
+    "revision", "inputs", "business_date", "source", "updated_at", "deleted_at",
+    "deleted_by_request_id",
 )
+_R = RECORD_UPDATE_COLUMNS
 COLUMN_UPDATES: Mapping[str, tuple[str, ...]] = MappingProxyType({
     "os_workspaces": ("version", "summaries", "updated_at"),
-    "os_leads": _RECORD_COLUMNS,
-    "os_clients": _RECORD_COLUMNS,
-    "os_works": (*_RECORD_COLUMNS, "agreed_amount_minor", "currency"),
-    "os_payments": (*_RECORD_COLUMNS, "amount_minor", "currency"),
-    "os_time": (*_RECORD_COLUMNS, "minutes"),
-    "os_expenses": (*_RECORD_COLUMNS, "amount_minor", "currency"),
-    "os_tasks": (*_RECORD_COLUMNS, "person_id", "work_id", "due_date"),
+    "os_leads": (*_R, "person_id"),
+    "os_clients": _R,
+    "os_works": (*_R, "person_id", "agreed_amount_minor", "currency"),
+    "os_payments": (*_R, "person_id", "work_id", "amount_minor", "currency", "original_payment_id"),
+    "os_time": (*_R, "person_id", "work_id", "minutes"),
+    "os_expenses": (*_R, "amount_minor", "currency", "source_type", "source_key", "source_digest"),
+    "os_tasks": (*_R, "person_id", "work_id", "due_date"),
     "os_proposals": ("status",),
     "os_outbox": (
         "status", "attempts", "next_attempt_at", "lease_owner", "lease_generation",
@@ -50,11 +58,55 @@ COLUMN_UPDATES: Mapping[str, tuple[str, ...]] = MappingProxyType({
     "os_import_rows": ("record_id", "status", "canonical_record", "quarantine"),
 })
 FUNCTION_PRIVILEGES = frozenset({"expense_source_key_sha256(text)"})
-_FUNCTIONS = FUNCTION_PRIVILEGES | {"require_pending_assistant_proposal_insert()"}
+# The complete assaf_os inventory, owned by assaf_os_owner (provisioning re-owns it).
+OWNED_TABLES = tuple(sorted(TABLES | {"schema_migrations"}))
+OWNED_FUNCTIONS = (
+    "expense_source_key_sha256(text)", "require_pending_assistant_proposal_insert()",
+)
+# The only non-internal trigger on any assaf_os relation:
+# (table, trigger, function, tgenabled 'O' = fires normally, tgtype 7 = ROW|BEFORE|INSERT).
+TRIGGERS = frozenset({(
+    "os_proposals", "os_proposals_assistant_insert_pending",
+    "assaf_os.require_pending_assistant_proposal_insert()", "O", 7,
+)})
 _USER_SCHEMA = (
     "n.nspname NOT IN ('pg_catalog', 'information_schema') "
     "AND n.nspname NOT LIKE 'pg_toast%' AND n.nspname NOT LIKE 'pg_temp_%'"
 )
+# Every catalog object that belongs to assaf_os, as (catalog oid, object oid): the schema,
+# its relations with their toast tables and toast indexes, functions, types,
+# constraints, triggers, rules, column defaults, policies and extended statistics.
+_INSIDE = """
+WITH ns AS (SELECT oid FROM pg_namespace WHERE nspname = 'assaf_os'),
+rel AS (SELECT c.oid, c.reltoastrelid FROM pg_class c WHERE c.relnamespace IN (SELECT oid FROM ns)),
+allrel AS (
+    SELECT oid FROM rel
+    UNION SELECT reltoastrelid FROM rel WHERE reltoastrelid <> 0
+    UNION SELECT i.indexrelid FROM pg_index i
+          WHERE i.indrelid IN (SELECT reltoastrelid FROM rel WHERE reltoastrelid <> 0)),
+inside(classid, objid) AS (
+    SELECT 'pg_namespace'::regclass::oid, oid FROM ns
+    UNION ALL SELECT 'pg_class'::regclass::oid, oid FROM allrel
+    UNION ALL SELECT 'pg_proc'::regclass::oid, p.oid FROM pg_proc p
+              WHERE p.pronamespace IN (SELECT oid FROM ns)
+    UNION ALL SELECT 'pg_type'::regclass::oid, t.oid FROM pg_type t
+              WHERE t.typnamespace IN (SELECT oid FROM ns)
+    UNION ALL SELECT 'pg_constraint'::regclass::oid, k.oid FROM pg_constraint k
+              WHERE k.connamespace IN (SELECT oid FROM ns)
+    UNION ALL SELECT 'pg_trigger'::regclass::oid, g.oid FROM pg_trigger g
+              WHERE g.tgrelid IN (SELECT oid FROM allrel)
+    UNION ALL SELECT 'pg_rewrite'::regclass::oid, w.oid FROM pg_rewrite w
+              WHERE w.ev_class IN (SELECT oid FROM allrel)
+    UNION ALL SELECT 'pg_attrdef'::regclass::oid, a.oid FROM pg_attrdef a
+              WHERE a.adrelid IN (SELECT oid FROM allrel)
+    UNION ALL SELECT 'pg_policy'::regclass::oid, y.oid FROM pg_policy y
+              WHERE y.polrelid IN (SELECT oid FROM allrel)
+    UNION ALL SELECT 'pg_statistic_ext'::regclass::oid, s.oid FROM pg_statistic_ext s
+              WHERE s.stxnamespace IN (SELECT oid FROM ns))
+"""
+# initdb-created objects (OID < FirstNormalObjectId, e.g. the plpgsql language) are
+# the only things outside assaf_os that an assaf_os object may depend on.
+_FIRST_NORMAL_OID = 16384
 
 
 def ledger_grant_statements() -> tuple[str, ...]:
@@ -79,7 +131,21 @@ def _require(ok: bool) -> None:
         raise ValueError(DENIED)
 
 
-def _roles(conn: Connection, main_role: str, migration_role: str) -> None:
+def _migration_role(conn: Connection, explicit: str | None) -> str:
+    # §5.5: the migration identity is the single member holding an ADMIN-only edge
+    # (ADMIN TRUE, SET FALSE, INHERIT FALSE) on assaf_os_owner. Zero or several such
+    # members, or an explicit pin that differs from it, are refused.
+    members = set(conn.execute(text(
+        "SELECT DISTINCT pg_get_userbyid(member) FROM pg_auth_members "
+        "WHERE roleid = to_regrole(:owner) AND admin_option AND NOT set_option "
+        "AND NOT inherit_option"
+    ), {"owner": OWNER_ROLE}).scalars())
+    _require(len(members) == 1 and (explicit is None or members == {explicit}))
+    return members.pop()
+
+
+def _roles(conn: Connection, main_role: str, migration_role: str | None) -> None:
+    migration_role = _migration_role(conn, migration_role)
     _require(bool(main_role) and bool(migration_role) and len({
         RUNTIME_ROLE, OWNER_ROLE, RETENTION_ROLE, main_role, migration_role,
     }) == 5)
@@ -89,10 +155,8 @@ def _roles(conn: Connection, main_role: str, migration_role: str) -> None:
             "rolreplication, rolbypassrls FROM pg_roles WHERE rolname=:role"
         ), {"role": role}).first()
         _require(row is not None and row[0] == login and not any(row[1:]))
-    _require(conn.scalar(text("SELECT to_regrole(:role) IS NOT NULL"),
-                         {"role": migration_role}))
-    # Match V2-14 review r1: the owner may ONLY have an ADMIN-only edge to the
-    # pinned migration identity. NOINHERIT alone never prevents SET ROLE.
+    # Match V2-14 review r1: the owner may ONLY have the ADMIN-only edge to the
+    # migration identity. NOINHERIT alone never prevents SET ROLE.
     edges = conn.execute(text(
         "SELECT pg_get_userbyid(roleid), pg_get_userbyid(member), admin_option, "
         "set_option, inherit_option FROM pg_auth_members WHERE "
@@ -101,6 +165,10 @@ def _roles(conn: Connection, main_role: str, migration_role: str) -> None:
     ), {"roles": [RUNTIME_ROLE, OWNER_ROLE, RETENTION_ROLE, main_role]}).all()
     _require(all(tuple(edge) == (OWNER_ROLE, migration_role, True, False, False) for edge in edges))
     _validate_main_role_catalog(conn, main_role)
+    # The main role has no TEMP: no temporary relation of its own on any connection.
+    _require(not conn.scalar(text(
+        "SELECT has_database_privilege(:role, current_database(), 'TEMP')"
+    ), {"role": main_role}))
     for role in (RUNTIME_ROLE, RETENTION_ROLE):
         _require(not conn.scalar(text(
             "SELECT has_database_privilege(:role,current_database(),'CREATE,TEMP') OR EXISTS ("
@@ -110,14 +178,18 @@ def _roles(conn: Connection, main_role: str, migration_role: str) -> None:
             "SELECT 1 FROM pg_database WHERE datdba=to_regrole(:role)) OR EXISTS ("
             "SELECT 1 FROM pg_namespace WHERE has_schema_privilege(:role,oid,'CREATE'))"
         ), {"role": role}))
+        # Exactly one database ACL entry is allowed: the runtime role's own CONNECT
+        # on this database (needed when PUBLIC CONNECT is revoked).
         _require(not conn.scalar(text("""
             SELECT EXISTS(SELECT 1 FROM pg_namespace n
             CROSS JOIN LATERAL aclexplode(n.nspacl) a
             WHERE a.grantee=to_regrole(:role) AND n.nspname<>'assaf_os')
             OR EXISTS(SELECT 1 FROM pg_database d
             CROSS JOIN LATERAL aclexplode(d.datacl) a
-            WHERE d.datname=current_database() AND a.grantee=to_regrole(:role))
-        """), {"role": role}))
+            WHERE d.datname=current_database() AND a.grantee=to_regrole(:role)
+            AND NOT (CAST(:connect AS boolean) AND a.privilege_type = 'CONNECT'
+                     AND NOT a.is_grantable))
+        """), {"role": role, "connect": role == RUNTIME_ROLE}))
         _require(not conn.scalar(text(f"""
             SELECT EXISTS(SELECT 1 FROM pg_namespace n WHERE {_USER_SCHEMA}
             AND n.nspname NOT IN ('assaf_os','public')
@@ -132,11 +204,104 @@ def _acl(conn: Connection, sql: str, expected: set[tuple]) -> None:
     _require({tuple(row) for row in rows} == expected)
 
 
-def _catalog(conn: Connection, main_role: str, migration_role: str) -> None:
+def _closure(conn: Connection) -> None:
+    # r1 must-fix 1: a rule or trigger turns one exact-grant INSERT into anything its
+    # definer may do. No rule; exactly the reviewed trigger, enabled; no RLS policies.
+    _require(not conn.scalar(text(
+        "SELECT EXISTS(SELECT 1 FROM pg_rewrite r JOIN pg_class c ON c.oid=r.ev_class "
+        "WHERE c.relnamespace=to_regnamespace('assaf_os'))"
+    )))
+    triggers = conn.execute(text(
+        "SELECT c.relname, t.tgname, t.tgfoid::regprocedure::text, t.tgenabled::text, "
+        "t.tgtype::int FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid "
+        "WHERE c.relnamespace=to_regnamespace('assaf_os') AND NOT t.tgisinternal"
+    )).all()
+    _require(len(triggers) == len(TRIGGERS) and {tuple(row) for row in triggers} == TRIGGERS)
+    _require(not conn.scalar(text(
+        "SELECT EXISTS(SELECT 1 FROM pg_class c WHERE c.relnamespace=to_regnamespace('assaf_os') "
+        "AND (c.relrowsecurity OR c.relforcerowsecurity)) OR EXISTS(SELECT 1 FROM pg_policy p "
+        "JOIN pg_class c ON c.oid=p.polrelid WHERE c.relnamespace=to_regnamespace('assaf_os'))"
+    )))
+    # r1 must-fix 2: assaf_os is a closed dependency island. Nothing outside depends on
+    # it (views, matviews, sql-body functions, foreign keys, row types, statistics,
+    # publications), and it depends on nothing outside except initdb objects
+    # (triggers, defaults, checks or indexes calling another schema's functions).
+    _require(not conn.scalar(text(_INSIDE + f"""
+        SELECT EXISTS(SELECT 1 FROM pg_depend d
+        WHERE ((d.classid, d.objid) IN (SELECT classid, objid FROM inside))
+              <> ((d.refclassid, d.refobjid) IN (SELECT classid, objid FROM inside))
+          AND NOT ((d.classid, d.objid) IN (SELECT classid, objid FROM inside)
+                   AND d.refobjid < {_FIRST_NORMAL_OID}::oid))
+    """)))
+
+
+def _footprints(conn: Connection, main_role: str) -> None:
+    params = {
+        "owner": OWNER_ROLE, "runtime": RUNTIME_ROLE, "retention": RETENTION_ROLE,
+        "main": main_role,
+    }
+    # r1 must-fix 2: the owner owns nothing in this database outside assaf_os (other
+    # than its own default ACL, checked in _defaults) and no shared object.
+    _require(not conn.scalar(text(_INSIDE + """
+        SELECT EXISTS(SELECT 1 FROM pg_shdepend s
+        WHERE s.refclassid = 'pg_authid'::regclass AND s.refobjid = to_regrole(:owner)
+          AND s.deptype = 'o'
+          AND (s.dbid = 0 OR (
+               s.dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
+               AND (s.classid, s.objid) NOT IN (SELECT classid, objid FROM inside)
+               AND NOT (s.classid = 'pg_default_acl'::regclass AND s.objid IN (
+                   SELECT oid FROM pg_default_acl WHERE defaclrole = to_regrole(:owner))))))
+    """), params))
+    # The runtime role appears in no ACL and owns nothing in ANY database or shared
+    # object (tablespaces, other databases, parameters, large objects, types, ...),
+    # except assaf_os objects (pinned exactly by _catalog) and CONNECT on this database.
+    # Retention appears nowhere at all.
+    _require(not conn.scalar(text(_INSIDE + """
+        SELECT EXISTS(SELECT 1 FROM pg_shdepend s
+        WHERE s.refclassid = 'pg_authid'::regclass
+          AND (s.refobjid = to_regrole(:retention) OR (
+               s.refobjid = to_regrole(:runtime) AND NOT (s.deptype = 'a' AND (
+                 (s.dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
+                  AND s.classid IN ('pg_namespace'::regclass, 'pg_class'::regclass,
+                                    'pg_proc'::regclass)
+                  AND (s.classid, s.objid) IN (SELECT classid, objid FROM inside))
+                 OR (s.dbid = 0 AND s.classid = 'pg_database'::regclass
+                     AND s.objid = (SELECT oid FROM pg_database
+                                    WHERE datname = current_database())))))))
+    """), params))
+    # r1 must-fix 3: SET / ALTER SYSTEM on a parameter (session_replication_role turns
+    # off foreign keys and the assistant trigger) is granted to none of these or PUBLIC.
+    _require(not conn.scalar(text("""
+        SELECT EXISTS(SELECT 1 FROM pg_parameter_acl p CROSS JOIN LATERAL aclexplode(p.paracl) a
+        WHERE a.grantee = 0 OR a.grantee IN (to_regrole(:runtime), to_regrole(:retention),
+                                             to_regrole(:owner), to_regrole(:main)))
+    """), params))
+    # No per-role settings for the ledger roles, and no database- or cluster-wide
+    # session_replication_role that would apply to the runtime role's sessions.
+    _require(not conn.scalar(text("""
+        SELECT EXISTS(SELECT 1 FROM pg_db_role_setting s
+        WHERE s.setrole IN (to_regrole(:runtime), to_regrole(:retention), to_regrole(:owner))
+           OR (s.setrole = 0
+               AND s.setdatabase IN (0, (SELECT oid FROM pg_database
+                                         WHERE datname = current_database()))
+               AND EXISTS(SELECT 1 FROM unnest(s.setconfig) c
+                          WHERE lower(split_part(c, '=', 1)) = 'session_replication_role')))
+    """), params))
+    # A user-created SECURITY DEFINER routine owned by a superuser or the owner is a
+    # write path into assaf_os whatever its body. EXECUTE is not the boundary: a
+    # trigger on a main-owned table or an event trigger invokes it without that check.
+    _require(not conn.scalar(text(f"""
+        SELECT EXISTS(SELECT 1 FROM pg_proc p JOIN pg_roles r ON r.oid = p.proowner
+        WHERE p.prosecdef AND p.oid >= {_FIRST_NORMAL_OID}::oid
+          AND (r.rolsuper OR r.rolname = :owner))
+    """), params))
+
+
+def _catalog(conn: Connection, main_role: str, migration_role: str | None) -> None:
     _require(conn.dialect.name == "postgresql")
     conn.execute(text("SET LOCAL statement_timeout = '5s'"))
     conn.execute(text("SET LOCAL lock_timeout = '5s'"))
-    conn.execute(text("SET LOCAL search_path = pg_catalog"))
+    conn.execute(text(CATALOG_SEARCH_PATH))
     _roles(conn, main_role, migration_role)
     _require(conn.scalar(text(
         "SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname='assaf_os'"
@@ -147,7 +312,7 @@ def _catalog(conn: Connection, main_role: str, migration_role: str) -> None:
         "AND c.relkind NOT IN ('i','I','t')"
     )).all()
     _require({tuple(row) for row in relations} == {
-        (name, "r", OWNER_ROLE) for name in TABLES | {"schema_migrations"}
+        (name, "r", OWNER_ROLE) for name in OWNED_TABLES
     })
     functions = conn.execute(text(
         "SELECT p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')', "
@@ -156,7 +321,7 @@ def _catalog(conn: Connection, main_role: str, migration_role: str) -> None:
     )).all()
     # identity_arguments includes the declared argument name in this SQL helper.
     _require({(name.replace('value text', 'text'), owner, security) for name, owner, security
-              in functions} == {(name, OWNER_ROLE, False) for name in _FUNCTIONS})
+              in functions} == {(name, OWNER_ROLE, False) for name in OWNED_FUNCTIONS})
     _acl(conn, """
         SELECT pg_get_userbyid(a.grantee),a.privilege_type,a.is_grantable
         FROM pg_namespace n CROSS JOIN LATERAL
@@ -190,16 +355,19 @@ def _catalog(conn: Connection, main_role: str, migration_role: str) -> None:
     for role in (RUNTIME_ROLE, RETENTION_ROLE):
         _require(not conn.scalar(text(f"""
             SELECT EXISTS(SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
-            WHERE {_USER_SCHEMA} AND (n.nspname<>'assaf_os' OR :role=:retention) AND CASE
+            WHERE {_USER_SCHEMA} AND (n.nspname<>'assaf_os' OR CAST(:retention AS boolean))
+            AND CASE
               WHEN c.relkind='S' THEN has_sequence_privilege(:role,c.oid,'USAGE,SELECT,UPDATE')
               WHEN c.relkind IN ('r','p','v','m','f') THEN
                 has_table_privilege(:role,c.oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
                 OR has_any_column_privilege(:role,c.oid,'SELECT,INSERT,UPDATE,REFERENCES')
               ELSE false END)
             OR EXISTS(SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
-            WHERE {_USER_SCHEMA} AND (n.nspname<>'assaf_os' OR :role=:retention)
+            WHERE {_USER_SCHEMA} AND (n.nspname<>'assaf_os' OR CAST(:retention AS boolean))
             AND has_function_privilege(:role,p.oid,'EXECUTE'))
-        """), {"role": role, "retention": RETENTION_ROLE}))
+        """), {"role": role, "retention": role == RETENTION_ROLE}))
+    _closure(conn)
+    _footprints(conn, main_role)
     _defaults(conn, main_role)
 
 
@@ -226,30 +394,38 @@ def _defaults(conn: Connection, main_role: str) -> None:
 
 
 def validate_ledger_catalog(
-    conn: Connection, *, main_role: str, migration_role: str,
+    conn: Connection, *, main_role: str, migration_role: str | None = None,
 ) -> None:
     """Operator-only transactional audit; raises ValueError('ledger_role_denied').
 
     main_role must come from validate_main_role on the actual main DSN, never a
-    caller-supplied replacement. Runtime consumers use validate_ledger_role below.
+    caller-supplied replacement. migration_role=None derives it (§5.5); an explicit
+    value must equal the derived one. Runtime consumers use validate_ledger_role.
     This function does not commit and cannot prove a supplied role is a real DSN.
+    It sets transaction-local timeouts and a catalog-first search_path.
     """
     try:
         _catalog(conn, main_role, migration_role)
-    except (ValueError, SQLAlchemyError, TypeError, AttributeError):
+    except (ValueError, SQLAlchemyError, TypeError, AttributeError, KeyError):
         raise ValueError(DENIED) from None
 
 
-def validate_ledger_role(db: Session, main_engine: Engine, *, migration_role: str) -> None:
-    """Runtime/authority-preflight hook; audit both actual DSNs, without caching.
+def validate_ledger_role(
+    db: Session, main_engine: Engine, *, migration_role: str | None = None,
+) -> None:
+    """§5.5 runtime/authority preflight; audit both actual DSNs, without caching.
 
-    Requires separate, unimpersonated identities on the same PostgreSQL server
-    and database. All refusals, including unavailable catalogs, use the single
-    sanitized ValueError code ledger_role_denied. Does not activate the ledger.
+    A preflight, not a per-request check (0.1-0.3 s of catalog queries): run it on
+    the first connection, every 10 minutes and after a reconnect, and cache the result.
+    Requires separate, unimpersonated identities on the same PostgreSQL server and
+    database. migration_role=None derives the migration identity as the single
+    ADMIN-only member of assaf_os_owner. Every refusal, including an unavailable
+    catalog, is the single sanitized ValueError('ledger_role_denied'). It does not
+    activate the ledger.
     """
     try:
         _require(db.get_bind().dialect.name == main_engine.dialect.name == "postgresql")
-        db.execute(text("SET LOCAL search_path = pg_catalog"))
+        db.execute(text(CATALOG_SEARCH_PATH))
         identity = text(
             "SELECT current_database(),inet_server_addr()::text,inet_server_port(),"
             "session_user,current_user"
@@ -257,7 +433,7 @@ def validate_ledger_role(db: Session, main_engine: Engine, *, migration_role: st
         ledger = db.execute(identity).one()
         _require(ledger[3] == ledger[4] == RUNTIME_ROLE and None not in ledger[:3])
         with main_engine.connect() as main:
-            main.execute(text("SET LOCAL search_path = pg_catalog"))
+            main.execute(text(CATALOG_SEARCH_PATH))
             app = main.execute(identity).one()
             _require(app[:3] == ledger[:3] and app[3] == app[4] and app[3] != ledger[3])
             main.execute(text("SET LOCAL statement_timeout = '5s'"))
@@ -265,5 +441,5 @@ def validate_ledger_role(db: Session, main_engine: Engine, *, migration_role: st
             validate_ledger_catalog(
                 db.connection(), main_role=app[3], migration_role=migration_role,
             )
-    except (ValueError, SQLAlchemyError, TypeError, AttributeError):
+    except (ValueError, SQLAlchemyError, TypeError, AttributeError, KeyError):
         raise ValueError(DENIED) from None
