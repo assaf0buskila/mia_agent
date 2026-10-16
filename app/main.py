@@ -9,24 +9,34 @@ from starlette.exceptions import HTTPException
 
 from app import __version__
 from app.api.assaf_os import router as assaf_os_router
+from app.api.assistant.mcp import router as assistant_mcp_router
+from app.api.assistant.os import router as assistant_os_router
 from app.api.business_ledger import router as business_ledger_router
 from app.api.form_intake import router as form_intake_router
+from app.api.os_v2.commits import router as os_v2_commits_router
+from app.api.os_v2.credentials import router as os_v2_credentials_router
+from app.api.os_v2.errors import ledger_error_handler
+from app.api.os_v2.reads import router as os_v2_reads_router
+from app.api.os_v2.statements import router as os_v2_statements_router
 from app.api.owner_os import router as owner_os_router
 from app.api.owner_os_actions import router as owner_os_actions_router
 from app.api.owner_os_boundary import OwnerOSBoundary, owner_http_error, owner_validation_error
 from app.api.owner_sessions import router as owner_sessions_router
+from app.api.owner_step_up import router as owner_step_up_router
 from app.api.quick_leads import router as quick_leads_router
 from app.api.telegram import router as telegram_router
 from app.api.website import router as website_router
 from app.brain.store import BrainStore
 from app.core.capabilities import capability_map
-from app.core.config import MiaEnv, get_settings
+from app.core.config import MiaEnv, get_settings, os_config_coerced
 from app.core.demo import demo_mode_active
 from app.core.errors import MiaError
 from app.core.logging import configure_logging
 from app.db.session import database_ready, get_session_factory, init_db
 from app.db.store import LeadStore
+from app.services.os_ledger.api import LedgerError
 from app.surfaces.site_v2 import SITE_PROMPT_VERSION
+from app.workers import os_mirror
 
 settings = get_settings()
 configure_logging(settings.log_level)
@@ -271,6 +281,7 @@ async def lifespan(_app: FastAPI):
     from app.workers.reminders import start_reminder_runtime
 
     reminder_runtime = start_reminder_runtime(get_settings(), get_session_factory())
+    os_mirror.start_if_enabled(get_settings())
     try:
         yield
     finally:
@@ -307,9 +318,18 @@ app.include_router(owner_os_router)
 app.include_router(owner_os_actions_router)
 app.include_router(business_ledger_router)
 app.include_router(assaf_os_router)
+# Assaf OS v2 (V2-16s). Every router is empty until its chunk fills it, and default-off after.
+app.include_router(os_v2_reads_router)
+app.include_router(os_v2_commits_router)
+app.include_router(os_v2_statements_router)
+app.include_router(os_v2_credentials_router)
+app.include_router(owner_step_up_router)
+app.include_router(assistant_os_router)
+app.include_router(assistant_mcp_router)
 app.add_middleware(OwnerOSBoundary)
 app.add_exception_handler(HTTPException, owner_http_error)
 app.add_exception_handler(RequestValidationError, owner_validation_error)
+app.add_exception_handler(LedgerError, ledger_error_handler)
 
 _ROOT_LANDING_HTML = """<!DOCTYPE html>
 <html lang="he" dir="rtl">
@@ -404,6 +424,7 @@ def health() -> dict:
         },
         "owner_integrations": owner_integrations(live),
         "capabilities": capability_map(),
+        "os_config_coerced": os_config_coerced(),
         "risk": {
             "R4_meta_writes": "deny",
             "R5_destructive": "deny",
