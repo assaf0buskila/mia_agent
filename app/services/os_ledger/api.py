@@ -607,6 +607,20 @@ DEPENDENTS: tuple[tuple[Entity, str, Entity], ...] = (
     ("payments", "original_payment_id", "payments"),
 )
 
+# FORK-DELETE end states (§0, §11.1 delete table, §22 E7): the (column, value) an entity's delete
+# sets, or None for a tombstone (tasks). The one map; FakeLedger and PG both import it.
+# live_ids() excludes a row only when it is tombstoned or already in this end state, so a done or
+# status-בוטל task stays included.
+FORK_DELETE_END_STATE: Mapping[str, tuple[str, str] | None] = MappingProxyType({
+    "leads": ("status", "לא רלוונטי"),
+    "clients": ("status", "לא פעיל"),
+    "works": ("status", "בוטלה"),
+    "payments": ("kind", "בוטל"),
+    "time": ("status", "בוטל"),
+    "expenses": ("payment_status", "בוטל"),
+    "tasks": None,
+})
+
 _CANCELLED: Mapping[str, tuple[str, str]] = MappingProxyType({
     "payments": ("kind", "בוטל"),
     "works": ("status", "בוטלה"),
