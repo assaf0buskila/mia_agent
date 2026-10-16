@@ -5,6 +5,7 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 COPY app ./app
 COPY migrations ./migrations
+COPY migrations_assaf_os ./migrations_assaf_os
 RUN apk upgrade --no-cache \
  && chmod 644 /etc/ssl/certs/rds-global-bundle.pem \
  && uv sync --frozen --no-dev --no-editable \

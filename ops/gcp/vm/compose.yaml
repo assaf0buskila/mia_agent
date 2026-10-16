@@ -43,6 +43,17 @@ services:
       postgres: { condition: service_healthy }
     restart: "no"
 
+  os-ledger-migrate:
+    # Explicit owner-gated job only. Never part of deploy/start_services or app dependencies.
+    image: mia:${MIA_TAG:?MIA_TAG is required}
+    profiles: [os-ledger]
+    network_mode: host
+    entrypoint: ["python", "-m", "app.workers.os_ledger"]
+    # runtime.env must contain V2-14a's demoted MAIN app DSN. The privileged ledger
+    # migration DSN lives in a root-owned file mounted into this service only.
+    env_file: [/etc/mia/os-ledger-migrate.env, /etc/mia/runtime.env]
+    restart: "no"
+
   app:
     image: mia:${MIA_TAG:?MIA_TAG is required}
     network_mode: host

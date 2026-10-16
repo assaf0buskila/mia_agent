@@ -81,6 +81,27 @@ def database_ready() -> bool:
         return False
 
 
+def ledger_schema_ready(engine: Engine) -> bool:
+    """Opt-in ledger schema probe. Ordinary application readiness stays independent."""
+    from app.db.os_ledger_migrate import TABLES, migration_scripts
+
+    if engine.dialect.name != "postgresql":
+        return False
+    try:
+        with engine.connect() as conn:
+            tables = set(conn.scalars(text(
+                "SELECT tablename FROM pg_tables WHERE schemaname='assaf_os'"
+            )))
+            if not TABLES <= tables:
+                return False
+            applied = dict(conn.execute(text(
+                "SELECT filename, sha256 FROM assaf_os.schema_migrations"
+            )).all())
+            return applied == {name: digest for name, _, digest in migration_scripts()}
+    except (SQLAlchemyError, ValueError, OSError):
+        return False
+
+
 def reset_engine() -> None:
     global _engine, _SessionLocal
     if _engine is not None:
