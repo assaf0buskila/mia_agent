@@ -23,6 +23,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.core.config import Settings
 from app.core.owner_timing import owner_phase
+from app.core.owner_write import current_write_dispatch
 
 API_VERSION = "assaf-os.v1"
 SCHEMA_VERSION = "assaf-os-unified.v1"
@@ -773,9 +774,12 @@ class AssafOsPort:
         # Server-Timing "script" is the Apps Script round trip; "verify" is the local signature,
         # envelope and result validation. Both are silent outside an owner OS request.
         stage = "os_commit" if operation in UNCERTAIN_OPERATIONS else "os_read"
+        dispatch = current_write_dispatch() if operation in UNCERTAIN_OPERATIONS else None
         try:
             with owner_phase("script", stage):
                 try:
+                    if dispatch is not None:
+                        dispatch.dispatched += 1
                     raw = _post(self.settings.assaf_os_script_url, body, budget)
                 except _ScriptTimeout as timeout:
                     # The stage log records reason=timeout_<operation>, a fixed code only.
@@ -832,6 +836,9 @@ class AssafOsPort:
                     "unknown" if operation in UNCERTAIN_OPERATIONS else "source_unavailable"
                 )
             code = error["error"]["code"]
+            # Only the verified identity above can attest to the Script's pre-open lock failure.
+            if dispatch is not None and code == "runtime_busy":
+                dispatch.signed_busy = True
             status = (
                 404
                 if code in {"not_found", "proposal_not_found"}
