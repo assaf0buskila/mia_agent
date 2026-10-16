@@ -53,6 +53,7 @@ class Settings(BaseSettings):
     )
 
     database_url: str = Field(default="sqlite:///:memory:")
+    app_role_posture: Literal["observe", "enforce"] = "observe"
     composio_api_key: str = Field(default="")
     composio_user_id: str = Field(default="")
     # Ask Composio for resource ids (GSC site, GA4 property) when the matching env var is
