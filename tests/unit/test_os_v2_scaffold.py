@@ -147,7 +147,7 @@ def test_request_uuids_are_deterministic_uuid5_in_one_namespace():
 
 
 def test_error_table_is_complete_and_exact():
-    assert len(api.ERROR_CODES) == 46
+    assert len(api.ERROR_CODES) == 50
     unknown = api.LedgerError("unknown")
     assert (unknown.status, unknown.write_outcome, unknown.retryable) == (503, "unknown", False)
     for code, spec in api.ERROR_CODES.items():
@@ -253,20 +253,20 @@ DEFAULTS = {
 BAD = {
     "assaf_os_backend": ["Postgres", "mysql", 1],
     "assaf_os_ledger_enabled": ["maybe", "2", [1]],
-    "assaf_os_authority_epoch": ["-1", "abc", "1.5", True],
+    "assaf_os_authority_epoch": ["-1", "abc", "1.5", True, "9" * 25],
     "assaf_os_freeze": ["sure", {}],
     "assaf_os_owner_direct_enabled": ["enable"],
     "owner_undo_window_seconds": ["9", "61", "thirty", False],
     "assaf_os_statements_enabled": ["x"],
-    "os_statement_pepper": [123, None],
+    "os_statement_pepper": [123, None, "short", "x" * 31],
     "assaf_os_mirror_enabled": ["y e s"],
-    "os_mirror_spreadsheet_id": [42],
+    "os_mirror_spreadsheet_id": [42, "a,b", "a b", "id/with/slash"],
     "os_mirror_service_account_json": [{"k": "v"}],
     "os_mirror_lag_warn_seconds": ["59", "3601"],
     "os_mirror_anti_entropy_seconds": ["299", "3601"],
     "assaf_os_assistant_enabled": ["nope"],
-    "os_assistant_ip_hmac_key": [b"bytes"],
-    "os_step_up_secret": [1.5],
+    "os_assistant_ip_hmac_key": [b"bytes", "k" * 31],
+    "os_step_up_secret": [1.5, "too-short"],
 }
 GOOD = {
     "assaf_os_backend": ("postgres", "postgres"),
@@ -520,7 +520,7 @@ def test_write_routes_carry_write_outcome_and_reads_do_not(caplog):
     assert "write_outcome" not in step_up
     messages = [r.getMessage() for r in caplog.records if r.name == "mia.os_v2"]
     assert (
-        "os_v2 op=write outcome=ledger_unavailable reason=workspace_missing write=True" in messages
+        "os_v2 op=fail outcome=ledger_unavailable reason=workspace_missing write=True" in messages
     )
 
 
@@ -568,3 +568,113 @@ def test_main_registers_the_ledger_error_handler_and_the_mirror_hook(monkeypatch
     with TestClient(main.app):
         pass
     assert len(calls) == 1
+
+
+def test_erratum_e1_rev_import_surface():
+    assert api.IMPORT_STATUS_EDGES == {
+        ("staged", "validated"),
+        ("staged", "quarantined"),
+        ("validated", "imported"),
+        ("staged", "failed"),
+        ("validated", "failed"),
+    }
+    # The vocabulary is exactly the V2-14 CHECK on os_import_batches.status.
+    sql = (ROOT / "migrations_assaf_os" / "20261015_assaf_os_ledger.sql").read_text("utf-8")
+    check = re.search(r"os_import_batches.*?status IN \(([^)]*)\)", sql, re.S).group(1)
+    assert set(re.findall(r"'(\w+)'", check)) == set(api.ImportStatus.__args__)
+    assert api.LIVE_IDS_LIMIT == 100_000
+    for code, status in (
+        ("invalid_transaction_kind", 409),
+        ("import_status_invalid", 409),
+        ("local_record_limit", 409),
+        ("invalid_entity", 422),
+    ):
+        assert (api.ERROR_CODES[code].status, api.ERROR_CODES[code].retryable) == (status, False)
+    for method in ("insert_import_batch", "insert_import_rows", "set_import_status", "live_ids"):
+        assert callable(getattr(api.LedgerTx, method))
+    assert [f for f in api.ImportRow.__dataclass_fields__] == [
+        "row_number", "entity", "record_id", "source_digest", "status",
+        "raw_record", "canonical_record", "provenance", "quarantine",
+    ]
+
+
+# A literal copy of the §5.2 table plus the E1-rev codes: (status, retryable, details keys).
+SECTION_5_2 = {
+    "invalid_query": (400, False, ()),
+    "owner_auth_required": (401, False, ()),
+    "assistant_auth_required": (401, False, ()),
+    "kill_switch": (403, False, ()),
+    "scope_denied": (403, False, ()),
+    "channel_operation_denied": (403, False, ()),
+    "owner_approval_required": (403, False, ()),
+    "browser_mutation_verification_required": (403, False, ()),
+    "step_up_required": (403, False, ()),
+    "invalid_trusted_context": (403, False, ()),
+    "operation_unavailable": (404, False, ()),
+    "proposal_not_found": (404, False, ()),
+    "commit_not_found": (404, False, ()),
+    "batch_not_found": (404, False, ()),
+    "idempotency_mismatch": (409, False, ()),
+    "decision_request_mismatch": (409, False, ()),
+    "already_decided": (409, False, ()),
+    "authority_changed": (409, False, ()),
+    "authority_moved": (409, False, ()),
+    "cursor_invalidated": (409, False, ("observed_version",)),
+    "target_changed": (409, False, ("reason",)),
+    "not_undoable": (409, False, ()),
+    "already_undone": (409, False, ("undo_request_id",)),
+    "undo_expired": (409, False, ()),
+    "undo_conflict": (409, False, ("reason", "changed")),
+    "has_dependents": (409, False, ("dependents",)),
+    "review_stale": (409, False, ()),
+    "unassigned_lines": (409, False, ()),
+    "merge_choice_required": (409, False, ()),
+    "draft_conflict": (409, False, ()),
+    "batch_conflict": (409, False, ("conflicting_proposal_id",)),
+    "lead_already_exists": (409, False, ()),
+    "import_quarantine_unresolved": (409, False, ("count",)),
+    "manifest_digest_mismatch": (409, False, ()),
+    "import_orphan_rows": (409, False, ("counts",)),
+    "validation_error": (422, False, ("reason",)),
+    "invalid_request_id": (422, False, ()),
+    "invalid_cursor": (422, False, ()),
+    "invalid_statement_batch": (422, False, ("issues",)),
+    "rate_limited": (429, True, ()),
+    "ledger_unavailable": (503, True, ()),
+    "backend_not_postgres": (503, False, ()),
+    "authority_not_active": (503, False, ()),
+    "os_frozen": (503, True, ()),
+    "ledger_integrity_failed": (503, False, ()),
+    "unknown": (503, False, ()),
+    # Erratum E1-rev (§22).
+    "invalid_transaction_kind": (409, False, ()),
+    "import_status_invalid": (409, False, ()),
+    "local_record_limit": (409, False, ()),
+    "invalid_entity": (422, False, ()),
+}
+
+
+def test_error_table_equals_a_literal_copy_of_section_5_2():
+    actual = {
+        code: (spec.status, spec.retryable, tuple(sorted(spec.details)))
+        for code, spec in api.ERROR_CODES.items()
+    }
+    expected = {code: (s, r, tuple(sorted(d))) for code, (s, r, d) in SECTION_5_2.items()}
+    assert actual == expected
+
+
+@pytest.mark.parametrize("method", ["HEAD", "OPTIONS"])
+def test_head_and_options_are_buffered_like_any_non_get(method):
+    inner = FastAPI()
+
+    @inner.api_route("/v1/owner/os/unified/x", methods=[method])
+    async def handler(request: Request):
+        return {"n": len(await request.body())}
+
+    client = TestClient(OwnerOSBoundary(inner))
+    assert client.request(method, "/v1/owner/os/unified/x").status_code == 200
+    over = client.request(
+        method, "/v1/owner/os/unified/x", content=_json(16_385),
+        headers={"content-type": "application/json"},
+    )
+    assert over.status_code == 413

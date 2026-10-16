@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 from collections.abc import Callable
 from enum import StrEnum
 from typing import Any, Literal
@@ -61,25 +62,44 @@ def _os_str(value: Any) -> str:
     return value
 
 
+def _os_secret(value: Any) -> str:
+    """Unset, or at least 32 bytes. Fingerprints and other checks still happen at use."""
+    secret = _os_str(value)
+    if secret and len(secret.encode("utf-8")) < 32:
+        raise ValueError
+    return secret
+
+
+_SHEET_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
+
+
+def _os_sheet_id(value: Any) -> str:
+    """Unset, or exactly one spreadsheet id (no list, no whitespace)."""
+    sheet_id = _os_str(value).strip()
+    if sheet_id and not _SHEET_ID.fullmatch(sheet_id):
+        raise ValueError
+    return sheet_id
+
+
 # Field -> (default, parser) for the §3.3 block. A parser raises on any unparsable or out-of-range
 # value, and the field then falls back to its default.
 _OS_CONFIG_RULES: dict[str, tuple[Any, Callable[[Any], Any]]] = {
     "assaf_os_backend": ("sheets", _os_choice("sheets", "postgres")),
     "assaf_os_ledger_enabled": (False, _os_bool),
-    "assaf_os_authority_epoch": (0, _os_int(0, None)),
+    "assaf_os_authority_epoch": (0, _os_int(0, 2**63 - 1)),  # PostgreSQL BIGINT
     "assaf_os_freeze": (False, _os_bool),
     "assaf_os_owner_direct_enabled": (False, _os_bool),
     "owner_undo_window_seconds": (30, _os_int(10, 60)),
     "assaf_os_statements_enabled": (False, _os_bool),
-    "os_statement_pepper": ("", _os_str),
+    "os_statement_pepper": ("", _os_secret),
     "assaf_os_mirror_enabled": (False, _os_bool),
-    "os_mirror_spreadsheet_id": ("", _os_str),
+    "os_mirror_spreadsheet_id": ("", _os_sheet_id),
     "os_mirror_service_account_json": ("", _os_str),
     "os_mirror_lag_warn_seconds": (300, _os_int(60, 3600)),
     "os_mirror_anti_entropy_seconds": (900, _os_int(300, 3600)),
     "assaf_os_assistant_enabled": (False, _os_bool),
-    "os_assistant_ip_hmac_key": ("", _os_str),
-    "os_step_up_secret": ("", _os_str),
+    "os_assistant_ip_hmac_key": ("", _os_secret),
+    "os_step_up_secret": ("", _os_secret),
 }
 _OS_CONFIG_COERCED: set[str] = set()
 

@@ -8,6 +8,7 @@ code allows it. Nothing from the request, the record or the database is rendered
 from __future__ import annotations
 
 import logging
+import re
 from uuid import uuid4
 
 from fastapi import Request
@@ -23,6 +24,7 @@ _HEADERS = {
     "Vary": "Cookie, Origin",
 }
 _READ_METHODS = frozenset({"GET", "HEAD"})
+_OP = re.compile(r"[a-z][a-z0-9_]{0,47}")
 # Step-up re-authentication is not an OS write (§10.5: no osWrite on /api/auth/step-up).
 _NON_WRITE_PREFIX = "/v1/owner/auth"
 
@@ -48,8 +50,13 @@ def ledger_error_response(exc: LedgerError, *, write: bool) -> JSONResponse:
 
 async def ledger_error_handler(request: Request, exc: LedgerError) -> JSONResponse:
     write = write_route(request.method, request.url.path)
+    # op is the route's endpoint name. The route's own log line (e.g. os_commit, §11.1) carries
+    # ms; this handler never saw the request start.
+    route = request.scope.get("route")
+    op = getattr(route, "name", "") or "unrouted"
+    if not _OP.fullmatch(op):
+        op = "route"
     _LOG.info(
-        "os_v2 op=%s outcome=%s reason=%s write=%s",
-        "write" if write else "read", exc.code, exc.reason or exc.code, write,
+        "os_v2 op=%s outcome=%s reason=%s write=%s", op, exc.code, exc.reason or exc.code, write
     )
     return ledger_error_response(exc, write=write)

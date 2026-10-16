@@ -57,6 +57,18 @@ Operation = Literal[
     "expire_batches",
 ]
 RecordDict = dict[str, Any]  # the v1 wire record: schema fields + id key + "revision"
+# Erratum E1-rev (§22): the import batch status machine, in V2-14's own vocabulary. staged ->
+# validated (manifest computed, no quarantined row) -> imported (only inside promote); staged ->
+# quarantined (terminal); staged|validated -> failed (abandon).
+ImportStatus = Literal["staged", "validated", "imported", "quarantined", "failed"]
+IMPORT_STATUS_EDGES: frozenset[tuple[str, str]] = frozenset({
+    ("staged", "validated"),
+    ("staged", "quarantined"),
+    ("validated", "imported"),
+    ("staged", "failed"),
+    ("validated", "failed"),
+})
+LIVE_IDS_LIMIT = 100_000  # live_ids() refuses with local_record_limit above this, per entity
 
 _LOG = logging.getLogger("mia.os_ledger")
 
@@ -111,6 +123,11 @@ ERROR_CODES: Mapping[str, ErrorSpec] = MappingProxyType({
     "import_quarantine_unresolved": _spec(409, False, "count"),
     "manifest_digest_mismatch": _spec(409),
     "import_orphan_rows": _spec(409, False, "counts"),
+    # Erratum E1-rev (§22): the import LedgerTx methods.
+    "invalid_transaction_kind": _spec(409),
+    "import_status_invalid": _spec(409),
+    "local_record_limit": _spec(409),
+    "invalid_entity": _spec(422),
     "validation_error": _spec(422, False, "reason"),
     "invalid_request_id": _spec(422),
     "invalid_cursor": _spec(422),
@@ -402,6 +419,19 @@ class Page:
 
 
 @dataclass(frozen=True)
+class ImportRow:  # one os_import_rows insert (erratum E1-rev); rows are insert-only
+    row_number: int  # > 0, unique within the batch
+    entity: Entity
+    record_id: str | None  # None for an id-less row, which is always quarantined
+    source_digest: str  # unique within the batch
+    status: Literal["staged", "quarantined"]
+    raw_record: Mapping[str, Any]
+    canonical_record: Mapping[str, Any] | None
+    provenance: Mapping[str, Any]
+    quarantine: Mapping[str, Any] | None  # required when status == "quarantined"
+
+
+@dataclass(frozen=True)
 class ProposalPage:
     items: tuple[ProposalRow, ...]
     next_cursor: str | None
@@ -458,6 +488,28 @@ class LedgerTx(Protocol):
         undo_of: str | None = None,
         reason_codes: Sequence[str] = (),
     ) -> ReceiptRow: ...  # bumps version + pending_seq
+
+    # Erratum E1-rev (§22). The three writers run only in a kind="import" transaction with
+    # core=shadow; live_ids also runs in reads. Any other use raises invalid_transaction_kind. Rows
+    # are insert-only, and a status change outside IMPORT_STATUS_EDGES raises import_status_invalid.
+    # set_import_status sets completed_at exactly on entering imported, quarantined or failed, and
+    # needs a quarantine object on entering quarantined.
+    def insert_import_batch(
+        self,
+        *,
+        batch_id: str,
+        authority_epoch: int,
+        source_digest: str,
+        source_binding: str,
+        provenance: Mapping[str, Any],
+    ) -> None: ...
+    def insert_import_rows(self, batch_id: str, rows: Sequence[ImportRow]) -> int: ...
+    def set_import_status(
+        self, batch_id: str, status: ImportStatus, *, quarantine: Mapping[str, Any] | None = None
+    ) -> None: ...
+    # Non-deleted, non-cancelled ids; invalid_entity for a non-record entity; local_record_limit
+    # above LIVE_IDS_LIMIT.
+    def live_ids(self, entity: Entity) -> frozenset[str]: ...
 
 
 class LedgerStore(Protocol):
