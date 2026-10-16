@@ -8,7 +8,7 @@ logic ever touches.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Any
 
@@ -33,7 +33,7 @@ class Classification:
     """How a business line is booked. This is all the detail a business row keeps beyond its
     facts."""
 
-    category: str
+    category: str = field(repr=False)
     path: str
     platform: str
     is_subscription: bool
@@ -83,11 +83,11 @@ class ExpenseDraft:
     """The expense input for one line, in minor units. Foreign amounts stay line metadata."""
 
     date: date
-    category: str
+    category: str = field(repr=False)
     platform: str
     path: str
-    vendor: str
-    amount_ils: int
+    vendor: str = field(repr=False)
+    amount_ils: int = field(repr=False)
     currency: str
     payment_status: str
     source_type: str

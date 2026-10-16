@@ -7,6 +7,12 @@ re-import of an unchanged statement yields identical keys.
 
 The pepper is injected. Without it a stored key-only personal row cannot be brute-forced back to
 a merchant and an amount.
+
+The pepper is a long-lived identity key, not a session secret. Changing it changes every
+statement_id and every line_key, so a re-import would look like a brand-new statement and book
+every charge a second time. The persistence layer must therefore keep the pepper stable (rotate
+only with a planned re-keying of the stored rows) and keep a unique (workspace, account label,
+charge date) guard on stored statements as the second line of defence.
 """
 
 from __future__ import annotations
@@ -14,7 +20,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 
 from .errors import IssueCollector, StatementValidationError
@@ -104,12 +110,12 @@ class LineFacts:
     """What the bank printed for one line. Immutable, and the only source of a line's key."""
 
     txn_date: date
-    merchant_display: str
-    merchant_key: str
-    amount_minor: int
+    merchant_display: str = field(repr=False)  # statement text and amounts never reach a log line
+    merchant_key: str = field(repr=False)
+    amount_minor: int = field(repr=False)
     kind: str
     currency: str
-    original_amount_minor: int | None = None
+    original_amount_minor: int | None = field(default=None, repr=False)
     original_currency: str | None = None
     installment_n: int | None = None
     installment_of: int | None = None

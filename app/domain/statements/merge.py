@@ -8,21 +8,24 @@ A hand-entered expense is a candidate for a charge line only when all of these h
   - its vendor matches the merchant key or one of the matched rule's aliases.
 
 Exactly one candidate is a proposed link. Several are a choice the owner must make, and
-nothing merges on its own. Credits and cash entries never merge.
+nothing merges on its own. Credits never merge. An entry with no vendor never matches. The
+expense schema has no payment-method field, so a cash entry cannot be told from a card entry:
+one whose vendor, amount and date all match is a candidate like any other, and the owner
+approves the link.
 """
 
 from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Sequence
-from dataclasses import dataclass
-from datetime import date, timedelta
+from dataclasses import dataclass, field
+from datetime import date, datetime, timedelta
 
-from .errors import StatementValidationError
+from .errors import IssueCollector, StatementValidationError
 from .expense import is_statement_source_key
-from .identity import LineFacts
+from .identity import LineFacts, is_line_key
 from .text import normalize_merchant
-from .vocabulary import MIN_PREFIX_CHARS, PAYMENT_STATUS_CANCELLED
+from .vocabulary import CURRENCIES, MIN_PREFIX_CHARS, PAYMENT_STATUS_CANCELLED, PAYMENT_STATUSES
 
 WINDOW_BEFORE_DAYS = 3
 WINDOW_AFTER_DAYS = 3
@@ -30,16 +33,41 @@ WINDOW_AFTER_DAYS = 3
 
 @dataclass(frozen=True)
 class ManualExpense:
-    """A read-only view of an existing expense. The domain never modifies one."""
+    """A read-only view of an existing expense. The domain never modifies one.
+
+    `vendor` is optional in the schema; a None or empty vendor never matches a line. Every field
+    is checked here, so a malformed view fails with a reason code when it is built instead of
+    breaking every import of the statement it is a candidate for.
+    """
 
     expense_id: str
     source_key: str
     date: date
-    vendor: str
-    amount_minor: int
+    vendor: str | None = field(repr=False)
+    amount_minor: int = field(repr=False)
     currency: str
     payment_status: str
     linked_line_key: str | None = None
+
+    def __post_init__(self) -> None:
+        problems = IssueCollector()
+        for name in ("expense_id", "source_key"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value:
+                problems.add(name, "invalid_expense")
+        if not isinstance(self.date, date) or isinstance(self.date, datetime):
+            problems.add("date", "invalid_expense")
+        if self.vendor is not None and not isinstance(self.vendor, str):
+            problems.add("vendor", "invalid_expense")
+        if type(self.amount_minor) is not int or self.amount_minor <= 0:
+            problems.add("amount_minor", "invalid_expense")
+        if self.currency not in CURRENCIES:
+            problems.add("currency", "invalid_expense")
+        if self.payment_status not in PAYMENT_STATUSES:
+            problems.add("payment_status", "invalid_expense")
+        if self.linked_line_key is not None and not is_line_key(self.linked_line_key):
+            problems.add("linked_line_key", "invalid_expense")
+        problems.raise_if_any()
 
 
 @dataclass(frozen=True)
@@ -63,8 +91,11 @@ def _keys_match(left: str, right: str) -> bool:
     return len(short) >= MIN_PREFIX_CHARS and long_.startswith(short + " ")
 
 
-def vendor_matches(vendor: str, merchant_key: str, aliases: Sequence[str] = ()) -> bool:
-    """Equal keys, or one is a whole-word prefix of the other (at least 3 characters)."""
+def vendor_matches(vendor: str | None, merchant_key: str, aliases: Sequence[str] = ()) -> bool:
+    """Equal keys, or one is a whole-word prefix of the other (at least 3 characters).
+    A missing vendor matches nothing."""
+    if not isinstance(vendor, str):
+        return False
     mine = normalize_merchant(vendor)
     if not mine:
         return False

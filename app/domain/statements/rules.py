@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from .batch import BatchLine
@@ -51,10 +51,15 @@ def _check_label_text(value: object, field: str, max_chars: int) -> None:
 
 @dataclass(frozen=True)
 class OwnerOverride:
-    """What the owner chose in review. A None field means he did not choose it."""
+    """What the owner chose in review. A None field means he did not choose it.
+
+    `make_rule` ("always for this merchant") needs the tag in the same override: the rule takes
+    the tag he states, never the one a rule or the assistant suggested, and never one the diff
+    kept from an earlier review. A client that shows a tag sends that tag with the tap.
+    """
 
     tag: str | None = None
-    category: str | None = None
+    category: str | None = field(default=None, repr=False)
     path: str | None = None
     is_subscription: bool | None = None
     make_rule: bool = False
@@ -86,15 +91,15 @@ class MerchantRule:
     """One approved rule row. `merchant_key` is a normalized key (see normalize_merchant)."""
 
     rule_id: str
-    merchant_key: str
+    merchant_key: str = field(repr=False)
     tag: str
     match: str = "exact"
-    category: str | None = None
+    category: str | None = field(default=None, repr=False)
     path: str | None = None
     platform: str | None = None
     is_subscription: bool | None = None
-    label: str | None = None
-    aliases: tuple[str, ...] = ()
+    label: str | None = field(default=None, repr=False)
+    aliases: tuple[str, ...] = field(default=(), repr=False)
     active: bool = True
     revision: int = 1
 
@@ -166,7 +171,9 @@ def _effect(rule: MerchantRule) -> tuple[Any, ...]:
 
 def best_rule(rules: Sequence[MerchantRule], merchant_key: str) -> RuleMatch | None:
     """Exact beats prefix; a longer prefix beats a shorter one. Rules tied at the top that
-    disagree are a conflict: the newest revision wins and the caller is told."""
+    disagree are a conflict: the caller is told, and one of them still wins deterministically
+    (highest revision, then rule_id). Revisions of different rules are not comparable, so that
+    tie-break only keeps the result stable; it says nothing about which rule is right."""
     scored: list[tuple[tuple[int, int], MerchantRule]] = []
     for rule in rules:
         if not rule.active:
@@ -190,7 +197,7 @@ class ResolvedLine:
     line: BatchLine
     tag: str | None
     tag_source: str  # owner_review | rule | assistant | unassigned
-    category: str
+    category: str = field(repr=False)
     path: str
     platform: str
     is_subscription: bool
@@ -298,9 +305,9 @@ class RuleConfirmation:
     """The owner said 'always for this merchant'. Only what he decided is carried: the tag, and
     the category, path and subscription flag only if he set them himself."""
 
-    merchant_key: str
+    merchant_key: str = field(repr=False)
     tag: str
-    category: str | None
+    category: str | None = field(repr=False)
     path: str | None
     is_subscription: bool | None
 
@@ -308,17 +315,19 @@ class RuleConfirmation:
 def confirmations_from_review(
     resolved: Sequence[ResolvedLine],
 ) -> tuple[RuleConfirmation, ...]:
-    """Owner confirmations only: assistant suggestions never become rules on their own."""
+    """Owner confirmations only: neither an assistant suggestion nor an approved rule becomes a
+    rule on its own. A confirmation carries the tag the owner stated in that very override."""
     found: dict[str, RuleConfirmation] = {}
     for line in resolved:
         override = line.override
         if override is None or not override.make_rule:
             continue
-        if line.tag is None:
-            raise StatementValidationError.of("rule_without_tag", "overrides")
+        if override.tag is None:
+            code = "rule_without_tag" if line.tag is None else "rule_without_owner_tag"
+            raise StatementValidationError.of(code, "overrides")
         confirmation = RuleConfirmation(
             merchant_key=line.line.facts.merchant_key,
-            tag=line.tag,
+            tag=override.tag,
             category=override.category,
             path=override.path,
             is_subscription=override.is_subscription,

@@ -130,10 +130,16 @@ def run_import(
 
 
 def commit_rows(diff: StatementDiff) -> list[StoredLine]:
-    """Emulate the committer: expense ids appear only after the write happened."""
+    """Emulate the committer: expense ids appear only after the write happened.
+
+    The contract it models: after a create the row gets the expense id, its source key and both
+    revisions; after an update, revive or void the expense revision moves up by one and the
+    import revision moves to the same value, so the statement's own write never reads as an
+    owner edit.
+    """
     rows: list[StoredLine] = []
     created = {op.line_key: op for op in diff.ops if op.op == "create"}
-    touched = {op.line_key: op for op in diff.ops if op.op in {"update", "revive"}}
+    touched = {op.line_key: op for op in diff.ops if op.op in {"update", "revive", "void"}}
     for row in diff.next_lines:
         if row.line_key in created:
             row = replace(

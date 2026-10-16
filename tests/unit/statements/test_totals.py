@@ -275,6 +275,13 @@ class TestCycleStatus:
         with pytest.raises(StatementValidationError):
             cycle_status(bad, committed_cycles=set(), today=date(2026, 10, 1))
 
+    @pytest.mark.parametrize("bad", ["2026-10", b"2026-10", None, 202610])
+    def test_committed_cycles_must_be_a_collection_not_a_string(self, bad):
+        # a plain string would answer "is this cycle a substring" instead of "is it in the set"
+        with pytest.raises(StatementValidationError) as raised:
+            cycle_status("2026-10", committed_cycles=bad, today=date(2026, 10, 1))
+        assert raised.value.issues[0].code == "invalid_cycles"
+
     @pytest.mark.parametrize("bad_day", [0, 29, 31, "20"])
     def test_invalid_deadline_days_are_rejected(self, bad_day):
         with pytest.raises(StatementValidationError):

@@ -94,8 +94,8 @@ def contains_card_like_digits(text: str) -> bool:
     punctuation separates the groups.
 
     Statements print masked numbers (the last four digits), so no legitimate field here ever
-    needs a long digit run. A false positive costs one rejected line; a false negative would
-    store a card number.
+    needs a long digit run. A false positive rejects the whole batch, which the assistant
+    resubmits with that field fixed; a false negative would store a card number.
     """
     folded = _ascii_digits(text)
     if _DIGIT_RUN.search(folded):

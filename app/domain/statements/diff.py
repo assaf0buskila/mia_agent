@@ -11,10 +11,22 @@ Safeguards, each covered by a test:
   - A statement-created expense the owner edited after import (its revision moved past the
     import revision) is reported as 'owner_edited_kept' and left alone unless the owner chose
     'overwrite' for that line.
-  - An owner's earlier tag/category/path/subscription choice survives a re-import when the
-    assistant or a rule now disagrees; it is reported as 'kept_earlier_choice'.
+  - What the owner approved last time is his choice. For every field of an active, committed line
+    (tag, category, path, platform, subscription flag) the order is: his explicit choice in this
+    review, his earlier explicit override, the committed row, a merchant rule, the assistant.
+    So a re-import with no new explicit choice from him never moves a committed line, however
+    the (non-deterministic) assistant or a rule that arrived later now reads it. Where the
+    newer reading differs, the entry says 'kept_earlier_choice' and lists the fields.
   - After a terminal decision a personal line keeps only its key, tag and state.
   - Every void or unlink appears as an entry. Nothing disappears silently.
+
+The committer contract (what the persistence step must write back, because the next diff reads it):
+  - create: the new expense id, its source key, and expense_revision = imported_expense_revision
+    = the revision the expense was created at.
+  - update, revive and void: expense_revision moves up by one and imported_expense_revision is set
+    to the same value. Otherwise the statement's own write looks like an owner edit and a later
+    revive or update is held back as 'owner_edited_kept'.
+  - link and unlink: only the matched_* columns change; the hand entry is not otherwise touched.
 """
 
 from __future__ import annotations
@@ -22,6 +34,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime
+from typing import Any
 
 from .errors import IssueCollector
 from .expense import (
@@ -34,7 +47,7 @@ from .expense import (
 from .identity import LineFacts, is_line_key, is_statement_id
 from .merge import ManualExpense, MatchResult, MergeItem, match_batch
 from .rules import MerchantRule, OwnerOverride, ResolvedLine, first_not_none
-from .vocabulary import TAGS
+from .vocabulary import PAYMENT_STATUS_CANCELLED, TAGS
 
 ACTIONS = ("add", "keep", "update", "void", "owner_edited_kept", "kept_earlier_choice")
 BLOCK_UNASSIGNED = "unassigned_lines"
@@ -46,6 +59,7 @@ _OP_ORDER = ("unlink", "void", "update", "revive", "create", "link")
 _DATE_BASES = ("charge_date", "txn_date")
 _OWNER_EDITED_CHOICES = ("keep", "overwrite")
 _OVERRIDE_FIELDS = ("tag", "category", "path", "is_subscription")
+_CLASSIFIED_FIELDS = ("category", "path", "is_subscription", "platform")
 _UNSET = object()
 
 
@@ -165,6 +179,7 @@ class _Context:
     merge: Mapping[str, str | None]
     matches: Mapping[str, MatchResult]
     pool: Mapping[str, ManualExpense]
+    known: Mapping[str, ManualExpense]  # every hand entry passed in, linked or not
 
 
 def _merge_override(
@@ -182,37 +197,60 @@ def _merge_override(
     return None if merged.is_empty else merged
 
 
+def _approved(prev: StoredLine | None) -> dict[str, Any]:
+    """What was committed for this line last time. Only an active row counts (a line that was
+    replaced and has come back is decided afresh), and a personal row kept key-only has a tag
+    and nothing else."""
+    if prev is None or prev.state != "active":
+        return {}
+    approved: dict[str, Any] = {"tag": prev.tag}
+    if prev.classification is not None:
+        for name in _CLASSIFIED_FIELDS:
+            approved[name] = getattr(prev.classification, name)
+    return approved
+
+
 def _target(resolved: ResolvedLine, prev: StoredLine | None) -> _Target:
     stored = prev.owner_override if prev is not None else None
     new = resolved.override
-    new_tag = new.tag if new is not None else None
+    approved = _approved(prev)
 
-    tag = resolved.tag
-    if new_tag is None and stored is not None and stored.tag is not None:
-        tag = stored.tag
-    carried = False
-    if tag is None and prev is not None and prev.state == "active" and prev.tag is not None:
-        tag, carried = prev.tag, True  # "no opinion" never voids a committed decision
+    def chosen_now(name: str) -> Any:
+        return getattr(new, name, None)  # None when he did not choose it in this review
 
-    def layered(name: str):
-        earlier = getattr(stored, name) if stored is not None else None
-        chosen_now = getattr(new, name) if new is not None else None
-        return earlier if chosen_now is None and earlier is not None else getattr(resolved, name)
+    def settled(name: str) -> Any:
+        """His earlier explicit override, else the committed row. Never a rule or a suggestion."""
+        earlier = getattr(stored, name, None)
+        return earlier if earlier is not None else approved.get(name)
+
+    settled_tag = settled("tag")
+    if chosen_now("tag") is not None:
+        tag, carried = chosen_now("tag"), False
+    elif settled_tag is not None:
+        # "no opinion" from the assistant never voids a committed decision
+        tag = settled_tag
+        carried = resolved.tag is None and getattr(stored, "tag", None) is None
+    else:
+        tag, carried = resolved.tag, False
+
+    def layered(name: str) -> Any:
+        earlier = settled(name)
+        if chosen_now(name) is None and earlier is not None:
+            return earlier
+        return getattr(resolved, name)
 
     kept: list[str] = []
-    if stored is not None:
-        if (
-            stored.tag is not None
-            and new_tag is None
-            and resolved.tag is not None
-            and resolved.tag != stored.tag
-        ):
-            kept.append("tag")
-        for name in _OVERRIDE_FIELDS[1:]:
-            earlier = getattr(stored, name)
-            chosen_now = getattr(new, name) if new is not None else None
-            if earlier is not None and chosen_now is None and getattr(resolved, name) != earlier:
-                kept.append(name)
+    if (
+        settled_tag is not None
+        and chosen_now("tag") is None
+        and resolved.tag is not None
+        and resolved.tag != settled_tag
+    ):
+        kept.append("tag")
+    for name in _CLASSIFIED_FIELDS:
+        earlier = settled(name)
+        if earlier is not None and chosen_now(name) is None and getattr(resolved, name) != earlier:
+            kept.append(name)
 
     return _Target(
         tag=tag,
@@ -220,7 +258,7 @@ def _target(resolved: ResolvedLine, prev: StoredLine | None) -> _Target:
         classification=Classification(
             category=layered("category"),
             path=layered("path"),
-            platform=resolved.platform,
+            platform=layered("platform"),
             is_subscription=layered("is_subscription"),
         ),
         override=_merge_override(stored, new),
@@ -426,7 +464,13 @@ def _revive(
 ) -> _Plan:
     """The line comes (back) as a business charge and already owns a cancelled expense."""
     if _held(ctx, prev):
-        return _held_plan(resolved, prev, target, "revive", reason)
+        # The owner restored and edited that expense, so it is left exactly as he has it. The
+        # line itself is in the statement again and must count in the cycle totals.
+        row, wrote = _finish(_row(ctx, resolved, prev, target, tag="business"), prev)
+        entry = _entry(
+            resolved, prev, target, "owner_edited_kept", reason=reason, held_back="revive"
+        )
+        return _Plan(entry, (), row, wrote)
     key = resolved.line.line_key
     draft = _draft(ctx, key, resolved.line.facts, target.classification)
     op = ExpenseOp("revive", key, prev.expense_id, prev.expense_source_key, reason, draft)
@@ -465,7 +509,16 @@ def _plan_same_tag(
         row, wrote = _finish(_row(ctx, resolved, prev, target, tag="business"), prev)
         return _plain(resolved, prev, target, row, wrote)
     if prev.matched_expense_id is not None:
-        if ctx.merge.get(key, _UNSET) is None:  # the owner unlinks it: book it as its own expense
+        # The owner unlinks it, or the hand entry it was merged into has been cancelled. Either
+        # way the card charge exists in no live expense, so book it as its own. A hand entry that
+        # is merely absent from the candidates proves nothing and changes nothing.
+        linked_entry = ctx.known.get(prev.matched_expense_id)
+        unlink_reason = None
+        if ctx.merge.get(key, _UNSET) is None:
+            unlink_reason = "unlinked_by_owner"
+        elif linked_entry is not None and linked_entry.payment_status == PAYMENT_STATUS_CANCELLED:
+            unlink_reason = "link_target_cancelled"
+        if unlink_reason is not None:
             draft = _draft(ctx, key, facts, target.classification)
             ops = (
                 ExpenseOp(
@@ -473,12 +526,12 @@ def _plan_same_tag(
                     key,
                     prev.matched_expense_id,
                     prev.matched_source_key,
-                    "unlinked_by_owner",
+                    unlink_reason,
                 ),
                 ExpenseOp("create", key, None, draft.source_key, None, draft),
             )
             row, _ = _finish(_row(ctx, resolved, prev, target, tag="business"), prev)
-            entry = _entry(resolved, prev, target, "update", reason="unlinked_by_owner")
+            entry = _entry(resolved, prev, target, "update", reason=unlink_reason)
             return _Plan(entry, ops, row, True)
         row, wrote = _finish(
             _row(ctx, resolved, prev, target, tag="business", matched=linked), prev
@@ -789,6 +842,7 @@ def diff_statement(
         merge=chosen.merge,
         matches=matches,
         pool=pool,
+        known={expense.expense_id: expense for expense in manual_candidates},
     )
 
     plans: list[_Plan] = []

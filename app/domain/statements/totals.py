@@ -8,7 +8,7 @@ a count only: with minimisation on, their amounts no longer exist, and the total
 from __future__ import annotations
 
 from collections.abc import Collection, Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime
 
 from .diff import StoredLine
@@ -27,7 +27,7 @@ class CycleTotals:
     personal_count: int
     personal_total_minor: int | None  # None while personal amounts are not kept
     unassigned_count: int
-    by_category: tuple[tuple[str, int], ...]  # credits netted, largest first
+    by_category: tuple[tuple[str, int], ...] = field(repr=False)  # credits netted, largest first
 
 
 def summarize_cycle(rows: Iterable[StoredLine] | None) -> CycleTotals | None:
@@ -77,7 +77,7 @@ def summarize_cycle(rows: Iterable[StoredLine] | None) -> CycleTotals | None:
 
 @dataclass(frozen=True)
 class SubscriptionRow:
-    label: str
+    label: str = field(repr=False)
     amount_minor: int | None  # None for a subscription that was not charged this cycle
     original_amount_minor: int | None
     original_currency: str | None
@@ -212,6 +212,9 @@ def cycle_status(
     with no committed statement is 'not imported' (null in the views, never a zero)."""
     if not is_cycle_label(cycle):
         raise StatementValidationError.of("invalid_cycle", "cycle")
+    if isinstance(committed_cycles, (str, bytes)) or not isinstance(committed_cycles, Collection):
+        # a plain string would answer "is it a substring" instead of "is it one of the cycles"
+        raise StatementValidationError.of("invalid_cycles", "committed_cycles")
     if not isinstance(today, date) or isinstance(today, datetime):
         raise StatementValidationError.of("invalid_date", "today")
     if type(import_by_day) is not int or not 1 <= import_by_day <= MAX_IMPORT_BY_DAY:

@@ -22,9 +22,11 @@ from tests.unit.statements.helpers import (
     PEPPER,
     WORKSPACE,
     fixture,
+    manual_expense,
     parse,
     raw_batch,
     raw_line,
+    run_import,
 )
 
 
@@ -265,7 +267,34 @@ class TestShapeIsStrict:
         assert line.is_subscription is True
 
 
+def hebrew_statement(count: int) -> dict:
+    """A full statement of Hebrew merchants: 6 bytes per letter once JSON escapes them."""
+    lines = [
+        raw_line(
+            merchant_display=f"חנות לדוגמה מספר {index}",
+            suggested_category="ציוד משרדי",
+            suggested_path="משותף",
+            amount_minor=100 + index,
+            txn_date=f"2026-09-{1 + index % 28:02d}",
+        )
+        for index in range(count)
+    ]
+    return raw_batch(lines)
+
+
 class TestSizeAndParsing:
+    @pytest.mark.parametrize("dump", [{}, {"indent": 2}], ids=["default", "indent2"])
+    def test_a_full_hebrew_statement_survives_json_dumps_escaping(self, dump):
+        # json.dumps escapes every Hebrew letter to six bytes by default, which is how most
+        # assistants and scripts will write the batch. A statement within the line cap must
+        # still be accepted whole: it cannot be split, because a second batch would void the
+        # first one's lines.
+        raw = hebrew_statement(MAX_LINES)
+        text = json.dumps(raw, **dump)
+        assert len(text.encode("utf-8")) > 128 * 1024  # the premise: larger than a 128 KiB cap
+        assert len(parse(text).lines) == MAX_LINES
+        assert len(parse(text.encode("utf-8")).lines) == MAX_LINES
+
     def test_byte_cap_on_raw_text(self):
         padding = "x" * (MAX_BATCH_BYTES + 10)
         raised = reject('{"pad": "' + padding + '"}')
@@ -377,6 +406,47 @@ class TestTextIsData:
         assert ("lines[0]", "unknown_field") in codes(raised)
         line = parse(raw_batch([raw_line(merchant_display="  Demo   SHOP ")])).lines[0]
         assert line.facts.merchant_key == "demo shop"
+
+
+def test_reprs_never_print_statement_text_or_amounts():
+    raw = raw_batch(
+        [
+            raw_line(
+                merchant_display="ZEBRA VENDOR",
+                amount_minor=987654,
+                original_amount_minor=111222,
+                original_currency="USD",
+                suggested_category="PRIVATECAT",
+            )
+        ],
+        account_label="Zulu Account Label",
+    )
+    imp = run_import(raw)
+    hand = manual_expense(
+        expense_id="e1",
+        source_key="manual:one",
+        date="2026-09-20",
+        vendor="ZEBRA VENDOR",
+        amount_minor=987654,
+        currency="ILS",
+        payment_status="שולם",
+    )
+    [create] = [op for op in imp.diff.ops if op.op == "create"]
+    carriers = [
+        imp.batch,
+        imp.batch.lines[0],
+        imp.batch.lines[0].facts,
+        imp.resolved[0],
+        create.draft,
+        imp.diff,
+        imp.diff.next_lines[0],
+        imp.diff.next_lines[0].classification,
+        hand,
+    ]
+    secrets = ("zebra", "987654", "111222", "privatecat", "zulu account")
+    for carrier in carriers:
+        text = repr(carrier).casefold()
+        assert not [secret for secret in secrets if secret in text], type(carrier).__name__
 
 
 def test_error_text_never_contains_input_values():

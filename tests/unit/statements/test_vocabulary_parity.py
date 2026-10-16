@@ -7,9 +7,11 @@ from datetime import date
 from pathlib import Path
 
 from app.domain.statements import (
+    CURRENCIES,
     PATHS,
     PAYMENT_STATUS_CANCELLED,
     PAYMENT_STATUS_PAID,
+    PAYMENT_STATUSES,
     PLATFORMS,
     SOURCE_TYPE_ACTUAL_PAYMENT,
     Classification,
@@ -43,6 +45,12 @@ def test_payment_statuses_and_source_type_are_schema_members():
     assert PAYMENT_STATUS_CANCELLED in enums["payment_status"]
     assert SOURCE_TYPE_ACTUAL_PAYMENT in enums["expense_source"]
     assert "ILS" in enums["currency"]
+
+
+def test_hand_entry_vocabularies_are_the_whole_schema_enums():
+    enums = schema()["enums"]
+    assert list(PAYMENT_STATUSES) == enums["payment_status"]
+    assert list(CURRENCIES) == enums["currency"]
 
 
 def test_a_mapped_expense_only_uses_the_frozen_input_contract():

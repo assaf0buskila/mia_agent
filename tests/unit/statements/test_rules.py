@@ -360,6 +360,27 @@ class TestLearningAsData:
             confirmations_from_review(resolved)
         assert raised.value.issues[0].code == "rule_without_tag"
 
+    def test_make_rule_needs_the_tag_from_the_owner_not_the_assistant(self):
+        line = raw_line(merchant_display="Demo  SHOP", suggested_tag="business")
+        batch = parse(raw_batch([line]))
+        key = batch.lines[0].line_key
+        resolved = apply_rules(batch.lines, [], {key: OwnerOverride(make_rule=True)})
+        assert resolved[0].tag == "business" and resolved[0].tag_source == "assistant"
+        with pytest.raises(StatementValidationError) as raised:
+            confirmations_from_review(resolved)
+        assert raised.value.issues[0].code == "rule_without_owner_tag"
+
+    def test_make_rule_does_not_take_the_tag_from_an_approved_rule_either(self):
+        line = raw_line(merchant_display="Demo  SHOP", suggested_tag="business")
+        batch = parse(raw_batch([line]))
+        key = batch.lines[0].line_key
+        approved = [rule(rule_id="r1", merchant_key="demo shop", tag="personal")]
+        resolved = apply_rules(batch.lines, approved, {key: OwnerOverride(make_rule=True)})
+        assert resolved[0].tag == "personal" and resolved[0].tag_source == "rule"
+        with pytest.raises(StatementValidationError) as raised:
+            confirmations_from_review(resolved)
+        assert raised.value.issues[0].code == "rule_without_owner_tag"
+
     def test_learning_never_mutates_what_it_is_given(self):
         existing = [rule(rule_id="MR_old", merchant_key="demo shop", tag="business")]
         snapshot = list(existing)

@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 
 import pytest
 from app.domain.statements import (
     LineFacts,
+    ManualExpense,
     MergeItem,
+    StatementValidationError,
     match_batch,
     match_manual,
     vendor_matches,
@@ -137,9 +139,21 @@ class TestSingleLine:
     def test_credits_are_never_merged(self):
         assert match_manual(facts(kind="credit"), [expense()], charge_date=CHARGE).outcome == "none"
 
-    def test_cash_and_other_unrelated_entries_stay_out(self):
-        cash = expense(expense_id="cash", source_key="cash:tip", vendor="Cash tip")
-        assert match_manual(facts(), [cash], charge_date=CHARGE).outcome == "none"
+    def test_an_entry_with_an_unrelated_vendor_stays_out(self):
+        tip = expense(expense_id="tip", source_key="cash:tip", vendor="Cash tip")
+        assert match_manual(facts(), [tip], charge_date=CHARGE).outcome == "none"
+
+    def test_the_schema_has_no_cash_marker_so_a_cash_entry_matches_on_vendor_amount_and_date(self):
+        # An expense has no payment-method field. Nothing here can tell a cash entry from a
+        # card entry, so a matching one is a candidate and the owner approves the link.
+        same = expense(expense_id="cash", source_key="cash:claude", vendor="Claude AI Subscription")
+        assert match_manual(facts(), [same], charge_date=CHARGE).outcome == "one"
+
+    @pytest.mark.parametrize("vendor", [None, "", "   "])
+    def test_an_entry_without_a_vendor_never_matches(self, vendor):
+        nameless = expense(vendor=vendor)
+        assert match_manual(facts(), [nameless], charge_date=CHARGE).outcome == "none"
+        assert not vendor_matches(vendor, "claude ai subscription", ("claude",))
 
 
 class TestWholeBatchContention:
@@ -184,3 +198,60 @@ class TestWholeBatchContention:
         assert result["claude"].expense_id == "exp-manual-claude"
         assert result["coffee"].outcome == "choose"
         assert result["coffee"].candidate_ids == ("exp-manual-coffee-a", "exp-manual-coffee-b")
+
+
+class TestManualExpenseIsValidated:
+    """A bad hand-entry view fails with a reason code at construction, not deep inside a diff."""
+
+    def build(self, **overrides):
+        base = {
+            "expense_id": "e1",
+            "source_key": "manual:one",
+            "date": date(2026, 9, 17),
+            "vendor": "Claude",
+            "amount_minor": 7500,
+            "currency": "ILS",
+            "payment_status": "שולם",
+            "linked_line_key": None,
+        }
+        base.update(overrides)
+        return ManualExpense(**base)
+
+    def test_a_well_formed_entry_builds(self):
+        assert self.build().vendor == "Claude"
+        assert self.build(vendor=None).vendor is None
+        assert self.build(linked_line_key="c" * 64).linked_line_key == "c" * 64
+
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("expense_id", ""),
+            ("expense_id", 5),
+            ("source_key", None),
+            ("source_key", ""),
+            ("date", datetime(2026, 9, 17, 10, 30)),
+            ("date", "2026-09-17"),
+            ("date", None),
+            ("vendor", 5),
+            ("amount_minor", "7500"),
+            ("amount_minor", 75.0),
+            ("amount_minor", True),
+            ("amount_minor", 0),
+            ("amount_minor", -5),
+            ("currency", "JPY"),
+            ("currency", None),
+            ("payment_status", "paid"),
+            ("payment_status", None),
+            ("linked_line_key", "not-a-line-key"),
+            ("linked_line_key", 12),
+        ],
+    )
+    def test_malformed_fields_are_refused_with_a_reason_code(self, field, value):
+        with pytest.raises(StatementValidationError) as raised:
+            self.build(**{field: value})
+        assert (field, "invalid_expense") in {(i.path, i.code) for i in raised.value.issues}
+
+    def test_the_error_never_echoes_the_value(self):
+        with pytest.raises(StatementValidationError) as raised:
+            self.build(vendor=5, amount_minor="987654")
+        assert "987654" not in str(raised.value) and "987654" not in repr(raised.value.issues)

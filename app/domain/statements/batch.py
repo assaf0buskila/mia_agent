@@ -7,7 +7,7 @@ Shape (all keys required unless marked optional; unknown keys are rejected every
       "client_batch_id": "<lowercase canonical uuid>",
       "account_label": "<= 40 chars, no digit runs>",
       "charge_date": "YYYY-MM-DD",
-      "lines": [ <= 300 of
+      "lines": [ <= 400 of
         {
           "txn_date": "YYYY-MM-DD", "merchant_display": "<= 80 chars",
           "amount_minor": <int > 0>, "kind": "charge" | "credit", "currency": "ILS",
@@ -20,6 +20,11 @@ Shape (all keys required unless marked optional; unknown keys are rejected every
 
 There is no free-text note or instruction field, so a line has nowhere to carry a sentence the
 system could mistake for a command. Every string is data: cleaned, bounded, keyed.
+
+This is the whole v1 contract, and it is narrower than some earlier drafts on purpose: no
+merchant_raw and no note field (both are free text), merchant_display is capped at 80 characters
+(the only merchant text that is kept), and the card label is called account_label. The batch is
+at most 400 lines and 256 KiB of UTF-8 JSON, whatever the whitespace or escaping.
 """
 
 from __future__ import annotations
@@ -29,7 +34,7 @@ import hmac
 import json
 import re
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
 
@@ -92,7 +97,7 @@ class BatchLine:
     occurrence_index: int
     facts: LineFacts
     suggested_tag: str | None
-    suggested_category: str | None
+    suggested_category: str | None = field(repr=False)
     suggested_path: str | None
     is_subscription: bool | None
     confidence: float
@@ -101,7 +106,7 @@ class BatchLine:
 @dataclass(frozen=True)
 class StatementBatch:
     client_batch_id: str
-    account_label: str
+    account_label: str = field(repr=False)
     charge_date: date
     cycle: str
     statement_id: str

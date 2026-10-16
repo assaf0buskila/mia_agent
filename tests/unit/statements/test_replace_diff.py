@@ -11,6 +11,7 @@ from app.domain.statements import (
     ReviewChoices,
     StatementValidationError,
     apply_rules,
+    confirmations_from_review,
     diff_statement,
     owns_source_key,
     statement_source_key,
@@ -22,10 +23,12 @@ from tests.unit.statements.helpers import (
     fixture,
     fixture_manual_expenses,
     fixture_rules,
+    manual_expense,
     ops_of,
     parse,
     raw_batch,
     raw_line,
+    rule,
     run_import,
 )
 
@@ -310,14 +313,16 @@ class TestTagFlips:
 
 class TestFieldUpdates:
     def test_a_changed_category_updates_the_expense(self):
+        # The owner chooses the new category in this review. (A changed assistant suggestion
+        # alone changes nothing: see TestCommittedChoiceSurvivesReimport.)
         first, prev = committed_october()
-        raw = fixture()["october"]
-        raw["lines"] = [
-            {**x, "suggested_category": "כיבוד"} if x["merchant_display"] == OFFICE else x
-            for x in raw["lines"]
-        ]
-        imp = run_import(raw, previous=prev, rules=fixture_rules())
         key = first.key(OFFICE)
+        imp = run_import(
+            fixture()["october"],
+            previous=prev,
+            rules=fixture_rules(),
+            overrides={key: OwnerOverride(category="כיבוד")},
+        )
         assert entry_of(imp.diff, key).action == "update"
         [op] = imp.diff.ops
         assert (op.op, op.expense_id) == ("update", row_of(prev, key).expense_id)
@@ -434,6 +439,23 @@ class TestOwnerEditedExpenses:
             choices=ReviewChoices(owner_edited={key: "keep"}),
         )
         assert imp.diff.ops == ()
+
+    def test_a_reappearing_line_whose_expense_the_owner_restored_stays_in_the_statement(self):
+        first, prev = committed_october()
+        key = first.key(CLAUDE)
+        raw = fixture()["october"]
+        smaller = {**raw, "lines": without(raw["lines"], CLAUDE)}
+        voided = commit_rows(run_import(smaller, previous=prev, rules=fixture_rules()).diff)
+        restored = self.edited(voided, key)  # he un-cancelled and edited the voided expense
+        imp = run_import(raw, previous=restored, rules=fixture_rules())
+        entry = entry_of(imp.diff, key)
+        assert (entry.action, entry.held_back) == ("owner_edited_kept", "revive")
+        assert imp.diff.ops == ()
+        row = row_of(imp.diff.next_lines, key)
+        # the line is in the statement again, so the cycle totals must count it
+        assert (row.state, row.tag) == ("active", "business")
+        assert row.expense_id == row_of(prev, key).expense_id
+        assert row.facts is not None and row.facts.amount_minor == 7500
 
     def test_an_unedited_expense_is_not_reported_as_owner_edited(self):
         first, prev = committed_october()
@@ -558,6 +580,139 @@ class TestEarlierOwnerChoice:
         row = row_of(prev, key)
         assert row.facts is None and row.owner_override == OwnerOverride(tag="personal")
 
+    def test_always_for_this_merchant_never_turns_into_the_tag_the_diff_did_not_keep(self):
+        # He earlier set the line personal; the rule and assistant still say business. If he now
+        # taps "always for this merchant" without naming a tag, the rule must not take the
+        # assistant's business tag, the opposite of what the diff keeps.
+        key, prev = self.personal_choice()
+        imp = october_import(previous=prev, overrides={key: OwnerOverride(make_rule=True)})
+        assert entry_of(imp.diff, key).kept_fields == ("tag",)
+        assert row_of(imp.diff.next_lines, key).tag == "personal"
+        with pytest.raises(StatementValidationError) as raised:
+            confirmations_from_review(imp.resolved)
+        assert raised.value.issues[0].code == "rule_without_owner_tag"
+
+    def test_always_for_this_merchant_with_the_tag_he_sees_matches_what_the_diff_keeps(self):
+        key, prev = self.personal_choice()
+        imp = october_import(
+            previous=prev, overrides={key: OwnerOverride(tag="personal", make_rule=True)}
+        )
+        [confirmation] = confirmations_from_review(imp.resolved)
+        assert confirmation.tag == row_of(imp.diff.next_lines, key).tag == "personal"
+
+
+def changed(lines, merchant_display, **fields):
+    return [
+        {**line, **fields} if line["merchant_display"] == merchant_display else line
+        for line in lines
+    ]
+
+
+class TestCommittedChoiceSurvivesReimport:
+    """What Assaf approved is his choice. A re-import with no new explicit override from him
+    leaves it alone, whatever the (non-deterministic) assistant or a later rule now says."""
+
+    def reimport(self, prev, lines, **kwargs):
+        raw = {**fixture()["october"], "lines": lines}
+        return run_import(raw, previous=prev, rules=kwargs.pop("rules", fixture_rules()), **kwargs)
+
+    def test_an_approved_business_tag_survives_an_assistant_that_now_says_personal(self):
+        first, prev = committed_october()
+        key = first.key(OFFICE)
+        lines = changed(fixture()["october"]["lines"], OFFICE, suggested_tag="personal")
+        imp = self.reimport(prev, lines)
+        entry = entry_of(imp.diff, key)
+        assert entry.action == "kept_earlier_choice" and entry.kept_fields == ("tag",)
+        assert "kept_earlier_choice" in entry.flags
+        assert imp.diff.ops == () and imp.diff.line_writes == () and imp.diff.is_noop
+        assert row_of(imp.diff.next_lines, key).tag == "business"
+
+    def test_an_approved_personal_tag_survives_an_assistant_that_now_says_business(self):
+        first, prev = committed_october()
+        key = first.key("PHARMACY DEMO")
+        lines = changed(fixture()["october"]["lines"], "PHARMACY DEMO", suggested_tag="business")
+        imp = self.reimport(prev, lines)
+        entry = entry_of(imp.diff, key)
+        assert entry.action == "kept_earlier_choice" and entry.kept_fields == ("tag",)
+        assert imp.diff.is_noop and imp.diff.ops == ()
+        row = row_of(imp.diff.next_lines, key)
+        assert row.tag == "personal" and row.facts is None
+
+    @pytest.mark.parametrize(
+        ("field", "value", "kept"),
+        [
+            ("suggested_category", "כיבוד", "category"),
+            ("suggested_path", "לימוד", "path"),
+            ("is_subscription", True, "is_subscription"),
+        ],
+    )
+    def test_a_changed_suggestion_alone_never_updates_an_approved_expense(self, field, value, kept):
+        first, prev = committed_october()
+        key = first.key(OFFICE)
+        lines = changed(fixture()["october"]["lines"], OFFICE, **{field: value})
+        imp = self.reimport(prev, lines)
+        entry = entry_of(imp.diff, key)
+        assert entry.action == "kept_earlier_choice" and entry.kept_fields == (kept,)
+        assert imp.diff.ops == () and imp.diff.is_noop
+
+    def test_a_rule_added_after_approval_does_not_retag_a_committed_line(self):
+        first, prev = committed_october()
+        key = first.key(OFFICE)
+        later = rule(rule_id="late", merchant_key="office supply demo", tag="personal")
+        late = [*fixture_rules(), later]
+        imp = self.reimport(prev, fixture()["october"]["lines"], rules=late)
+        assert imp.diff.ops == ()
+        assert entry_of(imp.diff, key).kept_fields == ("tag",)
+        assert row_of(imp.diff.next_lines, key).tag == "business"
+
+    def test_an_explicit_override_in_this_review_still_changes_a_committed_line(self):
+        first, prev = committed_october()
+        key = first.key(OFFICE)
+        lines = changed(fixture()["october"]["lines"], OFFICE, suggested_tag="personal")
+        imp = self.reimport(prev, lines, overrides={key: OwnerOverride(tag="personal")})
+        assert [op.op for op in imp.diff.ops] == ["void"]
+        assert entry_of(imp.diff, key).reason == "became_personal"
+
+    @pytest.mark.parametrize("seed", range(25))
+    def test_property_random_suggestions_alone_give_zero_ops(self, seed):
+        rnd = random.Random(seed)
+        first, prev = committed_october()
+        lines = [
+            {
+                **line,
+                "suggested_tag": rnd.choice(["business", "personal", None]),
+                "suggested_category": rnd.choice(["כיבוד", "ציוד", None, "אחר " + str(seed)]),
+                "suggested_path": rnd.choice(["לימוד", "אוטומציה", "משותף", None]),
+                "is_subscription": rnd.choice([True, False, None]),
+                "confidence": rnd.random(),
+            }
+            for line in fixture()["october"]["lines"]
+        ]
+        imp = self.reimport(prev, lines)
+        assert imp.diff.ops == (), seed
+        assert imp.diff.line_writes == (), seed
+        assert imp.diff.blocking == (), seed
+        assert {r.line_key: r.tag for r in imp.diff.next_lines} == {r.line_key: r.tag for r in prev}
+
+    @pytest.mark.parametrize("seed", range(25))
+    def test_property_random_suggestions_alone_give_zero_ops_without_any_rules(self, seed):
+        rnd = random.Random(seed)
+        raw = random_statement(seed)
+        first = run_import(raw)
+        prev = commit_rows(first.diff)
+        reshuffled = raw_batch(
+            [
+                {
+                    **line,
+                    "suggested_tag": rnd.choice(["business", "personal", None]),
+                    "suggested_category": rnd.choice(["א", "ב", None]),
+                }
+                for line in raw["lines"]
+            ]
+        )
+        again = run_import(reshuffled, previous=prev)
+        assert again.diff.ops == () and again.diff.is_noop, seed
+
 
 class TestMergeWithHandEnteredExpenses:
     def test_exactly_one_hand_entered_match_is_a_link_and_creates_no_expense(self):
@@ -670,6 +825,48 @@ class TestMergeWithHandEnteredExpenses:
         assert imp.diff.ops[0].expense_id == "exp-manual-claude"
         row = row_of(imp.diff.next_lines, key)
         assert row.matched_expense_id is None and row.matched_source_key is None
+
+    def test_a_cancelled_linked_hand_entry_is_unlinked_and_the_charge_is_booked(self):
+        first = october_import(candidates=fixture_manual_expenses(), choices=_coffee_choices())
+        prev = commit_rows(first.diff)
+        key = first.key(CLAUDE)
+        cancelled = [
+            replace(e, payment_status="בוטל") if e.expense_id == "exp-manual-claude" else e
+            for e in fixture_manual_expenses()
+        ]
+        imp = october_import(previous=prev, candidates=cancelled)
+        assert [(op.op, op.line_key) for op in imp.diff.ops] == [("unlink", key), ("create", key)]
+        assert imp.diff.ops[0].expense_id == "exp-manual-claude"
+        assert imp.diff.ops[0].reason == "link_target_cancelled"
+        entry = entry_of(imp.diff, key)
+        assert (entry.action, entry.reason) == ("update", "link_target_cancelled")
+        row = row_of(imp.diff.next_lines, key)
+        assert row.matched_expense_id is None and row.matched_source_key is None
+        assert row.state == "active" and row.tag == "business"
+
+    def test_a_linked_hand_entry_that_is_not_passed_in_proves_nothing(self):
+        first = october_import(candidates=fixture_manual_expenses(), choices=_coffee_choices())
+        prev = commit_rows(first.diff)
+        key = first.key(CLAUDE)
+        others = [e for e in fixture_manual_expenses() if e.expense_id != "exp-manual-claude"]
+        imp = october_import(previous=prev, candidates=others)
+        assert entry_of(imp.diff, key).action == "keep"
+        assert imp.diff.is_noop
+        assert row_of(imp.diff.next_lines, key).matched_expense_id == "exp-manual-claude"
+
+    def test_a_hand_entry_without_a_vendor_never_breaks_an_import(self):
+        nameless = manual_expense(
+            expense_id="exp-nameless",
+            source_key="manual:nameless",
+            date="2026-09-17",
+            vendor=None,
+            amount_minor=7500,
+            currency="ILS",
+            payment_status="שולם",
+        )
+        imp = october_import(candidates=[*fixture_manual_expenses(), nameless])
+        assert "exp-nameless" not in {op.expense_id for op in imp.diff.ops}
+        assert imp.diff.merged_count == 1  # Claude still links to its own hand entry
 
     def test_naming_an_expense_for_an_already_linked_line_is_refused(self):
         first = october_import(candidates=fixture_manual_expenses(), choices=_coffee_choices())
@@ -936,3 +1133,33 @@ class TestDiffSurface:
         snapshot = list(prev)
         october_import(previous=prev)
         assert prev == snapshot
+
+
+class TestCommitterContract:
+    """What the persistence step must write back so the next diff reads the rows correctly."""
+
+    def removed_claude(self):
+        first, prev = committed_october()
+        raw = fixture()["october"]
+        smaller = {**raw, "lines": without(raw["lines"], CLAUDE)}
+        step = run_import(smaller, previous=prev, rules=fixture_rules())
+        return first.key(CLAUDE), raw, step
+
+    def test_a_void_moves_the_import_revision_with_the_expense_revision(self):
+        key, raw, step = self.removed_claude()
+        committed = commit_rows(step.diff)
+        row = row_of(committed, key)
+        assert row.expense_revision == row.imported_expense_revision == 2
+        back = run_import(raw, previous=committed, rules=fixture_rules())
+        assert [op.op for op in back.diff.ops] == ["revive"]
+
+    def test_a_void_that_leaves_the_import_revision_behind_reads_as_an_owner_edit(self):
+        key, raw, step = self.removed_claude()
+        forgetful = [
+            replace(r, expense_revision=(r.expense_revision or 1) + 1) if r.line_key == key else r
+            for r in step.diff.next_lines
+        ]
+        back = run_import(raw, previous=forgetful, rules=fixture_rules())
+        entry = entry_of(back.diff, key)
+        assert (entry.action, entry.held_back) == ("owner_edited_kept", "revive")
+        assert back.diff.ops == ()

@@ -23,11 +23,17 @@ DEFAULT_PLATFORM = "אחר"
 
 PAYMENT_STATUS_PAID = "שולם"
 PAYMENT_STATUS_CANCELLED = "בוטל"
+PAYMENT_STATUSES = (PAYMENT_STATUS_PAID, "לא שולם", PAYMENT_STATUS_CANCELLED)
+CURRENCIES = (CURRENCY, "USD", "EUR", "GBP")
 SOURCE_TYPE_ACTUAL_PAYMENT = "תשלום בפועל"
 
 # A batch is a bounded document, not a stream: both caps are checked before any parsing work.
-MAX_BATCH_BYTES = 128 * 1024
-MAX_LINES = 300
+# They equal the assistant route's limits (256 KiB, 400 lines), so nothing the route admits is
+# refused here. A statement cannot be split across batches, because a second batch for the same
+# statement voids the first one's lines. 256 KiB also leaves room for a full statement of Hebrew
+# merchants written with json.dumps defaults, which escape every Hebrew letter to six bytes.
+MAX_BATCH_BYTES = 256 * 1024
+MAX_LINES = 400
 
 MAX_DISPLAY_CHARS = 80
 MAX_ACCOUNT_LABEL_CHARS = 40
