@@ -113,6 +113,20 @@ def test_the_guard_validates_once_and_caches_until_ten_minutes_or_a_new_connecti
     assert len(calls) == 3
 
 
+def test_a_bare_postgresql_scheme_is_pinned_to_psycopg3(pg):
+    """V2-15 writes runtime.env DSNs with the bare scheme; like the app, the ledger pins them."""
+    _, settings, _ = parts(pg)
+
+    def bare(dsn):
+        return dsn.replace("postgresql+psycopg://", "postgresql://", 1)
+
+    assert bare(settings.owner_os_ledger_database_url).startswith("postgresql://")
+    ledger = core.build_ledger(settings_like(
+        settings, owner_os_ledger_database_url=bare(settings.owner_os_ledger_database_url),
+        database_url=bare(settings.database_url)))
+    assert open_tx(ledger) == 0
+
+
 def test_a_runtime_dsn_that_is_not_the_ledger_role_is_refused(pg):
     _, settings, _ = parts(pg)
     impostor = settings_like(settings, owner_os_ledger_database_url=settings.database_url)

@@ -26,6 +26,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.db.os_ledger_migrate import RUNTIME_ROLE
+from app.db.session import sqlalchemy_database_url
 from app.services.os_ledger import api
 
 _LOG = logging.getLogger("mia.os_ledger")
@@ -124,24 +125,27 @@ _ENGINES: dict[str, Engine] = {}
 _GUARDS: dict[tuple[str, str], EngineGuard] = {}
 
 
-def _postgres_url(dsn: str, reason: str):
+def _postgres_url(dsn: str, reason: str) -> str:
+    """The DSN pinned to psycopg3, as the app pins every Postgres DSN (``runtime.env`` holds the
+    bare ``postgresql://`` scheme that V2-15 provisioning writes)."""
     try:
-        url = make_url(dsn)
+        pinned = sqlalchemy_database_url(dsn)
+        url = make_url(pinned)
     except Exception:  # noqa: BLE001 - any parse failure is the same refusal
         raise refuse(reason) from None
     if url.get_backend_name() != "postgresql":
         raise refuse(reason)
-    return url
+    return pinned
 
 
 def engine_for(dsn: str, *, reason: str = "ledger_dsn_invalid") -> Engine:
     """One pooled engine per DSN, shared by every ledger built on it (never logged)."""
-    _postgres_url(dsn, reason)
+    pinned = _postgres_url(dsn, reason)
     with _REGISTRY_LOCK:
         engine = _ENGINES.get(dsn)
         if engine is None:
             try:
-                engine = create_engine(dsn, pool_pre_ping=True, pool_size=5, max_overflow=5)
+                engine = create_engine(pinned, pool_pre_ping=True, pool_size=5, max_overflow=5)
             except Exception:  # noqa: BLE001 - e.g. a driver that is not installed
                 raise refuse(reason) from None
             _ENGINES[dsn] = engine
