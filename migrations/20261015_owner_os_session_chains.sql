@@ -2,7 +2,7 @@
 -- Legacy rows (chain_id NULL) keep authenticating until their old expiry and are never renewed.
 -- PostgreSQL ADD CONSTRAINT has no IF NOT EXISTS. A re-run through app.db.migrate is safe
 -- because each statement runs in a savepoint and "already exists" is skipped. The live auth
--- database is assaf_os_auth, which mia-migrate never reaches. It gets this file through
+-- database is the separate owner-auth database, which mia-migrate never reaches. It gets this file through
 -- ops/assaf-os/provision_auth.py --migrate-session-chains, which guards each constraint.
 -- No new table, so no grant change: table-level grants cover the new columns.
 ALTER TABLE owner_os_sessions ADD COLUMN IF NOT EXISTS chain_id VARCHAR(64) NULL;
