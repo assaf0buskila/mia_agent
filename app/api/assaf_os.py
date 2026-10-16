@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import re
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from starlette.concurrency import run_in_threadpool
 
 from app.api.owner_sessions import OwnerSessionPrincipal, owner_mutation_scope, owner_scope
 from app.core.config import Settings, get_settings
 from app.services.assaf_os import AssafOsError, AssafOsPort, DecisionRequest, ProposeRequest
+from app.services.assaf_os_snapshot_cache import read_cached_snapshot, remember_snapshot
 
 router = APIRouter(prefix="/v1/owner/os/unified", tags=["owner-os-unified"])
 _ID = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{2,63}$")
@@ -41,11 +42,16 @@ async def schema(
 
 @router.get("")
 async def snapshot(
+    background: BackgroundTasks,
     owner: OwnerSessionPrincipal = Depends(owner_scope("assaf-os:read")),
     settings: Settings = Depends(get_settings),
 ):
     port = _port(settings, owner)
-    return await _run(port.snapshot)
+    result = await _run(port.snapshot)
+    # V2-42: refresh the instant-open cache once the response is on the wire. This is the only
+    # caller of remember_snapshot, it never raises, and it cannot change or delay this response.
+    background.add_task(remember_snapshot, settings, owner.owner_id, result)
+    return result
 
 
 @router.post("/proposals")
@@ -112,3 +118,15 @@ async def receipt(
         raise HTTPException(422, "invalid_request_id")
     port = _port(settings, owner)
     return await _run(lambda: port.receipt(request_id))
+
+
+@router.get("/cached")
+async def cached_snapshot(
+    owner: OwnerSessionPrincipal = Depends(owner_scope("assaf-os:read")),
+    settings: Settings = Depends(get_settings),
+):
+    # V2-42: the last validated snapshot, served without the Apps Script. The port is constructed
+    # only to re-prove the enable flag, the owner allow-list and the configuration shapes (the
+    # same 404 and 503 as the snapshot route). None of its calls or caches is ever touched.
+    _port(settings, owner)
+    return await run_in_threadpool(read_cached_snapshot, settings, owner.owner_id)
