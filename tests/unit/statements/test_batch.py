@@ -254,6 +254,14 @@ class TestShapeIsStrict:
         assert ("lines", "too_many_lines") in codes(reject(raw_batch(lines)))
         assert len(parse(raw_batch(lines[:MAX_LINES])).lines) == MAX_LINES
 
+    def test_the_line_cap_is_the_contract_300(self):
+        # V2_PG_CONTRACTS.md 12.1: "at most 300 lines and 128 KiB". Literal numbers on purpose,
+        # so moving the constant cannot silently move the boundary.
+        assert MAX_LINES == 300
+        lines = [raw_line(amount_minor=100 + i) for i in range(301)]
+        assert len(parse(raw_batch(lines[:300])).lines) == 300
+        assert codes(reject(raw_batch(lines))) == {("lines", "too_many_lines")}
+
     def test_issues_are_collected_per_line_and_capped(self):
         lines = [raw_line(amount_minor=0) for _ in range(120)]
         raised = reject(raw_batch(lines))
@@ -282,18 +290,66 @@ def hebrew_statement(count: int) -> dict:
     return raw_batch(lines)
 
 
+CONTRACT_BYTES = 128 * 1024  # V2_PG_CONTRACTS.md 12.1; a literal, not MAX_BATCH_BYTES
+
+
+def padded_document(size: int, *, hebrew: bool = False) -> bytes:
+    """A valid one-line batch document, padded with trailing whitespace to exactly `size` bytes."""
+    raw = raw_batch([raw_line(merchant_display="חנות לדוגמה" if hebrew else "DEMO SHOP")])
+    body = json.dumps(raw, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    assert len(body) < size
+    return body + b" " * (size - len(body))
+
+
 class TestSizeAndParsing:
-    @pytest.mark.parametrize("dump", [{}, {"indent": 2}], ids=["default", "indent2"])
-    def test_a_full_hebrew_statement_survives_json_dumps_escaping(self, dump):
+    @pytest.mark.parametrize(
+        "dump",
+        [{}, {"ensure_ascii": False, "indent": 2}],
+        ids=["default", "unescaped-indent2"],
+    )
+    def test_a_full_hebrew_statement_inside_the_contract_caps_is_accepted(self, dump):
         # json.dumps escapes every Hebrew letter to six bytes by default, which is how most
-        # assistants and scripts will write the batch. A statement within the line cap must
-        # still be accepted whole: it cannot be split, because a second batch would void the
-        # first one's lines.
-        raw = hebrew_statement(MAX_LINES)
+        # assistants and scripts will write the batch. A statement of 300 lines written that way
+        # is 114 KB, inside the contract's 128 KiB, so it is accepted whole.
+        raw = hebrew_statement(300)
         text = json.dumps(raw, **dump)
-        assert len(text.encode("utf-8")) > 128 * 1024  # the premise: larger than a 128 KiB cap
-        assert len(parse(text).lines) == MAX_LINES
-        assert len(parse(text.encode("utf-8")).lines) == MAX_LINES
+        assert len(text.encode("utf-8")) <= CONTRACT_BYTES  # the premise: inside the byte cap
+        assert len(parse(text).lines) == 300
+        assert len(parse(text.encode("utf-8")).lines) == 300
+
+    def test_an_indented_escaped_full_statement_is_over_the_contract_byte_cap(self):
+        # The same 300 lines with indent=2 and every Hebrew letter escaped are 133,581 bytes.
+        # The contract cap is on bytes, whatever the whitespace or escaping, so this is refused.
+        text = json.dumps(hebrew_statement(300), indent=2)
+        assert len(text.encode("utf-8")) > CONTRACT_BYTES
+        assert codes(reject(text)) == {("", "batch_too_large")}
+        assert codes(reject(text.encode("utf-8"))) == {("", "batch_too_large")}
+
+    def test_the_byte_cap_is_the_contract_128_kib(self):
+        assert MAX_BATCH_BYTES == CONTRACT_BYTES == 131072
+
+    @pytest.mark.parametrize("kind", [bytes, str], ids=["bytes", "str"])
+    def test_exactly_131072_bytes_is_accepted(self, kind):
+        raw = padded_document(131072)
+        assert len(raw) == 131072
+        given = raw if kind is bytes else raw.decode("utf-8")
+        assert len(parse(given).lines) == 1
+
+    @pytest.mark.parametrize("kind", [bytes, str], ids=["bytes", "str"])
+    def test_131073_bytes_is_rejected(self, kind):
+        raw = padded_document(131073)
+        assert len(raw) == 131073
+        given = raw if kind is bytes else raw.decode("utf-8")
+        assert codes(reject(given)) == {("", "batch_too_large")}
+
+    def test_the_byte_cap_counts_utf8_bytes_not_characters(self):
+        # Hebrew letters are two bytes each, so the text has fewer characters than bytes.
+        accepted = padded_document(131072, hebrew=True).decode("utf-8")
+        assert len(accepted) < 131072 and len(accepted.encode("utf-8")) == 131072
+        assert len(parse(accepted).lines) == 1
+        rejected = padded_document(131073, hebrew=True).decode("utf-8")
+        assert len(rejected) < 131073 and len(rejected.encode("utf-8")) == 131073
+        assert codes(reject(rejected)) == {("", "batch_too_large")}
 
     def test_byte_cap_on_raw_text(self):
         padding = "x" * (MAX_BATCH_BYTES + 10)

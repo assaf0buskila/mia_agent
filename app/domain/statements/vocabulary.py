@@ -28,12 +28,12 @@ CURRENCIES = (CURRENCY, "USD", "EUR", "GBP")
 SOURCE_TYPE_ACTUAL_PAYMENT = "תשלום בפועל"
 
 # A batch is a bounded document, not a stream: both caps are checked before any parsing work.
-# They equal the assistant route's limits (256 KiB, 400 lines), so nothing the route admits is
-# refused here. A statement cannot be split across batches, because a second batch for the same
-# statement voids the first one's lines. 256 KiB also leaves room for a full statement of Hebrew
-# merchants written with json.dumps defaults, which escape every Hebrew letter to six bytes.
-MAX_BATCH_BYTES = 256 * 1024
-MAX_LINES = 400
+# They are the contract's (V2_PG_CONTRACTS.md 12.1: "at most 300 lines and 128 KiB"), counted in
+# UTF-8 bytes of the document whatever its whitespace or escaping, so a document of exactly
+# 131072 bytes is accepted and one of 131073 is not. A full statement of 300 Hebrew merchants
+# written with json.dumps defaults (six bytes per escaped letter) is about 114 KB and fits.
+MAX_BATCH_BYTES = 128 * 1024
+MAX_LINES = 300
 
 MAX_DISPLAY_CHARS = 80
 MAX_ACCOUNT_LABEL_CHARS = 40

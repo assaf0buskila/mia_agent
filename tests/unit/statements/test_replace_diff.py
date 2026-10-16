@@ -714,6 +714,138 @@ class TestCommittedChoiceSurvivesReimport:
         assert again.diff.ops == () and again.diff.is_noop, seed
 
 
+SHOP = "DEMO SHOP"
+OTHER_SHOP = "OTHER SHOP"
+
+
+def shop_a(**fields):
+    """Line A: a 10,000 minor-unit ILS charge dated 2026-09-20, billed 2026-10-15."""
+    return raw_line(**fields)
+
+
+def shop_b(**fields):
+    return raw_line(merchant_display=OTHER_SHOP, amount_minor=5500, txn_date="2026-09-21", **fields)
+
+
+def shop_a_key():
+    """A line key comes from the facts alone, so it does not depend on any suggestion."""
+    return run_import(raw_batch([shop_a(), shop_b()])).key(SHOP)
+
+
+class TestRestoredLineKeepsItsApprovedChoice:
+    """A line that leaves the statement and comes back is still the line Assaf approved. Its
+    committed tag and classification stay precedence inputs after the stored row is replaced;
+    only a new explicit override from him supersedes them."""
+
+    def removed_and_restored(
+        self, tag_then, tag_back, *, absent_imports=1, overrides=None, first_fields=None, **back
+    ):
+        line_a = shop_a(suggested_tag=tag_then, **(first_fields or {}))
+        first = run_import(raw_batch([line_a, shop_b()]))
+        prev = commit_rows(first.diff)
+        key = first.key(SHOP)
+        for _ in range(absent_imports):
+            gone = run_import(raw_batch([shop_b()]), previous=prev)
+            assert row_of(gone.diff.next_lines, key).state == "replaced"
+            prev = commit_rows(gone.diff)
+        again = run_import(
+            raw_batch([shop_a(suggested_tag=tag_back, **back), shop_b()]),
+            previous=prev,
+            overrides=overrides,
+        )
+        return prev, again, key
+
+    @pytest.mark.parametrize("absent_imports", [1, 2])
+    def test_an_approved_personal_line_that_comes_back_still_reads_personal(self, absent_imports):
+        prev, back, key = self.removed_and_restored(
+            "personal", "business", absent_imports=absent_imports
+        )
+        assert back.diff.ops == ()  # no expense is created for a line he kept personal
+        entry = entry_of(back.diff, key)
+        assert (entry.action, entry.reason, entry.to_tag) == ("add", "reappeared", "personal")
+        assert entry.kept_fields == ("tag",)
+        assert "kept_earlier_choice" in entry.flags
+        row = row_of(back.diff.next_lines, key)
+        assert (row.tag, row.state) == ("personal", "active")
+        assert row.facts is None  # still key-only
+        assert back.diff.blocking == ()
+
+    @pytest.mark.parametrize("absent_imports", [1, 2])
+    def test_an_approved_business_line_that_comes_back_still_reads_business(self, absent_imports):
+        prev, back, key = self.removed_and_restored(
+            "business", "personal", absent_imports=absent_imports
+        )
+        [op] = back.diff.ops
+        assert (op.op, op.expense_id, op.line_key) == ("revive", row_of(prev, key).expense_id, key)
+        entry = entry_of(back.diff, key)
+        assert (entry.action, entry.reason, entry.to_tag) == ("add", "reappeared", "business")
+        assert entry.kept_fields == ("tag",)
+        assert "kept_earlier_choice" in entry.flags
+        assert row_of(back.diff.next_lines, key).tag == "business"
+
+    def test_an_approved_business_line_that_comes_back_with_no_assistant_tag_stays_business(self):
+        prev, back, key = self.removed_and_restored("business", None)
+        assert [op.op for op in back.diff.ops] == ["revive"]
+        entry = entry_of(back.diff, key)
+        assert "assistant_tag_missing" in entry.flags
+        assert "unassigned" not in entry.flags
+        assert back.diff.blocking == ()
+
+    def test_the_approved_classification_comes_back_with_the_line(self):
+        # The first import had no category, path or subscription flag, so the defaults are what
+        # was approved. A restored line is not moved by the assistant's new reading of them.
+        prev, back, key = self.removed_and_restored(
+            "business",
+            "business",
+            suggested_category="ציוד",
+            suggested_path="לימוד",
+            is_subscription=True,
+        )
+        [op] = back.diff.ops
+        assert op.op == "revive"
+        assert (op.draft.category, op.draft.path) == ("לא מסווג", "משותף")
+        assert set(entry_of(back.diff, key).kept_fields) == {
+            "category",
+            "path",
+            "is_subscription",
+        }
+
+    def test_an_approved_category_survives_removal_and_restoration(self):
+        prev, back, key = self.removed_and_restored(
+            "business",
+            "business",
+            first_fields={"suggested_category": "כיבוד"},
+            suggested_category="ציוד",
+        )
+        [op] = back.diff.ops
+        assert (op.op, op.draft.category) == ("revive", "כיבוד")
+        assert entry_of(back.diff, key).kept_fields == ("category",)
+
+    def test_a_new_explicit_override_still_supersedes_an_approved_personal_line(self):
+        key = shop_a_key()
+        override = {key: OwnerOverride(tag="business", category="ציוד")}
+        prev, back, key = self.removed_and_restored("personal", "personal", overrides=override)
+        [op] = back.diff.ops
+        assert (op.op, op.draft.category) == ("create", "ציוד")
+        entry = entry_of(back.diff, key)
+        assert (entry.reason, entry.to_tag, entry.kept_fields) == ("reappeared", "business", ())
+        assert row_of(back.diff.next_lines, key).tag == "business"
+
+    def test_a_new_explicit_override_still_supersedes_an_approved_business_line(self):
+        override = {shop_a_key(): OwnerOverride(tag="personal")}
+        prev, back, key = self.removed_and_restored("business", "business", overrides=override)
+        assert back.diff.ops == ()  # the expense was voided on removal and stays that way
+        entry = entry_of(back.diff, key)
+        assert (entry.reason, entry.to_tag, entry.kept_fields) == ("reappeared", "personal", ())
+        assert row_of(back.diff.next_lines, key).tag == "personal"
+
+    def test_restoration_without_any_disagreement_is_not_flagged(self):
+        prev, back, key = self.removed_and_restored("business", "business")
+        entry = entry_of(back.diff, key)
+        assert entry.kept_fields == ()
+        assert "kept_earlier_choice" not in entry.flags
+
+
 class TestMergeWithHandEnteredExpenses:
     def test_exactly_one_hand_entered_match_is_a_link_and_creates_no_expense(self):
         imp = october_import(candidates=fixture_manual_expenses())
@@ -917,6 +1049,207 @@ class TestMergeWithHandEnteredExpenses:
         assert imp.key("OFFICE SUPPLY DEMO RETURN") not in {
             op.line_key for op in ops_of(imp.diff, "link")
         }
+
+
+def manual_one(**fields):
+    """manual-1: the hand entry that matches line A (10,000 ILS, 2026-09-20, DEMO SHOP)."""
+    data = {
+        "expense_id": "manual-1",
+        "source_key": "manual:1",
+        "date": "2026-09-20",
+        "vendor": SHOP,
+        "amount_minor": 10000,
+        "currency": "ILS",
+        "payment_status": "שולם",
+    }
+    data.update(fields)
+    return manual_expense(**data)
+
+
+class TestLinkedExpenseIsRevalidated:
+    """A stored link is re-checked against the hand entry as it is now. If the amount, currency,
+    date window or merchant no longer fit the statement line, the link is not kept silently: the
+    owner has to decide, and unlinking books the bank charge as its own expense."""
+
+    def linked(self):
+        raw = raw_batch([shop_a()])
+        first = run_import(raw, candidates=[manual_one()])
+        assert [(op.op, op.expense_id) for op in first.diff.ops] == [("link", "manual-1")]
+        return raw, commit_rows(first.diff), first.key(SHOP)
+
+    def reimport(self, expense, **kwargs):
+        raw, prev, key = self.linked()
+        return run_import(raw, previous=prev, candidates=[expense], **kwargs), key
+
+    def test_a_link_to_an_unchanged_hand_entry_is_still_a_noop(self):
+        imp, key = self.reimport(manual_one())
+        assert imp.diff.is_noop and imp.diff.blocking == ()
+        assert entry_of(imp.diff, key).action == "keep"
+        assert row_of(imp.diff.next_lines, key).matched_expense_id == "manual-1"
+
+    def test_the_reviewer_repro_a_changed_amount_and_vendor_needs_a_decision(self):
+        imp, key = self.reimport(manual_one(amount_minor=20000, vendor="Different shop"))
+        assert imp.diff.blocking == ("merge_choice_required",)
+        assert not imp.diff.is_noop
+        assert imp.diff.ops == ()  # nothing is unlinked or created behind his back
+        entry = entry_of(imp.diff, key)
+        assert entry.reason == "linked_expense_changed"
+        assert "linked_expense_changed" in entry.flags and "merge_choice_required" in entry.flags
+        assert entry.candidate_expense_ids == ("manual-1",)
+        row = row_of(imp.diff.next_lines, key)
+        assert (row.matched_expense_id, row.matched_source_key) == ("manual-1", "manual:1")
+
+    @pytest.mark.parametrize(
+        "change",
+        [
+            {"amount_minor": 20000},
+            {"currency": "USD"},
+            {"date": "2026-09-16"},  # one day before the 3-day window opens (txn_date - 3)
+            {"date": "2026-10-19"},  # one day after it closes (charge_date + 3)
+            {"vendor": "Different shop"},
+            {"vendor": None},
+        ],
+        ids=["amount", "currency", "date-before", "date-after", "vendor", "no-vendor"],
+    )
+    def test_each_contradicting_field_alone_needs_a_decision(self, change):
+        imp, key = self.reimport(manual_one(**change))
+        assert imp.diff.blocking == ("merge_choice_required",)
+        assert not imp.diff.is_noop and imp.diff.ops == ()
+        assert entry_of(imp.diff, key).reason == "linked_expense_changed"
+
+    @pytest.mark.parametrize(
+        "change",
+        [
+            {"date": "2026-09-17"},  # the first day of the window
+            {"date": "2026-10-18"},  # the last day of the window
+            {"vendor": "demo shop"},
+            {"vendor": "Demo Shop Tel Aviv"},  # a whole-word prefix match, as at link time
+        ],
+        ids=["window-start", "window-end", "vendor-case", "vendor-prefix"],
+    )
+    def test_a_change_that_still_fits_stays_a_noop(self, change):
+        imp, key = self.reimport(manual_one(**change))
+        assert imp.diff.is_noop and imp.diff.blocking == ()
+        assert row_of(imp.diff.next_lines, key).matched_expense_id == "manual-1"
+
+    def test_the_current_snapshot_may_mark_the_entry_as_linked_already(self):
+        key = self.linked()[2]
+        snapshot = manual_one(amount_minor=20000, linked_line_key=key)
+        imp, _ = self.reimport(snapshot)
+        assert imp.diff.blocking == ("merge_choice_required",)
+        unchanged, _ = self.reimport(manual_one(linked_line_key=key))
+        assert unchanged.diff.is_noop
+
+    def test_unlinking_keeps_the_hand_entry_and_books_the_bank_charge(self):
+        raw, prev, key = self.linked()
+        changed = manual_one(amount_minor=20000, vendor="Different shop")
+        imp = run_import(
+            raw, previous=prev, candidates=[changed], choices=ReviewChoices(merge={key: None})
+        )
+        assert imp.diff.blocking == ()
+        assert [(op.op, op.line_key) for op in imp.diff.ops] == [("unlink", key), ("create", key)]
+        unlink, create = imp.diff.ops
+        assert (unlink.expense_id, unlink.reason) == ("manual-1", "unlinked_by_owner")
+        assert create.expense_id is None and create.draft.amount_ils == 10000
+        assert owns_source_key(imp.batch.statement_id, create.source_key)
+        row = row_of(imp.diff.next_lines, key)
+        assert row.matched_expense_id is None and row.matched_source_key is None
+        assert entry_of(imp.diff, key).reason == "unlinked_by_owner"
+        # the hand entry itself is never modified: the only op that names it is the unlink
+        assert [op.op for op in imp.diff.ops if op.expense_id == "manual-1"] == ["unlink"]
+
+    def test_confirming_the_link_keeps_it_and_clears_the_block(self):
+        raw, prev, key = self.linked()
+        changed = manual_one(amount_minor=20000, vendor="Different shop")
+        imp = run_import(
+            raw,
+            previous=prev,
+            candidates=[changed],
+            choices=ReviewChoices(merge={key: "manual-1"}),
+        )
+        assert imp.diff.blocking == ()
+        assert imp.diff.is_noop
+        assert row_of(imp.diff.next_lines, key).matched_expense_id == "manual-1"
+        assert "merge_choice_required" not in entry_of(imp.diff, key).flags
+
+    def test_a_choice_must_name_the_linked_entry_or_none(self):
+        raw, prev, key = self.linked()
+        changed = manual_one(amount_minor=20000, vendor="Different shop")
+        other = manual_one(expense_id="manual-2", source_key="manual:2")
+        with pytest.raises(StatementValidationError) as raised:
+            run_import(
+                raw,
+                previous=prev,
+                candidates=[changed, other],
+                choices=ReviewChoices(merge={key: "manual-2"}),
+            )
+        assert raised.value.issues[0].code == "merge_choice_invalid"
+
+    def test_naming_the_linked_entry_is_still_refused_while_it_matches(self):
+        raw, prev, key = self.linked()
+        with pytest.raises(StatementValidationError) as raised:
+            run_import(
+                raw,
+                previous=prev,
+                candidates=[manual_one()],
+                choices=ReviewChoices(merge={key: "manual-1"}),
+            )
+        assert raised.value.issues[0].code == "merge_choice_invalid"
+
+    def test_a_hand_entry_that_is_not_passed_in_still_proves_nothing(self):
+        raw, prev, key = self.linked()
+        imp = run_import(raw, previous=prev)
+        assert imp.diff.is_noop and imp.diff.blocking == ()
+
+    def test_a_cancelled_hand_entry_is_unlinked_without_asking(self):
+        imp, key = self.reimport(manual_one(payment_status="בוטל", amount_minor=20000))
+        assert imp.diff.blocking == ()
+        assert [(op.op, op.reason) for op in imp.diff.ops] == [
+            ("unlink", "link_target_cancelled"),
+            ("create", None),
+        ]
+
+    def test_a_link_through_the_original_currency_stays_valid(self):
+        raw = raw_batch([shop_a(original_amount_minor=2700, original_currency="USD")])
+        usd = manual_one(amount_minor=2700, currency="USD")
+        prev = commit_rows(run_import(raw, candidates=[usd]).diff)
+        assert run_import(raw, previous=prev, candidates=[usd]).diff.is_noop
+        moved = manual_one(amount_minor=2800, currency="USD")
+        again = run_import(raw, previous=prev, candidates=[moved])
+        assert again.diff.blocking == ("merge_choice_required",)
+
+    def test_a_rule_alias_still_vouches_for_the_vendor(self):
+        # linked on the alias "claude" of rule_claude; a vendor outside the alias set is a mismatch
+        first = october_import(candidates=fixture_manual_expenses(), choices=_coffee_choices())
+        prev = commit_rows(first.diff)
+        key = first.key(CLAUDE)
+
+        def with_vendor(vendor):
+            return [
+                replace(e, vendor=vendor) if e.expense_id == "exp-manual-claude" else e
+                for e in fixture_manual_expenses()
+            ]
+
+        assert october_import(previous=prev, candidates=with_vendor("Anthropic")).diff.is_noop
+        drifted = october_import(previous=prev, candidates=with_vendor("Zoom"))
+        assert drifted.diff.blocking == ("merge_choice_required",)
+        assert entry_of(drifted.diff, key).reason == "linked_expense_changed"
+
+    def test_a_linked_line_that_goes_missing_or_personal_is_unchanged_by_a_changed_entry(self):
+        raw, prev, key = self.linked()
+        changed = manual_one(amount_minor=20000, vendor="Different shop")
+        gone = run_import(raw_batch([shop_b()]), previous=prev, candidates=[changed])
+        about_a = [(op.op, op.expense_id) for op in gone.diff.ops if op.line_key == key]
+        assert about_a == [("unlink", "manual-1")]
+        assert gone.diff.blocking == ()
+        personal = run_import(
+            raw,
+            previous=prev,
+            candidates=[changed],
+            overrides={key: OwnerOverride(tag="personal")},
+        )
+        assert [(op.op, op.reason) for op in personal.diff.ops] == [("unlink", "became_personal")]
+        assert personal.diff.blocking == ()
 
 
 def _coffee_choices():

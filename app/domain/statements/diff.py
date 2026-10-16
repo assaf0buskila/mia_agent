@@ -16,7 +16,15 @@ Safeguards, each covered by a test:
     review, his earlier explicit override, the committed row, a merchant rule, the assistant.
     So a re-import with no new explicit choice from him never moves a committed line, however
     the (non-deterministic) assistant or a rule that arrived later now reads it. Where the
-    newer reading differs, the entry says 'kept_earlier_choice' and lists the fields.
+    newer reading differs, the entry says 'kept_earlier_choice' and lists the fields. The same
+    holds for a line that left the statement and came back: its replaced row still carries what
+    he approved, and only a new explicit choice supersedes it.
+  - A link to a hand-entered expense is re-checked against that expense as it is now, whenever
+    it is passed in: amount (or original foreign amount), date window and merchant must still
+    fit the line. If they do not, the line is flagged 'linked_expense_changed' and approval is
+    blocked ('merge_choice_required') until the owner decides: keep the link (name the entry in
+    the merge choice) or unlink it (choice None), which books the bank charge as its own
+    expense. The hand entry is never modified, and an entry that is not passed in proves nothing.
   - After a terminal decision a personal line keeps only its key, tag and state.
   - Every void or unlink appears as an entry. Nothing disappears silently.
 
@@ -45,13 +53,15 @@ from .expense import (
     statement_source_key,
 )
 from .identity import LineFacts, is_line_key, is_statement_id
-from .merge import ManualExpense, MatchResult, MergeItem, match_batch
+from .merge import ManualExpense, MatchResult, MergeItem, match_batch, terms_match
 from .rules import MerchantRule, OwnerOverride, ResolvedLine, first_not_none
 from .vocabulary import PAYMENT_STATUS_CANCELLED, TAGS
 
 ACTIONS = ("add", "keep", "update", "void", "owner_edited_kept", "kept_earlier_choice")
 BLOCK_UNASSIGNED = "unassigned_lines"
 BLOCK_MERGE_CHOICE = "merge_choice_required"
+# Entry flag and reason: the hand entry a line is linked to no longer fits that line.
+LINKED_EXPENSE_CHANGED = "linked_expense_changed"
 
 # Ops are listed in a safe application order: an expense freed by an unlink or void can be
 # linked or reused later in the same list, so a "one active line per hand entry" index holds.
@@ -137,7 +147,9 @@ class StatementDiff:
 
     @property
     def is_noop(self) -> bool:
-        return not self.ops and not self.line_writes
+        """Nothing to write and nothing waiting on the owner. A diff that blocks approval is a
+        decision still to be made, not a no-op."""
+        return not self.ops and not self.line_writes and not self.blocking
 
     @property
     def counts(self) -> dict[str, int]:
@@ -180,6 +192,7 @@ class _Context:
     matches: Mapping[str, MatchResult]
     pool: Mapping[str, ManualExpense]
     known: Mapping[str, ManualExpense]  # every hand entry passed in, linked or not
+    stale: Mapping[str, str]  # line_key -> the linked hand entry that no longer fits the line
 
 
 def _merge_override(
@@ -198,10 +211,11 @@ def _merge_override(
 
 
 def _approved(prev: StoredLine | None) -> dict[str, Any]:
-    """What was committed for this line last time. Only an active row counts (a line that was
-    replaced and has come back is decided afresh), and a personal row kept key-only has a tag
-    and nothing else."""
-    if prev is None or prev.state != "active":
+    """What was committed for this line last time. A replaced row counts too: a line that left
+    the statement and came back is still the line he approved, so its committed tag and
+    classification stay precedence inputs and only a new explicit choice supersedes them. A
+    personal row kept key-only has a tag and nothing else."""
+    if prev is None:
         return {}
     approved: dict[str, Any] = {"tag": prev.tag}
     if prev.classification is not None:
@@ -513,8 +527,9 @@ def _plan_same_tag(
         # way the card charge exists in no live expense, so book it as its own. A hand entry that
         # is merely absent from the candidates proves nothing and changes nothing.
         linked_entry = ctx.known.get(prev.matched_expense_id)
+        choice = ctx.merge.get(key, _UNSET)
         unlink_reason = None
-        if ctx.merge.get(key, _UNSET) is None:
+        if choice is None:
             unlink_reason = "unlinked_by_owner"
         elif linked_entry is not None and linked_entry.payment_status == PAYMENT_STATUS_CANCELLED:
             unlink_reason = "link_target_cancelled"
@@ -536,6 +551,23 @@ def _plan_same_tag(
         row, wrote = _finish(
             _row(ctx, resolved, prev, target, tag="business", matched=linked), prev
         )
+        if key in ctx.stale and choice is _UNSET:
+            # The hand entry changed under the link. Nothing is unlinked or booked on its own:
+            # the owner keeps the link (names the entry) or unlinks it (None) before approval.
+            if wrote:
+                action = "update"
+            else:
+                action = "kept_earlier_choice" if target.kept_fields else "keep"
+            entry = _entry(
+                resolved,
+                prev,
+                target,
+                action,
+                reason=LINKED_EXPENSE_CHANGED,
+                extra_flags=(LINKED_EXPENSE_CHANGED, BLOCK_MERGE_CHOICE),
+                candidates=(prev.matched_expense_id,),
+            )
+            return _Plan(entry, (), row, wrote)
         return _plain(resolved, prev, target, row, wrote)
     if prev.expense_id is None:  # a charge that never got its expense: materialize it now
         return _materialize(ctx, resolved, prev, target, None)
@@ -752,6 +784,45 @@ def _validate(
     return chosen
 
 
+def _aliases(line: ResolvedLine, rules_by_id: Mapping[str, MerchantRule]) -> tuple[str, ...]:
+    """The merchant names the line's rule vouches for, as used to propose a link."""
+    rule = rules_by_id.get(line.rule_id) if line.rule_id else None
+    return (*rule.aliases, rule.merchant_key) if rule else ()
+
+
+def _stale_links(
+    previous: Sequence[StoredLine],
+    present: Mapping[str, ResolvedLine],
+    targets: Mapping[str, _Target],
+    known: Mapping[str, ManualExpense],
+    rules_by_id: Mapping[str, MerchantRule],
+    charge_date: date,
+) -> dict[str, str]:
+    """Stored links whose hand entry, as passed in now, no longer fits its line.
+
+    Only an entry that is passed in can contradict a link (one that is absent proves nothing),
+    and a cancelled one is unlinked on its own rule, so neither is reported here."""
+    stale: dict[str, str] = {}
+    for row in previous:
+        if row.state != "active" or row.matched_expense_id is None:
+            continue
+        line = present.get(row.line_key)
+        expense = known.get(row.matched_expense_id)
+        if line is None or expense is None or targets[row.line_key].tag != "business":
+            continue
+        if expense.payment_status == PAYMENT_STATUS_CANCELLED or line.line.facts.kind != "charge":
+            continue
+        fits = terms_match(
+            line.line.facts,
+            expense,
+            charge_date=charge_date,
+            aliases=_aliases(line, rules_by_id),
+        )
+        if not fits:
+            stale[row.line_key] = row.matched_expense_id
+    return stale
+
+
 def diff_statement(
     previous: Sequence[StoredLine],
     resolved: Sequence[ResolvedLine],
@@ -807,14 +878,14 @@ def diff_statement(
     }
 
     rules_by_id = {rule.rule_id: rule for rule in rules}
+    known = {expense.expense_id: expense for expense in manual_candidates}
     items = []
     for line in resolved:
         key = line.line.line_key
         if _needs_match(line, prev_by_key.get(key), targets[key]):
-            rule = rules_by_id.get(line.rule_id) if line.rule_id else None
-            aliases = (*rule.aliases, rule.merchant_key) if rule else ()
-            items.append(MergeItem(key, line.line.facts, aliases))
+            items.append(MergeItem(key, line.line.facts, _aliases(line, rules_by_id)))
     matches = match_batch(items, list(pool.values()), charge_date=charge_date)
+    stale = _stale_links(previous, present, targets, known, rules_by_id, charge_date)
 
     problems = IssueCollector()
     claimed: set[str] = set()
@@ -822,7 +893,10 @@ def diff_statement(
         if value is None:
             continue
         found = matches.get(key)
-        if not isinstance(value, str) or found is None or value not in found.candidate_ids:
+        allowed = list(found.candidate_ids) if found is not None else []
+        if key in stale:
+            allowed.append(stale[key])  # the owner may keep the link he is asked about
+        if not isinstance(value, str) or value not in allowed:
             problems.add("choices.merge", "merge_choice_invalid")
     problems.raise_if_any()
     for value in chosen.merge.values():
@@ -842,7 +916,8 @@ def diff_statement(
         merge=chosen.merge,
         matches=matches,
         pool=pool,
-        known={expense.expense_id: expense for expense in manual_candidates},
+        known=known,
+        stale=stale,
     )
 
     plans: list[_Plan] = []

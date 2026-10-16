@@ -7,7 +7,7 @@ Shape (all keys required unless marked optional; unknown keys are rejected every
       "client_batch_id": "<lowercase canonical uuid>",
       "account_label": "<= 40 chars, no digit runs>",
       "charge_date": "YYYY-MM-DD",
-      "lines": [ <= 400 of
+      "lines": [ <= 300 of
         {
           "txn_date": "YYYY-MM-DD", "merchant_display": "<= 80 chars",
           "amount_minor": <int > 0>, "kind": "charge" | "credit", "currency": "ILS",
@@ -24,7 +24,8 @@ system could mistake for a command. Every string is data: cleaned, bounded, keye
 This is the whole v1 contract, and it is narrower than some earlier drafts on purpose: no
 merchant_raw and no note field (both are free text), merchant_display is capped at 80 characters
 (the only merchant text that is kept), and the card label is called account_label. The batch is
-at most 400 lines and 256 KiB of UTF-8 JSON, whatever the whitespace or escaping.
+at most 300 lines and 128 KiB (131072 bytes) of UTF-8 JSON, whatever the whitespace or escaping
+(V2_PG_CONTRACTS.md 12.1).
 """
 
 from __future__ import annotations

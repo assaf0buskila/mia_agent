@@ -116,6 +116,27 @@ def _amount_matches(facts: LineFacts, expense: ManualExpense) -> bool:
     )
 
 
+def terms_match(
+    facts: LineFacts,
+    expense: ManualExpense,
+    *,
+    charge_date: date,
+    aliases: Sequence[str] = (),
+) -> bool:
+    """The amount (or the original foreign amount), the date window and the vendor all fit this
+    charge. Whether the entry is free, cancelled or statement-created is the caller's concern.
+
+    This is the one definition of "fits": a candidate is proposed by it, and a link that was made
+    earlier is re-checked by it against the entry as it is now."""
+    earliest = facts.txn_date - timedelta(days=WINDOW_BEFORE_DAYS)
+    latest = charge_date + timedelta(days=WINDOW_AFTER_DAYS)
+    return (
+        _amount_matches(facts, expense)
+        and earliest <= expense.date <= latest
+        and vendor_matches(expense.vendor, facts.merchant_key, aliases)
+    )
+
+
 def match_manual(
     facts: LineFacts,
     expenses: Sequence[ManualExpense],
@@ -126,17 +147,13 @@ def match_manual(
     """Which hand-entered expenses could be this charge. Pure: the inputs are not changed."""
     if facts.kind != "charge":
         return MatchResult("none", None, ())
-    earliest = facts.txn_date - timedelta(days=WINDOW_BEFORE_DAYS)
-    latest = charge_date + timedelta(days=WINDOW_AFTER_DAYS)
     found = sorted(
         expense.expense_id
         for expense in expenses
         if not is_statement_source_key(expense.source_key)
         and expense.payment_status != PAYMENT_STATUS_CANCELLED
         and expense.linked_line_key is None
-        and _amount_matches(facts, expense)
-        and earliest <= expense.date <= latest
-        and vendor_matches(expense.vendor, facts.merchant_key, aliases)
+        and terms_match(facts, expense, charge_date=charge_date, aliases=aliases)
     )
     if not found:
         return MatchResult("none", None, ())
