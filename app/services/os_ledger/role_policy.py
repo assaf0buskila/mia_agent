@@ -3,8 +3,9 @@
 Nothing connects on import. validate_ledger_role is the V2_PG_CONTRACTS.md §5.5
 preflight (first connection, every 10 minutes and after a reconnect; never per
 request). validate_ledger_catalog is the operator transaction hook used by
-provisioning. Retention stays reserved, NOLOGIN and unprivileged until V2-14b adds
-its tables. No default privileges are granted for future tables.
+provisioning. V2-14b extends the map for its seven tables and makes retention a
+LOGIN NOINHERIT role with exactly its §18.2 purge rights. No default privileges are
+granted for future tables.
 """
 
 from collections.abc import Mapping
@@ -108,6 +109,120 @@ inside(classid, objid) AS (
 # the only things outside assaf_os that an assaf_os object may depend on.
 _FIRST_NORMAL_OID = 16384
 
+# --- V2-14b extension (V2_PG_CONTRACTS.md section 18.2) --------------------------------
+# Kept apart from the V2-15 map above. Literal tuples only; the policy tests pin each one
+# to the migration SQL's columns. TABLE_PRIVILEGES already gives every V2-14b table
+# SELECT and INSERT, because os_ledger_migrate.TABLES lists them. Never updatable:
+# os_workspaces.epoch and statement_pepper_fp, os_receipts.reason_codes, and every
+# os_assistant_audit column.
+ADDENDUM_COLUMN_UPDATES: Mapping[str, tuple[str, ...]] = MappingProxyType({
+    "os_workspaces": ("pending_seq",),
+    "os_statements": (
+        "status", "line_count", "lines_digest", "current_proposal_id", "approved_proposal_id",
+        "imported_version", "updated_at",
+    ),
+    # Every column except workspace_id, statement_id, line_key and created_at.
+    "os_statement_lines": (
+        "tag", "state", "txn_date", "merchant_display", "merchant_key", "amount_minor", "kind",
+        "currency", "original_amount_minor", "original_currency", "installment_n",
+        "installment_of", "category", "path", "platform", "is_subscription", "rule_id",
+        "assistant_tag", "owner_override", "expense_id", "matched_expense_id",
+        "expense_revision_at_import", "revision", "updated_at",
+    ),
+    # Every column except workspace_id, rule_id and created_at.
+    "os_merchant_rules": (
+        "match", "tag", "merchant_key", "merchant_key_hmac", "category", "path", "platform",
+        "is_subscription", "label", "aliases", "active", "revision", "source_proposal_id",
+        "updated_at",
+    ),
+    "os_statement_review_drafts": ("draft_revision", "overrides", "choices", "updated_at"),
+    "os_statement_batch_lines": ("detail", "purged_at"),
+    "os_assistant_credentials": ("revoked_at", "last_used_at", "use_count"),
+})
+# Retention (LOGIN NOINHERIT): schema USAGE plus exactly these. The os-retention job uses
+# DELETE only for purged batch lines, batch lines whose proposal expired more than a day
+# ago (the I11 backstop, whatever purged_at says), and audit rows older than 180 days.
+RETENTION_TABLE_PRIVILEGES: Mapping[str, frozenset[str]] = MappingProxyType({
+    "os_assistant_audit": frozenset({"SELECT", "DELETE"}),
+    "os_statement_batch_lines": frozenset({"SELECT", "DELETE"}),
+})
+RETENTION_COLUMN_SELECTS: Mapping[str, tuple[str, ...]] = MappingProxyType({
+    "os_proposals": ("workspace_id", "proposal_id", "kind", "status", "expires_at"),
+})
+
+
+def addendum_grant_statements() -> tuple[str, ...]:
+    """V2-14b's GRANTs, appended to ledger_grant_statements() after V2-15's."""
+    statements = [
+        f"GRANT UPDATE ({', '.join(columns)}) ON TABLE assaf_os.{name} TO assaf_os_ledger;"
+        for name, columns in ADDENDUM_COLUMN_UPDATES.items()
+    ]
+    statements.append("GRANT USAGE ON SCHEMA assaf_os TO assaf_os_retention;")
+    for name, privileges in RETENTION_TABLE_PRIVILEGES.items():
+        statements.append(
+            f"GRANT {', '.join(sorted(privileges))} ON TABLE assaf_os.{name} "
+            "TO assaf_os_retention;"
+        )
+    for name, columns in RETENTION_COLUMN_SELECTS.items():
+        statements.append(
+            f"GRANT SELECT ({', '.join(columns)}) ON TABLE assaf_os.{name} TO assaf_os_retention;"
+        )
+    return tuple(statements)
+
+
+def _addendum_acl() -> tuple[set[tuple], set[tuple], set[tuple]]:
+    """Expected V2-14b schema, table and column ACL entries (no grant options)."""
+    schema = {(RETENTION_ROLE, "USAGE", False)}
+    tables = {
+        (name, RETENTION_ROLE, privilege, False)
+        for name, privileges in RETENTION_TABLE_PRIVILEGES.items() for privilege in privileges
+    }
+    columns = {
+        (name, column, RUNTIME_ROLE, "UPDATE", False)
+        for name, names in ADDENDUM_COLUMN_UPDATES.items() for column in names
+    } | {
+        (name, column, RETENTION_ROLE, "SELECT", False)
+        for name, names in RETENTION_COLUMN_SELECTS.items() for column in names
+    }
+    return schema, tables, columns
+
+
+def _retention_effective(conn: Connection) -> None:
+    # Effective, not only ACL-level: PUBLIC or any other path into assaf_os also fails.
+    tables = conn.execute(text("""
+        SELECT c.relname, p.privilege FROM pg_class c
+        JOIN pg_namespace n ON n.oid=c.relnamespace
+        CROSS JOIN unnest(ARRAY['SELECT','INSERT','UPDATE','DELETE','TRUNCATE',
+                                'REFERENCES','TRIGGER']) AS p(privilege)
+        WHERE n.nspname='assaf_os' AND c.relkind IN ('r','p','v','m','f')
+        AND has_table_privilege(:role, c.oid, p.privilege)
+    """), {"role": RETENTION_ROLE}).all()
+    _require({tuple(row) for row in tables} == {
+        (name, privilege)
+        for name, privileges in RETENTION_TABLE_PRIVILEGES.items() for privilege in privileges
+    })
+    columns = conn.execute(text("""
+        SELECT c.relname, a.attname, p.privilege FROM pg_class c
+        JOIN pg_namespace n ON n.oid=c.relnamespace
+        JOIN pg_attribute a ON a.attrelid=c.oid AND a.attnum > 0 AND NOT a.attisdropped
+        CROSS JOIN unnest(ARRAY['SELECT','INSERT','UPDATE','REFERENCES']) AS p(privilege)
+        WHERE n.nspname='assaf_os' AND c.relkind IN ('r','p','v','m','f')
+        AND has_column_privilege(:role, c.oid, a.attnum, p.privilege)
+    """), {"role": RETENTION_ROLE}).all()
+    _require({tuple(row) for row in columns if row[0] not in RETENTION_TABLE_PRIVILEGES} == {
+        (name, column, "SELECT")
+        for name, names in RETENTION_COLUMN_SELECTS.items() for column in names
+    })
+    _require({row[2] for row in columns if row[0] in RETENTION_TABLE_PRIVILEGES} <= {"SELECT"})
+    _require(not conn.scalar(text("""
+        SELECT EXISTS(SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+          WHERE n.nspname='assaf_os' AND CASE WHEN c.relkind='S'
+          THEN has_sequence_privilege(:role, c.oid, 'USAGE,SELECT,UPDATE') ELSE false END)
+        OR EXISTS(SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+          WHERE n.nspname='assaf_os' AND has_function_privilege(:role, p.oid, 'EXECUTE'))
+        OR NOT has_schema_privilege(:role, 'assaf_os', 'USAGE')
+    """), {"role": RETENTION_ROLE}))
+
 
 def ledger_grant_statements() -> tuple[str, ...]:
     """Return the complete, deterministic runtime GRANT set (no dynamic SQL names)."""
@@ -123,6 +238,7 @@ def ledger_grant_statements() -> tuple[str, ...]:
     statements.append(
         "GRANT EXECUTE ON FUNCTION assaf_os.expense_source_key_sha256(text) TO assaf_os_ledger;"
     )
+    statements.extend(addendum_grant_statements())  # V2-14b
     return tuple(statements)
 
 
@@ -149,7 +265,8 @@ def _roles(conn: Connection, main_role: str, migration_role: str | None) -> None
     _require(bool(main_role) and bool(migration_role) and len({
         RUNTIME_ROLE, OWNER_ROLE, RETENTION_ROLE, main_role, migration_role,
     }) == 5)
-    for role, login in ((RUNTIME_ROLE, True), (OWNER_ROLE, False), (RETENTION_ROLE, False)):
+    # V2-14b: retention is LOGIN NOINHERIT (section 18.2).
+    for role, login in ((RUNTIME_ROLE, True), (OWNER_ROLE, False), (RETENTION_ROLE, True)):
         row = conn.execute(text(
             "SELECT rolcanlogin, rolinherit, rolsuper, rolcreaterole, rolcreatedb, "
             "rolreplication, rolbypassrls FROM pg_roles WHERE rolname=:role"
@@ -322,12 +439,13 @@ def _catalog(conn: Connection, main_role: str, migration_role: str | None) -> No
     # identity_arguments includes the declared argument name in this SQL helper.
     _require({(name.replace('value text', 'text'), owner, security) for name, owner, security
               in functions} == {(name, OWNER_ROLE, False) for name in OWNED_FUNCTIONS})
+    addendum_schema, addendum_tables, addendum_columns = _addendum_acl()  # V2-14b
     _acl(conn, """
         SELECT pg_get_userbyid(a.grantee),a.privilege_type,a.is_grantable
         FROM pg_namespace n CROSS JOIN LATERAL
         aclexplode(COALESCE(n.nspacl,acldefault('n',n.nspowner))) a
         WHERE n.nspname='assaf_os' AND a.grantee<>n.nspowner
-    """, {(RUNTIME_ROLE, "USAGE", False)})
+    """, {(RUNTIME_ROLE, "USAGE", False)} | addendum_schema)
     _acl(conn, """
         SELECT c.relname,pg_get_userbyid(a.grantee),a.privilege_type,a.is_grantable
         FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
@@ -335,7 +453,8 @@ def _catalog(conn: Connection, main_role: str, migration_role: str | None) -> No
             CASE WHEN c.relkind='S' THEN 'S'::"char" ELSE 'r'::"char" END,c.relowner))) a
         WHERE n.nspname='assaf_os' AND a.grantee<>c.relowner
     """, {(name, RUNTIME_ROLE, privilege, False)
-          for name, privileges in TABLE_PRIVILEGES.items() for privilege in privileges})
+          for name, privileges in TABLE_PRIVILEGES.items() for privilege in privileges}
+        | addendum_tables)
     _acl(conn, """
         SELECT c.relname,col.attname,pg_get_userbyid(a.grantee),a.privilege_type,a.is_grantable
         FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
@@ -343,7 +462,8 @@ def _catalog(conn: Connection, main_role: str, migration_role: str | None) -> No
         CROSS JOIN LATERAL aclexplode(col.attacl) a
         WHERE n.nspname='assaf_os' AND a.grantee<>c.relowner
     """, {(name, col, RUNTIME_ROLE, "UPDATE", False)
-          for name, columns in COLUMN_UPDATES.items() for col in columns})
+          for name, columns in COLUMN_UPDATES.items() for col in columns}
+        | addendum_columns)
     _acl(conn, """
         SELECT p.proname,pg_get_userbyid(a.grantee),a.privilege_type,a.is_grantable
         FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
@@ -351,21 +471,22 @@ def _catalog(conn: Connection, main_role: str, migration_role: str | None) -> No
         WHERE n.nspname='assaf_os' AND a.grantee<>p.proowner
     """, {("expense_source_key_sha256", RUNTIME_ROLE, "EXECUTE", False)})
     # Reject ambient PUBLIC privileges and explicit grants in ANY user schema,
-    # even without schema USAGE. Retention has no effective object privileges.
+    # even without schema USAGE. V2-14b: inside assaf_os, retention's effective
+    # privileges are pinned exactly by _retention_effective below.
     for role in (RUNTIME_ROLE, RETENTION_ROLE):
         _require(not conn.scalar(text(f"""
             SELECT EXISTS(SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
-            WHERE {_USER_SCHEMA} AND (n.nspname<>'assaf_os' OR CAST(:retention AS boolean))
-            AND CASE
+            WHERE {_USER_SCHEMA} AND n.nspname<>'assaf_os' AND CASE
               WHEN c.relkind='S' THEN has_sequence_privilege(:role,c.oid,'USAGE,SELECT,UPDATE')
               WHEN c.relkind IN ('r','p','v','m','f') THEN
                 has_table_privilege(:role,c.oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
                 OR has_any_column_privilege(:role,c.oid,'SELECT,INSERT,UPDATE,REFERENCES')
               ELSE false END)
             OR EXISTS(SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
-            WHERE {_USER_SCHEMA} AND (n.nspname<>'assaf_os' OR CAST(:retention AS boolean))
+            WHERE {_USER_SCHEMA} AND n.nspname<>'assaf_os'
             AND has_function_privilege(:role,p.oid,'EXECUTE'))
-        """), {"role": role, "retention": role == RETENTION_ROLE}))
+        """), {"role": role}))
+    _retention_effective(conn)  # V2-14b
     _closure(conn)
     _footprints(conn, main_role)
     _defaults(conn, main_role)

@@ -1,4 +1,4 @@
-# Assaf OS ledger schema: V2-14
+# Assaf OS ledger schema: V2-14 and V2-14b
 
 This is an additive, inactive foundation in schema `assaf_os` inside database `mia`
 (owner decision FORK-DB option A). No application handler, worker or health endpoint
@@ -15,7 +15,35 @@ The frozen seven-entity JSON contract and parity oracle are unchanged. Monetary
 columns hold integer minor units, checked as unscaled NUMERIC so PostgreSQL cannot
 silently round fractional input on assignment to BIGINT. V2-16 must normalize input
 units explicitly; this migration performs no business-data import or conversion.
-Statement-domain and assistant-domain tables belong to their later chunks.
+The statement and assistant tables are V2-14b's addendum, below.
+
+## V2-14b schema addendum
+
+Three more allow-listed files, applied after `20261015_assaf_os_ledger.sql` in this
+order (the order of `MIGRATIONS`, not of the file names), by the same runner and
+journal, inside the same single transaction as any other pending file:
+
+1. `20261016_assaf_os_ledger_core_v2.sql`: `os_workspaces.pending_seq` and
+   `statement_pepper_fp`; proposals gain `abandoned` (only for `owner_direct`) and
+   receipts gain `superseded` and `abandoned`; the receipt undo-shape checks and the
+   INSERT-only `reason_codes`; the proposals `(workspace_id, status, kind, created_at)`
+   index; and the import key `(workspace_id, authority_epoch, source_digest)`. Each
+   replaced V2-14 constraint is dropped by its exact name, so a renamed one aborts the
+   whole run. `undo_state` is unchanged and inert.
+2. `20261016_assaf_os_statements.sql`: `os_statements`, `os_statement_lines`,
+   `os_statement_batch_lines`, `os_merchant_rules` and `os_statement_review_drafts`.
+   Personal lines and personal rules keep only keyed identities. Detail lives only in
+   `os_statement_batch_lines.detail` until the purge.
+3. `20261016_assaf_os_assistant.sql`: `os_assistant_credentials`, `os_assistant_audit`,
+   and the foreign key from `os_proposals(workspace_id, credential_id)`.
+
+None of the three files grants, revokes, creates a function or trigger, or writes a
+row. The grant map, including V2-14b's columns and the retention role, lives only in
+`app/services/os_ledger/role_policy.py` (contract section 18.2). Retention becomes a
+LOGIN NOINHERIT role with schema USAGE, SELECT and DELETE on `os_statement_batch_lines`
+and `os_assistant_audit`, and SELECT on five `os_proposals` columns. The runtime role
+still has no DELETE or TRUNCATE anywhere. `tests/db/test_assaf_os_ledger_addendum.py`
+pins every column, key, CHECK and index, with a rejecting case for every CHECK.
 
 ## Explicit operator job and production gate
 
@@ -63,8 +91,8 @@ grants after a `--no-owner --no-privileges` restore; on a database without
 `assaf_os` it is a no-op. Provisioning grants `assaf_os_owner` to the migration
 identity WITH ADMIN TRUE, SET FALSE, INHERIT FALSE, the one edge this runner allows.
 
-The future map must deny DELETE/TRUNCATE everywhere; events, receipts and audit are
-INSERT/SELECT only; the migration journal and authority fence are not runtime-writable.
+The runtime map denies DELETE/TRUNCATE everywhere (V2-14b gives DELETE only to the
+retention role, on two tables); events, receipts and audit are INSERT/SELECT only; the migration journal and authority fence are not runtime-writable.
 Record/proposal/outbox updates need their own explicit column allowlists. Runtime
 role and main app role must differ. The main DSN must independently fail closed on
 superuser/elevated attributes or ledger access, including in authority preflight.

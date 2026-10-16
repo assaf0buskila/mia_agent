@@ -64,7 +64,9 @@ _POSTURE = "NOINHERIT NOSUPERUSER NOCREATEROLE NOCREATEDB NOREPLICATION NOBYPASS
 _ROLE_PLAN = (
     (OWNER_ROLE, f"CREATE ROLE {OWNER_ROLE} NOLOGIN {_POSTURE};"),
     (RUNTIME_ROLE, f"CREATE ROLE {RUNTIME_ROLE} LOGIN {_POSTURE};"),
-    (RETENTION_ROLE, f"CREATE ROLE {RETENTION_ROLE} NOLOGIN {_POSTURE};"),
+    # V2-14b (§18.2): the os-retention job logs in as itself. No password is set here;
+    # its DSN is the job-only MIA_OS_LEDGER_RETENTION_DATABASE_URL (V2-31's env file).
+    (RETENTION_ROLE, f"CREATE ROLE {RETENTION_ROLE} LOGIN {_POSTURE};"),
 )
 _REAPPLY_NOTE = (
     "-- reapply: each CREATE ROLE runs only for a missing role; "
@@ -106,6 +108,8 @@ def provision_statements(name: str, mode: str = "provision") -> tuple[str, ...]:
         f"REVOKE ALL ON ALL ROUTINES IN SCHEMA assaf_os FROM {_GRANTEES};",
         # A --no-privileges restore also drops the owner's global default ACL.
         f"ALTER DEFAULT PRIVILEGES FOR ROLE {OWNER_ROLE} REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;",
+        # Includes V2-14b's addendum and retention grants (role_policy.addendum_grant_statements),
+        # so reapply restores them after the REVOKEs above.
         *ledger_grant_statements(),
     )
 
