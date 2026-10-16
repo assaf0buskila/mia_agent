@@ -1,4 +1,10 @@
-"""VM-local, owner-operated staging/cutover. Standard library only; no secret output."""
+"""VM-local, owner-operated staging/cutover. Standard library only; no secret output.
+
+Modes: stage (default), --check, --activate, --enforce, --rollback, and --reapply, the
+post-restore repair that `mia restore` runs (V2-10) after pg_restore and before the services
+start. Only --activate, --enforce and --rollback write /etc/mia/runtime.env; --reapply and
+--check never write any env file.
+"""
 
 import argparse
 import json
@@ -11,6 +17,37 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 SQL_PATH = Path(__file__).with_name("sql") / "app-role-demote.sql"
+ROLE_EXISTS_SQL = "SELECT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='mia_app')"
+# Fixed reason codes: the ones the reviewed SQL raises, and the ones this tool raises. Only these
+# are ever printed. Everything else (psql stderr can carry statements, DSNs and role names, and
+# arbitrary exceptions can carry anything) collapses to a generic code.
+SQL_REASONS = frozenset(
+    {
+        "app_role_admin_required",
+        "app_role_target_invalid",
+        "app_role_reapply_role_missing",
+        "app_role_existing_unsafe",
+        "app_role_database_owner_unsafe",
+        "app_role_membership_unsafe",
+        "app_role_ledger_access_unsafe",
+        "app_role_extension_object_requires_review",
+    }
+)
+TOOL_REASONS = frozenset(
+    {
+        "app_role_auth_failed",
+        "app_role_check_failed",
+        "app_role_database_failed",
+        "app_role_dsn_invalid",
+        "app_role_dsn_mismatch",
+        "app_role_file_unsafe",
+        "app_role_mode_invalid",
+        "app_role_root_required",
+        "app_role_staged_password_invalid",
+        "app_role_unmanaged",
+    }
+)
+SQL_ERROR_LINE = re.compile(r"^ERROR:\s+(app_role_[a-z_]+)\s*$", re.MULTILINE)
 CHECK_SQL = """
 SELECT json_build_object(
  'role_exists', EXISTS(SELECT 1 FROM pg_roles WHERE rolname='mia_app'),
@@ -78,8 +115,16 @@ def database(sql: str) -> str:
         timeout=120,
     )
     if result.returncode:
-        raise ValueError("app_role_database_failed")
+        raise ValueError(sql_reason(result.stderr))
     return result.stdout.strip()
+
+
+def sql_reason(stderr: str | None) -> str:
+    """The fixed reason code the reviewed SQL raised, else a generic code. Nothing else leaks."""
+    for code in SQL_ERROR_LINE.findall(stderr or ""):
+        if code in SQL_REASONS:
+            return code
+    return "app_role_database_failed"
 
 
 def authenticate(password: str) -> None:
@@ -114,7 +159,7 @@ def authenticate(password: str) -> None:
         raise ValueError("app_role_auth_failed")
 
 
-def require_safe(execute) -> None:
+def require_safe(execute, *, allow_ledger_access: bool = False) -> dict:
     state = json.loads(execute(CHECK_SQL))
     required = (
         "role_exists",
@@ -124,12 +169,14 @@ def require_safe(execute) -> None:
         "public_owned",
         "public_create",
     )
+    ledger_ok = (False, True) if allow_ledger_access else (False,)
     if (
         not all(state.get(key) is True for key in required)
         or state.get("database_create") is not False
-        or state.get("ledger_access") is not False
+        or state.get("ledger_access") not in ledger_ok
     ):
         raise ValueError("app_role_check_failed")
+    return state
 
 
 def atomic_write(path: Path, content: str) -> None:
@@ -189,7 +236,43 @@ def update_env(content: str, **updates: str) -> str:
     return "\n".join(lines) + "\n"
 
 
+def transaction(credential_sql: str = "", *, repair: bool = False) -> str:
+    """The one reviewed demote script in one transaction, with statement logging suppressed."""
+    return (
+        "BEGIN; SET LOCAL lock_timeout='5s'; SET LOCAL statement_timeout='90s';\n"
+        "SET LOCAL log_statement='none'; SET LOCAL log_min_error_statement='panic';\n"
+        "SET LOCAL log_min_duration_statement=-1; SET LOCAL log_min_duration_sample=-1;\n"
+        "SET LOCAL log_duration=off;\n"
+        + ("SET LOCAL mia.app_role_reapply='on';\n" if repair else "")
+        + SQL_PATH.read_text(encoding="utf-8")
+        + "\n"
+        + credential_sql
+        + "COMMIT;\n"
+    )
+
+
+def reapply(execute) -> dict[str, bool]:
+    """Post-restore repair, run as superuser mia under the caller's state lock.
+
+    `mia restore` drops and recreates the database, then runs `pg_restore --no-owner
+    --no-privileges`: every object is owned by mia, and every grant, default ACL and the
+    schema CREATE grant are gone. The role itself is cluster-global and survives. This re-runs
+    the idempotent ownership transfer and grants. It never reads or writes an env file, never
+    creates a role or rotates a password, and never restarts anything. Before the demote
+    exists there is nothing to repair, so that case is a no-op, not a failed restore.
+    """
+    if execute(ROLE_EXISTS_SQL) != "t":
+        return {"reapplied": False, "role_exists": False}
+    execute(transaction(repair=True))
+    # Residual assaf_os access is reported, not fatal: a restore resurrects PUBLIC EXECUTE on
+    # the ledger functions, and V2-15's reapply clears it. V2-10 then runs the real validator.
+    state = require_safe(execute, allow_ledger_access=True)
+    return {"reapplied": True, "role_exists": True, "ledger_access": state["ledger_access"]}
+
+
 def perform(mode: str, directory: Path, execute=database) -> dict[str, bool]:
+    if mode == "reapply":
+        return reapply(execute)
     runtime = directory / "runtime.env"
     staged = directory / "app-role.staged.env"
     rollback = directory / "app-role.rollback.env"
@@ -226,7 +309,7 @@ def perform(mode: str, directory: Path, execute=database) -> dict[str, bool]:
         return {"runtime_updated": True, "restart_required": True}
     if mode != "stage":
         raise ValueError("app_role_mode_invalid")
-    exists = execute("SELECT EXISTS(SELECT 1 FROM pg_roles WHERE rolname='mia_app')") == "t"
+    exists = execute(ROLE_EXISTS_SQL) == "t"
     if exists and not staged.exists():
         raise ValueError("app_role_unmanaged")
     if not rollback.exists():
@@ -246,16 +329,7 @@ def perform(mode: str, directory: Path, execute=database) -> dict[str, bool]:
     # A failed transaction leaves the same staged credential for a safe retry.
     # Existing managed roles are never rotated on re-run.
     credential_sql = "" if exists else f"ALTER ROLE mia_app PASSWORD '{password}';\n"
-    execute(
-        "BEGIN; SET LOCAL lock_timeout='5s'; SET LOCAL statement_timeout='90s';\n"
-        "SET LOCAL log_statement='none'; SET LOCAL log_min_error_statement='panic';\n"
-        "SET LOCAL log_min_duration_statement=-1; SET LOCAL log_min_duration_sample=-1;\n"
-        "SET LOCAL log_duration=off;\n"
-        + SQL_PATH.read_text(encoding="utf-8")
-        + "\n"
-        + credential_sql
-        + "COMMIT;\n"
-    )
+    execute(transaction(credential_sql))
     authenticate(password)
     return {"provisioned": True, "dsn_staged": True, "runtime_changed": False}
 
@@ -263,16 +337,19 @@ def perform(mode: str, directory: Path, execute=database) -> dict[str, bool]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     modes = parser.add_mutually_exclusive_group()
-    for mode in ("check", "activate", "enforce", "rollback"):
+    for mode in ("check", "activate", "enforce", "rollback", "reapply"):
         modes.add_argument(f"--{mode}", action="store_const", const=mode, dest="mode")
     args = parser.parse_args()
     try:
         if os.geteuid() != 0:
             raise ValueError("app_role_root_required")
         result = perform(args.mode or "stage", Path("/etc/mia"))
-    except Exception:
-        # Never stringify exceptions, SQL, subprocess output, paths, or credentials.
-        print("reason=app_role_operation_failed ok=false")
+    except Exception as failure:
+        # Never stringify exceptions, SQL, subprocess output, paths, or credentials. Only an
+        # exact fixed reason code (this tool's own, or one the reviewed SQL raised) is printed.
+        reason = str(failure) if isinstance(failure, ValueError) else ""
+        known = reason in SQL_REASONS or reason in TOOL_REASONS
+        print(f"reason={reason if known else 'app_role_operation_failed'} ok=false")
         return 1
     print(json.dumps(result, sort_keys=True))
     return 0

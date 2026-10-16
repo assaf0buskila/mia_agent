@@ -1,9 +1,16 @@
 -- Execute as the database superuser in ONE transaction. No password in this file.
 -- Optional transaction-local mia.app_role is for isolated tests; VM wrapper pins mia_app.
+-- Transaction-local mia.app_role_reapply = 'on' selects the post-restore repair (`reapply`):
+--   * it never creates the role (roles are cluster-global and survive DROP DATABASE), and
+--   * it does not refuse residual assaf_os access. pg_restore --no-owner --no-privileges
+--     resurrects PUBLIC EXECUTE on the ledger functions, and V2-15's reapply, the next
+--     post-restore step, clears it. The caller verifies the final state with the real
+--     V2-14 validator. Every other guard below applies unchanged.
 -- Do not REASSIGN OWNED: that would also transfer the database and private schemas.
 DO $demote$
 DECLARE
     target text := coalesce(nullif(current_setting('mia.app_role', true), ''), 'mia_app');
+    reapply boolean := coalesce(current_setting('mia.app_role_reapply', true), '') = 'on';
     target_oid oid;
     obj record;
 BEGIN
@@ -15,6 +22,9 @@ BEGIN
     END IF;
     PERFORM pg_advisory_xact_lock(214014);
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname=target) THEN
+        IF reapply THEN
+            RAISE EXCEPTION 'app_role_reapply_role_missing';
+        END IF;
         EXECUTE format('CREATE ROLE %I LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE '
                        'NOREPLICATION NOBYPASSRLS NOINHERIT', target);
     END IF;
@@ -31,7 +41,7 @@ BEGIN
     IF EXISTS (SELECT 1 FROM pg_auth_members WHERE member=target_oid) THEN
         RAISE EXCEPTION 'app_role_membership_unsafe';
     END IF;
-    IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname='assaf_os' AND
+    IF NOT reapply AND (EXISTS (SELECT 1 FROM pg_namespace WHERE nspname='assaf_os' AND
         has_schema_privilege(target, oid, 'USAGE,CREATE')) OR EXISTS (
         SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
         WHERE n.nspname='assaf_os' AND CASE
@@ -41,7 +51,7 @@ BEGIN
         OR has_any_column_privilege(target,c.oid,'SELECT,INSERT,UPDATE,REFERENCES')
         ELSE false END) OR EXISTS (
         SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
-        WHERE n.nspname='assaf_os' AND has_function_privilege(target,p.oid,'EXECUTE')) THEN
+        WHERE n.nspname='assaf_os' AND has_function_privilege(target,p.oid,'EXECUTE'))) THEN
         RAISE EXCEPTION 'app_role_ledger_access_unsafe';
     END IF;
     -- PUBLIC database CREATE is not required by current deployments. Keep CONNECT/TEMP.

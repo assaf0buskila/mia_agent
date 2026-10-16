@@ -1,9 +1,10 @@
 # V2-14a: owner-gated main application role cutover
 
 Status: implementation and disposable local evidence only. No production commands in
-this runbook have been executed by the builder. Independent Claude HEAVY review and
-Assaf's approval are required before production. Issue #151, epic #153; companion
-V2-14 ledger PR #157 is separate and must not be enabled by this procedure.
+this runbook have been executed by the builder. Independent HEAVY review and Assaf's
+approval are required before production. Issue #151, epic #153; the V2-14 ledger schema
+(PR #157) is merged but its migration is a separate owner gate and must not be run by this
+procedure. The `--reapply` post-restore repair (below) is the V2-14a finishing work.
 
 ## Migration decision and authority boundary
 
@@ -143,9 +144,64 @@ Resume jobs only to their recorded prior state. A repeated rollback is safe.
 
 If an old image must also be restored, use the normal exact-SHA rollback procedure
 after the DSN rollback. **Do not use `mia restore` for this cutover rollback.** Its
-current `--no-owner --no-privileges` behavior recreates objects as `mia` and strips
-ACLs; full disaster recovery requires independently restoring Owner OS/ledger roles
-and ACLs before reopening traffic. Default grants cannot replace ownership.
+`--no-owner --no-privileges` behavior recreates objects as `mia` and strips ACLs, so the
+database needs the repair below before `mia_app` can use it. Rolling back the DSN never
+needs a restore.
+
+## Re-applying after a restore (`--reapply`)
+
+`mia restore` runs `DROP DATABASE`/`CREATE DATABASE mia` and then
+`pg_restore --no-owner --no-privileges` as superuser `mia`. Roles are cluster-global, so
+`mia_app` survives. Everything database-local does not: every object is owned by `mia`,
+every grant and default ACL is gone, and `mia_app` has no CREATE on `public`. Until
+repaired, `mia_app` gets `permission denied` on every table and `mia-migrate` cannot ALTER.
+
+`app-role-demote.sh --reapply` is that repair. It takes the same state lock and runs the
+same reviewed SQL as the first demote, with these differences from `stage`:
+
+- It re-runs the ownership transfer of every `public` table, sequence, view, materialized
+  view, foreign table and routine to `mia_app`, the CONNECT, USAGE and CREATE grants, the
+  PUBLIC database CREATE revoke, and the global PUBLIC EXECUTE revoke for future functions.
+- It is idempotent: a second run changes no catalog row.
+- It reads and writes no env file (`runtime.env`, staged and rollback files stay untouched),
+  creates no role, rotates no password, restarts nothing, and prints booleans only.
+- Before the demote exists (`mia_app` absent) it is a no-op,
+  `{"reapplied": false, "role_exists": false}`, so a restore before step 2 of the production
+  order still works. In reapply mode the SQL itself refuses to create the role.
+- Every other guard still applies: an unsafe role, database ownership or membership aborts
+  with the same reason code. An extension-owned object in `public` stops the run with
+  `app_role_extension_object_requires_review`; the transaction rolls back and nothing
+  changes. Review it before restoring service.
+- It does not refuse residual `assaf_os` access. A restore resurrects PUBLIC EXECUTE on the
+  ledger functions, because their `REVOKE` is a privilege that `--no-privileges` drops.
+  `--reapply` never touches `assaf_os`; it reports `"ledger_access": true` and the next
+  post-restore step, `provision_ledger.py --mode reapply` (V2-15), clears it.
+- After the transaction it re-reads the catalog and fails with `app_role_check_failed` if
+  `public` is not fully owned by `mia_app` or any posture boolean is wrong.
+
+Output on success: `{"ledger_access": false, "reapplied": true, "role_exists": true}`.
+
+**Who runs it.** After V2-10's post-restore step lands in `ops/gcp/vm/mia`, `mia restore`
+runs it automatically: after `pg_restore`, before `start_services`, under the lock it already
+holds, followed by `provision_ledger.py --mode reapply`. Because `mia restore` already holds
+`/var/lock/mia-state.lock`, it must run `app_role_demote.py --reapply` directly: the wrapper
+takes the same lock on a new file description and would report busy. Until V2-10 lands, an
+operator restoring a post-demote dump runs
+`sudo /opt/mia/app-role-demote/app-role-demote.sh --reapply` immediately after `mia restore`,
+then recreates `app`. Never restore the services to traffic before it succeeds.
+
+**Known limit of the posture check.** V2-14's `_validate_main_role_catalog`, and so
+`/health/ready` under `enforce`, checks role attributes, database ownership, memberships and
+access to `assaf_os`. It does not check access to `public` tables. After a restore that is
+not repaired it still passes while every query is denied. V2-10's post-step must therefore
+also probe real table access as `mia_app` (SELECT and INSERT on an application table), not
+rely on the validator alone. The restore drill in
+`tests/unit/test_app_role_demote_postgres.py` asserts the denial before `--reapply` and the
+validator plus real SELECT and INSERT after it.
+
+Not covered: `--reapply` transfers tables, sequences, views, materialized views, foreign
+tables and routines. Custom types and domains in `public` are not transferred (the current
+schema has none); a future migration that adds one needs the SQL extended.
 
 ## Readiness and evidence
 
@@ -162,46 +218,53 @@ Observe never adds a startup blocker. Enforce affects `/health/ready`, not liven
 or process startup. Error details, SQL, role identifiers, DSNs and passwords are not
 included in posture logs or health responses.
 
-Baseline: `.cache/v2-14a-baseline.log`: **3672 passed, 213 skipped**.
-Tests-first red: `.cache/v2-14a-red.log`: **22 failed** (missing setting/module/SQL);
-`.cache/v2-14a-script-red.log`: **5 errors** (missing helper).
-Final local gates (Windows, offline venv):
+### Evidence
+
+As built (before the finishing work): baseline 3672 passed, 213 skipped; tests-first red
+22 failed plus 5 errors; full default suite 3699 passed, 228 skipped; full suite with the
+Owner OS database on the disposable server 3737 passed, 190 skipped; focused 57 passed with
+zero skipped. An additional fresh HEAVY source review of that build found a POSIX test-fixture
+ownership issue, which was corrected. Those counts are superseded by the run below.
+
+Finishing work, rebased on master `bfb78d6` (which carries the V2-14 ledger schema). Logs are
+local and uncommitted:
 
 | Gate | Result | Log |
 | --- | --- | --- |
-| Full default suite | 3699 passed, 228 skipped | `.cache/v2-14a-full.log` |
-| Full suite with Owner OS DB on disposable **56216** | 3737 passed, 190 skipped | `.cache/v2-14a-owner-full.log` |
-| Focused role, provisioning, posture and migration suite | 57 passed, zero skipped | `.cache/v2-14a-pg.log` |
-| Ruff (`app tests ops`) | passed | `.cache/v2-14a-ruff.log` |
-| Widget behavioral checks | passed | `.cache/v2-14a-widget.log` |
-| Shell syntax, LF, diff whitespace | passed | `.cache/v2-14a-shell.log`, `.cache/v2-14a-lf.log`, `.cache/v2-14a-diff-check.log` |
+| Tests-first red (reapply, restore drill, settings, real validator) | 60 failed, 51 passed | `.cache/v2-14a-finish-red.log` |
+| Full default suite (`MIA_ENV=test`, PG URL unset) | 4753 passed, 291 skipped | `.cache/v2-14a-finish-full.log` |
+| Focused role tests on disposable **56216** | 119 passed, 0 skipped | `.cache/v2-14a-finish-focused.log` |
+| Ruff (`app tests ops`) | passed | |
+| Widget behavioral checks | passed | `.cache/v2-14a-finish-widget.log` |
 
-The default suite's 228 skips include 15 new PG cases whose opt-in URL is unset,
-plus the baseline's 213 opt-in skips. The focused run enables all 15 new PG cases.
-An additional fresh HEAVY source review found a POSIX test-fixture ownership issue;
-it was corrected and re-reviewed with no remaining blockers. Production file
-ownership checks remain intact; separate tests cover their acceptance/rejection.
-Claude coordinator review, Linux CI and production acceptance are still pending.
+The focused command, run with the opt-in URL set so no case skips:
 
-All logs are local and uncommitted. The test fixture allows only the supplied disposable admin URL at
-`127.0.0.1:56216/mia_role_test`; it creates unique databases/roles and cleans them up.
-It executes the exact V2-14 catalog SQL, the deployment migration worker with
-MIA_DATABASE_URL changed to the demoted login, pending ALTER/CREATE migrations,
-real catalog staging/rerun/cutover/rollback, and sanitized failure/readiness tests.
-Loopback trust authentication proves SQL authority and orchestration, not production
-password-auth configuration; the VM helper separately verifies TCP login on cutover.
+```bash
+MIA_ENV=test MIA_APP_ROLE_TEST_POSTGRES_URL=postgresql+psycopg://postgres@127.0.0.1:56216/mia_role_test \
+  uv run --offline pytest -p no:warnings -rs tests/unit/test_app_role_demote_postgres.py \
+  tests/unit/test_app_role_demote_script.py tests/unit/test_app_role_posture.py
+```
+
+The default run skips the 27 PostgreSQL cases of `test_app_role_demote_postgres.py` because
+the opt-in URL is unset, on top of the other opt-in skips. The fixture allows only the supplied
+disposable admin URL at `127.0.0.1:56216/mia_role_test`; it creates unique databases and roles
+and removes them. The restore drill runs `pg_dump` and `pg_restore` with the VM's exact
+restore flags: from `PATH` when present, otherwise inside the disposable container with
+`docker exec` (`MIA_APP_ROLE_TEST_PG_CONTAINER`, default `assaf-os-v2-14a-pg`).
+
+The suite calls V2-14's real `_validate_main_role_catalog` (never a copy), the deployment
+migration worker with `MIA_DATABASE_URL` changed to the demoted login, pending ALTER/CREATE
+migrations, real catalog staging/rerun/cutover/rollback, the dump, restore and `--reapply`
+drill, and sanitized failure and readiness tests. Loopback trust authentication proves SQL
+authority and orchestration, not production password-auth configuration; the VM helper
+separately verifies TCP login on cutover.
 
 The full suite's existing `tests/conftest.py` overwrites MIA_DATABASE_URL with SQLite.
 The dedicated test explicitly sets it after conftest and resets the engine, so its
 real migration proof is not masked by that fixture. General SQLite suite results are
 not claimed as a full PostgreSQL application run.
 
-The requested shared-port 56215 suite gate is **not run**: its existing `os_pg`
-fixture creates roles/schema and revokes database grants. That conflicts with the
-read-only restriction on that shared database. No connection or mutation there was
-made. As a safe substitute, the full Owner OS gate used a newly created
-`owner_os_test` database on **56216**; the runner refused any pre-existing database
-of that name and removed its database after completion. This enabled 38 additional
-tests. Cleanup is recorded in `.cache/v2-14a-owner-runner.log`. This does not claim
-the exact shared-port gate ran. The issue read via `gh issue view 151 ... --comments` was blocked by sandbox
-network policy; implementation used the supplied brief and the local V2-14 reference.
+The shared-port 56215 suite gate was not run in the as-built phase: its `os_pg` fixture
+creates roles and schema and revokes database grants, which conflicts with the read-only
+restriction on that shared database. Nothing there was connected to or changed. Claude
+coordinator review, Linux CI and production acceptance are still pending.
