@@ -174,6 +174,7 @@ def take_dump(config: Config, runner, target: Path) -> None:
         "-d",
         config.database,
         "--format=custom",
+        f"--exclude-table-data={backup_lib.DUMP_EXCLUDE_TABLE_DATA}",
     ]
     done = runner.run(argv, stdout_path=target, timeout=900)
     if done.returncode != 0 or not target.exists() or target.stat().st_size == 0:

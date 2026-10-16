@@ -114,7 +114,7 @@ def test_dump_is_one_pg_dump_snapshot_taken_through_compose(env):
         "--env-file",
         "/opt/mia/tag.env",
     ]
-    assert dump.argv[-9:] == [
+    assert dump.argv[-10:] == [
         "exec",
         "-T",
         "postgres",
@@ -124,6 +124,8 @@ def test_dump_is_one_pg_dump_snapshot_taken_through_compose(env):
         "-d",
         "mia",
         "--format=custom",
+        # FORK-BACKUP: personal statement line detail stays out of every dump (V2-10)
+        "--exclude-table-data=assaf_os.os_statement_batch_lines",
     ]
     # The plaintext is written under the work dir, never next to `mia backup`'s dumps.
     assert dump.stdout_path.is_relative_to(work_dir(env))

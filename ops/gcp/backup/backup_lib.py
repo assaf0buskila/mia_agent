@@ -27,6 +27,11 @@ RETENTION_DAYS = {PREFIX_15MIN: 7, PREFIX_DAILY: 90}
 INTERVAL_MINUTES = 15
 RTO_SECONDS = 2 * 60 * 60
 
+# FORK-BACKUP: every dump leaves this table's data out. Personal statement line detail lives there
+# only while a batch is pending; after a restore the first os-retention run finishes a line-less
+# batch as `restored_without_detail`. `mia` carries the same pattern for its own dumps.
+DUMP_EXCLUDE_TABLE_DATA = "assaf_os.os_statement_batch_lines"
+
 DUMP_SUFFIX = ".dump.enc"
 MANIFEST_SUFFIX = ".manifest.json"
 MANIFEST_FORMAT = 1
