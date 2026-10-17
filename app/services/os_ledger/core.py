@@ -623,9 +623,10 @@ def build_ledger(settings: Any, *, clock: Callable[[], datetime] | None = None,
     ``ledger_unavailable`` when the ledger DSN or the main DSN is missing or not PostgreSQL. The
     switches (``assaf_os_ledger_enabled``, the kill switch, the backend, the epoch) are read at
     every call, not here, so the retention worker's ``purpose="expire"`` keeps working while the
-    ledger is off (I11). The defaults are the full validator and the full summary recompute;
-    V2-18 replaces them only after its equivalence property tests. ``clock`` is a test seam: by
-    default ``tx.now`` is the database ``now()`` of the transaction.
+    ledger is off (I11). V2-18 (the handoff): the ledger is ``reads.ReadModelLedger`` and the
+    defaults are ``ScopedStateValidator`` and ``IncrementalSummaries``, which the V2-18 property
+    tests prove equal to the full validator and the full summary recompute (pass those to opt
+    out). ``clock`` is a test seam: by default ``tx.now`` is the database ``now()``.
     """
     dsn = getattr(settings, "owner_os_ledger_database_url", "") or ""
     main = getattr(settings, "database_url", "") or ""
@@ -634,7 +635,12 @@ def build_ledger(settings: Any, *, clock: Callable[[], datetime] | None = None,
     if not main:
         raise refuse("main_dsn_missing")
     guard = guard_for(dsn, main)
-    from app.services.os_ledger.reads import ReadModelLedger  # V2-18 handoff; reads imports core
+    # The V2-18 handoff, imported here because reads.py imports this module.
+    from app.services.os_ledger.reads import ReadModelLedger
+    from app.services.os_ledger.summaries_incremental import IncrementalSummaries
+    from app.services.os_ledger.validate_scoped import ScopedStateValidator
 
-    return ReadModelLedger(settings, guard=guard, engine=engine_for(dsn), clock=clock,
-                           uuid4=uuid4, validator=validator, summaries=summaries)
+    return ReadModelLedger(
+        settings, guard=guard, engine=engine_for(dsn), clock=clock, uuid4=uuid4,
+        validator=validator if validator is not None else ScopedStateValidator(),
+        summaries=summaries if summaries is not None else IncrementalSummaries())
