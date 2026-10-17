@@ -585,6 +585,92 @@ REVIEW_R2_MUTATIONS = [
 ]
 
 
+def _events_fk(tail: str) -> str:
+    """Replace the os_events -> os_receipts edge, under its own name, with `tail` appended."""
+    return (
+        "ALTER TABLE assaf_os.os_events DROP CONSTRAINT os_events_workspace_id_decision_id_fkey, "
+        "ADD CONSTRAINT os_events_workspace_id_decision_id_fkey "
+        "FOREIGN KEY (workspace_id, decision_id) "
+        "REFERENCES assaf_os.os_receipts(workspace_id, request_id) " + tail
+    )
+
+
+def _internal_trigger(mode: str) -> str:
+    """ALTER TABLE assaf_os.os_events <mode> TRIGGER on an internal (RI) trigger of that table."""
+    return (
+        "DO $$ DECLARE t text; BEGIN SELECT tgname INTO t FROM pg_catalog.pg_trigger "
+        "WHERE tgrelid = 'assaf_os.os_events'::regclass AND tgisinternal ORDER BY tgname LIMIT 1; "
+        f"EXECUTE 'ALTER TABLE assaf_os.os_events {mode} TRIGGER ' || quote_ident(t); END $$"
+    )
+
+
+# Review of #170 r3 (round 2). Major: a foreign key's internal (RI) triggers run as the
+# referencing table's owner, so an owner-level FK with a referential action, or a disabled RI
+# trigger, is a write path the grant map cannot see. The first entry is the reviewer's
+# reproduction verbatim: the §18.2-permitted UPDATE of os_leads.person_id then rewrites
+# os_receipts.proposal_id, which the runtime role may not UPDATE directly. The generic RI
+# rule must refuse each of these on its own, without the pinned inventory.
+REVIEW_R3_REFERENTIAL_MUTATIONS = [
+    "ALTER TABLE assaf_os.os_receipts ADD CONSTRAINT v215_cascade "
+    "FOREIGN KEY (workspace_id, proposal_id) "
+    "REFERENCES assaf_os.os_leads(workspace_id, person_id) ON UPDATE CASCADE",
+    "ALTER TABLE assaf_os.os_receipts DROP CONSTRAINT os_receipts_workspace_id_undo_of_fkey, "
+    "ADD CONSTRAINT os_receipts_workspace_id_undo_of_fkey "
+    "FOREIGN KEY (workspace_id, undo_of) "
+    "REFERENCES assaf_os.os_receipts(workspace_id, request_id) ON UPDATE SET NULL",
+    _events_fk("ON DELETE CASCADE"),
+    _events_fk("ON UPDATE CASCADE"),
+    _events_fk("ON DELETE SET NULL"),
+    _events_fk("ON DELETE RESTRICT"),
+    _events_fk("MATCH FULL"),
+    _events_fk("DEFERRABLE INITIALLY DEFERRED"),
+    _events_fk("NOT VALID"),
+    "ALTER TABLE assaf_os.os_events "
+    "ALTER CONSTRAINT os_events_workspace_id_decision_id_fkey DEFERRABLE INITIALLY DEFERRED",
+    # The same FK bypass r1 must-fix 3 refused through session_replication_role: the orphan
+    # event the reviewer inserted after disabling the RI triggers of os_events.
+    _internal_trigger("DISABLE"),
+    _internal_trigger("ENABLE REPLICA"),
+    _internal_trigger("ENABLE ALWAYS"),
+    "ALTER TABLE assaf_os.os_events DISABLE TRIGGER ALL",
+]
+# Minors of the same review: durability, and the constraint and index inventory.
+REVIEW_R3_MUTATIONS = [
+    *REVIEW_R3_REFERENTIAL_MUTATIONS,
+    "ALTER TABLE assaf_os.os_events DROP CONSTRAINT os_events_workspace_id_decision_id_fkey",
+    # Durability: an UNLOGGED table is truncated by crash recovery (events, receipts and the
+    # outbox are exactly what exactly-once depends on). The first entry is the reviewer's.
+    "ALTER TABLE assaf_os.os_outbox SET UNLOGGED; ALTER TABLE assaf_os.os_events SET UNLOGGED; "
+    "ALTER TABLE assaf_os.os_receipts SET UNLOGGED",
+    "ALTER TABLE assaf_os.os_summary_monthly SET UNLOGGED",
+    # The constraint and index inventory: dropped, weakened, replaced or added.
+    "ALTER TABLE assaf_os.os_proposals DROP CONSTRAINT os_proposals_check5",
+    "ALTER TABLE assaf_os.os_proposals DROP CONSTRAINT os_proposals_check5, "
+    "ADD CONSTRAINT os_proposals_check5 CHECK (true)",
+    # A UNIQUE re-declared under its own name on other columns.
+    "ALTER TABLE assaf_os.os_events DROP CONSTRAINT os_events_workspace_id_commit_version_key, "
+    "ADD CONSTRAINT os_events_workspace_id_commit_version_key "
+    "UNIQUE (workspace_id, event_id, commit_version)",
+    # A name-only CHECK (an enumeration) re-created identically but NOT VALID.
+    "ALTER TABLE assaf_os.os_receipts DROP CONSTRAINT os_receipts_status_check, "
+    "ADD CONSTRAINT os_receipts_status_check "
+    "CHECK (status IN ('committed', 'rejected', 'expired', 'target_changed')) NOT VALID",
+    "ALTER TABLE assaf_os.os_events ADD CONSTRAINT v215_ck CHECK (true)",
+    "ALTER TABLE assaf_os.os_events "
+    "ADD CONSTRAINT v215_uq UNIQUE (workspace_id, decision_id, commit_version)",
+    "ALTER TABLE assaf_os.os_proposals DROP CONSTRAINT os_proposals_workspace_id_request_id_key",
+    "ALTER TABLE assaf_os.os_summary_cycle DROP CONSTRAINT os_summary_cycle_pkey",
+    "CREATE UNIQUE INDEX v215_ui ON assaf_os.os_events(workspace_id, commit_version, event_id)",
+    "CREATE INDEX v215_i ON assaf_os.os_events(created_at)",
+    "DROP INDEX assaf_os.os_expenses_source_key_idx",
+    "DROP INDEX assaf_os.os_outbox_delivery_idx; "
+    "CREATE INDEX os_outbox_delivery_idx ON assaf_os.os_outbox(status)",
+    "UPDATE pg_catalog.pg_index SET indisvalid = false "
+    "WHERE indexrelid = 'assaf_os.os_outbox_delivery_idx'::regclass",
+    "CREATE DOMAIN assaf_os.v215_dom AS integer CHECK (VALUE > 0)",
+]
+
+
 @pytest.mark.parametrize("mutation", [
     "GRANT DELETE ON assaf_os.os_leads TO assaf_os_ledger",
     "GRANT TRUNCATE ON assaf_os.os_events TO assaf_os_ledger",
@@ -667,6 +753,7 @@ REVIEW_R2_MUTATIONS = [
     "GRANT SELECT ON public.v215_extra TO assaf_os_ledger",
     *REVIEW_R1_MUTATIONS,
     *REVIEW_R2_MUTATIONS,
+    *REVIEW_R3_MUTATIONS,
 ])
 def test_extra_or_missing_privilege_fails(roles, mutation):
     admin, _, _ = roles
@@ -709,6 +796,103 @@ def test_function_pins_are_the_frozen_migration_sql():
     sql = SQL.read_text(encoding="utf-8")
     assert "LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE\nSET search_path = pg_catalog" in sql
     assert "RETURNS trigger\nLANGUAGE plpgsql\nAS $$" in sql
+
+
+def sql_constraints() -> tuple[set[tuple[str, str, str]], dict[str, int]]:
+    """PRIMARY KEY, UNIQUE and FOREIGN KEY pins, and the CHECK count per table, from the SQL.
+
+    PostgreSQL names an unnamed constraint <table>_pkey, <table>_<columns>_key or
+    <table>_<columns>_fkey and deparses it as `PRIMARY KEY (a, b)`, `UNIQUE (a, b)` or
+    `FOREIGN KEY (a, b) REFERENCES assaf_os.t(c, d)`. CHECK names depend on creation order
+    and the deparsed expression is the server's, so those are counted here and compared
+    exactly against the migrated catalog in test_constraint_and_index_pins_are_the_catalog.
+    """
+    def columns(raw: str) -> list[str]:
+        return [name.strip() for name in raw.split(",")]
+
+    pins: set[tuple[str, str, str]] = set()
+    checks: dict[str, int] = {}
+    blocks = re.finditer(
+        r"CREATE TABLE assaf_os\.(\w+) \(\n(.*?)\n\);", SQL.read_text(encoding="utf-8"), re.S
+    )
+    for block in blocks:
+        table, body = block.groups()
+        keys = [columns(raw) for raw in re.findall(r"^    PRIMARY KEY \(([^)]*)\)", body, re.M)]
+        keys += [[name] for name in re.findall(
+            r"^    (\w+) [^\n]*\bPRIMARY KEY\b(?!\s*\()", body, re.M
+        )]
+        assert len(keys) == 1, table
+        pins.add((table, f"{table}_pkey", f"PRIMARY KEY ({', '.join(keys[0])})"))
+        for raw in re.findall(r"^    UNIQUE \(([^)]*)\)", body, re.M):
+            names = columns(raw)
+            pins.add((table, f"{table}_{'_'.join(names)}_key", f"UNIQUE ({', '.join(names)})"))
+        for raw, parent, parent_raw in re.findall(
+            r"^    FOREIGN KEY \(([^)]*)\)\s+REFERENCES assaf_os\.(\w+)\(([^)]*)\)", body, re.M
+        ):
+            names = columns(raw)
+            pins.add((
+                table, f"{table}_{'_'.join(names)}_fkey",
+                f"FOREIGN KEY ({', '.join(names)}) "
+                f"REFERENCES assaf_os.{parent}({', '.join(columns(parent_raw))})",
+            ))
+        checks[table] = len(re.findall(r"\bCHECK\b", body))
+    return pins, checks
+
+
+def test_constraint_and_index_pins_are_the_frozen_migration_sql():
+    """The inventory the validator pins equals what the V2-14 SQL declares.
+
+    PRIMARY KEY, UNIQUE and FOREIGN KEY entries are derived here from the SQL text with
+    PostgreSQL's own naming and deparse rules; CHECK entries are counted per table; the
+    indexes outside a constraint are the CREATE INDEX statements, by name, table and
+    uniqueness. schema_migrations is the runner's own table.
+    """
+    import inspect
+
+    from app.db import os_ledger_migrate
+
+    pins = {(pin.relation, pin.name, pin.definition) for pin in policy().CONSTRAINT_PINS}
+    # A constraint name is unique per table, so a repeated (table, name) is a pin typo.
+    assert len({(pin.relation, pin.name) for pin in policy().CONSTRAINT_PINS}) == len(pins)
+    assert len(pins) == len(policy().CONSTRAINT_PINS)
+    assert {pin.relation for pin in policy().CONSTRAINT_PINS} == set(OWNED_TABLES)
+    expected, check_counts = sql_constraints()
+    assert set(check_counts) == TABLES
+
+    def is_check(pin) -> bool:
+        return re.search(r"_check\d*$", pin[1]) is not None
+
+    # Keys never go unpinned (None); a CHECK pin is its text or, for the 17 enumerations
+    # that do not survive a restore, the name alone.
+    keyed = {pin for pin in pins if not is_check(pin)}
+    assert all(pin[2] is not None for pin in keyed)
+    assert all(pin[2] is None or pin[2].startswith("CHECK (") for pin in pins if is_check(pin))
+    assert {pin for pin in keyed if pin[0] != "schema_migrations"} == expected
+    assert {pin for pin in keyed if pin[0] == "schema_migrations"} == {
+        ("schema_migrations", "schema_migrations_pkey", "PRIMARY KEY (filename)")
+    }
+    assert "filename text PRIMARY KEY" in inspect.getsource(os_ledger_migrate)
+    pinned_checks = {
+        table: sum(1 for pin in pins if pin[0] == table and is_check(pin))
+        for table in OWNED_TABLES
+    }
+    assert pinned_checks.pop("schema_migrations") == 0
+    assert pinned_checks == check_counts
+    assert sum(1 for pin in pins if pin[2] is None) == 17
+    sql = SQL.read_text(encoding="utf-8")
+    created = {
+        (name, table, bool(unique)) for unique, name, table in re.findall(
+            r"^CREATE (UNIQUE )?INDEX (\w+)\s+ON assaf_os\.(\w+)", sql, re.M
+        )
+    }
+    pinned = set()
+    for definition in policy().INDEX_PINS:
+        match = re.fullmatch(
+            r"CREATE (UNIQUE )?INDEX (\w+) ON assaf_os\.(\w+) USING btree \(.*\)", definition
+        )
+        assert match, definition
+        pinned.add((match.group(2), match.group(3), bool(match.group(1))))
+    assert pinned == created and len(created) == len(policy().INDEX_PINS) == 10
 
 
 def test_privileged_predefined_roles_are_the_reviewed_set():
@@ -884,6 +1068,116 @@ def test_column_map_matches_live_catalog(roles):
         assert set(updates) <= set(live[table]), table
 
 
+def live_constraints(c):
+    """Independent oracle: every constraint of an assaf_os table, as the server deparses it."""
+    return sorted(tuple(row) for row in c.execute(text(
+        "SELECT t.relname, k.conname, pg_get_constraintdef(k.oid) FROM pg_constraint k "
+        "JOIN pg_class t ON t.oid = k.conrelid WHERE t.relnamespace = 'assaf_os'::regnamespace"
+    )))
+
+
+def live_indexes(c):
+    """Independent oracle: the indexes that do not back a PRIMARY KEY or UNIQUE constraint."""
+    return sorted(c.execute(text(
+        "SELECT pg_get_indexdef(i.indexrelid) FROM pg_index i "
+        "JOIN pg_class x ON x.oid = i.indexrelid "
+        "WHERE x.relnamespace = 'assaf_os'::regnamespace AND NOT EXISTS ("
+        "SELECT 1 FROM pg_constraint k WHERE k.conindid = i.indexrelid "
+        "AND k.conrelid = i.indrelid AND k.contype IN ('p','u'))"
+    )).scalars())
+
+
+def test_constraint_and_index_pins_are_the_catalog(roles):
+    """The migrated database holds exactly the pinned inventory: 26 foreign keys, 19 primary
+    keys, 12 unique constraints, 112 checks, ten further indexes and 104 enabled RI triggers."""
+    pinned = sorted((pin.relation, pin.name, pin.definition) for pin in policy().CONSTRAINT_PINS)
+    name_only = {(pin.relation, pin.name) for pin in policy().CONSTRAINT_PINS
+                 if pin.definition is None}
+    with roles[0].connect() as c, c.begin():
+        c.execute(text(policy().CATALOG_SEARCH_PATH))
+        live = live_constraints(c)
+        assert [row[:2] for row in live] == [row[:2] for row in pinned]
+        assert [row for row in live if row[:2] not in name_only] == [
+            row for row in pinned if row[2] is not None
+        ]
+        assert live_indexes(c) == sorted(policy().INDEX_PINS)
+        kinds = [row[2].split(" ", 1)[0] for row in live]
+        assert {kind: kinds.count(kind) for kind in set(kinds)} == {
+            "FOREIGN": 26, "PRIMARY": 19, "UNIQUE": 12, "CHECK": 112,
+        }
+        # Foreign keys: NO ACTION on update and delete, MATCH SIMPLE, immediate, validated.
+        assert c.execute(text(
+            "SELECT confupdtype::text, confdeltype::text, confmatchtype::text, condeferrable, "
+            "condeferred, convalidated, count(*) FROM pg_constraint "
+            "WHERE contype = 'f' AND connamespace = 'assaf_os'::regnamespace GROUP BY 1,2,3,4,5,6"
+        )).all() == [("a", "a", "s", False, False, True, 26)]
+        assert c.execute(text(
+            "SELECT t.tgenabled::text, count(*) FROM pg_trigger t "
+            "JOIN pg_class r ON r.oid = t.tgrelid "
+            "WHERE r.relnamespace = 'assaf_os'::regnamespace AND t.tgisinternal GROUP BY 1"
+        )).all() == [("O", 104)]
+        assert c.execute(text(
+            "SELECT relpersistence::text, count(*) FROM pg_class "
+            "WHERE relnamespace = 'assaf_os'::regnamespace GROUP BY 1"
+        )).all() == [("p", 60)]
+
+
+def test_constraint_pins_survive_a_dump_and_restore_roundtrip(roles):
+    """pg_dump writes every constraint as its deparsed text and pg_restore parses it back. If
+    that changed a pinned definition, the validator would refuse a correctly restored database
+    (V2-10's reapply step). Drop and re-add every constraint and index from its own live text
+    (foreign keys last), twice, and expect: only the name-only CHECKs deparse differently
+    (and no pinned text is wrong the other way round), the second restore changes nothing,
+    every RI trigger is created enabled, and the validator accepts the restored schema."""
+    rank = {"PRIMARY": 0, "UNIQUE": 1, "CHECK": 2, "FOREIGN": 3}
+    options = {"no_parameters": True}  # a CHECK holds LIKE patterns: no % placeholders
+    with roles[0].connect() as c, c.begin():
+        c.execute(text(policy().CATALOG_SEARCH_PATH))
+        original, indexes = live_constraints(c), live_indexes(c)
+        restored = []
+        for _ in range(2):
+            rows = sorted(live_constraints(c), key=lambda row: rank[row[2].split(" ", 1)[0]])
+            for relation, name, _ in reversed(rows):
+                c.exec_driver_sql(f"ALTER TABLE assaf_os.{relation} DROP CONSTRAINT {name}")
+            assert live_constraints(c) == []
+            for relation, name, definition in rows:
+                c.exec_driver_sql(
+                    f"ALTER TABLE assaf_os.{relation} ADD CONSTRAINT {name} {definition}",
+                    execution_options=options,
+                )
+            restored.append(live_constraints(c))
+        assert restored[1] == restored[0]
+        changed = {before[:2] for before, after in zip(original, restored[0]) if before != after}
+        assert changed == {(pin.relation, pin.name) for pin in policy().CONSTRAINT_PINS
+                           if pin.definition is None} and len(changed) == 17
+        assert c.scalar(text(
+            "SELECT count(*) FROM pg_trigger t JOIN pg_class r ON r.oid = t.tgrelid "
+            "WHERE r.relnamespace = 'assaf_os'::regnamespace AND t.tgisinternal "
+            "AND t.tgenabled = 'O'"
+        )) == 104
+        for definition in indexes:
+            name = re.fullmatch(r"CREATE (?:UNIQUE )?INDEX (\w+) .*", definition).group(1)
+            c.exec_driver_sql(f"DROP INDEX assaf_os.{name}")
+            c.exec_driver_sql(definition, execution_options=options)
+        assert live_indexes(c) == indexes
+        catalog(c)
+        c.rollback()
+    validate(roles)
+
+
+@pytest.mark.parametrize("mutation", REVIEW_R3_REFERENTIAL_MUTATIONS)
+def test_referential_rules_stand_without_the_pinned_inventory(roles, mutation):
+    """Defence in depth, and for V2-14b's future foreign keys: the generic referential-action
+    and RI-trigger rules refuse each reproduction by themselves, with no pin involved."""
+    with roles[0].connect() as c, c.begin():
+        c.execute(text(policy().CATALOG_SEARCH_PATH))
+        policy()._referential_integrity(c)
+        c.exec_driver_sql(mutation)
+        with pytest.raises(ValueError, match=DENIED):
+            policy()._referential_integrity(c)
+        c.rollback()
+
+
 WS = "v215e"
 SEED = (
     "INSERT INTO assaf_os.os_clients(workspace_id,record_id,revision,inputs,source,created_at,"
@@ -976,6 +1270,64 @@ def test_runtime_role_edits_imported_rows_on_every_record_table(roles):
             with pytest.raises(SQLAlchemyError), c.begin_nested():
                 c.execute(text(sql))
         c.rollback()
+
+
+def test_a_referential_action_rewrites_history_and_the_validator_refuses_it(roles):
+    """Review of #170 r3 (round 2), end to end and committed. The reviewer's probe: an
+    owner-level ON UPDATE CASCADE edge lets the §18.2-permitted UPDATE of os_leads.person_id
+    rewrite os_receipts.proposal_id, which a direct UPDATE by the runtime role cannot touch."""
+    from sqlalchemy.exc import SQLAlchemyError
+    admin, runtime = roles[0], roles[1]
+    ws, request, edge = "v215c", "00000000-0000-4000-8000-0000000000c1", "v215_cascade"
+    proposal = (
+        "INSERT INTO assaf_os.os_proposals(workspace_id,proposal_id,request_id,request_digest,"
+        "envelope_digest,owner_id,epoch,approval_id,rejection_id,entity,record_id,"
+        "expected_revision,mutations,dependency_digest,source,kind,status,expires_at) "
+        f"VALUES ('{ws}',:p,:r,'d','d','123',1,:a,:j,'leads','L1',0,'[]','d','OS_DIRECT',"
+        "'owner_direct','committed',now() + interval '1 hour')"
+    )
+    with workspace(admin, ws):
+        try:
+            with admin.begin() as c:
+                for number, name in ((1, "P1"), (2, "P2")):
+                    c.execute(text(proposal), {
+                        "p": name, "r": f"00000000-0000-4000-8000-00000000000{number}",
+                        "a": f"00000000-0000-4000-8000-0000000000a{number}",
+                        "j": f"00000000-0000-4000-8000-0000000000b{number}",
+                    })
+                c.execute(text(
+                    "INSERT INTO assaf_os.os_leads(workspace_id,record_id,revision,inputs,source,"
+                    f"created_at,updated_at,person_id) VALUES ('{ws}','L1',1,'{{}}','IMPORT',"
+                    "now(),now(),'P1')"
+                ))
+                c.execute(text(
+                    "INSERT INTO assaf_os.os_receipts(workspace_id,request_id,proposal_id,epoch,"
+                    f"status,kind,commit_version,records,completed_at) VALUES ('{ws}','{request}',"
+                    "'P1',1,'committed','owner_direct',1,'[]',now())"
+                ))
+                c.execute(text(
+                    f"ALTER TABLE assaf_os.os_receipts ADD CONSTRAINT {edge} "
+                    "FOREIGN KEY (workspace_id, proposal_id) "
+                    "REFERENCES assaf_os.os_leads(workspace_id, person_id) ON UPDATE CASCADE"
+                ))
+            with pytest.raises(ValueError, match=DENIED):
+                validate(roles)  # refused while the edge exists, before any write
+            with runtime.begin() as c:
+                with pytest.raises(SQLAlchemyError), c.begin_nested():
+                    c.execute(text("UPDATE assaf_os.os_receipts SET proposal_id='P2'"))
+                c.execute(text("UPDATE assaf_os.os_leads SET person_id='P2' WHERE record_id='L1'"))
+            with admin.connect() as c:
+                assert c.scalar(text(
+                    "SELECT proposal_id FROM assaf_os.os_receipts WHERE request_id=:r"
+                ), {"r": request}) == "P2"  # history rewritten through the cascade
+        finally:
+            with admin.begin() as c:
+                c.execute(text(
+                    f"ALTER TABLE assaf_os.os_receipts DROP CONSTRAINT IF EXISTS {edge}"
+                ))
+                for table in ("os_receipts", "os_leads", "os_proposals"):
+                    c.execute(text(f"DELETE FROM assaf_os.{table} WHERE workspace_id='{ws}'"))
+    validate(roles)
 
 
 # ------------------------------------------- provisioning entrypoints (run last: they
@@ -1222,4 +1574,42 @@ def test_reapply_without_ledger_schema_is_a_noop(roles, monkeypatch, capsys):
         empty.dispose()
         with admin.connect().execution_options(isolation_level="AUTOCOMMIT") as c:
             c.execute(text(f"DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
+    validate(roles)
+
+
+def test_reapply_never_writes_the_env_file_for_a_missing_runtime_role(
+    roles, monkeypatch, tmp_path, capsys,
+):
+    """Review of #170 r3 minor 3 and §22 E10: roles are cluster-global and survive a restore,
+    so a runtime role that is missing during a reapply is an anomaly. Reapply must abort
+    and leave the VM-owned env file byte for byte as it was; only `provision` stages a DSN."""
+    admin, runtime, _ = roles
+    p = provision()
+    env = tmp_path / "runtime.env"
+    original = "MIA_DATABASE_URL=postgresql://keep@127.0.0.1:5432/mia\nMIA_APP_ROLE_POSTURE=enforce\n"
+    url = pin(p, monkeypatch, admin, name="mia-vm", runtime_env=str(env))
+    reapply = ["--target", "mia-vm", "--mode", "reapply", "--apply", "--approved-sha", SHA]
+    try:
+        drop_runtime_roles(admin, runtime)
+        env.write_text(original, encoding="utf-8", newline="\n")
+        os.chmod(env, 0o600)
+        capsys.readouterr()
+        with pytest.raises(SystemExit) as refused:
+            p.main(reapply)
+        assert refused.value.code == 1
+        assert "ledger_provision_refused" in capsys.readouterr().err
+        assert env.read_bytes().decode("utf-8") == original  # no line appended
+        assert role_state(admin) == ([], 0)  # the CREATE ROLE rolled back with the refusal
+        # A DSN staged by an earlier provision that was refused before commit is reused as
+        # is, without rewriting the file: the role is recreated with that same password.
+        password = p.runtime_credential(p._TARGETS["mia-vm"])
+        staged = env.read_bytes().decode("utf-8")
+        assert staged.startswith(original) and staged.count("\n") == 3
+        p.main(reapply)
+        assert env.read_bytes().decode("utf-8") == staged
+        assert scram_matches(ledger_password(admin), password)
+        assert role_state(admin) == (["assaf_os_ledger", "assaf_os_retention"], 1)
+        validate(roles)
+    finally:
+        settle(admin, url.database)
     validate(roles)

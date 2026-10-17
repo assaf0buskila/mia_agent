@@ -63,7 +63,7 @@ migration SQL and to the live catalog):
 ## Validator
 
 `validate_ledger_role(db, main_engine, *, migration_role=None)` is the §5.5 runtime
-hook. It is a **preflight, not a per-request check** (0.1 to 0.3 s of catalog
+hook. It is a **preflight, not a per-request check** (0.1 to 0.4 s of catalog
 queries): run it on the first connection, every 10 minutes and after a reconnect,
 and cache the result. It needs the real ledger session and the real main engine:
 both unimpersonated, different, and on the same server and database.
@@ -81,6 +81,19 @@ It refuses anything beyond the exact posture:
 - any rewrite rule on an `assaf_os` relation; any non-internal trigger other than the
   enabled `os_proposals_assistant_insert_pending`, which must also have no WHEN clause,
   no arguments and no column list; and row-level security or policies;
+- a foreign key that is not plain: each must be `ON UPDATE NO ACTION ON DELETE NO ACTION`,
+  `MATCH SIMPLE`, not deferrable and validated, and every internal (RI) trigger on an
+  `assaf_os` relation must be enabled (`tgenabled = 'O'`). The RI triggers run as the
+  owner of the referencing table, so one owner-level `ADD CONSTRAINT ... ON UPDATE
+  CASCADE` would let the §18.2-permitted UPDATE of `os_leads.person_id` rewrite
+  `os_receipts.proposal_id`, which the runtime role may not UPDATE, and `ALTER TABLE ...
+  DISABLE TRIGGER` on an RI trigger would let it insert an event with no receipt (the same
+  foreign-key bypass that `session_replication_role` is refused for). This rule is generic:
+  it holds for any foreign key a later migration adds, whatever the pins say;
+- a relation that is not permanent: `SET UNLOGGED` on a table or index makes crash recovery
+  truncate it, which would silently lose the append-only events and receipts and the
+  outbox that exactly-once depends on, whatever `fsync` and `synchronous_commit` say;
+- the constraint and index inventory, below;
 - either `assaf_os` function (`expense_source_key_sha256(text)`,
   `require_pending_assistant_proposal_insert()`) whose body, language, volatility,
   strictness, return type or own SET clauses differ from the V2-14 SQL (`FUNCTION_PINS`,
@@ -122,7 +135,38 @@ dblink or postgres_fdw loopback with privileged credentials, a `FOR ALL TABLES`
 publication, or a logical-replication subscription. A role with the REPLICATION
 attribute can stream the WAL and is likewise outside what the ledger can police
 (`pg_hba.conf` decides who may connect as one). The main DSN is never a superuser
-(V2-14a).
+(V2-14a). Column definitions (type, NOT NULL, default) are not pinned: a weakened column is
+an integrity regression, not a privilege path.
+
+**Constraint and index inventory (`CONSTRAINT_PINS`, `INDEX_PINS`).** The database is the
+exactly-once and append-only backstop, so its constraints are an exact inventory, not a
+count: all 169 (19 primary keys, 12 UNIQUE, 26 foreign keys, 112 CHECKs, including
+`schema_migrations`) by table, name and server-deparsed definition, plus the ten indexes
+that back no primary key or UNIQUE constraint, by `pg_get_indexdef`. A dropped, renamed,
+re-targeted or added constraint or index, a NOT VALID constraint, and an invalid index
+are refused. The V2-14 SQL is tied to the pins by a test (keys and foreign keys are derived
+from the SQL text; the CHECKs are counted per table and compared with a freshly migrated
+catalog).
+
+- **17 CHECKs are pinned by name only** (`definition=None`): the enumerations over a
+  `varchar` column (`status IN (...)`, `currency IN (...)`, `kind IN (...)`, ...). PostgreSQL
+  deparses `= ANY ((ARRAY['a'::character varying, ...])::text[])` and, after the constraint
+  is re-created from that text, which is what every `pg_dump` and `pg_restore` does,
+  deparses it as `= ANY (ARRAY[('a'::character varying)::text, ...])`. Pinning the first
+  form would refuse a correctly restored database at V2-10's reapply step. A test drops and
+  re-adds every constraint from its own live text (twice) and asserts that exactly these 17
+  change, once, and that the validator accepts the restored schema. The residual: a
+  same-name replacement of one of the 17 by a weaker expression is not detected.
+- **Obligation for V2-14b.** A new or changed constraint or index is added to the pins on
+  purpose, in the same commit (a failing test prints the difference). A CHECK that is a
+  `varchar` enumeration, such as the extended `os_proposals_status_check`, is `None`; the
+  roundtrip test says whether a new one must be. The generic foreign-key rule above applies
+  to its new foreign keys without any pin, so a new `ON DELETE CASCADE` edge is refused
+  until the rule itself is changed on purpose.
+- **PostgreSQL upgrades.** The pinned text is PostgreSQL 16's deparse (the VM and CI both
+  run 16). After a major upgrade the validator may refuse the migrated database; that is
+  the signal to regenerate the pins from a fresh migration on the new version, as part of
+  the upgrade's rehearsal.
 
 **Obligation for V2-16 (ledger core): `search_path`.** The validator pins its own session
 to `pg_catalog, pg_temp`, but a database-wide `ALTER DATABASE ... SET search_path` is
@@ -167,6 +211,12 @@ block a reapply.
   re-applies every REVOKE and GRANT and the owner's default ACL, and validates. It is
   idempotent. On a database without `assaf_os` it prints the no-op line, exits 0, and
   does not need the main DSN.
+- `--mode reapply` never writes `/etc/mia/runtime.env` (§22 E10: roles are cluster-global
+  and survive a restore, so a missing runtime role is an anomaly, and the V2-10 container
+  mounts `/etc/mia` read-only). If the runtime role is missing and no DSN is staged, it is
+  refused before the `CREATE ROLE` (`ledger_provision_refused`, nothing created, the file
+  untouched): run `--mode provision`. If a DSN is already staged, the role is recreated
+  with that password and the file is left as it is.
 
 **Runtime DSN (`mia-vm`).** When the runtime role is created, the password is 32
 random bytes (hex). Its DSN
@@ -181,6 +231,16 @@ the statement log. Nothing prints the DSN, the password or the verifier. Ops wir
 (running this script as root with `/etc/mia` writable, from the restore post-step or
 the FORK-PROD-ORDER runbook) belongs to V2-10 and the runbook.
 
+**A refused provision leaves its staged DSN behind (operator rule).** The DSN is staged
+before commit on purpose, so a transaction that the in-transaction audit then refuses
+(`ledger_provision_refused`) rolls the role back but keeps the line in `runtime.env`. That
+line now names a role that does not exist. V2-17's `core_authority_state` treats any set
+`MIA_OWNER_OS_LEDGER_DATABASE_URL` as live, so after the next app recreate every Sheets
+write would fail closed with `ledger_unavailable`. After a refused `--mode provision`,
+either fix the cause and re-run it until it passes (the staged password is reused), or
+delete the `MIA_OWNER_OS_LEDGER_DATABASE_URL` line before any recreate of the app. The
+FORK-PROD-ORDER runbook (step 4) must carry the same sentence.
+
 **Locking.** The staging write is a read-modify-replace of `/etc/mia/runtime.env`, and
 `app_role_demote.py` edits the same file, so two runs at once would let the last writer
 win and lose either its posture change or the staged ledger DSN. The caller must hold
@@ -188,7 +248,7 @@ win and lose either its posture change or the staged ledger DSN. The caller must
 and the FORK-PROD-ORDER runbook do. The script does not take that lock itself, on purpose:
 those callers already hold it, and a second `flock` on it from inside a locked caller
 blocks forever. Run `--apply` only through those wrappers and never alongside
-`app-role-demote.sh`. (`--mode reapply` never writes the file.)
+`app-role-demote.sh`. (`--mode reapply` never writes the file, see above.)
 
 ## Test fixtures
 

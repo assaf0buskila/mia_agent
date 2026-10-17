@@ -5,6 +5,12 @@ preflight (first connection, every 10 minutes and after a reconnect; never per
 request). validate_ledger_catalog is the operator transaction hook used by
 provisioning. Retention stays reserved, NOLOGIN and unprivileged until V2-14b adds
 its tables. No default privileges are granted for future tables.
+
+Besides ACLs and ownership it pins what makes the exact grants safe and durable: no rule,
+trigger or policy beyond the reviewed one, a closed dependency island, the owned functions,
+every foreign key NO ACTION with its RI triggers enabled, permanent (logged) relations, and
+the constraint and index inventory (CONSTRAINT_PINS, INDEX_PINS). V2-14b extends the pins
+with its own tables.
 """
 
 from collections.abc import Mapping
@@ -107,6 +113,392 @@ TRIGGERS = frozenset({(
     "os_proposals", "os_proposals_assistant_insert_pending",
     "assaf_os.require_pending_assistant_proposal_insert()", "O", 7,
 )})
+
+
+class ConstraintPin(NamedTuple):
+    """One reviewed pg_constraint row of an assaf_os table, as the V2-14 SQL created it."""
+
+    relation: str
+    name: str
+    # pg_get_constraintdef under CATALOG_SEARCH_PATH, verbatim; None pins the name only. A
+    # definition is None exactly when re-creating the constraint from its own deparsed text,
+    # which every pg_dump and pg_restore does, deparses it differently: the 17 CHECKs over a
+    # varchar column's enumerated values (`= ANY ((ARRAY['a'::character varying, ...])::text[])`
+    # becomes `= ANY (ARRAY[('a'::character varying)::text, ...])`). A test enforces both
+    # directions, so a restored database is not refused and no other pin escapes its text.
+    definition: str | None
+
+
+# The complete constraint inventory of the owned tables: every PRIMARY KEY, UNIQUE, FOREIGN
+# KEY and CHECK, by table, name and server-deparsed definition (the deparse is that of
+# PostgreSQL 16, the version the ledger runs on). The database is the exactly-once and
+# append-only backstop, so a dropped, renamed, re-targeted or added constraint, and a
+# changed definition other than the 17 name-only CHECKs, is a change a migration chunk must
+# make on purpose, here. A test derives the keys and foreign keys from
+# migrations_assaf_os/20261015_*.sql and compares the rest with a freshly migrated catalog.
+# What a foreign key may DO (its actions) is _referential_integrity's generic rule, which
+# also covers constraints added later.
+CONSTRAINT_PINS: tuple[ConstraintPin, ...] = (
+    # os_workspaces
+    ConstraintPin("os_workspaces", "os_workspaces_pkey", "PRIMARY KEY (workspace_id)"),
+    ConstraintPin("os_workspaces", "os_workspaces_check", "CHECK ((updated_at >= created_at))"),
+    ConstraintPin("os_workspaces", "os_workspaces_epoch_check", "CHECK ((epoch > 0))"),
+    ConstraintPin("os_workspaces", "os_workspaces_owner_id_check",
+                  "CHECK (((owner_id)::text ~ '^[0-9]+$'::text))"),
+    ConstraintPin("os_workspaces", "os_workspaces_summaries_check",
+                  "CHECK ((jsonb_typeof(summaries) = 'object'::text))"),
+    ConstraintPin("os_workspaces", "os_workspaces_version_check", "CHECK ((version >= 0))"),
+    # os_authority
+    ConstraintPin("os_authority", "os_authority_pkey", "PRIMARY KEY (workspace_id, domain)"),
+    ConstraintPin("os_authority", "os_authority_workspace_id_fkey",
+                  "FOREIGN KEY (workspace_id) REFERENCES assaf_os.os_workspaces(workspace_id)"),
+    ConstraintPin("os_authority", "os_authority_activated_by_check",
+                  "CHECK (((activated_by IS NULL) OR ((activated_by)::text ~ "
+                  "'^[0-9]+$'::text)))"),
+    ConstraintPin("os_authority", "os_authority_check",
+                  "CHECK (((activated_at IS NULL) = (activated_by IS NULL)))"),
+    ConstraintPin("os_authority", "os_authority_check1",
+                  "CHECK ((((state)::text <> 'active'::text) OR (activated_at IS NOT NULL)))"),
+    ConstraintPin("os_authority", "os_authority_check2", "CHECK ((updated_at >= created_at))"),
+    ConstraintPin("os_authority", "os_authority_domain_check", None),
+    ConstraintPin("os_authority", "os_authority_epoch_check", "CHECK ((epoch > 0))"),
+    ConstraintPin("os_authority", "os_authority_state_check", None),
+    # os_leads
+    ConstraintPin("os_leads", "os_leads_pkey", "PRIMARY KEY (workspace_id, record_id)"),
+    ConstraintPin("os_leads", "os_leads_workspace_id_person_id_key",
+                  "UNIQUE (workspace_id, person_id)"),
+    ConstraintPin("os_leads", "os_leads_workspace_id_fkey",
+                  "FOREIGN KEY (workspace_id) REFERENCES assaf_os.os_workspaces(workspace_id)"),
+    ConstraintPin("os_leads", "os_leads_check", "CHECK ((updated_at >= created_at))"),
+    ConstraintPin("os_leads", "os_leads_check1",
+                  "CHECK (((deleted_at IS NULL) = (deleted_by_request_id IS NULL)))"),
+    ConstraintPin("os_leads", "os_leads_inputs_check",
+                  "CHECK ((jsonb_typeof(inputs) = 'object'::text))"),
+    ConstraintPin("os_leads", "os_leads_inputs_check1",
+                  "CHECK (((NOT (inputs ? 'status'::text)) OR COALESCE(((inputs ->> "
+                  "'status'::text) = ANY (ARRAY['חדש'::text, 'רלוונטי'::text, 'לא "
+                  "רלוונטי'::text, 'לא ענה'::text, 'הפך ללקוח'::text])), false)))"),
+    ConstraintPin("os_leads", "os_leads_revision_check", "CHECK ((revision > 0))"),
+    # os_clients
+    ConstraintPin("os_clients", "os_clients_pkey", "PRIMARY KEY (workspace_id, record_id)"),
+    ConstraintPin("os_clients", "os_clients_workspace_id_fkey",
+                  "FOREIGN KEY (workspace_id) REFERENCES assaf_os.os_workspaces(workspace_id)"),
+    ConstraintPin("os_clients", "os_clients_check", "CHECK ((updated_at >= created_at))"),
+    ConstraintPin("os_clients", "os_clients_check1",
+                  "CHECK (((deleted_at IS NULL) = (deleted_by_request_id IS NULL)))"),
+    ConstraintPin("os_clients", "os_clients_inputs_check",
+                  "CHECK ((jsonb_typeof(inputs) = 'object'::text))"),
+    ConstraintPin("os_clients", "os_clients_inputs_check1",
+                  "CHECK (((NOT (inputs ? 'status'::text)) OR COALESCE(((inputs ->> "
+                  "'status'::text) = ANY (ARRAY['פעיל'::text, 'לא פעיל'::text])), false)))"),
+    ConstraintPin("os_clients", "os_clients_revision_check", "CHECK ((revision > 0))"),
+    # os_works
+    ConstraintPin("os_works", "os_works_pkey", "PRIMARY KEY (workspace_id, record_id)"),
+    ConstraintPin("os_works", "os_works_workspace_id_fkey",
+                  "FOREIGN KEY (workspace_id) REFERENCES assaf_os.os_workspaces(workspace_id)"),
+    ConstraintPin("os_works", "os_works_workspace_id_person_id_fkey",
+                  "FOREIGN KEY (workspace_id, person_id) REFERENCES "
+                  "assaf_os.os_clients(workspace_id, record_id)"),
+    ConstraintPin("os_works", "os_works_agreed_amount_minor_check",
+                  "CHECK (((agreed_amount_minor IS NULL) OR ((agreed_amount_minor = "
+                  "trunc(agreed_amount_minor)) AND (agreed_amount_minor >= (0)::numeric) AND "
+                  "(agreed_amount_minor <= ('9007199254740991'::bigint)::numeric))))"),
+    ConstraintPin("os_works", "os_works_check", "CHECK ((updated_at >= created_at))"),
+    ConstraintPin("os_works", "os_works_check1",
+                  "CHECK (((deleted_at IS NULL) = (deleted_by_request_id IS NULL)))"),
+    ConstraintPin("os_works", "os_works_currency_check", None),
+    ConstraintPin("os_works", "os_works_inputs_check",
+                  "CHECK ((jsonb_typeof(inputs) = 'object'::text))"),
+    ConstraintPin("os_works", "os_works_inputs_check1",
+                  "CHECK (((NOT (inputs ? 'status'::text)) OR COALESCE(((inputs ->> "
+                  "'status'::text) = ANY (ARRAY['מתוכננת'::text, 'פעילה'::text, 'הושלמה'::text, "
+                  "'בוטלה'::text])), false)))"),
+    ConstraintPin("os_works", "os_works_revision_check", "CHECK ((revision > 0))"),
+    # os_payments
+    ConstraintPin("os_payments", "os_payments_pkey", "PRIMARY KEY (workspace_id, record_id)"),
+    ConstraintPin("os_payments", "os_payments_workspace_id_fkey",
+                  "FOREIGN KEY (workspace_id) REFERENCES assaf_os.os_workspaces(workspace_id)"),
+    ConstraintPin("os_payments", "os_payments_workspace_id_original_payment_id_fkey",
+                  "FOREIGN KEY (workspace_id, original_payment_id) REFERENCES "
+                  "assaf_os.os_payments(workspace_id, record_id)"),
+    ConstraintPin("os_payments", "os_payments_workspace_id_person_id_fkey",
+                  "FOREIGN KEY (workspace_id, person_id) REFERENCES "
+                  "assaf_os.os_clients(workspace_id, record_id)"),
+    ConstraintPin("os_payments", "os_payments_workspace_id_work_id_fkey",
+                  "FOREIGN KEY (workspace_id, work_id) REFERENCES "
+                  "assaf_os.os_works(workspace_id, record_id)"),
+    ConstraintPin("os_payments", "os_payments_amount_minor_check",
+                  "CHECK (((amount_minor = trunc(amount_minor)) AND (amount_minor > "
+                  "(0)::numeric) AND (amount_minor <= ('9007199254740991'::bigint)::numeric)))"),
+    ConstraintPin("os_payments", "os_payments_check", "CHECK ((updated_at >= created_at))"),
+    ConstraintPin("os_payments", "os_payments_check1",
+                  "CHECK (((deleted_at IS NULL) = (deleted_by_request_id IS NULL)))"),
+    ConstraintPin("os_payments", "os_payments_currency_check", None),
+    ConstraintPin("os_payments", "os_payments_inputs_check",
+                  "CHECK ((jsonb_typeof(inputs) = 'object'::text))"),
+    ConstraintPin("os_payments", "os_payments_inputs_check1",
+                  "CHECK (((NOT (inputs ? 'kind'::text)) OR COALESCE(((inputs ->> 'kind'::text) "
+                  "= ANY (ARRAY['התקבל'::text, 'החזר'::text, 'בוטל'::text])), false)))"),
+    ConstraintPin("os_payments", "os_payments_revision_check", "CHECK ((revision > 0))"),
+    # os_time
+    ConstraintPin("os_time", "os_time_pkey", "PRIMARY KEY (workspace_id, record_id)"),
+    ConstraintPin("os_time", "os_time_workspace_id_fkey",
+                  "FOREIGN KEY (workspace_id) REFERENCES assaf_os.os_workspaces(workspace_id)"),
+    ConstraintPin("os_time", "os_time_workspace_id_person_id_fkey",
+                  "FOREIGN KEY (workspace_id, person_id) REFERENCES "
+                  "assaf_os.os_clients(workspace_id, record_id)"),
+    ConstraintPin("os_time", "os_time_workspace_id_work_id_fkey",
+                  "FOREIGN KEY (workspace_id, work_id) REFERENCES "
+                  "assaf_os.os_works(workspace_id, record_id)"),
+    ConstraintPin("os_time", "os_time_check", "CHECK ((updated_at >= created_at))"),
+    ConstraintPin("os_time", "os_time_check1",
+                  "CHECK (((deleted_at IS NULL) = (deleted_by_request_id IS NULL)))"),
+    ConstraintPin("os_time", "os_time_inputs_check",
+                  "CHECK ((jsonb_typeof(inputs) = 'object'::text))"),
+    ConstraintPin("os_time", "os_time_inputs_check1",
+                  "CHECK (((NOT (inputs ? 'status'::text)) OR COALESCE(((inputs ->> "
+                  "'status'::text) = ANY (ARRAY['פעיל'::text, 'בוטל'::text])), false)))"),
+    ConstraintPin("os_time", "os_time_minutes_check",
+                  "CHECK (((minutes >= 0) AND (minutes <= '9007199254740991'::bigint)))"),
+    ConstraintPin("os_time", "os_time_revision_check", "CHECK ((revision > 0))"),
+    # os_expenses
+    ConstraintPin("os_expenses", "os_expenses_pkey", "PRIMARY KEY (workspace_id, record_id)"),
+    ConstraintPin("os_expenses", "os_expenses_workspace_id_source_digest_key",
+                  "UNIQUE (workspace_id, source_digest)"),
+    ConstraintPin("os_expenses", "os_expenses_workspace_id_fkey",
+                  "FOREIGN KEY (workspace_id) REFERENCES assaf_os.os_workspaces(workspace_id)"),
+    ConstraintPin("os_expenses", "os_expenses_amount_minor_check",
+                  "CHECK (((amount_minor = trunc(amount_minor)) AND (amount_minor > "
+                  "(0)::numeric) AND (amount_minor <= ('9007199254740991'::bigint)::numeric)))"),
+    ConstraintPin("os_expenses", "os_expenses_check", "CHECK ((updated_at >= created_at))"),
+    ConstraintPin("os_expenses", "os_expenses_check1",
+                  "CHECK (((deleted_at IS NULL) = (deleted_by_request_id IS NULL)))"),
+    ConstraintPin("os_expenses", "os_expenses_currency_check", None),
+    ConstraintPin("os_expenses", "os_expenses_inputs_check",
+                  "CHECK ((jsonb_typeof(inputs) = 'object'::text))"),
+    ConstraintPin("os_expenses", "os_expenses_inputs_check1",
+                  "CHECK (((NOT (inputs ? 'payment_status'::text)) OR COALESCE(((inputs ->> "
+                  "'payment_status'::text) = ANY (ARRAY['שולם'::text, 'לא שולם'::text, "
+                  "'בוטל'::text])), false)))"),
+    ConstraintPin("os_expenses", "os_expenses_revision_check", "CHECK ((revision > 0))"),
+    # os_tasks
+    ConstraintPin("os_tasks", "os_tasks_pkey", "PRIMARY KEY (workspace_id, record_id)"),
+    ConstraintPin("os_tasks", "os_tasks_workspace_id_fkey",
+                  "FOREIGN KEY (workspace_id) REFERENCES assaf_os.os_workspaces(workspace_id)"),
+    ConstraintPin("os_tasks", "os_tasks_workspace_id_person_id_fkey",
+                  "FOREIGN KEY (workspace_id, person_id) REFERENCES "
+                  "assaf_os.os_clients(workspace_id, record_id)"),
+    ConstraintPin("os_tasks", "os_tasks_workspace_id_work_id_fkey",
+                  "FOREIGN KEY (workspace_id, work_id) REFERENCES "
+                  "assaf_os.os_works(workspace_id, record_id)"),
+    ConstraintPin("os_tasks", "os_tasks_check", "CHECK ((updated_at >= created_at))"),
+    ConstraintPin("os_tasks", "os_tasks_check1",
+                  "CHECK (((deleted_at IS NULL) = (deleted_by_request_id IS NULL)))"),
+    ConstraintPin("os_tasks", "os_tasks_inputs_check",
+                  "CHECK ((jsonb_typeof(inputs) = 'object'::text))"),
+    ConstraintPin("os_tasks", "os_tasks_inputs_check1",
+                  "CHECK (((NOT (inputs ? 'status'::text)) OR COALESCE(((inputs ->> "
+                  "'status'::text) = ANY (ARRAY['לביצוע'::text, 'בתהליך'::text, 'ממתין'::text, "
+                  "'בוצע'::text, 'בוטל'::text])), false)))"),
+    ConstraintPin("os_tasks", "os_tasks_revision_check", "CHECK ((revision > 0))"),
+    # os_proposals
+    ConstraintPin("os_proposals", "os_proposals_pkey", "PRIMARY KEY (workspace_id, proposal_id)"),
+    ConstraintPin("os_proposals", "os_proposals_workspace_id_approval_id_key",
+                  "UNIQUE (workspace_id, approval_id)"),
+    ConstraintPin("os_proposals", "os_proposals_workspace_id_rejection_id_key",
+                  "UNIQUE (workspace_id, rejection_id)"),
+    ConstraintPin("os_proposals", "os_proposals_workspace_id_request_id_key",
+                  "UNIQUE (workspace_id, request_id)"),
+    ConstraintPin("os_proposals", "os_proposals_workspace_id_fkey",
+                  "FOREIGN KEY (workspace_id) REFERENCES assaf_os.os_workspaces(workspace_id)"),
+    ConstraintPin("os_proposals", "os_proposals_check", "CHECK ((approval_id <> rejection_id))"),
+    ConstraintPin("os_proposals", "os_proposals_check1", "CHECK ((expires_at > created_at))"),
+    ConstraintPin("os_proposals", "os_proposals_check2",
+                  "CHECK ((((kind)::text <> 'proposal'::text) OR (expires_at <= (created_at + "
+                  "'00:10:00'::interval))))"),
+    ConstraintPin("os_proposals", "os_proposals_check3",
+                  "CHECK ((((kind)::text <> 'statement_batch'::text) OR (expires_at <= "
+                  "(created_at + '7 days'::interval))))"),
+    ConstraintPin("os_proposals", "os_proposals_check4", None),
+    ConstraintPin("os_proposals", "os_proposals_check5",
+                  r"CHECK ((((source)::text !~~ like_escape('ASSISTANT\_%'::text, '\'::text)) OR "
+                  "((kind)::text = 'statement_batch'::text)))"),
+    ConstraintPin("os_proposals", "os_proposals_epoch_check", "CHECK ((epoch > 0))"),
+    ConstraintPin("os_proposals", "os_proposals_expected_revision_check",
+                  "CHECK ((expected_revision >= 0))"),
+    ConstraintPin("os_proposals", "os_proposals_kind_check", None),
+    ConstraintPin("os_proposals", "os_proposals_mutations_check",
+                  "CHECK ((jsonb_typeof(mutations) = 'array'::text))"),
+    ConstraintPin("os_proposals", "os_proposals_owner_id_check",
+                  "CHECK (((owner_id)::text ~ '^[0-9]+$'::text))"),
+    ConstraintPin("os_proposals", "os_proposals_source_check",
+                  "CHECK (((source)::text ~ '^[A-Z][A-Z0-9_]{1,31}$'::text))"),
+    ConstraintPin("os_proposals", "os_proposals_status_check", None),
+    # os_receipts
+    ConstraintPin("os_receipts", "os_receipts_pkey", "PRIMARY KEY (workspace_id, request_id)"),
+    ConstraintPin("os_receipts", "os_receipts_workspace_id_proposal_id_key",
+                  "UNIQUE (workspace_id, proposal_id)"),
+    ConstraintPin("os_receipts", "os_receipts_workspace_id_undo_of_key",
+                  "UNIQUE (workspace_id, undo_of)"),
+    ConstraintPin("os_receipts", "os_receipts_workspace_id_proposal_id_fkey",
+                  "FOREIGN KEY (workspace_id, proposal_id) REFERENCES "
+                  "assaf_os.os_proposals(workspace_id, proposal_id)"),
+    ConstraintPin("os_receipts", "os_receipts_workspace_id_undo_of_fkey",
+                  "FOREIGN KEY (workspace_id, undo_of) REFERENCES "
+                  "assaf_os.os_receipts(workspace_id, request_id)"),
+    ConstraintPin("os_receipts", "os_receipts_check",
+                  "CHECK (((undo_until IS NULL) OR (undo_until > completed_at)))"),
+    ConstraintPin("os_receipts", "os_receipts_check1",
+                  "CHECK (((undo_of IS NULL) OR (undo_of <> request_id)))"),
+    ConstraintPin("os_receipts", "os_receipts_commit_version_check",
+                  "CHECK ((commit_version > 0))"),
+    ConstraintPin("os_receipts", "os_receipts_epoch_check", "CHECK ((epoch > 0))"),
+    ConstraintPin("os_receipts", "os_receipts_kind_check", None),
+    ConstraintPin("os_receipts", "os_receipts_records_check",
+                  "CHECK ((jsonb_typeof(records) = 'array'::text))"),
+    ConstraintPin("os_receipts", "os_receipts_status_check", None),
+    ConstraintPin("os_receipts", "os_receipts_undo_state_check", None),
+    # os_events
+    ConstraintPin("os_events", "os_events_pkey", "PRIMARY KEY (workspace_id, event_id)"),
+    ConstraintPin("os_events", "os_events_workspace_id_commit_version_key",
+                  "UNIQUE (workspace_id, commit_version)"),
+    ConstraintPin("os_events", "os_events_workspace_id_decision_id_key",
+                  "UNIQUE (workspace_id, decision_id)"),
+    ConstraintPin("os_events", "os_events_workspace_id_decision_id_fkey",
+                  "FOREIGN KEY (workspace_id, decision_id) REFERENCES "
+                  "assaf_os.os_receipts(workspace_id, request_id)"),
+    ConstraintPin("os_events", "os_events_body_check",
+                  "CHECK ((jsonb_typeof(body) = 'object'::text))"),
+    ConstraintPin("os_events", "os_events_commit_version_check", "CHECK ((commit_version > 0))"),
+    # os_outbox
+    ConstraintPin("os_outbox", "os_outbox_pkey", "PRIMARY KEY (workspace_id, event_id)"),
+    ConstraintPin("os_outbox", "os_outbox_workspace_id_commit_version_key",
+                  "UNIQUE (workspace_id, commit_version)"),
+    ConstraintPin("os_outbox", "os_outbox_workspace_id_event_id_fkey",
+                  "FOREIGN KEY (workspace_id, event_id) REFERENCES "
+                  "assaf_os.os_events(workspace_id, event_id)"),
+    ConstraintPin("os_outbox", "os_outbox_attempts_check", "CHECK ((attempts >= 0))"),
+    ConstraintPin("os_outbox", "os_outbox_body_check",
+                  "CHECK ((jsonb_typeof(body) = 'object'::text))"),
+    ConstraintPin("os_outbox", "os_outbox_check", "CHECK ((updated_at >= created_at))"),
+    ConstraintPin("os_outbox", "os_outbox_check1",
+                  "CHECK ((((status)::text = 'leased'::text) = (lease_owner IS NOT NULL)))"),
+    ConstraintPin("os_outbox", "os_outbox_check2",
+                  "CHECK (((lease_owner IS NULL) = (leased_at IS NULL)))"),
+    ConstraintPin("os_outbox", "os_outbox_commit_version_check", "CHECK ((commit_version > 0))"),
+    ConstraintPin("os_outbox", "os_outbox_lease_generation_check",
+                  "CHECK ((lease_generation >= 0))"),
+    ConstraintPin("os_outbox", "os_outbox_status_check", None),
+    # os_mirror_state
+    ConstraintPin("os_mirror_state", "os_mirror_state_pkey", "PRIMARY KEY (workspace_id)"),
+    ConstraintPin("os_mirror_state", "os_mirror_state_workspace_id_fkey",
+                  "FOREIGN KEY (workspace_id) REFERENCES assaf_os.os_workspaces(workspace_id)"),
+    ConstraintPin("os_mirror_state", "os_mirror_state_check",
+                  "CHECK ((verified_version <= projected_version))"),
+    ConstraintPin("os_mirror_state", "os_mirror_state_projected_version_check",
+                  "CHECK ((projected_version >= 0))"),
+    ConstraintPin("os_mirror_state", "os_mirror_state_scan_coverage_check",
+                  "CHECK ((jsonb_typeof(scan_coverage) = 'object'::text))"),
+    ConstraintPin("os_mirror_state", "os_mirror_state_status_check", None),
+    ConstraintPin("os_mirror_state", "os_mirror_state_verified_version_check",
+                  "CHECK ((verified_version >= 0))"),
+    ConstraintPin("os_mirror_state", "os_mirror_state_watermark_check",
+                  "CHECK ((jsonb_typeof(watermark) = 'object'::text))"),
+    # os_summary_monthly
+    ConstraintPin("os_summary_monthly", "os_summary_monthly_pkey",
+                  "PRIMARY KEY (workspace_id, month_start)"),
+    ConstraintPin("os_summary_monthly", "os_summary_monthly_workspace_id_fkey",
+                  "FOREIGN KEY (workspace_id) REFERENCES assaf_os.os_workspaces(workspace_id)"),
+    ConstraintPin("os_summary_monthly", "os_summary_monthly_month_start_check",
+                  "CHECK ((month_start = (date_trunc('month'::text, (month_start)::timestamp "
+                  "with time zone))::date))"),
+    ConstraintPin("os_summary_monthly", "os_summary_monthly_summary_check",
+                  "CHECK ((jsonb_typeof(summary) = 'object'::text))"),
+    ConstraintPin("os_summary_monthly", "os_summary_monthly_version_check",
+                  "CHECK ((version >= 0))"),
+    # os_summary_cycle
+    ConstraintPin("os_summary_cycle", "os_summary_cycle_pkey",
+                  "PRIMARY KEY (workspace_id, cycle_id)"),
+    ConstraintPin("os_summary_cycle", "os_summary_cycle_workspace_id_fkey",
+                  "FOREIGN KEY (workspace_id) REFERENCES assaf_os.os_workspaces(workspace_id)"),
+    ConstraintPin("os_summary_cycle", "os_summary_cycle_check", "CHECK ((ends_on >= starts_on))"),
+    ConstraintPin("os_summary_cycle", "os_summary_cycle_summary_check",
+                  "CHECK ((jsonb_typeof(summary) = 'object'::text))"),
+    ConstraintPin("os_summary_cycle", "os_summary_cycle_version_check", "CHECK ((version >= 0))"),
+    # os_import_batches
+    ConstraintPin("os_import_batches", "os_import_batches_pkey",
+                  "PRIMARY KEY (workspace_id, batch_id)"),
+    ConstraintPin("os_import_batches", "os_import_batches_workspace_id_source_digest_key",
+                  "UNIQUE (workspace_id, source_digest)"),
+    ConstraintPin("os_import_batches", "os_import_batches_workspace_id_fkey",
+                  "FOREIGN KEY (workspace_id) REFERENCES assaf_os.os_workspaces(workspace_id)"),
+    ConstraintPin("os_import_batches", "os_import_batches_authority_epoch_check",
+                  "CHECK ((authority_epoch > 0))"),
+    ConstraintPin("os_import_batches", "os_import_batches_check", None),
+    ConstraintPin("os_import_batches", "os_import_batches_check1",
+                  "CHECK (((completed_at IS NULL) OR (completed_at >= created_at)))"),
+    ConstraintPin("os_import_batches", "os_import_batches_check2",
+                  "CHECK ((((status)::text <> 'quarantined'::text) OR (quarantine IS NOT "
+                  "NULL)))"),
+    ConstraintPin("os_import_batches", "os_import_batches_provenance_check",
+                  "CHECK ((jsonb_typeof(provenance) = 'object'::text))"),
+    ConstraintPin("os_import_batches", "os_import_batches_quarantine_check",
+                  "CHECK (((quarantine IS NULL) OR (jsonb_typeof(quarantine) = "
+                  "'object'::text)))"),
+    ConstraintPin("os_import_batches", "os_import_batches_status_check", None),
+    # os_import_rows
+    ConstraintPin("os_import_rows", "os_import_rows_pkey",
+                  "PRIMARY KEY (workspace_id, batch_id, row_number)"),
+    ConstraintPin("os_import_rows", "os_import_rows_workspace_id_batch_id_source_digest_key",
+                  "UNIQUE (workspace_id, batch_id, source_digest)"),
+    ConstraintPin("os_import_rows", "os_import_rows_workspace_id_batch_id_fkey",
+                  "FOREIGN KEY (workspace_id, batch_id) REFERENCES "
+                  "assaf_os.os_import_batches(workspace_id, batch_id)"),
+    ConstraintPin("os_import_rows", "os_import_rows_canonical_record_check",
+                  "CHECK (((canonical_record IS NULL) OR (jsonb_typeof(canonical_record) = "
+                  "'object'::text)))"),
+    ConstraintPin("os_import_rows", "os_import_rows_check",
+                  "CHECK ((((status)::text <> 'quarantined'::text) OR (quarantine IS NOT "
+                  "NULL)))"),
+    ConstraintPin("os_import_rows", "os_import_rows_entity_check", None),
+    ConstraintPin("os_import_rows", "os_import_rows_provenance_check",
+                  "CHECK ((jsonb_typeof(provenance) = 'object'::text))"),
+    ConstraintPin("os_import_rows", "os_import_rows_quarantine_check",
+                  "CHECK (((quarantine IS NULL) OR (jsonb_typeof(quarantine) = "
+                  "'object'::text)))"),
+    ConstraintPin("os_import_rows", "os_import_rows_raw_record_check",
+                  "CHECK ((jsonb_typeof(raw_record) = 'object'::text))"),
+    ConstraintPin("os_import_rows", "os_import_rows_row_number_check", "CHECK ((row_number > 0))"),
+    ConstraintPin("os_import_rows", "os_import_rows_status_check", None),
+    # schema_migrations
+    ConstraintPin("schema_migrations", "schema_migrations_pkey", "PRIMARY KEY (filename)"),
+)
+
+# The indexes that back no PRIMARY KEY or UNIQUE constraint (those are the pins above), by
+# pg_get_indexdef. The expression index is the exactly-once key for expenses (V2-14).
+INDEX_PINS = frozenset({
+    "CREATE INDEX os_clients_workspace_business_date_idx ON assaf_os.os_clients USING btree "
+    "(workspace_id, business_date)",
+    "CREATE UNIQUE INDEX os_expenses_source_key_idx ON assaf_os.os_expenses USING btree "
+    "(workspace_id, source_type, assaf_os.expense_source_key_sha256((source_key)::text))",
+    "CREATE INDEX os_expenses_workspace_business_date_idx ON assaf_os.os_expenses USING btree "
+    "(workspace_id, business_date)",
+    "CREATE INDEX os_leads_workspace_business_date_idx ON assaf_os.os_leads USING btree "
+    "(workspace_id, business_date)",
+    "CREATE INDEX os_outbox_delivery_idx ON assaf_os.os_outbox USING btree (status, "
+    "next_attempt_at, workspace_id, commit_version)",
+    "CREATE INDEX os_payments_workspace_business_date_idx ON assaf_os.os_payments USING btree "
+    "(workspace_id, business_date)",
+    "CREATE INDEX os_tasks_workspace_business_date_idx ON assaf_os.os_tasks USING btree "
+    "(workspace_id, business_date)",
+    "CREATE INDEX os_tasks_workspace_status_due_date_idx ON assaf_os.os_tasks USING btree "
+    "(workspace_id, status, due_date)",
+    "CREATE INDEX os_time_workspace_business_date_idx ON assaf_os.os_time USING btree "
+    "(workspace_id, business_date)",
+    "CREATE INDEX os_works_workspace_business_date_idx ON assaf_os.os_works USING btree "
+    "(workspace_id, business_date)",
+})
+
 # Predefined roles whose members reach assaf_os without any ACL, ownership or pg_depend
 # edge: row access (read and write all data, maintain from PostgreSQL 17) and the file and
 # program roles that read or overwrite the data files or run as the server's OS user. A
@@ -286,6 +678,72 @@ def _closure(conn: Connection) -> None:
     """)))
 
 
+def _referential_integrity(conn: Connection) -> None:
+    # Review of #170 r3 (round 2), major. A foreign key is enforced by internal (RI)
+    # triggers, and a referential action (ON UPDATE or ON DELETE CASCADE, SET NULL, SET
+    # DEFAULT) runs as the OWNER of the referencing table, not as the session that fired it.
+    # One owner-level `ADD CONSTRAINT ... ON UPDATE CASCADE` therefore turns the
+    # §18.2-permitted UPDATE of os_leads.person_id into a rewrite of os_receipts.proposal_id,
+    # which the runtime role may not UPDATE, and an ON DELETE CASCADE edge would let a
+    # retention DELETE erase history. Every foreign key must be NO ACTION, MATCH SIMPLE,
+    # immediate and validated, whatever CONSTRAINT_PINS says, so that a later migration's new
+    # foreign key meets the same rule.
+    _require(not conn.scalar(text(
+        "SELECT EXISTS(SELECT 1 FROM pg_constraint k JOIN pg_class c ON c.oid = k.conrelid "
+        "WHERE c.relnamespace = to_regnamespace('assaf_os') AND k.contype = 'f' AND NOT ("
+        "k.confupdtype = 'a' AND k.confdeltype = 'a' AND k.confmatchtype = 's' "
+        "AND NOT k.condeferrable AND NOT k.condeferred AND k.convalidated))"
+    )))
+    # Disabling or re-modeling the internal triggers (ALTER TABLE ... DISABLE TRIGGER, which
+    # needs a superuser) is the same bypass r1 refused through session_replication_role:
+    # the runtime role could then insert an event with no receipt. They must all fire in
+    # every session (origin), which is tgenabled = 'O'.
+    _require(not conn.scalar(text(
+        "SELECT EXISTS(SELECT 1 FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid "
+        "WHERE c.relnamespace = to_regnamespace('assaf_os') AND t.tgisinternal "
+        "AND t.tgenabled <> 'O')"
+    )))
+
+
+def _integrity(conn: Connection) -> None:
+    _referential_integrity(conn)
+    # An UNLOGGED table is truncated by crash recovery, which silently loses the append-only
+    # events and receipts and the outbox that exactly-once depends on, whatever fsync and
+    # synchronous_commit say. Every relation, indexes included, is permanent.
+    _require(not conn.scalar(text(
+        "SELECT EXISTS(SELECT 1 FROM pg_class c WHERE c.relnamespace = to_regnamespace('assaf_os') "
+        "AND c.relpersistence <> 'p')"
+    )))
+    # The constraint inventory is exact, and every constraint is validated (a NOT VALID one
+    # is not checked against the rows already there, including a name-only CHECK). The LEFT
+    # JOIN keeps a constraint with no table, such as a domain's CHECK in assaf_os, in the
+    # comparison, where it matches no pin.
+    constraints = conn.execute(text(
+        "SELECT COALESCE(c.relname, ''), k.conname, pg_get_constraintdef(k.oid), k.convalidated "
+        "FROM pg_constraint k LEFT JOIN pg_class c ON c.oid = k.conrelid "
+        "WHERE k.connamespace = to_regnamespace('assaf_os') "
+        "OR c.relnamespace = to_regnamespace('assaf_os')"
+    )).all()
+    live = {(row[0], row[1]): row[2] for row in constraints}
+    pinned = {(pin.relation, pin.name): pin.definition for pin in CONSTRAINT_PINS}
+    _require(all(row[3] is True for row in constraints)
+             and len(constraints) == len(live) == len(CONSTRAINT_PINS) == len(pinned)
+             and live.keys() == pinned.keys()
+             and all(want is None or live[key] == want for key, want in pinned.items()))
+    # Every index is usable (a failed concurrent build leaves an invalid one), and the ones
+    # that back no PRIMARY KEY or UNIQUE constraint are exactly the pinned set.
+    indexes = conn.execute(text(
+        "SELECT pg_get_indexdef(i.indexrelid), EXISTS(SELECT 1 FROM pg_constraint k "
+        "WHERE k.conindid = i.indexrelid AND k.conrelid = i.indrelid "
+        "AND k.contype IN ('p', 'u', 'x')), i.indisvalid AND i.indisready AND i.indislive "
+        "FROM pg_index i JOIN pg_class x ON x.oid = i.indexrelid "
+        "WHERE x.relnamespace = to_regnamespace('assaf_os')"
+    )).all()
+    _require(all(row[2] is True for row in indexes))
+    unbacked = [row[0] for row in indexes if row[1] is False]
+    _require(len(unbacked) == len(INDEX_PINS) and set(unbacked) == INDEX_PINS)
+
+
 def _footprints(conn: Connection, main_role: str) -> None:
     params = {
         "owner": OWNER_ROLE, "runtime": RUNTIME_ROLE, "retention": RETENTION_ROLE,
@@ -452,6 +910,7 @@ def _catalog(conn: Connection, main_role: str, migration_role: str | None) -> No
             AND has_function_privilege(:role,p.oid,'EXECUTE'))
         """), {"role": role, "retention": role == RETENTION_ROLE}))
     _closure(conn)
+    _integrity(conn)
     _footprints(conn, main_role)
     _defaults(conn, main_role)
 
@@ -500,7 +959,7 @@ def validate_ledger_role(
 ) -> None:
     """§5.5 runtime/authority preflight; audit both actual DSNs, without caching.
 
-    A preflight, not a per-request check (0.1-0.3 s of catalog queries): run it on
+    A preflight, not a per-request check (0.1-0.4 s of catalog queries): run it on
     the first connection, every 10 minutes and after a reconnect, and cache the result.
     Requires separate, unimpersonated identities on the same PostgreSQL server and
     database. migration_role=None derives the migration identity as the single
