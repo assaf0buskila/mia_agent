@@ -479,6 +479,7 @@ def test_the_binding_is_reproved_with_the_snapshot_routes_404_and_503(
         owner_id="99999999" if case == "owner_removed" else OWNER,
         scopes=frozenset({"assaf-os:read"}),
         session_hash="h" * 64,
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
     )
     if case == "feature_off":
         config.assaf_os_enabled = False

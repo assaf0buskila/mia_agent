@@ -1,9 +1,19 @@
+import logging
 import os
+import re
+from collections.abc import Callable
 from enum import StrEnum
-from typing import Literal
+from typing import Any, Literal, Self
 from urllib.parse import urlparse
 
-from pydantic import Field
+from pydantic import (
+    Field,
+    TypeAdapter,
+    ValidationError,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.core.models import model_chain
@@ -21,6 +31,104 @@ class AutomationMode(StrEnum):
     SHADOW = "shadow"
     HYBRID = "hybrid"
     AUTO_APPROVED = "auto_approved"
+
+
+_LOG = logging.getLogger("mia.config")
+_BOOL = TypeAdapter(bool)
+_INT = TypeAdapter(int)
+
+
+def _os_bool(value: Any) -> bool:
+    return _BOOL.validate_python(value)
+
+
+def _os_int(low: int, high: int | None) -> Callable[[Any], int]:
+    def parse(value: Any) -> int:
+        if isinstance(value, bool):
+            raise ValueError
+        number = _INT.validate_python(value)
+        if number < low or (high is not None and number > high):
+            raise ValueError
+        return number
+
+    return parse
+
+
+def _os_choice(*allowed: str) -> Callable[[Any], str]:
+    def parse(value: Any) -> str:
+        if value not in allowed:
+            raise ValueError
+        return value
+
+    return parse
+
+
+def _os_str(value: Any) -> str:
+    if type(value) is not str:
+        raise ValueError
+    return value
+
+
+def _os_secret(value: Any) -> str:
+    """Unset, or at least 32 bytes. Fingerprints and other checks still happen at use."""
+    secret = _os_str(value)
+    if secret and len(secret.encode("utf-8")) < 32:
+        raise ValueError
+    return secret
+
+
+_SHEET_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
+
+
+def _os_sheet_id(value: Any) -> str:
+    """Unset, or exactly one spreadsheet id (no list, no whitespace)."""
+    sheet_id = _os_str(value).strip()
+    if sheet_id and not _SHEET_ID.fullmatch(sheet_id):
+        raise ValueError
+    return sheet_id
+
+
+# Field -> (default, parser) for the §3.3 block. A parser raises on any unparsable or out-of-range
+# value, and the field then falls back to its default.
+_OS_CONFIG_RULES: dict[str, tuple[Any, Callable[[Any], Any]]] = {
+    "assaf_os_backend": ("sheets", _os_choice("sheets", "postgres")),
+    "assaf_os_ledger_enabled": (False, _os_bool),
+    "assaf_os_authority_epoch": (0, _os_int(0, 2**63 - 1)),  # PostgreSQL BIGINT
+    "assaf_os_freeze": (False, _os_bool),
+    "assaf_os_owner_direct_enabled": (False, _os_bool),
+    "owner_undo_window_seconds": (30, _os_int(10, 60)),
+    "assaf_os_statements_enabled": (False, _os_bool),
+    "os_statement_pepper": ("", _os_secret),
+    "assaf_os_mirror_enabled": (False, _os_bool),
+    "os_mirror_spreadsheet_id": ("", _os_sheet_id),
+    "os_mirror_service_account_json": ("", _os_str),
+    "os_mirror_lag_warn_seconds": (300, _os_int(60, 3600)),
+    "os_mirror_anti_entropy_seconds": (900, _os_int(300, 3600)),
+    "assaf_os_assistant_enabled": (False, _os_bool),
+    "os_assistant_ip_hmac_key": ("", _os_secret),
+    "os_step_up_secret": ("", _os_secret),
+}
+_OS_CONFIG_COERCED: set[str] = set()
+
+
+def _os_config_value(name: str, value: Any) -> Any:
+    default, parse = _OS_CONFIG_RULES[name]
+    if isinstance(value, str) and not value.strip() and default != "":
+        return default  # An empty env value for a non-string field means unset.
+    try:
+        return parse(value)
+    except (TypeError, ValueError, ValidationError):
+        if name not in _OS_CONFIG_COERCED:
+            _OS_CONFIG_COERCED.add(name)
+            _LOG.warning(
+                "os_config op=load outcome=coerced reason=config_invalid field=%s", name
+            )
+        return default
+
+
+def os_config_coerced() -> bool:
+    """True once any §3.3 value in this process was invalid and fell back to its default."""
+    return bool(_OS_CONFIG_COERCED)
 
 
 class Settings(BaseSettings):
@@ -86,6 +194,25 @@ class Settings(BaseSettings):
     assaf_os_workspace_id: str = ""
     assaf_os_hmac_secret: str = Field(default="", repr=False)
     assaf_os_mode: Literal["TEST", "LIVE"] = "TEST"
+    # Assaf OS v2 on PostgreSQL (V2_PG_CONTRACTS.md §3.3). Every field is default-off and plainly
+    # typed: _coerce_os_config turns an invalid value into the safe default, so a misconfiguration
+    # never fails the settings load. Secrets and ids are checked where they are used.
+    assaf_os_backend: str = "sheets"
+    assaf_os_ledger_enabled: bool = False
+    assaf_os_authority_epoch: int = 0
+    assaf_os_freeze: bool = False
+    assaf_os_owner_direct_enabled: bool = False
+    owner_undo_window_seconds: int = 30
+    assaf_os_statements_enabled: bool = False
+    os_statement_pepper: str = Field(default="", repr=False)
+    assaf_os_mirror_enabled: bool = False
+    os_mirror_spreadsheet_id: str = ""
+    os_mirror_service_account_json: str = Field(default="", repr=False)
+    os_mirror_lag_warn_seconds: int = 300
+    os_mirror_anti_entropy_seconds: int = 900
+    assaf_os_assistant_enabled: bool = False
+    os_assistant_ip_hmac_key: str = Field(default="", repr=False)
+    os_step_up_secret: str = Field(default="", repr=False)
     # Separate, TEST-only Sheets ledger. Never enables CRM or reminder writes.
     business_ledger_test_enabled: bool = False
     business_ledger_workspace_id: str = ""
@@ -97,7 +224,12 @@ class Settings(BaseSettings):
     owner_os_read_database_url: str = ""
     owner_os_action_database_url: str = ""
     owner_os_cursor_secret: str = ""
+    # Declared only so the existing mia-env still validates. Nothing reads it since V2-08.
     owner_os_session_ttl_seconds: int = Field(default=1800, gt=0, le=1800)
+    # V2-08 sliding sessions: a renewal slides the idle window, never past the absolute cap
+    # measured from the chain's first login.
+    owner_os_session_idle_seconds: int = Field(default=43_200, ge=300, le=43_200)
+    owner_os_session_absolute_seconds: int = Field(default=1_209_600, ge=3_600, le=1_209_600)
     owner_os_session_scopes: str = (
         "owner-os:read:contacts,owner-os:read:activities,owner-os:read:reminders"
     )
@@ -169,6 +301,17 @@ class Settings(BaseSettings):
     gsc_site_url: str = Field(default="")
     ga4_property_id: str = Field(default="")
 
+    @field_validator(*_OS_CONFIG_RULES, mode="before")
+    @classmethod
+    def _coerce_os_config(cls, value: Any, info: ValidationInfo) -> Any:
+        return _os_config_value(info.field_name, value)
+
+    @model_validator(mode="after")
+    def _owner_os_session_windows(self) -> Self:
+        if self.owner_os_session_absolute_seconds < self.owner_os_session_idle_seconds:
+            raise ValueError("owner_os_session_absolute_seconds must be at least the idle window")
+        return self
+
     def cors_origin_list(self) -> list[str]:
         return [item.strip() for item in self.cors_origins.split(",") if item.strip()]
 
@@ -187,6 +330,11 @@ class Settings(BaseSettings):
         }
         configured.add(self.resolved_sheets_spreadsheet_id())
         configured.add(LOCKED_SPREADSHEET_ID)
+        # The OS mirror workbook is never a write target. The OS workbook stops being one once it
+        # is frozen or PostgreSQL holds the authority.
+        configured.discard(self.os_mirror_spreadsheet_id.strip())
+        if self.assaf_os_freeze or self.assaf_os_backend == "postgres":
+            configured.discard(self.assaf_os_workbook_id.strip())
         return frozenset(configured)
 
     def sales_llm_ready(self) -> bool:

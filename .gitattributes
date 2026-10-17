@@ -2,3 +2,6 @@
 ops/gcp/vm/* text eol=lf
 migrations_assaf_os/*.sql text eol=lf
 ops/gcp/backup/* text eol=lf
+# Python and SQL are LF everywhere: CRLF in the index makes whole-file diffs (V2-16f follow-up).
+*.py text eol=lf
+*.sql text eol=lf
