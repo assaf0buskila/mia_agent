@@ -437,6 +437,12 @@ _LEDGER_UNAVAILABLE_TEXT = "Assaf OS אינו זמין כרגע. לא נכתבה
 _LEDGER_REJECT_UNAVAILABLE_TEXT = (
     "הדחייה נשמרה כאן, אך Assaf OS אינו זמין כרגע. ההצעה נשארת שם ממתינה עד שתפוג."
 )
+# When no clean receipt read preceded the refusal, an earlier tap may already have committed:
+# say only that nothing new was sent (review r1, I2).
+_LEDGER_UNAVAILABLE_NEUTRAL_TEXT = "Assaf OS אינו זמין כרגע. לא נשלחה החלטה חדשה; אפשר לנסות שוב."
+_LEDGER_REJECT_UNAVAILABLE_NEUTRAL_TEXT = (
+    "הדחייה נשמרה כאן, אך Assaf OS אינו זמין כרגע ולא נשלחה דחייה חדשה. אפשר לנסות שוב."
+)
 _SHEETS_CARD_REJECT_TEXT = "הדחייה נשמרה. ההצעה מהגיליון הישן לא תיכתב ותפוג מעצמה."
 _LEDGER_TERMINAL = frozenset({"rejected", "expired", "target_changed", "committed"})
 
@@ -550,16 +556,29 @@ def _ledger_receipt_outcome(
     )
 
 
-def _ledger_refusal(exc: ledger_api.LedgerError, *, decision: str) -> OwnerActionExecution:
-    """A definite refusal: the ledger wrote nothing, and a later callback may try again."""
+def _ledger_refusal(
+    exc: ledger_api.LedgerError, *, decision: str, no_prior_receipt: bool = False
+) -> OwnerActionExecution:
+    """A definite refusal of this call; a later callback may try again.
+
+    ``no_prior_receipt`` is True only after this call's receipt reads succeeded and found
+    nothing. Only then may the text say that no record was written.
+    """
     if exc.code == "kill_switch":
         return OwnerActionExecution("policy_denied")
     if exc.code in {"decision_request_mismatch", "invalid_request_id", "validation_error"}:
         return OwnerActionExecution("unbound")
-    return OwnerActionExecution(
-        "not_connected",
-        _LEDGER_UNAVAILABLE_TEXT if decision == "approve" else _LEDGER_REJECT_UNAVAILABLE_TEXT,
-    )
+    if no_prior_receipt:
+        text = (
+            _LEDGER_UNAVAILABLE_TEXT if decision == "approve" else _LEDGER_REJECT_UNAVAILABLE_TEXT
+        )
+    else:
+        text = (
+            _LEDGER_UNAVAILABLE_NEUTRAL_TEXT
+            if decision == "approve"
+            else _LEDGER_REJECT_UNAVAILABLE_NEUTRAL_TEXT
+        )
+    return OwnerActionExecution("not_connected", text)
 
 
 def _ledger_target_matches(
@@ -723,7 +742,9 @@ def execute_ledger_owner_decision(
                 status="target_changed",
             )
         _ledger_log(op, "refused", exc.reason or exc.code, started)
-        return _ledger_refusal(exc, decision=decision)
+        # This call's receipt reads succeeded and found nothing, and the decide was refused
+        # definitely, so "no record was written" is provable here.
+        return _ledger_refusal(exc, decision=decision, no_prior_receipt=True)
     except Exception:  # noqa: BLE001 - an unclassified failure is uncertain: recover by reading
         return _ledger_recover(
             store,

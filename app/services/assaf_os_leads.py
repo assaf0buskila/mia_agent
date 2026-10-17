@@ -588,7 +588,7 @@ def _ledger_lead_exists(ledger, ctx, lead_input: Mapping[str, str]) -> bool:
                 return _duplicate_in_snapshot({"records": {"leads": leads}}, lead_input)
     except ledger_api.LedgerError as exc:
         raise _as_os_error(exc) from None
-    raise ValueError("sheet_snapshot_unavailable")
+    raise ValueError("ledger_lead_scan_bounded")
 
 
 def _create_final_ledger_proposal(

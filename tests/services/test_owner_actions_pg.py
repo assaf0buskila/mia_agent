@@ -385,3 +385,59 @@ def test_execute_ledger_owner_decision_requires_the_matching_owner_decision(stor
     )
     assert stranger.status in {"unauthorized", "unbound"}
     assert world.ledger.named("decide") == []
+
+
+def _reject(store, world, proposal):
+    return reject_assaf_os_owner_action(
+        store, settings=world.settings, principal=PRINCIPAL, proposal_id=proposal.proposal_id
+    )
+
+
+def _fail_next_read(world):
+    def fail():
+        raise api.LedgerError("ledger_unavailable")
+
+    world.ledger.before_read = fail
+
+
+@pytest.mark.parametrize("decision", ["approve", "reject"])
+def test_an_outage_in_the_receipt_read_never_claims_a_no_write(store, world, decision):
+    # Review r1 (#177): a decision committed, then the next tap's receipt read fails. The server
+    # cannot prove a no-write, so the text must not say one; the next tap still converges.
+    row, proposal = _card(store, world)
+    if decision == "approve":
+        approve_row(store, proposal.approval_id)
+        decision_id = row.approval_id
+    else:
+        approve_row(store, proposal.approval_id, DECISION_REJECTED)
+        decision_id = row.rejection_id
+    store.session.commit()
+    world.ledger.decide(world.ctx("TELEGRAM_APPROVAL"), row.proposal_id, decision_id, decision)
+    _fail_next_read(world)
+    run = _approve if decision == "approve" else _reject
+    outcome = run(store, world, proposal)
+    assert outcome.status == "not_connected"
+    assert "לא נכתבה רשומה" not in outcome.text and "ממתינה עד שתפוג" not in outcome.text
+    assert "לא נשלחה" in outcome.text
+    again = run(store, world, proposal)
+    assert again.status == "executed"
+    assert len(world.receipts()) == 1
+
+
+def test_a_definite_refusal_after_a_clean_receipt_read_may_say_nothing_was_written(
+    store, world, monkeypatch
+):
+    # The receipt read succeeded and found nothing, and the decide was refused definitely, so
+    # "no record was written" is provable here.
+    row, proposal = _card(store, world)
+    approve_row(store, proposal.approval_id)
+    store.session.commit()
+
+    def refuse(*_args, **_kwargs):
+        raise api.LedgerError("ledger_unavailable")
+
+    monkeypatch.setattr(world.ledger, "decide", refuse)
+    outcome = _approve(store, world, proposal)
+    assert outcome.status == "not_connected"
+    assert "לא נכתבה רשומה" in outcome.text
+    assert world.receipts() == []
