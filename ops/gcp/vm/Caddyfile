@@ -1,0 +1,16 @@
+{
+	admin off
+}
+
+# Replaces the AWS load balancer: TLS for mia.assafweb.com, everything proxied to the app
+# on loopback. The certificate is issued automatically once DNS points at this VM.
+mia.assafweb.com {
+	encode gzip
+	reverse_proxy 127.0.0.1:8000 {
+		transport http {
+			dial_timeout 3s
+			# Owner turns can run long; the ALB allowed 130s of idle.
+			response_header_timeout 130s
+		}
+	}
+}

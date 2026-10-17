@@ -12,7 +12,7 @@ import hashlib
 import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import update
@@ -58,6 +58,14 @@ class OwnerActionExecution:
 
 class OwnerActionTargetChanged(RuntimeError):
     """The approved target changed after the final snapshot check."""
+
+
+class OwnerActionTerminal(RuntimeError):
+    """A provider returned a signed, terminal non-success result."""
+
+    def __init__(self, status: str):
+        self.status = status
+        super().__init__(status)
 
 
 def typed_composio_binding(settings, toolkit: str, *, port: object | None = None) -> dict[str, Any]:
@@ -128,6 +136,7 @@ def propose_owner_action(
     target: Mapping[str, Any],
     risk: str = "R3",
     now: datetime | None = None,
+    ttl_seconds: int | None = None,
 ) -> OwnerActionProposal:
     """Persist one exact proposal. Replaying the same owner event is idempotent."""
     if not _valid_owner(principal):
@@ -160,7 +169,10 @@ def propose_owner_action(
             created=False,
         )
     moment = _aware(now)
-    expires_at = (moment + APPROVAL_TTL).isoformat()
+    ttl = APPROVAL_TTL if ttl_seconds is None else timedelta(seconds=ttl_seconds)
+    if ttl <= timedelta(0) or ttl > APPROVAL_TTL:
+        raise ValueError("approval ttl is outside the allowed bound")
+    expires_at = (moment + ttl).isoformat()
     row = ApprovalRow(
         lead_id=None,
         channel="telegram",
@@ -294,7 +306,10 @@ def execute_owner_action(
     if row.decision != DECISION_APPROVED:
         return OwnerActionExecution("not_approved")
     if str(row.executed_at or "").strip():
-        return OwnerActionExecution("already_handled")
+        return OwnerActionExecution(
+            "already_handled",
+            "הפעולה כבר בוצעה ואושרה לפי הקבלה השמורה.",
+        )
     moment = _aware(now)
     try:
         expiry = datetime.fromisoformat(row.expires_at.replace("Z", "+00:00"))
@@ -319,8 +334,13 @@ def execute_owner_action(
     try:
         text = execute(kind, parameters)
     except OwnerActionTargetChanged:
-        store.fail_operation(scope="approval", key=operation_key)
+        store.release_operation(scope="approval", key=operation_key)
         return OwnerActionExecution("target_changed")
+    except OwnerActionTerminal as exc:
+        # This exception is reserved for a signed provider result proving that no
+        # write committed, so this execution claim is safe to retire.
+        store.release_operation(scope="approval", key=operation_key)
+        return OwnerActionExecution(exc.status)
     except Exception:  # provider may have applied the write before transport failed
         store.mark_provider_write_pending_review(scope="approval", key=operation_key)
         return OwnerActionExecution("unknown")
@@ -399,6 +419,117 @@ def execute_approved_owner_action_with_adapters(
     if envelope is None:
         return OwnerActionExecution("unbound")
 
+    # Finance actions use the same durable approval/claim engine, but dispatch
+    # before constructing any unrelated Composio, CRM or Google provider.
+    if envelope["kind"].startswith("business."):
+        if getattr(settings, "assaf_os_enabled", False):
+            return OwnerActionExecution("policy_denied")
+        from app.services.business_ledger_actions import execute_business_action
+
+        return execute_business_action(
+            store,
+            settings=settings,
+            principal=principal,
+            proposal_id=proposal_id,
+        )
+
+    if envelope["kind"] == "assaf_os.approve":
+        from app.services.assaf_os import AssafOsError, AssafOsPort, DecisionRequest
+
+        def schema(kind, values):
+            return (
+                kind == "assaf_os.approve"
+                and set(values) == {"proposal_id", "request_id", "rejection_request_id"}
+                and isinstance(values["proposal_id"], str)
+                and isinstance(values["request_id"], str)
+                and isinstance(values["rejection_request_id"], str)
+            )
+
+        def policy(kind, values):
+            return bool(
+                settings.assaf_os_enabled
+                and not settings.kill_switch
+                and schema(kind, values)
+            )
+
+        def connected(kind):
+            try:
+                AssafOsPort(settings, principal.actor_id, actor_source="TELEGRAM_APPROVAL")
+                return kind == "assaf_os.approve"
+            except AssafOsError:
+                return False
+
+        def target(kind, values):
+            del kind
+            # TELEGRAM_APPROVAL is intentionally valid only for the final decision.
+            # The server performs the pending-target read under the non-deciding MIA source.
+            port = AssafOsPort(settings, principal.actor_id, actor_source="MIA")
+            current = port.proposal(str(values["proposal_id"]))
+            result = {
+                "proposal": current,
+                "proposal_digest": hashlib.sha256(_canonical(current).encode()).hexdigest(),
+                "approval_guard_version": current.get("approval_guard_version"),
+                "workbook_id": settings.assaf_os_workbook_id,
+                "workspace_id": settings.assaf_os_workspace_id,
+                "mode": settings.assaf_os_mode,
+            }
+            source_binding = envelope["target"].get("source_binding")
+            if isinstance(source_binding, dict):
+                from app.services.assaf_os_leads import (
+                    current_source_binding,
+                )
+
+                result["source_binding"] = current_source_binding(store, source_binding)
+                result["contact_provenance"] = envelope["target"].get(
+                    "contact_provenance"
+                )
+                duplicate_guard = envelope["target"].get("duplicate_guard")
+                if isinstance(duplicate_guard, dict):
+                    # Runtime guard v1 includes the same canonical phone/email
+                    # dependency set in the proposal fingerprint and rechecks it
+                    # under the Apps Script lock during approve. Keep the review
+                    # value immutable here; an older runtime has no guard version
+                    # and therefore fails the exact target comparison closed.
+                    if current.get("approval_guard_version") == 1:
+                        result["duplicate_guard"] = duplicate_guard
+            return result
+
+        def run(kind, values):
+            del kind
+            port = AssafOsPort(settings, principal.actor_id, actor_source="TELEGRAM_APPROVAL")
+            receipt = port.decide(
+                "approve",
+                str(values["proposal_id"]),
+                DecisionRequest(request_id=str(values["request_id"])),
+            )
+            status = receipt.get("status")
+            if status != "committed":
+                if status in {"expired", "target_changed", "rejected"}:
+                    raise OwnerActionTerminal(str(status))
+                raise RuntimeError("unexpected Assaf OS decision result")
+            return f"Assaf OS committed: {receipt.get('proposal_id', values['proposal_id'])}"
+
+        outcome = execute_owner_action(
+            store,
+            principal=principal,
+            proposal_id=proposal_id,
+            validate_schema=schema,
+            validate_policy=policy,
+            connection_ready=connected,
+            current_target=target,
+            execute=run,
+        )
+        execution_key = f"{proposal_id}:execute"
+        if (
+            isinstance(envelope["target"].get("source_binding"), dict)
+            and outcome.status in {"target_changed", "expired", "rejected"}
+            and not store.get_provider_write_status(
+                scope="approval", key=execution_key
+            )
+        ):
+            row.result = f"terminal:{outcome.status}"
+            store.session.flush()
+        return outcome
     prepared: dict[str, Any] = {}
 
     def validate_schema(kind: str, parameters: Mapping[str, Any]) -> bool:
@@ -472,6 +603,21 @@ def execute_approved_owner_action_with_adapters(
         return False
 
     def validate_policy(kind: str, _parameters: Mapping[str, Any]) -> bool:
+        if getattr(settings, "assaf_os_enabled", False) and kind in {
+            "sheets.update",
+            "sheets.append",
+            "crm.upsert",
+            "crm.activity",
+            "crm.resolve_conflict",
+        }:
+            return False
+        if (
+            getattr(settings, "assaf_os_enabled", False)
+            and kind == "composio.write"
+            and str(_parameters.get("toolkit") or "").upper()
+            in {"GOOGLESHEETS", "GOOGLE_SHEETS"}
+        ):
+            return False
         try:
             if kind in {"sheets.update", "sheets.append"}:
                 authorize(kind, principal=principal, kill_switch=settings.kill_switch)
@@ -865,6 +1011,60 @@ def execute_approved_owner_action_with_adapters(
         catalog = ports.get("composio")
         if catalog is not None:
             catalog.__exit__(None, None, None)
+
+
+def reject_assaf_os_owner_action(
+    store, *, settings, principal: Principal, proposal_id: str
+) -> OwnerActionExecution:
+    """Mirror a durable Telegram rejection into the stored Apps Script proposal once."""
+    if not _valid_owner(principal):
+        return OwnerActionExecution("unauthorized")
+    if settings.kill_switch:
+        return OwnerActionExecution("policy_denied")
+    row = store.get_approval_by_resource(
+        RESOURCE_OWNER_PROPOSAL, proposal_id, ACTION_OWNER_EXTERNAL_WRITE
+    )
+    envelope = read_owner_action(row)
+    if (
+        row is None
+        or envelope is None
+        or envelope.get("kind") != "assaf_os.approve"
+        or row.decision != DECISION_REJECTED
+        or row.actor_id != principal.actor_id
+    ):
+        return OwnerActionExecution("unbound")
+    parameters = envelope["parameters"]
+    operation_key = f"{proposal_id}:reject"
+    if not store.claim_provider_write(scope="approval", key=operation_key):
+        return OwnerActionExecution("already_handled")
+    try:
+        from app.services.assaf_os import AssafOsPort, DecisionRequest
+
+        result = AssafOsPort(
+            settings, principal.actor_id, actor_source="TELEGRAM_APPROVAL"
+        ).decide(
+            "reject",
+            str(parameters["proposal_id"]),
+            DecisionRequest(request_id=str(parameters["rejection_request_id"])),
+        )
+    except Exception:  # remote may have accepted before transport failed
+        store.mark_provider_write_pending_review(scope="approval", key=operation_key)
+        return OwnerActionExecution("unknown")
+    if result.get("status") != "rejected":
+        terminal = str(result.get("status") or "unknown")
+        store.fail_operation(scope="approval", key=operation_key)
+        if terminal in {"committed", "expired", "target_changed"}:
+            return OwnerActionExecution(terminal)
+        return OwnerActionExecution("unknown")
+    if not store.complete_provider_write(
+        scope="approval", key=operation_key, result_json='{"ok":true}'
+    ):
+        return OwnerActionExecution("unknown")
+    row.executed_at = datetime.now(UTC).isoformat()
+    row.execution_operation_id = operation_key[:64]
+    row.result = str(result.get("status", "rejected"))[:255]
+    store.session.flush()
+    return OwnerActionExecution("executed", "ההצעה ב-Assaf OS נדחתה.")
 
 
 def sync_owner_crm_sheet_in_session(

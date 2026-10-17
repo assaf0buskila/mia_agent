@@ -445,12 +445,14 @@ def test_v2_rejects_model_effect_claim_without_contact(monkeypatch, claim: str) 
         session_id, credential = _new(client)
         response = client.post(
             f"/v1/website/sessions/{session_id}/messages",
-            json={"text": "Hello", "client_message_id": "claim-1"},
+            json={"text": "Tell me about a website for my company", "client_message_id": "claim-1"},
             headers=_headers(credential),
         )
         assert response.status_code == 200, response.text
         assert response.json()["delivery_status"] == "none"
-        assert response.json()["message"] == "How can I help?"
+        assert response.json()["message"] == (
+            "Got it. We can continue from the same point and focus on what matters now."
+        )
         assert fake.validation_calls == fake.calls == 2
         with get_session_factory()() as db:
             assert (
@@ -677,13 +679,13 @@ def test_rolled_back_claim_allows_retry_after_restart(monkeypatch) -> None:
                 session_id=session_id,
                 credential=credential,
                 client_message_id="retryable",
-                payload={"text": "hello"},
+                payload={"text": "I need a website"},
             )
             assert state is not None and replay is None
             db.rollback()
         retry = client.post(
             f"/v1/website/sessions/{session_id}/messages",
-            json={"text": "hello", "client_message_id": "retryable"},
+            json={"text": "I need a website", "client_message_id": "retryable"},
             headers=_headers(credential),
         )
         assert retry.status_code == 200
@@ -1360,7 +1362,11 @@ def test_greeting_regex_worst_case_input_stays_fast() -> None:
     is kept only as a cheap second guard, not the actual fix."""
     from time import perf_counter
 
-    from app.surfaces.site_v2 import _GREETING_ONLY, _is_uninformative_business_text
+    from app.surfaces.site_v2 import (
+        _GREETING_ONLY,
+        _fast_path_kind,
+        _is_uninformative_business_text,
+    )
 
     worst_59 = ("היי" * 20)[:59] + "ה"
     worst_59_x = ("היי" * 20)[:59] + "X"
@@ -1374,6 +1380,14 @@ def test_greeting_regex_worst_case_input_stays_fast() -> None:
     long_text = "היי" * 1333 + "X"
     start = perf_counter()
     assert _GREETING_ONLY.fullmatch(long_text) is None
+    assert perf_counter() - start < 0.05
+
+    # The website shortcut uses a deliberately smaller whole-phrase grammar. It must
+    # remain linear too: the first dedicated version reintroduced overlapping repeated
+    # alternatives and took about 0.26s on this 58-character near match.
+    fast_near_match = "היי" * 19 + "X"
+    start = perf_counter()
+    assert _fast_path_kind(fast_near_match) == ""
     assert perf_counter() - start < 0.05
 
 
@@ -1847,3 +1861,652 @@ def test_a_hebrew_refusal_with_a_word_between_verb_and_object_is_caught(text: st
     ) == {}
     assert fake.consent_prompts == []
     assert state.pending_contact == {}
+
+
+# ---------------------------------------------------------------- 2026-09-27 upgrade
+
+
+class _BriefSubmitLeadClient(_SubmitLeadClient):
+    """submit_lead that also carries the owner-facing brief fields."""
+
+    def __init__(self, *, brief: dict, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._brief = brief
+
+    def complete(self, **kwargs):  # noqa: ANN003
+        response = super().complete(**kwargs)
+        if response.tool_calls and response.tool_calls[0].name == "submit_lead":
+            call = response.tool_calls[0]
+            arguments = {**call.arguments, **self._brief}
+            return LlmResponse(
+                "",
+                (ToolCall(call.call_id, "submit_lead", arguments, "{}"),),
+                "stop",
+                "",
+                0,
+                0,
+                {"role": "assistant", "content": None},
+            )
+        return response
+
+
+def test_submit_lead_brief_fields_shape_the_owner_brief(monkeypatch) -> None:
+    """The owner card describes the visitor's business, not their first question."""
+    monkeypatch.setenv("MIA_WEBSITE_V2_ENABLED", "true")
+    monkeypatch.setenv("MIA_CRM_V2_ENABLED", "true")
+    monkeypatch.setenv("MIA_TELEGRAM_OWNER_USER_IDS", "123")
+    fake = _BriefSubmitLeadClient(
+        next_step="שיחת אפיון",
+        name="דנה",
+        brief={
+            "business": "קליניקת פיזיותרפיה בתל אביב, 3 מטפלים",
+            "need": "מענה מהיר לפניות וקביעת תורים ביומן Google",
+            "timeline": "תוך חודש",
+            "budget": None,
+            "availability": "א׳-ה׳ אחרי 16:00",
+        },
+    )
+    monkeypatch.setattr("app.surfaces.site_v2.build_site_client", lambda _settings: fake)
+    with TestClient(app) as client:
+        session_id, credential = _new(client)
+        opener = client.post(
+            f"/v1/website/sessions/{session_id}/messages",
+            json={"text": "מה השירותים שלכם וכמה עולה אתר?", "client_message_id": "q-1"},
+            headers=_headers(credential),
+        )
+        assert opener.status_code == 200
+        with get_session_factory()() as db:
+            state = json.loads(db.get(SiteV2SessionRow, session_id).state_json)
+            # A pure question is not latched as "the business".
+            assert state["business_context"] == ""
+        captured = client.post(
+            f"/v1/website/sessions/{session_id}/messages",
+            json={
+                "text": "קוראים לי דנה, תחזרו אליי בבקשה",
+                "phone": "052-4443331",
+                "client_message_id": "lead-1",
+            },
+            headers=_headers(credential),
+        )
+        assert captured.status_code == 200, captured.text
+        with get_session_factory()() as db:
+            contact = db.scalar(
+                select(CrmContactRow).where(CrmContactRow.conversation_id == session_id)
+            )
+            job = db.scalar(
+                select(CrmOutboxRow).where(
+                    CrmOutboxRow.aggregate_id == contact.id,
+                    CrmOutboxRow.destination == "telegram",
+                )
+            )
+            text = json.loads(job.payload_json)["text"]
+            assert "העסק: קליניקת פיזיותרפיה בתל אביב, 3 מטפלים" in text
+            assert "הצורך: מענה מהיר לפניות וקביעת תורים ביומן Google" in text
+            assert "לוח זמנים: תוך חודש" in text
+            assert "זמינות לשיחה: א׳-ה׳ אחרי 16:00" in text
+            assert "תקציב" not in text
+            assert "טלפון: 052-4443331" in text
+            assert "מה השירותים שלכם" not in text
+
+
+def test_phone_added_after_capture_updates_contact_and_queues_one_update_card(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("MIA_WEBSITE_V2_ENABLED", "true")
+    monkeypatch.setenv("MIA_CRM_V2_ENABLED", "true")
+    monkeypatch.setenv("MIA_TELEGRAM_OWNER_USER_IDS", "123")
+    fake = _SiteClient()
+    monkeypatch.setattr("app.surfaces.site_v2.build_site_client", lambda _settings: fake)
+    # The test DB is shared across tests, so contact values must be unique here or the
+    # capture matches another test's contact (and, correctly, cannot edit it).
+    from uuid import uuid4
+
+    unique = uuid4().hex
+    email = f"clinic-{unique[:10]}@example.com"
+    number = "052-" + str(int(unique[10:18], 16) % 10_000_000).zfill(7)
+    with TestClient(app) as client:
+        session_id, credential = _new(client)
+        first = client.post(
+            f"/v1/website/sessions/{session_id}/messages",
+            json={
+                "text": "יש לי קליניקה, תחזרו אליי בבקשה",
+                "email": email,
+                "client_message_id": "lead-1",
+            },
+            headers=_headers(credential),
+        )
+        assert first.status_code == 200, first.text
+        assert first.json()["next_action"] == "contact_saved"
+        phone = client.post(
+            f"/v1/website/sessions/{session_id}/messages",
+            json={
+                "text": f"אפשר גם בטלפון, המספר שלי {number}.",
+                "client_message_id": "phone-1",
+            },
+            headers=_headers(credential),
+        )
+        assert phone.status_code == 200, phone.text
+        assert phone.json()["message"].startswith("הפרטים עודכנו.")
+        again = client.post(
+            f"/v1/website/sessions/{session_id}/messages",
+            json={"text": f"שוב, המספר שלי {number}", "client_message_id": "phone-2"},
+            headers=_headers(credential),
+        )
+        assert again.status_code == 200, again.text
+        with get_session_factory()() as db:
+            contact = db.scalar(
+                select(CrmContactRow).where(CrmContactRow.conversation_id == session_id)
+            )
+            fields = json.loads(contact.fields_json)
+            assert fields.get("email") == email
+            assert fields.get("phone")
+            jobs = list(
+                db.scalars(
+                    select(CrmOutboxRow)
+                    .where(
+                        CrmOutboxRow.aggregate_id == contact.id,
+                        CrmOutboxRow.destination == "telegram",
+                    )
+                    .order_by(CrmOutboxRow.created_at)
+                ).all()
+            )
+            assert len(jobs) == 2
+            update = json.loads(jobs[1].payload_json)
+            assert update["ping_scope"] == "update-phone"
+            assert update["text"].startswith("עדכון לפנייה מהאתר")
+            assert number in update["text"]
+            # A number that ends the sentence is saved without the period.
+            assert f"{number}." not in update["text"]
+            assert not fields["phone"].endswith(".")
+
+
+def test_system_prompt_flags_stop_repeated_invites_without_requiring_phone() -> None:
+    from app.surfaces.site_v2 import _system_prompt
+
+    fresh = _system_prompt(False, "none")
+    assert "אל תזמיני שוב" not in fresh
+    assert "אל תפתחי שאלון" in fresh
+    assert "שאלה אחת או קריאה אחת לפעולה" in fresh
+    assert "מתומחר אישית" in fresh
+    invited = _system_prompt(False, "none", contact_invited_recently=True)
+    assert "אל תזמיני שוב" in invited
+    saved = _system_prompt(True, "pending", has_phone=False)
+    assert "אל תבקשי טלפון כברירת מחדל" in saved
+    assert "זמינות לשיחה" in saved
+    asked = _system_prompt(True, "pending", has_phone=False, phone_requested=True)
+    assert "אל תבקשי טלפון כברירת מחדל" in asked
+    known = _system_prompt(
+        True, "pending", has_phone=True, availability_known=True,
+        availability_requested=True,
+    )
+    assert "אם זמינות לשיחה באמת מקדמת" not in known
+
+
+def test_recently_invited_reads_only_the_last_mia_turns() -> None:
+    from app.surfaces.site_v2 import SiteV2State, _recently_invited
+
+    state = SiteV2State()
+    assert not _recently_invited(state)
+    state.turns = [{"role": "mia", "text": "אפשר להשאיר טלפון או אימייל ואחזור."}]
+    assert _recently_invited(state)
+    state.turns += [
+        {"role": "visitor", "text": "עוד שאלה"},
+        {"role": "mia", "text": "תשובה"},
+        {"role": "visitor", "text": "ועוד"},
+        {"role": "mia", "text": "תשובה נוספת"},
+    ]
+    assert not _recently_invited(state)
+
+
+def test_hebrew_status_copy_never_exposes_internal_pending_step() -> None:
+    from app.surfaces.site_v2 import _status_message
+
+    for status in ("saved", "pending", "confirmed", "failed"):
+        message = _status_message(status, hebrew=True)
+        assert "ממתינה" not in message and "לאישור" not in message
+    assert _status_message("pending", hebrew=True) == "הפרטים נשמרו ויועברו לאסף."
+
+
+class _AvailabilityOnUpdateClient(_SiteClient):
+    """Replies normally, except the reply on the phone-update turn reports availability."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.reply_turns = 0
+
+    def complete(self, **kwargs):  # noqa: ANN003
+        if _has_tool(kwargs, "submit_lead"):
+            self.reply_turns += 1
+            if self.reply_turns == 2:
+                self.calls += 1
+                arguments = {
+                    "name": None, "phone": None, "email": None, "next_step": None,
+                    "business": None, "need": None, "timeline": None, "budget": None,
+                    "availability": "ב׳ ו-ד׳ בבוקר",
+                }
+                return LlmResponse(
+                    "",
+                    (ToolCall("lead-2", "submit_lead", arguments, "{}"),),
+                    "stop", "", 0, 0, {"role": "assistant", "content": None},
+                )
+        return super().complete(**kwargs)
+
+
+def test_availability_from_the_update_turn_reaches_the_update_card(monkeypatch) -> None:
+    """The update card carries the call times the visitor gave with their phone, and the
+    prompt stops asking for times once they are known."""
+    monkeypatch.setenv("MIA_WEBSITE_V2_ENABLED", "true")
+    monkeypatch.setenv("MIA_CRM_V2_ENABLED", "true")
+    monkeypatch.setenv("MIA_TELEGRAM_OWNER_USER_IDS", "123")
+    fake = _AvailabilityOnUpdateClient()
+    monkeypatch.setattr("app.surfaces.site_v2.build_site_client", lambda _settings: fake)
+    from uuid import uuid4
+
+    unique = uuid4().hex
+    email = f"studio-{unique[:10]}@example.com"
+    number = "054-" + str(int(unique[10:18], 16) % 10_000_000).zfill(7)
+    with TestClient(app) as client:
+        session_id, credential = _new(client)
+        first = client.post(
+            f"/v1/website/sessions/{session_id}/messages",
+            json={
+                "text": "יש לי סטודיו, תחזרו אליי בבקשה",
+                "email": email,
+                "client_message_id": "lead-1",
+            },
+            headers=_headers(credential),
+        )
+        assert first.status_code == 200, first.text
+        phone = client.post(
+            f"/v1/website/sessions/{session_id}/messages",
+            json={
+                "text": f"הטלפון שלי {number}, הכי נוח ב׳ ו-ד׳ בבוקר",
+                "client_message_id": "phone-1",
+            },
+            headers=_headers(credential),
+        )
+        assert phone.status_code == 200, phone.text
+        with get_session_factory()() as db:
+            state = json.loads(db.get(SiteV2SessionRow, session_id).state_json)
+            assert state["brief"]["availability"] == "ב׳ ו-ד׳ בבוקר"
+            contact = db.scalar(
+                select(CrmContactRow).where(CrmContactRow.conversation_id == session_id)
+            )
+            jobs = list(
+                db.scalars(
+                    select(CrmOutboxRow)
+                    .where(
+                        CrmOutboxRow.aggregate_id == contact.id,
+                        CrmOutboxRow.destination == "telegram",
+                    )
+                    .order_by(CrmOutboxRow.created_at)
+                ).all()
+            )
+            assert len(jobs) == 2
+            update_text = json.loads(jobs[1].payload_json)["text"]
+            assert "זמינות לשיחה: ב׳ ו-ד׳ בבוקר" in update_text
+        from app.surfaces.site_v2 import _system_prompt
+
+        prompt = _system_prompt(
+            True, "pending", has_phone=True, availability_known=bool(state["brief"])
+        )
+        assert "מתי נוח לדבר" not in prompt
+
+
+class _ConversationFlowClient:
+    def __init__(self) -> None:
+        self.generation_inputs: list[str] = []
+        self.system_prompts: list[str] = []
+        self.consent_calls = 0
+        self.validation_calls = 0
+
+    def enabled(self) -> bool:
+        return True
+
+    def complete(self, **kwargs):  # noqa: ANN003
+        if _has_tool(kwargs, "classify_contact_consent"):
+            self.consent_calls += 1
+            payload = kwargs["messages"][-1]["content"]
+            current = json.loads(payload.split("CURRENT_INPUT=", 1)[1].split("\n", 1)[0])
+            contact = json.loads(payload.split("SERVER_EXTRACTED_CONTACT=", 1)[1])
+            return LlmResponse(
+                "",
+                (ToolCall("consent-flow", "classify_contact_consent", {
+                    "decision": "affirmative", "evidence": current, "contact_span": contact,
+                }, "{}"),),
+                "stop", "", 1, 1, {"role": "assistant", "content": None},
+            )
+        if _has_tool(kwargs, "validate_site_narrative"):
+            self.validation_calls += 1
+            proposed = json.loads(kwargs["messages"][-1]["content"])["proposed_reply"]
+            return _validation_response(proposed, "safe")
+        current = kwargs["messages"][-1]["content"]
+        self.generation_inputs.append(current)
+        self.system_prompts.append(kwargs["messages"][0]["content"])
+        if "חשוב שהאתר" in current:
+            text = (
+                "כדאי לבנות מסלול קצר שמסביר את הערך ומוביל לפנייה. "
+                "אם מתאים, אפשר להשאיר אימייל לשיחת אפיון קצרה."
+            )
+        elif "@" in current:
+            text = "תודה. אפשר להמשיך מכאן עם כל פרט נוסף שחשוב לאתר."
+        else:
+            text = (
+                "כדאי להתחיל בעמוד שמסביר למי השירות מיועד ומה מקבלים ממנו. "
+                "מה הפעולה המרכזית שהאתר צריך להוביל אליה?"
+            )
+        return LlmResponse(
+            text, (), "stop", "", 10, 10, {"role": "assistant", "content": text}
+        )
+
+
+def test_observed_transcript_keeps_context_through_contact_and_later_greeting(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("MIA_WEBSITE_V2_ENABLED", "true")
+    monkeypatch.setenv("MIA_CRM_V2_ENABLED", "true")
+    monkeypatch.setenv("MIA_TELEGRAM_OWNER_USER_IDS", "123")
+    fake = _ConversationFlowClient()
+    retrievals: list[str] = []
+    monkeypatch.setattr("app.surfaces.site_v2.build_site_client", lambda _settings: fake)
+    monkeypatch.setattr(
+        "app.surfaces.site_v2._knowledge",
+        lambda _settings, _db, text: retrievals.append(text) or (),
+    )
+    from uuid import uuid4
+
+    email = f"mail-site-{uuid4().hex[:10]}@example.com"
+    with TestClient(app) as client:
+        session_id, credential = _new(client)
+
+        def send(text: str, message_id: str) -> dict:
+            response = client.post(
+                f"/v1/website/sessions/{session_id}/messages",
+                json={"text": text, "client_message_id": message_id},
+                headers=_headers(credential),
+            )
+            assert response.status_code == 200, response.text
+            return response.json()
+
+        greeting = send("היי", "flow-1")
+        need = send("אני צריך אתר לחברה ששולחת מיילים ללקוחות", "flow-2")
+        follow_up = send("חשוב שהאתר יסביר את הערך ויביא פניות", "flow-3")
+        captured = send(f"אפשר לחזור אליי במייל {email}", "flow-4")
+        calls_before_last_greeting = len(fake.generation_inputs) + fake.validation_calls
+        later_greeting = send("שלום", "flow-5")
+
+        assert greeting["message"] == "שלום, אני מיה, עוזרת ה-AI של אסף. במה אפשר לעזור?"
+        assert "עמוד" in need["message"]
+        assert "אימייל" in follow_up["message"]
+        assert captured["next_action"] == "contact_saved"
+        assert later_greeting["message"] == "היי, אני כאן. אפשר להמשיך מאותה נקודה."
+        assert len(fake.generation_inputs) + fake.validation_calls == calls_before_last_greeting
+        assert retrievals == [
+            "אני צריך אתר לחברה ששולחת מיילים ללקוחות",
+            "חשוב שהאתר יסביר את הערך ויביא פניות",
+            f"אפשר לחזור אליי במייל {email}",
+        ]
+        with get_session_factory()() as db:
+            state = json.loads(db.get(SiteV2SessionRow, session_id).state_json)
+            assert state["business_context"] == "אני צריך אתר לחברה ששולחת מיילים ללקוחות"
+            assert state["contact"]["email"] == email
+            assert state["contact_invited"] is True
+            assert state["captured"] is True
+
+        other_session, other_credential = _new(client)
+        other = client.post(
+            f"/v1/website/sessions/{other_session}/messages",
+            json={"text": "היי", "client_message_id": "other-1"},
+            headers=_headers(other_credential),
+        )
+        assert other.status_code == 200
+        assert other.json()["message"] == "שלום, אני מיה, עוזרת ה-AI של אסף. במה אפשר לעזור?"
+        with get_session_factory()() as db:
+            other_state = json.loads(db.get(SiteV2SessionRow, other_session).state_json)
+            assert other_state["business_context"] == ""
+            assert other_state["contact"] == {}
+
+
+def test_pure_fast_paths_make_zero_retrieval_or_model_calls(monkeypatch, caplog) -> None:
+    monkeypatch.setenv("MIA_WEBSITE_V2_ENABLED", "true")
+    fake = _ConversationFlowClient()
+    monkeypatch.setattr("app.surfaces.site_v2.build_site_client", lambda _settings: fake)
+
+    def unexpected_retrieval(*_args):
+        raise AssertionError("pure fast path must not retrieve knowledge")
+
+    monkeypatch.setattr("app.surfaces.site_v2._knowledge", unexpected_retrieval)
+    caplog.set_level("INFO", logger="app.surfaces.site_v2")
+    with TestClient(app) as client:
+        session_id, credential = _new(client)
+        for index, text in enumerate(("היי", "תודה", "מה מצב הפרטים?"), start=1):
+            response = client.post(
+                f"/v1/website/sessions/{session_id}/messages",
+                json={"text": text, "client_message_id": f"fast-{index}"},
+                headers=_headers(credential),
+            )
+            assert response.status_code == 200, response.text
+
+    assert fake.generation_inputs == []
+    assert fake.consent_calls == fake.validation_calls == 0
+    website_logs = [
+        record.getMessage()
+        for record in caplog.records
+        if "WEBSITE turn" in record.getMessage()
+    ]
+    assert len(website_logs) == 3
+    assert all("retrieval_ms=0.0" in line and "generation_calls=0" in line for line in website_logs)
+    assert all(
+        visitor_text not in "\n".join(website_logs)
+        for visitor_text in ("היי", "תודה", "פרטים")
+    )
+
+
+class _ContextAnswerClient(_ConversationFlowClient):
+    def complete(self, **kwargs):  # noqa: ANN003
+        if _has_tool(kwargs, "validate_site_narrative"):
+            return super().complete(**kwargs)
+        if kwargs["messages"][-1].get("role") == "tool":
+            text = "מעולה, נמשיך לפי הפרט הזה."
+            return LlmResponse(
+                text, (), "stop", "", 1, 1, {"role": "assistant", "content": text}
+            )
+        current = kwargs["messages"][-1]["content"]
+        self.generation_inputs.append(current)
+        self.system_prompts.append(kwargs["messages"][0]["content"])
+        if current == "אשמח לדבר עם אסף":
+            text = "מתי נוח לדבר עם אסף?"
+        elif current == "אני מתכנן אתר לעסק":
+            text = "האם מדובר באתר חדש או באתר קיים?"
+        elif current == "בוקר":
+            arguments = {
+                "name": None,
+                "phone": None,
+                "email": None,
+                "next_step": None,
+                "business": None,
+                "need": None,
+                "timeline": None,
+                "budget": None,
+                "availability": "בוקר",
+            }
+            return LlmResponse(
+                "",
+                (ToolCall("availability", "submit_lead", arguments, "{}"),),
+                "stop", "", 1, 1, {"role": "assistant", "content": None},
+            )
+        else:
+            text = "אפשר להתאים את המבנה לאתר חדש."
+        return LlmResponse(
+            text, (), "stop", "", 1, 1, {"role": "assistant", "content": text}
+        )
+
+
+def test_contextual_short_answers_are_not_misrouted_as_greetings(monkeypatch) -> None:
+    monkeypatch.setenv("MIA_WEBSITE_V2_ENABLED", "true")
+    fake = _ContextAnswerClient()
+    retrievals: list[str] = []
+    monkeypatch.setattr("app.surfaces.site_v2.build_site_client", lambda _settings: fake)
+    monkeypatch.setattr(
+        "app.surfaces.site_v2._knowledge",
+        lambda _settings, _db, query: retrievals.append(query) or (),
+    )
+    with TestClient(app) as client:
+        availability_session, availability_credential = _new(client)
+
+        def send(session_id: str, credential: str, text: str, message_id: str) -> dict:
+            response = client.post(
+                f"/v1/website/sessions/{session_id}/messages",
+                json={"text": text, "client_message_id": message_id},
+                headers=_headers(credential),
+            )
+            assert response.status_code == 200, response.text
+            return response.json()
+
+        send(
+            availability_session,
+            availability_credential,
+            "אשמח לדבר עם אסף",
+            "context-availability-1",
+        )
+        availability = send(
+            availability_session,
+            availability_credential,
+            "בוקר",
+            "context-availability-2",
+        )
+        assert availability["message"] == "מעולה, נמשיך לפי הפרט הזה."
+        with get_session_factory()() as db:
+            state = json.loads(db.get(SiteV2SessionRow, availability_session).state_json)
+            assert state["brief"]["availability"] == "בוקר"
+
+        site_session, site_credential = _new(client)
+        send(site_session, site_credential, "אני מתכנן אתר לעסק", "context-site-1")
+        existing_or_new = send(site_session, site_credential, "חדש", "context-site-2")
+        assert existing_or_new["message"] == "אפשר להתאים את המבנה לאתר חדש."
+
+    assert "בוקר" in fake.generation_inputs
+    assert "חדש" in fake.generation_inputs
+    assert "בוקר" in retrievals
+    assert "חדש" in retrievals
+
+
+class _RejectedNarrativeClient(_ConversationFlowClient):
+    def complete(self, **kwargs):  # noqa: ANN003
+        if _has_tool(kwargs, "validate_site_narrative"):
+            self.validation_calls += 1
+            proposed = json.loads(kwargs["messages"][-1]["content"])["proposed_reply"]
+            return _validation_response(proposed, "effect_claim")
+        if kwargs.get("tool_choice") == "none":
+            text = "הבקשה נשמרה ונשלחה."
+            return LlmResponse(
+                text, (), "stop", "", 1, 1, {"role": "assistant", "content": text}
+            )
+        text = "הפרטים נשמרו ונשלחו לאסף."
+        return LlmResponse(
+            text, (), "stop", "", 1, 1, {"role": "assistant", "content": text}
+        )
+
+
+def test_rejected_narrative_uses_context_preserving_server_fallback(monkeypatch) -> None:
+    monkeypatch.setenv("MIA_WEBSITE_V2_ENABLED", "true")
+    fake = _RejectedNarrativeClient()
+    monkeypatch.setattr("app.surfaces.site_v2.build_site_client", lambda _settings: fake)
+    monkeypatch.setattr("app.surfaces.site_v2._knowledge", lambda *_args: ())
+    with TestClient(app) as client:
+        session_id, credential = _new(client)
+        response = client.post(
+            f"/v1/website/sessions/{session_id}/messages",
+            json={
+                "text": "אני צריך אתר לחברת תוכנה",
+                "client_message_id": "rejected-1",
+            },
+            headers=_headers(credential),
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["message"] == (
+            "קיבלתי. אפשר להמשיך מאותה נקודה ולחדד מה חשוב לכם עכשיו."
+        )
+        assert "איך אפשר לעזור" not in response.json()["message"]
+        assert fake.validation_calls == 2
+
+
+@pytest.mark.parametrize(
+    "text",
+    (
+        "היי המספר השתנה",
+        "תודה ומה המחיר?",
+        "מה מצב הפרטים ומה המחיר?",
+        "האם אפשר לקבל הצעת מחיר במייל?",
+        "האם אפשר לדבר בטלפון?",
+        "מה מצב האתר והאם אפשר לקבל מחיר במייל?",
+        "did you build websites and send email?",
+    ),
+)
+def test_mixed_shortcut_phrases_stay_on_full_business_path(monkeypatch, text: str) -> None:
+    monkeypatch.setenv("MIA_WEBSITE_V2_ENABLED", "true")
+    fake = _ConversationFlowClient()
+    retrievals: list[str] = []
+    monkeypatch.setattr("app.surfaces.site_v2.build_site_client", lambda _settings: fake)
+    monkeypatch.setattr(
+        "app.surfaces.site_v2._knowledge",
+        lambda _settings, _db, query: retrievals.append(query) or (),
+    )
+    with TestClient(app) as client:
+        session_id, credential = _new(client)
+        response = client.post(
+            f"/v1/website/sessions/{session_id}/messages",
+            json={"text": text, "client_message_id": "mixed-1"},
+            headers=_headers(credential),
+        )
+        assert response.status_code == 200, response.text
+        assert fake.generation_inputs == [text]
+        assert retrievals == [text]
+        if text != "מה מצב הפרטים ומה המחיר?":
+            assert not response.json()["message"].startswith("לא נשמרו פרטי קשר")
+
+
+class _DurableInvitationClient(_ConversationFlowClient):
+    def complete(self, **kwargs):  # noqa: ANN003
+        if _has_tool(kwargs, "validate_site_narrative"):
+            proposed = json.loads(kwargs["messages"][-1]["content"])["proposed_reply"]
+            return _validation_response(proposed, "safe")
+        system = kwargs["messages"][0]["content"]
+        self.system_prompts.append(system)
+        text = (
+            "אפשר להמשיך להתמקד באתר בהתאם למה שחשוב לכם."
+            if "אל תזמיני שוב" in system
+            else "אפשר להשאיר אימייל לשיחת אפיון קצרה."
+        )
+        return LlmResponse(
+            text, (), "stop", "", 1, 1, {"role": "assistant", "content": text}
+        )
+
+
+def test_contact_refusal_is_durable_and_stops_repeated_cta(monkeypatch) -> None:
+    monkeypatch.setenv("MIA_WEBSITE_V2_ENABLED", "true")
+    fake = _DurableInvitationClient()
+    monkeypatch.setattr("app.surfaces.site_v2.build_site_client", lambda _settings: fake)
+    monkeypatch.setattr("app.surfaces.site_v2._knowledge", lambda *_args: ())
+    with TestClient(app) as client:
+        session_id, credential = _new(client)
+
+        def send(text: str, message_id: str) -> dict:
+            response = client.post(
+                f"/v1/website/sessions/{session_id}/messages",
+                json={"text": text, "client_message_id": message_id},
+                headers=_headers(credential),
+            )
+            assert response.status_code == 200, response.text
+            return response.json()
+
+        first = send("אני צריך אתר חדש לעסק", "decline-1")
+        refused = send("לא רוצה להשאיר פרטים", "decline-2")
+        later = send("מה כדאי להציג בעמוד הראשון?", "decline-3")
+        assert "להשאיר אימייל" in first["message"]
+        assert "להשאיר פרטים" not in refused["message"]
+        assert "להשאיר אימייל" not in later["message"]
+        with get_session_factory()() as db:
+            state = json.loads(db.get(SiteV2SessionRow, session_id).state_json)
+            assert state["contact_invited"] is True
+            assert state["contact_declined"] is True

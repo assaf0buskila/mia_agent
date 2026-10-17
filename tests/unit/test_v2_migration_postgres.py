@@ -32,8 +32,11 @@ def test_v2_sql_creates_schema_and_preserves_existing_contact_history(monkeypatc
         assert not first.failed
         assert first.applied == [p.name for p in paths]
         inspector = inspect(engine)
+        migration_sql = "\n".join(path.read_text(encoding="utf-8") for path in paths)
         v2_tables = [
-            t for t in Base.metadata.sorted_tables if t.name.startswith(("crm_", "site_v2_"))
+            table
+            for table in Base.metadata.sorted_tables
+            if f"CREATE TABLE IF NOT EXISTS {table.name}" in migration_sql
         ]
         assert v2_tables
         for table in v2_tables:

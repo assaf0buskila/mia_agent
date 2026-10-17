@@ -40,6 +40,10 @@ SLOW_HOUSE_TOOLS = frozenset(
 
 OWNER_HOUSE_TOOLS: frozenset[str] = frozenset(
     {
+        "reminder_create",
+        "reminder_list",
+        "reminder_change",
+        "reminder_snapshot",
         "search_memory",
         "search_knowledge",
         "refresh_website_knowledge",
@@ -78,6 +82,7 @@ OWNER_HOUSE_TOOLS: frozenset[str] = frozenset(
         "crm_upsert",
         "crm_record_activity",
         "crm_conflicts",
+        "crm_operational_health",
         "crm_resolve_conflict",
         "sheets_read",
         "sheets_update",
@@ -89,6 +94,26 @@ OWNER_HOUSE_TOOLS: frozenset[str] = frozenset(
         "composio_execute_tool",
         "composio_propose_linkedin_action",
         "composio_propose_action",
+        "business_overview",
+        "business_deals",
+        "business_payments",
+        "business_outstanding",
+        "business_expenses",
+        "business_projects",
+        "business_crm_leads",
+        "business_unhandled_leads",
+        "business_propose_deal",
+        "business_propose_schedule",
+        "business_propose_payment",
+        "business_propose_expense",
+        "business_propose_project",
+        "business_recover_receipt",
+        "assaf_os_snapshot",
+        "assaf_os_follow_up",
+        "assaf_os_receipt",
+        "assaf_os_propose",
+        "assaf_os_lead_candidates",
+        "assaf_os_prepare_crm_lead",
     }
 )
 

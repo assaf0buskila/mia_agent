@@ -183,3 +183,57 @@ def test_a_db_error_in_one_job_does_not_wedge_every_job_behind_it(tmp_path):
         assert statuses == {"telegram:poison": "failed", "telegram:healthy": "confirmed"}
     finally:
         engine.dispose()
+
+
+def test_website_brief_is_delivered_as_an_html_lead_card(tmp_path):
+    """Owner request 2026-09-27: the lead ping is a scannable card, not raw text.
+
+    The stored brief stays plain text (it is also the CRM Activity row); only the
+    Telegram delivery renders it, with phone/email tap-to-copy.
+    """
+    engine, factory, settings, payload = _runtime(tmp_path)
+    brief = (
+        "פנייה חדשה מהאתר\n"
+        "העסק: קליניקת פיזיותרפיה\n"
+        "יצירת קשר:\n"
+        "שם: דנה\n"
+        "טלפון: 052-1112222\n"
+        "השלב הבא המומלץ: שיחת אפיון"
+    )
+    sends = []
+    try:
+        handle = telegram_receipt_handler(
+            factory, settings, transport=lambda *args: sends.append(args)
+        )
+        assert handle({**payload, "text": brief}, False) == "confirmed"
+        _chat_id, text = sends[0]
+        assert "<b>פנייה חדשה מהאתר</b>" in text
+        assert "<b>העסק:</b> קליניקת פיזיותרפיה" in text
+        assert "<code>052-1112222</code>" in text
+        assert "יצירת קשר" not in text
+    finally:
+        engine.dispose()
+
+
+def test_scoped_contact_update_gets_its_own_single_ping(tmp_path):
+    """A phone added after the first handoff is its own at-most-once ping; it can
+    neither replay nor be suppressed by the first handoff's claim."""
+    engine, factory, settings, payload = _runtime(tmp_path)
+    update = {
+        **payload,
+        "text": "עדכון לפנייה מהאתר\nטלפון: 052-1112222",
+        "ping_scope": "update-phone",
+    }
+    sends = []
+    try:
+        handle = telegram_receipt_handler(
+            factory, settings, transport=lambda *args: sends.append(args)
+        )
+        assert handle(payload, False) == "confirmed"
+        assert handle(update, False) == "confirmed"
+        assert handle(update, False) == "confirmed"
+        assert handle(payload, False) == "confirmed"
+        assert len(sends) == 2
+        assert "עדכון לפנייה מהאתר" in sends[1][1]
+    finally:
+        engine.dispose()

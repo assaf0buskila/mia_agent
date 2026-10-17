@@ -1,0 +1,98 @@
+name: Assaf OS v2 chunk
+description: One roadmap chunk, worked as issue, then PR, then cross-agent review.
+title: "[V2-NN] "
+labels: ["os-v2"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        State lives in HANDOFF.md and TASKS.md; this issue is the queue entry. The author never
+        reviews their own work, and a deploy needs Assaf's explicit go. See docs/COWORK.md.
+  - type: input
+    id: chunk_id
+    attributes:
+      label: Chunk id
+      description: The roadmap id, for example V2-01.
+      placeholder: V2-NN
+    validations:
+      required: true
+  - type: dropdown
+    id: tier
+    attributes:
+      label: Tier
+      description: HEAVY for design, security and approval work, MID for bounded implementation, CHEAP for inventories (AGENTS.md).
+      options:
+        - HEAVY
+        - MID
+        - CHEAP
+    validations:
+      required: true
+  - type: dropdown
+    id: author_agent
+    attributes:
+      label: Author agent
+      description: Branch name is claude|codex/os-v2-<id>-<slug>, matching this agent.
+      options:
+        - claude
+        - codex
+    validations:
+      required: true
+  - type: dropdown
+    id: reviewer_agent
+    attributes:
+      label: Reviewer agent
+      description: Must be the other agent.
+      options:
+        - claude
+        - codex
+    validations:
+      required: true
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: What the chunk delivers and why, in terms the owner would recognise.
+    validations:
+      required: true
+  - type: textarea
+    id: owned_files
+    attributes:
+      label: Owned files
+      description: The only files this chunk may change.
+    validations:
+      required: true
+  - type: textarea
+    id: must_not_touch
+    attributes:
+      label: Must not touch
+      description: Files and areas other lanes own right now.
+    validations:
+      required: true
+  - type: textarea
+    id: invariants
+    attributes:
+      label: Invariants
+      description: What must stay true, from AGENTS.md and the chunk contract.
+    validations:
+      required: true
+  - type: textarea
+    id: stop_conditions
+    attributes:
+      label: Stop conditions
+      description: When to stop and report, such as two failed fix attempts. No provider writes, .env reads, deploy or merge.
+    validations:
+      required: true
+  - type: textarea
+    id: return_format
+    attributes:
+      label: Return format
+      description: Exactly what the builder reports back, such as head SHA, commands, results and deviations.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence_states
+    attributes:
+      label: Target evidence state per capability
+      description: One line per capability, using only CODE_CHECKED, LOCAL_TESTED, INTEGRATION_TESTED, STAGING_VERIFIED, DEPLOYED, PHONE_VERIFIED, BLOCKED or NOT_INCLUDED. Never a percentage.
+    validations:
+      required: true

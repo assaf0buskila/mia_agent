@@ -889,3 +889,19 @@ class CrmWorkerStateRow(Base):
     key: Mapped[str] = mapped_column(String(64), primary_key=True)
     value: Mapped[str] = mapped_column(Text, default="")
     updated_at: Mapped[str] = mapped_column(String(64), default="")
+
+
+class CrmFormIntakeReceiptRow(Base):
+    """Immutable receipt for one AssafWeb form event.
+
+    The normalized request is represented only by its digest.  Contact data stays in
+    the canonical CRM tables and is not duplicated here.
+    """
+
+    __tablename__ = "crm_form_intake_receipts"
+
+    source_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    payload_sha256: Mapped[str] = mapped_column(String(64))
+    contact_id: Mapped[str] = mapped_column(ForeignKey("crm_contacts.id"), index=True)
+    activity_id: Mapped[str] = mapped_column(ForeignKey("crm_activities.id"))
+    created_at: Mapped[str] = mapped_column(String(64), default="")

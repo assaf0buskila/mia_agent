@@ -412,41 +412,74 @@ class BrainStore:
         chunks: list[tuple[KnowledgeChunk, list[float] | None]],
         embedding_model: str = "",
     ) -> int:
-        """Re-ingest is idempotent: retire the old chunks for this source, insert the new.
+        """Re-ingest is idempotent: reuse known chunks and retire only absent ones.
 
-        Retiring rather than deleting keeps provenance for anything already cited.
+        A deterministic ``chunk_id`` is also the durable citation identity. Reusing its
+        row preserves that provenance across forced and partial refreshes; a retired
+        chunk that reappears is reactivated. Concurrent inserts still fail the unique
+        constraint and roll back the caller's transaction instead of silently replacing
+        another source's evidence.
         """
-        existing = self.session.scalars(
-            select(KnowledgeChunkRow).where(
-                KnowledgeChunkRow.source_id == source_id,
-                KnowledgeChunkRow.status == "active",
-            )
-        ).all()
-        for row in existing:
-            row.status = "retired"
-        stamp = now_iso()
-        written = 0
+        prepared: list[tuple[KnowledgeChunk, str, list[float] | None]] = []
+        incoming_ids: set[str] = set()
         for chunk, embedding in chunks:
             cleaned = chunk.text.strip()[:MAX_CHUNK_TEXT]
             if not cleaned:
                 continue
-            self.session.add(
-                KnowledgeChunkRow(
-                    chunk_id=chunk.chunk_id,
-                    source_id=source_id,
-                    category=chunk.category.value,
-                    title=chunk.title[:255],
-                    text=cleaned,
-                    url=chunk.url[:500],
-                    ordinal=chunk.ordinal,
-                    content_hash=chunk.content_hash or content_hash(cleaned),
-                    fetched_at=stamp,
-                    status="active",
-                    embedding=encode_vector(embedding) if embedding else "",
-                    embedding_model=embedding_model if embedding else "",
-                    embedding_dim=len(embedding) if embedding else 0,
+            if chunk.source_id != source_id:
+                raise ValueError("knowledge chunk source does not match replacement source")
+            if chunk.chunk_id in incoming_ids:
+                raise ValueError("duplicate knowledge chunk id in replacement")
+            incoming_ids.add(chunk.chunk_id)
+            prepared.append((chunk, cleaned, embedding))
+
+        # Serialize refreshes once a source exists. Two first-ever ingests can still
+        # race; the unique chunk/source constraints make one transaction fail cleanly.
+        self.session.scalar(
+            select(KnowledgeSourceRow.id)
+            .where(KnowledgeSourceRow.source_id == source_id)
+            .with_for_update()
+        )
+        existing = self.session.scalars(
+            select(KnowledgeChunkRow)
+            .where(KnowledgeChunkRow.source_id == source_id)
+            .with_for_update()
+        ).all()
+        existing_by_id = {row.chunk_id: row for row in existing}
+        if incoming_ids:
+            collisions = self.session.scalars(
+                select(KnowledgeChunkRow).where(
+                    KnowledgeChunkRow.chunk_id.in_(incoming_ids),
+                    KnowledgeChunkRow.source_id != source_id,
                 )
-            )
+            ).all()
+            if collisions:
+                raise ValueError("knowledge chunk id already belongs to another source")
+
+        for row in existing:
+            if row.status == "active" and row.chunk_id not in incoming_ids:
+                row.status = "retired"
+        stamp = now_iso()
+        written = 0
+        for chunk, cleaned, embedding in prepared:
+            row = existing_by_id.get(chunk.chunk_id)
+            if row is None:
+                row = KnowledgeChunkRow(
+                    chunk_id=chunk.chunk_id,
+                )
+                self.session.add(row)
+            row.source_id = source_id
+            row.category = chunk.category.value
+            row.title = chunk.title[:255]
+            row.text = cleaned
+            row.url = chunk.url[:500]
+            row.ordinal = chunk.ordinal
+            row.content_hash = chunk.content_hash or content_hash(cleaned)
+            row.fetched_at = stamp
+            row.status = "active"
+            row.embedding = encode_vector(embedding) if embedding else ""
+            row.embedding_model = embedding_model if embedding else ""
+            row.embedding_dim = len(embedding) if embedding else 0
             written += 1
         self.session.flush()
         return written

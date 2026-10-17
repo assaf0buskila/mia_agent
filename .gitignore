@@ -12,6 +12,7 @@ build/
 .ruff_cache/
 .mypy_cache/
 .cache/
+node_modules/
 .coverage
 .env
 !.env.example

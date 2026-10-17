@@ -1,5 +1,52 @@
 # Mia handoff — 2026-09-17
 
+## Active owner product — 2026-10-12
+
+The owner reopened the OS and selected Cloudflare + one editable Google Sheets
+workbook + Apps Script, with MIA approval in Telegram. The existing MIA VM stays;
+the additional old OS VM/disk/IP were removed. This overrides historical owner-OS
+UI freeze and PostgreSQL business-authority assumptions for this new owner product,
+without silently migrating public website CRM intake. Current implementation,
+permission approvals, exact verification and remaining live gates are recorded in
+`docs/ASSAF_OS_RELEASE_STATUS.md` and `ops/assaf-os/CONTRACT.md`.
+
+## Owner OS integration — local worktree, 2026-10-11
+
+Branch `codex/owner-os-integration`, base `9fc30581705e8d18f21f53fe28c6203909cdd050`.
+Standalone Telegram Login -> opaque PostgreSQL owner session -> canonical read-only
+Owner OS APIs, with a Node adapter for frozen mobile PR #59. Both feature gates
+default off. Quick Lead and reminder adapters are prepared, not activated.
+See `docs/OWNER_OS_LOCAL_INTEGRATION.md` and `docs/OWNER_OS_AUTH_THREAT_MODEL.md`
+for the exact endpoints, tests, permissions, frontend changes and release blockers.
+Public production health observed at 2026-10-11 09:20:36 UTC reports
+`a213c9a7fbdf5586e13cb38ffdbc4646f59c4541`, schema
+`20261008_assafweb_form_intake_receipts.sql`; master and deployment differ.
+No production mutation, migration, deployment, provider call, DNS change or merge
+was performed. Preserve this isolated worktree and the frozen mobile assets.
+
+## P0A reviewed feature branch — 2026-10-10
+
+AssafWeb OS P0A was implemented locally on branch `codex/mia-p0a-crm`, based on
+`660160d79002404e979dbfd88cf5d297e0055758`. Scope: sanitized read-only reconciliation,
+private owner CRM health, worker telemetry, and disabled-by-default new-input Israeli
+phone comparison. The owner subsequently authorized a clean commit, feature-branch
+push and Pull Request against `master`. Merge, deployment, production data/Sheets,
+cloud settings and external messages still require separate authorization.
+See `docs/P0A_CRM_RUNBOOK.md` and the separate `docs/P0B_WEBSITE_HANDOFF.md` specification.
+Final local suite: 2,647 passed with real disposable PostgreSQL; Ruff and widget checks
+passed. Independent HEAVY review approved local P0A without blocking findings. Exact
+evidence, known measurement limits and safe read-only execution are in the runbook.
+Phone policy remains disabled; no migration, deployment or historical repair occurred.
+The reviewed branch is prepared for a Pull Request; it is not a deployed revision.
+
+## Current operational override — GCP
+
+Mia's current deployment path is the GCP VM documented in `ops/gcp/README.md`. Production
+settings live in GCP Secret Manager `mia-env`; patch one or more keys with
+`ops/gcp/push-settings.ps1 -PatchSecret -Set` so every unmentioned value is preserved.
+The AWS production and deploy material below records the September state and remains useful
+history, but it is not the current operational path.
+
 Section 0 is the current state for the next session. The sections after it are older handoffs and
 still hold — the deploy gotchas especially.
 

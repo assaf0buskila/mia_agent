@@ -88,6 +88,7 @@ async def test_kill_switch_crm_callback_keeps_pending_without_constructing_sheet
                 "from": "123",
                 "data": f"ok:{proposal.approval_id}",
                 "chat_id": "123",
+                "chat_type": "private",
                 "message_id": "1",
             },
             port=_CallbackPort(),
@@ -282,5 +283,8 @@ def test_widget_contact_status_uses_backend_delivery_state() -> None:
     source = Path("app/web/ask_mia.js").read_text(encoding="utf-8")
     assert "הפרטים נשמרו. אסף יחזור אליכם." not in source
     assert "data.delivery_status" in source
-    assert "הפרטים נשמרו והמסירה לאסף עדיין ממתינה." in source
-    assert "הפרטים נשמרו והמסירה לאסף אושרה." in source
+    # Visitor-facing copy stays tied to the backend state but no longer exposes the
+    # internal "pending approval" step (owner request, 2026-09-27).
+    assert "הפרטים נשמרו ויועברו לאסף." in source
+    assert "הפרטים נשמרו והגיעו לאסף." in source
+    assert "ממתינה" not in source

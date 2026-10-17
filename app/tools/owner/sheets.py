@@ -131,6 +131,8 @@ def _sheets_list_tabs(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
 
 
 def _sheets_write(ctx: ToolContext, args: dict[str, Any], *, append: bool) -> ToolResult:
+    if getattr(ctx.settings, "assaf_os_enabled", False):
+        return ToolResult(ok=False, error="legacy owner Sheets writer is disabled")
     if ctx.kill_switch:
         return ToolResult(ok=False, error="sheets write denied")
     allowed_spreadsheet_ids = ctx.settings.allowed_sheets_spreadsheet_ids()

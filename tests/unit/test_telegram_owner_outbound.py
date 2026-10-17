@@ -352,6 +352,7 @@ async def test_file_sqlite_crm_callback_syncs_before_decision_and_executes_once(
             "from": _OWNER_ID,
             "data": f"ok:{approval_token(proposal.approval_id)}",
             "chat_id": _OWNER_ID,
+            "chat_type": "private",
             "message_id": "44",
         }
 
@@ -388,10 +389,12 @@ class _CallbackPort(RecordingMessagePort):
     def __init__(self) -> None:
         super().__init__()
         self.answered: list[str] = []
+        self.answer_texts: list[str] = []
         self.edited: list[dict[str, str]] = []
 
     async def answer_callback_query(self, callback_query_id: str, *, text: str = "") -> None:
         self.answered.append(callback_query_id)
+        self.answer_texts.append(text)
 
     async def edit_message_text(
         self,
@@ -419,9 +422,230 @@ def _callback_update(*, update_id: int, query_id: str, data: str) -> dict:
             "id": query_id,
             "from": {"id": int(_OWNER_ID)},
             "data": data,
-            "message": {"message_id": 44, "chat": {"id": int(_OWNER_ID)}},
+            "message": {
+                "message_id": 44,
+                "chat": {"id": int(_OWNER_ID), "type": "private"},
+            },
         },
     }
+
+
+@pytest.mark.asyncio
+async def test_assaf_os_callback_claims_and_acks_before_blocked_provider_without_blocking_loop(
+    monkeypatch,
+) -> None:
+    import asyncio
+    import threading
+
+    from app.api import telegram as telegram_api
+    from app.core.config import Settings
+    from app.services import owner_actions as owner_actions_service
+    from app.services.owner_actions import OwnerActionExecution
+
+    init_db()
+    db = get_session_factory()()
+    entered = threading.Event()
+    release = threading.Event()
+    provider_calls = []
+    try:
+        settings = Settings(telegram_owner_user_ids=_OWNER_ID)
+        store = LeadStore(db)
+        proposal = propose_owner_action(
+            store,
+            principal=Principal.owner(source="telegram", actor_id=_OWNER_ID),
+            source_ref="telegram:latency-order",
+            kind="assaf_os.approve",
+            parameters={
+                "proposal_id": "PR_latency_order",
+                "request_id": "approve-latency-order",
+                "rejection_request_id": "reject-latency-order",
+            },
+            target={"approval_guard_version": 1, "proposal": {"status": "pending"}},
+        )
+        db.commit()
+        port = _CallbackPort()
+
+        def blocked_execute(thread_store, **kwargs):
+            proposal_id = kwargs["proposal_id"]
+            row = thread_store.get_approval_by_approval_id(proposal.approval_id)
+            assert row is not None and row.decision == DECISION_APPROVED
+            if not thread_store.claim_provider_write(
+                scope="approval", key=f"{proposal_id}:execute"
+            ):
+                return OwnerActionExecution("already_handled")
+            assert port.answered == ["q-latency-order"]
+            assert "נקלט" in port.answer_texts[0]
+            assert "בוצע" not in port.answer_texts[0]
+            provider_calls.append(proposal_id)
+            thread_store.mark_provider_write_pending_review(
+                scope="approval", key=f"{proposal_id}:execute"
+            )
+            entered.set()
+            assert release.wait(2)
+            return OwnerActionExecution("unknown")
+
+        monkeypatch.setattr(
+            owner_actions_service,
+            "execute_approved_owner_action_with_adapters",
+            blocked_execute,
+        )
+        callback_task = asyncio.create_task(
+            telegram_api._handle_callback(
+                callback={
+                    "callback_query_id": "q-latency-order",
+                    "from": _OWNER_ID,
+                    "data": f"ok:{approval_token(proposal.approval_id)}",
+                    "chat_id": _OWNER_ID,
+                    "chat_type": "private",
+                    "message_id": "88",
+                },
+                port=port,
+                owner_ids={_OWNER_ID},
+                db=db,
+                settings=settings,
+            )
+        )
+        assert await asyncio.to_thread(entered.wait, 1)
+        # The provider remains blocked in its worker thread while the event loop runs.
+        await asyncio.wait_for(asyncio.sleep(0), timeout=0.1)
+        assert port.edited and "נקלט" in port.edited[0]["text"]
+        release.set()
+        result = await callback_task
+        assert result["processed"] == 1
+        assert "אינה ודאית" in port.edited[-1]["text"]
+        assert "בוצעה" not in port.edited[-1]["text"]
+        replay = await telegram_api._handle_callback(
+            callback={
+                "callback_query_id": "q-latency-order-replay",
+                "from": _OWNER_ID,
+                "data": f"ok:{approval_token(proposal.approval_id)}",
+                "chat_id": _OWNER_ID,
+                "chat_type": "private",
+                "message_id": "88",
+            },
+            port=port,
+            owner_ids={_OWNER_ID},
+            db=db,
+            settings=settings,
+        )
+        assert replay["processed"] == 1
+        assert provider_calls == [proposal.proposal_id]
+        assert "בוצעה" not in port.edited[-1]["text"]
+    finally:
+        release.set()
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_assaf_os_preflight_exception_finishes_unknown_and_sticks_without_retry(
+    monkeypatch,
+) -> None:
+    from app.api import telegram as telegram_api
+    from app.core.config import Settings
+    from app.services import owner_actions as owner_actions_service
+
+    init_db()
+    db = get_session_factory()()
+    calls = []
+    try:
+        settings = Settings(telegram_owner_user_ids=_OWNER_ID)
+        proposal = propose_owner_action(
+            LeadStore(db),
+            principal=Principal.owner(source="telegram", actor_id=_OWNER_ID),
+            source_ref="telegram:preflight-exception",
+            kind="assaf_os.approve",
+            parameters={
+                "proposal_id": "PR_preflight_exception",
+                "request_id": "approve-preflight-exception",
+                "rejection_request_id": "reject-preflight-exception",
+            },
+            target={"approval_guard_version": 1, "proposal": {"status": "pending"}},
+        )
+        db.commit()
+        port = _CallbackPort()
+
+        def fail_preflight(*_args, **_kwargs):
+            calls.append("preflight")
+            raise RuntimeError("synthetic preflight failure")
+
+        monkeypatch.setattr(
+            owner_actions_service,
+            "execute_approved_owner_action_with_adapters",
+            fail_preflight,
+        )
+        callback = {
+            "callback_query_id": "q-preflight-exception",
+            "from": _OWNER_ID,
+            "data": f"ok:{approval_token(proposal.approval_id)}",
+            "chat_id": _OWNER_ID,
+            "chat_type": "private",
+            "message_id": "89",
+        }
+        result = await telegram_api._handle_callback(
+            callback=callback,
+            port=port,
+            owner_ids={_OWNER_ID},
+            db=db,
+            settings=settings,
+        )
+        replay = await telegram_api._handle_callback(
+            callback={**callback, "callback_query_id": "q-preflight-exception-replay"},
+            port=port,
+            owner_ids={_OWNER_ID},
+            db=db,
+            settings=settings,
+        )
+        assert result["processed"] == replay["processed"] == 1
+        assert calls == ["preflight"]
+        assert "אינה ודאית" in port.edited[-1]["text"]
+        assert "בודק קבלה" not in port.edited[-1]["text"]
+    finally:
+        db.close()
+
+
+@pytest.mark.asyncio
+async def test_assaf_os_crash_window_claim_replay_stays_unknown_without_remote_read(
+    monkeypatch,
+) -> None:
+    from app.api import telegram as telegram_api
+    from app.core.config import Settings
+    from app.services import owner_actions as owner_actions_service
+
+    init_db()
+    db = get_session_factory()()
+    try:
+        proposal = propose_owner_action(
+            LeadStore(db),
+            principal=Principal.owner(source="telegram", actor_id=_OWNER_ID),
+            source_ref="telegram:claimed-crash-window",
+            kind="assaf_os.approve",
+            parameters={
+                "proposal_id": "PR_claimed_crash_window",
+                "request_id": "approve-claimed-crash-window",
+                "rejection_request_id": "reject-claimed-crash-window",
+            },
+            target={"approval_guard_version": 1, "proposal": {"status": "pending"}},
+        )
+        row = LeadStore(db).get_approval_by_approval_id(proposal.approval_id)
+        row.decision = DECISION_APPROVED
+        db.commit()
+        assert LeadStore(db).claim_provider_write(
+            scope="approval", key=f"{proposal.proposal_id}:execute"
+        )
+        monkeypatch.setattr(
+            owner_actions_service,
+            "execute_approved_owner_action_with_adapters",
+            lambda *_args, **_kwargs: pytest.fail("remote preflight replayed"),
+        )
+        outcome = await telegram_api._execute_assaf_os_owner_decision(
+            settings=Settings(telegram_owner_user_ids=_OWNER_ID),
+            actor_id=_OWNER_ID,
+            proposal_id=proposal.proposal_id,
+            decision="approve",
+        )
+        assert outcome.status == "unknown"
+    finally:
+        db.close()
 
 
 def test_approval_keyboard_callback_applies_the_decision(monkeypatch) -> None:
@@ -475,7 +699,7 @@ def test_approval_keyboard_callback_applies_the_decision(monkeypatch) -> None:
                             "data": f"ok:{token}",
                             "message": {
                                 "message_id": 44,
-                                "chat": {"id": int(_OWNER_ID)},
+                                "chat": {"id": int(_OWNER_ID), "type": "private"},
                             },
                         },
                     },
@@ -941,6 +1165,7 @@ async def test_callback_edit_failure_falls_back_and_never_reruns_the_action(
             "from": _OWNER_ID,
             "data": f"ok:{approval_token(proposal.approval_id)}",
             "chat_id": _OWNER_ID,
+            "chat_type": "private",
             "message_id": "77",
         }
 
@@ -1052,7 +1277,10 @@ async def test_legacy_pending_row_renders_as_a_card_and_still_resolves(monkeypat
                             "id": "q-legacy-resolve",
                             "from": {"id": int(_OWNER_ID)},
                             "data": f"ok:{approval_token(row.approval_id)}",
-                            "message": {"message_id": 44, "chat": {"id": int(_OWNER_ID)}},
+                            "message": {
+                                "message_id": 44,
+                                "chat": {"id": int(_OWNER_ID), "type": "private"},
+                            },
                         },
                     },
                     headers={"X-Telegram-Bot-Api-Secret-Token": "tg-secret"},

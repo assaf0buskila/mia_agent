@@ -46,6 +46,7 @@ def get_session_factory() -> sessionmaker[Session]:
 
 def init_db() -> None:
     from app.db import models as _models  # noqa: F401
+    from app.db import reminders as _reminders  # noqa: F401
     from app.db import site_v2 as _site_v2  # noqa: F401
 
     Base.metadata.create_all(bind=get_engine())
@@ -53,6 +54,7 @@ def init_db() -> None:
 
 def schema_ready(engine: Engine) -> bool:
     from app.db import models as _models  # noqa: F401
+    from app.db import reminders as _reminders  # noqa: F401
     from app.db import site_v2 as _site_v2  # noqa: F401
 
     try:
@@ -76,6 +78,27 @@ def database_ready() -> bool:
             conn.execute(text("SELECT 1"))
         return schema_ready(engine)
     except SQLAlchemyError:
+        return False
+
+
+def ledger_schema_ready(engine: Engine) -> bool:
+    """Opt-in ledger schema probe. Ordinary application readiness stays independent."""
+    from app.db.os_ledger_migrate import TABLES, migration_scripts
+
+    if engine.dialect.name != "postgresql":
+        return False
+    try:
+        with engine.connect() as conn:
+            tables = set(conn.scalars(text(
+                "SELECT tablename FROM pg_tables WHERE schemaname='assaf_os'"
+            )))
+            if not TABLES <= tables:
+                return False
+            applied = dict(conn.execute(text(
+                "SELECT filename, sha256 FROM assaf_os.schema_migrations"
+            )).all())
+            return applied == {name: digest for name, _, digest in migration_scripts()}
+    except (SQLAlchemyError, ValueError, OSError):
         return False
 
 

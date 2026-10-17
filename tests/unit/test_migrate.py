@@ -161,6 +161,9 @@ def test_postgres_only_skip_contract() -> None:
             "20260901_approval_resource_id_varchar80.sql",
             "20260901_linkedin_approval_parameters_text.sql",
             "20260901_owner_brief_drop_campaign_columns.sql",
+            "20261011_owner_os_sessions.sql",
+            "20261015_assaf_os_ledger.sql",
+            "20261015_owner_os_session_chains.sql",
         }
     )
 

@@ -89,6 +89,7 @@ async def test_telegram_timeout_sends_fallback_not_silence(monkeypatch) -> None:
             "id": "tg-hang-1",
             "from": "99",
             "chat_id": "99",
+            "chat_type": "private",
             "text": "GA",
             "message_id": "1",
         }
@@ -170,6 +171,7 @@ async def test_worker_cancellation_drains_owner_turn_before_session_close(monkey
                 "id": "tg-cancel-drain-1",
                 "from": "99",
                 "chat_id": "99",
+                "chat_type": "private",
                 "text": "check",
             },
             envelope_kind="text",
@@ -226,6 +228,7 @@ async def test_cancellation_during_deadline_drain_keeps_session_open_for_sync_wo
                 "id": "tg-cancel-deadline-drain-1",
                 "from": "99",
                 "chat_id": "99",
+                "chat_type": "private",
                 "text": "check the current pipeline",
             },
             envelope_kind="text",
@@ -262,10 +265,22 @@ async def test_telegram_burst_is_one_owner_turn(monkeypatch) -> None:
     init_db()
     db = get_session_factory()()
     items = [
-        {"id": "tg-a", "from": "99", "chat_id": "99", "text": "what do you see on the site"},
-        {"id": "tg-b", "from": "99", "chat_id": "99", "text": "improvements"},
-        {"id": "tg-c", "from": "99", "chat_id": "99", "text": "?"},
-        {"id": "tg-d", "from": "99", "chat_id": "99", "text": "Mia"},
+        {
+            "id": "tg-a",
+            "from": "99",
+            "chat_id": "99",
+            "chat_type": "private",
+            "text": "what do you see on the site",
+        },
+        {
+            "id": "tg-b",
+            "from": "99",
+            "chat_id": "99",
+            "chat_type": "private",
+            "text": "improvements",
+        },
+        {"id": "tg-c", "from": "99", "chat_id": "99", "chat_type": "private", "text": "?"},
+        {"id": "tg-d", "from": "99", "chat_id": "99", "chat_type": "private", "text": "Mia"},
     ]
     try:
         store = LeadStore(db)
@@ -333,6 +348,7 @@ async def test_live_telegram_voice_persists_transcript_and_provenance(monkeypatc
             "id": "tg-voice-live-1",
             "from": "99",
             "chat_id": "99",
+            "chat_type": "private",
             "message_id": "5",
             "text": "",
             "mime_type": "audio/ogg",

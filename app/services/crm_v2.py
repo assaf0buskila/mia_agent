@@ -22,6 +22,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from sqlalchemy import delete, or_, select, text, update
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.db.models import (
     CrmActivityRow,
     CrmContactConversationRow,
@@ -32,6 +33,7 @@ from app.db.models import (
     CrmOutboxRow,
     CrmSyncSnapshotRow,
 )
+from app.services.phone_identity import normalize_new_input_phone
 
 CONTACT_FIELDS = (
     "name",
@@ -93,6 +95,14 @@ class CrmRevisionConflict(CrmError):
 
 class CrmNotFound(CrmError):
     pass
+
+
+class CrmPhoneInputInvalid(CrmError):
+    """The opt-in policy rejected a phone before any contact mutation."""
+
+
+class CrmPhoneNormalizationRequired(CrmError):
+    """Opt-in identity policy cannot safely run against legacy comparison keys."""
 
 
 @dataclass(frozen=True)
@@ -173,6 +183,12 @@ class ConflictView:
     database_value: str
     sheet_value: str
     status: str
+
+
+@dataclass(frozen=True)
+class ConflictGroupView:
+    representative: ConflictView
+    observations: int
 
 
 @dataclass(frozen=True)
@@ -371,10 +387,40 @@ class CrmService:
         *,
         now: Callable[[], datetime] | datetime | None = None,
         timezone: str = "Asia/Jerusalem",
+        normalize_israeli_phones: bool | None = None,
     ) -> None:
         self.session = session
         self._clock = now
         self._timezone = timezone
+        self._normalize_israeli_phones = (
+            get_settings().crm_israeli_phone_normalization_enabled
+            if normalize_israeli_phones is None
+            else normalize_israeli_phones
+        )
+
+    def _new_input_fields(self, fields: Mapping[str, Any]) -> dict[str, str]:
+        if self._normalize_israeli_phones:
+            raw_phone = str(fields.get("phone") or "").strip()
+            if raw_phone and not normalize_new_input_phone(raw_phone):
+                raise CrmPhoneInputInvalid("invalid phone")
+        return _bounded_fields(fields)
+
+    def _require_phone_normalization_ready(self) -> None:
+        if not self._normalize_israeli_phones:
+            return
+        # Switching comparison keys without migrating persisted identities can create a
+        # second contact or attach an alias to an old row. Fail before any CRM mutation.
+        # No number or customer data is included in the failure.
+        values = self.session.scalars(
+            select(CrmIdentityRow.normalized_value).where(CrmIdentityRow.kind == "phone")
+        )
+        if any(
+            not (canonical := normalize_new_input_phone(value)) or canonical != value
+            for value in values
+        ):
+            raise CrmPhoneNormalizationRequired(
+                "phone normalization requires reviewed identity migration"
+            )
 
     def _now(self) -> str:
         moment = self._clock() if callable(self._clock) else self._clock
@@ -426,12 +472,13 @@ class CrmService:
         expected_revision: int | None = None,
     ) -> CaptureResult:
         self._lock_projection_effects()
+        self._require_phone_normalization_ready()
         if writer not in WRITERS:
             raise CrmError("writer must be declared as 'owner' or 'public'")
         source_ref = source_ref.strip()
         if not source_ref or len(source_ref) > 255:
             raise CrmError("source_ref is required and must be at most 255 characters")
-        incoming = _bounded_fields(fields)
+        incoming = self._new_input_fields(fields)
         identities = self._identities(incoming)
         self._lock_identities(identities)
         matched_ids = self._matched_contact_ids(identities)
@@ -569,18 +616,46 @@ class CrmService:
         source_ref: str,
         summary: str = "",
         recipient_ids: Sequence[str] = (),
+        ping_scope: str = "",
     ) -> CaptureResult:
+        """Capture a website lead and queue Assaf's Telegram card.
+
+        ``ping_scope`` is empty for the first handoff (at most one per conversation). A
+        later contact update passes a scope such as ``update-phone``; it gets its own
+        dedupe key and its own delivery claim, so it is at most once per scope and can
+        never replay or suppress the first handoff.
+        """
         safe_summary = summary.strip()[:MAX_FIELD_CHARS]
+        raw_source_fields = {
+            key: str(fields.get(key) or "").strip()[:MAX_FIELD_CHARS]
+            for key in (
+                "name", "phone", "email", "business", "summary", "next_step",
+                "want", "source", "date", "status",
+            )
+        }
+        scope = "".join(ch for ch in ping_scope if ch.isalnum() or ch == "-")[:40]
+        suffix = f":{scope}" if scope else ""
+
+        def _payload(recipient_id: object) -> dict[str, str]:
+            payload = {
+                "recipient_id": str(recipient_id),
+                "text": safe_summary,
+                "conversation_id": conversation_id,
+                "receipt_key": f"crm:{conversation_id}:{recipient_id}{suffix}",
+                "lead_source": {
+                    "source_ref": source_ref,
+                    "raw_fields": raw_source_fields,
+                },
+            }
+            if scope:
+                payload["ping_scope"] = scope
+            return payload
+
         intents = tuple(
             DestinationIntent(
                 destination="telegram",
-                payload={
-                    "recipient_id": str(recipient_id),
-                    "text": safe_summary,
-                    "conversation_id": conversation_id,
-                    "receipt_key": f"crm:{conversation_id}:{recipient_id}",
-                },
-                dedupe_key=f"telegram:crm:{conversation_id}:{recipient_id}",
+                payload=_payload(recipient_id),
+                dedupe_key=f"telegram:crm:{conversation_id}:{recipient_id}{suffix}",
             )
             for recipient_id in recipient_ids
             if str(recipient_id).strip()
@@ -594,6 +669,69 @@ class CrmService:
                 channel="website",
                 action="contact_captured",
                 result=safe_summary,
+                source_ref=f"{source_ref}:activity",
+            ),
+            destination_intents=intents,
+        )
+
+    @_autoflushing
+    def capture_form_lead(
+        self,
+        fields: Mapping[str, Any],
+        *,
+        source_id: str,
+        submitted_at: str,
+        summary: str,
+        recipient_ids: Sequence[str] = (),
+    ) -> CaptureResult:
+        """Capture one deterministic AssafWeb form event without a model turn.
+
+        ``form:<source_id>`` is a CRM ownership scope only.  This method does not
+        create a website session, canonical chat event, AI run, or provider request.
+        Delivery remains asynchronous through the existing CRM outbox.
+        """
+        safe_source_id = source_id.strip()
+        if not safe_source_id or len(safe_source_id) > 36:
+            raise CrmError("form source_id is required and must be at most 36 characters")
+        safe_summary = summary.strip()[:MAX_FIELD_CHARS]
+        conversation_id = f"form:{safe_source_id}"
+        source_ref = f"assafweb-form:{safe_source_id}"
+        raw_source_fields = {
+            key: str(fields.get(key) or "").strip()[:MAX_FIELD_CHARS]
+            for key in (
+                "name", "phone", "email", "business", "summary", "next_step",
+                "want", "source", "date", "status",
+            )
+        }
+
+        intents = tuple(
+            DestinationIntent(
+                destination="telegram",
+                payload={
+                    "recipient_id": str(recipient_id),
+                    "text": safe_summary,
+                    "conversation_id": conversation_id,
+                    "receipt_key": f"crm:{conversation_id}:{recipient_id}",
+                    "lead_source": {
+                        "source_ref": source_ref,
+                        "raw_fields": raw_source_fields,
+                    },
+                },
+                dedupe_key=f"telegram:crm:{conversation_id}:{recipient_id}",
+            )
+            for recipient_id in recipient_ids
+            if str(recipient_id).strip()
+        )
+        return self.capture(
+            fields,
+            writer=WRITER_PUBLIC,
+            source_ref=source_ref,
+            conversation_id=conversation_id,
+            activity=ActivityInput(
+                channel="form",
+                action="contact_captured",
+                result=safe_summary,
+                occurred_at=submitted_at,
                 source_ref=f"{source_ref}:activity",
             ),
             destination_intents=intents,
@@ -708,7 +846,10 @@ class CrmService:
             return [self._contact_view(row)] if row is not None else []
         if query and (email := normalize_email(query)):
             return self._lookup_identity("email", email, limit)
-        if query and (phone := normalize_phone(query)):
+        phone_normalizer = (
+            normalize_new_input_phone if self._normalize_israeli_phones else normalize_phone
+        )
+        if query and (phone := phone_normalizer(query)):
             return self._lookup_identity("phone", phone, limit)
         statement = select(CrmContactRow).order_by(CrmContactRow.updated_at.desc()).limit(limit)
         if query:
@@ -763,7 +904,8 @@ class CrmService:
     @_autoflushing
     def snapshot_identity(self, fields: Mapping[str, Any]) -> TargetSnapshot:
         """Bind a create proposal either to an existing contact or to observed absence."""
-        bounded = _bounded_fields(fields)
+        self._require_phone_normalization_ready()
+        bounded = self._new_input_fields(fields)
         matched = self._matched_contact_ids(self._identities(bounded))
         if len(matched) > 1:
             raise CrmError("identities belong to different contacts")
@@ -809,6 +951,45 @@ class CrmService:
         return [self._conflict_view(row) for row in self.session.scalars(statement).all()]
 
     @_autoflushing
+    def list_conflict_groups(
+        self, *, contact_id: str | None = None, unresolved_only: bool = True
+    ) -> list[ConflictGroupView]:
+        """Group exact stored observations for bounded owner-facing presentation.
+
+        ``list_conflicts`` remains the lossless ID-level API used by resolution and
+        approval revalidation. This projection includes raw details and resolution
+        state in its key, so observations that look alike in ``ConflictView`` are not
+        collapsed when their evidence differs.
+        """
+        statement = select(CrmIssueRow).order_by(CrmIssueRow.created_at, CrmIssueRow.id)
+        if contact_id:
+            statement = statement.where(self._issue_contact_predicate(contact_id))
+        if unresolved_only:
+            statement = statement.where(CrmIssueRow.status.in_(("open", "resolving")))
+        grouped: dict[tuple[str, ...], tuple[CrmIssueRow, int]] = {}
+        for row in self.session.scalars(statement).all():
+            key = (
+                row.contact_id,
+                row.issue_type,
+                row.field_name,
+                row.base_value,
+                row.database_value,
+                row.sheet_value,
+                row.details_json,
+                row.status,
+                row.resolution,
+                row.resolved_at,
+            )
+            representative, count = grouped.get(key, (row, 0))
+            grouped[key] = (representative, count + 1)
+        return [
+            ConflictGroupView(
+                representative=self._conflict_view(representative), observations=count
+            )
+            for representative, count in grouped.values()
+        ]
+
+    @_autoflushing
     def resolve_conflict(
         self,
         conflict_id: str,
@@ -818,6 +999,7 @@ class CrmService:
         expected_contact_revision: int | None = None,
     ) -> ContactView:
         self._lock_projection_effects()
+        self._require_phone_normalization_ready()
         issue = self.session.get(CrmIssueRow, conflict_id)
         if issue is None or issue.status != "open" or not issue.contact_id:
             raise CrmNotFound(conflict_id)
@@ -838,23 +1020,26 @@ class CrmService:
             if selected is None:
                 raise CrmError("value resolution requires value")
             fields = _load_fields(contact.fields_json)
-            selected_value = _bounded_fields({issue.field_name: selected}).get(
+            selected_value = self._new_input_fields({issue.field_name: selected}).get(
                 issue.field_name, ""
             )
             if issue.field_name in {"phone", "email"}:
-                old_value = fields.get(issue.field_name, "")
-                lock_values = {
-                    issue.field_name: value
-                    for value in (old_value, selected_value)
-                    if value
-                }
-                self._lock_identity_values(issue.field_name, lock_values.values())
+                # The approved field value and the identity comparison key have
+                # different purposes. Never persist a local-format comparison key.
+                old_key = self._identities(fields).get(issue.field_name, "")
+                selected_key = self._identities(
+                    {issue.field_name: selected_value}
+                ).get(issue.field_name, "")
+                self._lock_identity_values(
+                    issue.field_name,
+                    [key for key in (old_key, selected_key) if key],
+                )
                 owner = self.session.scalars(
                     select(CrmIdentityRow.contact_id).where(
                         CrmIdentityRow.kind == issue.field_name,
-                        CrmIdentityRow.normalized_value == selected_value,
+                        CrmIdentityRow.normalized_value == selected_key,
                     )
-                ).first() if selected_value else None
+                ).first() if selected_key else None
                 if owner is not None and owner != contact.id:
                     raise CrmError("resolved identity belongs to another contact")
                 self.session.execute(
@@ -863,13 +1048,13 @@ class CrmService:
                         CrmIdentityRow.kind == issue.field_name,
                     )
                 )
-                if selected_value:
+                if selected_key:
                     self.session.add(
                         CrmIdentityRow(
                             id=_new_id("identity"),
                             contact_id=contact.id,
                             kind=issue.field_name,
-                            normalized_value=selected_value,
+                            normalized_value=selected_key,
                             source_ref=f"conflict:{issue.id}",
                             created_at=self._now(),
                         )
@@ -945,11 +1130,14 @@ class CrmService:
     @_autoflushing
     def import_sheet_contact(self, cells: Sequence[Any], *, row_number: int) -> CaptureResult:
         self._lock_projection_effects()
+        self._require_phone_normalization_ready()
         raw_values = [str(value or "") for value in cells[:15]]
         raw_values.extend([""] * (15 - len(raw_values)))
         values = [value.strip() for value in raw_values]
         values.extend([""] * (15 - len(values)))
         sheet_fields = dict(zip(CONTACT_FIELDS, values[:14], strict=True))
+        # Validate new input before legacy formatting can discard invalid text.
+        self._new_input_fields(sheet_fields)
         sheet_id = values[14]
         source_ref = f"sheets:Contacts:{row_number}"
         if not sheet_id:
@@ -1173,10 +1361,15 @@ class CrmService:
                 )
             )
         proposed_identities = self._identities(merged)
+        old_identities = self._identities(db_fields)
         for kind in ("phone", "email"):
             self._lock_identity_values(
                 kind,
-                [value for value in (db_fields.get(kind, ""), merged.get(kind, "")) if value],
+                [
+                    value
+                    for value in (old_identities.get(kind, ""), proposed_identities.get(kind, ""))
+                    if value
+                ],
             )
         identity_owners = self._matched_contact_ids(proposed_identities) - {contact.id}
         if identity_owners:
@@ -1210,7 +1403,7 @@ class CrmService:
         self._reconcile_identities(
             contact.id,
             db_fields,
-            self._identities(view.fields),
+            view.fields,
             f"sheets:Contacts:{row_number}",
         )
         for name in accepted_from_sheet:
@@ -1234,10 +1427,13 @@ class CrmService:
         )
 
     def _identities(self, fields: Mapping[str, str]) -> dict[str, str]:
+        phone = fields.get("phone", "")
+        if self._normalize_israeli_phones:
+            phone = normalize_new_input_phone(phone)
         return {
             kind: value
             for kind, value in (
-                ("phone", fields.get("phone", "")),
+                ("phone", phone),
                 ("email", fields.get("email", "")),
             )
             if value
@@ -1496,6 +1692,29 @@ class CrmService:
         sheet_value: str = "",
         details: Mapping[str, Any] | None = None,
     ) -> str:
+        # Keep exact-observation lookup and insert atomic on PostgreSQL even if a
+        # future caller reaches this private helper without an already-locked entrypoint.
+        self._lock_projection_effects()
+        details_json = _json(details or {})
+        existing = self.session.scalars(
+            select(CrmIssueRow)
+            .where(
+                CrmIssueRow.contact_id == contact_id,
+                CrmIssueRow.issue_type == issue_type,
+                CrmIssueRow.field_name == field_name,
+                CrmIssueRow.base_value == base_value,
+                CrmIssueRow.database_value == database_value,
+                CrmIssueRow.sheet_value == sheet_value,
+                CrmIssueRow.details_json == details_json,
+                CrmIssueRow.status == "open",
+            )
+            .order_by(CrmIssueRow.created_at, CrmIssueRow.id)
+        ).first()
+        if existing is not None:
+            # Historical databases may already contain many copies. Keep every audit
+            # row, but reuse one exact open observation and repair its contact link.
+            self._link_issue_contact(existing.id, contact_id)
+            return existing.id
         issue_id = _new_id("issue")
         self.session.add(
             CrmIssueRow(
@@ -1506,7 +1725,7 @@ class CrmService:
                 base_value=base_value,
                 database_value=database_value,
                 sheet_value=sheet_value,
-                details_json=_json(details or {}),
+                details_json=details_json,
                 status="open",
                 created_at=self._now(),
             )

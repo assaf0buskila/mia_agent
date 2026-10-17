@@ -1,0 +1,47 @@
+name: Review gate
+
+# Process aid, not a security boundary: both agents share the same GitHub login. Reviewer-Agent
+# and Reviewer-Run are self-attested; this cannot authenticate an independent reviewer (#109).
+# The status-writing job executes only the trusted default branch's publisher, never PR code.
+# PR changes and comments are API data only. The publisher re-reads the head before each status
+# write and skips publication if it changed. Re-running reads live state again.
+# Both triggers require the trusted workflow/script to be installed on the default branch first;
+# the PR introducing this gate cannot bootstrap it by executing its own publisher.
+# Assaf's explicit deploy go is still required. Rules and owner actions: docs/COWORK.md.
+
+on:
+  pull_request_target:
+    branches: [master]
+    types: [opened, reopened, synchronize, edited]
+  issue_comment:
+    types: [created, edited, deleted]
+
+permissions: {}
+
+# The newest evaluation wins: each run reads the live state, so cancelling an older one is safe.
+concurrency:
+  group: review-gate-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: true
+
+jobs:
+  # Not named review-gate, so the job's check run cannot be mistaken for the status context.
+  evaluate:
+    if: github.event_name == 'pull_request_target' || github.event.issue.pull_request
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+      statuses: write
+    env:
+      REVIEW_GATE_ALLOWED_REVIEWERS: assaf0buskila
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - name: Evaluate and publish the commit status
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+        run: python3 scripts/ci/review_gate.py

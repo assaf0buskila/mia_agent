@@ -39,6 +39,7 @@ def test_inventory_covers_the_runtime_registry_and_states_live_boundary() -> Non
     reply = owner_tool_inventory_reply()
     assert f"{len(tool_names())} כלים רשומים" in reply
     assert all(name in reply for name in tool_names())
+    assert "פנקס עסקי TEST (כבוי כברירת מחדל)" in reply
     assert "לא בדיקת חיבור חיה" in reply
     assert "באישור" in reply
 

@@ -6,10 +6,12 @@ from dataclasses import asdict
 from typing import Any
 
 from app.domain.tools import AdapterHttpError
-from app.domain.two_state import is_sheets_health_ask
+from app.domain.two_state import is_sheets_health_ask, may_run, state_for
 from app.integrations.sheets import build_sheets_port
+from app.services.crm_diagnostics import build_crm_diagnostics, render_operational_health_he
 from app.services.crm_v2 import CONTACT_FIELDS, CrmError, CrmService
 from app.services.owner_actions import propose_owner_action, sync_owner_crm_sheet_in_session
+from app.services.phone_identity import normalize_new_input_phone
 from app.surfaces.crm import (
     ACTIVITY_TAB,
     CONTACTS_TAB,
@@ -17,6 +19,15 @@ from app.surfaces.crm import (
 )
 from app.surfaces.owner_crm_intent import is_explicit_owner_crm_write_intent
 from app.tools.owner.types import ToolContext, ToolResult, _crm_spreadsheet_id
+
+_MAX_CONFLICT_GROUPS = 25
+_MAX_CONFLICT_VALUE_CHARS = 160
+
+
+def _bounded_conflict_value(value: str) -> str:
+    if len(value) <= _MAX_CONFLICT_VALUE_CHARS:
+        return value
+    return value[: _MAX_CONFLICT_VALUE_CHARS - 1] + "…"
 
 
 def _crm_workspace_missing(ctx: ToolContext, port: object) -> bool:
@@ -43,6 +54,8 @@ def _crm_workspace_missing(ctx: ToolContext, port: object) -> bool:
 
 
 def _crm_search(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
+    if getattr(ctx.settings, "assaf_os_enabled", False):
+        return ToolResult(ok=False, error="legacy owner CRM path is disabled")
     query = str(args.get("query") or ctx.owner_text or "").strip()
     port = ctx.sheets or build_sheets_port(ctx.settings)
     if _crm_workspace_missing(ctx, port):
@@ -65,6 +78,25 @@ def _crm_search(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
         ),
     )
 
+
+def _crm_operational_health(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
+    """Private, DB-only operational view; never syncs or calls Sheets."""
+    del args
+    actor_id = str(ctx.principal.actor_id or "")
+    if (
+        not may_run(state=state_for(ctx.principal), tool="crm_operational_health")
+        or not actor_id.isascii()
+        or not actor_id.isdigit()
+        or actor_id not in ctx.settings.telegram_owner_user_id_set()
+    ):
+        return ToolResult(ok=False, error="הכלי זמין רק לבעלים מאומתים.")
+    report = build_crm_diagnostics(
+        ctx.store.session,
+        phone_normalizer=normalize_new_input_phone,
+        recipient_ids=ctx.settings.telegram_owner_user_id_set(),
+        legacy_sheet_projection_enabled=not ctx.settings.assaf_os_enabled,
+    )
+    return ToolResult(ok=True, text=render_operational_health_he(report))
 
 
 def _crm_health_query(query: str) -> bool:
@@ -103,6 +135,8 @@ def _read_locked_activity(port: object, ctx: ToolContext) -> list[list[str]] | N
 
 
 def _crm_upsert(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
+    if getattr(ctx.settings, "assaf_os_enabled", False):
+        return ToolResult(ok=False, error="legacy owner CRM writer is disabled")
     if not is_explicit_owner_crm_write_intent(ctx.owner_text):
         return ToolResult(
             ok=False,
@@ -160,6 +194,8 @@ def _propose_crm_upsert(
     overwrite its real source or summary on approval. A new contact's snapshot hashes
     only phone/email, so filling defaults after it leaves the bound target unchanged.
     """
+    if getattr(ctx.settings, "assaf_os_enabled", False):
+        return ToolResult(ok=False, error="legacy owner CRM writer is disabled")
     problem = _sync_current_sheet_edits(ctx, port)
     if problem:
         return ToolResult(ok=False, error=problem)
@@ -192,6 +228,8 @@ def _propose_crm_upsert(
 
 
 def _crm_record_activity(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
+    if getattr(ctx.settings, "assaf_os_enabled", False):
+        return ToolResult(ok=False, error="legacy owner CRM writer is disabled")
     contact_id = str(args.get("contact_id") or "").strip()
     kind = str(args.get("kind") or "activity").strip()
     summary = str(args.get("summary") or "").strip()
@@ -223,6 +261,8 @@ def _crm_record_activity(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
 
 
 def _crm_conflicts(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
+    if getattr(ctx.settings, "assaf_os_enabled", False):
+        return ToolResult(ok=False, error="legacy owner CRM path is disabled")
     port = ctx.sheets or build_sheets_port(ctx.settings)
     if _crm_workspace_missing(ctx, port):
         return ToolResult(ok=False, error="the CRM sheet is not set up")
@@ -230,23 +270,43 @@ def _crm_conflicts(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
     if problem:
         return ToolResult(ok=False, error=problem)
     contact_id = str(args.get("contact_id") or "").strip() or None
-    conflicts = CrmService(ctx.store.session, timezone=ctx.timezone()).list_conflicts(
+    groups = CrmService(ctx.store.session, timezone=ctx.timezone()).list_conflict_groups(
         contact_id=contact_id
     )
-    if not conflicts:
+    if not groups:
         return ToolResult(ok=True, text="No unresolved CRM conflicts.")
+    visible = groups[:_MAX_CONFLICT_GROUPS]
+    omitted = len(groups) - len(visible)
+    header = (
+        f"Unresolved CRM conflict groups (showing {len(visible)} of {len(groups)}; "
+        "repeated observations are grouped):"
+    )
+    if omitted:
+        header += f" {omitted} additional groups omitted."
     return ToolResult(
         ok=True,
-        text="Unresolved CRM conflicts:\n"
+        text=header
+        + "\n"
         + "\n".join(
-            f"- {item.id} contact={item.contact_id} field={item.field_name or '-'} "
-            f"database={item.database_value!r} sheet={item.sheet_value!r}"
-            for item in conflicts
+            f"- {group.representative.id} type={group.representative.issue_type} "
+            f"contact={group.representative.contact_id or '-'} "
+            f"field={group.representative.field_name or '-'} "
+            f"observations={group.observations} "
+            f"database={_bounded_conflict_value(group.representative.database_value)!r} "
+            f"sheet={_bounded_conflict_value(group.representative.sheet_value)!r}"
+            + (
+                " reference=missing-contact (not a field-value resolution)"
+                if group.representative.issue_type == "missing_contact"
+                else ""
+            )
+            for group in visible
         ),
     )
 
 
 def _crm_resolve_conflict(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
+    if getattr(ctx.settings, "assaf_os_enabled", False):
+        return ToolResult(ok=False, error="legacy owner CRM writer is disabled")
     conflict_id = str(args.get("conflict_id") or "").strip()
     resolution = str(args.get("resolution") or "").strip().lower()
     value = args.get("value")
@@ -291,6 +351,8 @@ def _crm_resolve_conflict(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
 
 def _sync_current_sheet_edits(ctx: ToolContext, port: object) -> str:
     """Import owner-edited Contacts before every v2 CRM read/proposal snapshot."""
+    if getattr(ctx.settings, "assaf_os_enabled", False):
+        return "legacy owner CRM path is disabled"
     if not all(
         callable(getattr(port, name, None))
         for name in ("ensure_crm_workspace", "read_crm_contacts_chunk")

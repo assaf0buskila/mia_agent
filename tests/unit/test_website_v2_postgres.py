@@ -62,12 +62,15 @@ def pg_sessions():
 
 
 @pytest.mark.parametrize("same_message", [False, True])
+@pytest.mark.parametrize("fast_path", [False, True])
 def test_concurrent_messages_preserve_history_and_deduplicate(
     pg_sessions,
     monkeypatch,
     same_message,
+    fast_path,
 ):
     calls = []
+    provider_calls = []
     calls_lock = Lock()
 
     class Provider:
@@ -75,6 +78,8 @@ def test_concurrent_messages_preserve_history_and_deduplicate(
             return True
 
         def complete(self, **kwargs):
+            with calls_lock:
+                provider_calls.append(kwargs)
             validation = _fixture_validation(kwargs)
             if validation is not None:
                 return validation
@@ -100,7 +105,12 @@ def test_concurrent_messages_preserve_history_and_deduplicate(
 
     def request(index):
         message_id = "same" if same_message else f"turn-{index}"
-        body = "hello" if same_message else f"hello-{index}"
+        if fast_path:
+            body = "hello"
+        elif same_message:
+            body = "I need a website for my company"
+        else:
+            body = f"I need a website for company {index}"
         with pg_sessions() as db:
             barrier.wait(timeout=10)
             _, replay = begin_site_message(
@@ -126,7 +136,17 @@ def test_concurrent_messages_preserve_history_and_deduplicate(
     with ThreadPoolExecutor(max_workers=2) as pool:
         results = list(pool.map(request, (1, 2)))
     expected_turns = 1 if same_message else 2
-    assert len(calls) == expected_turns
+    expected_bodies = (
+        {"hello"}
+        if fast_path
+        else (
+            {"I need a website for my company"}
+            if same_message
+            else {"I need a website for company 1", "I need a website for company 2"}
+        )
+    )
+    assert len(calls) == (0 if fast_path else expected_turns)
+    assert len(provider_calls) == (0 if fast_path else expected_turns * 2)
     assert sorted(results) == (["completed", "replay"] if same_message else ["completed"] * 2)
     with pg_sessions() as db:
         row = db.get(SiteV2SessionRow, "site-pg")
@@ -136,9 +156,16 @@ def test_concurrent_messages_preserve_history_and_deduplicate(
         completed = db.scalars(select(SiteV2MessageRow)).all()
         assert len(completed) == expected_turns
         assert all(turn.status == "completed" for turn in completed)
-    if not same_message:
+        stored_visitor_texts = {turn["text"] for turn in turns if turn["role"] == "visitor"}
+        assert stored_visitor_texts == expected_bodies
+        stored_replies = {json.loads(turn.response_json)["message"] for turn in completed}
+        if fast_path:
+            assert stored_replies == {"Hi, I'm Mia, Assaf's AI assistant. How can I help?"}
+        else:
+            assert stored_replies == {"Test reply"}
+    if not fast_path and not same_message:
         visitor_texts = {message["content"] for message in calls[-1] if message["role"] == "user"}
-        assert {"hello-1", "hello-2"} <= visitor_texts
+        assert expected_bodies <= visitor_texts
 
 
 @pytest.mark.asyncio

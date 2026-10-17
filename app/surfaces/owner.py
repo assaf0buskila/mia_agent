@@ -35,6 +35,7 @@ from app.domain.owner.callbacks import approval_token
 from app.domain.owner.proposal_cards import pending_approval_cards, render_owner_approval_card
 from app.domain.owner.request_routing import (
     capability_request_kind,
+    is_crm_operational_health_request,
     is_pending_approvals_request,
     owner_capability_reply,
     owner_tool_inventory_reply,
@@ -108,6 +109,18 @@ async def run_owner_loop(
     stamp_correlation(incoming, correlation_id)
     store.save_canonical_event(provider=provider, event=incoming)
     reply = ""
+    if provider == "telegram" and channel is Channel.TELEGRAM:
+        from app.tools.owner.reminders import handle_reminder_message
+
+        reply = (
+            handle_reminder_message(
+                item=item,
+                principal=Principal.owner(source="telegram", actor_id=item["from"]),
+                store=store,
+                settings=settings,
+            )
+            or ""
+        )
     task_type = OwnerTaskType.NOTE
     crm_wrote = False
     turn_approval_ids: list[str] = []
@@ -135,6 +148,26 @@ async def run_owner_loop(
         reply = owner_tool_inventory_reply()
     elif capability_kind == "capabilities":
         reply = owner_capability_reply()
+    elif is_crm_operational_health_request(owner_text):
+        # Both the entry allowlist and the configured numeric identity must agree.
+        # This command never imports Sheet edits, calls a model or sends an alert.
+        if _is_authorized_owner(
+            actor_id=item["from"], owner_ids=settings.telegram_owner_user_id_set()
+        ):
+            from app.services.crm_diagnostics import (
+                build_crm_diagnostics,
+                render_operational_health_he,
+            )
+            from app.services.phone_identity import normalize_new_input_phone
+
+            report = build_crm_diagnostics(
+                store.session,
+                phone_normalizer=normalize_new_input_phone,
+                recipient_ids=settings.telegram_owner_user_id_set(),
+            )
+            reply = render_operational_health_he(report)
+        else:
+            reply = "הכלי זמין רק לבעלים מאומתים."
     elif not reply:
         reply, crm_wrote = await asyncio.to_thread(
             lambda: _talk_with_optional_agent(
@@ -450,6 +483,7 @@ def _talk_with_optional_agent(
             demo_active=demo_mode_active(settings),
             source_ref=item.get("id", ""),
             now=datetime.now(UTC),
+            private_owner_chat=item.get("chat_id", item["from"]) == item["from"],
             deadline_at=deadline_at,
             input_source=item.get("source") or "text",
             usage=usage,

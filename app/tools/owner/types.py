@@ -99,6 +99,7 @@ class ToolContext:
     source_ref: str = ""
     owner_text: str = ""
     now: datetime | None = None
+    private_owner_chat: bool = False
 
     def timezone(self) -> str:
         return self.settings.calendar_timezone

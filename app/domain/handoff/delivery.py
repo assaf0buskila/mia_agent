@@ -5,6 +5,8 @@ question "has this website lead already produced an owner handoff ping?" New hot
 handoffs and WhatsApp clicks share one recipient key; old rows remain evidence.
 """
 
+from uuid import UUID
+
 KIND_HOT_LEAD_LEGACY = "hot_lead"
 KIND_WEBSITE_WHATSAPP_LEGACY = "website_whatsapp_handoff"
 KIND_WEBSITE_HANDOFF_DELIVERY = "website_owner_handoff"
@@ -19,6 +21,7 @@ WEBSITE_HANDOFF_DELIVERY_KINDS = (
 # claim on a lead id. The conversation itself is the scope: two /end calls on one
 # session are one logical handoff, and a returning visitor's new session is a new one.
 WEBSITE_PING_SCOPE_PREFIX = "site"
+FORM_PING_SCOPE_PREFIX = "form"
 
 
 MAX_LEAD_ID_CHARS = 40  # matches OwnerNotificationRecipientClaimRow.lead_id String(40)
@@ -41,3 +44,19 @@ def website_ping_scope(session_id: str) -> tuple[str, str]:
         "column - this used to fail silently as a DataError deep in CRM delivery"
     )
     return lead_id, f"site-ping:{session_id}"
+
+
+def form_ping_scope(conversation_id: str) -> tuple[str, str]:
+    """Bounded delivery receipt scope for one AssafWeb form source UUID.
+
+    Form CRM ownership scopes use ``form:<uuid>``.  Reusing the website helper would
+    prepend ``site:`` to that 41-character string and overflow the receipt ledger's
+    40-character ``lead_id``.  UUID hex keeps all 128 bits while fitting exactly.
+    """
+    prefix = f"{FORM_PING_SCOPE_PREFIX}:"
+    if not conversation_id.startswith(prefix):
+        raise ValueError("not a form conversation scope")
+    source_id = str(UUID(conversation_id.removeprefix(prefix)))
+    lead_id = f"{FORM_PING_SCOPE_PREFIX}:{UUID(source_id).hex}"
+    assert len(lead_id) <= MAX_LEAD_ID_CHARS
+    return lead_id, f"form-ping:{source_id}"

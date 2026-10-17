@@ -168,6 +168,18 @@ async function main() {
   assert.equal(accessible.el('panel').hidden, true, 'Escape closes the panel');
   assert.equal(accessible.el('launcher').focused, true, 'closing returns focus to launcher');
 
+  const rapid = world(); await rapid.open();
+  rapid.el('input').value = 'צריך אתר'; rapid.el('send').click();
+  rapid.el('input').value = 'לחברת מיילים'; rapid.el('send').click();
+  const burstTimers = [...rapid.timers.entries()].filter(([, timer]) => timer.ms === 200);
+  assert.equal(burstTimers.length, 1, 'rapid text uses one 200ms coalescing timer');
+  const [rapidTimerId, rapidTimer] = burstTimers[0];
+  rapid.timers.delete(rapidTimerId); rapidTimer.fn(); await settle();
+  const rapidPosts = rapid.calls.filter(c => c.url.includes('/messages'));
+  assert.equal(rapidPosts.length, 1, 'rapid text is sent as one ordered turn');
+  assert.equal(JSON.parse(rapidPosts[0].options.body).text, 'צריך אתר לחברת מיילים');
+  assert.ok(JSON.parse(rapidPosts[0].options.body).client_message_id, 'coalesced turn has an id');
+
   const w = world(); await w.open(); await w.send('אני צריכה עזרה');
   const form = await w.submit();
   assert.equal(w.calls.filter(c => c.url.includes('/messages')).length, 1, 'empty form never posts');

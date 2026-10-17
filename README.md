@@ -61,40 +61,70 @@ with `uv run mia-migrate`; production never runs `create_all`.
 
 ## Deploy
 
-Production is ECS Fargate — cluster and service `mia`, region `eu-north-1`, images in
-ECR repository `mia`. Secrets come from Secrets Manager. Never copy `.env` anywhere.
+The standalone AssafWeb OS owner integration is local and disabled by default.
+See [the integration contract and release gates](docs/OWNER_OS_LOCAL_INTEGRATION.md)
+and [the authentication threat model](docs/OWNER_OS_AUTH_THREAT_MODEL.md).
+Its PostgreSQL session migration and dedicated roles require separate approval;
+merged backend or mobile code is not evidence that the owner app is deployed.
 
-1. Merge to `master` and wait for **Mia v2 checks** to pass on the exact SHA.
-2. From a clean checkout at that SHA:
-   ```bash
-   git archive $SHA | docker build -f deploy/Dockerfile \
-     --provenance=false --sbom=false --platform linux/amd64 \
-     --build-arg MIA_BUILD_SHA=$SHA -t <ecr>/mia:v2-$SHA -
-   ```
-   The flags matter: `deploy_ecs_revision.py` rejects OCI image indexes, which is what
-   a default Docker 29 build produces.
-3. Push, then read the digest from `aws ecr describe-images`.
-4. `uv run python scripts/deploy_ecs_revision.py --v2-release --image-uri <ecr>/mia@<digest> --sha $SHA`
-   It verifies the image label and env match `$SHA` through the ECR API (no local Docker
-   needed), requires `HEAD == $SHA` with a clean tree, and registers the next `mia:N`.
-5. **Apply migrations BEFORE updating the service.** This step is easy to skip and nothing
-   catches it:
-   ```bash
-   uv run python scripts/run_ecs_migration.py --task-definition mia:N
-   ```
-   It runs `mia-migrate` from the image in **that** task definition, so it only sees the `.sql`
-   files baked into the new image. Run it against the currently-serving revision and it applies
-   nothing and exits 0. Confirm each new file appears under `applied` in the printed summary,
-   not `already` or `skipped`. Re-running is safe (ledger + savepointed duplicate tolerance).
-6. `aws ecs update-service --cluster mia --service mia --task-definition mia:N`, wait stable.
-7. Re-pin scheduler `mia-due-scan` to `mia:N`. Leave `mia-reconcile` disabled. Nothing does
-   this automatically and forgetting it fails silently.
-8. Confirm `https://mia.assafweb.com/health` reports `deployment.commit_sha == $SHA`, every
-   field non-null, and `/health/ready` returns 200. **Do not judge a deploy by `/health/live`** —
-   both the ALB target group and the ECS container check probe it, and it returns 200 without
-   touching the database. If step 5 was skipped, `schema_ready()` fails, `/health` goes all-null,
-   `/health/ready` returns 503 and the scheduled workers die on their first ORM read, while ECS
-   reports a healthy, stable deployment throughout.
+Production runs on the GCP VM `mia` in `me-west1-a`. Settings come from Secret Manager
+`mia-env`; PostgreSQL and runtime database credentials stay on the VM. Never copy `.env`.
+The complete runbook is `ops/gcp/README.md`.
 
-Rollback is `update-service` to the previous revision. Machine-specific gotchas
-(Docker Desktop, the credential helper, `aws login` expiry) are in `HANDOFF.md`.
+1. Merge to `master` and wait for **Mia v2 checks** on the exact SHA.
+2. Pause scheduled jobs and create a verified database backup.
+3. **Owner-session database, before the first image that contains V2-08 (and before any
+   later image if the step has not run yet).** `mia-migrate` does NOT reach `assaf_os_auth`.
+   It migrates only the `mia` database. The live owner session table is in `assaf_os_auth`,
+   so its schema change is a separate step that needs the owner's go. Run it in this order:
+   1. Back up `assaf_os_auth`. `sudo mia backup` dumps only `mia`, so also run this on the VM
+      (bash):
+      ```sh
+      set -o pipefail
+      f=/var/lib/mia/backups/assaf_os_auth-$(date -u +%Y%m%dT%H%M%SZ).dump
+      sudo docker exec mia-postgres-1 pg_dump -U mia -d assaf_os_auth --format=custom \
+        | sudo tee "$f" >/dev/null && sudo chmod 600 "$f" && sudo test -s "$f" \
+        && sudo cat "$f" | sudo docker exec -i mia-postgres-1 pg_restore -l >/dev/null \
+        && echo "backup ok: $f"
+      ```
+      Without a `backup ok:` line there is no usable backup. Stop there.
+   2. Dry run. It changes nothing and must print `"status":"session_chains_dry_run"`:
+      ```powershell
+      python ops/assaf-os/provision_auth.py --migrate-session-chains
+      ```
+   3. Only with the owner's explicit go, apply it. It is one transaction, and running it
+      again changes nothing:
+      ```powershell
+      python ops/assaf-os/provision_auth.py --migrate-session-chains --apply
+      ```
+   4. Require `"status":"session_chains_applied"` with `"role_posture":"pass"`. This means
+      the schema check (7 columns, 2 constraints) and the runtime-role posture check both
+      passed. Any `"status":"failed"` stops the release: do not deploy the image.
+   5. Only then deploy (step 5). The new columns are additive and nullable, so the running
+      image is unaffected. A new image without them fails closed with
+      `503 owner_auth_unavailable`.
+4. For a narrow setting change, preserve the full live secret:
+   ```powershell
+   .\ops\gcp\push-settings.ps1 -ProjectId mia-assafweb -PatchSecret -Set @{ KEY = "value" }
+   ```
+5. From a clean checkout, deploy the exact SHA:
+   ```powershell
+   .\ops\gcp\deploy.ps1 -ProjectId mia-assafweb -Ref $SHA
+   ```
+   The VM builds that commit, fetches settings, runs `mia-migrate` (database `mia` only), and
+   starts the app only after migration succeeds.
+6. Confirm `/health` reports the exact SHA, `/health/ready` returns 200, and `sudo mia status`
+   shows the expected HTTPS and job state before resuming jobs.
+7. Smoke-check owner authentication. `$OS_ORIGIN` is the configured `MIA_OWNER_OS_ORIGIN`:
+   ```powershell
+   curl.exe -s -o NUL -w "%{http_code}\n" -H "Origin: $OS_ORIGIN" https://mia.assafweb.com/v1/owner/auth/session
+   curl.exe -s -D - -o NUL -X POST -H "Origin: $OS_ORIGIN" -H "Cookie: __Host-mia-owner=smoke-check" https://mia.assafweb.com/v1/owner/auth/refresh
+   ```
+   The first sends no cookie and must print `401`. The second sends a dummy cookie, so the
+   server has to look it up in `assaf_os_auth`. It must answer `401`, with a `Set-Cookie` that
+   deletes `__Host-mia-owner` (`Max-Age=0`) and no `Server-Timing` header. A `503` means the
+   `assaf_os_auth` step did not run: run step 3, or redeploy the previous SHA. A request
+   without a cookie never reaches the database, so it cannot detect a missing migration.
+
+Historical AWS deploy evidence and gotchas remain in `HANDOFF.md`; they are not the current
+production procedure.

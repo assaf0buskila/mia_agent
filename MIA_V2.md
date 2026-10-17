@@ -1,5 +1,34 @@
 # MIA_V2.md — what Mia is, from the code
 
+## Active shared Assaf OS — 2026-10-12
+
+The new default-off shared adapter exposes schema/snapshot/proposals/receipts for
+one pinned Google Sheet through signed Apps Script calls. MIA can read and propose;
+only the private numeric owner can approve via Telegram or authenticated OS. With
+this binding enabled, legacy owner business/CRM/Sheet writers and side-effecting
+CRM read-sync tools are refused before provider effects. Public website intake
+remains canonical in PostgreSQL. Its existing at-most-once Telegram ping can include
+one server-bound lead preparation card: the owner first chooses the exact CRM path,
+then receives a separate 10-minute immutable approval card. Only that final approval
+can create the shared Sheet row. Contact values come from the captured conversation;
+the model may suggest only a bounded summary, next step, and path recommendation.
+Missing names or malformed numbers require an explicit owner correction, and an
+unknown path never defaults. The final callback revalidates the CRM source, pending
+Apps Script proposal, workbook binding, and absence of a matching Sheet phone/email.
+See `docs/ASSAF_OS_RELEASE_STATUS.md` for deployment
+evidence: current code tests are not live product acceptance.
+
+## Local addition — Owner OS, 2026-10-11
+
+The separately gated `/v1/owner/auth/*` and `/v1/owner/os/*` routers integrate the
+existing standalone mobile UI with server-persisted owner sessions and canonical
+PostgreSQL contacts, activities and internal reminders. `MIA_OWNER_OS_ENABLED`
+and `MIA_OWNER_OS_ACTIONS_ENABLED` default false. There is no OAuth server,
+second CRM or browser-side provider credential. Prepared action adapters reuse
+existing approval/Quick Lead/reminder services. Details and live-evidence limits:
+`docs/OWNER_OS_LOCAL_INTEGRATION.md`. The historical production notes below do
+not describe this local addition.
+
 Updated 2026-09-11. Production (`/health`, 2026-09-14): commit `4b80f31`, `eu-north-1`.
 
 ## Two loops, one app
@@ -20,8 +49,15 @@ with a hashed credential (`X-Mia-Session-Credential` header) and posts messages 
 `app/surfaces/site_v2.py:run_site_v2_turn`. The model sees public knowledge
 (`app/brain`; sources are `llms.txt`, `llms-full.txt`, `pricing.md`) and the session —
 nothing else. Its only tool is `submit_lead`. `next_action` is `answer` or
-`contact_saved`. Every reply passes a narrative validator that fails closed on any claim
-about saving or delivery; there is one rewrite attempt, after which the reply is dropped.
+`contact_saved`. Every model-generated narrative passes a validator that fails closed on any claim
+about saving or delivery; there is one rewrite attempt, then a safe server-owned fallback.
+Pure greetings, acknowledgements and explicit delivery-status-only queries use server-owned
+replies and skip model generation and knowledge retrieval. Mixed business/contact messages
+retain the full path. Invitation, refusal and availability-question flags persist in session
+JSON. The prompt requests short, useful answers and at most one optional question or invitation,
+with a consistent AI identity. Website requests reuse a dedicated HTTP pool; stage metrics
+contain timings and counts only. See `docs/WEBSITE_CONVERSATION_RELEASE.md` for release evidence
+and limits.
 
 ## Contact capture — what turns a chat into a lead
 
@@ -48,10 +84,12 @@ number ("zero five two…", "אפס חמש שתיים…") is normalised to digi
 ## Delivery and CRM
 
 `app/services/crm_v2.py` owns contacts, identities, activity, sync snapshots and outbox
-rows. `app/workers/crm_delivery.py` polls every 5 seconds under DB leases: Sheet import →
-Telegram lead brief → Contacts/Activity sync. Google Sheets is an editable owner view:
-three-way merge per field; a same-field conflict pauses for the owner. The worker logs
-only failures, by design — success is silent, so proof of delivery is the Telegram message.
+rows. `app/workers/crm_delivery.py` polls every 5 seconds under DB leases. In legacy mode
+it runs Sheet import → Telegram lead brief → Contacts/Activity sync. When the shared
+Assaf OS binding is enabled it keeps PostgreSQL intake and Telegram delivery active but
+leaves the old Contacts/Activity jobs and history untouched; it neither imports from nor
+projects to that retired Sheet path. The worker logs only failures, by design — success
+is silent, so proof of delivery is the Telegram message or its durable receipt.
 
 ## Widget
 

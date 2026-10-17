@@ -248,6 +248,7 @@ def answer_owner(
     now: datetime | None = None,
     deadline_at: float | None = None,
     input_source: str = "text",
+    private_owner_chat: bool = False,
     # Kept updated with tokens actually consumed while the loop runs, so a caller
     # that must catch an unexpected exception from this call can still record real
     # provider spend for the turn instead of losing it (see `OwnerUsage`).
@@ -305,6 +306,7 @@ def answer_owner(
         source_ref=source_ref,
         owner_text=(raw_owner_request if raw_owner_request is not None else owner_text),
         now=moment,
+        private_owner_chat=private_owner_chat,
     )
     outcome: AgentOutcome = run_owner_agent(
         client=agent_client,

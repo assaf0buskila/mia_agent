@@ -32,8 +32,20 @@ jobs:
       - run: uv sync --frozen --group dev
       - run: mkdir -p .cache
       - run: uv run python scripts/assert_origin_bind.py
-      - run: uv run ruff check app tests
+      - run: pwsh -NoProfile -File ops/gcp/tests/test-settings.ps1
+      - run: uv run ruff check app tests ops/business-ledger/staging
       - run: node --check app/web/ask_mia.js
+      - run: node tests/unit/widget_behavior.test.js
+      - run: node --test tests/business-ledger/*.test.js
+      - run: node --test tests/assaf-os/*.test.js
+      - run: uv run ruff check ops/assaf-os/provision_auth.py
+      - run: uv run pytest ops/business-ledger/staging/tests --basetemp=.cache/staging-overlay-ci
+      - name: Validate pinned staging HTTPS configuration without network
+        run: >-
+          docker run --rm --network none -e OS_STAGE_HOST=os-stage.example.test
+          -v "${{ github.workspace }}/ops/business-ledger/staging/Caddyfile:/etc/caddy/Caddyfile:ro"
+          caddy:2.11.4-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
+          caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
       - run: uv run pytest --basetemp=.cache/pytest-ci
 
   postgres:
@@ -69,11 +81,191 @@ jobs:
           uv run mia-migrate
           uv run mia-migrate
       - name: PostgreSQL concurrency and migration behavior
-        run: uv run pytest tests/unit/test_crm_v2.py tests/unit/test_v2_migration_postgres.py tests/unit/test_website_v2_postgres.py --basetemp=.cache/pytest-postgres-ci
+        run: >-
+          uv run pytest tests/unit/test_brain_knowledge_postgres.py tests/unit/test_crm_v2.py
+          tests/unit/test_form_intake.py tests/unit/test_phone_identity.py
+          tests/unit/test_crm_diagnostics.py tests/unit/test_crm_diagnostics_cli.py
+          tests/unit/test_v2_migration_postgres.py
+          tests/unit/test_website_v2_postgres.py tests/unit/test_reminders.py
+          tests/unit/test_reminder_worker.py tests/unit/test_reminder_owner.py
+          tests/unit/test_reminder_postgres.py tests/unit/test_reminder_telegram_boundary.py
+          tests/unit/test_telegram_owner_privacy.py tests/unit/test_due_scan_worker.py
+          --basetemp=.cache/pytest-postgres-ci
+
+  quick-leads-postgres:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        # The combined full suite includes reminder/vector fixtures. Keep PostgreSQL 16.
+        image: pgvector/pgvector:0.8.6-pg16-trixie
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: quick_lead_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d quick_lead_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      MIA_QUICK_LEAD_TEST_POSTGRES_URL: postgresql+psycopg://postgres@localhost:5432/quick_lead_test
+      MIA_TEST_POSTGRES_URL: postgresql+psycopg://postgres@localhost:5432/quick_lead_test
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.8.15"
+          python-version: "3.12"
+      - run: uv sync --frozen --group dev
+      - run: mkdir -p .cache
+      - name: Full suite with disposable PostgreSQL 16
+        run: uv run pytest --basetemp=.cache/pytest-quick-leads-ci
+
+  owner-os-postgres:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: owner_os_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d owner_os_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      MIA_OWNER_OS_TEST_POSTGRES_URL: postgresql+psycopg://postgres@localhost:5432/owner_os_test
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.8.15"
+          python-version: "3.12"
+      - run: uv sync --frozen --group dev
+      - run: mkdir -p .cache
+      # The mobile repository is private. Its actual browser/BFF integration runs
+      # in that repository's CI; this job needs no cross-repository credential.
+      - run: >-
+          uv run pytest tests/unit/test_owner_os_postgres.py
+          tests/unit/test_form_intake_owner_os_postgres.py
+          tests/services/test_owner_session_renewal.py tests/api/test_owner_auth_refresh.py
+          tests/unit/test_assaf_os_provision.py
+          -k 'not frozen_frontend_bff' --basetemp=.cache/owner-os-ci
+
+  os-ledger-postgres:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: assaf_os_local_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d assaf_os_local_ci"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      # Loopback host, assaf_os_local_ prefix, no query: required by LocalLedgerPrimary._guard.
+      MIA_OS_LOCAL_PROTOTYPE_URL: postgresql+psycopg://postgres@127.0.0.1:5432/assaf_os_local_ci
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.8.15"
+          python-version: "3.12"
+      - run: uv sync --frozen --group dev
+      - run: mkdir -p .cache
+      # initialize_local_schema refuses a database that lacks this marker. It is set on the
+      # database itself, so every connection the suite opens carries it.
+      - name: Mark the database disposable
+        run: |
+          uv run python - <<'PY'
+          import psycopg
+
+          with psycopg.connect(
+              "host=127.0.0.1 port=5432 user=postgres dbname=assaf_os_local_ci",
+              autocommit=True,
+          ) as conn:
+              conn.execute(
+                  "ALTER DATABASE assaf_os_local_ci SET assaf_os.local_prototype = 'disposable_only'"
+              )
+          PY
+      - name: Prototype ledger suite on PostgreSQL 16
+        run: |
+          rc=0
+          uv run pytest tests/prototypes -rs --basetemp=.cache/os-ledger-ci > .cache/os-ledger.log 2>&1 || rc=$?
+          cat .cache/os-ledger.log
+          exit $rc
+      # Every case in tests/prototypes must run here. A skip means the URL stopped reaching a test.
+      - name: Skip guard
+        if: always()
+        run: |
+          test -s .cache/os-ledger.log || { echo "::error::no pytest log"; exit 1; }
+          if grep -Eq '^SKIPPED|[0-9]+ skipped' .cache/os-ledger.log; then
+            echo "::error::tests/prototypes skipped a case while MIA_OS_LOCAL_PROTOTYPE_URL is set"; exit 1
+          fi
+          grep -Eq '[0-9]+ passed' .cache/os-ledger.log || { echo "::error::no passing summary"; exit 1; }
+
+  os-ledger-migration-postgres:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: mia_ledger_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d mia_ledger_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      MIA_OS_LEDGER_TEST_POSTGRES_URL: postgresql+psycopg://postgres@localhost:5432/mia_ledger_test
+      MIA_OWNER_OS_TEST_POSTGRES_URL: postgresql+psycopg://postgres@localhost:5432/owner_os_test
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.8.15"
+          python-version: "3.12"
+      - run: uv sync --frozen --group dev
+      - run: mkdir -p .cache
+      - name: Prepare isolated Owner OS posture database
+        run: >-
+          uv run python -c "import psycopg;
+          c=psycopg.connect('postgresql://postgres@localhost:5432/mia_ledger_test', autocommit=True);
+          c.execute('CREATE DATABASE owner_os_test'); c.close()"
+      - name: Normal migration isolation and explicit ledger migration contracts
+        run: |
+          rc=0
+          uv run pytest tests/db/test_assaf_os_ledger_migration.py -rs --basetemp=.cache/os-ledger-ci > .cache/os-ledger-ci.log 2>&1 || rc=$?
+          cat .cache/os-ledger-ci.log
+          exit $rc
+      - name: Skip guard
+        if: always()
+        run: |
+          test -s .cache/os-ledger-ci.log || { echo "::error::no pytest log"; exit 1; }
+          if grep -Eq '^SKIPPED|[0-9]+ skipped' .cache/os-ledger-ci.log; then
+            echo "::error::tests/db skipped a case while ledger PostgreSQL URLs are set"; exit 1
+          fi
+          grep -Eq '[0-9]+ passed' .cache/os-ledger-ci.log || { echo "::error::no passing summary"; exit 1; }
 
   container:
     runs-on: ubuntu-latest
-    needs: [checks, postgres]
+    needs: [checks, postgres, quick-leads-postgres, owner-os-postgres, os-ledger-postgres, os-ledger-migration-postgres]
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -81,6 +273,10 @@ jobs:
           persist-credentials: false
       - run: python scripts/assert_origin_bind.py
       - run: docker build -f deploy/Dockerfile --build-arg MIA_BUILD_SHA="${{ github.sha }}" -t mia:ci .
+      - name: Ledger migration image smoke
+        run: >-
+          docker run --rm --entrypoint python mia:ci -c
+          'from app.db.os_ledger_migrate import migration_scripts; migration_scripts()'
       - name: Nonroot startup smoke
         run: |
           docker run --rm -d --name mia-ci -p 127.0.0.1:8000:8000 -e MIA_ENV=test -e MIA_DATABASE_URL=sqlite:///:memory: mia:ci

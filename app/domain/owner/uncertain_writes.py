@@ -159,6 +159,19 @@ def describe_stuck_write(store, *, scope: str, key: str) -> tuple[str, str]:
     """
     parts = key.split(":")
     resource_id = parts[0] if parts else ""
+    if scope == "approval" and key.startswith("leadprep-contact:"):
+        try:
+            context = json.loads(store.get_provider_write_context(scope=scope, key=key))
+        except (TypeError, ValueError):
+            context = {}
+        contact_id = str(context.get("contact_id") or "")[:64]
+        request_id = str(context.get("request_id") or "")[:80]
+        target = ""
+        if contact_id:
+            target = f"CRM {contact_id}"
+        if request_id:
+            target += (" · " if target else "") + f"receipt request {request_id}"
+        return "Assaf OS lead proposal", target
     if scope == "approval" and len(parts) == 2 and parts[1] == "execute":
         resolved = _owner_proposal_target(store, resource_id)
         if resolved is not None:
@@ -228,7 +241,7 @@ def format_uncertain_writes(items: list[UncertainWrite]) -> str:
         return OWNER_UNCERTAIN_WRITES_EMPTY
     lines = [
         "These may or may not have happened. Mia will not retry them automatically "
-        "-- check the provider (Gmail/Calendar/LinkedIn/Composio) before redoing any "
+        "-- check the provider (Assaf OS/Gmail/Calendar/LinkedIn/Composio) before redoing any "
         "of them.",
     ]
     for index, item in enumerate(items, start=1):
