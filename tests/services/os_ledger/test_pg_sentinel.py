@@ -15,7 +15,7 @@ from pathlib import Path
 
 from tests.services.os_ledger.conftest import PG_URL_ENV, core_module_present, pg_enabled
 
-MIN_PG_CASES = 364
+MIN_PG_CASES = 365
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
