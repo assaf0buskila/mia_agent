@@ -428,8 +428,11 @@ def _plan_single(tx: api.LedgerTx, request: _CommitRequest,
             return (api.Mutation(entity, record_id, "tombstone", current,
                                  _bumped(entity, current, _inputs(entity, current))),), False
         inputs = _end_state(entity, current)
-    return (api.Mutation(entity, record_id, "upsert", current,
-                         _bumped(entity, current, inputs)),), False
+    mutation = api.Mutation(entity, record_id, "upsert", current, _bumped(entity, current, inputs))
+    if op == "update" and _is_delete(mutation):
+        # An update that lands in the FORK-DELETE end state is a delete (review r1).
+        _refuse_dependents(tx, entity, record_id)
+    return (mutation,), False
 
 
 def _plan_bulk(tx: api.LedgerTx,
@@ -574,7 +577,11 @@ def _undo_tx(tx: api.LedgerTx, ctx: api.TrustedOwnerContext, original_id: str, u
                           for m in proposal.mutations)
     # 6. a record the undo deletes (a created record, or one moved back into its cancellation
     # status) must have no live referrer outside this undo
-    deleting = {(m.entity, m.record_id) for m in compensations if _is_delete(m)}
+    # The undo of a create is that entity's delete even when the record was created already in
+    # its end state (review r1), so every compensation of a create counts.
+    deleting = {(c.entity, c.record_id)
+                for original, c in zip(proposal.mutations, compensations, strict=True)
+                if _is_delete(c) or original.before is None}
     blocking = [(ref.entity, ref.record_id)
                 for entity, record_id in sorted(deleting)
                 for ref in tx.dependents(entity, record_id)

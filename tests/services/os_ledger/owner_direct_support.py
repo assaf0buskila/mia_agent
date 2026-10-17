@@ -1,8 +1,9 @@
 """V2-24 test support: the ledger case per backend, a settings view over its knobs, and bodies.
 
 The owner-direct service tests run against ``LedgerEnv`` only (the same seam as the conformance
-suite), so one test proves the fake and, once V2-16's ``core.py`` lands, PostgreSQL. The pg case
-SKIPS with a reason until then; it is never stubbed.
+suite), so one test proves the fake and, once V2-16's ``core.py`` lands, PostgreSQL. The pg case is
+generated exactly when the conftest's ``LEDGER_CASES`` holds it (core present and the URL set),
+so it is never skipped (§3.4) and never stubbed.
 """
 
 from __future__ import annotations
@@ -10,38 +11,31 @@ from __future__ import annotations
 import os
 from typing import Any
 
-import pytest
 from app.prototypes.assaf_os_domain import ENUMS
 from app.services.os_ledger import api
 
 from tests.fakes.os_ledger_builders import ctx, rid
 from tests.fakes.os_ledger_env import OWNER_ID, LedgerEnv, build_fake_env
 from tests.services.os_ledger.conftest import (
+    LEDGER_CASES,
     PG_URL_ENV,
     _prepare,
     build_pg_env,
-    core_module_present,
 )
 
-BACKENDS = ("fake", "pg")
+# The conftest's conditional case list: "pg" only when V2-16's core and the URL are both present.
+BACKENDS = tuple(LEDGER_CASES)
 TASK_OPEN, TASK_DOING, TASK_WAITING, TASK_DONE, TASK_CANCELLED = ENUMS["task_status"]
 ENTITY_TABLES = tuple("os_" + entity for entity in api.ENTITIES)
 LEDGER_TABLES = ("os_proposals", "os_receipts", "os_events", "os_outbox")
 
 
 def ledger_case(case: str) -> LedgerEnv:
-    """A prepared workspace (epoch 1, core active) on ``case``; pg skips until V2-16 lands."""
+    """A prepared workspace (epoch 1, core active) on ``case``, a member of ``BACKENDS``."""
     if case == "fake":
         return _prepare(build_fake_env())
-    if case != "pg":
-        raise AssertionError("unknown ledger case")
-    if not core_module_present():
-        pytest.skip("pg variant: app.services.os_ledger.core (V2-16, PR #175) is not on this "
-                    "base; it runs unchanged once the PG core lands")
-    url = os.environ.get(PG_URL_ENV)
-    if not url:
-        pytest.skip(f"pg variant: {PG_URL_ENV} is not set")
-    return _prepare(build_pg_env(url))
+    assert case == "pg" and case in BACKENDS, case
+    return _prepare(build_pg_env(os.environ[PG_URL_ENV]))
 
 
 class KnobSettings:

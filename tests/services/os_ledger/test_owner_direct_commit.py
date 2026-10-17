@@ -555,3 +555,15 @@ def test_bulk_fused_columns_name_the_first_item(env):
     assert proposal["dependency_digest"] == api.digest([
         {"entity": "tasks", "record_id": "TAS_b2", "revision": 1},
         {"entity": "tasks", "record_id": "TAS_b1", "revision": 1}])
+
+
+def test_an_update_into_the_cancellation_status_with_live_dependents_is_has_dependents(env):
+    # Review r1: an update that lands a record in its FORK-DELETE end state is a delete, so it
+    # meets the same dependents check (a cancelled client may not keep a live work).
+    commit_direct(env, owner_ctx(), [client(), work()])
+    snapshot = state(env)
+    error = refused("has_dependents", commit, env,
+                    single("update", entity="clients", record_id="PER_c1", revision=1,
+                           patch={"status": CLIENT_INACTIVE}))
+    assert error.details == {"dependents": [{"entity": "works", "record_id": "WOR_w1"}]}
+    assert state(env) == snapshot

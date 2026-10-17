@@ -515,3 +515,17 @@ def test_logs_carry_the_op_the_outcome_and_ms_only(env, caplog):
     ]
     assert all(LOG_LINE.fullmatch(line) for line in lines)
     assert secret not in caplog.text
+
+
+def test_undo_of_a_create_already_in_its_end_state_still_meets_dependents(env):
+    # Review r1 (§11.1 step 6): undoing a create is that entity's delete, even when the record
+    # was created already in its cancellation status; a live referrer still blocks it.
+    created = commit(env, single("create", entity="clients",
+                                 patch={"name": "C", "status": "לא פעיל"}))
+    person = created["records"][0]["record"]["person_id"]
+    commit_direct(env, owner_ctx(), [work("WOR_w9", person_id=person)])
+    snapshot = state(env)
+    error = refused("undo_conflict", undo, env, created["request_id"])
+    assert error.details == {"reason": "dependent_exists",
+                             "changed": [{"entity": "works", "record_id": "WOR_w9"}]}
+    assert state(env) == snapshot
