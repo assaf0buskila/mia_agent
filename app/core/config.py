@@ -161,6 +161,10 @@ class Settings(BaseSettings):
     )
 
     database_url: str = Field(default="sqlite:///:memory:")
+    # V2-14a. A plain str on purpose: no Literal and no validator, so a bad value can never fail
+    # the settings load. app.db.app_role_posture treats anything but exactly "enforce" as
+    # "observe" at use and logs the coercion once.
+    app_role_posture: str = "observe"
     composio_api_key: str = Field(default="")
     composio_user_id: str = Field(default="")
     # Ask Composio for resource ids (GSC site, GA4 property) when the matching env var is
