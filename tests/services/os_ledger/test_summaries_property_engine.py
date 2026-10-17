@@ -506,7 +506,8 @@ class Generator:
     def next(self, step: int, model, history) -> tuple:
         r = self.rng.random()
         late = step > self.steps * 0.7
-        if self.huge and late and r < 0.04:
+        forced = step in {int(self.steps * 0.75), int(self.steps * 0.85)}  # never vacuous
+        if self.huge and late and (r < 0.04 or forced):
             amount = self.rng.choice((MAX_SAFE // 60 + self.rng.randint(0, 9),
                                       MAX_SAFE - self.rng.randint(0, 9)))
             return ("commit", self.payment(model, amount=amount) or [])

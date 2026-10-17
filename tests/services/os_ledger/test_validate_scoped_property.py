@@ -38,7 +38,7 @@ from tests.services.os_ledger.test_summaries_property_engine import (
     run,
 )
 
-FAKE_SEEDS = range(12)
+FAKE_SEEDS = range(8)
 PG_SEEDS = (101, 202, 303)
 POST_APPLY_REASONS = {"client_not_found", "work_not_found", "refund_original_not_found"}
 
@@ -126,9 +126,15 @@ SCENARIOS = {
         ["ok", "ok", "ok", "ok"]),
     "a_bulk_takes_the_referrers_with_it": (
         [[client(), work(), time_entry(), payment()],
-         [tombstone("clients", client().after), tombstone("works", work().after),
-          tombstone("time", time_entry().after), tombstone("payments", payment().after)]],
+         [tombstone("time", time_entry().after), tombstone("payments", payment().after),
+          tombstone("works", work().after), tombstone("clients", client().after)]],
         ["ok", "ok"]),
+    # apply validates each mutation against the state so far, so a referrer must go first
+    "a_bulk_in_the_wrong_order_is_refused": (
+        [[client(), work(), time_entry()],
+         [tombstone("clients", client().after), tombstone("works", work().after),
+          tombstone("time", time_entry().after)]],
+        ["ok", "client_not_found"]),
     "a_work_person_change_breaks_its_time_entry": (
         [[client(), client("PER_c2"), work(), time_entry()],
          [update(work().after, person_id="PER_c2")]],

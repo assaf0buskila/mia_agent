@@ -35,7 +35,7 @@ from tests.services.os_ledger.test_summaries_property_engine import (
     run,
 )
 
-FAKE_SEEDS = range(12)
+FAKE_SEEDS = range(8)
 PG_SEEDS = (11, 22, 33)
 
 

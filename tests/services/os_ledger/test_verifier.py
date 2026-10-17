@@ -103,9 +103,9 @@ def test_a_missing_month_row_or_header_is_summary_drift(pg):
 
 
 def test_the_header_must_name_complete_coverage_and_a_reached_version(pg):
-    admin("UPDATE assaf_os.os_workspaces SET summaries = "
-          "'{\"coverage\":\"complete\",\"calculated_version\":99}' WHERE workspace_id = :ws",
-          {"ws": WORKSPACE})
+    admin("UPDATE assaf_os.os_workspaces SET summaries = CAST(:header AS jsonb) "
+          "WHERE workspace_id = :ws",
+          {"ws": WORKSPACE, "header": '{"coverage":"complete","calculated_version":99}'})
     assert verifier.verify(settings_of(pg)).reasons == ("summary_drift",)
 
 
@@ -129,14 +129,20 @@ def test_the_verifier_reads_one_read_only_snapshot_and_writes_nothing(pg, monkey
     seen = []
     original = verifier.verify_snapshot
 
-    def probe(conn, workspace_id):
-        report = original(conn, workspace_id)
-        row = conn.execute(text(
+    def counters(conn):
+        return conn.execute(text(
             "SELECT current_setting('transaction_isolation') AS iso, "
             "current_setting('transaction_read_only') AS ro, current_user AS who, "
             "COALESCE(sum(n_tup_ins + n_tup_upd + n_tup_del), 0) AS writes "
             "FROM pg_stat_xact_user_tables")).one()
-        seen.append((row.iso, row.ro, row.who, int(row.writes)))
+
+    def probe(conn, workspace_id):
+        # pg_stat_xact_* also holds this backend's not-yet-flushed counts of earlier
+        # transactions (PG 15+), so the probe measures the delta across the snapshot's checks.
+        start = counters(conn)
+        report = original(conn, workspace_id)
+        end = counters(conn)
+        seen.append((end.iso, end.ro, end.who, int(end.writes) - int(start.writes)))
         return report
 
     monkeypatch.setattr(verifier, "verify_snapshot", probe)

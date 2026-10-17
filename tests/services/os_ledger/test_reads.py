@@ -128,16 +128,23 @@ def watched_reads(monkeypatch, ledger):
     seen = []
     original = ledger._read
 
+    def counters(tx):
+        return tx._exec(
+            "SELECT current_setting('transaction_isolation') AS iso, "
+            "current_setting('transaction_read_only') AS ro, "
+            "COALESCE(sum(n_tup_ins + n_tup_upd + n_tup_del), 0) AS writes, "
+            "count(*) AS tables FROM pg_stat_xact_user_tables").one()
+
     @contextmanager
     def probe(context):
+        # pg_stat_xact_* also holds this backend's not-yet-flushed counts of earlier
+        # transactions (PG 15+); nothing flushes inside a transaction, so the delta across the
+        # reader's body is exactly what the read itself wrote.
         with original(context) as tx:
+            start = counters(tx)
             yield tx
-            row = tx._exec(
-                "SELECT current_setting('transaction_isolation') AS iso, "
-                "current_setting('transaction_read_only') AS ro, "
-                "COALESCE(sum(n_tup_ins + n_tup_upd + n_tup_del), 0) AS writes, "
-                "count(*) AS tables FROM pg_stat_xact_user_tables").one()
-            seen.append((row.iso, row.ro, int(row.writes), int(row.tables)))
+            end = counters(tx)
+            seen.append((end.iso, end.ro, int(end.writes) - int(start.writes), int(end.tables)))
 
     monkeypatch.setattr(ledger, "_read", probe)
     yield seen
@@ -164,14 +171,19 @@ def test_pg_every_reader_writes_nothing_in_its_own_snapshot(pg, monkeypatch):
 def test_pg_the_write_probe_sees_writes_in_its_transaction(pg):
     """The control: the same counters move inside a transaction that does write."""
     seed(pg)
-    with create_engine(os.environ[PG_URL_ENV]).connect() as conn:
-        conn.execute(text("UPDATE assaf_os.os_workspaces SET updated_at = updated_at "
-                          "WHERE workspace_id = :ws"), {"ws": WORKSPACE})
-        writes = conn.execute(text(
-            "SELECT COALESCE(sum(n_tup_ins + n_tup_upd + n_tup_del), 0) "
-            "FROM pg_stat_xact_user_tables")).scalar()
-        conn.rollback()
-    assert int(writes) >= 1
+    probe = text("SELECT COALESCE(sum(n_tup_ins + n_tup_upd + n_tup_del), 0) "
+                 "FROM pg_stat_xact_user_tables")
+    engine = create_engine(os.environ[PG_URL_ENV])
+    try:
+        with engine.connect() as conn:
+            start = int(conn.execute(probe).scalar())
+            conn.execute(text("UPDATE assaf_os.os_workspaces SET updated_at = updated_at "
+                              "WHERE workspace_id = :ws"), {"ws": WORKSPACE})
+            end = int(conn.execute(probe).scalar())
+            conn.rollback()
+    finally:
+        engine.dispose()
+    assert end - start == 1
 
 
 # --- PG: keyset pages over every sort key --------------------------------------------------
@@ -251,7 +263,8 @@ def tokens(env):
 
 
 @pytest.mark.parametrize("mutate", [
-    lambda t: t[:-1] + ("A" if t[-1] != "A" else "B"),
+    lambda t: t[:-3] + ("A" if t[-3] != "A" else "B") + t[-2:],  # the tag; the last
+    # character of unpadded base64 also carries unused bits, so it is not a reliable flip
     lambda t: t[:20] + ("A" if t[20] != "A" else "B") + t[21:],
     lambda t: t[:-4],
     lambda t: t + "AAAA",
