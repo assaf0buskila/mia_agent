@@ -472,6 +472,13 @@ class FakeLedger:
         with self._read(ctx) as tx:
             return tuple(copy.deepcopy(tx.data["monthly_wire"]))
 
+    def proposal(self, ctx, proposal_id):
+        """§22 E14(1): one stored proposal, read-only, any status or kind; None when absent or of
+        another epoch (the I12 filter of ``pending``)."""
+        with self._read(ctx) as tx:
+            row = tx.proposal(proposal_id) if isinstance(proposal_id, str) else None
+            return row if row is not None and row.epoch == ctx.authority_epoch else None
+
     # ---- LedgerCore ---------------------------------------------------------------------------
 
     def propose(self, ctx, req):

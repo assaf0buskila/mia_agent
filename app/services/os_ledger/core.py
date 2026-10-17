@@ -634,5 +634,7 @@ def build_ledger(settings: Any, *, clock: Callable[[], datetime] | None = None,
     if not main:
         raise refuse("main_dsn_missing")
     guard = guard_for(dsn, main)
-    return PgLedger(settings, guard=guard, engine=engine_for(dsn), clock=clock, uuid4=uuid4,
-                    validator=validator, summaries=summaries)
+    from app.services.os_ledger.reads import ReadModelLedger  # V2-18 handoff; reads imports core
+
+    return ReadModelLedger(settings, guard=guard, engine=engine_for(dsn), clock=clock,
+                           uuid4=uuid4, validator=validator, summaries=summaries)
