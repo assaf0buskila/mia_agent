@@ -154,6 +154,8 @@ jobs:
       - run: >-
           uv run pytest tests/unit/test_owner_os_postgres.py
           tests/unit/test_form_intake_owner_os_postgres.py
+          tests/services/test_owner_session_renewal.py tests/api/test_owner_auth_refresh.py
+          tests/unit/test_assaf_os_provision.py
           -k 'not frozen_frontend_bff' --basetemp=.cache/owner-os-ci
 
   os-ledger-postgres:

@@ -3,10 +3,17 @@ import os
 import re
 from collections.abc import Callable
 from enum import StrEnum
-from typing import Any, Literal
+from typing import Any, Literal, Self
 from urllib.parse import urlparse
 
-from pydantic import Field, TypeAdapter, ValidationError, ValidationInfo, field_validator
+from pydantic import (
+    Field,
+    TypeAdapter,
+    ValidationError,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.core.models import model_chain
@@ -154,6 +161,10 @@ class Settings(BaseSettings):
     )
 
     database_url: str = Field(default="sqlite:///:memory:")
+    # V2-14a. A plain str on purpose: no Literal and no validator, so a bad value can never fail
+    # the settings load. app.db.app_role_posture treats anything but exactly "enforce" as
+    # "observe" at use and logs the coercion once.
+    app_role_posture: str = "observe"
     composio_api_key: str = Field(default="")
     composio_user_id: str = Field(default="")
     # Ask Composio for resource ids (GSC site, GA4 property) when the matching env var is
@@ -214,7 +225,12 @@ class Settings(BaseSettings):
     owner_os_action_database_url: str = ""
     owner_os_ledger_database_url: str = Field(default="", repr=False)
     owner_os_cursor_secret: str = ""
+    # Declared only so the existing mia-env still validates. Nothing reads it since V2-08.
     owner_os_session_ttl_seconds: int = Field(default=1800, gt=0, le=1800)
+    # V2-08 sliding sessions: a renewal slides the idle window, never past the absolute cap
+    # measured from the chain's first login.
+    owner_os_session_idle_seconds: int = Field(default=43_200, ge=300, le=43_200)
+    owner_os_session_absolute_seconds: int = Field(default=1_209_600, ge=3_600, le=1_209_600)
     owner_os_session_scopes: str = (
         "owner-os:read:contacts,owner-os:read:activities,owner-os:read:reminders"
     )
@@ -290,6 +306,12 @@ class Settings(BaseSettings):
     @classmethod
     def _coerce_os_config(cls, value: Any, info: ValidationInfo) -> Any:
         return _os_config_value(info.field_name, value)
+
+    @model_validator(mode="after")
+    def _owner_os_session_windows(self) -> Self:
+        if self.owner_os_session_absolute_seconds < self.owner_os_session_idle_seconds:
+            raise ValueError("owner_os_session_absolute_seconds must be at least the idle window")
+        return self
 
     def cors_origin_list(self) -> list[str]:
         return [item.strip() for item in self.cors_origins.split(",") if item.strip()]
