@@ -48,11 +48,13 @@ jobs:
           caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
       - run: uv run pytest --basetemp=.cache/pytest-ci
       # The suite above fails when the export differs from the committed golden tree (section
-      # 10.4), so this uploads exactly what the export produces. The frontend vendors it by hash.
+      # 10.4), so this uploads exactly what the export produces. The frontend vendors it by hash
+      # and records the backend SHA, so on a pull request the name carries the head SHA, not the
+      # merge commit that github.sha is there.
       - name: Upload the contract golden fixtures
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: os-contract-golden-${{ github.sha }}
+          name: os-contract-golden-${{ github.event.pull_request.head.sha || github.sha }}
           path: tests/contract/golden
           if-no-files-found: error
           retention-days: 30

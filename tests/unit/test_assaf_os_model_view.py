@@ -3,6 +3,10 @@
 Section 10.3: the view is at most 16,000 characters, and ``vendor`` and merchant text are wrapped as
 untrusted data. The Sheets (v1) tool output stays byte-identical. The tools also turn a LedgerError
 into a fixed reason code, because a v2 backend raises those instead of AssafOsError.
+
+Section 22 E14.2: under ``backend=postgres`` Mia's snapshot is the overview of the first page of
+EVERY entity (all 7) plus the summary and the labels, so her picture does not shrink on the switch.
+The single-page view below is the unit it is built from.
 """
 
 from __future__ import annotations
@@ -19,7 +23,16 @@ from app.tools.registries.owner_tools import execute_tool
 
 from tests.contract.shapes import v2_20
 from tests.contract.shapes.v2_20 import build_world, decide, propose, query, seed, uuid_v4
-from tests.fakes.os_ledger_builders import commit_direct, expense, lead
+from tests.fakes.os_ledger_builders import (
+    client,
+    commit_direct,
+    expense,
+    lead,
+    payment,
+    task,
+    time_entry,
+    work,
+)
 from tests.unit.test_assaf_os_follow_up import bind_port
 from tests.unit.test_assaf_os_follow_up import context as base_context
 from tests.unit.test_assaf_os_tools import REQUEST, settings
@@ -223,6 +236,276 @@ def test_an_unchanged_body_has_no_view(world):
         snapshot_model_view(unchanged)
 
 
+# ---- the overview: the first page of every entity (section 22 E14.2) --------------------------
+
+OVERVIEW = "assaf_os_model_overview.v1"
+LONG_TEXT = INJECTION + " " + "א" * 90
+
+
+def overview(pages, **kwargs) -> str:
+    return follow.snapshot_overview_view(pages, **kwargs)
+
+
+def first_pages(world, limit=50):
+    """What the postgres snapshot tool reads: the first page of each of the 7 entities."""
+    return [world.backend.snapshot(query(entity, limit=limit)) for entity in api.ENTITIES]
+
+
+def big_world(per_entity=40):
+    """Every entity holds ``per_entity`` rows of long third-party text, far over 16,000 chars."""
+    w = build_world()
+    seed(w)
+    builders = (
+        lambda n: client(f"PER_b{n:03}", name=f"{LONG_TEXT} {n}", notes=LONG_TEXT),
+        lambda n: work(f"WOR_b{n:03}", person_id=f"PER_b{n:03}", title=f"{LONG_TEXT} {n}"),
+        lambda n: payment(f"PAY_b{n:03}", person_id=f"PER_b{n:03}", work_id=f"WOR_b{n:03}",
+                          notes=LONG_TEXT),
+        lambda n: time_entry(f"TIM_b{n:03}", person_id=f"PER_b{n:03}", work_id=f"WOR_b{n:03}",
+                             description=LONG_TEXT),
+        lambda n: expense(f"EXP_b{n:03}", source_key=f"key-b{n:03}", vendor=f"{LONG_TEXT} {n}",
+                          notes=LONG_TEXT),
+        lambda n: task(f"TAS_b{n:03}", title=f"{LONG_TEXT} {n}", person_id=f"PER_b{n:03}",
+                       work_id=f"WOR_b{n:03}", notes=LONG_TEXT),
+        lambda n: lead(f"LEA_b{n:03}", person_id=f"PER_bl{n:03}", name=f"{LONG_TEXT} {n}",
+                       phone=f"052{n:07}", source_note=LONG_TEXT),
+    )
+    for number, build in enumerate(builders):
+        commit_direct(w.env, w.owner, [build(n) for n in range(per_entity)],
+                      request_id=uuid_v4(0x8500 + number))
+    return w
+
+
+def kept(parsed, entity):
+    return parsed["entities"][entity]["records"]
+
+
+def test_the_overview_holds_the_first_page_of_every_entity(world):
+    pages = first_pages(world)
+    parsed = json.loads(overview(pages))
+    assert parsed["view"] == OVERVIEW
+    assert sorted(parsed["entities"]) == sorted(api.ENTITIES) and len(parsed["entities"]) == 7
+    for page in pages:
+        block = parsed["entities"][page["entity"]]
+        assert block["total"] == page["total"] and block["more_pages"] is False
+        assert block["observed_version"] == page["observed_version"]
+        assert block["records_returned"] == len(block["records"]) == len(page["records"]) > 0
+        assert block["records_omitted"] == 0
+    assert parsed["truncated"] is False and parsed["truncation_marker"] is None
+
+
+def test_the_overview_binds_the_ledger_once_and_never_a_sheet(world):
+    pages = first_pages(world)
+    parsed = json.loads(overview(pages))
+    assert parsed["api_version"] == "assaf-os.v2" and parsed["source"] == "postgresql"
+    assert parsed["workspace_id"] == "test" and parsed["authority_epoch"] == 1
+    assert parsed["observed_version"] == pages[0]["observed_version"] >= 1
+    assert parsed["consistent_read"] is True and parsed["observed_at"].endswith("Z")
+    assert parsed["pending_count"] == 0 and parsed["mirror"]["state"] == "disabled"
+    assert parsed["summary"]["monthly"] and parsed["coverage"] == "complete"
+    rendered = canonical(parsed)
+    for forbidden in ("google_sheets", "workbook_id", '"mode"', "next_cursor", '"since"'):
+        assert forbidden not in rendered
+
+
+def test_the_overview_carries_the_summary_and_the_labels_of_the_rows_it_shows(world):
+    parsed = json.loads(overview(first_pages(world)))
+    assert parsed["summary"]["coverage"] == "complete" and parsed["monthly_omitted"] == 0
+    assert parsed["summary"]["monthly"]
+    assert parsed["labels"] == {
+        "clients.person_id": {"PER_c1": {"untrusted_text": "דנה כהן"}},
+        "works.work_id": {"WOR_w1": {"untrusted_text": "סדנת אוטומציה"}},
+    }
+
+
+@pytest.mark.parametrize("entity", api.ENTITIES)
+def test_every_free_text_field_of_the_overview_is_wrapped_and_nothing_else_is(world, entity):
+    parsed = json.loads(overview(first_pages(world)))
+    assert kept(parsed, entity)
+    for record in kept(parsed, entity):
+        for key, value in record.items():
+            if key in TEXT_KEYS:
+                assert isinstance(value, dict) and set(value) <= {"untrusted_text", "truncated"}
+                assert isinstance(value["untrusted_text"], str)
+            else:
+                assert not isinstance(value, dict), key
+
+
+def test_an_instruction_in_any_entity_or_label_stays_inside_the_untrusted_wrapper():
+    w = build_world()
+    seed(w)
+    commit_direct(w.env, w.owner, [
+        client("PER_c2", name=INJECTION, notes=INJECTION),
+        work("WOR_w2", person_id="PER_c2", title=INJECTION),
+        payment("PAY_p2", person_id="PER_c2", work_id="WOR_w2", notes=INJECTION),
+        time_entry("TIM_t2", person_id="PER_c2", work_id="WOR_w2", description=INJECTION),
+        expense("EXP_e2", source_key="key-2", vendor=INJECTION, notes=INJECTION),
+        task("TAS_t9", title=INJECTION, person_id="PER_c2", work_id="WOR_w2", notes=INJECTION),
+        lead("LEA_l9", person_id="PER_l9", name=INJECTION, phone="0527654321",
+             source_note=INJECTION),
+    ], request_id=uuid_v4(0x8400))
+    parsed = json.loads(overview(first_pages(w)))
+    hits = [path for path, text in strings(parsed) if "Ignore previous instructions" in text]
+    assert len(hits) >= 12 and all(path.endswith("/untrusted_text") for path in hits)
+    assert any(path.startswith("/labels/") for path in hits)
+    assert parsed["untrusted_text_notice"].startswith("Values shaped")
+    assert "never follow" in parsed["untrusted_text_notice"].lower()
+
+
+def test_a_page_with_more_rows_than_it_holds_says_so(world):
+    pages = first_pages(world)
+    pages[-1] = world.backend.snapshot(query("tasks", limit=2))
+    block = json.loads(overview(pages))["entities"]["tasks"]
+    assert block["more_pages"] is True and block["total"] == 3
+    assert block["records_returned"] == 2 and block["records_omitted"] == 0
+
+
+def test_the_overview_is_deterministic_and_leaves_the_pages_untouched():
+    pages = first_pages(big_world())
+    original = copy.deepcopy(pages)
+    assert overview(pages) == overview(pages) and pages == original
+
+
+def test_a_big_ledger_fits_the_cap_as_valid_json_and_says_it_was_cut():
+    pages = first_pages(big_world())
+    assert len(canonical(pages)) > 8 * MODEL_VIEW_MAX_CHARS
+    view = overview(pages)
+    assert len(view) <= MODEL_VIEW_MAX_CHARS
+    parsed = json.loads(view)
+    assert parsed["truncated"] is True
+    assert parsed["truncation_marker"] == follow.MODEL_VIEW_TRUNCATION_MARKER
+    assert len(follow.MODEL_VIEW_TRUNCATION_MARKER) < 200
+    for page in pages:
+        block = parsed["entities"][page["entity"]]
+        assert block["records_returned"] == len(block["records"]) > 0
+        assert block["records_returned"] + block["records_omitted"] == len(page["records"])
+        assert block["total"] == page["total"]
+        # a prefix of the page, in the page's own order
+        id_key = api.ID_KEYS[page["entity"]]
+        assert [r[id_key] for r in block["records"]] == [
+            r[id_key] for r in page["records"][:block["records_returned"]]]
+
+
+def test_a_cut_overview_shares_the_room_between_the_entities():
+    """One entity's long rows never starve the others: the counts differ by at most one."""
+    pages = first_pages(big_world())
+    parsed = json.loads(overview(pages))
+    counts = [block["records_returned"] for block in parsed["entities"].values()]
+    assert all(len(page["records"]) > max(counts) for page in pages)
+    assert max(counts) - min(counts) <= 1 and min(counts) >= 1
+
+
+def test_a_cut_overview_keeps_only_the_labels_of_the_rows_it_kept():
+    pages = first_pages(big_world())
+    parsed = json.loads(overview(pages))
+    shown = {value for block in parsed["entities"].values() for record in block["records"]
+             for value in record.values() if isinstance(value, str)}
+    wrapped = {key: set(mapping) for key, mapping in parsed["labels"].items()}
+    assert set(wrapped) == {"clients.person_id", "works.work_id"}
+    assert wrapped["clients.person_id"] and wrapped["works.work_id"]
+    assert (wrapped["clients.person_id"] | wrapped["works.work_id"]) <= shown
+    every: dict[str, set[str]] = {}
+    for page in pages:
+        for key, mapping in page["labels"].items():
+            every.setdefault(key, set()).update(mapping)
+    assert wrapped["clients.person_id"] < every["clients.person_id"]
+    assert wrapped["works.work_id"] < every["works.work_id"]
+
+
+def test_a_trimmed_summary_keeps_the_newest_months_first(world):
+    pages = first_pages(world)
+    for page in pages:
+        page["summary"]["monthly"] = monthly_rows(600)
+    view = overview(pages)
+    assert len(view) <= MODEL_VIEW_MAX_CHARS
+    parsed = json.loads(view)
+    months = [row["month"] for row in parsed["summary"]["monthly"]]
+    assert len(months) == follow.OVERVIEW_MONTHS < 600
+    assert parsed["monthly_omitted"] == 600 - len(months)
+    assert months[0] == "2049-12" and months == sorted(months, reverse=True)
+    assert parsed["truncated"] is True and parsed["truncation_marker"]
+
+
+def test_the_summary_and_counts_come_from_the_newest_page_and_the_read_says_it_is_skewed(world):
+    pages = first_pages(world)
+    newest = pages[3]
+    newest["observed_version"] += 1
+    newest["pending_count"] = 9
+    newest["observed_at"] = "2026-10-16T12:00:09.000Z"
+    parsed = json.loads(overview(pages))
+    assert parsed["consistent_read"] is False
+    assert parsed["observed_version"] == newest["observed_version"]
+    assert parsed["pending_count"] == 9 and parsed["observed_at"] == newest["observed_at"]
+    assert parsed["entities"][newest["entity"]]["observed_version"] == newest["observed_version"]
+    assert parsed["entities"]["tasks"]["observed_version"] == pages[-1]["observed_version"]
+
+
+def test_an_overview_never_exceeds_its_cap_and_grows_with_it():
+    pages = first_pages(big_world())
+    returned = []
+    for cap in range(1500, 9000, 500):
+        try:
+            view = overview(pages, max_chars=cap)
+        except contract.ContractError as exc:
+            assert exc.reason == "model_view_too_large" and not returned
+            continue
+        assert len(view) <= cap
+        parsed = json.loads(view)
+        returned.append(sum(b["records_returned"] for b in parsed["entities"].values()))
+        assert parsed["truncated"] is True
+    assert returned and returned == sorted(returned) and returned[-1] > returned[0]
+
+
+def test_an_overview_that_cannot_hold_even_its_frame_is_refused(world):
+    with pytest.raises(contract.ContractError) as refusal:
+        overview(first_pages(world), max_chars=300)
+    assert refusal.value.reason == "model_view_too_large"
+
+
+def pages_with(world, index, **changes):
+    pages = first_pages(world)
+    pages[index] = pages[index] | changes
+    return pages
+
+
+def pages_with_unchanged_time(world):
+    pages = first_pages(world)
+    pages[4] = world.backend.snapshot(query("time", since=pages[4]["since"]))
+    assert pages[4]["unchanged"] is True
+    return pages
+
+
+BROKEN_PAGES = {
+    "none": lambda w: [],
+    "one_missing": lambda w: first_pages(w)[:-1],
+    "one_repeated": lambda w: [*first_pages(w)[:-1], first_pages(w)[0]],
+    "extra_page": lambda w: [*first_pages(w), first_pages(w)[0]],
+    "tasks_relabelled_as_leads": lambda w: pages_with(w, 6, entity="leads"),
+    "another_workspace": lambda w: pages_with(w, 2, workspace_id="other"),
+    "another_epoch": lambda w: pages_with(w, 5, authority_epoch=2),
+    "mode_key": lambda w: pages_with(w, 1, mode="TEST"),
+    "extra_key": lambda w: pages_with(w, 0, extra=1),
+    "sheets_source": lambda w: pages_with(w, 3, source="google_sheets"),
+    "unchanged_body": pages_with_unchanged_time,
+}
+
+
+@pytest.mark.parametrize("name", BROKEN_PAGES)
+def test_pages_that_are_not_the_first_page_of_each_entity_have_no_overview(world, name):
+    with pytest.raises(contract.ContractError):
+        overview(BROKEN_PAGES[name](world))
+
+
+@pytest.mark.parametrize("junk", [None, "x", 7, {}])
+def test_a_value_that_is_not_a_list_of_pages_has_no_overview(junk):
+    with pytest.raises(contract.ContractError):
+        overview(junk)
+
+
+def test_a_single_page_is_not_an_overview(world):
+    with pytest.raises(contract.ContractError):
+        overview(world.backend.snapshot(query("tasks")))
+
+
 # ---- the owner tools ---------------------------------------------------------------------------
 
 
@@ -245,26 +528,44 @@ def test_the_sheets_snapshot_tool_output_is_byte_identical(monkeypatch):
     assert result.evidence == "assaf_os_signed_snapshot"
 
 
-def test_the_postgres_snapshot_tool_returns_the_bounded_view(world, monkeypatch):
-    many_expenses(world)
-    seen = []
+class Recording:
+    """A real backend that remembers every query the tool made."""
 
-    class Recording:
-        kind = "postgres"
+    kind = "postgres"
 
-        def snapshot(self, q=None):
-            seen.append(q)
-            return world.backend.snapshot(v2_20.query("expenses", limit=200))
+    def __init__(self, backend):
+        self.backend, self.seen = backend, []
 
-    use_backend(monkeypatch, Recording())
+    def snapshot(self, q=None):
+        self.seen.append(q)
+        return self.backend.snapshot(q)
+
+
+def test_the_postgres_snapshot_tool_reads_the_first_page_of_every_entity(world, monkeypatch):
+    """E14.2: the overview is not tasks only. It reads all 7 entities, one first page each."""
+    recording = Recording(world.backend)
+    use_backend(monkeypatch, recording)
     result = execute_tool("assaf_os_snapshot", {}, pg_context())
-    assert result.ok and len(seen) == 1 and seen[0] is not None
-    assert (seen[0].entity, seen[0].after, seen[0].since) == ("tasks", None, None)
-    assert result.evidence == "assaf_os_ledger_snapshot"
+    assert result.ok and result.evidence == "assaf_os_ledger_snapshot"
+    assert [(q.entity, q.after, q.since, q.limit) for q in recording.seen] == [
+        (entity, None, None, 50) for entity in api.ENTITIES]
     assert result.max_chars == MODEL_VIEW_MAX_CHARS
     payload = result.payload()["result"]
     assert payload == result.text and len(payload) <= MODEL_VIEW_MAX_CHARS
-    assert json.loads(payload)["view"] == "assaf_os_model_view.v1"
+    parsed = json.loads(payload)
+    assert parsed["view"] == OVERVIEW and sorted(parsed["entities"]) == sorted(api.ENTITIES)
+    assert payload == overview(first_pages(world))
+
+
+def test_the_postgres_snapshot_tool_hands_a_big_ledger_over_whole_and_marked(monkeypatch):
+    """The tool's text is the complete JSON document: the 16,000 slice never cuts it."""
+    use_backend(monkeypatch, big_world().backend)
+    result = execute_tool("assaf_os_snapshot", {}, pg_context())
+    assert result.ok and len(result.text) <= MODEL_VIEW_MAX_CHARS
+    assert result.payload()["result"] == result.text
+    parsed = json.loads(result.text)
+    assert parsed["truncated"] is True
+    assert parsed["truncation_marker"] == follow.MODEL_VIEW_TRUNCATION_MARKER
 
 
 def test_the_postgres_snapshot_tool_refuses_a_mixed_body(world, monkeypatch):
@@ -275,6 +576,37 @@ def test_the_postgres_snapshot_tool_refuses_a_mixed_body(world, monkeypatch):
     use_backend(monkeypatch, Mixed())
     result = execute_tool("assaf_os_snapshot", {}, pg_context())
     assert not result.ok and result.error == "mixed_contract_shapes" and not result.text
+
+
+class Changing(Recording):
+    """A real backend that rewrites the page of one entity."""
+
+    def __init__(self, backend, entity, change):
+        super().__init__(backend)
+        self.entity, self.change = entity, change
+
+    def snapshot(self, q=None):
+        body = super().snapshot(q)
+        return self.change(body) if q.entity == self.entity else body
+
+
+def test_one_mixed_page_among_the_seven_leaves_the_model_nothing(world, monkeypatch):
+    use_backend(monkeypatch, Changing(world.backend, "time", lambda b: b | {"mode": "TEST"}))
+    result = execute_tool("assaf_os_snapshot", {}, pg_context())
+    assert not result.ok and result.error == "mixed_contract_shapes" and not result.text
+
+
+@pytest.mark.parametrize("change", [
+    lambda b: b | {"workspace_id": "other"},
+    lambda b: b | {"authority_epoch": 2},
+    lambda b: b | {"extra": 1},
+])
+def test_pages_of_two_ledgers_or_one_the_reader_refuses_leave_the_model_nothing(
+    world, monkeypatch, change
+):
+    use_backend(monkeypatch, Changing(world.backend, "payments", change))
+    result = execute_tool("assaf_os_snapshot", {}, pg_context())
+    assert not result.ok and result.error == "invalid_response" and not result.text
 
 
 def test_a_v2_body_the_reader_refuses_is_not_shown_to_the_model(world, monkeypatch):

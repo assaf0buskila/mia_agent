@@ -11,6 +11,7 @@ Three things are pinned here:
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import json
 import shutil
@@ -706,6 +707,9 @@ def test_ci_uploads_the_golden_tree_as_an_artifact_pinned_to_a_commit():
     assert upload["with"]["path"] == "tests/contract/golden"
     assert upload["with"]["if-no-files-found"] == "error"
     assert upload["with"]["name"].startswith("os-contract-golden-")
+    # On a pull request ``github.sha`` is the merge commit; the frontend records the head SHA.
+    assert upload["with"]["name"] == (
+        "os-contract-golden-${{ github.event.pull_request.head.sha || github.sha }}")
     # It runs after the suite that compares the export with the committed copy.
     suite = [
         i for i, step in enumerate(steps)
@@ -743,3 +747,155 @@ def test_a_label_of_exactly_the_cap_is_kept_and_a_surrogate_is_never_split():
     keep = contract.labels_view({"works.work_id": {"W_1": "x" * 120, "W_2": "x" * 119 + ASTRAL}})
     assert keep["works.work_id"]["W_1"] == "x" * 120
     assert keep["works.work_id"]["W_2"] == "x" * 119
+
+
+# ---- review round 1 -----------------------------------------------------------------------------
+# Each test below failed on the first V2-20 head (5e84fa3) and pins one reviewer finding.
+
+
+def test_a_committed_batch_with_no_expense_op_has_a_receipt_without_records():
+    """Section 10.2 caps ``records`` (non-empty only for committed and target_changed); it does not
+    demand them. A batch of personal-only lines commits with no record mutation (section 12.2)."""
+    body = golden("receipt_batch_committed")
+    assert body["status"] == "committed" and body["kind"] == "statement_batch"
+    assert body["records"] == [] and body["undo"] is None and body["committed_at"]
+    assert contract.READERS["receipt"](body) == body
+
+
+def test_the_recovery_envelope_accepts_a_committed_batch_whose_receipt_lists_no_record():
+    body = golden("proposal_request_batch_committed")
+    assert body["proposal"]["kind"] == "statement_batch"
+    assert body["proposal"]["status"] == body["receipt"]["status"] == "committed"
+    assert body["receipt"]["records"] == []
+    assert contract.READERS["proposal_request"](body) == body
+
+
+@pytest.mark.parametrize("kind", ["statement_batch", "import"])
+def test_the_kinds_that_may_commit_without_a_record_accept_both_shapes(kind):
+    body = golden("receipt_committed")
+    body["kind"] = kind
+    assert contract.READERS["receipt"](body)
+    body["records"] = []
+    assert contract.READERS["receipt"](body)
+
+
+@pytest.mark.parametrize("kind", ["proposal", "owner_direct", "owner_undo"])
+def test_a_committed_receipt_of_a_record_kind_still_lists_its_records(kind):
+    body = golden("receipt_committed")
+    body["kind"] = kind
+    if kind == "owner_direct":
+        body["undo"] = {"state": "none", "until": None, "undo_request_id": None}
+    if kind == "owner_undo":
+        body["undo_of"] = "00000000-0000-4000-8000-000000000077"
+    assert contract.READERS["receipt"](body)
+    body["records"] = []
+    refused(contract.READERS["receipt"], body)
+
+
+def test_a_lone_proposal_is_pending_and_of_kind_proposal_like_the_frontend_reader():
+    """V2-21 ``readProposalV2`` accepts statuses ['pending'] and kinds ['proposal'] only."""
+    read = contract.READERS["proposal"]
+    assert read(golden("proposal_update"))
+    for status in ("committed", "rejected", "expired", "target_changed"):
+        body = golden("proposal_update")
+        body["status"] = status
+        refused(read, body)
+    for kind in ("owner_direct", "owner_undo", "statement_batch", "import"):
+        body = golden("proposal_update")
+        body["kind"] = kind
+        refused(read, body)
+
+
+def test_the_status_and_kind_sets_are_arguments_of_the_reader_not_defaults():
+    body = golden("proposal_update")
+    body["status"], body["kind"] = "committed", "statement_batch"
+    refused(contract.read_proposal_v2, body)
+    refused(lambda v: contract.read_proposal_v2(v, statuses=contract.PROPOSAL_STATUSES), body)
+    assert contract.read_proposal_v2(
+        body, statuses=contract.PROPOSAL_STATUSES, kinds=contract.PROPOSAL_KINDS)
+
+
+def test_a_decided_proposal_is_still_read_inside_the_recovery_envelope():
+    for name in ("proposal_request_committed", "proposal_request_abandoned",
+                 "proposal_request_superseded", "proposal_request_batch_committed"):
+        body = golden(name)
+        assert body["proposal"]["status"] != "pending"
+        assert contract.READERS["proposal_request"](body)
+
+
+def test_a_boolean_is_not_the_approval_guard_version_anywhere_it_is_read():
+    """In Python ``True == 1``; JavaScript's ``=== 1`` is false for ``true``."""
+    body = golden("proposal_update")
+    body["approval_guard_version"] = True
+    refused(contract.READERS["proposal"], body)
+    body = golden("pending_list")
+    body["items"][0]["approval_guard_version"] = True
+    refused(contract.READERS["pending"], body)
+    body = golden("proposal_request_pending")
+    body["proposal"]["approval_guard_version"] = True
+    refused(contract.READERS["proposal_request"], body)
+    body = golden("proposal_request_committed")
+    body["proposal"]["approval_guard_version"] = True
+    refused(contract.READERS["proposal_request"], body)
+
+
+# ---- a hostile value of the wrong type is a contract error, never a crash ------------------------
+
+
+def node_paths(value, prefix=()):
+    """Every member path below ``value`` (lists by index, objects by key), parents first."""
+    if isinstance(value, dict):
+        for key, item in value.items():
+            yield (*prefix, key)
+            yield from node_paths(item, (*prefix, key))
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            yield (*prefix, index)
+            yield from node_paths(item, (*prefix, index))
+
+
+def replaced(body, path, junk):
+    broken = copy.deepcopy(body)
+    holder = broken
+    for step in path[:-1]:
+        holder = holder[step]
+    holder[path[-1]] = junk
+    return broken
+
+
+@pytest.mark.parametrize("name", NAMES)
+def test_an_unhashable_value_in_any_member_is_a_contract_error_never_a_type_error(name):
+    base, read = golden(name), reader(name)
+    for path in node_paths(base):
+        for junk in ([], {}):
+            with contextlib.suppress(contract.ContractError):
+                read(replaced(base, path, junk))
+
+
+@pytest.mark.parametrize("junk", [[], {}, [[]], [{}]])
+def test_the_request_status_and_the_schema_enums_refuse_unhashable_values(junk):
+    body = golden("proposal_request_unknown")
+    body["status"] = junk
+    refused(contract.READERS["proposal_request"], body)
+    schema = golden("schema")
+    schema["tabs"][1]["fields"][0]["type"] = junk
+    refused(contract.READERS["schema"], schema)
+    schema = golden("schema")
+    schema["tabs"][1]["fields"][0]["role"] = junk
+    refused(contract.READERS["schema"], schema)
+    schema = golden("schema")
+    schema["tabs"][1]["kind"] = junk
+    refused(contract.READERS["schema"], schema)
+
+
+# ---- the mirror agrees with the token that rides beside it ---------------------------------------
+
+
+@pytest.mark.parametrize(
+    "name", ["snapshot_tasks_page", "snapshot_tasks_second_page", "snapshot_expenses_page",
+             "snapshot_unchanged"])
+def test_a_golden_mirror_is_the_version_the_since_token_names(name):
+    body = golden(name)
+    version, _pending_seq, mirror_part = body["since"].split(".")
+    assert int(mirror_part) == body["mirror"]["verified_version"] == int(version)
+    assert body["mirror"]["state"] == "verified"

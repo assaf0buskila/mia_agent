@@ -17,11 +17,11 @@ from app.domain.owner.assaf_os_follow_up import (
     MODEL_VIEW_MAX_CHARS,
     follow_up_check,
     receipt_check,
-    snapshot_model_view,
+    snapshot_overview_view,
     unknown_check,
 )
 from app.services.assaf_os import REQUEST_PATTERN, AssafOsError, AssafOsPort, ProposeRequest
-from app.services.os_ledger.api import LedgerError
+from app.services.os_ledger.api import ENTITIES, LedgerError
 from app.services.os_ledger.contract import ContractError, body_shape
 from app.services.owner_actions import propose_owner_action
 from app.services.phone_identity import normalize_new_input_phone
@@ -47,8 +47,9 @@ def _json(value: object) -> str:
 
 
 # Under backend=postgres a snapshot is one page of one entity (section 10.2). The model view reads
-# the first VIEW_LIMIT tasks; the follow-up check reads tasks and leads, each up to MAX_PAGES pages
-# of PAGE_LIMIT rows (the 1,000-row cap of the Sheets snapshot).
+# the first VIEW_LIMIT rows of every entity (section 22 E14.2: Mia's overview does not shrink to
+# tasks); the follow-up check reads tasks and leads, each up to MAX_PAGES pages of PAGE_LIMIT rows
+# (the 1,000-row cap of the Sheets snapshot).
 V2_VIEW_LIMIT = 50
 V2_PAGE_LIMIT = 200
 V2_MAX_PAGES = 5
@@ -62,14 +63,17 @@ def _uses_ledger(ctx: ToolContext) -> bool:
 def _ledger_snapshot(ctx: ToolContext) -> ToolResult:
     from app.services.os_backend_pg import PageQuery
 
-    body = _port(ctx).snapshot(PageQuery(entity="tasks", limit=V2_VIEW_LIMIT))
-    shape = body_shape(body)
-    if shape == "mixed":
+    backend = _port(ctx)
+    pages = [
+        backend.snapshot(PageQuery(entity=entity, limit=V2_VIEW_LIMIT)) for entity in ENTITIES
+    ]
+    shapes = {body_shape(page) for page in pages}
+    if "mixed" in shapes:
         return ToolResult(ok=False, error="mixed_contract_shapes")
     try:
-        if shape != "v2":
+        if shapes != {"v2"}:
             raise ContractError("not_a_v2_body")
-        text = snapshot_model_view(body)
+        text = snapshot_overview_view(pages)
     except ContractError:
         return ToolResult(ok=False, error="invalid_response")
     return ToolResult(

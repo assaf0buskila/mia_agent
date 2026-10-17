@@ -33,7 +33,7 @@
       "vendor": "Meta Platforms"
     }
   ],
-  "since": "1.2.0",
+  "since": "1.2.1",
   "source": "postgresql",
   "summary": {
     "coverage": "complete",

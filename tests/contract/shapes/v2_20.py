@@ -148,12 +148,25 @@ def deterministic_cursors() -> Iterator[None]:
 
 
 def verified_mirror(head: api.Head) -> dict:
-    """What V2-29 hands the backend once the mirror verified the head."""
+    """What V2-29 hands the backend once the mirror verified the head.
+
+    ``verified_version`` is the ledger's own ``mirror_verified_version``, the third part of the
+    ``since`` token, so a golden never carries a mirror that contradicts its token.
+    ``verify_mirror`` seeds that version in the fake.
+    """
     return {
         "state": "verified",
         "last_verified_at": "2026-10-16T11:59:30.000Z",
-        "verified_version": head.observed_version,
+        "verified_version": head.mirror_verified_version,
         "lag_s": 0,
+    }
+
+
+def verify_mirror(world: World) -> None:
+    """Record in the fake that the mirror verified the current head (V2-29 does this for real)."""
+    head = world.ledger.head(world.owner)
+    world.ledger._workspaces[WORKSPACE]["tables"]["os_mirror_state"]["main"] = {
+        "verified_version": head.observed_version,
     }
 
 
@@ -206,6 +219,8 @@ def _in_world(build: Callable[[World], dict], **world_options) -> Callable[[], d
         with deterministic_cursors():
             world = build_world(**world_options)
             seed(world)
+            if world_options.get("mirror") is not None:
+                verify_mirror(world)
             return build(world)
 
     return shape
@@ -345,6 +360,30 @@ def receipt_superseded(world: World) -> dict:
     return world.backend.receipt(key)
 
 
+def committed_batch(world: World) -> tuple[str, str]:
+    """A statement batch whose lines were all personal: it commits with no record mutation.
+
+    Section 12.2 allows such a batch (it has no expense operation), so its committed receipt lists
+    no record. Returns ``(request_id, approval_request_id)``.
+    """
+    world.ledger.transition(
+        WORKSPACE, "statements", "active", expected_epoch=1, actor_owner_id=OWNER_ID)
+    request_id = uuid_v4(0x7007)
+    with world.ledger.transaction(world.owner, domain="statements", kind="statement_batch") as tx:
+        proposal = tx.insert_proposal(api.ProposalDraft(
+            kind="statement_batch", source="ASSISTANT_PASTE", request_id=request_id,
+            request_digest=api.digest({"batch": 2}), entity="statements",
+            record_id="STM_" + "2" * 32, expected_revision=0, mutations=(),
+            dependency_digest=api.digest([]), expires_at=tx.now + timedelta(days=7)))
+        tx.finish(proposal, status="committed", receipt_request_id=proposal.approval_id)
+    return request_id, proposal.approval_id
+
+
+def receipt_batch_committed(world: World) -> dict:
+    _, approval_id = committed_batch(world)
+    return world.backend.receipt(approval_id)
+
+
 def proposal_request_pending(world: World) -> dict:
     proposal = proposal_create(world)
     return world.backend.proposal_request(proposal["request_id"])
@@ -367,6 +406,11 @@ def proposal_request_abandoned(world: World) -> dict:
 
 def proposal_request_superseded(world: World) -> dict:
     return world.backend.proposal_request(_superseded_batch(world))
+
+
+def proposal_request_batch_committed(world: World) -> dict:
+    request_id, _ = committed_batch(world)
+    return world.backend.proposal_request(request_id)
 
 
 def deleted_page(world: World) -> dict:
@@ -397,11 +441,13 @@ SHAPES: dict[str, Callable[[], dict]] = {
     "receipt_direct_undo_expired": _in_world(receipt_direct_undo_expired),
     "receipt_direct_abandoned": _in_world(receipt_direct_abandoned),
     "receipt_superseded": _in_world(receipt_superseded),
+    "receipt_batch_committed": _in_world(receipt_batch_committed),
     "proposal_request_pending": _in_world(proposal_request_pending),
     "proposal_request_committed": _in_world(proposal_request_committed),
     "proposal_request_unknown": _in_world(proposal_request_unknown),
     "proposal_request_abandoned": _in_world(proposal_request_abandoned),
     "proposal_request_superseded": _in_world(proposal_request_superseded),
+    "proposal_request_batch_committed": _in_world(proposal_request_batch_committed),
     "deleted_page": _in_world(deleted_page),
 }
 
@@ -426,10 +472,12 @@ READER_OF: dict[str, str] = {
     "receipt_direct_undo_expired": "receipt",
     "receipt_direct_abandoned": "receipt",
     "receipt_superseded": "receipt",
+    "receipt_batch_committed": "receipt",
     "proposal_request_pending": "proposal_request",
     "proposal_request_committed": "proposal_request",
     "proposal_request_unknown": "proposal_request",
     "proposal_request_abandoned": "proposal_request",
     "proposal_request_superseded": "proposal_request",
+    "proposal_request_batch_committed": "proposal_request",
     "deleted_page": "deleted",
 }

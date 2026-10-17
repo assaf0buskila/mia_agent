@@ -8,9 +8,11 @@ chunk adds its shapes by adding its own module, never by editing this file.
     python scripts/export_os_contract_fixtures.py            # write the golden tree
     python scripts/export_os_contract_fixtures.py --check    # exit 1 when the tree differs
 
-CI runs ``--check``: the export must equal the committed copy. The frontend vendors the files by
-hash. ``fixtures.sha256`` is the integrator's, regenerated on every rebase; this script never writes
-it and ``--check`` ignores it.
+The export must equal the committed copy. ``tests/contract/test_goldens.py`` enforces that (it runs
+``check`` and compares every shape), and CI runs it as part of the suite; run ``--check`` by hand
+before committing a changed shape. The frontend vendors the files by hash. ``fixtures.sha256`` is
+the integrator's, regenerated on every rebase; this script never writes it and ``--check`` ignores
+it.
 """
 
 from __future__ import annotations

@@ -350,6 +350,9 @@ class PostgresOsBackend:
         del budget  # the ledger has no remote call to bound
         with self._operation("proposal"):
             ctx = self._read_ctx()
+            # LedgerReader has no proposal-by-id yet, so this read is admitted as a write
+            # transaction: it fails closed under the kill switch and a fenced core (I8), and on PG
+            # it takes the workspace lock. A read-only API from V2-16/V2-18 replaces it.
             with self._ledger.transaction(ctx, domain="core", kind="proposal") as tx:
                 row = tx.proposal(proposal_id)
             if row is None or row.kind != "proposal":
@@ -357,7 +360,8 @@ class PostgresOsBackend:
             if row.epoch != ctx.authority_epoch:
                 raise api.LedgerError("authority_changed")  # I12: never read across epochs
             return contract.read_proposal_v2(
-                contract.proposal_v2(row, authority_epoch=ctx.authority_epoch))
+                contract.proposal_v2(row, authority_epoch=ctx.authority_epoch),
+                statuses=contract.PROPOSAL_STATUSES)
 
     # ---- writes ----------------------------------------------------------------------------
 
@@ -368,8 +372,10 @@ class PostgresOsBackend:
                 request_id=request.request_id, entity=request.entity,
                 record_id=request.record_id, expected_revision=request.expected_revision,
                 input=dict(request.input)))
+            # A replay returns the stored row whatever its status (I1), so the guard names them.
             return contract.read_proposal_v2(
-                contract.proposal_v2(row, authority_epoch=ctx.authority_epoch))
+                contract.proposal_v2(row, authority_epoch=ctx.authority_epoch),
+                statuses=contract.PROPOSAL_STATUSES)
 
     def decide(
         self, operation: Literal["approve", "reject"], proposal_id: str, request: Any

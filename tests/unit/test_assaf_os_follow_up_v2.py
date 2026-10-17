@@ -133,6 +133,106 @@ def test_a_truncated_lead_list_is_unknown_and_consecutive_pages_complete_it(worl
         r["lead_id"] for r in first["records"] + second["records"]]
 
 
+# ---- a chain of pages is evidence only when it adds up (review round 1) -----------------------
+
+
+def task_chain(world):
+    """Page 1 (two open tasks, a cursor) and page 2 (the one closed task, no cursor), total 3."""
+    first = world.backend.snapshot(query("tasks", limit=2))
+    second = world.backend.snapshot(query("tasks", after=first["next_cursor"], limit=2))
+    assert first["next_cursor"] and second["next_cursor"] is None and first["total"] == 3
+    return first, second
+
+
+def unreliable_tasks(check):
+    tasks = check["entities"]["tasks"]
+    assert tasks["coverage"] == "unknown" and tasks["state"] == "unknown"
+    assert tasks["follow_up_count"] is None and tasks["omitted_count"] is None
+    assert tasks["reason_codes"] == ["source_incomplete_or_invalid"]
+    assert not [i for i in check["items"] if i["entity"] == "tasks"]
+    assert check["state"] == "unknown" and check["coverage"] == "unknown"
+
+
+def test_a_whole_page_chain_that_adds_up_to_total_is_complete(world):
+    first, second = task_chain(world)
+    check = follow_up_check([first, second, world.backend.snapshot(query("leads"))])
+    assert check["entities"]["tasks"]["state"] == "checked"
+    assert check["entities"]["tasks"]["coverage"] == "complete"
+    assert check["entities"]["tasks"]["observed_row_count"] == 3
+    assert check["entities"]["tasks"]["follow_up_count"] == 2
+
+
+def test_the_last_page_alone_does_not_prove_that_no_task_is_open(world):
+    """Page 2 ends the chain (no cursor) and holds one closed row, but ``total`` is 3: the two open
+    tasks on page 1 are missing, so 'zero open tasks' is not evidence."""
+    _, second = task_chain(world)
+    check = follow_up_check([second, world.backend.snapshot(query("leads"))])
+    unreliable_tasks(check)
+    assert check["entities"]["tasks"]["observed_row_count"] == 1
+    assert check["entities"]["leads"]["state"] == "checked"
+
+
+def test_a_chain_that_ends_short_of_total_is_unknown(world):
+    first, second = task_chain(world)
+    for page in (first, second):
+        page["total"] = 4
+    unreliable_tasks(follow_up_check([first, second, world.backend.snapshot(query("leads"))]))
+
+
+def test_a_single_page_that_ends_with_fewer_rows_than_total_is_unknown(world):
+    tasks, leads = pages(world)
+    assert tasks["next_cursor"] is None
+    tasks["total"] += 1
+    unreliable_tasks(follow_up_check([tasks, leads]))
+
+
+def test_pages_of_one_entity_must_share_one_observed_version(world):
+    first, second = task_chain(world)
+    second["observed_version"] = first["observed_version"] + 1
+    unreliable_tasks(follow_up_check([first, second, world.backend.snapshot(query("leads"))]))
+
+
+def test_pages_of_one_entity_must_share_one_total(world):
+    first, second = task_chain(world)
+    first["total"] = 4
+    unreliable_tasks(follow_up_check([first, second, world.backend.snapshot(query("leads"))]))
+
+
+def test_a_page_that_ends_the_chain_cannot_be_followed_by_another(world):
+    commit_direct(world.env, world.owner,
+                  [lead("LEA_l2", person_id="PER_l2", name="רונית", phone="0502222222")],
+                  request_id=uuid_v4(0x8005))
+    tasks = world.backend.snapshot(query("tasks"))
+    first = world.backend.snapshot(query("leads", limit=1))
+    second = world.backend.snapshot(query("leads", after=first["next_cursor"], limit=1))
+    assert first["next_cursor"] and second["next_cursor"] is None
+    assert follow_up_check([tasks, first, second])["entities"]["leads"]["state"] == "checked"
+    swapped = follow_up_check([tasks, second, first])
+    assert swapped["entities"]["leads"]["state"] == "unknown"
+    assert swapped["entities"]["leads"]["reason_codes"] == ["source_incomplete_or_invalid"]
+    assert not [i for i in swapped["items"] if i["entity"] == "leads"]
+
+
+def test_a_truncated_chain_never_holds_more_rows_than_total(world):
+    first, second = task_chain(world)
+    second["next_cursor"] = "more-pages"
+    first["total"] = second["total"] = 2
+    unreliable_tasks(follow_up_check([first, second, world.backend.snapshot(query("leads"))]))
+
+
+@pytest.mark.parametrize("junk", [[], {}, [[]]])
+def test_an_unhashable_entity_is_an_unreadable_body_not_a_crash(world, junk):
+    tasks, leads = pages(world)
+    tasks["entity"] = junk
+    check = follow_up_check([tasks, leads])
+    assert check["state"] == "unknown" and check["entities"]["tasks"]["state"] == "unknown"
+    assert check["entities"]["leads"]["state"] == "checked"
+    bad = world.backend.snapshot(query("leads"))
+    bad["entity"] = junk
+    assert follow_up_check([tasks | {"entity": "tasks"}, bad])["entities"]["leads"][
+        "state"] == "unknown"
+
+
 def test_more_than_five_items_are_shown_with_an_omission_count(world):
     commit_direct(world.env, world.owner,
                   [lead(f"LEA_x{n}", person_id=f"PER_x{n}", name=f"ליד {n}",
@@ -313,6 +413,18 @@ def test_a_committed_v2_receipt_proves_that_exact_write_only(world):
     rendered = text(check)
     for forbidden in ("google_sheets", "workbook_id", '"mode"', "בדיקה"):
         assert forbidden not in rendered
+
+
+def test_a_committed_batch_receipt_with_no_record_still_proves_the_write(world):
+    """A personal-only statement batch commits with no expense record; the write still happened."""
+    _, approval_id = v2_20.committed_batch(world)
+    receipt = world.backend.receipt(approval_id)
+    assert receipt["status"] == "committed" and receipt["records"] == []
+    check = receipt_check(receipt, approval_id, now=NOW)
+    assert check["state"] == "completed" and check["reason_codes"] == ["exact_write_committed"]
+    assert check["source"]["receipt_kind"] == "statement_batch"
+    assert check["source"]["records"] == []
+    assert check["source"]["commit_version"] == receipt["commit_version"]
 
 
 @pytest.mark.parametrize("status", ["rejected", "expired", "target_changed"])

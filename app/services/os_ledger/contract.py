@@ -45,12 +45,20 @@ ACTOR_SOURCES: tuple[str, ...] = (
 PROPOSAL_KINDS: tuple[str, ...] = (
     "proposal", "owner_direct", "owner_undo", "statement_batch", "import",
 )
-# The statuses every proposal body may carry; superseded and abandoned are accepted only inside
-# the request-recovery envelope (section 10.5).
+# The statuses a stored ``proposal``-kind row may carry, pending or decided: what the backend's own
+# guard accepts for a replay or a read by id. ``superseded`` and ``abandoned`` are added inside the
+# request-recovery envelope (section 10.2).
 PROPOSAL_STATUSES: tuple[str, ...] = (
     "pending", "committed", "rejected", "expired", "target_changed",
 )
 PROPOSAL_REQUEST_STATUSES: tuple[str, ...] = (*PROPOSAL_STATUSES, "superseded", "abandoned")
+# The frontend's ``readProposalV2``, ``readPendingList`` and the ``GET /proposals/{id}`` body are
+# pending and of kind ``proposal`` only (section 10.2). Anything wider is an explicit argument.
+LONE_PROPOSAL_STATUSES: tuple[str, ...] = ("pending",)
+LONE_PROPOSAL_KINDS: tuple[str, ...] = ("proposal",)
+# The kinds whose committed receipt always lists records: they always carry record mutations.
+# A statement batch of only personal lines (no expense op, section 12.2) and an import do not.
+_RECORD_KINDS = frozenset({"proposal", "owner_direct", "owner_undo"})
 RECEIPT_STATUSES: tuple[str, ...] = (
     "committed", "rejected", "expired", "target_changed", "superseded", "abandoned",
 )
@@ -492,6 +500,11 @@ def _is_object(value: Any) -> bool:
     return isinstance(value, dict)
 
 
+def _member(value: Any, allowed: Iterable[str]) -> bool:
+    """``value`` is one of the strings in ``allowed``. Never raises on a list or object value."""
+    return isinstance(value, str) and value in tuple(allowed)
+
+
 def _exact(value: Any, required: Iterable[str], optional: Iterable[str] = ()) -> dict[str, Any]:
     if not _is_object(value):
         _fail("not_an_object")
@@ -601,7 +614,7 @@ def _read_field(value: Any) -> None:
     )
     if (
         not _is_id(value["key"]) or not _is_text(value["label"], 120)
-        or value["type"] not in _FIELD_TYPES or value["role"] not in _FIELD_ROLES
+        or not _member(value["type"], _FIELD_TYPES) or not _member(value["role"], _FIELD_ROLES)
         or type(value["required"]) is not bool
     ):
         _fail("schema_field")
@@ -639,7 +652,7 @@ def read_schema_v2(value: Any) -> dict[str, Any]:
         fields = tab["fields"]
         if (
             not _is_id(tab["key"]) or not _is_text(tab["name"], 80)
-            or tab["kind"] not in {"input", "calculated"}
+            or not _member(tab["kind"], ("input", "calculated"))
             or not _is_int(tab["frozenRows"]) or not _is_int(tab["order"])
             or not isinstance(fields, list) or len(fields) > 40 or tab["key"] in seen
         ):
@@ -763,9 +776,17 @@ def _read_state(value: Any, entity: str, *, after: bool, kind: str) -> None:
 
 
 def read_proposal_v2(
-    value: Any, *, statuses: Sequence[str] = PROPOSAL_STATUSES
+    value: Any,
+    *,
+    statuses: Sequence[str] = LONE_PROPOSAL_STATUSES,
+    kinds: Sequence[str] = LONE_PROPOSAL_KINDS,
 ) -> dict[str, Any]:
-    """``proposal_v2``: the binding without ``observed_version`` and the immutable proposal."""
+    """``proposal_v2``: the binding without ``observed_version`` and the immutable proposal.
+
+    By default it is the frontend's ``readProposalV2``: pending, kind ``proposal``. A caller that
+    legitimately holds a decided or a batch/import proposal (the request-recovery envelope, the
+    backend's own guard of a stored row) says so in ``statuses`` and ``kinds``.
+    """
     _exact(value, (
         *_BINDING_KEYS, "status", "proposal_id", "request_id", "approval_request_id",
         "rejection_request_id", "approval_guard_version", "actor_source", "kind", "expires_at",
@@ -774,12 +795,13 @@ def read_proposal_v2(
     check_binding(value, observed=False)
     kind = value["kind"]
     if (
-        value["status"] not in statuses or not _is_id(value["proposal_id"])
+        not _member(value["status"], statuses) or not _is_id(value["proposal_id"])
         or not all(_is_uuid(value[key]) for key in (
             "request_id", "approval_request_id", "rejection_request_id"))
         or value["approval_request_id"] == value["rejection_request_id"]
+        or type(value["approval_guard_version"]) is not int  # not ``true``: True == 1 in Python
         or value["approval_guard_version"] != APPROVAL_GUARD_VERSION
-        or value["actor_source"] not in ACTOR_SOURCES or kind not in PROPOSAL_KINDS
+        or value["actor_source"] not in ACTOR_SOURCES or not _member(kind, kinds)
         or not _is_iso(value["expires_at"])
         or value["entity"] not in (PROPOSAL_ENTITIES if kind == "proposal" else KIND_ENTITIES)
         or not _nullable(value["record_id"], _is_id)
@@ -802,9 +824,7 @@ def read_pending_list(value: Any) -> dict[str, Any]:
     ):
         _fail("pending_shape")
     for item in items:
-        read_proposal_v2(item, statuses=("pending",))
-        if item["kind"] != "proposal":
-            _fail("pending_kind")
+        read_proposal_v2(item, statuses=LONE_PROPOSAL_STATUSES, kinds=LONE_PROPOSAL_KINDS)
         _same_binding(item, value)
     return value
 
@@ -864,7 +884,7 @@ def read_receipt_v2(value: Any) -> dict[str, Any]:
     records = value["records"]
     if records and status not in {"committed", "target_changed"}:
         _fail("receipt_records")
-    if status == "committed" and kind != "import" and not records:
+    if status == "committed" and kind in _RECORD_KINDS and not records:
         _fail("receipt_records")
     for item in records:
         _exact(item, ("entity", "record"))
@@ -891,7 +911,7 @@ def read_proposal_request_v2(value: Any) -> dict[str, Any]:
     ))
     check_binding(value, observed=True)
     if (
-        not _is_uuid(value["request_id"]) or value["status"] not in {"found", "unknown"}
+        not _is_uuid(value["request_id"]) or not _member(value["status"], ("found", "unknown"))
         or not _reason_codes(value["reason_codes"])
     ):
         _fail("proposal_request_shape")
@@ -905,7 +925,7 @@ def read_proposal_request_v2(value: Any) -> dict[str, Any]:
     proposal = value["proposal"]
     if value["reason_codes"]:
         _fail("proposal_request_shape")
-    read_proposal_v2(proposal, statuses=PROPOSAL_REQUEST_STATUSES)
+    read_proposal_v2(proposal, statuses=PROPOSAL_REQUEST_STATUSES, kinds=PROPOSAL_KINDS)
     if proposal["request_id"] != value["request_id"]:
         _fail("proposal_request_id")
     _same_binding(proposal, value)

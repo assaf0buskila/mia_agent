@@ -594,8 +594,36 @@ def test_proposal_reads_a_pending_and_a_decided_proposal(world):
     assert body == pending
     decide(world, "approve", pending)
     decided = world.backend.proposal(pending["proposal_id"])
-    contract.read_proposal_v2(decided)
+    # A lone proposal reader is pending-only (the frontend's readProposalV2); a decided body is
+    # read with the statuses the ledger may return for a proposal-kind row.
+    contract.read_proposal_v2(decided, statuses=contract.PROPOSAL_STATUSES)
     assert decided["status"] == "committed"
+
+
+def test_a_replayed_propose_of_a_decided_proposal_returns_the_stored_body(world):
+    """I1: a replay returns the stored result whatever its status, not an integrity failure."""
+    pending = world.backend.propose(request())
+    decide(world, "approve", pending)
+    again = world.backend.propose(request())
+    assert again["status"] == "committed" and again["proposal_id"] == pending["proposal_id"]
+    assert {k: v for k, v in again.items() if k != "status"} == {
+        k: v for k, v in pending.items() if k != "status"}
+
+
+def test_the_backend_guards_a_proposal_body_with_explicit_statuses(world, monkeypatch):
+    seen = []
+    real = contract.read_proposal_v2
+
+    def spy(value, **kwargs):
+        seen.append(kwargs)
+        return real(value, **kwargs)
+
+    monkeypatch.setattr(contract, "read_proposal_v2", spy)
+    pending = world.backend.propose(request())
+    world.backend.proposal(pending["proposal_id"])
+    assert len(seen) == 2
+    assert all(call.get("statuses") == contract.PROPOSAL_STATUSES for call in seen)
+    assert all(call.get("kinds", ("proposal",)) == ("proposal",) for call in seen)
 
 
 def test_proposal_of_an_unknown_id_or_another_kind_is_404(world):
@@ -734,6 +762,20 @@ def test_proposal_request_recovers_a_lost_acknowledgement_by_reading(world):
     assert unknown["status"] == "unknown" and unknown["reason_codes"] == [
         "proposal_request_unknown"]
     assert unknown["proposal"] is None and unknown["receipt"] is None
+
+
+def test_a_committed_batch_that_wrote_no_record_is_recoverable_by_reading(world):
+    """A statement batch of personal-only lines has no expense op (section 12.2), so it commits
+    with ``records == []``. The I1 recovery reads of that real commit must not fail."""
+    request_id, approval_id = v2_20.committed_batch(world)
+    receipt = world.backend.receipt(approval_id)
+    contract.read_receipt_v2(receipt)
+    assert receipt["status"] == "committed" and receipt["kind"] == "statement_batch"
+    assert receipt["records"] == [] and receipt["committed_at"] and receipt["undo"] is None
+    found = world.backend.proposal_request(request_id)
+    contract.read_proposal_request_v2(found)
+    assert found["status"] == "found" and found["proposal"]["status"] == "committed"
+    assert found["receipt"] == receipt
 
 
 def test_a_proposal_request_never_reads_across_epochs(world):
