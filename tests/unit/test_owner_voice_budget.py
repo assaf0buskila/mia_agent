@@ -124,7 +124,14 @@ async def test_scenario_c_slow_successful_stt_leaves_full_owner_budget(monkeypat
     port = RecordingMessagePort()
 
     await telegram_owner.process_telegram_owner_update(
-        item={"id": event_id, "from": ACTOR, "chat_id": ACTOR, "message_id": "1", "text": ""},
+        item={
+            "id": event_id,
+            "from": ACTOR,
+            "chat_id": ACTOR,
+            "chat_type": "private",
+            "message_id": "1",
+            "text": "",
+        },
         envelope_kind="audio",
         voice_file_id="voice-file-1",
         port=port,
@@ -181,7 +188,13 @@ async def _text_only_coalescing_does_not_consume_reasoning_time(monkeypatch) -> 
     port = RecordingMessagePort()
 
     await telegram_owner.process_telegram_owner_update(
-        item={"id": event_id, "from": ACTOR, "chat_id": ACTOR, "text": "מה המצב"},
+        item={
+            "id": event_id,
+            "from": ACTOR,
+            "chat_id": ACTOR,
+            "chat_type": "private",
+            "text": "מה המצב",
+        },
         envelope_kind="text",
         voice_file_id=None,
         port=port,
@@ -258,7 +271,14 @@ async def test_stt_failure_sends_stt_specific_reply_not_owner_timeout(monkeypatc
     port = RecordingMessagePort()
 
     await telegram_owner.process_telegram_owner_update(
-        item={"id": event_id, "from": ACTOR, "chat_id": ACTOR, "message_id": "1", "text": ""},
+        item={
+            "id": event_id,
+            "from": ACTOR,
+            "chat_id": ACTOR,
+            "chat_type": "private",
+            "message_id": "1",
+            "text": "",
+        },
         envelope_kind="audio",
         voice_file_id="voice-file-2",
         port=port,

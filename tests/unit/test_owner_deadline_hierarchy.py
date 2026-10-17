@@ -402,7 +402,13 @@ async def test_genuine_owner_timeout_emits_exactly_one_reply(monkeypatch) -> Non
     port = RecordingMessagePort()
 
     await telegram_owner.process_telegram_owner_update(
-        item={"id": event_id, "from": ACTOR, "chat_id": ACTOR, "text": "?"},
+        item={
+            "id": event_id,
+            "from": ACTOR,
+            "chat_id": ACTOR,
+            "chat_type": "private",
+            "text": "?",
+        },
         envelope_kind="text",
         voice_file_id=None,
         port=port,
@@ -438,7 +444,13 @@ async def test_late_completion_during_drain_never_duplicates_the_reply(monkeypat
     port = RecordingMessagePort()
 
     await telegram_owner.process_telegram_owner_update(
-        item={"id": event_id, "from": ACTOR, "chat_id": ACTOR, "text": "check"},
+        item={
+            "id": event_id,
+            "from": ACTOR,
+            "chat_id": ACTOR,
+            "chat_type": "private",
+            "text": "check",
+        },
         envelope_kind="text",
         voice_file_id=None,
         port=port,

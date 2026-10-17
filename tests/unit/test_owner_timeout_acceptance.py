@@ -258,6 +258,7 @@ async def test_voice_and_text_converge_on_the_same_owner_budget(monkeypatch) -> 
                 "id": event_id,
                 "from": ACTOR,
                 "chat_id": ACTOR,
+                "chat_type": "private",
                 "message_id": "1",
                 "text": "" if voice_file_id else "מה יש לי מחר",
             },
