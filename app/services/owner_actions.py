@@ -75,6 +75,46 @@ class OwnerActionTerminal(RuntimeError):
         super().__init__(status)
 
 
+class OwnerActionNotStarted(RuntimeError):
+    """The decision was refused before anything was dispatched (section 5.2 ``not_started``).
+
+    Raised only on ``WriteDispatch.not_started`` proof, e.g. by the V2-17 Sheets fence, so the
+    claim is safe to release: a later tap decides afresh instead of parking a sticky unknown.
+    """
+
+    def __init__(self, reason: str):
+        self.reason = reason
+        super().__init__(reason)
+
+
+# The V2-17 Sheets fence's own refusals (assaf_os.AssafOsPort._fence), raised before dispatch.
+_FENCE_REFUSALS = frozenset({"authority_moved", "ledger_unavailable"})
+
+
+def _decide_sheets_card(make_port, operation: str, proposal_id: str, request_id: str):
+    """One Telegram decision on an Apps Script card.
+
+    Only a fence refusal that the dispatch counter proves came before dispatch is
+    ``OwnerActionNotStarted``. Any other failure is left to the caller as uncertain.
+    """
+    from contextlib import nullcontext
+
+    from app.core.owner_write import WriteDispatch, current_write_dispatch
+    from app.services.assaf_os import AssafOsError, DecisionRequest
+
+    outer = current_write_dispatch()
+    context = WriteDispatch(operation).activate() if outer is None else nullcontext(outer)
+    with context as dispatch:
+        try:
+            return make_port().decide(
+                operation, proposal_id, DecisionRequest(request_id=request_id)
+            )
+        except AssafOsError as exc:
+            if exc.code in _FENCE_REFUSALS and dispatch.not_started:
+                raise OwnerActionNotStarted(exc.code) from None
+            raise
+
+
 def typed_composio_binding(settings, toolkit: str, *, port: object | None = None) -> dict[str, Any]:
     """Return the exact account and active connection bound to a typed write."""
     toolkit = toolkit.strip().upper()
@@ -348,6 +388,11 @@ def execute_owner_action(
         # write committed, so this execution claim is safe to retire.
         store.release_operation(scope="approval", key=operation_key)
         return OwnerActionExecution(exc.status)
+    except OwnerActionNotStarted as exc:
+        # Proven never dispatched (section 5.2): retire the claim, never pending_review.
+        store.release_operation(scope="approval", key=operation_key)
+        _LOG.info("owner_actions op=execute outcome=not_started reason=%s", exc.reason)
+        return OwnerActionExecution("not_started")
     except Exception:  # provider may have applied the write before transport failed
         store.mark_provider_write_pending_review(scope="approval", key=operation_key)
         return OwnerActionExecution("unknown")
@@ -821,7 +866,7 @@ def execute_approved_owner_action_with_adapters(
         )
 
     if envelope["kind"] == "assaf_os.approve":
-        from app.services.assaf_os import AssafOsError, DecisionRequest
+        from app.services.assaf_os import AssafOsError
         from app.services.os_backend import get_os_backend
 
         def schema(kind, values):
@@ -848,7 +893,9 @@ def execute_approved_owner_action_with_adapters(
             try:
                 get_os_backend(settings, principal.actor_id, actor="TELEGRAM_APPROVAL")
                 return kind == "assaf_os.approve"
-            except AssafOsError:
+            except (AssafOsError, ledger_api.LedgerError) as exc:
+                # A LedgerError is handled here explicitly (V2-17 review): no card is connected.
+                _LOG.info("owner_actions op=connect outcome=refused reason=%s", exc.code)
                 return False
 
         def target(kind, values):
@@ -888,11 +935,13 @@ def execute_approved_owner_action_with_adapters(
 
         def run(kind, values):
             del kind
-            port = get_os_backend(settings, principal.actor_id, actor="TELEGRAM_APPROVAL")
-            receipt = port.decide(
+            receipt = _decide_sheets_card(
+                lambda: get_os_backend(
+                    settings, principal.actor_id, actor="TELEGRAM_APPROVAL"
+                ),
                 "approve",
                 str(values["proposal_id"]),
-                DecisionRequest(request_id=str(values["request_id"])),
+                str(values["request_id"]),
             )
             status = receipt.get("status")
             if status != "committed":
@@ -1442,16 +1491,19 @@ def reject_assaf_os_owner_action(
     if not store.claim_provider_write(scope="approval", key=operation_key):
         return OwnerActionExecution("already_handled")
     try:
-        from app.services.assaf_os import DecisionRequest
         from app.services.os_backend import get_os_backend
 
-        result = get_os_backend(
-            settings, principal.actor_id, actor="TELEGRAM_APPROVAL"
-        ).decide(
+        result = _decide_sheets_card(
+            lambda: get_os_backend(settings, principal.actor_id, actor="TELEGRAM_APPROVAL"),
             "reject",
             str(parameters["proposal_id"]),
-            DecisionRequest(request_id=str(parameters["rejection_request_id"])),
+            str(parameters["rejection_request_id"]),
         )
+    except OwnerActionNotStarted as exc:
+        # Proven never dispatched (section 5.2): retire the claim, never pending_review.
+        store.release_operation(scope="approval", key=operation_key)
+        _LOG.info("owner_actions op=reject outcome=not_started reason=%s", exc.reason)
+        return OwnerActionExecution("not_started")
     except Exception:  # remote may have accepted before transport failed
         store.mark_provider_write_pending_review(scope="approval", key=operation_key)
         return OwnerActionExecution("unknown")

@@ -1184,6 +1184,10 @@ def recover_expired_approved_crm_lead(
             summary=summary,
             next_step=next_step,
         )
+    if _uses_ledger(settings):
+        # An Apps Script card under postgres: the backend is the ledger, which cannot prove an
+        # Apps Script no-write (V2-17 review). Refuse explicitly; no backend is built.
+        raise ValueError("remote_no_write_unproven")
     port = get_os_backend(settings, principal.actor_id, actor="MIA")
     remote = port.proposal(str(parameters["proposal_id"]))
     receipt = port.receipt(str(parameters["request_id"]))

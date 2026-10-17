@@ -543,6 +543,7 @@ async def _handle_callback(
             "expired": "האישור פג. צריך להכין בקשת אישור חדשה.",
             "rejected": "ההצעה כבר נדחתה ולא בוצעה.",
             "policy_denied": "מתג העצירה פעיל. הפעולה לא בוצעה.",
+            "not_started": "הפעולה לא נשלחה ולא בוצעה. אפשר לנסות שוב מאוחר יותר.",
         }.get(outcome.status, "הפעולה לא בוצעה.")
     if resolved is not None and decision == "reject":
         rejected_row = store.get_approval_by_approval_id(token)
@@ -571,6 +572,7 @@ async def _handle_callback(
                 "expired": "ההצעה פגה ולא בוצעה.",
                 "target_changed": "היעד השתנה וההצעה לא בוצעה.",
                 "policy_denied": "מתג העצירה פעיל. הדחייה לא נשלחה לגיליון.",
+                "not_started": "הדחייה נשמרה, אבל לא נשלחה לגיליון. ההצעה תפוג ולא תבוצע.",
             }.get(rejected.status, reply_text)
     # Every branch above either interpolates only server-escaped HTML (bold()/code()
     # from resolve_owner_callback_result) or a fixed Hebrew literal, except
