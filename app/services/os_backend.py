@@ -166,7 +166,9 @@ class SheetsOsBackend:
 
 
 def _log(outcome: str, reason: str) -> None:
-    _LOG.info("os_backend op=select outcome=%s reason=%s", outcome, reason)
+    # The routine sheets/ok selection runs on every OS route and Mia tool call: DEBUG, not INFO.
+    level = logging.DEBUG if (outcome, reason) == ("sheets", "ok") else logging.INFO
+    _LOG.log(level, "os_backend op=select outcome=%s reason=%s", outcome, reason)
 
 
 def _refuse_ledger(reason: str) -> AssafOsError:
@@ -192,6 +194,8 @@ def _postgres_backend(settings: Any, owner_id: str, actor: ActorSource, principa
     except (AssafOsError, LedgerError) as exc:
         _log("refused", exc.code)
         raise
+    except Exception:  # any other construction failure still fails closed, never a raw 500
+        raise _refuse_ledger("backend_init_failed") from None
     _log("postgres", "ok")
     return backend
 

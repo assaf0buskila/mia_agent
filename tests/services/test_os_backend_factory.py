@@ -148,13 +148,14 @@ def test_sheets_returns_the_wrapped_port_and_never_touches_the_ledger(monkeypatc
     ledger_calls = []
     monkeypatch.setattr(ledger_api, "core_authority_state", lambda s: ledger_calls.append(s))
     monkeypatch.setattr(ledger_api, "build_ledger", lambda s: ledger_calls.append(s))
-    with caplog.at_level(logging.INFO, logger=LOGGER):
+    with caplog.at_level(logging.DEBUG, logger=LOGGER):
         backend = get_os_backend(config, OWNER, actor="MIA")
     assert isinstance(backend, SheetsOsBackend) and backend.kind == "sheets"
     assert isinstance(backend._port, port.AssafOsPort)
     assert (backend.owner_id, backend.actor_source) == (OWNER, "MIA")
     assert ledger_calls == []
     assert backend_lines(caplog) == ["os_backend op=select outcome=sheets reason=ok"]
+    assert [r.levelno for r in caplog.records if r.name == LOGGER] == [logging.DEBUG]
 
 
 def test_sheets_never_returns_a_ledger_backend_even_with_the_ledger_ready(pg_stub):
@@ -214,6 +215,25 @@ def test_postgres_fails_closed_when_the_module_has_no_backend_class(monkeypatch,
             get_os_backend(pg_settings(), OWNER, actor="OS")
     assert (refused.value.code, refused.value.status) == ("ledger_unavailable", 503)
     assert backend_lines(caplog) == ["os_backend op=select outcome=refused reason=module_missing"]
+
+
+def test_postgres_fails_closed_when_the_backend_constructor_raises(monkeypatch, caplog):
+    module = types.ModuleType(PG_MODULE)
+
+    class Broken:
+        def __init__(self, *args, **kwargs):
+            raise RuntimeError("secret dsn text")
+
+    module.PostgresOsBackend = Broken
+    monkeypatch.setitem(sys.modules, PG_MODULE, module)
+    with caplog.at_level(logging.INFO, logger=LOGGER):
+        with pytest.raises(port.AssafOsError) as refused:
+            get_os_backend(pg_settings(), OWNER, actor="OS")
+    assert (refused.value.code, refused.value.status) == ("ledger_unavailable", 503)
+    assert refused.value.__cause__ is None and refused.value.__suppress_context__
+    lines = backend_lines(caplog)
+    assert lines == ["os_backend op=select outcome=refused reason=backend_init_failed"]
+    assert all("secret" not in record.getMessage() for record in caplog.records)
 
 
 def test_postgres_never_builds_the_sheets_port(pg_stub, monkeypatch):
@@ -978,13 +998,38 @@ def port_references(source: str):
                 return node.name
         return None
 
+    def in_annotation(node):
+        child = node
+        while child in parents:
+            parent = parents[child]
+            if isinstance(parent, ast.arg) and parent.annotation is child:
+                return True
+            if isinstance(parent, ast.AnnAssign) and parent.annotation is child:
+                return True
+            functions = (ast.FunctionDef, ast.AsyncFunctionDef)
+            if isinstance(parent, functions) and parent.returns is child:
+                return True
+            child = parent
+        return False
+
     found = []
+    calls = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
             callee = node.func
             name = callee.id if isinstance(callee, ast.Name) else getattr(callee, "attr", None)
             if name == "AssafOsPort":
                 found.append(("call", node.lineno, enclosing(node)))
+                calls.add(callee)
+    for node in ast.walk(tree):
+        # Any other load of the name (an alias, functools.partial, __new__, a dict of factories)
+        # could smuggle the port past the factory; type annotations are not loads at run time.
+        loaded = (isinstance(node, ast.Name) and node.id == "AssafOsPort") or (
+            isinstance(node, ast.Attribute) and node.attr == "AssafOsPort"
+        )
+        if loaded and isinstance(node.ctx, ast.Load) and node not in calls:
+            if not in_annotation(node):
+                found.append(("load", node.lineno, enclosing(node)))
         elif isinstance(node, ast.ImportFrom):
             for alias in node.names:
                 if alias.name == "AssafOsPort" and alias.asname:
