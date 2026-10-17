@@ -9,6 +9,7 @@ its tables. No default privileges are granted for future tables.
 
 from collections.abc import Mapping
 from types import MappingProxyType
+from typing import NamedTuple
 
 from sqlalchemy import text
 from sqlalchemy.engine import Connection, Engine
@@ -23,8 +24,12 @@ DENIED = "ledger_role_denied"
 # (left out, pg_temp is searched FIRST for relations). Functions never resolve there.
 CATALOG_SEARCH_PATH = "SET LOCAL search_path = pg_catalog, pg_temp"
 
+# §18.2: SELECT + INSERT everywhere except two read-only tables. os_authority is written
+# by the privileged AuthorityAdmin only, and so is the os_workspaces row itself
+# (`ensure_workspace`, §5.4: the runtime never creates a workspace).
+_READ_ONLY_TABLES = frozenset({"os_authority", "os_workspaces"})
 TABLE_PRIVILEGES: Mapping[str, frozenset[str]] = MappingProxyType({
-    name: frozenset({"SELECT"} if name == "os_authority" else {"SELECT", "INSERT"})
+    name: frozenset({"SELECT"} if name in _READ_ONLY_TABLES else {"SELECT", "INSERT"})
     for name in sorted(TABLES)
 })
 # §18.2: every record table has these UPDATE columns plus its own typed columns.
@@ -60,15 +65,56 @@ COLUMN_UPDATES: Mapping[str, tuple[str, ...]] = MappingProxyType({
 FUNCTION_PRIVILEGES = frozenset({"expense_source_key_sha256(text)"})
 # The complete assaf_os inventory, owned by assaf_os_owner (provisioning re-owns it).
 OWNED_TABLES = tuple(sorted(TABLES | {"schema_migrations"}))
-OWNED_FUNCTIONS = (
-    "expense_source_key_sha256(text)", "require_pending_assistant_proposal_insert()",
-)
+
+
+class FunctionPin(NamedTuple):
+    """The reviewed pg_proc shape of an assaf_os function, as the V2-14 SQL wrote it."""
+
+    language: str
+    volatility: str  # pg_proc.provolatile: i immutable, v volatile
+    strict: bool
+    returns: str
+    config: tuple[str, ...] | None  # pg_proc.proconfig: the function's own SET clauses
+    source: str  # pg_proc.prosrc: the body between the dollar quotes, verbatim
+
+
+# Both functions are pinned by body and settings, not just by name and owner: CREATE OR
+# REPLACE keeps the owner and the ACL, and ALTER FUNCTION ... SET search_path changes how
+# the body resolves names. A test ties each pin to migrations_assaf_os/20261015_*.sql.
+FUNCTION_PINS: Mapping[str, FunctionPin] = MappingProxyType({
+    "expense_source_key_sha256(text)": FunctionPin(
+        "sql", "i", True, "bytea", ("search_path=pg_catalog",),
+        "\n    SELECT sha256(convert_to(value, 'UTF8'));\n",
+    ),
+    "require_pending_assistant_proposal_insert()": FunctionPin(
+        "plpgsql", "v", False, "trigger", None,
+        r"""
+BEGIN
+    IF NEW.source LIKE 'ASSISTANT\_%' ESCAPE '\' AND NEW.status <> 'pending' THEN
+        RAISE EXCEPTION 'assistant proposals must start pending'
+            USING ERRCODE = '23514', CONSTRAINT = 'os_proposals_assistant_insert_pending';
+    END IF;
+    RETURN NEW;
+END;
+""",
+    ),
+})
+OWNED_FUNCTIONS = tuple(FUNCTION_PINS)
 # The only non-internal trigger on any assaf_os relation:
 # (table, trigger, function, tgenabled 'O' = fires normally, tgtype 7 = ROW|BEFORE|INSERT).
+# _closure also requires it to have no WHEN clause, no arguments and no column list.
 TRIGGERS = frozenset({(
     "os_proposals", "os_proposals_assistant_insert_pending",
     "assaf_os.require_pending_assistant_proposal_insert()", "O", 7,
 )})
+# Predefined roles whose members reach assaf_os without any ACL, ownership or pg_depend
+# edge: row access (read and write all data, maintain from PostgreSQL 17) and the file and
+# program roles that read or overwrite the data files or run as the server's OS user. A
+# role that is absent on this server version (pg_maintain on 16) matches nothing.
+_PRIVILEGED_PREDEFINED = (
+    "pg_read_all_data", "pg_write_all_data", "pg_maintain",
+    "pg_read_server_files", "pg_write_server_files", "pg_execute_server_program",
+)
 _USER_SCHEMA = (
     "n.nspname NOT IN ('pg_catalog', 'information_schema') "
     "AND n.nspname NOT LIKE 'pg_toast%' AND n.nspname NOT LIKE 'pg_temp_%'"
@@ -211,12 +257,17 @@ def _closure(conn: Connection) -> None:
         "SELECT EXISTS(SELECT 1 FROM pg_rewrite r JOIN pg_class c ON c.oid=r.ev_class "
         "WHERE c.relnamespace=to_regnamespace('assaf_os'))"
     )))
+    # The last column is false for a WHEN clause (tgqual), trigger arguments or a column
+    # list: re-creating the trigger under the same name with WHEN (false) keeps every
+    # other column here unchanged and silently drops the guard.
     triggers = conn.execute(text(
         "SELECT c.relname, t.tgname, t.tgfoid::regprocedure::text, t.tgenabled::text, "
-        "t.tgtype::int FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid "
+        "t.tgtype::int, (t.tgqual IS NULL AND t.tgnargs = 0 AND t.tgattr = ''::int2vector) "
+        "FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid "
         "WHERE c.relnamespace=to_regnamespace('assaf_os') AND NOT t.tgisinternal"
     )).all()
-    _require(len(triggers) == len(TRIGGERS) and {tuple(row) for row in triggers} == TRIGGERS)
+    _require(len(triggers) == len(TRIGGERS) and all(row[5] is True for row in triggers))
+    _require({tuple(row[:5]) for row in triggers} == TRIGGERS)
     _require(not conn.scalar(text(
         "SELECT EXISTS(SELECT 1 FROM pg_class c WHERE c.relnamespace=to_regnamespace('assaf_os') "
         "AND (c.relrowsecurity OR c.relforcerowsecurity)) OR EXISTS(SELECT 1 FROM pg_policy p "
@@ -295,6 +346,33 @@ def _footprints(conn: Connection, main_role: str) -> None:
         WHERE p.prosecdef AND p.oid >= {_FIRST_NORMAL_OID}::oid
           AND (r.rolsuper OR r.rolname = :owner))
     """), params))
+    # The same holds for ANY other owner that can reach assaf_os, and the list of such
+    # owners is not just superusers and the schema owner. The predefined data roles
+    # (pg_write_all_data, pg_read_all_data, ...) grant row access with no ACL entry, no
+    # ownership and no pg_depend edge, so none of the checks above sees them. Two rules:
+    #  (a) no ordinary role anywhere in the cluster is a member of one of them, with or
+    #      without INHERIT (SET ROLE is enough); a LOGIN member would be a second identity
+    #      with read or write access to every ledger row;
+    #  (b) a SECURITY DEFINER routine's non-superuser owner holds no privilege on any
+    #      assaf_os relation, however it got it. (b) also covers a predefined role added
+    #      to a later PostgreSQL version that (a) does not yet list.
+    _require(not conn.scalar(text(f"""
+        SELECT EXISTS(SELECT 1 FROM pg_roles r JOIN pg_roles g ON g.rolname = ANY(:privileged)
+        WHERE r.oid >= {_FIRST_NORMAL_OID}::oid AND NOT r.rolsuper
+          AND pg_has_role(r.oid, g.oid, 'MEMBER'))
+    """), {**params, "privileged": list(_PRIVILEGED_PREDEFINED)}))
+    _require(not conn.scalar(text(f"""
+        SELECT EXISTS(SELECT 1 FROM pg_proc p JOIN pg_roles r ON r.oid = p.proowner
+        WHERE p.prosecdef AND p.oid >= {_FIRST_NORMAL_OID}::oid
+          AND NOT r.rolsuper AND r.rolname <> :owner
+          AND EXISTS(SELECT 1 FROM pg_class c
+                     WHERE c.relnamespace = to_regnamespace('assaf_os')
+                       AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+                       AND (has_table_privilege(r.oid, c.oid,
+                              'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+                            OR has_any_column_privilege(r.oid, c.oid,
+                              'SELECT,INSERT,UPDATE,REFERENCES'))))
+    """), params))
 
 
 def _catalog(conn: Connection, main_role: str, migration_role: str | None) -> None:
@@ -316,12 +394,19 @@ def _catalog(conn: Connection, main_role: str, migration_role: str | None) -> No
     })
     functions = conn.execute(text(
         "SELECT p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')', "
-        "pg_get_userbyid(p.proowner), p.prosecdef FROM pg_proc p JOIN pg_namespace n "
-        "ON n.oid=p.pronamespace WHERE n.nspname='assaf_os'"
+        "pg_get_userbyid(p.proowner), p.prosecdef, l.lanname, p.provolatile::text, "
+        "p.proisstrict, p.prorettype::regtype::text, p.proconfig, p.prosrc "
+        "FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace "
+        "JOIN pg_language l ON l.oid=p.prolang WHERE n.nspname='assaf_os'"
     )).all()
     # identity_arguments includes the declared argument name in this SQL helper.
-    _require({(name.replace('value text', 'text'), owner, security) for name, owner, security
-              in functions} == {(name, OWNER_ROLE, False) for name in OWNED_FUNCTIONS})
+    _require({
+        (name.replace('value text', 'text'), owner, security,
+         FunctionPin(language, volatility, strict, returns,
+                     None if config is None else tuple(config), source))
+        for name, owner, security, language, volatility, strict, returns, config, source
+        in functions
+    } == {(name, OWNER_ROLE, False, pin) for name, pin in FUNCTION_PINS.items()})
     _acl(conn, """
         SELECT pg_get_userbyid(a.grantee),a.privilege_type,a.is_grantable
         FROM pg_namespace n CROSS JOIN LATERAL
@@ -419,9 +504,10 @@ def validate_ledger_role(
     the first connection, every 10 minutes and after a reconnect, and cache the result.
     Requires separate, unimpersonated identities on the same PostgreSQL server and
     database. migration_role=None derives the migration identity as the single
-    ADMIN-only member of assaf_os_owner. Every refusal, including an unavailable
-    catalog, is the single sanitized ValueError('ledger_role_denied'). It does not
-    activate the ledger.
+    ADMIN-only member of assaf_os_owner. The ledger session must also run in
+    session_replication_role = 'origin' (a cluster-wide replica setting is invisible to
+    the catalog checks). Every refusal, including an unavailable catalog, is the single
+    sanitized ValueError('ledger_role_denied'). It does not activate the ledger.
     """
     try:
         _require(db.get_bind().dialect.name == main_engine.dialect.name == "postgresql")
@@ -432,6 +518,10 @@ def validate_ledger_role(
         )
         ledger = db.execute(identity).one()
         _require(ledger[3] == ledger[4] == RUNTIME_ROLE and None not in ledger[:3])
+        # session_replication_role = replica (ALTER SYSTEM or postgresql.conf, which neither
+        # the role- nor the database-setting check sees) turns off foreign keys and the
+        # assistant trigger for this very session.
+        _require(db.scalar(text("SELECT current_setting('session_replication_role')")) == "origin")
         with main_engine.connect() as main:
             main.execute(text(CATALOG_SEARCH_PATH))
             app = main.execute(identity).one()

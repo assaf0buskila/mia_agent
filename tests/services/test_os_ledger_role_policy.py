@@ -7,6 +7,7 @@ import importlib.util
 import os
 import re
 import stat
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -114,6 +115,20 @@ def test_column_updates_is_exactly_the_frozen_map():
     for immutable in ("os_receipts", "os_events", "schema_migrations"):
         assert immutable not in policy().COLUMN_UPDATES
     assert "epoch" not in policy().COLUMN_UPDATES["os_workspaces"]
+
+
+def test_table_privileges_are_exactly_the_frozen_map():
+    # §18.2: every table is SELECT + INSERT for the runtime role except os_authority
+    # and os_workspaces, which are SELECT only. The workspace row is created once by the
+    # privileged AuthorityAdmin (`mia os-authority init`, §5.4), never by the runtime.
+    read_only = {"os_authority", "os_workspaces"}
+    assert dict(policy().TABLE_PRIVILEGES) == {
+        name: frozenset({"SELECT"} if name in read_only else {"SELECT", "INSERT"})
+        for name in TABLES
+    }
+    statements = policy().ledger_grant_statements()
+    assert "GRANT SELECT ON TABLE assaf_os.os_workspaces TO assaf_os_ledger;" in statements
+    assert not [s for s in statements if "INSERT" in s and "os_workspaces" in s]
 
 
 def test_column_updates_are_pinned_to_the_migration_sql():
@@ -503,6 +518,72 @@ REVIEW_R1_MUTATIONS = [
     "GRANT TEMP ON DATABASE mia_ledger_test TO v215_main",
 ]
 
+# Review of #170 r2 (round 1), major: privileges that reach assaf_os through the predefined
+# roles rather than through an ACL, ownership or pg_depend. The first entry is the reviewer's
+# reproduction verbatim: a SECURITY DEFINER function owned by a pg_write_all_data member
+# deletes ledger rows for the main role, while a direct DELETE by the main role fails.
+REVIEW_R2_MUTATIONS = [
+    "CREATE ROLE v215_px NOLOGIN NOINHERIT; "
+    "GRANT pg_write_all_data, pg_read_all_data TO v215_px WITH INHERIT TRUE; "
+    "CREATE FUNCTION public.v215_pxf() RETURNS void LANGUAGE sql SECURITY DEFINER "
+    "SET search_path = pg_catalog "
+    "AS 'DELETE FROM assaf_os.os_workspaces WHERE workspace_id=''v215probe'''; "
+    "REVOKE ALL ON FUNCTION public.v215_pxf() FROM PUBLIC; "
+    "ALTER FUNCTION public.v215_pxf() OWNER TO v215_px; "
+    "GRANT EXECUTE ON FUNCTION public.v215_pxf() TO v215_main; "
+    "GRANT USAGE ON SCHEMA public TO v215_main",
+    # pg_write_all_data alone: an unqualified DELETE works the same way.
+    "CREATE ROLE v215_pw NOLOGIN NOINHERIT; GRANT pg_write_all_data TO v215_pw WITH INHERIT TRUE; "
+    "CREATE FUNCTION public.v215_pwf() RETURNS void LANGUAGE sql SECURITY DEFINER "
+    "SET search_path = pg_catalog AS 'DELETE FROM assaf_os.os_events'; "
+    "REVOKE ALL ON FUNCTION public.v215_pwf() FROM PUBLIC; "
+    "ALTER FUNCTION public.v215_pwf() OWNER TO v215_pw; "
+    "GRANT EXECUTE ON FUNCTION public.v215_pwf() TO v215_main",
+    # A second LOGIN identity with write access, set-only (no INHERIT) or inherited.
+    "CREATE ROLE v215_ps LOGIN NOINHERIT; "
+    "GRANT pg_write_all_data TO v215_ps WITH INHERIT FALSE, SET TRUE",
+    "CREATE ROLE v215_pi LOGIN; GRANT pg_write_all_data TO v215_pi WITH INHERIT TRUE",
+    # A second LOGIN identity with read access to every ledger row.
+    "CREATE ROLE v215_pr LOGIN; GRANT pg_read_all_data TO v215_pr",
+    "GRANT pg_write_all_data TO v215_other",
+    "GRANT pg_read_all_data TO v215_other",
+    # Transitive membership, with no INHERIT anywhere on the chain.
+    "CREATE ROLE v215_pg NOLOGIN NOINHERIT; GRANT pg_write_all_data TO v215_pg; "
+    "GRANT v215_pg TO v215_other WITH INHERIT FALSE, SET TRUE",
+    # The same class one step further: file and program access reach the data files
+    # (or run as the server's OS user) without any ACL on assaf_os.
+    "GRANT pg_read_server_files TO v215_other",
+    "GRANT pg_write_server_files TO v215_other",
+    "GRANT pg_execute_server_program TO v215_other",
+    # Minor: the one allowed trigger and both owned functions are pinned, not just named.
+    "DROP TRIGGER os_proposals_assistant_insert_pending ON assaf_os.os_proposals; "
+    "CREATE TRIGGER os_proposals_assistant_insert_pending BEFORE INSERT ON assaf_os.os_proposals "
+    "FOR EACH ROW WHEN (false) "
+    "EXECUTE FUNCTION assaf_os.require_pending_assistant_proposal_insert()",
+    "DROP TRIGGER os_proposals_assistant_insert_pending ON assaf_os.os_proposals; "
+    "CREATE TRIGGER os_proposals_assistant_insert_pending BEFORE INSERT ON assaf_os.os_proposals "
+    "FOR EACH ROW EXECUTE FUNCTION assaf_os.require_pending_assistant_proposal_insert('x')",
+    "DROP TRIGGER os_proposals_assistant_insert_pending ON assaf_os.os_proposals; "
+    "CREATE TRIGGER os_proposals_assistant_insert_pending "
+    "BEFORE INSERT OR UPDATE OF status ON assaf_os.os_proposals "
+    "FOR EACH ROW EXECUTE FUNCTION assaf_os.require_pending_assistant_proposal_insert()",
+    "ALTER TABLE assaf_os.os_proposals ENABLE ALWAYS TRIGGER os_proposals_assistant_insert_pending",
+    "CREATE OR REPLACE FUNCTION assaf_os.require_pending_assistant_proposal_insert() "
+    "RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$",
+    "CREATE OR REPLACE FUNCTION assaf_os.require_pending_assistant_proposal_insert() "
+    "RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN DELETE FROM assaf_os.os_events; "
+    "RETURN NEW; END $$",
+    "ALTER FUNCTION assaf_os.require_pending_assistant_proposal_insert() SET search_path = public",
+    "CREATE OR REPLACE FUNCTION assaf_os.expense_source_key_sha256(value text) RETURNS bytea "
+    "LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE SET search_path = pg_catalog "
+    "AS $$ SELECT sha256(convert_to(value || 'x', 'UTF8')) $$",
+    "ALTER FUNCTION assaf_os.expense_source_key_sha256(text) SET search_path = public",
+    "ALTER FUNCTION assaf_os.expense_source_key_sha256(text) RESET search_path",
+    "ALTER FUNCTION assaf_os.expense_source_key_sha256(text) VOLATILE",
+    # §18.2 (found while re-verifying the grant map): os_workspaces is SELECT only.
+    "GRANT INSERT ON assaf_os.os_workspaces TO assaf_os_ledger",
+]
+
 
 @pytest.mark.parametrize("mutation", [
     "GRANT DELETE ON assaf_os.os_leads TO assaf_os_ledger",
@@ -585,6 +666,7 @@ REVIEW_R1_MUTATIONS = [
     "CREATE TABLE public.v215_extra (id integer); "
     "GRANT SELECT ON public.v215_extra TO assaf_os_ledger",
     *REVIEW_R1_MUTATIONS,
+    *REVIEW_R2_MUTATIONS,
 ])
 def test_extra_or_missing_privilege_fails(roles, mutation):
     admin, _, _ = roles
@@ -594,6 +676,97 @@ def test_extra_or_missing_privilege_fails(roles, mutation):
         with pytest.raises(ValueError, match=DENIED):
             catalog(c)
         c.rollback()
+    validate(roles)
+
+
+def sql_function_bodies() -> dict[str, str]:
+    """Function name -> dollar-quoted body, per CREATE FUNCTION of the frozen V2-14 SQL."""
+    return {
+        match.group(1): match.group(2)
+        for match in re.finditer(
+            r"CREATE FUNCTION assaf_os\.(\w+)\([^)]*\)\s.*?\bAS \$\$(.*?)\$\$;",
+            SQL.read_text(encoding="utf-8"), re.S,
+        )
+    }
+
+
+def test_function_pins_are_the_frozen_migration_sql():
+    """The validator pins each owned function's body and settings; they equal the SQL."""
+    pins = policy().FUNCTION_PINS
+    assert tuple(pins) == policy().OWNED_FUNCTIONS == OWNED_FUNCTIONS
+    bodies = sql_function_bodies()
+    assert set(bodies) == {identity.split("(")[0] for identity in pins}
+    for identity, pin in pins.items():
+        assert pin.source == bodies[identity.split("(")[0]], identity
+    sha = pins["expense_source_key_sha256(text)"]
+    assert (sha.language, sha.volatility, sha.strict, sha.returns, sha.config) == (
+        "sql", "i", True, "bytea", ("search_path=pg_catalog",)
+    )
+    trigger = pins["require_pending_assistant_proposal_insert()"]
+    assert (trigger.language, trigger.volatility, trigger.strict, trigger.returns,
+            trigger.config) == ("plpgsql", "v", False, "trigger", None)
+    # What the SQL declares for each function header, spelled here independently.
+    sql = SQL.read_text(encoding="utf-8")
+    assert "LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE\nSET search_path = pg_catalog" in sql
+    assert "RETURNS trigger\nLANGUAGE plpgsql\nAS $$" in sql
+
+
+def test_privileged_predefined_roles_are_the_reviewed_set():
+    """Data and OS reach by membership; absent roles (pg_maintain before PG17) are no-ops."""
+    assert set(policy()._PRIVILEGED_PREDEFINED) == {
+        "pg_read_all_data", "pg_write_all_data", "pg_maintain",
+        "pg_read_server_files", "pg_write_server_files", "pg_execute_server_program",
+    }
+
+
+def test_secdef_owner_privilege_check_stands_without_the_membership_check(roles, monkeypatch):
+    """Defence in depth: with the membership rule off, the reviewer's probe is still refused,
+    because the owner of a SECURITY DEFINER routine holds privileges on assaf_os."""
+    monkeypatch.setattr(policy(), "_PRIVILEGED_PREDEFINED", ())
+    with roles[0].connect() as c, c.begin():
+        c.exec_driver_sql(REVIEW_R2_MUTATIONS[0])
+        with pytest.raises(ValueError, match=DENIED):
+            catalog(c)
+        c.rollback()
+
+
+def test_unprivileged_secdef_owner_and_monitoring_roles_are_accepted(roles):
+    """No false positives on what production may hold: the main role owns public objects
+    (and may own SECURITY DEFINER routines, with nothing on assaf_os), and monitoring roles
+    read statistics only."""
+    with roles[0].connect() as c, c.begin():
+        c.exec_driver_sql(
+            "CREATE FUNCTION public.v215_okf() RETURNS int LANGUAGE sql SECURITY DEFINER "
+            "SET search_path = pg_catalog AS 'SELECT 1'; "
+            "REVOKE ALL ON FUNCTION public.v215_okf() FROM PUBLIC; "
+            "ALTER FUNCTION public.v215_okf() OWNER TO v215_main; "
+            "GRANT pg_monitor, pg_read_all_settings, pg_read_all_stats, pg_stat_scan_tables "
+            "TO v215_other"
+        )
+        catalog(c)
+        c.rollback()
+
+
+def test_ledger_session_must_run_in_origin_replication_role(roles):
+    """ALTER SYSTEM or postgresql.conf can set session_replication_role = replica, which
+    switches off foreign keys and the assistant trigger and which neither the role-setting
+    nor the database-setting check can see. The ledger session itself is asserted."""
+    admin, _, main = roles
+    for replication_role in ("origin", "replica"):
+        with admin.connect() as conn:
+            try:
+                # The superuser sets the value first; the session then becomes the runtime
+                # role and keeps it, which is what a cluster-wide setting looks like.
+                conn.exec_driver_sql(f"SET session_replication_role = '{replication_role}'")
+                conn.exec_driver_sql("SET SESSION AUTHORIZATION assaf_os_ledger")
+                with Session(bind=conn) as db:
+                    if replication_role == "origin":
+                        policy().validate_ledger_role(db, main, migration_role="postgres")
+                    else:
+                        with pytest.raises(ValueError, match=DENIED):
+                            policy().validate_ledger_role(db, main, migration_role="postgres")
+            finally:
+                conn.rollback()
     validate(roles)
 
 
@@ -658,15 +831,32 @@ def test_refusal_is_sanitized_on_catalog_failure(roles):
             policy().validate_ledger_role(db, roles[2], migration_role="postgres")
 
 
+@contextmanager
+def workspace(admin, workspace_id):
+    """The workspace row exists before the runtime role touches anything.
+
+    §18.2: the runtime role cannot INSERT into os_workspaces. The privileged
+    AuthorityAdmin creates it once (`mia os-authority init`, §5.4), so tests do too.
+    """
+    insert = ("INSERT INTO assaf_os.os_workspaces(workspace_id,owner_id,epoch) "
+              "VALUES (:w,'123',1)")
+    with admin.begin() as c:
+        c.execute(text(insert), {"w": workspace_id})
+    try:
+        yield
+    finally:
+        with admin.begin() as c:
+            c.execute(text("DELETE FROM assaf_os.os_workspaces WHERE workspace_id=:w"),
+                      {"w": workspace_id})
+
+
 def test_database_enforces_history_and_named_updates(roles):
     from sqlalchemy.exc import SQLAlchemyError
-    with roles[1].connect() as c, c.begin():
-        c.execute(text(
-            "INSERT INTO assaf_os.os_workspaces(workspace_id,owner_id,epoch) "
-            "VALUES ('v215','123',1)"
-        ))
+    with workspace(roles[0], "v215"), roles[1].connect() as c, c.begin():
         c.execute(text("UPDATE assaf_os.os_workspaces SET version=1 WHERE workspace_id='v215'"))
         for sql in (
+            "INSERT INTO assaf_os.os_workspaces(workspace_id,owner_id,epoch) "
+            "VALUES ('v215x','123',1)",
             "DELETE FROM assaf_os.os_workspaces", "TRUNCATE assaf_os.os_events",
             "UPDATE assaf_os.os_receipts SET undo_state='undone'",
             "UPDATE assaf_os.os_events SET body='{}'",
@@ -696,7 +886,6 @@ def test_column_map_matches_live_catalog(roles):
 
 WS = "v215e"
 SEED = (
-    f"INSERT INTO assaf_os.os_workspaces(workspace_id,owner_id,epoch) VALUES ('{WS}','123',1)",
     "INSERT INTO assaf_os.os_clients(workspace_id,record_id,revision,inputs,source,created_at,"
     f"updated_at) VALUES ('{WS}','C1',1,'{{}}','IMPORT',now(),now())",
     "INSERT INTO assaf_os.os_leads(workspace_id,record_id,revision,inputs,source,created_at,"
@@ -722,7 +911,7 @@ SEED = (
 def test_runtime_role_edits_imported_rows_on_every_record_table(roles):
     """§20 V2-15 gate: an owner edit of an imported row succeeds as the runtime role."""
     from sqlalchemy.exc import SQLAlchemyError
-    with roles[1].connect() as c, c.begin():
+    with workspace(roles[0], WS), roles[1].connect() as c, c.begin():
         assert c.scalar(text("SELECT current_user")) == "assaf_os_ledger"
         for statement in SEED:
             c.execute(text(statement))

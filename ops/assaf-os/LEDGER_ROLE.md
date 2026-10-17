@@ -41,7 +41,10 @@ V2-14a demote and `mia os-ledger migrate`, with its own owner go.
 migration SQL and to the live catalog):
 
 - USAGE on the schema; EXECUTE on `assaf_os.expense_source_key_sha256(text)` only.
-- SELECT on `os_authority`; SELECT and INSERT on the other 17 tables.
+- SELECT on `os_authority` and `os_workspaces`; SELECT and INSERT on the other 16 tables.
+  The runtime role never creates a workspace (§18.2, §5.4): the privileged
+  `AuthorityAdmin.ensure_workspace` does, once, from `mia os-authority init`, before any
+  import.
 - UPDATE on the record tables: `revision, inputs, business_date, source, updated_at,
   deleted_at, deleted_by_request_id`, plus `os_leads (person_id)`, `os_works
   (person_id, agreed_amount_minor, currency)`, `os_payments (person_id, work_id,
@@ -76,7 +79,13 @@ It refuses anything beyond the exact posture:
   attributes; memberships in either direction; default ACLs (the owner keeps its
   global PUBLIC EXECUTE revoke);
 - any rewrite rule on an `assaf_os` relation; any non-internal trigger other than the
-  enabled `os_proposals_assistant_insert_pending`, and row-level security or policies;
+  enabled `os_proposals_assistant_insert_pending`, which must also have no WHEN clause,
+  no arguments and no column list; and row-level security or policies;
+- either `assaf_os` function (`expense_source_key_sha256(text)`,
+  `require_pending_assistant_proposal_insert()`) whose body, language, volatility,
+  strictness, return type or own SET clauses differ from the V2-14 SQL (`FUNCTION_PINS`,
+  tied to the migration file by a test): `CREATE OR REPLACE` keeps the owner and the ACL,
+  and `ALTER FUNCTION ... SET search_path` changes how the body resolves names;
 - any dependency crossing the schema boundary: an outside view, materialized view,
   SQL-body function, foreign key, row-type column, statistics object or publication
   that depends on `assaf_os`, and any `assaf_os` default, check, index or trigger that
@@ -92,11 +101,37 @@ It refuses anything beyond the exact posture:
 - any user-created SECURITY DEFINER routine owned by a superuser or the owner, in any
   schema and whoever holds EXECUTE (a trigger on a main-owned table or an event
   trigger runs it without an EXECUTE check);
+- any SECURITY DEFINER routine whose non-superuser owner holds any privilege on an
+  `assaf_os` relation, however it got it;
+- membership of any non-superuser role in the cluster (LOGIN or not, with or without
+  INHERIT, directly or through other roles) in `pg_read_all_data`, `pg_write_all_data`,
+  `pg_maintain` (PostgreSQL 17 and later), `pg_read_server_files`,
+  `pg_write_server_files` or `pg_execute_server_program`. These give row access, or
+  access to the data files and the server's OS user, with no ACL entry, ownership or
+  `pg_depend` edge on `assaf_os`, so none of the checks above sees them. A backup or
+  monitoring identity that needs them must be the superuser `mia`, not a second role.
+  Monitoring roles such as `pg_monitor` are not affected;
+- a ledger session whose `session_replication_role` is not `origin`
+  (`validate_ledger_role` only). `ALTER SYSTEM` or `postgresql.conf` can set it
+  cluster-wide, which the role- and database-setting checks cannot see, and `replica`
+  switches off the foreign keys and the assistant trigger;
 - TEMP for the main role.
 
 Out of scope: what a superuser installs outside these catalog paths, such as a
-dblink or postgres_fdw loopback with privileged credentials, or a logical-replication
-subscription. The main DSN is never a superuser (V2-14a).
+dblink or postgres_fdw loopback with privileged credentials, a `FOR ALL TABLES`
+publication, or a logical-replication subscription. A role with the REPLICATION
+attribute can stream the WAL and is likewise outside what the ledger can police
+(`pg_hba.conf` decides who may connect as one). The main DSN is never a superuser
+(V2-14a).
+
+**Obligation for V2-16 (ledger core): `search_path`.** The validator pins its own session
+to `pg_catalog, pg_temp`, but a database-wide `ALTER DATABASE ... SET search_path` is
+accepted, and the V2-14 trigger function has no `SET search_path` of its own, so it
+resolves operators in the invoker's path. The validator does not assert the ledger
+session's `search_path`: production's default path contains `public`, where the main role
+holds CREATE (§18.1), so a literal "no schema the main role can CREATE in" check would
+refuse every production start. Instead, every ledger transaction must run
+`SET LOCAL search_path = pg_catalog, pg_temp` and schema-qualify its SQL (`assaf_os.*`).
 
 ## Provisioning (`provision_ledger.py`)
 
@@ -145,6 +180,15 @@ a SCRAM-SHA-256 verifier computed client-side by libpq, so the plaintext is neve
 the statement log. Nothing prints the DSN, the password or the verifier. Ops wiring
 (running this script as root with `/etc/mia` writable, from the restore post-step or
 the FORK-PROD-ORDER runbook) belongs to V2-10 and the runbook.
+
+**Locking.** The staging write is a read-modify-replace of `/etc/mia/runtime.env`, and
+`app_role_demote.py` edits the same file, so two runs at once would let the last writer
+win and lose either its posture change or the staged ledger DSN. The caller must hold
+`/var/lock/mia-state.lock`, as `mia restore`, the V2-10 post-restore step, `mia os-ledger`
+and the FORK-PROD-ORDER runbook do. The script does not take that lock itself, on purpose:
+those callers already hold it, and a second `flock` on it from inside a locked caller
+blocks forever. Run `--apply` only through those wrappers and never alongside
+`app-role-demote.sh`. (`--mode reapply` never writes the file.)
 
 ## Test fixtures
 
