@@ -79,12 +79,17 @@ PostgreSQL. It was created by `ops/assaf-os/provision_auth.py`. **`mia-migrate` 
 tables. A schema change there is a separate step that needs the owner's go, and it runs
 **before** the image that needs it. For V2-08 (session renewal), the sequence is:
 
-1. **Backup.** `sudo mia backup` dumps only `mia`. On the VM, also dump `assaf_os_auth`:
+1. **Backup.** `sudo mia backup` dumps only `mia`. On the VM (bash), also dump `assaf_os_auth`
+   and check that the archive reads back:
    ```sh
+   set -o pipefail
    f=/var/lib/mia/backups/assaf_os_auth-$(date -u +%Y%m%dT%H%M%SZ).dump
    sudo docker exec mia-postgres-1 pg_dump -U mia -d assaf_os_auth --format=custom \
-     | sudo tee "$f" >/dev/null && sudo chmod 600 "$f" && echo "$f"
+     | sudo tee "$f" >/dev/null && sudo chmod 600 "$f" && sudo test -s "$f" \
+     && sudo cat "$f" | sudo docker exec -i mia-postgres-1 pg_restore -l >/dev/null \
+     && echo "backup ok: $f"
    ```
+   Without a `backup ok:` line there is no usable backup. Stop there.
 2. **Dry run**, from the repository root with the same gcloud login used for provisioning. It
    changes nothing and must print `"status":"session_chains_dry_run"`:
    ```powershell
@@ -108,12 +113,13 @@ tables. A schema change there is a separate step that needs the owner's go, and 
    `MIA_OWNER_OS_ORIGIN`:
    ```powershell
    curl.exe -s -o NUL -w "%{http_code}\n" -H "Origin: $OS_ORIGIN" https://mia.assafweb.com/v1/owner/auth/session
-   curl.exe -s -D - -o NUL -X POST -H "Origin: $OS_ORIGIN" https://mia.assafweb.com/v1/owner/auth/refresh
+   curl.exe -s -D - -o NUL -X POST -H "Origin: $OS_ORIGIN" -H "Cookie: __Host-mia-owner=smoke-check" https://mia.assafweb.com/v1/owner/auth/refresh
    ```
-   The unauthenticated session read must print `401`. The refresh without a cookie must answer
-   `401`, with a `Set-Cookie` that deletes `__Host-mia-owner` (`Max-Age=0`) and no
-   `Server-Timing` header. A `503` means step 3 did not run. Run it, or redeploy the previous
-   SHA.
+   The unauthenticated session read must print `401`. The refresh sends a dummy cookie, so the
+   server has to look it up in `assaf_os_auth`. It must answer `401`, with a `Set-Cookie` that
+   deletes `__Host-mia-owner` (`Max-Age=0`) and no `Server-Timing` header. A `503` means step 3
+   did not run. Run it, or redeploy the previous SHA. A request without a cookie never reaches
+   the database, so it cannot detect a missing migration.
 
 ## Known gotchas
 

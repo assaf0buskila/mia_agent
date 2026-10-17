@@ -77,12 +77,17 @@ The complete runbook is `ops/gcp/README.md`.
    later image if the step has not run yet).** `mia-migrate` does NOT reach `assaf_os_auth`.
    It migrates only the `mia` database. The live owner session table is in `assaf_os_auth`,
    so its schema change is a separate step that needs the owner's go. Run it in this order:
-   1. Back up `assaf_os_auth`. `sudo mia backup` dumps only `mia`, so also run this on the VM:
+   1. Back up `assaf_os_auth`. `sudo mia backup` dumps only `mia`, so also run this on the VM
+      (bash):
       ```sh
+      set -o pipefail
       f=/var/lib/mia/backups/assaf_os_auth-$(date -u +%Y%m%dT%H%M%SZ).dump
       sudo docker exec mia-postgres-1 pg_dump -U mia -d assaf_os_auth --format=custom \
-        | sudo tee "$f" >/dev/null && sudo chmod 600 "$f" && echo "$f"
+        | sudo tee "$f" >/dev/null && sudo chmod 600 "$f" && sudo test -s "$f" \
+        && sudo cat "$f" | sudo docker exec -i mia-postgres-1 pg_restore -l >/dev/null \
+        && echo "backup ok: $f"
       ```
+      Without a `backup ok:` line there is no usable backup. Stop there.
    2. Dry run. It changes nothing and must print `"status":"session_chains_dry_run"`:
       ```powershell
       python ops/assaf-os/provision_auth.py --migrate-session-chains
@@ -113,12 +118,13 @@ The complete runbook is `ops/gcp/README.md`.
 7. Smoke-check owner authentication. `$OS_ORIGIN` is the configured `MIA_OWNER_OS_ORIGIN`:
    ```powershell
    curl.exe -s -o NUL -w "%{http_code}\n" -H "Origin: $OS_ORIGIN" https://mia.assafweb.com/v1/owner/auth/session
-   curl.exe -s -D - -o NUL -X POST -H "Origin: $OS_ORIGIN" https://mia.assafweb.com/v1/owner/auth/refresh
+   curl.exe -s -D - -o NUL -X POST -H "Origin: $OS_ORIGIN" -H "Cookie: __Host-mia-owner=smoke-check" https://mia.assafweb.com/v1/owner/auth/refresh
    ```
-   The first must print `401`. The second sends no cookie. It must answer `401`, with a
-   `Set-Cookie` that deletes `__Host-mia-owner` (`Max-Age=0`) and no `Server-Timing` header.
-   A `503` means the `assaf_os_auth` step did not run: run step 3, or redeploy the previous
-   SHA.
+   The first sends no cookie and must print `401`. The second sends a dummy cookie, so the
+   server has to look it up in `assaf_os_auth`. It must answer `401`, with a `Set-Cookie` that
+   deletes `__Host-mia-owner` (`Max-Age=0`) and no `Server-Timing` header. A `503` means the
+   `assaf_os_auth` step did not run: run step 3, or redeploy the previous SHA. A request
+   without a cookie never reaches the database, so it cannot detect a missing migration.
 
 Historical AWS deploy evidence and gotchas remain in `HANDOFF.md`; they are not the current
 production procedure.
