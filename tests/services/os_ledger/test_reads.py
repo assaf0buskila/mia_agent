@@ -244,6 +244,7 @@ def test_pg_deleted_pages_walk_newest_first_and_total_counts_live_rows(pg):
 def test_pg_pending_walks_creation_order_and_a_propose_between_pages_appends(pg):
     made = [propose_task(pg).proposal_id for _ in range(5)]  # one frozen clock: created_at ties
     first = pg.pending(ctx(), after=None, limit=2)
+    pg.advance(1)  # a later transaction: created_at moves past the cursor's anchor
     late = propose_task(pg).proposal_id  # pending_seq moves, the version does not
     seen = [p.proposal_id for p in first.items]
     cursor = first.next_cursor
