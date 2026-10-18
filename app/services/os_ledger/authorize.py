@@ -6,9 +6,8 @@ channel credential into a ``TrustedOwnerContext`` for one call:
 
 * ``from_owner_read(principal)``: OS, from a cookie-session ``OwnerSessionPrincipal``; never a
   verified browser mutation.
-* ``from_owner_mutation(principal)``: OS, only for a principal carrying
-  ``owner_sessions._MUTATION_PROOF``, which ``owner_mutation_scope`` attaches after the exact
-  Origin, the session and CSRF pass.
+* ``from_owner_mutation(principal)``: OS, only for the exact principal ``owner_mutation_scope``
+  returned after the exact Origin, the session and CSRF pass (``owner_sessions._mutation_proven``).
 * ``from_telegram_decision(approval)``: TELEGRAM_APPROVAL, only for a persisted ApprovalRow whose
   decision was written by the compare-and-set (V2-28 commits the CAS before it calls this).
 * ``from_mia_tool(principal)``: MIA, from the Telegram owner ``Principal`` of the tool loop.
@@ -18,7 +17,9 @@ channel credential into a ``TrustedOwnerContext`` for one call:
 Every constructor re-checks the numeric owner allow-list (a username never grants, I6), takes the
 ledger workspace and epoch from settings (I12), and sets ``auth_expires_at`` from the session or
 credential expiry, or a short per-call bound. ``require(ctx, op)`` then enforces the §9 channel x
-operation matrix and re-validates the context itself. The ledger still owns the kill switch, the
+operation matrix and re-validates the context itself: it must be the very object minted here,
+unmodified (review r1: a ``dataclasses.replace`` copy, an ``object.__setattr__`` edit or a
+re-construction with the capability is refused). The ledger still owns the kill switch, the
 freeze, the backend and the authority state (§5.3): a context is authorization, not admission.
 """
 
@@ -26,6 +27,8 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
+import weakref
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
@@ -64,6 +67,12 @@ _OWNER_ID = re.compile(r"[1-9][0-9]{0,18}")  # ASCII, canonical: str(int(x)) == 
 _WORKSPACE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
 _CREDENTIAL_ID = re.compile(r"AC_[0-9a-f]{32}")
 _LOG = logging.getLogger("mia.os_authorize")
+
+# Every context minted here, by identity: (a weak reference to it, a snapshot of its fields). An
+# entry leaves when its context is collected. RLock: a weakref callback can run during a GC that
+# an allocation inside the lock triggers.
+_MINTED: dict[int, tuple[weakref.ref[api.TrustedOwnerContext], tuple[Any, ...]]] = {}
+_MINTED_LOCK = threading.RLock()
 
 
 # ---------------------------------------------------------------------------------------------
@@ -154,15 +163,41 @@ def _binding(settings: Any, *, op: str) -> tuple[str, int]:
     return workspace, epoch
 
 
+def _fields(ctx: api.TrustedOwnerContext) -> tuple[Any, ...]:
+    return (ctx.numeric_owner, ctx.workspace, ctx.authority_epoch, ctx.channel, ctx.scopes,
+            ctx.auth_expires_at, ctx.browser_mutation_verified, ctx.credential_id)
+
+
+def _register(ctx: api.TrustedOwnerContext) -> api.TrustedOwnerContext:
+    """Remember ``ctx`` as minted here, with its fields, until it is collected."""
+    key = id(ctx)
+
+    def forget(ref: weakref.ref[api.TrustedOwnerContext], key: int = key) -> None:
+        with _MINTED_LOCK:
+            entry = _MINTED.get(key)
+            if entry is not None and entry[0] is ref:
+                del _MINTED[key]
+
+    with _MINTED_LOCK:
+        _MINTED[key] = (weakref.ref(ctx, forget), _fields(ctx))
+    return ctx
+
+
+def _minted_unchanged(ctx: api.TrustedOwnerContext) -> bool:
+    with _MINTED_LOCK:
+        entry = _MINTED.get(id(ctx))
+    return entry is not None and entry[0]() is ctx and entry[1] == _fields(ctx)
+
+
 def _mint(channel: str, owner: int, settings: Any, *, op: str, scopes: frozenset[str],
           expires: datetime, verified: bool = False,
           credential_id: str | None = None) -> api.TrustedOwnerContext:
     workspace, epoch = _binding(settings, op=op)
-    return api._issue(
+    return _register(api._issue(
         numeric_owner=owner, workspace=workspace, authority_epoch=epoch, channel=channel,
         scopes=frozenset(scopes), auth_expires_at=expires, browser_mutation_verified=verified,
         credential_id=credential_id,
-    )
+    ))
 
 
 # ---------------------------------------------------------------------------------------------
@@ -195,7 +230,7 @@ def from_owner_mutation(principal: OwnerSessionPrincipal,
     """OS write context, only behind ``owner_mutation_scope`` (exact Origin + session + CSRF)."""
     op = "from_owner_mutation"
     owner, scopes, expires = _session(principal, settings, op=op)
-    if getattr(principal, "_mutation_proof", None) is not owner_sessions._MUTATION_PROOF:
+    if not owner_sessions._mutation_proven(principal):
         raise _refuse(op, "browser_mutation_verification_required", "mutation_proof_missing")
     if not scopes & owner_sessions.ASSAF_OS_WRITE_SCOPES:
         raise _refuse(op, "scope_denied", "write_scope_missing")
@@ -322,7 +357,7 @@ def _column(channel: str) -> str:
 def _validate(ctx: Any) -> None:
     """The context must be one this module minted, and still well-formed and unexpired."""
     if type(ctx) is not api.TrustedOwnerContext or getattr(
-            ctx, "_capability", None) is not api._CAPABILITY:
+            ctx, "_capability", None) is not api._CAPABILITY or not _minted_unchanged(ctx):
         raise api.LedgerError("invalid_trusted_context", reason="context_not_issued")
     channel = ctx.channel
     scopes = ctx.scopes

@@ -42,6 +42,7 @@ from fastapi.routing import APIRoute, _IncludedRouter
 from fastapi.testclient import TestClient
 
 from tests.api.os_v2.v2_19_support import ORIGIN, OwnerApp, owner_settings, session_factory
+from tests.fakes.contexts import make_ctx as fake_ctx
 from tests.fakes.os_ledger_env import OWNER_ID
 
 SAMPLE_ID = "12345678-1234-4234-8234-123456789012"
@@ -200,7 +201,7 @@ def proof_app(settings) -> FastAPI:
 
     def report(principal: OwnerSessionPrincipal, build) -> dict:
         ctx = build(principal, settings)
-        return {"proof": principal._mutation_proof is owner_sessions._MUTATION_PROOF,
+        return {"proof": owner_sessions._mutation_proven(principal),
                 "verified": ctx.browser_mutation_verified, "channel": ctx.channel}
 
     @probe.get("/read")
@@ -323,7 +324,10 @@ def test_contexts_from_mia_telegram_and_bearer_can_never_commit_undo_or_abandon(
     bearer = authorize.from_assistant(key, settings)
     workers = [authorize.for_worker(job, settings)
                for job in ("import", "mirror", "verifier", "authority", "retention")]
-    for ctx in (mia, bearer, *workers):
+    # review r1: a TELEGRAM_APPROVAL context too (registered like a minted one).
+    telegram = authorize._register(fake_ctx("TELEGRAM_APPROVAL", scopes=frozenset(),
+                                            browser_mutation_verified=False))
+    for ctx in (mia, telegram, bearer, *workers):
         for op in ("commit_direct", "undo", "abandon"):
             with pytest.raises(api.LedgerError) as exc:
                 authorize.require(ctx, op)

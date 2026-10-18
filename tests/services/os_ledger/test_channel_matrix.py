@@ -16,7 +16,12 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from app.services.os_ledger import api, authorize
 
-from tests.fakes.contexts import make_ctx
+from tests.fakes.contexts import make_ctx as fake_ctx
+
+
+def make_ctx(*args, **kwargs) -> api.TrustedOwnerContext:
+    # require() accepts only contexts authorize registered (review r1); register the fakes.
+    return authorize._register(fake_ctx(*args, **kwargs))
 
 CHANNELS = ("OS", "MIA", "TELEGRAM_APPROVAL", "ASSISTANT_CLAUDE", "ASSISTANT_GPT", "WORKER")
 OPERATIONS = typing.get_args(api.Operation)
@@ -247,8 +252,8 @@ def test_a_worker_context_holds_exactly_one_known_job(scopes):
 
 @pytest.mark.parametrize("channel", CHANNELS)
 def test_an_expired_context_is_refused(channel):
-    ctx = dataclasses.replace(channel_ctx(channel),
-                              auth_expires_at=datetime.now(UTC) - timedelta(seconds=1))
+    # Built expired (a replace copy is refused as not minted since review r1).
+    ctx = channel_ctx(channel, expires_in=-1)
     expected = ("assistant_auth_required" if channel.startswith("ASSISTANT_")
                 else "owner_auth_required")
     for op in OPERATIONS:

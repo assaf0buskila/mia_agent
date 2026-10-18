@@ -5,6 +5,7 @@ from __future__ import annotations
 import hmac
 import json
 import logging
+import weakref
 from collections.abc import Callable, Generator
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -83,13 +84,6 @@ KNOWN_SCOPES = (
 
 _logger = logging.getLogger(__name__)
 
-# V2-19 (§9): the browser mutation proof. Module-private: only owner_mutation_scope attaches it,
-# after the exact Origin, the session and CSRF have all passed, and
-# authorize.from_owner_mutation admits an OS ledger context only for a principal carrying it.
-# tests/unit/test_trusted_context_ast.py pins that no other app module references it.
-_MUTATION_PROOF = object()
-
-
 @dataclass(frozen=True)
 class OwnerSessionPrincipal:
     owner_id: str
@@ -97,6 +91,47 @@ class OwnerSessionPrincipal:
     session_hash: str
     expires_at: datetime
     _mutation_proof: object | None = field(default=None, repr=False, compare=False)
+
+
+# V2-19 (§9): the browser mutation proof. Module-private: only owner_mutation_scope attaches one,
+# after the exact Origin, the session and CSRF have all passed, and
+# authorize.from_owner_mutation admits an OS ledger context only for a principal it proves.
+# Each proof is bound, once, to the exact principal it was attached to and a snapshot of its
+# fields (review r1), so it cannot be borrowed onto another principal or survive a widening
+# ``replace``/``__setattr__``. tests/unit/test_trusted_context_ast.py pins who may touch it.
+def _principal_fields(principal: OwnerSessionPrincipal) -> tuple[Any, ...]:
+    return (principal.owner_id, principal.scopes, principal.session_hash, principal.expires_at)
+
+
+class _MutationProof:
+    __slots__ = ("_principal", "_fields")
+
+    def __init__(self) -> None:
+        self._principal: weakref.ref[OwnerSessionPrincipal] | None = None
+        self._fields: tuple[Any, ...] | None = None
+
+    def _bind(self, principal: OwnerSessionPrincipal) -> None:
+        if self._principal is not None:
+            raise RuntimeError("mutation proof already bound")
+        self._principal = weakref.ref(principal)
+        self._fields = _principal_fields(principal)
+
+
+def _attach_mutation_proof(principal: OwnerSessionPrincipal) -> OwnerSessionPrincipal:
+    proof = _MutationProof()
+    proven = replace(principal, _mutation_proof=proof)
+    proof._bind(proven)
+    return proven
+
+
+def _mutation_proven(principal: Any) -> bool:
+    """True only for the exact, unmodified principal ``owner_mutation_scope`` returned."""
+    if type(principal) is not OwnerSessionPrincipal:
+        return False
+    proof = principal._mutation_proof
+    if type(proof) is not _MutationProof or proof._principal is None:
+        return False
+    return proof._principal() is principal and proof._fields == _principal_fields(principal)
 
 
 class OwnerLoginBody(BaseModel):
@@ -667,7 +702,7 @@ def owner_mutation_scope(
             ):
                 raise _error(401, "owner_auth_required")
         # Origin, session and CSRF (and the fresh login when required) have all passed.
-        return replace(principal, _mutation_proof=_MUTATION_PROOF)
+        return _attach_mutation_proof(principal)
 
     return dependency
 

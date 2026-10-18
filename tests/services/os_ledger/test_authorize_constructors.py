@@ -51,7 +51,7 @@ def principal(*, owner=OWNER_ID, scopes=ALL_OS, expires_at=None) -> OwnerSession
 
 def proven(value: OwnerSessionPrincipal) -> OwnerSessionPrincipal:
     """What ``owner_mutation_scope`` returns after Origin + session + CSRF pass (tests only)."""
-    return dataclasses.replace(value, _mutation_proof=owner_sessions._MUTATION_PROOF)
+    return owner_sessions._attach_mutation_proof(value)
 
 
 def refused(call, *args) -> str:
