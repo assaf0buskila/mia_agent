@@ -397,7 +397,7 @@ class LocalShadowImporter:
         if (
             not isinstance(batch["source_id"], str)
             or len(batch["source_id"]) > 256
-            or not batch["source_id"].startswith("synthetic:")
+            or not batch["source_id"].startswith(("synthetic:", "owner_export:"))
         ):
             raise LocalPrimaryError("synthetic_source_required")
         if (
