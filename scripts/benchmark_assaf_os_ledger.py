@@ -45,7 +45,7 @@ from app.services.os_ledger import api, core, verifier  # noqa: E402
 from app.services.os_ledger.domain import ENUMS, canonical_input, validate_state  # noqa: E402
 from app.services.os_ledger.ids import DATE_KEYS, dependency_digest  # noqa: E402
 from app.services.os_ledger.summaries import FullSummaries, build_summaries  # noqa: E402
-from app.services.os_ledger.tx import TYPED_COLUMNS, jsonb  # noqa: E402
+from app.services.os_ledger.tx import TYPED_COLUMNS, FullCoreChecks, jsonb  # noqa: E402
 from app.services.os_ledger.validate_full import FullStateValidator  # noqa: E402
 from sqlalchemy import create_engine, text  # noqa: E402
 from sqlalchemy.engine import make_url  # noqa: E402
@@ -57,7 +57,11 @@ BUDGETS_MS = {"page_p95": 50.0, "write_p95": 800.0}
 # Raised after the 2026-10-18 run (0.5 cpu / 1 GB, 20k records, concurrent pg_dump): page p95
 # 91 ms (p50 12-17 ms; the tail is CPU contention with pg_dump), write p95 1.1 s, of which the
 # full-state load and validate_transition in V2-16's ``apply`` are most (``write_breakdown``).
-RAISED_CAPS_MS = {"page_p95": 100.0, "write_p95": 1200.0}
+# V2-16b (§22 E23) scoped those core checks: on the same setup write p95 went from 1.9 s to
+# 0.31 s, so the write cap is the §8 budget again. The page cap stays raised: page p95 86 ms,
+# and even head() (one row) is 66 ms at p95, so the tail is CPU contention with pg_dump, not the
+# query shape of V2-18's readers.
+RAISED_CAPS_MS = {"page_p95": 100.0, "write_p95": BUDGETS_MS["write_p95"]}
 MIX = {"leads": 0.10, "clients": 0.10, "works": 0.10, "payments": 0.25, "time": 0.225,
        "expenses": 0.125, "tasks": 0.10}
 _CLAIM_FIELDS = ("person_id", "work_id", "original_payment_id", "currency", "source_type",
@@ -299,7 +303,7 @@ def run(args: argparse.Namespace) -> dict:
                 approvals.append(tx.insert_proposal(draft))
 
         breakdown: dict[str, list[float]] = {"snapshot_records": [], "validate_state": []}
-        for _ in range(5):  # the O(N) part of every apply that V2-16's tx.py still runs
+        for _ in range(5):  # V2-16's full-state load and check (FullCoreChecks); V2-16b skips
             with ledger.transaction(context, domain="core", kind="owner_direct") as tx:
                 loaded = timed(breakdown["snapshot_records"], tx.snapshot_records)
             timed(breakdown["validate_state"], lambda r=loaded: validate_state(r))
@@ -360,15 +364,19 @@ def run(args: argparse.Namespace) -> dict:
                 result = timed(writes["approve"], lambda p=proposal: ledger.decide(
                     context, p.proposal_id, p.approval_id, "approve"))
                 assert result.receipt.status == "committed", result.receipt.status
-            compare: dict[str, list[float]] = {"propose_v2_16": [], "commit_payment_full": []}
+            compare: dict[str, list[float]] = {"propose": [], "propose_full": [],
+                                               "commit_payment_full": []}
+            # V2-16 in full (the reference of the V2-16b/V2-18 property tests), for comparison
             full = core.build_ledger(ledger.settings, clock=ledger.clock,
-                                     validator=FullStateValidator(), summaries=FullSummaries())
+                                     validator=FullStateValidator(), summaries=FullSummaries(),
+                                     checks=FullCoreChecks())
             for i in range(args.compare_samples):
-                timed(compare["propose_v2_16"], lambda n=i: ledger.propose(
-                    context, api.ProposeInput(str(UUID(int=rng.getrandbits(128), version=4)),
-                                              "tasks", None, 0, {
-                                                  "title": f"Proposed {n}",
-                                                  "status": ENUMS["task_status"][0]})))
+                for name, target in (("propose", ledger), ("propose_full", full)):
+                    timed(compare[name], lambda n=i, t=target: t.propose(
+                        context, api.ProposeInput(str(UUID(int=rng.getrandbits(128), version=4)),
+                                                  "tasks", None, 0, {
+                                                      "title": f"Proposed {n}",
+                                                      "status": ENUMS["task_status"][0]})))
                 commit(full, payment(10_000 + i), compare["commit_payment_full"])
         finally:
             dumps.stop.set()
