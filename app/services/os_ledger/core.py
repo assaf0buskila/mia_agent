@@ -457,7 +457,14 @@ class PgLedger:
                         tx.apply(proposal.mutations, source=proposal.source,
                                  request_id=decision_id)
                     except api.LedgerError as exc:
-                        if exc.code not in {"target_changed", "lead_already_exists"}:
+                        # §22 E26: a live referrer added since the proposal (the digest does
+                        # not cover referrers) ends it target_changed, reason has_dependents,
+                        # instead of leaving it pending. apply is atomic, so only the
+                        # receipt and its event are written. Every other refusal keeps its
+                        # behaviour; ledger_integrity_failed is re-raised (§22 E22, §5.2).
+                        if exc.code == "has_dependents":
+                            reasons = ("has_dependents",)
+                        elif exc.code not in {"target_changed", "lead_already_exists"}:
                             raise
                         status = "target_changed"
             receipt = tx.finish(proposal, status=status, receipt_request_id=decision_id,
