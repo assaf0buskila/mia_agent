@@ -55,7 +55,7 @@ from sqlalchemy.engine import make_url  # noqa: E402
 # (RAISED) and is reported as a fork; it never silently passes.
 BUDGETS_MS = {"page_p95": 50.0, "write_p95": 800.0}
 # Raised after the 2026-10-18 run (0.5 cpu / 1 GB, 20k records, concurrent pg_dump): page p95
-# 91 ms (p50 12-17 ms; the tail is CPU contention with pg_dump), write p95 ~1.0 s, of which the
+# 91 ms (p50 12-17 ms; the tail is CPU contention with pg_dump), write p95 1.1 s, of which the
 # full-state load and validate_transition in V2-16's ``apply`` are most (``write_breakdown``).
 RAISED_CAPS_MS = {"page_p95": 100.0, "write_p95": 1200.0}
 MIX = {"leads": 0.10, "clients": 0.10, "works": 0.10, "payments": 0.25, "time": 0.225,
