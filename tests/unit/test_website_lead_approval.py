@@ -384,7 +384,7 @@ def test_path_choice_prepares_once_without_writing_and_binds_exact_schema(
 ):
     FakeAssafOsPort.proposals = []
     FakeAssafOsPort.snapshot_rows = []
-    monkeypatch.setattr(assaf_os_leads, "AssafOsPort", FakeAssafOsPort)
+    monkeypatch.setattr("app.services.assaf_os.AssafOsPort", FakeAssafOsPort)
     prepared = prepare_lead_choice(
         lead_store,
         settings=_settings(),
@@ -432,7 +432,7 @@ def test_late_public_brief_refresh_does_not_stale_captured_source_binding(
     FakeAssafOsPort.proposals = []
     FakeAssafOsPort.decisions = []
     FakeAssafOsPort.snapshot_rows = []
-    monkeypatch.setattr(assaf_os_leads, "AssafOsPort", FakeAssafOsPort)
+    monkeypatch.setattr("app.services.assaf_os.AssafOsPort", FakeAssafOsPort)
     monkeypatch.setattr(assaf_os_service, "AssafOsPort", FakeAssafOsPort)
     payload = _seed_source(lead_store)
     lead_store.session.add(
@@ -478,7 +478,7 @@ def test_late_public_brief_refresh_does_not_stale_captured_source_binding(
 
 def test_path_choice_rejects_changed_durable_source_before_provider(lead_store, monkeypatch):
     FakeAssafOsPort.proposals = []
-    monkeypatch.setattr(assaf_os_leads, "AssafOsPort", FakeAssafOsPort)
+    monkeypatch.setattr("app.services.assaf_os.AssafOsPort", FakeAssafOsPort)
     prepared = prepare_lead_choice(
         lead_store,
         settings=_settings(),
@@ -516,7 +516,7 @@ def test_final_approval_uses_locked_runtime_duplicate_guard_without_snapshot(
     FakeAssafOsPort.proposals = []
     FakeAssafOsPort.decisions = []
     FakeAssafOsPort.snapshot_rows = []
-    monkeypatch.setattr(assaf_os_leads, "AssafOsPort", FakeAssafOsPort)
+    monkeypatch.setattr("app.services.assaf_os.AssafOsPort", FakeAssafOsPort)
     monkeypatch.setattr(assaf_os_service, "AssafOsPort", FakeAssafOsPort)
     _seed_source(lead_store)
     principal = Principal.owner(source="telegram", actor_id=OWNER)
@@ -552,7 +552,7 @@ def test_final_approval_fails_closed_against_old_runtime_without_guard(
     FakeAssafOsPort.proposals = []
     FakeAssafOsPort.decisions = []
     FakeAssafOsPort.snapshot_rows = []
-    monkeypatch.setattr(assaf_os_leads, "AssafOsPort", FakeAssafOsPort)
+    monkeypatch.setattr("app.services.assaf_os.AssafOsPort", FakeAssafOsPort)
     monkeypatch.setattr(assaf_os_service, "AssafOsPort", FakeAssafOsPort)
     _seed_source(lead_store)
     principal = Principal.owner(source="telegram", actor_id=OWNER)
@@ -589,7 +589,7 @@ def test_final_approval_accepts_unchanged_raw_local_source(lead_store, monkeypat
     FakeAssafOsPort.proposals = []
     FakeAssafOsPort.decisions = []
     FakeAssafOsPort.snapshot_rows = []
-    monkeypatch.setattr(assaf_os_leads, "AssafOsPort", FakeAssafOsPort)
+    monkeypatch.setattr("app.services.assaf_os.AssafOsPort", FakeAssafOsPort)
     monkeypatch.setattr(assaf_os_service, "AssafOsPort", FakeAssafOsPort)
     _seed_source(lead_store)
     principal = Principal.owner(source="telegram", actor_id=OWNER)
@@ -621,7 +621,7 @@ def test_conclusive_source_change_allows_a_new_exact_proposal(lead_store, monkey
     FakeAssafOsPort.proposals = []
     FakeAssafOsPort.decisions = []
     FakeAssafOsPort.snapshot_rows = []
-    monkeypatch.setattr(assaf_os_leads, "AssafOsPort", FakeAssafOsPort)
+    monkeypatch.setattr("app.services.assaf_os.AssafOsPort", FakeAssafOsPort)
     monkeypatch.setattr(assaf_os_service, "AssafOsPort", FakeAssafOsPort)
     _seed_source(lead_store)
     principal = Principal.owner(source="telegram", actor_id=OWNER)
@@ -678,7 +678,7 @@ def test_unknown_execute_cannot_be_reclassified_terminal_or_reprepared(
     UnknownAfterCommitPort.proposals = []
     UnknownAfterCommitPort.snapshot_rows = []
     UnknownAfterCommitPort.decisions = []
-    monkeypatch.setattr(assaf_os_leads, "AssafOsPort", UnknownAfterCommitPort)
+    monkeypatch.setattr("app.services.assaf_os.AssafOsPort", UnknownAfterCommitPort)
     monkeypatch.setattr(assaf_os_service, "AssafOsPort", UnknownAfterCommitPort)
     _seed_source(lead_store)
     principal = Principal.owner(source="telegram", actor_id=OWNER)
@@ -728,7 +728,7 @@ def test_link_created_during_contact_claim_race_wins_without_second_provider_cal
 ):
     FakeAssafOsPort.proposals = []
     FakeAssafOsPort.snapshot_rows = []
-    monkeypatch.setattr(assaf_os_leads, "AssafOsPort", FakeAssafOsPort)
+    monkeypatch.setattr("app.services.assaf_os.AssafOsPort", FakeAssafOsPort)
     source = source_from_delivery_payload(lead_store, _seed_source(lead_store))
     principal = Principal.owner(source="telegram", actor_id=OWNER)
     injected = {}
@@ -803,7 +803,7 @@ def test_link_created_during_contact_claim_race_wins_without_second_provider_cal
 def test_committed_source_link_survives_native_contact_edits(lead_store, monkeypatch):
     FakeAssafOsPort.proposals = []
     FakeAssafOsPort.snapshot_rows = []
-    monkeypatch.setattr(assaf_os_leads, "AssafOsPort", FakeAssafOsPort)
+    monkeypatch.setattr("app.services.assaf_os.AssafOsPort", FakeAssafOsPort)
     _seed_source(lead_store)
     principal = Principal.owner(source="telegram", actor_id=OWNER)
     first = prepare_selected_crm_lead(
@@ -847,7 +847,7 @@ def test_provider_uncertainty_sticks_to_stable_contact_claim(lead_store, monkeyp
             raise AssafOsError("unknown")
 
     UncertainPort.snapshot_rows = []
-    monkeypatch.setattr(assaf_os_leads, "AssafOsPort", UncertainPort)
+    monkeypatch.setattr("app.services.assaf_os.AssafOsPort", UncertainPort)
     _seed_source(lead_store)
     principal = Principal.owner(source="telegram", actor_id=OWNER)
     with pytest.raises(AssafOsError, match="unknown"):
@@ -893,7 +893,7 @@ def test_invalid_source_can_be_corrected_without_poisoning_contact_claim(
 ):
     FakeAssafOsPort.proposals = []
     FakeAssafOsPort.snapshot_rows = []
-    monkeypatch.setattr(assaf_os_leads, "AssafOsPort", FakeAssafOsPort)
+    monkeypatch.setattr("app.services.assaf_os.AssafOsPort", FakeAssafOsPort)
     _seed_source(
         lead_store,
         captured_fields={"phone": "+972502222222", "source": "AssafWeb"},
@@ -929,7 +929,7 @@ def test_invalid_source_can_be_corrected_without_poisoning_contact_claim(
 def test_expired_final_proposal_allows_one_new_attempt(lead_store, monkeypatch):
     FakeAssafOsPort.proposals = []
     FakeAssafOsPort.snapshot_rows = []
-    monkeypatch.setattr(assaf_os_leads, "AssafOsPort", FakeAssafOsPort)
+    monkeypatch.setattr("app.services.assaf_os.AssafOsPort", FakeAssafOsPort)
     _seed_source(lead_store)
     principal = Principal.owner(source="telegram", actor_id=OWNER)
     first = prepare_selected_crm_lead(
@@ -977,7 +977,7 @@ def test_expired_approved_no_write_evidence_requires_a_fresh_exact_card(
     ExpiredNoWritePort.proposals = []
     ExpiredNoWritePort.snapshot_rows = []
     ExpiredNoWritePort.decisions = []
-    monkeypatch.setattr(assaf_os_leads, "AssafOsPort", ExpiredNoWritePort)
+    monkeypatch.setattr("app.services.assaf_os.AssafOsPort", ExpiredNoWritePort)
     _seed_source(lead_store)
     principal = Principal.owner(source="telegram", actor_id=OWNER)
     first = prepare_selected_crm_lead(
@@ -1030,7 +1030,7 @@ def test_expired_approved_recovery_refuses_unproven_no_write(lead_store, monkeyp
 
     MissingReceiptProofPort.proposals = []
     MissingReceiptProofPort.snapshot_rows = []
-    monkeypatch.setattr(assaf_os_leads, "AssafOsPort", MissingReceiptProofPort)
+    monkeypatch.setattr("app.services.assaf_os.AssafOsPort", MissingReceiptProofPort)
     _seed_source(lead_store)
     principal = Principal.owner(source="telegram", actor_id=OWNER)
     first = prepare_selected_crm_lead(
@@ -1163,7 +1163,7 @@ def test_model_timeout_preserves_one_claimed_telegram_ping(tmp_path, monkeypatch
 
     FakeAssafOsPort.proposals = []
     FakeAssafOsPort.snapshot_rows = []
-    monkeypatch.setattr(assaf_os_leads, "AssafOsPort", FakeAssafOsPort)
+    monkeypatch.setattr("app.services.assaf_os.AssafOsPort", FakeAssafOsPort)
     sends = []
     settings = _settings(telegram_bot_token="test-token")
     handler = telegram_receipt_handler(
@@ -1204,7 +1204,7 @@ def test_oversized_enrichment_falls_back_to_one_legal_original_ping(tmp_path, mo
         session.commit()
     FakeAssafOsPort.proposals = []
     FakeAssafOsPort.snapshot_rows = []
-    monkeypatch.setattr(assaf_os_leads, "AssafOsPort", FakeAssafOsPort)
+    monkeypatch.setattr("app.services.assaf_os.AssafOsPort", FakeAssafOsPort)
     sends = []
     handler = telegram_receipt_handler(
         factory,

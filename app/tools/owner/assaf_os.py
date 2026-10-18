@@ -16,7 +16,8 @@ from app.domain.owner.assaf_os_follow_up import (
     receipt_check,
     unknown_check,
 )
-from app.services.assaf_os import REQUEST_PATTERN, AssafOsError, AssafOsPort, ProposeRequest
+from app.services.assaf_os import REQUEST_PATTERN, AssafOsError, ProposeRequest
+from app.services.os_backend import OsBackend, get_os_backend
 from app.services.owner_actions import propose_owner_action
 from app.services.phone_identity import normalize_new_input_phone
 from app.tools.owner.types import OUTCOME_PARTIAL, ToolContext, ToolResult
@@ -32,8 +33,8 @@ def assaf_os_enabled(ctx: ToolContext) -> bool:
     )
 
 
-def _port(ctx: ToolContext) -> AssafOsPort:
-    return AssafOsPort(ctx.settings, ctx.principal.actor_id, actor_source="MIA")
+def _port(ctx: ToolContext) -> OsBackend:
+    return get_os_backend(ctx.settings, ctx.principal.actor_id, actor="MIA")
 
 
 def _json(value: object) -> str:

@@ -448,8 +448,8 @@ test("unchanged empty snapshot performs one raw read per sheet and no UI or proj
   assert.deepEqual(response.data.records.clients, []);
   assert.deepEqual(response.data.records.works, []);
   assert.deepEqual(h.metrics(), {
-    getValues: 16, getFormulas: 8, getLastRow: 16, getLastColumn: 19,
-    getDataRange: 11, setDataValidation: 0, batchUpdate: 0,
+    getValues: 8, getFormulas: 8, getLastRow: 13, getLastColumn: 16,
+    getDataRange: 8, setDataValidation: 0, batchUpdate: 0, batchGet: 1,
   });
   assert.equal(h.context.ASSAF_OS_REQUEST_READ_CACHE, null);
 });
@@ -465,8 +465,8 @@ test("unchanged populated snapshot keeps bounded reads and skips stable picker a
   assert.equal(response.data.records.payments[0].payment_id, "PAY_1");
   assert.equal(response.data.summary.monthly[0].paid_income_ils, 10000);
   assert.deepEqual(h.metrics(), {
-    getValues: 17, getFormulas: 8, getLastRow: 17, getLastColumn: 20,
-    getDataRange: 12, setDataValidation: 0, batchUpdate: 0,
+    getValues: 8, getFormulas: 8, getLastRow: 13, getLastColumn: 16,
+    getDataRange: 8, setDataValidation: 0, batchUpdate: 0, batchGet: 1,
   });
 });
 
@@ -481,8 +481,8 @@ test("five-lead fresh snapshot keeps metadata reads constant and performs no wri
   const response = h.call(h.request("snapshot", {}));
   assert.equal(response.data.records.leads.length, 5);
   assert.deepEqual(h.metrics(), {
-    getValues: 17, getFormulas: 8, getLastRow: 17, getLastColumn: 20,
-    getDataRange: 12, setDataValidation: 0, batchUpdate: 0,
+    getValues: 8, getFormulas: 8, getLastRow: 13, getLastColumn: 16,
+    getDataRange: 8, setDataValidation: 0, batchUpdate: 0, batchGet: 1,
   });
 });
 
@@ -494,9 +494,55 @@ test("guarded lead approval has a bounded service-call shape", () => {
   const response = approve(h, proposal, "TELEGRAM_APPROVAL");
   assert.equal(response.data.status, "committed");
   assert.deepEqual(h.metrics(), {
-    getValues: 16, getFormulas: 7, getLastRow: 23, getLastColumn: 18,
-    getDataRange: 11, setDataValidation: 0, batchUpdate: 1,
+    getValues: 7, getFormulas: 7, getLastRow: 19, getLastColumn: 14,
+    getDataRange: 7, setDataValidation: 0, batchUpdate: 1, batchGet: 1,
   });
+});
+
+test("metadata preload checks capacity before any body read", () => {
+  const h = createHarness({ maxRows: 2002 });
+  h.workbook.getSheetByName("_assaf_os_accepted").setRow(2002, ["overflow"]);
+  h.resetMetrics();
+  const response = h.call(h.request("schema", {}));
+  assert.equal(response.ok, false);
+  assert.equal(response.data.error.code, "metadata_capacity_exceeded");
+  assert.equal(h.metrics().getValues, 0);
+  assert.equal(h.metrics().getDataRange, 0);
+});
+
+test("metadata preload rejects header drift before runtime reads", () => {
+  const h = createHarness({ maxRows: 2001 });
+  h.workbook.getSheetByName("_assaf_os_receipts").setCell(1, 1, "drifted");
+  const response = h.call(h.request("schema", {}));
+  assert.equal(response.ok, false);
+  assert.equal(response.data.error.code, "metadata_header_drift");
+});
+
+test("successful metadata appends invalidate preloaded proposal and replay bodies", () => {
+  const h = createHarness({ maxRows: 2001 });
+  h.context.assafOsBeginRequestReadCache_(h.workbook);
+  h.context.assafOsVerifyMetadata_(h.workbook);
+  const proposals = h.workbook.getSheetByName("_assaf_os_proposals");
+  const replay = h.workbook.getSheetByName("_assaf_os_replay");
+  assert.equal(h.context.assafOsReadValuesOnce_(proposals).length, 1);
+  assert.equal(h.context.assafOsReadValuesOnce_(replay).length, 1);
+  const request = h.request("propose", null, { actor_source: "MIA" });
+  request.data = {
+    request_id: request.request_id,
+    entity: "leads",
+    record_id: null,
+    expected_revision: 0,
+    input: { name: "Synthetic", phone: "+972502222222", path: "לימוד", status: "חדש", source_note: "synthetic" },
+  };
+  h.context.assafOsPropose_(
+    h.workbook,
+    request,
+    { ...h.binding, secret: h.secret },
+    h.context.assafOsIdempotencyHash_(request),
+    null,
+  );
+  assert.equal(h.context.assafOsReadValuesOnce_(proposals).length, 2);
+  assert.equal(h.context.assafOsReadValuesOnce_(replay).length, 2);
 });
 
 test("snapshot repairs calculated summary drift without refreshing stable native pickers", () => {

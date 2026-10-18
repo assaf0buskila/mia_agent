@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import math
 import re
 import time
@@ -24,7 +25,9 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from app.core.config import Settings
 from app.core.owner_timing import owner_phase
 from app.core.owner_write import current_write_dispatch
+from app.services.os_ledger import api as _ledger_api
 
+_LOG = logging.getLogger("mia.os_backend")
 API_VERSION = "assaf-os.v1"
 SCHEMA_VERSION = "assaf-os-unified.v1"
 MAX_BODY_BYTES = 32_768
@@ -708,6 +711,9 @@ def _clear_assaf_os_schema_cache() -> None:
 
 class AssafOsPort:
     def __init__(self, settings: Settings, owner_id: str, *, actor_source: ActorSource):
+        if getattr(settings, "assaf_os_backend", "sheets") == "postgres":
+            # V2-17: under postgres the factory never builds this port (section 7).
+            raise AssafOsError("authority_moved", 409)
         if (
             not settings.assaf_os_enabled
             or owner_id not in settings.telegram_owner_user_id_set()
@@ -730,6 +736,28 @@ class AssafOsPort:
         ):
             raise AssafOsError("operation_unavailable")
         self.settings, self.owner_id, self.actor_source = settings, owner_id, actor_source
+
+    def _fence(self, operation: str) -> None:
+        """V2-17 Sheets-side fence (V2_PG_CONTRACTS.md section 7), for propose, approve, reject.
+
+        Freeze first (new intents only), then the ledger's core authority. Reads never get here.
+        """
+        code = None
+        if operation == "propose" and self.settings.assaf_os_freeze:
+            code, status = "os_frozen", 503
+        else:
+            try:
+                state = _ledger_api.core_authority_state(self.settings)
+            except Exception:  # LedgerError, or any leak: nothing was dispatched, so fail closed
+                code, status = "ledger_unavailable", 503
+            else:
+                if state in ("active", "restoring"):
+                    code, status = "authority_moved", 409
+                elif state not in (None, "shadow", "fenced"):
+                    code, status = "ledger_unavailable", 503
+        if code is not None:
+            _LOG.info("os_backend op=fence outcome=refused reason=%s operation=%s", code, operation)
+            raise AssafOsError(code, status)
 
     def _call(
         self,
@@ -770,6 +798,9 @@ class AssafOsPort:
         ).encode()
         if len(body) > MAX_BODY_BYTES:
             raise AssafOsError("validation_error", 422)
+        if operation in UNCERTAIN_OPERATIONS:
+            # Last refusal point: nothing below moves WriteDispatch.dispatched until it passes.
+            self._fence(operation)
         budget = _SCRIPT_BUDGET_SECONDS[operation] if budget is None else budget
         # Server-Timing "script" is the Apps Script round trip; "verify" is the local signature,
         # envelope and result validation. Both are silent outside an owner OS request.
