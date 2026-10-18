@@ -1,0 +1,33 @@
+{
+  "api_version": "assaf-os.v2",
+  "authority_epoch": 1,
+  "observed_version": 1,
+  "rules": [
+    {
+      "category": null,
+      "is_subscription": null,
+      "label": null,
+      "match": "exact",
+      "merchant_key": null,
+      "path": null,
+      "platform": null,
+      "revision": 1,
+      "rule_id": "MR_3dc0ab82f15c73559bc2c705",
+      "tag": "personal"
+    },
+    {
+      "category": "Tools",
+      "is_subscription": true,
+      "label": null,
+      "match": "exact",
+      "merchant_key": "demo shop",
+      "path": null,
+      "platform": null,
+      "revision": 1,
+      "rule_id": "MR_ce92e3c92c7243ecbc41095a",
+      "tag": "business"
+    }
+  ],
+  "source": "postgresql",
+  "workspace_id": "test"
+}
