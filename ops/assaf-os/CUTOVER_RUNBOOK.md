@@ -86,6 +86,10 @@ Every production step above pauses the jobs and takes a verified backup first (s
 - **Command**: see "Step 1a in detail" in `docs/runbooks/APP_ROLE_DEMOTE.md`:
   `sudo bash /opt/mia/src/<S-tag>/ops/gcp/vm/pg-hba-harden.sh --check`, then `--apply`, then
   `curl --fail http://127.0.0.1:8000/health/ready`, then `--check` again.
+- **Order matters**: run it **before** step 4. The script refuses to apply while a login role that a live
+  DSN uses has no password, and V2-15 creates `assaf_os_retention` as LOGIN without one (E8). If step 4
+  already ran (a repeat of the window), run `sudo mia os-provision retention --approved-sha S` first: it
+  gives that role its verifier even while loopback is still `trust`.
 - **Verify**: `--check` reports `hardened=true`; readiness is 200.
 - **Rollback**: `sudo bash <path>/pg-hba-harden.sh --rollback`, check readiness, stop.
 
@@ -144,6 +148,9 @@ Every production step above pauses the jobs and takes a verified backup first (s
   `sudo mia settings` recreates the app and `/health/ready` is 200. This is the precondition
   `ledger_role_unsafe` of `activate` later.
 - **Rollback**: both commands are idempotent. There is nothing to undo before step 5.
+- **After a restore**: roles are cluster-global, so on the same cluster a `mia restore` keeps both
+  passwords. On a **new** cluster or VM the roles come back without them (and `/etc/mia` is gone): run
+  both commands again before the services start.
 
 ### Step 5: initialise the authority
 
