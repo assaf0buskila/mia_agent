@@ -1,15 +1,22 @@
-"""A deterministic statement world for the V2-26 tests: a FakeLedger, a service, three contexts.
+"""A deterministic statement world for the V2-26 tests: a ledger, a service, three contexts.
 
-Everything here is synthetic. ``World`` wires the real ``LedgerStatementService`` to the
-``FakeLedger`` with in-memory statement tables (``tx.scratch``), a pinned pepper and a frozen
-clock. The knobs the ledger reads (kill switch, freeze, backend, flag) are the ``Settings`` object
-the service reads, so one assignment moves both.
+Everything here is synthetic. ``World`` wires the real ``LedgerStatementService`` to either ledger:
+
+* ``"fake"``: the ``FakeLedger`` with in-memory statement tables (``tx.scratch``);
+* ``"pg"``: the V2-16 ``PgLedger`` on a disposable PostgreSQL, with the §4 tables on
+  ``tx.connection`` (``MIA_OS_LEDGER_TEST_POSTGRES_URL``; never skipped when it is set).
+
+Both run on a pinned pepper and the conformance suite's frozen clock. The knobs the ledger reads
+(kill switch, freeze, backend, flag) are the ``Settings`` object the service reads, so one
+assignment moves both. A test written against ``World`` runs unchanged on the two.
 """
 
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
+import os
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from contextlib import contextmanager
@@ -19,7 +26,7 @@ from uuid import UUID
 
 from app.core.config import MiaEnv, Settings
 from app.services.os_ledger import api
-from app.services.os_ledger.statement_tables import CredentialRow
+from app.services.os_ledger.statement_tables import CredentialRow, tables_for
 from app.services.os_ledger.statements import LedgerStatementService, pepper_fingerprint
 
 from tests.fakes.contexts import for_worker, make_ctx
@@ -28,6 +35,7 @@ from tests.fakes.os_ledger_builders import commit_direct, expense
 from tests.fakes.os_ledger_env import NOW, OWNER_ID, WORKSPACE, Knobs, LedgerEnv
 from tests.unit.statements.helpers import PEPPER, raw_batch, raw_line
 
+PG_URL_ENV = "MIA_OS_LEDGER_TEST_POSTGRES_URL"
 OWNER = int(OWNER_ID)
 CRED = "AC_" + "a" * 32
 CRED_B = "AC_" + "b" * 32
@@ -112,11 +120,36 @@ def make_settings(**over: Any) -> Settings:
     return Settings(**values)
 
 
+def pg_url() -> str | None:
+    return os.environ.get(PG_URL_ENV) or None
+
+
 class World:
-    def __init__(self, *, pin: bool = True, statements: str = "active", **settings: Any) -> None:
+    def __init__(self, backend: str = "fake", *, request: Any = None, pin: bool = True,
+                 statements: str = "active", **settings: Any) -> None:
+        # ``request`` must stay a local name: the PG fixture registers its teardown from the
+        # caller's frame (tests/services/os_ledger/conftest.py).
+        self.kind = backend
         self.config = make_settings(**settings)
-        config = self.config
         self.new_id = Counter()
+        self.watermark: dict[str, Any] = {"value": None}
+        if backend == "fake":
+            self._start_fake(pin, statements)
+        else:
+            self._start_pg(request, pin, statements)
+        self.service = LedgerStatementService(
+            self.ledger, self.config, pin_reader=self._pin_reader,
+            revoke_watermark=lambda owner_id: self.watermark["value"], require=default_require())
+        self.owner = make_ctx("OS", owner=OWNER, workspace=WORKSPACE, scopes=OWNER_SCOPES,
+                              browser_mutation_verified=True)
+        self.reader = make_ctx("OS", owner=OWNER, workspace=WORKSPACE, scopes=OWNER_SCOPES,
+                               browser_mutation_verified=False)
+        self.worker = for_worker("retention", owner=OWNER, workspace=WORKSPACE)
+
+    # ---- the two ledgers ------------------------------------------------------------------
+
+    def _start_fake(self, pin: bool, statements: str) -> None:
+        config = self.config
         self.ledger = FakeLedger(
             clock=lambda: NOW, uuid4=self.new_id,
             settings_epoch=lambda: config.assaf_os_authority_epoch,
@@ -124,25 +157,53 @@ class World:
             freeze=lambda: config.assaf_os_freeze,
             undo_window_s=lambda: config.owner_undo_window_seconds,
             enabled=lambda: config.assaf_os_ledger_enabled)
-        self.ledger.ensure_workspace(WORKSPACE, OWNER_ID, 1)
-        for domain, state in (("core", "active"), ("statements", statements)):
-            if state != "shadow":
-                self.ledger.transition(WORKSPACE, domain, state, expected_epoch=1,
-                                       actor_owner_id=OWNER_ID)
-        if pin:
-            self.ledger.pin_statement_pepper(WORKSPACE, pepper_fingerprint(PEPPER))
-        self.watermark: dict[str, Any] = {"value": None}
-        self.service = LedgerStatementService(
-            self.ledger, config, pin_reader=lambda tx: tx.data["statement_pepper_fp"],
-            revoke_watermark=lambda owner_id: self.watermark["value"], require=default_require())
+        self.admin = self.ledger
         self.env = LedgerEnv("fake", self.ledger, Knobs(), rows=self.ledger.rows,
                              version=self.ledger.version, now=self.ledger._now,
                              advance=self.ledger.advance)
-        self.owner = make_ctx("OS", owner=OWNER, workspace=WORKSPACE, scopes=OWNER_SCOPES,
-                              browser_mutation_verified=True)
-        self.reader = make_ctx("OS", owner=OWNER, workspace=WORKSPACE, scopes=OWNER_SCOPES,
-                               browser_mutation_verified=False)
-        self.worker = for_worker("retention", owner=OWNER, workspace=WORKSPACE)
+        self._pin_reader = lambda tx: tx.data["statement_pepper_fp"]
+        self._start(pin, statements)
+
+    def _start_pg(self, request: Any, pin: bool, statements: str) -> None:
+        from app.db.os_ledger_migrate import RUNTIME_ROLE
+        from app.services.os_ledger import core
+        from sqlalchemy.engine import make_url
+
+        from tests.services.os_ledger.conftest import build_pg_env
+
+        url = pg_url()
+        assert url, f"{PG_URL_ENV} is not set"
+        base = build_pg_env(url)  # one-time roles and grants, then a clean ledger
+        self._admin_engine = build_pg_env.state[url]["admin"]
+        parsed = make_url(url)
+        self.config.database_url = parsed.set(
+            username="v216_main", password=None).render_as_string(hide_password=False)
+        self.config.owner_os_ledger_database_url = parsed.set(
+            username=RUNTIME_ROLE, password=None).render_as_string(hide_password=False)
+        self.ledger = core.build_ledger(self.config, clock=base.now)
+        self.admin = base
+        ledger = self.ledger
+
+        class Impl:
+            def __getattr__(self, name: str) -> Any:
+                if name in {"ensure_workspace", "state", "transition", "bump_epoch",
+                            "pin_statement_pepper"}:
+                    return getattr(base, name)
+                return getattr(ledger, name)
+
+        self.env = LedgerEnv("pg", Impl(), Knobs(), rows=base.rows, version=base.version,
+                             now=base.now, advance=base.advance)
+        self._pin_reader = None  # the production reader: the workspace row on tx.connection
+        self._start(pin, statements)
+
+    def _start(self, pin: bool, statements: str) -> None:
+        self.admin.ensure_workspace(WORKSPACE, OWNER_ID, 1)
+        for domain, state in (("core", "active"), ("statements", statements)):
+            if state != "shadow":
+                self.admin.transition(WORKSPACE, domain, state, expected_epoch=1,
+                                      actor_owner_id=OWNER_ID)
+        if pin:
+            self.admin.pin_statement_pepper(WORKSPACE, pepper_fingerprint(PEPPER))
 
     # ---- contexts -------------------------------------------------------------------------
 
@@ -156,6 +217,34 @@ class World:
                                       browser_mutation_verified=True)
         fields.update(over)
         return make_ctx(channel, **fields)
+
+    # ---- the clock and the authority -------------------------------------------------------
+
+    def now(self):
+        return self.env.now()
+
+    def advance(self, seconds: float) -> None:
+        self.env.advance(seconds)
+
+    def bump_epoch(self) -> None:
+        """Move the world to epoch 2 (settings and workspace together)."""
+        self.config.assaf_os_authority_epoch = 2
+        self.admin.bump_epoch(WORKSPACE, expected_epoch=1)
+
+    def fence_statements(self) -> None:
+        self.admin.transition(WORKSPACE, "statements", "fenced", expected_epoch=1,
+                              actor_owner_id=OWNER_ID)
+
+    def set_pin(self, fingerprint: str | None) -> None:
+        """Tamper with the pinned fingerprint (the privileged side may; the runtime may not)."""
+        if self.kind == "fake":
+            with self.scratch_tx() as tx:
+                tx.data["statement_pepper_fp"] = fingerprint
+            return
+        from sqlalchemy import text
+        with self._admin_engine.begin() as conn:
+            conn.execute(text("UPDATE assaf_os.os_workspaces SET statement_pepper_fp = :fp "
+                              "WHERE workspace_id = :ws"), {"fp": fingerprint, "ws": WORKSPACE})
 
     # ---- seeding --------------------------------------------------------------------------
 
@@ -180,19 +269,45 @@ class World:
             credential_id=credential_id, owner_id=OWNER_ID, epoch=1, label=label, kind="claude",
             created_at=NOW - timedelta(days=1), expires_at=NOW + timedelta(days=30),
             revoked_at=NOW if revoked else None)
-        with self.scratch_tx() as tx:
-            tx.scratch.setdefault("statement_tables", {}).setdefault(
-                "credentials", {})[credential_id] = row
+        if self.kind == "fake":
+            with self.scratch_tx() as tx:
+                tx.scratch.setdefault("statement_tables", {}).setdefault(
+                    "credentials", {})[credential_id] = row
+            return
+        from sqlalchemy import text
+        with self._admin_engine.begin() as conn:
+            conn.execute(text(
+                "INSERT INTO assaf_os.os_assistant_credentials (workspace_id, credential_id, "
+                "owner_id, epoch, label, kind, scopes, secret_hash, created_at, expires_at, "
+                "revoked_at) VALUES (:ws, :id, :owner, 1, :label, 'claude', "
+                "'merchant_rules:read own_proposals:read statement:propose', :hash, :created, "
+                ":expires, :revoked)"),
+                {"ws": WORKSPACE, "id": credential_id, "owner": OWNER_ID, "label": label,
+                 "hash": hashlib.sha256(credential_id.encode()).hexdigest(),
+                 "created": row.created_at, "expires": row.expires_at, "revoked": row.revoked_at})
 
     def revoke(self, credential_id: str = CRED) -> None:
-        with self.scratch_tx() as tx:
-            table = tx.scratch["statement_tables"]["credentials"]
-            table[credential_id] = dataclasses.replace(table[credential_id], revoked_at=tx.now)
+        if self.kind == "fake":
+            with self.scratch_tx() as tx:
+                table = tx.scratch["statement_tables"]["credentials"]
+                table[credential_id] = dataclasses.replace(table[credential_id],
+                                                           revoked_at=tx.now)
+            return
+        from sqlalchemy import text
+        with self._admin_engine.begin() as conn:
+            conn.execute(text("UPDATE assaf_os.os_assistant_credentials SET revoked_at = :now "
+                              "WHERE workspace_id = :ws AND credential_id = :id"),
+                         {"now": self.now(), "ws": WORKSPACE, "id": credential_id})
 
     def drop_batch_lines(self) -> None:
         """A restore: FORK-BACKUP excludes the batch-line data."""
-        with self.scratch_tx() as tx:
-            tx.scratch["statement_tables"]["batch_lines"].clear()
+        if self.kind == "fake":
+            with self.scratch_tx() as tx:
+                tx.scratch["statement_tables"]["batch_lines"].clear()
+            return
+        from sqlalchemy import text
+        with self._admin_engine.begin() as conn:
+            conn.execute(text("DELETE FROM assaf_os.os_statement_batch_lines"))
 
     def hand_expense(self, record_id: str, *, vendor: str, amount: int, day: str,
                      currency: str = "ILS", source_key: str | None = None, **over: Any) -> None:
@@ -263,30 +378,33 @@ class World:
     # ---- observers ------------------------------------------------------------------------
 
     def version(self) -> int:
-        return self.ledger.version(WORKSPACE)
+        return self.env.version(WORKSPACE)
 
     def tables(self) -> dict[str, Any]:
-        """The statement tables, copied out of a transaction (full rows, detail included)."""
-        import copy
+        """Every statement table, copied out of a transaction (full rows, detail included)."""
         with self.scratch_tx() as tx:
-            return copy.deepcopy(tx.scratch.get("statement_tables", {}))
+            return tables_for(tx).dump()
+
+    def saved_drafts(self) -> dict[str, Any]:
+        """The drafts the owner actually saved (every batch also has a revision-0 registry row)."""
+        return {pid: row for pid, row in self.tables()["drafts"].items()
+                if row.draft_revision > 0}
 
     def rows(self, table: str) -> list[dict[str, Any]]:
-        return self.ledger.rows(table)
+        found = self.env.rows(table)
+        if table == "os_receipts":  # PG returns lists where the fake keeps tuples
+            for row in found:
+                row["reason_codes"] = tuple(row["reason_codes"])
+        return found
 
     def everything(self) -> str:
         """A text dump of every ledger table and every statement table (for privacy greps)."""
-        parts = [repr(self.ledger.rows(name)) for name in (
+        parts = [repr(self.rows(name)) for name in (
             "os_proposals", "os_receipts", "os_events", "os_outbox", "os_expenses",
             "os_mirror_state", "os_summary_monthly")]
         parts.append(json.dumps(_plain(self.tables()), ensure_ascii=False, default=str,
                                 sort_keys=True))
         return "\n".join(parts)
-
-    def saved_drafts(self) -> dict[str, Any]:
-        """The drafts the owner actually saved (every batch also has a revision-0 registry row)."""
-        return {pid: row for pid, row in self.tables().get("drafts", {}).items()
-                if row.draft_revision > 0}
 
 
 def _plain(value: Any) -> Any:

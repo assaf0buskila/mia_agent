@@ -15,17 +15,11 @@ from tests.services.os_ledger.statements.support import (
     CRED_B,
     GPT,
     PASTE,
-    World,
     batch,
     encode,
     line,
     three_lines,
 )
-
-
-@pytest.fixture
-def world():
-    return World()
 
 
 def refused(code: str):
@@ -48,7 +42,7 @@ def test_paste_creates_a_pending_batch_with_the_submitted_line_summary(world):
     assert proposal["created_at"] == NOW
     # The request id is the owner-paste id and the digest binds batch, source and credential.
     assert proposal["request_id"] == api.paste_request_uuid("123", world_client_batch_id(1))
-    assert world.ledger.version("test") == 0  # a propose moves pending_seq, not the version
+    assert world.version() == 0  # a propose moves pending_seq, not the version
 
 
 def world_client_batch_id(number: int) -> str:
@@ -220,8 +214,8 @@ def test_a_disabled_flag_or_the_sheets_backend_is_unavailable(world):
         world.paste(batch(three_lines()))
 
 
-def test_statements_must_be_active(world):
-    shadow = World(statements="shadow")
+def test_statements_must_be_active(new_world):
+    shadow = new_world(statements="shadow")
     with refused("authority_not_active"):
         shadow.paste(batch(three_lines()))
     assert shadow.rows("os_proposals") == []
@@ -230,17 +224,17 @@ def test_statements_must_be_active(world):
 # ---- the pepper pin -------------------------------------------------------------------------
 
 
-def test_an_unpinned_pepper_refuses_and_writes_nothing(caplog):
-    world = World(pin=False)
+def test_an_unpinned_pepper_refuses_and_writes_nothing(new_world, caplog):
+    world = new_world(pin=False)
     with caplog.at_level("INFO"):
         with refused("ledger_unavailable"):
             world.paste(batch(three_lines()))
     assert "reason=statement_pepper_unpinned" in caplog.text
-    assert world.rows("os_proposals") == [] and world.tables() == {}
+    assert world.rows("os_proposals") == []
+    assert not any(world.tables().values())
 
 
-def test_a_mismatched_pepper_refuses_and_writes_nothing(caplog):
-    world = World()
+def test_a_mismatched_pepper_refuses_and_writes_nothing(world, caplog):
     world.config.os_statement_pepper = "a-different-synthetic-pepper-0123456789abcdef"
     with caplog.at_level("INFO"):
         with refused("ledger_unavailable"):
@@ -249,8 +243,8 @@ def test_a_mismatched_pepper_refuses_and_writes_nothing(caplog):
     assert world.rows("os_proposals") == []
 
 
-def test_no_configured_pepper_refuses(caplog):
-    world = World(os_statement_pepper="")
+def test_no_configured_pepper_refuses(new_world, caplog):
+    world = new_world(os_statement_pepper="")
     with caplog.at_level("INFO"):
         with refused("ledger_unavailable"):
             world.paste(batch(three_lines()))

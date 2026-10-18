@@ -7,15 +7,10 @@ import hmac
 
 import pytest
 
-from tests.services.os_ledger.statements.support import World, batch, line, three_lines
+from tests.services.os_ledger.statements.support import batch, line, three_lines
 from tests.unit.statements.helpers import PEPPER
 
 SECRETS = ("PERSONAL CAFE", "personal cafe", "421731", "ZZ-PRIVATE-SHOP")
-
-
-@pytest.fixture
-def world():
-    return World()
 
 
 def derived_sha256_id(merchant_key: str) -> str:
@@ -144,7 +139,7 @@ def test_no_log_line_carries_statement_text_amounts_or_ids(world, caplog):
         world.draft(submitted.proposal_id, [{"line_key": key, "category": "Tools"}])
         world.approve(submitted.proposal_id)
         world.paste(batch(three_lines(), number=2))
-        world.ledger.advance(8 * 24 * 3600)
+        world.advance(8 * 24 * 3600)
         world.service.expire_due(world.worker)
         with pytest.raises(Exception):  # a refused call logs a reason code too
             world.paste(b"not json")

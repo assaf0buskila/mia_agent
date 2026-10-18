@@ -13,17 +13,11 @@ from tests.services.os_ledger.statements.support import (
     CRED_B,
     GPT,
     OWNER,
-    World,
     batch,
     three_lines,
 )
 
 WEEK = 7 * 24 * 3600
-
-
-@pytest.fixture
-def world():
-    return World()
 
 
 def refused(code: str):
@@ -44,9 +38,9 @@ def purged(world, proposal_id):
 
 def test_expire_due_finishes_overdue_batches_and_purges_their_detail(world):
     old = world.paste(batch(three_lines(), number=1))
-    world.ledger.advance(WEEK - 10)
+    world.advance(WEEK - 10)
     fresh = world.paste(batch(three_lines(), number=2, charge_date="2026-11-15"))
-    world.ledger.advance(20)
+    world.advance(20)
     version = world.version()
     assert world.service.expire_due(world.worker) == 1
     assert statuses(world) == {old.proposal_id: "expired", fresh.proposal_id: "pending"}
@@ -66,7 +60,7 @@ def test_expire_due_finishes_overdue_batches_and_purges_their_detail(world):
     ("assaf_os_freeze", True), ("assaf_os_statements_enabled", False)])
 def test_expiry_runs_under_every_switch(world, knob, value):
     submitted = world.paste(batch(three_lines()))
-    world.ledger.advance(WEEK + 1)
+    world.advance(WEEK + 1)
     setattr(world.config, knob, value)
     assert world.service.expire_due(world.worker) == 1
     assert statuses(world) == {submitted.proposal_id: "expired"}
@@ -75,9 +69,8 @@ def test_expiry_runs_under_every_switch(world, knob, value):
 
 def test_expiry_runs_while_the_statements_domain_is_fenced(world):
     submitted = world.paste(batch(three_lines()))
-    world.ledger.transition("test", "statements", "fenced", expected_epoch=1,
-                            actor_owner_id="123")
-    world.ledger.advance(WEEK + 1)
+    world.fence_statements()
+    world.advance(WEEK + 1)
     assert world.service.expire_due(world.worker) == 1
     assert statuses(world) == {submitted.proposal_id: "expired"}
 
@@ -93,8 +86,7 @@ def test_a_batch_without_lines_finishes_as_restored_without_detail(world):
 
 def test_a_batch_from_an_older_epoch_expires_with_epoch_changed(world):
     submitted = world.paste(batch(three_lines()))
-    world.config.assaf_os_authority_epoch = 2
-    world.ledger.bump_epoch("test", expected_epoch=1)
+    world.bump_epoch()
     ctx = for_worker("retention", owner=OWNER, workspace="test", epoch=2)
     assert world.service.expire_due(ctx) == 1
     receipt = world.rows("os_receipts")[0]
@@ -111,7 +103,7 @@ def test_a_current_batch_with_lines_is_left_alone(world):
 
 def test_expire_due_only_accepts_the_retention_worker(world):
     world.paste(batch(three_lines()))
-    world.ledger.advance(WEEK + 1)
+    world.advance(WEEK + 1)
     for ctx in (world.owner, world.reader, world.ctx("MIA"),
                 make_ctx("WORKER", owner=OWNER, workspace="test", scopes=frozenset({"mirror"}))):
         with pytest.raises(api.LedgerError) as caught:
@@ -123,7 +115,7 @@ def test_expire_due_only_accepts_the_retention_worker(world):
 def test_expiry_leaves_the_credential_of_a_batch_untouched(world):
     world.credential()
     submitted = world.paste(batch(three_lines()), ctx=world.assistant(), source=CLAUDE)
-    world.ledger.advance(WEEK + 1)
+    world.advance(WEEK + 1)
     world.service.expire_due(world.worker)
     assert statuses(world) == {submitted.proposal_id: "expired"}
     assert world.tables()["credentials"][CRED].revoked_at is None
@@ -184,18 +176,13 @@ def test_revoke_with_nothing_pending_returns_zero(world):
 
 
 @pytest.mark.parametrize("how", ["unpinned", "mismatch"])
-def test_every_statement_write_refuses_without_a_matching_pin(how):
-    world = World()
+def test_every_statement_write_refuses_without_a_matching_pin(world, how):
     submitted = world.paste(batch(three_lines()))
     review = world.review(submitted.proposal_id)
     key = world.lines(submitted.proposal_id)[0]["line_key"]
-    world.ledger.advance(WEEK + 1)
-    with world.ledger.transaction(world.owner, domain="statements",
-                                  kind="statement_batch") as tx:
-        if how == "unpinned":
-            tx.data["statement_pepper_fp"] = None
-        else:
-            tx.data["statement_pepper_fp"] = pepper_fingerprint(b"another-pepper-0123456789abcdef")
+    world.advance(WEEK + 1)
+    world.set_pin(None if how == "unpinned"
+                  else pepper_fingerprint(b"another-pepper-0123456789abcdef"))
     before = (world.version(), world.everything())
     calls = [
         lambda: world.paste(batch(three_lines(), number=2)),

@@ -11,7 +11,6 @@ from app.services.os_ledger import api
 
 from tests.services.os_ledger.statements.support import (
     CLAUDE,
-    World,
     batch,
     line,
     three_lines,
@@ -29,11 +28,6 @@ LINE_KEYS = {
     "original_amount_minor", "original_currency", "installment", "suggested_tag", "tag",
     "category", "path", "is_subscription", "rule_id", "disagreement", "confidence", "action",
     "flags", "candidate_expense_ids"}
-
-
-@pytest.fixture
-def world():
-    return World()
 
 
 def refused(code: str):
@@ -303,7 +297,7 @@ def test_a_stale_merge_choice_is_dropped_before_the_recompute(world):
 
 def test_a_pending_batch_past_its_expiry_reads_as_expired(world):
     submitted = world.paste(batch(three_lines()))
-    world.ledger.advance(7 * 24 * 3600 + 1)
+    world.advance(7 * 24 * 3600 + 1)
     review = world.review(submitted.proposal_id)
     assert review["status"] == "expired" and review["line_count"] == 3
     assert [p["status"] for p in world.rows("os_proposals")] == ["pending"]  # reads never write
@@ -314,7 +308,7 @@ def test_a_pending_batch_past_its_expiry_reads_as_expired(world):
 def test_a_draft_after_expiry_is_refused_and_writes_nothing(world):
     submitted = world.paste(batch(three_lines()))
     key = world.lines(submitted.proposal_id)[0]["line_key"]
-    world.ledger.advance(7 * 24 * 3600 + 1)
+    world.advance(7 * 24 * 3600 + 1)
     with refused("review_stale"):
         world.service.save_draft(world.owner, submitted.proposal_id, 0,
                                  [{"line_key": key, "tag": "personal"}], {})
@@ -342,3 +336,26 @@ def test_the_whole_cycle_does_not_log_statement_text(world, caplog):
     for secret in ("DEMO SHOP", "PERSONAL CAFE", "BIZ REFUND", "10000", "421731", "1500"):
         assert secret not in text
     assert timedelta  # keep the import honest
+
+
+def test_a_decided_batch_reviews_without_detail_and_refuses_a_draft(world):
+    submitted = world.paste(batch(three_lines()))
+    world.reject(submitted.proposal_id)
+    review = world.review(submitted.proposal_id)
+    assert review["status"] == "rejected" and review["blocking"] == [] and review["merges"] == []
+    assert review["counts"] == {"add": 0, "keep": 0, "update": 0, "void": 0,
+                                "owner_edited_kept": 0, "kept_earlier_choice": 0}
+    assert review["totals"]["business_line_count"] == 0 and review["conflict_with"] == []
+    assert world.lines(submitted.proposal_id) == []
+    with refused("already_decided"):
+        world.service.save_draft(world.owner, submitted.proposal_id, 0, [], {})
+
+
+def test_a_restored_batch_without_detail_reads_as_expired_and_refuses_a_draft(world):
+    submitted = world.paste(batch(three_lines()))
+    world.drop_batch_lines()
+    review = world.review(submitted.proposal_id)
+    assert review["status"] == "expired" and review["line_count"] == 0
+    assert world.lines(submitted.proposal_id) == []
+    with refused("review_stale"):
+        world.service.save_draft(world.owner, submitted.proposal_id, 0, [], {})

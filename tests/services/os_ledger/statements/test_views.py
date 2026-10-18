@@ -11,7 +11,6 @@ from tests.services.os_ledger.statements.support import (
     CLAUDE,
     CRED,
     CRED_B,
-    World,
     batch,
     line,
     three_lines,
@@ -19,11 +18,6 @@ from tests.services.os_ledger.statements.support import (
 
 BINDING = {"api_version": "assaf-os.v2", "source": "postgresql", "workspace_id": "test",
            "authority_epoch": 1}
-
-
-@pytest.fixture
-def world():
-    return World()
 
 
 def refused(code: str):
@@ -65,7 +59,7 @@ def test_an_open_cycle_is_pending_until_the_20th_and_not_imported_after(world):
     entry = world.service.cycles(world.reader)["cycles"][0]
     assert (entry["cycle"], entry["status"]) == ("2026-10", "pending")  # the clock reads Oct 16
     assert entry["pending_proposal_id"] is None and entry["business_total_minor"] is None
-    world.ledger.advance(6 * 24 * 3600)  # Oct 22: past the 20th
+    world.advance(6 * 24 * 3600)  # Oct 22: past the 20th
     entry = world.service.cycles(world.reader)["cycles"][0]
     assert (entry["cycle"], entry["status"]) == ("2026-10", "not_imported")
 
@@ -76,7 +70,7 @@ def test_a_pending_batch_shows_in_its_cycle(world):
     assert (entry["status"], entry["pending_proposal_id"], entry["statement_id"]) == (
         "pending", submitted.proposal_id, None)
     assert entry["charge_date"] == "2026-10-15" and entry["business_total_minor"] is None
-    world.ledger.advance(7 * 24 * 3600 + 1)  # an expired batch is not pending any more
+    world.advance(7 * 24 * 3600 + 1)  # an expired batch is not pending any more
     assert world.service.cycles(world.reader)["cycles"][0]["pending_proposal_id"] is None
 
 
@@ -246,7 +240,7 @@ def test_a_credential_sees_only_its_own_batch_status(world):
     with refused("batch_not_found"):  # an owner paste has no credential
         world.service.status_for_credential(world.assistant(), pasted.proposal_id)
     world.reject(mine.proposal_id)
-    world.ledger.advance(60)
+    world.advance(60)
     status = world.service.status_for_credential(world.assistant(), mine.proposal_id)
     assert status["status"] == "rejected" and status["updated_at"] == "2026-10-16T12:00:00.000Z"
     assert "approval_request_id" not in status and "rejection_request_id" not in status

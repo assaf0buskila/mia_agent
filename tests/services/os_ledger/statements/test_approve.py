@@ -13,18 +13,12 @@ from tests.services.os_ledger.statements.support import (
     CLAUDE,
     CRED,
     HEX64,
-    World,
     batch,
     line,
     three_lines,
 )
 
 STM_KEY = re.compile(r"stmt:STM_[0-9a-f]{32}:[0-9a-f]{64}")
-
-
-@pytest.fixture
-def world():
-    return World()
 
 
 def refused(code: str):
@@ -236,7 +230,8 @@ def test_the_kill_switch_blocks_decisions_and_the_freeze_does_not(world):
 
 
 @pytest.mark.parametrize("point", ["after_apply", "after_receipt", "before_commit"])
-def test_a_failure_at_any_point_leaves_nothing_behind(world, point):
+def test_a_failure_at_any_point_leaves_nothing_behind(fake_world, point):
+    world = fake_world
     submitted = world.paste(batch(three_lines()))
     review = world.review(submitted.proposal_id)
     before = (world.version(), world.everything())
@@ -253,7 +248,8 @@ def test_a_failure_at_any_point_leaves_nothing_behind(world, point):
                                  review["review_digest"]).receipt.status == "committed"
 
 
-def test_an_unknown_commit_recovers_by_replay(world):
+def test_an_unknown_commit_recovers_by_replay(fake_world):
+    world = fake_world
     submitted = world.paste(batch(three_lines()))
     review = world.review(submitted.proposal_id)
     world.ledger.inject("commit_unknown", RuntimeError("lost"))
@@ -287,7 +283,7 @@ def test_a_late_approve_or_reject_finishes_expired_and_purges(world):
     first = world.paste(batch(three_lines(), number=1))
     second = world.paste(batch(three_lines(), number=2, charge_date="2026-11-15"))
     r1, r2 = world.review(first.proposal_id), world.review(second.proposal_id)
-    world.ledger.advance(7 * 24 * 3600 + 1)
+    world.advance(7 * 24 * 3600 + 1)
     late_approve = world.service.approve(world.owner, first.proposal_id,
                                          r1["approval_request_id"], r1["review_digest"])
     assert late_approve.receipt.status == "expired"
@@ -302,8 +298,7 @@ def test_a_late_approve_or_reject_finishes_expired_and_purges(world):
 def test_a_pending_batch_of_an_older_epoch_is_expired_on_a_decision(world):
     submitted = world.paste(batch(three_lines()))
     review = world.review(submitted.proposal_id)
-    world.config.assaf_os_authority_epoch = 2
-    world.ledger.bump_epoch("test", expected_epoch=1)
+    world.bump_epoch()
     ctx = world.ctx("OS", epoch=2)
     result = world.service.approve(ctx, submitted.proposal_id, review["approval_request_id"],
                                    review["review_digest"])
@@ -331,14 +326,16 @@ def test_a_key_older_than_the_revoke_all_watermark_can_never_commit(world):
     world.credential()
     submitted = world.paste(batch(three_lines()), ctx=world.assistant(), source=CLAUDE)
     review = world.review(submitted.proposal_id)
-    world.watermark["value"] = world.ledger._now()  # the key was created a day before
+    world.watermark["value"] = world.now()  # the key was created a day before
     result = world.service.approve(world.owner, submitted.proposal_id,
                                    review["approval_request_id"], review["review_digest"])
     assert (result.receipt.status, result.receipt.reason_codes) == (
         "rejected", ("credential_revoked",))
 
 
-def test_a_missing_credential_row_fails_closed(world):
+def test_a_missing_credential_row_fails_closed(fake_world):
+    # PostgreSQL cannot reach this state: os_proposals(credential_id) is a foreign key.
+    world = fake_world
     submitted = world.paste(batch(three_lines()), ctx=world.assistant(), source=CLAUDE)
     review = world.review(submitted.proposal_id)
     result = world.service.approve(world.owner, submitted.proposal_id,
@@ -348,7 +345,7 @@ def test_a_missing_credential_row_fails_closed(world):
 
 def test_an_owner_paste_is_not_affected_by_the_watermark(world):
     submitted = world.paste(batch(three_lines()))
-    world.watermark["value"] = world.ledger._now() + timedelta(days=1)
+    world.watermark["value"] = world.now() + timedelta(days=1)
     assert world.approve(submitted.proposal_id).receipt.status == "committed"
 
 
