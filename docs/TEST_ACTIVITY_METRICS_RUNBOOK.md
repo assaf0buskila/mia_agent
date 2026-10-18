@@ -58,6 +58,7 @@ uv run mia-mark-test-activities `
   --confirm mark-reviewed-test-activities
 ```
 
-No command in this runbook deletes or rewrites contacts, activities or receipts. A
-rollback of the classification sets `is_test = false` on these exact two activities
-after the same receipt/activity/contact evidence is revalidated; do not delete rows.
+No command in this runbook deletes rows or rewrites contact, activity-content or
+receipt fields; the guarded write changes only `crm_activities.is_test`. A rollback of
+the classification sets `is_test = false` on these exact two activities after the same
+receipt/activity/contact evidence is revalidated; do not delete rows.
