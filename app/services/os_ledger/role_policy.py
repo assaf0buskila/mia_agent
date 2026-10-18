@@ -3,14 +3,15 @@
 Nothing connects on import. validate_ledger_role is the V2_PG_CONTRACTS.md §5.5
 preflight (first connection, every 10 minutes and after a reconnect; never per
 request). validate_ledger_catalog is the operator transaction hook used by
-provisioning. Retention stays reserved, NOLOGIN and unprivileged until V2-14b adds
-its tables. No default privileges are granted for future tables.
+provisioning. V2-14b extends the map for its seven tables and makes retention a
+LOGIN NOINHERIT role with exactly its §18.2 purge rights. No default privileges are
+granted for future tables.
 
 Besides ACLs and ownership it pins what makes the exact grants safe and durable: no rule,
 trigger or policy beyond the reviewed one, a closed dependency island, the owned functions,
 every foreign key NO ACTION with its RI triggers enabled, permanent (logged) relations, and
-the constraint and index inventory (CONSTRAINT_PINS, INDEX_PINS). V2-14b extends the pins
-with its own tables.
+the constraint and index inventory (CONSTRAINT_PINS, INDEX_PINS). V2-14b's pins cover its
+seven tables and the constraints and index its core-v2 migration adds to the V2-14 tables.
 """
 
 from collections.abc import Mapping
@@ -145,6 +146,9 @@ CONSTRAINT_PINS: tuple[ConstraintPin, ...] = (
     ConstraintPin("os_workspaces", "os_workspaces_epoch_check", "CHECK ((epoch > 0))"),
     ConstraintPin("os_workspaces", "os_workspaces_owner_id_check",
                   "CHECK (((owner_id)::text ~ '^[0-9]+$'::text))"),
+    ConstraintPin("os_workspaces", "os_workspaces_pending_seq_check", "CHECK ((pending_seq >= 0))"),
+    ConstraintPin("os_workspaces", "os_workspaces_statement_pepper_fp_check",
+                  "CHECK ((statement_pepper_fp ~ '^[0-9a-f]{64}$'::text))"),
     ConstraintPin("os_workspaces", "os_workspaces_summaries_check",
                   "CHECK ((jsonb_typeof(summaries) = 'object'::text))"),
     ConstraintPin("os_workspaces", "os_workspaces_version_check", "CHECK ((version >= 0))"),
@@ -309,8 +313,14 @@ CONSTRAINT_PINS: tuple[ConstraintPin, ...] = (
                   "UNIQUE (workspace_id, rejection_id)"),
     ConstraintPin("os_proposals", "os_proposals_workspace_id_request_id_key",
                   "UNIQUE (workspace_id, request_id)"),
+    ConstraintPin("os_proposals", "os_proposals_credential_fkey",
+                  "FOREIGN KEY (workspace_id, credential_id) REFERENCES "
+                  "assaf_os.os_assistant_credentials(workspace_id, credential_id)"),
     ConstraintPin("os_proposals", "os_proposals_workspace_id_fkey",
                   "FOREIGN KEY (workspace_id) REFERENCES assaf_os.os_workspaces(workspace_id)"),
+    ConstraintPin("os_proposals", "os_proposals_abandoned_kind_check",
+                  "CHECK ((((status)::text <> 'abandoned'::text) OR ((kind)::text = "
+                  "'owner_direct'::text)))"),
     ConstraintPin("os_proposals", "os_proposals_check", "CHECK ((approval_id <> rejection_id))"),
     ConstraintPin("os_proposals", "os_proposals_check1", "CHECK ((expires_at > created_at))"),
     ConstraintPin("os_proposals", "os_proposals_check2",
@@ -354,10 +364,18 @@ CONSTRAINT_PINS: tuple[ConstraintPin, ...] = (
                   "CHECK ((commit_version > 0))"),
     ConstraintPin("os_receipts", "os_receipts_epoch_check", "CHECK ((epoch > 0))"),
     ConstraintPin("os_receipts", "os_receipts_kind_check", None),
+    ConstraintPin("os_receipts", "os_receipts_reason_codes_check",
+                  "CHECK (((jsonb_typeof(reason_codes) = 'array'::text) AND "
+                  "(jsonb_array_length(reason_codes) <= 20)))"),
     ConstraintPin("os_receipts", "os_receipts_records_check",
                   "CHECK ((jsonb_typeof(records) = 'array'::text))"),
     ConstraintPin("os_receipts", "os_receipts_status_check", None),
+    ConstraintPin("os_receipts", "os_receipts_undo_of_kind_check",
+                  "CHECK (((undo_of IS NOT NULL) = ((kind)::text = 'owner_undo'::text)))"),
     ConstraintPin("os_receipts", "os_receipts_undo_state_check", None),
+    ConstraintPin("os_receipts", "os_receipts_undo_until_kind_check",
+                  "CHECK (((undo_until IS NULL) OR (((kind)::text = 'owner_direct'::text) AND "
+                  "((status)::text = 'committed'::text))))"),
     # os_events
     ConstraintPin("os_events", "os_events_pkey", "PRIMARY KEY (workspace_id, event_id)"),
     ConstraintPin("os_events", "os_events_workspace_id_commit_version_key",
@@ -428,8 +446,8 @@ CONSTRAINT_PINS: tuple[ConstraintPin, ...] = (
     # os_import_batches
     ConstraintPin("os_import_batches", "os_import_batches_pkey",
                   "PRIMARY KEY (workspace_id, batch_id)"),
-    ConstraintPin("os_import_batches", "os_import_batches_workspace_id_source_digest_key",
-                  "UNIQUE (workspace_id, source_digest)"),
+    ConstraintPin("os_import_batches", "os_import_batches_workspace_epoch_digest_key",
+                  "UNIQUE (workspace_id, authority_epoch, source_digest)"),
     ConstraintPin("os_import_batches", "os_import_batches_workspace_id_fkey",
                   "FOREIGN KEY (workspace_id) REFERENCES assaf_os.os_workspaces(workspace_id)"),
     ConstraintPin("os_import_batches", "os_import_batches_authority_epoch_check",
@@ -470,13 +488,206 @@ CONSTRAINT_PINS: tuple[ConstraintPin, ...] = (
                   "CHECK ((jsonb_typeof(raw_record) = 'object'::text))"),
     ConstraintPin("os_import_rows", "os_import_rows_row_number_check", "CHECK ((row_number > 0))"),
     ConstraintPin("os_import_rows", "os_import_rows_status_check", None),
+    # os_statements
+    ConstraintPin("os_statements", "os_statements_pkey",
+                  "PRIMARY KEY (workspace_id, statement_id)"),
+    ConstraintPin("os_statements", "os_statements_label_charge_date_key",
+                  "UNIQUE (workspace_id, account_label, charge_date)"),
+    ConstraintPin("os_statements", "os_statements_approved_proposal_fkey",
+                  "FOREIGN KEY (workspace_id, approved_proposal_id) REFERENCES "
+                  "assaf_os.os_proposals(workspace_id, proposal_id)"),
+    ConstraintPin("os_statements", "os_statements_current_proposal_fkey",
+                  "FOREIGN KEY (workspace_id, current_proposal_id) REFERENCES "
+                  "assaf_os.os_proposals(workspace_id, proposal_id)"),
+    ConstraintPin("os_statements", "os_statements_workspace_fkey",
+                  "FOREIGN KEY (workspace_id) REFERENCES assaf_os.os_workspaces(workspace_id)"),
+    ConstraintPin("os_statements", "os_statements_account_label_check",
+                  "CHECK (((account_label)::text !~ '[0-9]{8,}'::text))"),
+    ConstraintPin("os_statements", "os_statements_cycle_check",
+                  "CHECK ((cycle ~ '^[0-9]{4}-(0[1-9]|1[0-2])$'::text))"),
+    ConstraintPin("os_statements", "os_statements_cycle_range_check",
+                  "CHECK ((cycle_to >= cycle_from))"),
+    ConstraintPin("os_statements", "os_statements_imported_version_check",
+                  "CHECK ((imported_version > 0))"),
+    ConstraintPin("os_statements", "os_statements_line_count_check", "CHECK ((line_count >= 0))"),
+    ConstraintPin("os_statements", "os_statements_lines_digest_check",
+                  "CHECK ((lines_digest ~ '^[0-9a-f]{64}$'::text))"),
+    ConstraintPin("os_statements", "os_statements_statement_id_check",
+                  "CHECK (((statement_id)::text ~ '^STM_[0-9a-f]{32}$'::text))"),
+    ConstraintPin("os_statements", "os_statements_status_check", None),
+    ConstraintPin("os_statements", "os_statements_updated_check",
+                  "CHECK ((updated_at >= created_at))"),
+    # os_statement_lines
+    ConstraintPin("os_statement_lines", "os_statement_lines_pkey",
+                  "PRIMARY KEY (workspace_id, statement_id, line_key)"),
+    ConstraintPin("os_statement_lines", "os_statement_lines_expense_fkey",
+                  "FOREIGN KEY (workspace_id, expense_id) REFERENCES "
+                  "assaf_os.os_expenses(workspace_id, record_id)"),
+    ConstraintPin("os_statement_lines", "os_statement_lines_matched_expense_fkey",
+                  "FOREIGN KEY (workspace_id, matched_expense_id) REFERENCES "
+                  "assaf_os.os_expenses(workspace_id, record_id)"),
+    ConstraintPin("os_statement_lines", "os_statement_lines_statement_fkey",
+                  "FOREIGN KEY (workspace_id, statement_id) REFERENCES "
+                  "assaf_os.os_statements(workspace_id, statement_id)"),
+    ConstraintPin("os_statement_lines", "os_statement_lines_workspace_fkey",
+                  "FOREIGN KEY (workspace_id) REFERENCES assaf_os.os_workspaces(workspace_id)"),
+    ConstraintPin("os_statement_lines", "os_statement_lines_amount_minor_check",
+                  "CHECK ((amount_minor > 0))"),
+    ConstraintPin("os_statement_lines", "os_statement_lines_assistant_tag_check", None),
+    ConstraintPin("os_statement_lines", "os_statement_lines_business_check",
+                  "CHECK ((((tag)::text <> 'business'::text) OR ((txn_date IS NOT NULL) AND "
+                  "(merchant_display IS NOT NULL) AND (merchant_key IS NOT NULL) AND "
+                  "(amount_minor IS NOT NULL) AND (kind IS NOT NULL) AND "
+                  "(currency IS NOT NULL))))"),
+    ConstraintPin("os_statement_lines", "os_statement_lines_currency_check",
+                  "CHECK ((currency ~ '^[A-Z]{3}$'::text))"),
+    ConstraintPin("os_statement_lines", "os_statement_lines_expense_revision_at_import_check",
+                  "CHECK ((expense_revision_at_import > 0))"),
+    ConstraintPin("os_statement_lines", "os_statement_lines_installment_check",
+                  "CHECK ((((installment_n IS NULL) = (installment_of IS NULL)) AND "
+                  "((installment_n IS NULL) OR ((installment_n >= 1) AND (installment_n <= "
+                  "installment_of)))))"),
+    ConstraintPin("os_statement_lines", "os_statement_lines_kind_check", None),
+    ConstraintPin("os_statement_lines", "os_statement_lines_line_key_check",
+                  "CHECK ((line_key ~ '^[0-9a-f]{64}$'::text))"),
+    ConstraintPin("os_statement_lines", "os_statement_lines_original_amount_minor_check",
+                  "CHECK ((original_amount_minor > 0))"),
+    ConstraintPin("os_statement_lines", "os_statement_lines_original_currency_check",
+                  "CHECK ((original_currency ~ '^[A-Z]{3}$'::text))"),
+    ConstraintPin("os_statement_lines", "os_statement_lines_original_pair_check",
+                  "CHECK (((original_amount_minor IS NULL) = (original_currency IS NULL)))"),
+    ConstraintPin("os_statement_lines", "os_statement_lines_owner_override_check",
+                  "CHECK ((jsonb_typeof(owner_override) = 'object'::text))"),
+    ConstraintPin("os_statement_lines", "os_statement_lines_personal_check",
+                  "CHECK ((((tag)::text <> 'personal'::text) OR ((txn_date IS NULL) AND "
+                  "(merchant_display IS NULL) AND (merchant_key IS NULL) AND (amount_minor IS "
+                  "NULL) AND (kind IS NULL) AND (currency IS NULL) AND (original_amount_minor IS "
+                  "NULL) AND (original_currency IS NULL) AND (installment_n IS NULL) AND "
+                  "(installment_of IS NULL) AND (category IS NULL) AND (path IS NULL) AND "
+                  "(platform IS NULL) AND (is_subscription IS NULL) AND (rule_id IS NULL) AND "
+                  "(assistant_tag IS NULL) AND (owner_override IS NULL) AND (expense_id IS NULL) "
+                  "AND (matched_expense_id IS NULL) AND (expense_revision_at_import IS NULL))))"),
+    ConstraintPin("os_statement_lines", "os_statement_lines_revision_check",
+                  "CHECK ((revision > 0))"),
+    ConstraintPin("os_statement_lines", "os_statement_lines_rule_id_check",
+                  "CHECK (((rule_id)::text ~ '^MR_[0-9a-f]{24}$'::text))"),
+    ConstraintPin("os_statement_lines", "os_statement_lines_state_check", None),
+    ConstraintPin("os_statement_lines", "os_statement_lines_tag_check", None),
+    ConstraintPin("os_statement_lines", "os_statement_lines_updated_check",
+                  "CHECK ((updated_at >= created_at))"),
+    # os_statement_batch_lines
+    ConstraintPin("os_statement_batch_lines", "os_statement_batch_lines_pkey",
+                  "PRIMARY KEY (workspace_id, proposal_id, line_key)"),
+    ConstraintPin("os_statement_batch_lines", "os_statement_batch_lines_proposal_fkey",
+                  "FOREIGN KEY (workspace_id, proposal_id) REFERENCES "
+                  "assaf_os.os_proposals(workspace_id, proposal_id)"),
+    ConstraintPin("os_statement_batch_lines", "os_statement_batch_lines_workspace_fkey",
+                  "FOREIGN KEY (workspace_id) REFERENCES assaf_os.os_workspaces(workspace_id)"),
+    ConstraintPin("os_statement_batch_lines", "os_statement_batch_lines_detail_check",
+                  "CHECK ((jsonb_typeof(detail) = 'object'::text))"),
+    ConstraintPin("os_statement_batch_lines", "os_statement_batch_lines_line_key_check",
+                  "CHECK ((line_key ~ '^[0-9a-f]{64}$'::text))"),
+    ConstraintPin("os_statement_batch_lines", "os_statement_batch_lines_occurrence_index_check",
+                  "CHECK ((occurrence_index >= 0))"),
+    ConstraintPin("os_statement_batch_lines", "os_statement_batch_lines_purge_check",
+                  "CHECK (((detail IS NULL) = (purged_at IS NOT NULL)))"),
+    ConstraintPin("os_statement_batch_lines", "os_statement_batch_lines_updated_check",
+                  "CHECK ((updated_at >= created_at))"),
+    # os_merchant_rules
+    ConstraintPin("os_merchant_rules", "os_merchant_rules_pkey",
+                  "PRIMARY KEY (workspace_id, rule_id)"),
+    ConstraintPin("os_merchant_rules", "os_merchant_rules_match_hmac_key",
+                  "UNIQUE (workspace_id, match, merchant_key_hmac)"),
+    ConstraintPin("os_merchant_rules", "os_merchant_rules_source_proposal_fkey",
+                  "FOREIGN KEY (workspace_id, source_proposal_id) REFERENCES "
+                  "assaf_os.os_proposals(workspace_id, proposal_id)"),
+    ConstraintPin("os_merchant_rules", "os_merchant_rules_workspace_fkey",
+                  "FOREIGN KEY (workspace_id) REFERENCES assaf_os.os_workspaces(workspace_id)"),
+    ConstraintPin("os_merchant_rules", "os_merchant_rules_aliases_check",
+                  "CHECK (((jsonb_typeof(aliases) = 'array'::text) AND "
+                  "(jsonb_array_length(aliases) <= 10)))"),
+    ConstraintPin("os_merchant_rules", "os_merchant_rules_business_check",
+                  "CHECK ((((tag)::text <> 'business'::text) OR (merchant_key IS NOT NULL)))"),
+    ConstraintPin("os_merchant_rules", "os_merchant_rules_match_check", None),
+    ConstraintPin("os_merchant_rules", "os_merchant_rules_merchant_key_hmac_check",
+                  "CHECK ((merchant_key_hmac ~ '^[0-9a-f]{64}$'::text))"),
+    ConstraintPin("os_merchant_rules", "os_merchant_rules_personal_check",
+                  "CHECK ((((tag)::text <> 'personal'::text) OR ((merchant_key IS NULL) AND "
+                  "((match)::text = 'exact'::text) AND (aliases = '[]'::jsonb) AND (label IS "
+                  "NULL) AND (category IS NULL) AND (path IS NULL) AND (platform IS NULL) AND "
+                  "(is_subscription IS NULL))))"),
+    ConstraintPin("os_merchant_rules", "os_merchant_rules_revision_check",
+                  "CHECK ((revision > 0))"),
+    ConstraintPin("os_merchant_rules", "os_merchant_rules_rule_id_check",
+                  "CHECK (((rule_id)::text ~ '^MR_[0-9a-f]{24}$'::text))"),
+    ConstraintPin("os_merchant_rules", "os_merchant_rules_tag_check", None),
+    ConstraintPin("os_merchant_rules", "os_merchant_rules_updated_check",
+                  "CHECK ((updated_at >= created_at))"),
+    # os_statement_review_drafts
+    ConstraintPin("os_statement_review_drafts", "os_statement_review_drafts_pkey",
+                  "PRIMARY KEY (workspace_id, proposal_id)"),
+    ConstraintPin("os_statement_review_drafts", "os_statement_review_drafts_proposal_fkey",
+                  "FOREIGN KEY (workspace_id, proposal_id) REFERENCES "
+                  "assaf_os.os_proposals(workspace_id, proposal_id)"),
+    ConstraintPin("os_statement_review_drafts", "os_statement_review_drafts_workspace_fkey",
+                  "FOREIGN KEY (workspace_id) REFERENCES assaf_os.os_workspaces(workspace_id)"),
+    ConstraintPin("os_statement_review_drafts", "os_statement_review_drafts_choices_check",
+                  "CHECK ((jsonb_typeof(choices) = 'object'::text))"),
+    ConstraintPin("os_statement_review_drafts", "os_statement_review_drafts_draft_revision_check",
+                  "CHECK ((draft_revision >= 0))"),
+    ConstraintPin("os_statement_review_drafts", "os_statement_review_drafts_overrides_check",
+                  "CHECK ((jsonb_typeof(overrides) = 'object'::text))"),
+    ConstraintPin("os_statement_review_drafts", "os_statement_review_drafts_updated_check",
+                  "CHECK ((updated_at >= created_at))"),
+    # os_assistant_credentials
+    ConstraintPin("os_assistant_credentials", "os_assistant_credentials_pkey",
+                  "PRIMARY KEY (workspace_id, credential_id)"),
+    ConstraintPin("os_assistant_credentials", "os_assistant_credentials_secret_hash_key",
+                  "UNIQUE (secret_hash)"),
+    ConstraintPin("os_assistant_credentials", "os_assistant_credentials_workspace_fkey",
+                  "FOREIGN KEY (workspace_id) REFERENCES assaf_os.os_workspaces(workspace_id)"),
+    ConstraintPin("os_assistant_credentials", "os_assistant_credentials_credential_id_check",
+                  "CHECK (((credential_id)::text ~ '^AC_[0-9a-f]{32}$'::text))"),
+    ConstraintPin("os_assistant_credentials", "os_assistant_credentials_epoch_check",
+                  "CHECK ((epoch > 0))"),
+    ConstraintPin("os_assistant_credentials", "os_assistant_credentials_expiry_check",
+                  "CHECK ((expires_at > created_at))"),
+    ConstraintPin("os_assistant_credentials", "os_assistant_credentials_expiry_max_check",
+                  "CHECK ((expires_at <= (created_at + '90 days'::interval)))"),
+    ConstraintPin("os_assistant_credentials", "os_assistant_credentials_kind_check", None),
+    ConstraintPin("os_assistant_credentials", "os_assistant_credentials_owner_id_check",
+                  "CHECK (((owner_id)::text ~ '^[0-9]+$'::text))"),
+    ConstraintPin("os_assistant_credentials", "os_assistant_credentials_revoked_check",
+                  "CHECK (((revoked_at IS NULL) OR (revoked_at >= created_at)))"),
+    ConstraintPin("os_assistant_credentials", "os_assistant_credentials_scopes_check",
+                  "CHECK (((scopes)::text = 'merchant_rules:read own_proposals:read "
+                  "statement:propose'::text))"),
+    ConstraintPin("os_assistant_credentials", "os_assistant_credentials_secret_hash_check",
+                  "CHECK ((secret_hash ~ '^[0-9a-f]{64}$'::text))"),
+    ConstraintPin("os_assistant_credentials", "os_assistant_credentials_use_count_check",
+                  "CHECK ((use_count >= 0))"),
+    # os_assistant_audit
+    ConstraintPin("os_assistant_audit", "os_assistant_audit_pkey",
+                  "PRIMARY KEY (workspace_id, audit_id)"),
+    ConstraintPin("os_assistant_audit", "os_assistant_audit_workspace_fkey",
+                  "FOREIGN KEY (workspace_id) REFERENCES assaf_os.os_workspaces(workspace_id)"),
+    ConstraintPin("os_assistant_audit", "os_assistant_audit_bytes_check", "CHECK ((bytes >= 0))"),
+    ConstraintPin("os_assistant_audit", "os_assistant_audit_client_ip_hmac_check",
+                  "CHECK ((client_ip_hmac ~ '^[0-9a-f]{64}$'::text))"),
+    ConstraintPin("os_assistant_audit", "os_assistant_audit_credential_id_check",
+                  "CHECK (((credential_id)::text ~ '^AC_[0-9a-f]{32}$'::text))"),
+    ConstraintPin("os_assistant_audit", "os_assistant_audit_line_count_check",
+                  "CHECK ((line_count >= 0))"),
     # schema_migrations
     ConstraintPin("schema_migrations", "schema_migrations_pkey", "PRIMARY KEY (filename)"),
 )
 
 # The indexes that back no PRIMARY KEY or UNIQUE constraint (those are the pins above), by
-# pg_get_indexdef. The expression index is the exactly-once key for expenses (V2-14).
+# pg_get_indexdef. The expression index is the exactly-once key for expenses (V2-14). The
+# audit and proposals indexes and the partial unique index of statement lines are V2-14b's.
 INDEX_PINS = frozenset({
+    "CREATE INDEX os_assistant_audit_credential_occurred_idx ON assaf_os.os_assistant_audit "
+    "USING btree (credential_id, occurred_at)",
     "CREATE INDEX os_clients_workspace_business_date_idx ON assaf_os.os_clients USING btree "
     "(workspace_id, business_date)",
     "CREATE UNIQUE INDEX os_expenses_source_key_idx ON assaf_os.os_expenses USING btree "
@@ -489,6 +700,11 @@ INDEX_PINS = frozenset({
     "next_attempt_at, workspace_id, commit_version)",
     "CREATE INDEX os_payments_workspace_business_date_idx ON assaf_os.os_payments USING btree "
     "(workspace_id, business_date)",
+    "CREATE INDEX os_proposals_workspace_status_kind_created_idx ON assaf_os.os_proposals "
+    "USING btree (workspace_id, status, kind, created_at)",
+    "CREATE UNIQUE INDEX os_statement_lines_matched_expense_key ON assaf_os.os_statement_lines "
+    "USING btree (workspace_id, matched_expense_id) WHERE (((state)::text = 'active'::text) "
+    "AND (matched_expense_id IS NOT NULL))",
     "CREATE INDEX os_tasks_workspace_business_date_idx ON assaf_os.os_tasks USING btree "
     "(workspace_id, business_date)",
     "CREATE INDEX os_tasks_workspace_status_due_date_idx ON assaf_os.os_tasks USING btree "
@@ -546,6 +762,143 @@ inside(classid, objid) AS (
 # the only things outside assaf_os that an assaf_os object may depend on.
 _FIRST_NORMAL_OID = 16384
 
+# --- V2-14b extension (V2_PG_CONTRACTS.md section 18.2) --------------------------------
+# Kept apart from the V2-15 map above. Literal tuples only; the policy tests pin each one
+# to the migration SQL's columns. TABLE_PRIVILEGES already gives every V2-14b table
+# SELECT and INSERT, because os_ledger_migrate.TABLES lists them. Never updatable:
+# os_workspaces.epoch and statement_pepper_fp, os_receipts.reason_codes, and every
+# os_assistant_audit column.
+ADDENDUM_COLUMN_UPDATES: Mapping[str, tuple[str, ...]] = MappingProxyType({
+    "os_workspaces": ("pending_seq",),
+    "os_statements": (
+        "status", "line_count", "lines_digest", "current_proposal_id", "approved_proposal_id",
+        "imported_version", "updated_at",
+    ),
+    # Every column except workspace_id, statement_id, line_key and created_at.
+    "os_statement_lines": (
+        "tag", "state", "txn_date", "merchant_display", "merchant_key", "amount_minor", "kind",
+        "currency", "original_amount_minor", "original_currency", "installment_n",
+        "installment_of", "category", "path", "platform", "is_subscription", "rule_id",
+        "assistant_tag", "owner_override", "expense_id", "matched_expense_id",
+        "expense_revision_at_import", "revision", "updated_at",
+    ),
+    # Every column except workspace_id, rule_id and created_at.
+    "os_merchant_rules": (
+        "match", "tag", "merchant_key", "merchant_key_hmac", "category", "path", "platform",
+        "is_subscription", "label", "aliases", "active", "revision", "source_proposal_id",
+        "updated_at",
+    ),
+    "os_statement_review_drafts": ("draft_revision", "overrides", "choices", "updated_at"),
+    "os_statement_batch_lines": ("detail", "purged_at"),
+    "os_assistant_credentials": ("revoked_at", "last_used_at", "use_count"),
+})
+# Retention (LOGIN NOINHERIT): schema USAGE plus exactly these. The os-retention job uses
+# DELETE only for purged batch lines, batch lines whose proposal expired more than a day
+# ago (the I11 backstop, whatever purged_at says), and audit rows older than 180 days.
+RETENTION_TABLE_PRIVILEGES: Mapping[str, frozenset[str]] = MappingProxyType({
+    "os_assistant_audit": frozenset({"SELECT", "DELETE"}),
+    "os_statement_batch_lines": frozenset({"SELECT", "DELETE"}),
+})
+RETENTION_COLUMN_SELECTS: Mapping[str, tuple[str, ...]] = MappingProxyType({
+    "os_proposals": ("workspace_id", "proposal_id", "kind", "status", "expires_at"),
+})
+# §22 E6: the database cannot enforce retention's row predicates (no RLS), so the
+# os-retention job runs exactly these fixed statements and no other SQL as the retention
+# role. The only bound parameter is :workspace_id; the windows are literals, so no caller
+# can widen them. V2-26's app/workers/os_retention.py must execute these constants.
+RETENTION_DELETE_SQL: Mapping[str, str] = MappingProxyType({
+    # Batch lines whose detail the runtime path already purged.
+    "purge": (
+        "DELETE FROM assaf_os.os_statement_batch_lines "
+        "WHERE workspace_id = :workspace_id AND purged_at IS NOT NULL"
+    ),
+    # The I11 backstop: lines of a proposal that expired more than a day ago, whatever
+    # purged_at says.
+    "backstop": (
+        "DELETE FROM assaf_os.os_statement_batch_lines AS b USING assaf_os.os_proposals AS p "
+        "WHERE b.workspace_id = :workspace_id AND p.workspace_id = b.workspace_id "
+        "AND p.proposal_id = b.proposal_id AND p.expires_at < now() - interval '1 day'"
+    ),
+    # Assistant audit rows are kept for 180 days (§17.2).
+    "audit": (
+        "DELETE FROM assaf_os.os_assistant_audit "
+        "WHERE workspace_id = :workspace_id AND occurred_at < now() - interval '180 days'"
+    ),
+})
+
+
+def addendum_grant_statements() -> tuple[str, ...]:
+    """V2-14b's GRANTs, appended to ledger_grant_statements() after V2-15's."""
+    statements = [
+        f"GRANT UPDATE ({', '.join(columns)}) ON TABLE assaf_os.{name} TO assaf_os_ledger;"
+        for name, columns in ADDENDUM_COLUMN_UPDATES.items()
+    ]
+    statements.append("GRANT USAGE ON SCHEMA assaf_os TO assaf_os_retention;")
+    for name, privileges in RETENTION_TABLE_PRIVILEGES.items():
+        statements.append(
+            f"GRANT {', '.join(sorted(privileges))} ON TABLE assaf_os.{name} "
+            "TO assaf_os_retention;"
+        )
+    for name, columns in RETENTION_COLUMN_SELECTS.items():
+        statements.append(
+            f"GRANT SELECT ({', '.join(columns)}) ON TABLE assaf_os.{name} TO assaf_os_retention;"
+        )
+    return tuple(statements)
+
+
+def _addendum_acl() -> tuple[set[tuple], set[tuple], set[tuple]]:
+    """Expected V2-14b schema, table and column ACL entries (no grant options)."""
+    schema = {(RETENTION_ROLE, "USAGE", False)}
+    tables = {
+        (name, RETENTION_ROLE, privilege, False)
+        for name, privileges in RETENTION_TABLE_PRIVILEGES.items() for privilege in privileges
+    }
+    columns = {
+        (name, column, RUNTIME_ROLE, "UPDATE", False)
+        for name, names in ADDENDUM_COLUMN_UPDATES.items() for column in names
+    } | {
+        (name, column, RETENTION_ROLE, "SELECT", False)
+        for name, names in RETENTION_COLUMN_SELECTS.items() for column in names
+    }
+    return schema, tables, columns
+
+
+def _retention_effective(conn: Connection) -> None:
+    # Effective, not only ACL-level: PUBLIC or any other path into assaf_os also fails.
+    tables = conn.execute(text("""
+        SELECT c.relname, p.privilege FROM pg_class c
+        JOIN pg_namespace n ON n.oid=c.relnamespace
+        CROSS JOIN unnest(ARRAY['SELECT','INSERT','UPDATE','DELETE','TRUNCATE',
+                                'REFERENCES','TRIGGER']) AS p(privilege)
+        WHERE n.nspname='assaf_os' AND c.relkind IN ('r','p','v','m','f')
+        AND has_table_privilege(:role, c.oid, p.privilege)
+    """), {"role": RETENTION_ROLE}).all()
+    _require({tuple(row) for row in tables} == {
+        (name, privilege)
+        for name, privileges in RETENTION_TABLE_PRIVILEGES.items() for privilege in privileges
+    })
+    columns = conn.execute(text("""
+        SELECT c.relname, a.attname, p.privilege FROM pg_class c
+        JOIN pg_namespace n ON n.oid=c.relnamespace
+        JOIN pg_attribute a ON a.attrelid=c.oid AND a.attnum > 0 AND NOT a.attisdropped
+        CROSS JOIN unnest(ARRAY['SELECT','INSERT','UPDATE','REFERENCES']) AS p(privilege)
+        WHERE n.nspname='assaf_os' AND c.relkind IN ('r','p','v','m','f')
+        AND has_column_privilege(:role, c.oid, a.attnum, p.privilege)
+    """), {"role": RETENTION_ROLE}).all()
+    _require({tuple(row) for row in columns if row[0] not in RETENTION_TABLE_PRIVILEGES} == {
+        (name, column, "SELECT")
+        for name, names in RETENTION_COLUMN_SELECTS.items() for column in names
+    })
+    _require({row[2] for row in columns if row[0] in RETENTION_TABLE_PRIVILEGES} <= {"SELECT"})
+    _require(not conn.scalar(text("""
+        SELECT EXISTS(SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+          WHERE n.nspname='assaf_os' AND CASE WHEN c.relkind='S'
+          THEN has_sequence_privilege(:role, c.oid, 'USAGE,SELECT,UPDATE') ELSE false END)
+        OR EXISTS(SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+          WHERE n.nspname='assaf_os' AND has_function_privilege(:role, p.oid, 'EXECUTE'))
+        OR NOT has_schema_privilege(:role, 'assaf_os', 'USAGE')
+    """), {"role": RETENTION_ROLE}))
+
 
 def ledger_grant_statements() -> tuple[str, ...]:
     """Return the complete, deterministic runtime GRANT set (no dynamic SQL names)."""
@@ -561,6 +914,7 @@ def ledger_grant_statements() -> tuple[str, ...]:
     statements.append(
         "GRANT EXECUTE ON FUNCTION assaf_os.expense_source_key_sha256(text) TO assaf_os_ledger;"
     )
+    statements.extend(addendum_grant_statements())  # V2-14b
     return tuple(statements)
 
 
@@ -587,7 +941,8 @@ def _roles(conn: Connection, main_role: str, migration_role: str | None) -> None
     _require(bool(main_role) and bool(migration_role) and len({
         RUNTIME_ROLE, OWNER_ROLE, RETENTION_ROLE, main_role, migration_role,
     }) == 5)
-    for role, login in ((RUNTIME_ROLE, True), (OWNER_ROLE, False), (RETENTION_ROLE, False)):
+    # V2-14b: retention is LOGIN NOINHERIT (section 18.2).
+    for role, login in ((RUNTIME_ROLE, True), (OWNER_ROLE, False), (RETENTION_ROLE, True)):
         row = conn.execute(text(
             "SELECT rolcanlogin, rolinherit, rolsuper, rolcreaterole, rolcreatedb, "
             "rolreplication, rolbypassrls FROM pg_roles WHERE rolname=:role"
@@ -764,12 +1119,33 @@ def _footprints(conn: Connection, main_role: str) -> None:
     # The runtime role appears in no ACL and owns nothing in ANY database or shared
     # object (tablespaces, other databases, parameters, large objects, types, ...),
     # except assaf_os objects (pinned exactly by _catalog) and CONNECT on this database.
-    # Retention appears nowhere at all.
-    _require(not conn.scalar(text(_INSIDE + """
+    # V2-14b: retention appears only as the grantee of its exact §18.2 ACL entries in
+    # this database (the assaf_os schema, its two tables, the five os_proposals
+    # columns); never as an owner, on a shared object or in another database.
+    retention = {
+        "retention_tables": sorted(RETENTION_TABLE_PRIVILEGES),
+        "column_tables": [t for t, cs in RETENTION_COLUMN_SELECTS.items() for _ in cs],
+        "column_names": [c for cs in RETENTION_COLUMN_SELECTS.values() for c in cs],
+    }
+    _require(not conn.scalar(text(_INSIDE + """,
+        retention_acl(classid, objid, objsubid) AS (
+            SELECT 'pg_namespace'::regclass::oid, oid, 0 FROM ns
+            UNION ALL SELECT 'pg_class'::regclass::oid, c.oid, 0 FROM pg_class c
+                WHERE c.relnamespace IN (SELECT oid FROM ns)
+                  AND c.relname = ANY(CAST(:retention_tables AS text[]))
+            UNION ALL SELECT 'pg_class'::regclass::oid, c.oid, a.attnum::int
+                FROM pg_class c JOIN pg_attribute a ON a.attrelid = c.oid
+                JOIN unnest(CAST(:column_tables AS text[]), CAST(:column_names AS text[]))
+                     AS g(relname, attname)
+                  ON g.relname = c.relname AND g.attname = a.attname
+                WHERE c.relnamespace IN (SELECT oid FROM ns))
         SELECT EXISTS(SELECT 1 FROM pg_shdepend s
         WHERE s.refclassid = 'pg_authid'::regclass
-          AND (s.refobjid = to_regrole(:retention) OR (
-               s.refobjid = to_regrole(:runtime) AND NOT (s.deptype = 'a' AND (
+          AND ((s.refobjid = to_regrole(:retention) AND NOT (s.deptype = 'a'
+                 AND s.dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
+                 AND (s.classid, s.objid, s.objsubid)
+                     IN (SELECT classid, objid, objsubid FROM retention_acl)))
+           OR (s.refobjid = to_regrole(:runtime) AND NOT (s.deptype = 'a' AND (
                  (s.dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
                   AND s.classid IN ('pg_namespace'::regclass, 'pg_class'::regclass,
                                     'pg_proc'::regclass)
@@ -777,7 +1153,7 @@ def _footprints(conn: Connection, main_role: str) -> None:
                  OR (s.dbid = 0 AND s.classid = 'pg_database'::regclass
                      AND s.objid = (SELECT oid FROM pg_database
                                     WHERE datname = current_database())))))))
-    """), params))
+    """), params | retention))
     # r1 must-fix 3: SET / ALTER SYSTEM on a parameter (session_replication_role turns
     # off foreign keys and the assistant trigger) is granted to none of these or PUBLIC.
     _require(not conn.scalar(text("""
@@ -865,12 +1241,13 @@ def _catalog(conn: Connection, main_role: str, migration_role: str | None) -> No
         for name, owner, security, language, volatility, strict, returns, config, source
         in functions
     } == {(name, OWNER_ROLE, False, pin) for name, pin in FUNCTION_PINS.items()})
+    addendum_schema, addendum_tables, addendum_columns = _addendum_acl()  # V2-14b
     _acl(conn, """
         SELECT pg_get_userbyid(a.grantee),a.privilege_type,a.is_grantable
         FROM pg_namespace n CROSS JOIN LATERAL
         aclexplode(COALESCE(n.nspacl,acldefault('n',n.nspowner))) a
         WHERE n.nspname='assaf_os' AND a.grantee<>n.nspowner
-    """, {(RUNTIME_ROLE, "USAGE", False)})
+    """, {(RUNTIME_ROLE, "USAGE", False)} | addendum_schema)
     _acl(conn, """
         SELECT c.relname,pg_get_userbyid(a.grantee),a.privilege_type,a.is_grantable
         FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
@@ -878,7 +1255,8 @@ def _catalog(conn: Connection, main_role: str, migration_role: str | None) -> No
             CASE WHEN c.relkind='S' THEN 'S'::"char" ELSE 'r'::"char" END,c.relowner))) a
         WHERE n.nspname='assaf_os' AND a.grantee<>c.relowner
     """, {(name, RUNTIME_ROLE, privilege, False)
-          for name, privileges in TABLE_PRIVILEGES.items() for privilege in privileges})
+          for name, privileges in TABLE_PRIVILEGES.items() for privilege in privileges}
+        | addendum_tables)
     _acl(conn, """
         SELECT c.relname,col.attname,pg_get_userbyid(a.grantee),a.privilege_type,a.is_grantable
         FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
@@ -886,7 +1264,8 @@ def _catalog(conn: Connection, main_role: str, migration_role: str | None) -> No
         CROSS JOIN LATERAL aclexplode(col.attacl) a
         WHERE n.nspname='assaf_os' AND a.grantee<>c.relowner
     """, {(name, col, RUNTIME_ROLE, "UPDATE", False)
-          for name, columns in COLUMN_UPDATES.items() for col in columns})
+          for name, columns in COLUMN_UPDATES.items() for col in columns}
+        | addendum_columns)
     _acl(conn, """
         SELECT p.proname,pg_get_userbyid(a.grantee),a.privilege_type,a.is_grantable
         FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
@@ -894,21 +1273,22 @@ def _catalog(conn: Connection, main_role: str, migration_role: str | None) -> No
         WHERE n.nspname='assaf_os' AND a.grantee<>p.proowner
     """, {("expense_source_key_sha256", RUNTIME_ROLE, "EXECUTE", False)})
     # Reject ambient PUBLIC privileges and explicit grants in ANY user schema,
-    # even without schema USAGE. Retention has no effective object privileges.
+    # even without schema USAGE. V2-14b: inside assaf_os, retention's effective
+    # privileges are pinned exactly by _retention_effective below.
     for role in (RUNTIME_ROLE, RETENTION_ROLE):
         _require(not conn.scalar(text(f"""
             SELECT EXISTS(SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
-            WHERE {_USER_SCHEMA} AND (n.nspname<>'assaf_os' OR CAST(:retention AS boolean))
-            AND CASE
+            WHERE {_USER_SCHEMA} AND n.nspname<>'assaf_os' AND CASE
               WHEN c.relkind='S' THEN has_sequence_privilege(:role,c.oid,'USAGE,SELECT,UPDATE')
               WHEN c.relkind IN ('r','p','v','m','f') THEN
                 has_table_privilege(:role,c.oid,'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
                 OR has_any_column_privilege(:role,c.oid,'SELECT,INSERT,UPDATE,REFERENCES')
               ELSE false END)
             OR EXISTS(SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
-            WHERE {_USER_SCHEMA} AND (n.nspname<>'assaf_os' OR CAST(:retention AS boolean))
+            WHERE {_USER_SCHEMA} AND n.nspname<>'assaf_os'
             AND has_function_privilege(:role,p.oid,'EXECUTE'))
-        """), {"role": role, "retention": role == RETENTION_ROLE}))
+        """), {"role": role}))
+    _retention_effective(conn)  # V2-14b
     _closure(conn)
     _integrity(conn)
     _footprints(conn, main_role)
