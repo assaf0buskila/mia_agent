@@ -37,6 +37,8 @@ DIRECT = "app.services.os_ledger.owner_direct"
 SESSIONS = "app.api.owner_sessions"
 AUTHORIZE = "app.services.os_ledger.authorize"
 AUTHORIZE_FILE = "app/services/os_ledger/authorize.py"
+# authorize's registry entry points, also flagged as plain string constants (review r3).
+AUTHORIZE_REGISTRY = frozenset({"_register", "_mint", "_MINTED"})
 CONTEXT_NAMES = frozenset({"_issue", "_CAPABILITY", "TrustedOwnerContext"})
 CONTEXT_ATTRS = frozenset({"_issue", "_CAPABILITY"})
 PROOF_NAMES = frozenset({"_mutation_proven", "_attach_mutation_proof", "_MutationProof"})
@@ -199,6 +201,9 @@ class Scanner(ast.NodeVisitor):
     def visit_Constant(self, node: ast.Constant) -> None:
         if isinstance(node.value, str):
             self._field(getattr(node, "lineno", 0), node.value)
+            if node.value in AUTHORIZE_REGISTRY:  # review r3: attrgetter('_register') and kin
+                self.findings.add((getattr(node, "lineno", 0), "authorize_private",
+                                   f"{AUTHORIZE}.{node.value}"))
 
     def visit_keyword(self, node: ast.keyword) -> None:
         if node.arg:
@@ -219,6 +224,8 @@ class Scanner(ast.NodeVisitor):
             target = self.resolve(node.args[0])
             if target in GUARDED_MODULES:
                 self.findings.add((node.lineno, "module_table", target))
+            if target == AUTHORIZE:  # review r3: vars(authorize)['_register']
+                self.findings.add((node.lineno, "authorize_private", f"{AUTHORIZE}.__dict__"))
         self.generic_visit(node)
 
 
@@ -414,6 +421,16 @@ PLANTED = {
                              "def f(p, x):\n"
                              "    return dataclasses.replace(p, **{'_mutation_proof': x})\n"),
     "capability_by_dict": ("app/x/evil.py", "def f(c):\n    return c.__dict__['_capability']\n"),
+    # review r3: vars() of authorize itself, and its registry names through reflection
+    "authorize_vars": ("app/x/evil.py",
+                       "from app.services.os_ledger import authorize\n"
+                       "def f(c):\n    return vars(authorize)['_register'](c)\n"),
+    "authorize_vars_sys_modules": (
+        "app/x/evil.py",
+        "import sys\nvars(sys.modules['app.services.os_ledger.authorize'])['_MINTED'].clear()\n"),
+    "authorize_attrgetter": ("app/x/evil.py",
+                             "import operator\nfrom app.services.os_ledger import authorize\n"
+                             "operator.attrgetter('_register')(authorize)\n"),
 }
 
 

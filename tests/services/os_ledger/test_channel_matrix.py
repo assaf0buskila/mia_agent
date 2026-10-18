@@ -264,6 +264,22 @@ def test_a_worker_context_holds_exactly_one_known_job(scopes):
     assert malformed(ctx, "read") == MALFORMED
 
 
+class _ExpirySubclass(datetime):
+    pass
+
+
+class _ScopeSubclass(frozenset):
+    pass
+
+
+def test_only_an_exact_datetime_expiry_and_an_exact_frozenset_of_scopes_are_well_formed():
+    # Review r3: pins the exact-type checks (a subclass could override comparison).
+    later = _ExpirySubclass(2099, 1, 1, tzinfo=UTC)
+    assert malformed(dataclasses.replace(os_ctx(), auth_expires_at=later), "read") == MALFORMED
+    scopes = _ScopeSubclass(OS_SCOPES)
+    assert malformed(dataclasses.replace(os_ctx(), scopes=scopes), "read") == MALFORMED
+
+
 @pytest.mark.parametrize("channel", CHANNELS)
 def test_an_expired_context_is_refused(channel):
     # Built expired (a replace copy is refused as not minted since review r1).
