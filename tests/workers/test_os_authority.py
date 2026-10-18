@@ -232,7 +232,8 @@ def test_the_all_green_world_activates_core_without_bumping_the_epoch(ready):
     assert run.code == 0 and run.err == ""
     after = ready.state()
     assert (before.epoch, before.states["core"]) == (1, "shadow")
-    assert (after.epoch, after.states["core"], after.states["statements"]) == (1, "active", "shadow")
+    states = (after.epoch, after.states["core"], after.states["statements"])
+    assert states == (1, "active", "shadow")
     assert after.activated_at["core"] is not None and after.activated_at["statements"] is None
     assert [c["status"] for c in run.out["checks"]] == ["pass"] * len(cli.PRECONDITIONS)
     activation = ready.get(cli.ACTIVATION)
@@ -265,7 +266,8 @@ BREAKERS = {
         cli.DRILL, {**w.get(cli.DRILL), "started_utc": stamp(at(days=-8))}),
     "mirror_not_verified": lambda w: setattr(w.probes, "mirror_state", "unverified"),
     "manifest_not_signed": lambda w: w.put(
-        cli.MANIFEST, signed_manifest(at(minutes=-90), at(minutes=-30), signoff_manifest_digest="0" * 64)),
+        cli.MANIFEST,
+        signed_manifest(at(minutes=-90), at(minutes=-30), signoff_manifest_digest="0" * 64)),
     "fe_v2_reader_not_live": lambda w: w.drop(cli.FRONTEND),
     "journal_capacity": lambda w: w.put(
         cli.JOURNAL, {**w.get(cli.JOURNAL), "tabs": {"_assaf_os_proposals": 1900}}),
@@ -348,7 +350,9 @@ def test_evidence_from_another_epoch_or_release_is_stale(ready):
     assert codes(ready.run("activate")) == ["sheets_pending_proposals"]
     ready.put(cli.DRAIN, {**ready.get(cli.DRAIN), "epoch": 1, "freeze": False})
     assert codes(ready.run("activate")) == ["sheets_pending_proposals"]
-    ready.put(cli.DRAIN, {**ready.get(cli.DRAIN), "freeze": True, "recorded_at": stamp(at(hours=-1))})
+    ready.put(
+        cli.DRAIN, {**ready.get(cli.DRAIN), "freeze": True, "recorded_at": stamp(at(hours=-1))}
+    )
     assert codes(ready.run("activate")) == ["sheets_pending_proposals"]  # drained after the fence
     ready.put(cli.PREFLIGHT, {**ready.get(cli.PREFLIGHT), "epoch": 2})
     run = ready.run("activate")
@@ -387,7 +391,10 @@ def test_the_journal_headroom_is_ninety_percent_of_the_cap(ready):
     for rows, ok in ((1800, True), (1801, False)):
         ready.put(cli.JOURNAL, {**ready.get(cli.JOURNAL), "tabs": {"_assaf_os_replay": rows}})
         assert (ready.run("preflight").code == 0) is ok
-    ready.put(cli.JOURNAL, {**ready.get(cli.JOURNAL), "tabs": {"x": 1}, "measured_at": stamp(at(days=-8))})
+    ready.put(
+        cli.JOURNAL,
+        {**ready.get(cli.JOURNAL), "tabs": {"x": 1}, "measured_at": stamp(at(days=-8))},
+    )
     assert ready.run("preflight").code == 1
 
 
@@ -479,7 +486,9 @@ def test_fence_refuses_every_ledger_write_and_is_idempotent(ready):
 
 
 def test_fence_also_stops_an_active_statements_domain(ready):
-    ready.env.transition(WORKSPACE, "statements", "active", expected_epoch=1, actor_owner_id=OWNER_ID)
+    ready.env.transition(
+        WORKSPACE, "statements", "active", expected_epoch=1, actor_owner_id=OWNER_ID
+    )
     run = ready.run("fence")
     assert run.out["fenced"] == ["core", "statements"]
     assert ready.state().states == {"core": "fenced", "statements": "fenced"}
