@@ -51,12 +51,17 @@ of application code.
 
 ## V2-15 role hooks
 
-`RUNTIME_ROLE = assaf_os_ledger` and `RUNTIME_DSN_ENV = MIA_OS_LEDGER_DATABASE_URL`
-reserve the separate runtime identity and DSN. This chunk creates no runtime login,
-password, memberships or grants. V2-15 must provision a LOGIN NOINHERIT NOSUPERUSER
+`RUNTIME_ROLE = assaf_os_ledger` and `RUNTIME_DSN_ENV = MIA_OWNER_OS_LEDGER_DATABASE_URL`
+reserve the separate runtime identity and DSN. V2-14 creates no runtime login,
+password, memberships or grants. V2-15's explicit provisioning plan creates a LOGIN NOINHERIT NOSUPERUSER
 NOCREATEROLE NOCREATEDB NOREPLICATION NOBYPASSRLS role with no memberships and no
 database CREATE/TEMP, schema CREATE, object ownership or unsafe callable functions.
-It must connect as itself (no SET ROLE), and use an exact privilege-map validator.
+It must connect as itself (no SET ROLE), and use the exact privilege-map validator
+in `app/services/os_ledger/role_policy.py`. See `ops/assaf-os/LEDGER_ROLE.md`.
+`provision_ledger.py --mode reapply` restores this schema's ownership, REVOKEs and
+grants after a `--no-owner --no-privileges` restore; on a database without
+`assaf_os` it is a no-op. Provisioning grants `assaf_os_owner` to the migration
+identity WITH ADMIN TRUE, SET FALSE, INHERIT FALSE, the one edge this runner allows.
 
 The future map must deny DELETE/TRUNCATE everywhere; events, receipts and audit are
 INSERT/SELECT only; the migration journal and authority fence are not runtime-writable.
