@@ -516,7 +516,10 @@ class LeadStore:
         statement = select(
             CrmActivityRow.contact_id.label("contact_id"),
             func.max(CrmActivityRow.occurred_at).label("latest_occurred_at"),
-        ).where(CrmActivityRow.action == "contact_captured")
+        ).where(
+            CrmActivityRow.action == "contact_captured",
+            CrmActivityRow.is_test.is_(False),
+        )
         if occurred_from:
             statement = statement.where(CrmActivityRow.occurred_at >= occurred_from)
         if occurred_to:
@@ -576,7 +579,8 @@ class LeadStore:
     ) -> int:
         """Distinct contacts captured in the window -- a returning visitor is one lead."""
         statement = select(func.count(func.distinct(CrmActivityRow.contact_id))).where(
-            CrmActivityRow.action == "contact_captured"
+            CrmActivityRow.action == "contact_captured",
+            CrmActivityRow.is_test.is_(False),
         )
         if occurred_from:
             statement = statement.where(CrmActivityRow.occurred_at >= occurred_from)
