@@ -1,7 +1,11 @@
-"""V2-31: the os-authority CLI on the FakeLedger (V2_PG_CONTRACTS.md section 16 and section 20).
+"""V2-31: the os-authority CLI (V2_PG_CONTRACTS.md section 16 and section 20).
 
-Everything runs on fakes: the in-memory ledger (its ``AuthorityAdmin``), fake probes and a
-temporary evidence directory. Nothing here touches a database, a network or a secret store.
+The probes, the evidence directory and the clock are fakes. The ledger's ``AuthorityAdmin`` is the
+in-memory FakeLedger, and the tests that exercise the authority state machine (init, activate,
+fence, rollback, re-arm, the whole cutover) run a second time against the REAL
+``PgAuthorityAdmin`` on a disposable database when ``MIA_OS_LEDGER_TEST_POSTGRES_URL`` is set (the
+V2-16f ``ledger`` rule: a ``pg`` case exists only when it can run, so it is never skipped).
+Nothing here touches a network or a secret store.
 """
 
 from __future__ import annotations
@@ -11,6 +15,7 @@ import hmac
 import io
 import json
 import logging
+import os
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any, NamedTuple
@@ -21,6 +26,7 @@ from app.workers import os_authority as cli
 
 from tests.fakes.os_ledger_builders import commit_direct, commit_import, ctx, task
 from tests.fakes.os_ledger_env import OWNER_ID, WORKSPACE, build_fake_env
+from tests.services.os_ledger.conftest import PG_URL_ENV, build_pg_env, pg_enabled
 
 SHA = "a" * 40
 OTHER_SHA = "b" * 40
@@ -102,9 +108,13 @@ class FakeProbes:
         self.closed = True
 
 
+CASES = ["fake", *(["pg"] if pg_enabled() else [])]
+
+
 class World:
-    def __init__(self, tmp_path):
-        self.env = build_fake_env()
+    def __init__(self, tmp_path, case="fake"):
+        self.case = case
+        self.env = build_fake_env() if case == "fake" else build_pg_env(os.environ[PG_URL_ENV])
         self.settings = SimpleNamespace(
             assaf_os_freeze=True, os_statement_pepper="", assaf_os_backend="sheets",
             assaf_os_ledger_enabled=False, assaf_os_authority_epoch=0,
@@ -205,6 +215,19 @@ def ready(world):
     return world
 
 
+@pytest.fixture(params=CASES)
+def any_world(request, tmp_path):
+    """``world`` over every ledger implementation that can run here."""
+    return World(tmp_path, request.param)
+
+
+@pytest.fixture
+def any_ready(any_world):
+    assert any_world.run("init").code == 0
+    good_evidence(any_world)
+    return any_world
+
+
 def codes(run: Run) -> list[str]:
     assert run.err.startswith("os_authority_refused:"), run.err
     return run.err.removeprefix("os_authority_refused:").strip().split(",")
@@ -226,7 +249,8 @@ def test_the_precondition_table_is_the_contract_table():
     )
 
 
-def test_the_all_green_world_activates_core_without_bumping_the_epoch(ready):
+def test_the_all_green_world_activates_core_without_bumping_the_epoch(any_ready):
+    ready = any_ready
     before = ready.state()
     run = ready.run("activate")
     assert run.code == 0 and run.err == ""
@@ -240,7 +264,8 @@ def test_the_all_green_world_activates_core_without_bumping_the_epoch(ready):
     assert (activation["epoch"], activation["release_sha"]) == (1, SHA)
 
 
-def test_activate_is_idempotent_once_active_and_skips_the_checks(ready):
+def test_activate_is_idempotent_once_active_and_skips_the_checks(any_ready):
+    ready = any_ready
     assert ready.run("activate").code == 0
     ready.settings.assaf_os_freeze = False  # the switch step turned the freeze off
     ready.probes.fence = ("live", "")
@@ -401,7 +426,8 @@ def test_the_journal_headroom_is_ninety_percent_of_the_cap(ready):
 # --------------------------------------------------------------------------- init
 
 
-def test_init_creates_epoch_one_and_is_idempotent(world):
+def test_init_creates_epoch_one_and_is_idempotent(any_world):
+    world = any_world
     first = world.run("init")
     assert first.code == 0 and first.out["outcome"] == "created"
     assert (first.out["epoch"], first.out["states"]) == (
@@ -412,7 +438,8 @@ def test_init_creates_epoch_one_and_is_idempotent(world):
     assert world.state().epoch == 1
 
 
-def test_init_pins_the_pepper_fingerprint_once_and_never_prints_the_pepper(world, caplog):
+def test_init_pins_the_pepper_fingerprint_once_and_never_prints_the_pepper(any_world, caplog):
+    world = any_world
     world.settings.os_statement_pepper = PEPPER
     with caplog.at_level(logging.DEBUG):
         run = world.run("init")
@@ -430,7 +457,8 @@ def test_init_pins_the_pepper_fingerprint_once_and_never_prints_the_pepper(world
     assert world.env.rows("os_workspaces")[0]["statement_pepper_fp"] == expected
 
 
-def test_init_without_a_pepper_pins_nothing(world):
+def test_init_without_a_pepper_pins_nothing(any_world):
+    world = any_world
     run = world.run("init")
     assert run.out["pepper_pinned"] is False
     assert world.env.rows("os_workspaces")[0]["statement_pepper_fp"] is None
@@ -442,13 +470,15 @@ def test_a_short_pepper_is_refused_before_any_pin():
     assert refused.value.codes == ["pepper_invalid"]
 
 
-def test_init_refuses_a_workspace_owned_by_someone_else(world):
+def test_init_refuses_a_workspace_owned_by_someone_else(any_world):
+    world = any_world
     world.env.ensure_workspace(WORKSPACE, "999", 1)
     run = world.run("init")
     assert run.code == 1 and codes(run) == ["authority_changed:workspace_conflict"]
 
 
-def test_init_never_runs_before_the_workspace_is_known_to_exist(world):
+def test_init_never_runs_before_the_workspace_is_known_to_exist(any_world):
+    world = any_world
     assert codes(world.run("activate")) == ["workspace_missing"]
     for command in ("status", "fence", "rollback"):
         assert codes(world.run(command)) == ["workspace_missing"], command
@@ -459,7 +489,8 @@ def test_init_never_runs_before_the_workspace_is_known_to_exist(world):
 
 
 @pytest.mark.parametrize("path", [("fenced",), ("fenced", "restoring")])
-def test_activate_only_runs_from_shadow(ready, path):
+def test_activate_only_runs_from_shadow(any_ready, path):
+    ready = any_ready
     for step in path:
         ready.env.transition(WORKSPACE, "core", step, expected_epoch=1, actor_owner_id=OWNER_ID)
     run = ready.run("activate")
@@ -469,7 +500,8 @@ def test_activate_only_runs_from_shadow(ready, path):
 # --------------------------------------------------------------------------- fence and rollback
 
 
-def test_fence_refuses_every_ledger_write_and_is_idempotent(ready):
+def test_fence_refuses_every_ledger_write_and_is_idempotent(any_ready):
+    ready = any_ready
     ctx_ = ctx()
     assert ready.run("activate").code == 0
     commit_direct(ready.env, ctx_, [task()])  # a business write while active
@@ -485,7 +517,8 @@ def test_fence_refuses_every_ledger_write_and_is_idempotent(ready):
     assert ready.state().epoch == 1
 
 
-def test_fence_also_stops_an_active_statements_domain(ready):
+def test_fence_also_stops_an_active_statements_domain(any_ready):
+    ready = any_ready
     ready.env.transition(
         WORKSPACE, "statements", "active", expected_epoch=1, actor_owner_id=OWNER_ID
     )
@@ -494,13 +527,15 @@ def test_fence_also_stops_an_active_statements_domain(ready):
     assert ready.state().states == {"core": "fenced", "statements": "fenced"}
 
 
-def test_fence_refuses_a_restoring_ledger(ready):
+def test_fence_refuses_a_restoring_ledger(any_ready):
+    ready = any_ready
     for step in ("fenced", "restoring"):
         ready.env.transition(WORKSPACE, "core", step, expected_epoch=1, actor_owner_id=OWNER_ID)
     assert codes(ready.run("fence")) == ["authority_state_invalid"]
 
 
-def test_rollback_before_the_first_write_leaves_only_import_rows(ready):
+def test_rollback_before_the_first_write_leaves_only_import_rows(any_ready):
+    ready = any_ready
     commit_import(ready.env, ctx(), [task("TAS_i1")], "e" * 64)
     assert ready.run("activate").code == 0
     run = ready.run("rollback")
@@ -513,7 +548,8 @@ def test_rollback_before_the_first_write_leaves_only_import_rows(ready):
     assert ready.run("rollback").code == 0  # idempotent
 
 
-def test_rollback_after_the_first_business_write_is_refused_and_changes_nothing(ready):
+def test_rollback_after_the_first_business_write_is_refused_and_changes_nothing(any_ready):
+    ready = any_ready
     commit_import(ready.env, ctx(), [task("TAS_i1")], "e" * 64)
     assert ready.run("activate").code == 0
     commit_direct(ready.env, ctx(), [task("TAS_w1")])
@@ -523,13 +559,15 @@ def test_rollback_after_the_first_business_write_is_refused_and_changes_nothing(
     assert ready.run("fence").code == 0  # roll forward: fence is still available
 
 
-def test_rollback_refuses_a_restoring_ledger(ready):
+def test_rollback_refuses_a_restoring_ledger(any_ready):
+    ready = any_ready
     for step in ("fenced", "restoring"):
         ready.env.transition(WORKSPACE, "core", step, expected_epoch=1, actor_owner_id=OWNER_ID)
     assert codes(ready.run("rollback")) == ["authority_state_invalid"]
 
 
-def test_a_rolled_back_cutover_re_arms_with_one_idempotent_epoch_bump(ready):
+def test_a_rolled_back_cutover_re_arms_with_one_idempotent_epoch_bump(any_ready):
+    ready = any_ready
     commit_import(ready.env, ctx(), [task("TAS_i1")], "e" * 64)
     assert ready.run("activate").code == 0
     assert ready.run("rollback").code == 0
@@ -553,7 +591,8 @@ def test_a_rolled_back_cutover_re_arms_with_one_idempotent_epoch_bump(ready):
     assert (ready.state().epoch, ready.state().states["core"]) == (2, "active")
 
 
-def test_re_arm_is_refused_unless_fenced_and_never_after_a_business_write(ready):
+def test_re_arm_is_refused_unless_fenced_and_never_after_a_business_write(any_ready):
+    ready = any_ready
     assert ready.run("activate").code == 0
     assert codes(ready.run("init", "--rearm")) == ["authority_state_invalid"]
     commit_direct(ready.env, ctx(), [task("TAS_w1")])
@@ -613,7 +652,8 @@ def test_a_capture_taken_before_the_continuous_fence_cannot_activate(ready):
     assert codes(ready.run("activate")) == ["capture_before_fence"]
 
 
-def test_the_whole_cutover_in_order_with_cli_written_evidence(world):
+def test_the_whole_cutover_in_order_with_cli_written_evidence(any_world):
+    world = any_world
     world.settings.os_statement_pepper = PEPPER
     assert world.run("init").code == 0
     world.probes.fence = ("live", "")
