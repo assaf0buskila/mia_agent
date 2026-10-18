@@ -282,7 +282,7 @@ Recorded so nobody reads a green suite as completeness.
 - [ ] The main checkout still has stale uncommitted `crm_v2.py` edits superseded by #55
       (unverified from this worktree).
 
-## Telegram owner turn timeouts (branch `claude/telegram-owner-timeouts-1645f0`, not merged)
+## Telegram owner turn timeouts (PR #91, branch `claude/telegram-owner-timeouts-1645f0`; brought up to date 2026-10-18, not deployed)
 
 Both text and voice owner turns were returning the timeout line for ordinary messages,
 including a bare `?`. Four root causes, all confirmed against the deployed SHA `6369126`
@@ -319,20 +319,17 @@ New settings, all defaults **proposals** pending real latency data --
 `MIA_OWNER_TURN_TIMEOUT_SECONDS` stays **45** by Assaf's decision: the fix is the moved
 boundary and the per-child caps, not a bigger number.
 
-Evidence state: **LOCAL_TESTED**. 2666 unit tests pass, ruff clean, three independent opus
-reviews. Not deployed, not merged, and **no real Telegram turn has exercised it** -- every
+Evidence state: **LOCAL_TESTED**. 5581 tests pass (after the 2026-10-18 merge with master), ruff clean,
+four independent opus reviews. Not deployed, and **no real Telegram turn has exercised it** -- every
 provider and STT call in these tests is mocked, so per `AGENTS.md` this proves nothing about
 live model or delivery behaviour.
 
-### Blocked on Assaf
+### Remaining
 
-- **Add four names to `.env.example`**: `MIA_OWNER_FINAL_RESERVE_SECONDS`,
-  `MIA_OWNER_MODEL_ATTEMPT_TIMEOUT_SECONDS`, `MIA_OWNER_MIN_MODEL_SECONDS`,
-  `MIA_OWNER_MIN_TOOL_SECONDS`. `test_env_example_documents_settings_and_adapter_map` fails
-  until then, so CI cannot be green. Every agent session is denied that path by permission
-  settings; it needs hands with access.
-- **Tune the four defaults from production**, once `aws login` is current. The query is a
-  CloudWatch Insights `stats` over `owner_stage` by stage:
+- **Done:** the four `MIA_OWNER_*` names are in `.env.example` (`c4034df`).
+- **Tune the four defaults from production.** Production is now the GCP VM, so read the
+  `owner_stage` reason-code log lines there (the older CloudWatch query below is AWS-era). Group
+  `owner_stage` by stage:
   `filter @message like /owner_stage/ | parse @message "stage=* outcome=* latency_ms=*" as
   stage, outcome, latency_ms | stats count(*), pct(latency_ms,50), pct(latency_ms,95) by
   stage, outcome`. The new stage names make `input_preprocess`, `stt`, `model_primary`,

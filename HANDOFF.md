@@ -50,10 +50,13 @@ history, but it is not the current operational path.
 Section 0 is the current state for the next session. The sections after it are older handoffs and
 still hold — the deploy gotchas especially.
 
-## 0b. Telegram owner timeouts (2026-09-19) -- committed, NOT merged, NOT deployed
+## 0b. Telegram owner timeouts (2026-09-19; brought up to date 2026-10-18) -- PR #91, NOT deployed
 
-Branch `claude/telegram-owner-timeouts-1645f0`, head `d4bdbde`, 11 commits, branched from
-`31a91c9`. Full detail in `TASKS.md`; this is the state a next session needs.
+PR assaf0buskila/mia_agent#91, branch `claude/telegram-owner-timeouts-1645f0`. Master was merged
+in at `fa1bbd5` and adapted in `54cb2e1`, keeping master's private-chat owner contract and new tool
+groups. An independent Claude opus review gave PASS_WITH_NITS at `54cb2e1`: 5581 passed, 323 skipped.
+Assaf gave a fresh go on 2026-10-17 to update, review and merge it. A deploy still needs its own go.
+Full detail in `TASKS.md`.
 
 Assaf reported owner turns timing out on both transports, including for a bare `?`. Fixed
 four root causes plus one found while fixing. The headline number: the owner execution
@@ -63,17 +66,13 @@ budget. It now starts once the final owner utterance exists. `MIA_OWNER_TURN_TIM
 stays 45 by his decision -- the fix is the boundary and the per-child caps, not a bigger
 number.
 
-**Two things block a merge, one of them only Assaf can do:**
+The old merge blockers are resolved. The four `MIA_OWNER_*` names are in `.env.example` (`c4034df`),
+and Assaf's fresh go covers update, review and merge. Agent sessions are still denied reading
+`.env*` by permission settings; `test_env_example_documents_settings_and_adapter_map` is the check
+that covers it.
 
-1. `.env.example` must document four new `MIA_OWNER_*` names (listed in `TASKS.md`).
-   `test_env_example_documents_settings_and_adapter_map` fails until then, so CI cannot go
-   green. **Every agent session is denied that path by permission settings** -- do not waste a
-   session rediscovering that. Same class as the `*secret*` deny already recorded.
-2. No PR is open. Assaf said commit only, explicitly no deploy, and he had already observed
-   Mia working well at the time. Do not open one, merge, or deploy without a fresh go.
-
-Evidence state **LOCAL_TESTED** and no higher: 2666 unit tests pass and three independent
-opus reviews ran, but every provider and STT call is mocked. Per `AGENTS.md` that proves
+Evidence state **LOCAL_TESTED** and no higher: 5581 tests pass and four independent opus reviews ran,
+but every provider and STT call is mocked. Per `AGENTS.md` that proves
 nothing about live behaviour, so a real Telegram turn is still required -- voice note, bare
 `?`, the capability sentence, one tool-using question -- then read the new `timeout_stage`
 log lines.
