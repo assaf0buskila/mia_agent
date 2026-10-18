@@ -1,9 +1,11 @@
-# V2-15: inactive ledger role contract
+# V2-15 and V2-14b: inactive ledger role contract
 
 Binding spec: `V2_PG_CONTRACTS.md` §18.2 (grant map), §5.5 (runtime guard) and §18.1
-(restore re-apply). Nothing here activates the ledger, demotes the main role or
-touches production. Production provisioning is FORK-PROD-ORDER step 4, after the
-V2-14a demote and `mia os-ledger migrate`, with its own owner go.
+(restore re-apply). V2-14b (the schema addendum) extends the map for its seven tables
+and makes the retention role a LOGIN role (§22 E8 item 4, E6). Nothing here activates
+the ledger, demotes the main role or touches production. Production provisioning is
+FORK-PROD-ORDER step 4, after the V2-14a demote and `mia os-ledger migrate`, with its
+own owner go.
 
 ## What is guaranteed, precisely
 
@@ -29,19 +31,32 @@ V2-14a demote and `mia os-ledger migrate`, with its own owner go.
   NOBYPASSRLS, no memberships, no TEMP, no CREATE anywhere, no role settings. DSN:
   `MIA_OWNER_OS_LEDGER_DATABASE_URL` (FORK-LEDGER-DSN), only in VM-owned
   `/etc/mia/runtime.env`, never in `mia-env`.
-- `assaf_os_retention`: reserved, NOLOGIN, no privileges, no memberships, no settings.
-  V2-14b turns it into a LOGIN role when its tables exist.
+- `assaf_os_retention`: **retention is LOGIN** (V2-14b, §18.2, §22 E8 item 4): LOGIN
+  NOINHERIT NOSUPERUSER NOCREATEROLE NOCREATEDB NOREPLICATION NOBYPASSRLS, no memberships,
+  no TEMP, no CREATE anywhere, no role settings, and exactly these rights and no other:
+  USAGE on the schema; SELECT and DELETE on `os_statement_batch_lines` and
+  `os_assistant_audit`; SELECT on `os_proposals (workspace_id, proposal_id, kind, status,
+  expires_at)`. It has no UPDATE, INSERT or TRUNCATE anywhere, no DELETE on any other
+  table, and no EXECUTE on any function. Provisioning sets **no password** for it (§22 E8
+  item 1): V2-31's owner-approved cutover runbook provisions the password and a job-only
+  env file carrying `MIA_OS_LEDGER_RETENTION_DATABASE_URL` (VM-owned, never in `mia-env`,
+  never a `Settings` field, already covered by the `MIA_OS_LEDGER_\w+` owned-regex).
+  Until then the role has no credential. It relies on PUBLIC CONNECT on the database; if
+  production ever revokes it, a §18.2 erratum grants retention exactly CONNECT (E8 item 2).
 - The main role: nothing on `assaf_os` (V2-14's `_validate_main_role_catalog`), no TEMP,
   and no parameter ACL.
 
 ## Grant map (`role_policy.py`)
 
-`ledger_grant_statements()` is the complete runtime GRANT list, built from
-`TABLE_PRIVILEGES` and `COLUMN_UPDATES` (literal tuples, each pinned by a test to the
-migration SQL and to the live catalog):
+`ledger_grant_statements()` is the complete GRANT list (the runtime role's, then
+V2-14b's `addendum_grant_statements()`, which also holds the retention role's), built from
+`TABLE_PRIVILEGES`, `COLUMN_UPDATES`, `ADDENDUM_COLUMN_UPDATES`, `RETENTION_TABLE_PRIVILEGES`
+and `RETENTION_COLUMN_SELECTS` (literal tuples, each pinned by a test to the migration SQL
+and to the live catalog):
 
 - USAGE on the schema; EXECUTE on `assaf_os.expense_source_key_sha256(text)` only.
-- SELECT on `os_authority` and `os_workspaces`; SELECT and INSERT on the other 16 tables.
+- SELECT on `os_authority` and `os_workspaces`; SELECT and INSERT on the other 23 tables
+  (the 16 V2-14 ones and V2-14b's seven).
   The runtime role never creates a workspace (§18.2, §5.4): the privileged
   `AuthorityAdmin.ensure_workspace` does, once, from `mia os-authority init`, before any
   import.
@@ -59,6 +74,29 @@ migration SQL and to the live catalog):
   (record_id, status, canonical_record, quarantine)`. §22 E1-rev's
   `set_import_status` needs exactly the batch columns; import rows stay insert-only
   through the typed API.
+- V2-14b's UPDATE columns (`ADDENDUM_COLUMN_UPDATES`): `os_workspaces (pending_seq)`, in
+  addition to the three above (never `epoch` or `statement_pepper_fp`); `os_statements
+  (status, line_count, lines_digest, current_proposal_id, approved_proposal_id,
+  imported_version, updated_at)`; every `os_statement_lines` column except `workspace_id`,
+  `statement_id`, `line_key` and `created_at`; every `os_merchant_rules` column except
+  `workspace_id`, `rule_id` and `created_at`; `os_statement_review_drafts (draft_revision,
+  overrides, choices, updated_at)`; `os_statement_batch_lines (detail, purged_at)`; and
+  `os_assistant_credentials (revoked_at, last_used_at, use_count)`. `os_assistant_audit`
+  and `os_receipts.reason_codes` are INSERT-only. The runtime role still has no DELETE
+  anywhere: the purge is the retention role's.
+
+## Retention (`RETENTION_DELETE_SQL`)
+
+PostgreSQL grants are table-level, so the database does not enforce which *rows* the
+retention role may delete (§22 E6: no RLS). The `os-retention` job (V2-26) therefore runs
+only the three fixed statements in `role_policy.RETENTION_DELETE_SQL`, the only bound
+parameter being `:workspace_id`: purged batch lines (`purged_at IS NOT NULL`), the I11
+backstop (lines of a proposal that expired more than a day ago, whatever `purged_at`
+says), and assistant audit rows older than 180 days. A test seeds rows inside and outside
+each predicate, runs these statements as the retention role and asserts nothing outside
+them is deleted and a second run deletes none. The retention credential stays VM-owned and
+is used only by that job. **Revisit trigger:** a second user of the retention role, or any
+path that gives it ad-hoc SQL, makes RLS mandatory first.
 
 ## Validator
 
@@ -107,7 +145,11 @@ It refuses anything beyond the exact posture:
   than its own default ACL), or any shared object it owns;
 - any ACL entry or ownership of the runtime role outside `assaf_os` in any database,
   or on a shared object (tablespace, another database, parameter, large object),
-  except CONNECT on this database; and any footprint at all of retention;
+  except CONNECT on this database; for retention, any ACL entry beyond its exact §18.2
+  rights in this database (the schema, its two tables and the five `os_proposals`
+  columns), any ownership and any shared-object entry. Its effective privileges are
+  pinned too (`_retention_effective`), so a PUBLIC grant or any other path into
+  `assaf_os` is refused as well;
 - `pg_parameter_acl` entries (SET or ALTER SYSTEM) for PUBLIC, the main, runtime,
   retention or owner role; `pg_db_role_setting` rows for the ledger roles; and a
   database- or cluster-wide `session_replication_role`;
@@ -140,29 +182,40 @@ an integrity regression, not a privilege path.
 
 **Constraint and index inventory (`CONSTRAINT_PINS`, `INDEX_PINS`).** The database is the
 exactly-once and append-only backstop, so its constraints are an exact inventory, not a
-count: all 169 (19 primary keys, 12 UNIQUE, 26 foreign keys, 112 CHECKs, including
-`schema_migrations`) by table, name and server-deparsed definition, plus the ten indexes
-that back no primary key or UNIQUE constraint, by `pg_get_indexdef`. A dropped, renamed,
-re-targeted or added constraint or index, a NOT VALID constraint, and an invalid index
-are refused. The V2-14 SQL is tied to the pins by a test (keys and foreign keys are derived
-from the SQL text; the CHECKs are counted per table and compared with a freshly migrated
-catalog).
+count: all 260 (26 primary keys, 15 UNIQUE, 42 foreign keys, 177 CHECKs, including
+`schema_migrations`) by table, name and server-deparsed definition, plus the thirteen
+indexes that back no primary key or UNIQUE constraint, by `pg_get_indexdef`. A dropped,
+renamed, re-targeted or added constraint or index, a NOT VALID constraint, and an invalid
+index are refused. The V2-14 SQL and the three V2-14b addendum files are tied to the pins
+by a test (keys and foreign keys are derived from the SQL text, applying each addendum
+`DROP CONSTRAINT` and `ADD CONSTRAINT`; the CHECKs are counted per table, the addendum's
+also by name, and compared with a freshly migrated catalog).
 
-- **17 CHECKs are pinned by name only** (`definition=None`): the enumerations over a
-  `varchar` column (`status IN (...)`, `currency IN (...)`, `kind IN (...)`, ...). PostgreSQL
+- **25 CHECKs are pinned by name only** (`definition=None`): the enumerations over a
+  `varchar` column (`status IN (...)`, `currency IN (...)`, `kind IN (...)`, ...), 17 from
+  V2-14 and eight from V2-14b (`os_assistant_credentials_kind_check`,
+  `os_merchant_rules_match_check` and `_tag_check`, `os_statement_lines_assistant_tag_check`,
+  `_kind_check`, `_state_check` and `_tag_check`, `os_statements_status_check`). PostgreSQL
   deparses `= ANY ((ARRAY['a'::character varying, ...])::text[])` and, after the constraint
   is re-created from that text, which is what every `pg_dump` and `pg_restore` does,
   deparses it as `= ANY (ARRAY[('a'::character varying)::text, ...])`. Pinning the first
   form would refuse a correctly restored database at V2-10's reapply step. A test drops and
-  re-adds every constraint from its own live text (twice) and asserts that exactly these 17
+  re-adds every constraint from its own live text (twice) and asserts that exactly these 25
   change, once, and that the validator accepts the restored schema. The residual: a
-  same-name replacement of one of the 17 by a weaker expression is not detected.
-- **Obligation for V2-14b.** A new or changed constraint or index is added to the pins on
-  purpose, in the same commit (a failing test prints the difference). A CHECK that is a
-  `varchar` enumeration, such as the extended `os_proposals_status_check`, is `None`; the
-  roundtrip test says whether a new one must be. The generic foreign-key rule above applies
-  to its new foreign keys without any pin, so a new `ON DELETE CASCADE` edge is refused
-  until the rule itself is changed on purpose.
+  same-name replacement of one of the 25 by a weaker expression is not detected.
+- **V2-14b's pins.** The core-v2 file's changes are pinned in place: the two new
+  `os_workspaces` CHECKs, `os_proposals_abandoned_kind_check`, the three new `os_receipts`
+  CHECKs, and `os_import_batches_workspace_epoch_digest_key`, which replaces the V2-14
+  `(workspace_id, source_digest)` key. `os_proposals_status_check` and
+  `os_receipts_status_check` keep their names and stay name-only. The seven new tables
+  add 15 foreign keys, 7 primary keys, 3 UNIQUE constraints and 59 CHECKs, plus
+  `os_proposals_credential_fkey` on `os_proposals`, and three indexes (the audit and
+  proposals indexes and the partial unique index of active statement lines). Any further
+  constraint or index is added to the pins on purpose, in the same commit (a failing
+  test prints the difference). The
+  generic foreign-key rule above applies to every foreign key without any pin, so a new
+  `ON DELETE CASCADE` edge is refused until the rule itself is changed on purpose. V2-14b
+  adds no function or trigger, so `FUNCTION_PINS` and `TRIGGERS` are unchanged.
 - **PostgreSQL upgrades.** The pinned text is PostgreSQL 16's deparse (the VM and CI both
   run 16). After a major upgrade the validator may refuse the migrated database; that is
   the signal to regenerate the pins from a fresh migration on the new version, as part of
