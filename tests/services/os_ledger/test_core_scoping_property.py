@@ -71,7 +71,6 @@ from tests.services.os_ledger.test_summaries_property_engine import (
     attempt,
     compare_state,
     model_of,
-    run,
     uuid_source,
 )
 
@@ -283,60 +282,58 @@ def lead_op(rng, leads):
     return ("propose", "leads", None, 0, values, "approve")
 
 
-def fake_run(seed, steps):
-    """The V2-18 random sequence on one FakeLedger, probing every operation first."""
-    fake = new_fake(seed)
-    side, check = Side(fake, WORKSPACE), FakeProbe(fake)
-    rng = random.Random(seed)
-    gen = Generator(rng, steps, huge=True)
-    history: dict[str, tuple[str, list[api.Mutation]]] = {}
-    for step in range(steps):
-        rows = {e: fake.rows("os_" + e) for e in (*RECORD_ENTITIES, "leads")}
-        model = model_of(rows)
-        fake.advance(rng.choice((1, 2, 5)))
-        op = lead_op(rng, model["leads"]) if rng.random() < 0.12 else gen.next(
-            step, model, history)
-        if op[0] == "commit" and op[1]:
-            check.batch(op[1], "owner_direct")
-            request_id = gen.rid()
-            if attempt(lambda m=op[1], r=request_id: side.commit(m, r))[0] == "ok":
-                gen.commits.append(request_id)
-                history[request_id] = (request_id, list(op[1]))
-        elif op[0] == "undo":
-            check.batch(op[2], "owner_undo")
-            attempt(lambda o=op: side.commit(o[2], gen.rid(), kind="owner_undo", original=o[1]))
-        elif op[0] == "propose":
-            _, entity, record_id, expected, values, then = op
-            check.proposal(entity, record_id, expected, values)
-            request_id = gen.rid()
-            made = attempt(lambda: side.propose(request_id, entity, record_id, expected, values))
-            if made[0] != "ok":
-                continue
-            if then == "change" and record_id is not None:
-                record = model[entity][record_id][0]
-                nudge = [update(record, minutes=(record["minutes"] + 1) % 300)]
-                check.batch(nudge, "owner_direct")
-                attempt(lambda: side.commit(nudge, gen.rid()))
-            if then == "expire":
-                fake.advance(601)
-            check.decision(side.proposals[request_id])
-            attempt(lambda: side.decide(request_id, "reject" if then == "reject" else "approve"))
-    return check.calls
+def dropped_then_more(rng, gen, model):
+    """A tombstone, then unrelated mutations in the same batch. A later mutation's check sees what
+    the tombstone left behind: a cancelled or done referrer, which has_dependents lets through."""
+    entity = rng.choice(("works", "works", "clients", "payments"))
+    live = Generator.live(model, entity)
+    record_id = gen.pick(live)
+    if record_id is None:
+        return gen.task(model)
+    return [tombstone(entity, live[record_id]), *gen.task(model), *(gen.change(model) or [])]
 
 
-def test_fake_scoped_core_checks_equal_the_full_ones_over_random_sequences():
-    seen, kinds, moved = set(), set(), 0
-    for seed in FAKE_SEEDS:
-        calls = fake_run(seed, 160)
-        differ = disagreements(calls)
-        assert not differ, f"seed {seed}: full != scoped on {differ[:5]}"
-        seen |= refusals(calls)
-        kinds |= {c[0] for c in calls}
-        moved += sum(1 for c in calls if c[0] == "digest_moved" and c[1])
-    assert {"transition", "proposal", "digest", "decide_digest"} <= kinds, kinds
-    assert moved, "no decision ever saw a changed dependency digest"
-    assert {"client_not_found", "work_not_found", "work_person_mismatch",
-            "refund_exceeds_original", "lead_already_exists"} <= seen, seen
+def key_id(key):
+    return str(uuid5(NAMESPACE_URL, "v2-16b:" + key))
+
+
+class FakeDriver:
+    """One FakeLedger; every operation is probed (full against scoped) before it runs."""
+
+    def __init__(self, seed=7):
+        self.fake = new_fake(seed)
+        self.side, self.check = Side(self.fake, WORKSPACE), FakeProbe(self.fake)
+
+    def rows(self, entity):
+        return self.fake.rows("os_" + entity)
+
+    def advance(self, seconds):
+        self.fake.advance(seconds)
+
+    def commit(self, key, mutations):
+        self.check.batch(mutations, "owner_direct")
+        return attempt(lambda: self.side.commit(mutations, key_id(key)))
+
+    def undo(self, key, mutations, original):
+        self.check.batch(mutations, "owner_undo")
+        return attempt(lambda: self.side.commit(mutations, key_id(key), kind="owner_undo",
+                                                original=key_id(original)))
+
+    def propose(self, key, entity, record_id, expected, values):
+        self.check.proposal(entity, record_id, expected, values)
+        return attempt(lambda: self.side.propose(key_id(key), entity, record_id, expected,
+                                                 values))
+
+    def decide(self, key, decision="approve"):
+        self.check.decision(self.side.proposals[key_id(key)])
+        return attempt(lambda: self.side.decide(key_id(key), decision))
+
+    def get(self, entity, record_id):
+        with self.fake.transaction(ctx(), domain="core", kind="owner_direct") as tx:
+            return tx.get(entity, record_id)
+
+    def calls(self):
+        return self.check.calls
 
 
 # --- PG: the twin with a dual check ------------------------------------------------------------
@@ -399,66 +396,33 @@ def pg_core_twin(seed):
     return Twin("pg", Side(ref, WORKSPACE), Side(sut, TWIN), tables, env.advance), dual
 
 
-def test_pg_scoped_core_checks_equal_the_full_ones_over_random_sequences():
-    needs_pg()
-    seen, kinds = set(), set()
-    for seed in PG_SEEDS:
-        twin, dual = pg_core_twin(seed)
-        stats = run(twin, seed, 70)  # asserts equal outcomes and rows after every step
-        differ = disagreements(dual.calls)
-        assert not differ, f"pg seed {seed}: full != scoped on {differ[:5]}"
-        seen |= refusals(dual.calls)
-        kinds |= {c[0] for c in dual.calls}
-        assert stats["accepted"] > 10, stats
-    assert {"transition", "proposal", "digest"} <= kinds, kinds
-    assert seen, "no check ever refused"
-
-
-# --- scripted: what random sequences reach rarely --------------------------------------------
-
-
-def key_id(key):
-    return str(uuid5(NAMESPACE_URL, "v2-16b:" + key))
-
-
-class FakeDriver:
-    def __init__(self):
-        self.fake = new_fake(7)
-        self.side, self.check = Side(self.fake, WORKSPACE), FakeProbe(self.fake)
-
-    def commit(self, key, mutations):
-        self.check.batch(mutations, "owner_direct")
-        return attempt(lambda: self.side.commit(mutations, key_id(key)))
-
-    def propose(self, key, entity, record_id, expected, values):
-        self.check.proposal(entity, record_id, expected, values)
-        return attempt(lambda: self.side.propose(key_id(key), entity, record_id, expected,
-                                                 values))
-
-    def decide(self, key, decision="approve"):
-        self.check.decision(self.side.proposals[key_id(key)])
-        return attempt(lambda: self.side.decide(key_id(key), decision))
-
-    def get(self, entity, record_id):
-        with self.fake.transaction(ctx(), domain="core", kind="owner_direct") as tx:
-            return tx.get(entity, record_id)
-
-    def calls(self):
-        return self.check.calls
-
-
 class PgDriver:
-    def __init__(self):
-        self.twin, self.dual = pg_core_twin(7)
+    """The twin: every operation runs on both sides, which must agree on the outcome and on
+    every row afterwards; the system under test records each dual check."""
+
+    def __init__(self, seed=7):
+        self.twin, self.dual = pg_core_twin(seed)
+        self.step = 0
 
     def _both(self, call):
         both = self.twin.both(call)
-        assert both[0] == both[1], both
-        compare_state(self.twin, "scripted")
+        self.step += 1
+        assert both[0] == both[1], (self.step, both)
+        compare_state(self.twin, f"step {self.step}")
         return both[0]
+
+    def rows(self, entity):
+        return self.twin.tables("os_" + entity)[0]
+
+    def advance(self, seconds):
+        self.twin.advance(seconds)
 
     def commit(self, key, mutations):
         return self._both(lambda side: side.commit(mutations, key_id(key)))
+
+    def undo(self, key, mutations, original):
+        return self._both(lambda side: side.commit(mutations, key_id(key), kind="owner_undo",
+                                                   original=key_id(original)))
 
     def propose(self, key, entity, record_id, expected, values):
         return self._both(lambda side: side.propose(key_id(key), entity, record_id, expected,
@@ -477,12 +441,100 @@ class PgDriver:
 
 
 def label(result):
-    """'ok', a decided receipt's status, or a refusal's reason (its code when it has none)."""
+    """A commit's or decision's receipt status, 'ok' for a new proposal, or a refusal's reason
+    (its code when it has none)."""
     if result[0] == "ok":
         value = result[1]
-        return value[0] if isinstance(value, tuple) and value[0] in {
-            "committed", "target_changed", "rejected", "expired"} else "ok"
+        return value[0] if value[0] in {"committed", "target_changed", "rejected",
+                                        "expired"} else "ok"
     return result[2] or result[1]
+
+
+# --- the random sequences -----------------------------------------------------------------------
+
+
+def random_run(driver, seed, steps):
+    """The V2-18 generator's sequence, plus leads, promotions and tombstones followed by more
+    mutations in the same batch; returns the labels of every outcome."""
+    rng = random.Random(seed)
+    gen = Generator(rng, steps, huge=True)
+    history: dict[str, tuple[str, list[api.Mutation]]] = {}
+    labels: list[str] = []
+    for step in range(steps):
+        model = model_of({e: driver.rows(e) for e in (*RECORD_ENTITIES, "leads")})
+        driver.advance(rng.choice((1, 2, 5)))
+        roll = rng.random()
+        if roll < 0.12:
+            op = lead_op(rng, model["leads"])
+        elif roll < 0.2:
+            op = ("commit", dropped_then_more(rng, gen, model))
+        else:
+            op = gen.next(step, model, history)
+        if op[0] == "commit" and op[1] and op[1][0].op == "tombstone" and rng.random() < 0.5:
+            op = ("commit", [*op[1], *gen.task(model)])
+        if op[0] == "commit" and op[1]:
+            key = gen.rid()
+            labels.append(label(driver.commit(key, op[1])))
+            if labels[-1] == "committed":
+                gen.commits.append(key)
+                history[key] = (key, list(op[1]))
+        elif op[0] == "undo":
+            labels.append(label(driver.undo(gen.rid(), op[2], op[1])))
+        elif op[0] == "propose":
+            _, entity, record_id, expected, values, then = op
+            key = gen.rid()
+            labels.append(label(driver.propose(key, entity, record_id, expected, values)))
+            if labels[-1] != "ok":
+                continue
+            if then == "change" and record_id is not None:
+                record = model[entity][record_id][0]
+                nudge = [update(record, minutes=(record["minutes"] + 1) % 300)]
+                labels.append(label(driver.commit(gen.rid(), nudge)))
+            if then == "expire":
+                driver.advance(601)
+            labels.append(label(driver.decide(key, "reject" if then == "reject" else "approve")))
+    return labels
+
+
+def test_fake_scoped_core_checks_equal_the_full_ones_over_random_sequences():
+    seen, kinds, moved, outcomes = set(), set(), 0, set()
+    for seed in FAKE_SEEDS:
+        driver = FakeDriver(seed)
+        outcomes |= set(random_run(driver, seed, 160))
+        calls = driver.calls()
+        differ = disagreements(calls)
+        assert not differ, f"seed {seed}: full != scoped on {differ[:5]}"
+        seen |= refusals(calls)
+        kinds |= {c[0] for c in calls}
+        moved += sum(1 for c in calls if c[0] == "digest_moved" and c[1])
+    assert {"transition", "proposal", "digest", "decide_digest"} <= kinds, kinds
+    assert moved, "no decision ever saw a changed dependency digest"
+    assert {"client_not_found", "work_not_found", "work_person_mismatch", "work_path_mismatch",
+            "work_currency_mismatch", "refund_exceeds_original", "refund_before_original",
+            "refund_original_not_found", "duplicate_expense_source",
+            "lead_already_exists"} <= seen, seen
+    assert {"committed", "target_changed", "rejected", "expired"} <= outcomes, outcomes
+
+
+def test_pg_scoped_core_checks_equal_the_full_ones_over_random_sequences():
+    needs_pg()
+    seen, kinds, outcomes = set(), set(), set()
+    for seed in PG_SEEDS:
+        driver = PgDriver(seed)  # asserts equal outcomes and rows after every step
+        labels = random_run(driver, seed, 70)
+        outcomes |= set(labels)
+        calls = driver.calls()
+        differ = disagreements(calls)
+        assert not differ, f"pg seed {seed}: full != scoped on {differ[:5]}"
+        seen |= refusals(calls)
+        kinds |= {c[0] for c in calls}
+        assert labels.count("committed") > 10, labels
+    assert {"transition", "proposal", "digest"} <= kinds, kinds
+    assert len(seen) >= 4, seen
+    assert {"committed", "target_changed"} <= outcomes, outcomes
+
+
+# --- scripted: what random sequences reach rarely --------------------------------------------
 
 
 def bulk_orders(d):
@@ -569,16 +621,17 @@ def summary_overflow(d):
 
 
 SCRIPTS = {
-    "bulk_orders": (bulk_orders, ["ok", "client_not_found", "work_not_found", "ok"]),
-    "left_behind": (left_behind, ["ok", "client_not_found", "client_not_found"]),
+    "bulk_orders": (bulk_orders, [
+        "committed", "client_not_found", "work_not_found", "committed"]),
+    "left_behind": (left_behind, ["committed", "client_not_found", "client_not_found"]),
     "refund_siblings": (refund_siblings, [
-        "ok", "ok", "ok", "refund_exceeds_original", "ok", "refund_exceeds_original",
-        "refund_exceeds_original", "refund_before_original", "work_currency_mismatch",
-        "duplicate_expense_source"]),
+        "committed", "committed", "committed", "refund_exceeds_original", "ok",
+        "refund_exceeds_original", "refund_exceeds_original", "refund_before_original",
+        "work_currency_mismatch", "duplicate_expense_source"]),
     "leads_and_promotions": (leads_and_promotions, [
-        "ok", "lead_already_exists", "lead_already_exists", "ok", "committed", "ok", "ok",
-        "target_changed", "ok", "committed", "ok", "ok", "committed"]),
-    "summary_overflow": (summary_overflow, ["ok", "amount_overflow", "ok", "ok"]),
+        "committed", "lead_already_exists", "lead_already_exists", "ok", "committed", "ok",
+        "committed", "target_changed", "ok", "committed", "committed", "ok", "committed"]),
+    "summary_overflow": (summary_overflow, ["committed", "amount_overflow", "ok", "ok"]),
 }
 
 
