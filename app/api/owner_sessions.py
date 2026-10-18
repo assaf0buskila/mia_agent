@@ -13,6 +13,7 @@ from typing import Annotated, Any
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
@@ -20,6 +21,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
 from starlette.concurrency import run_in_threadpool
 
+from app.api.owner_os_boundary import error_response
 from app.api.quick_leads import verify_owner_login
 from app.core.config import Settings, get_settings
 from app.core.owner_timing import mark_owner_authenticated, owner_phase
@@ -30,7 +32,10 @@ from app.services.owner_google_login import (
     verify_google_owner_token,
 )
 from app.services.owner_sessions import (
-    MAX_SESSION_TTL_SECONDS,
+    MAX_ABSOLUTE_SECONDS,
+    MAX_IDLE_SECONDS,
+    MIN_ABSOLUTE_SECONDS,
+    MIN_IDLE_SECONDS,
     OwnerSessionDenied,
     OwnerSessionRateLimited,
     OwnerSessionRecord,
@@ -82,6 +87,7 @@ class OwnerSessionPrincipal:
     owner_id: str
     scopes: frozenset[str]
     session_hash: str
+    expires_at: datetime
 
 
 class OwnerLoginBody(BaseModel):
@@ -100,6 +106,8 @@ class OwnerSessionView(BaseModel):
     authenticated: bool = True
     scopes: list[str]
     expires_at: datetime
+    # V2-08: when the client should renew. "now" on a rotated predecessor.
+    renew_after: datetime
     csrf_token: str = Field(repr=False)
     # Non-credential namespace for pending UUID recovery; never exposes numeric ID.
     business_binding: str | None = Field(default=None, repr=False)
@@ -178,14 +186,20 @@ def _business_binding(settings: Settings, owner_id: str) -> str | None:
     return hmac.new(secret.encode(), identity.encode(), "sha256").hexdigest()
 
 
-def _session_ttl(settings: Settings) -> int:
+def _session_windows(settings: Settings) -> tuple[int, int]:
+    """Idle and absolute windows. owner_os_session_ttl_seconds is no longer read."""
     try:
-        configured = int(getattr(settings, "owner_os_session_ttl_seconds", 0))
+        idle = int(getattr(settings, "owner_os_session_idle_seconds", 0))
+        absolute = int(getattr(settings, "owner_os_session_absolute_seconds", 0))
     except (TypeError, ValueError):
         raise _error(503, "owner_auth_unavailable") from None
-    if configured <= 0:
+    if (
+        not MIN_IDLE_SECONDS <= idle <= MAX_IDLE_SECONDS
+        or not MIN_ABSOLUTE_SECONDS <= absolute <= MAX_ABSOLUTE_SECONDS
+        or absolute < idle
+    ):
         raise _error(503, "owner_auth_unavailable")
-    return min(configured, MAX_SESSION_TTL_SECONDS)
+    return idle, absolute
 
 
 def _session_secret(settings: Settings) -> str:
@@ -541,7 +555,15 @@ def _record_principal(
         owner_id=record.owner_id,
         scopes=scopes,
         session_hash=record.session_hash,
+        expires_at=record.expires_at,
     )
+
+
+def _bound_statements(db: Session) -> None:
+    """Re-apply the per-request bounds a commit ended (SET LOCAL is transaction scoped)."""
+    if db.get_bind().dialect.name == "postgresql":
+        db.execute(text("SET LOCAL statement_timeout = '5s'"))
+        db.execute(text("SET LOCAL lock_timeout = '5s'"))
 
 
 def require_owner_session(
@@ -556,7 +578,13 @@ def require_owner_session(
         _require_origin(request, settings)
         cookie_token = _request_cookie(request, SESSION_COOKIE)
         try:
-            record = OwnerSessionStore(db).authenticate(cookie_token)
+            store = OwnerSessionStore(db)
+            record = store.authenticate(cookie_token)
+            if store.first_use_recorded:
+                # Durable before anything else: renewal treats a used successor as proof
+                # that the browser replaced its predecessor.
+                db.commit()
+                _bound_statements(db)
         except OwnerSessionDenied:
             raise _error(401, "owner_auth_required") from None
         except SQLAlchemyError:
@@ -628,19 +656,28 @@ def owner_mutation_scope(
     return dependency
 
 
+def _cookie_max_age(record: OwnerSessionRecord) -> int:
+    """expires_at minus the clock now, while Set-Cookie is built, floored.
+
+    Not the row's age: a slow response must not let the browser keep the cookie past the
+    server-side expiry (or past the chain's absolute cap).
+    """
+    return max(0, int((record.expires_at - datetime.now(UTC)).total_seconds()))
+
+
 def _issue_session_view(
     response: Response,
     issued,
     *,
     settings: Settings,
 ) -> OwnerSessionView:
-    ttl = _session_ttl(settings)
-    _cookie(response, SESSION_COOKIE, issued.cookie_token, max_age=ttl)
+    _cookie(response, SESSION_COOKIE, issued.cookie_token, max_age=_cookie_max_age(issued.record))
     _clear_cookie(response, CHALLENGE_COOKIE)
     return OwnerSessionView(
         scopes=sorted(issued.record.scopes),
         business_binding=_business_binding(settings, issued.record.owner_id),
         expires_at=issued.record.expires_at,
+        renew_after=issued.record.renew_after,
         csrf_token=session_csrf_token(
             issued.cookie_token,
             secret=_session_secret(settings),
@@ -730,7 +767,7 @@ async def login(
                 challenge_cookie=challenge_cookie,
                 challenge_csrf=csrf_token or "",
                 previous_cookie=previous_cookie,
-                ttl_seconds=_session_ttl(settings),
+                ttl_seconds=_session_windows(settings)[0],
             )
             db.commit()
     except (OwnerSessionDenied, OwnerSessionReplay):
@@ -815,7 +852,7 @@ async def google_login(
                 challenge_cookie=challenge_cookie,
                 challenge_csrf=csrf_token or "",
                 previous_cookie=previous_cookie,
-                ttl_seconds=_session_ttl(settings),
+                ttl_seconds=_session_windows(settings)[0],
             )
             db.commit()
     except (OwnerSessionDenied, OwnerSessionReplay):
@@ -847,6 +884,7 @@ def session_status(
         scopes=sorted(principal.scopes),
         business_binding=_business_binding(settings, principal.owner_id),
         expires_at=record.expires_at,
+        renew_after=record.renew_after,
         csrf_token=session_csrf_token(cookie_token, secret=_session_secret(settings)),
     )
 
@@ -886,7 +924,8 @@ def logout(
         request, csrf_token or "", db, settings
     )
     try:
-        OwnerSessionStore(db).revoke_current(
+        # The whole chain, so a predecessor in grace cannot outlive its own logout.
+        OwnerSessionStore(db).revoke_current_chain(
             session_hash=principal.session_hash,
             owner_id=principal.owner_id,
         )
@@ -916,3 +955,84 @@ def revoke_all(
         _logger.warning("owner_auth reason=revoke_all_persist_failed")
         raise _error(503, "owner_auth_unavailable") from None
     _clear_cookie(response, SESSION_COOKIE)
+
+
+async def _empty_refresh_request(
+    request: Request,
+    settings: Settings = Depends(get_settings),
+) -> None:
+    """Owner Origin first, then no query and an empty body, all before any database work."""
+    _require_origin(request, settings)
+    if request.scope.get("query_string", b""):
+        raise _error(400, "invalid_query")
+    if await request.body():
+        raise _error(422, "validation_error")
+
+
+def _refresh_unauthorized() -> JSONResponse:
+    """The 401 envelope, plus the cookie deletion an HTTPException cannot carry."""
+    response = error_response(401, "owner_auth_required")
+    _clear_cookie(response, SESSION_COOKIE)
+    return response
+
+
+@router.post("/refresh", response_model=OwnerSessionView)
+def refresh_session(
+    request: Request,
+    response: Response,
+    _empty: None = Depends(_empty_refresh_request),
+    csrf_token: Annotated[str | None, Header(alias=CSRF_HEADER)] = None,
+    db: Session = Depends(get_owner_session_db),
+    settings: Settings = Depends(get_settings),
+) -> OwnerSessionView | Response:
+    """V2-08: rotate the session cookie and its CSRF token. Any valid session, no scope.
+
+    Not counted as an auth attempt: it proves possession of a live session, not an identity.
+    The CSRF token is the HMAC of the presented cookie, so a predecessor in its grace uses its
+    own. Scopes are copied from the stored row, never derived from the current settings.
+    """
+    _no_store(response)
+    try:
+        require_owner_session(request, None, db=db, settings=settings)
+    except HTTPException as exc:
+        if exc.status_code == 401:
+            return _refresh_unauthorized()
+        raise
+    cookie_token = _request_cookie(request, SESSION_COOKIE)
+    secret = _session_secret(settings)
+    if not valid_session_csrf(cookie_token, csrf_token or "", secret=secret):
+        raise _error(403, "csrf_denied")
+    idle, absolute = _session_windows(settings)
+
+    def authorize(record: OwnerSessionRecord) -> None:
+        # The numeric owner allow-list and the workspace, re-checked for the locked row.
+        _record_principal(record, settings=settings, required_scope=None)
+
+    try:
+        with owner_phase("auth", "os_auth"):
+            issued = OwnerSessionStore(db).renew(
+                cookie_token, idle_seconds=idle, absolute_seconds=absolute, authorize=authorize
+            )
+            # Committed before the new cookie leaves.
+            db.commit()
+    except OwnerSessionDenied:
+        db.rollback()
+        return _refresh_unauthorized()
+    except HTTPException as exc:
+        db.rollback()
+        if exc.status_code == 401:
+            return _refresh_unauthorized()
+        raise
+    except SQLAlchemyError:
+        db.rollback()
+        _logger.warning("owner_auth reason=session_renew_failed")
+        raise _error(503, "owner_auth_unavailable") from None
+    principal = _record_principal(issued.record, settings=settings, required_scope=None)
+    _cookie(response, SESSION_COOKIE, issued.cookie_token, max_age=_cookie_max_age(issued.record))
+    return OwnerSessionView(
+        scopes=sorted(principal.scopes),
+        business_binding=_business_binding(settings, principal.owner_id),
+        expires_at=issued.record.expires_at,
+        renew_after=issued.record.renew_after,
+        csrf_token=session_csrf_token(issued.cookie_token, secret=secret),
+    )

@@ -474,6 +474,12 @@ class LedgerTx(Protocol):
     def undo_receipt_of(self, request_id: str) -> ReceiptRow | None: ...
     # Status pending; bumps pending_seq.
     def insert_proposal(self, draft: ProposalDraft) -> ProposalRow: ...
+    # Atomic. A strict compare-and-set (§22 E22): an update, tombstone or restore whose `before`
+    # differs from the stored record (the canonical record digest, not only the revision) raises
+    # ledger_integrity_failed, so build every before-image from tx.get. A mutation that moves an
+    # existing record into its FORK_DELETE_END_STATE (or tombstones it) raises has_dependents while
+    # a live record still refers to it, whatever the kind (§22 E20); liveness is judged on the
+    # batch's result. A stale revision is still target_changed.
     def apply(
         self, mutations: Sequence[Mutation], *, source: Source, request_id: str
     ) -> tuple[RecordDict, ...]: ...
@@ -606,6 +612,20 @@ DEPENDENTS: tuple[tuple[Entity, str, Entity], ...] = (
     ("tasks", "work_id", "works"),
     ("payments", "original_payment_id", "payments"),
 )
+
+# FORK-DELETE end states (§0, §11.1 delete table, §22 E7): the (column, value) an entity's delete
+# sets, or None for a tombstone (tasks). The one map; FakeLedger and PG both import it.
+# live_ids() excludes a row only when it is tombstoned or already in this end state, so a done or
+# status-בוטל task stays included.
+FORK_DELETE_END_STATE: Mapping[str, tuple[str, str] | None] = MappingProxyType({
+    "leads": ("status", "לא רלוונטי"),
+    "clients": ("status", "לא פעיל"),
+    "works": ("status", "בוטלה"),
+    "payments": ("kind", "בוטל"),
+    "time": ("status", "בוטל"),
+    "expenses": ("payment_status", "בוטל"),
+    "tasks": None,
+})
 
 _CANCELLED: Mapping[str, tuple[str, str]] = MappingProxyType({
     "payments": ("kind", "בוטל"),
