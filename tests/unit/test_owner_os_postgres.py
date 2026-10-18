@@ -15,7 +15,7 @@ from uuid import uuid4
 import pytest
 from app.core.config import Settings, get_settings
 from app.db.base import Base
-from app.db.migrate import _split_statements
+from app.db.migrate import _apply_file, _split_statements
 from app.db.models import CrmContactRow, CrmIdentityRow
 from app.db.reminders import OwnerReminderRow
 from app.services.owner_os_action_policy import (
@@ -69,6 +69,9 @@ def os_pg():
         for _ in range(2):
             for sql in _split_statements(migration.read_text(encoding="utf-8")):
                 c.execute(text(sql))
+        # ADD CONSTRAINT has no IF NOT EXISTS: re-runs go through the runner's savepoints.
+        for _ in range(2):
+            _apply_file(c, migration.parent / "20261015_owner_os_session_chains.sql")
         grants = {
             "owner_os_login_challenges": "SELECT, INSERT, UPDATE",
             "owner_os_login_proofs": "INSERT",

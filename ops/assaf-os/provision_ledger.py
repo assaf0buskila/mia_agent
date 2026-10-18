@@ -11,7 +11,10 @@ assaf_os it is a no-op. --apply needs --approved-sha equal to MIA_BUILD_SHA and 
 pinned MIA_OS_LEDGER_MIGRATION_DATABASE_URL and MIA_DATABASE_URL. For a target with a
 runtime env file (mia-vm), a newly created runtime role gets a generated password whose
 DSN is written to that VM-owned file as MIA_OWNER_OS_LEDGER_DATABASE_URL before commit.
-Nothing prints a DSN or a password.
+Only provision writes that file. A reapply that finds the runtime role missing creates it
+from a DSN that is already staged there, and with nothing staged it is refused before the
+CREATE ROLE (V2_PG_CONTRACTS.md §22 E10: provision explicitly). Nothing prints a DSN or a
+password.
 """
 
 import argparse
@@ -269,13 +272,20 @@ def _apply(target: Target, mode: str, statements: tuple[str, ...]) -> tuple[str,
                     text("SELECT to_regrole(:role) IS NOT NULL"), {"role": role}
                 ):
                     continue  # adopt it; the catalog audit below decides
+                if (role == RUNTIME_ROLE and target.runtime_env and mode == "reapply"
+                        and runtime_credential(target, create=False) is None):
+                    # §22 E10: roles are cluster-global and survive a restore, so a missing
+                    # runtime role is an anomaly. Reapply never writes VM secrets: abort
+                    # (nothing was created) and provision explicitly.
+                    raise ValueError("ledger_runtime_credential_missing")
                 # provision: CREATE ROLE refuses an existing role; never adopt one.
                 conn.exec_driver_sql(statement)
                 executed.append(statement)
                 if role == RUNTIME_ROLE and target.runtime_env:
                     # Staged in the env file BEFORE commit, so a failed transaction
-                    # retries with the same credential instead of losing it.
-                    password = runtime_credential(target)
+                    # retries with the same credential instead of losing it. Only
+                    # provision stages; a reapply reuses what is already there.
+                    password = runtime_credential(target, create=(mode == "provision"))
                     conn.exec_driver_sql(
                         f"ALTER ROLE {RUNTIME_ROLE} PASSWORD '{_verifier(conn, password)}'"
                     )
