@@ -260,7 +260,7 @@ def test_an_owner_direct_request_is_found_with_its_undo_view(owner, world):
     ("value", "status", "code"),
     [
         ("not-a-uuid", 422, "invalid_request_id"),
-        (UNKNOWN.upper(), 422, "invalid_request_id"),
+        ("0f8fad5b-d9cb-469f-a165-70867728950e".upper(), 422, "invalid_request_id"),
         (UNKNOWN.replace("-", ""), 422, "invalid_request_id"),
         (UNKNOWN + "?x=1", 400, "invalid_query"),
     ],

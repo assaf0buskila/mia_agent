@@ -6,7 +6,7 @@ import hmac
 import json
 import logging
 from collections.abc import Callable, Generator
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from functools import lru_cache
 from typing import Annotated, Any
@@ -69,7 +69,9 @@ ACTION_SCOPES = frozenset({"quick_leads.create", "reminders.write"})
 BUSINESS_READ_SCOPES = frozenset({"business-ledger:read"})
 BUSINESS_WRITE_SCOPES = frozenset({"business-ledger:write"})
 ASSAF_OS_READ_SCOPES = frozenset({"assaf-os:read"})
-ASSAF_OS_WRITE_SCOPES = frozenset({"assaf-os:propose", "assaf-os:approve"})
+# assaf-os:direct (V2-19, §9): owner-direct commit, undo and abandon. Cookie sessions only, like
+# every scope here; granting it is the configured owner scope set (a wave-6 config step).
+ASSAF_OS_WRITE_SCOPES = frozenset({"assaf-os:propose", "assaf-os:approve", "assaf-os:direct"})
 KNOWN_SCOPES = (
     READ_SCOPES
     | ACTION_SCOPES
@@ -81,6 +83,12 @@ KNOWN_SCOPES = (
 
 _logger = logging.getLogger(__name__)
 
+# V2-19 (§9): the browser mutation proof. Module-private: only owner_mutation_scope attaches it,
+# after the exact Origin, the session and CSRF have all passed, and
+# authorize.from_owner_mutation admits an OS ledger context only for a principal carrying it.
+# tests/unit/test_trusted_context_ast.py pins that no other app module references it.
+_MUTATION_PROOF = object()
+
 
 @dataclass(frozen=True)
 class OwnerSessionPrincipal:
@@ -88,6 +96,7 @@ class OwnerSessionPrincipal:
     scopes: frozenset[str]
     session_hash: str
     expires_at: datetime
+    _mutation_proof: object | None = field(default=None, repr=False, compare=False)
 
 
 class OwnerLoginBody(BaseModel):
@@ -149,6 +158,12 @@ def _feature_settings(settings: Settings) -> tuple[str, str]:
 
 def _require_origin(request: Request, settings: Settings) -> str:
     expected, _ = _feature_settings(settings)
+    if "authorization" in request.headers:
+        # V2-19 (I4, §9): the owner surface is cookie-session only. A request carrying any
+        # Authorization header (bearer, basic, even empty) is refused before anything else is
+        # read, whatever session, Origin or CSRF it also carries.
+        _logger.warning("owner_auth reason=authorization_header")
+        raise _error(401, "owner_auth_required")
     supplied = request.headers.get("origin", "")
     if not supplied or supplied == "null" or supplied != expected:
         raise _error(403, "origin_denied")
@@ -651,7 +666,8 @@ def owner_mutation_scope(
                 supplied_proof_hash,
             ):
                 raise _error(401, "owner_auth_required")
-        return principal
+        # Origin, session and CSRF (and the fresh login when required) have all passed.
+        return replace(principal, _mutation_proof=_MUTATION_PROOF)
 
     return dependency
 
