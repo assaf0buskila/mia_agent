@@ -437,6 +437,7 @@ def test_postgres_concurrent_retry_creates_one_capture(monkeypatch) -> None:
         paths = [
             root / "migrations" / "20260910_crm_v2.sql",
             root / "migrations" / "20261008_assafweb_form_intake_receipts.sql",
+            root / "migrations" / "20261016_crm_activity_is_test.sql",
         ]
         monkeypatch.setattr("app.db.migrate.list_migration_files", lambda: paths)
         migration = apply_migrations(engine)
