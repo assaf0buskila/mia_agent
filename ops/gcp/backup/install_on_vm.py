@@ -9,7 +9,8 @@ It copies the backup scripts to /opt/mia/backup, the systemd units to /etc/syste
 settings to /etc/mia/backup-offsite.env, creates the private work directory and runs
 `systemctl daemon-reload`. It does not enable the timer unless --enable-timer is given, never starts
 the backup service itself, and never touches `mia`, compose.yaml, the app, the database or the jobs.
-It does not install the restore drill: that runs on Assaf's PC, never on the VM.
+It does not install the restore drill or ledger_posture.py: both run on Assaf's PC, never on the VM.
+`mia restore` re-grants assaf_os through V2-15's provision_ledger.py alone.
 
 Safe to repeat. It writes nothing unless every precondition holds. Standard library only.
 """
@@ -25,7 +26,7 @@ from pathlib import Path
 import backup_lib
 
 SOURCE = Path(__file__).resolve().parent
-SCRIPTS = ("backup_lib.py", "backup_offsite.py", "ledger_posture.py")
+SCRIPTS = ("backup_lib.py", "backup_offsite.py")
 UNITS = ("mia-backup-offsite.service", "mia-backup-offsite.timer")
 TOOLS = ("python3", "docker", "gcloud", "openssl")
 

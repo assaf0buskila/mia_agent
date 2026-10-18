@@ -18,8 +18,9 @@ usage: sudo mia <command>
   telegram-webhook      register https://<public url>/v1/telegram/webhook with Telegram
   go-live               after DNS points here: https enable, jobs resume, webhook, first ingest
   restore <dump>        replace the database with a pg_dump custom-format file, give the
-                        roles their ownership and grants back, and only then start the services
-  backup                write a database dump to /var/lib/mia/backups
+                        roles their ownership and grants back, and only then start the services.
+                        It pauses the jobs first; resume them with `jobs resume` once ready
+  backup               write a database dump to /var/lib/mia/backups
   status                containers, health and timers
   logs [service]        follow logs (postgres, migrate, app, caddy)
 EOF
@@ -154,7 +155,9 @@ EOF
 # `mia restore` runs post_restore_reapply between pg_restore and start_services, under the
 # /var/lock/mia-state.lock it already holds, so nothing below may flock that file again. A failure
 # prints one fixed reason code and stops with the services DOWN. Every step is idempotent: fix
-# the cause and run `mia restore` again. Nothing here prints SQL, DSNs, passwords or row data.
+# the cause and run `mia restore` again. Nothing here prints DSNs, passwords or row data.
+# Step 2's provision_ledger.py does print the DDL and GRANT statements it ran, and step 1's
+# helper prints one JSON line; neither prints a secret.
 app_role_dir=/opt/mia/app-role-demote
 
 restore_note() { echo "mia: post-restore $*"; }
@@ -187,13 +190,13 @@ restore_demote_reapply() {
   restore_note "app_role_reapply ok"
 }
 
-# Step 2, V2-15 r2: assaf_os gets its owner, its revokes and its exact grants back. The script is
+# Step 2, V2-15: assaf_os gets its owner, its revokes and its exact grants back. The script is
 # the one deployed with the running image, mounted into that image, run as root because it reads
-# /etc/mia/runtime.env. /etc/mia is mounted READ-ONLY: a restore never writes a VM-owned file, so
-# a ledger runtime role that is missing (a fresh cluster) cannot be created here. The script then
-# refuses, the transaction rolls back and the restore stops: provision it explicitly first
-# (provision_ledger.py --mode provision, per the runbook). A database without assaf_os has
-# nothing to repair.
+# /etc/mia/runtime.env. /etc/mia is mounted READ-ONLY: a restore never writes a VM-owned file. A
+# ledger runtime role that is missing (a fresh cluster) is therefore created only from a DSN that
+# is already staged in runtime.env; with nothing staged the script refuses before it creates
+# anything and the restore stops: provision it explicitly first (provision_ledger.py --mode
+# provision, per the runbook). A database without assaf_os has nothing to repair.
 restore_ledger_reapply() {
   local present tag script
   present="$(restore_sql mia -c "SELECT to_regnamespace('assaf_os') IS NOT NULL")" \
@@ -236,6 +239,9 @@ restore_read_main_dsn() {
 
 # Step 3: V2-14's own posture validator, run for real in the deployed image on the real main DSN.
 # Only once the main DSN is the demoted role: before the cutover it is still the superuser mia.
+# It proves the role's catalog posture, not its password: while the cluster's loopback pg_hba
+# line is `trust` (the postgres image's initdb default, ahead of POSTGRES_HOST_AUTH_METHOD), a
+# wrong password still connects. Hardening that is an owner-gated V2-14a follow-up.
 restore_main_role_validate() {
   restore_read_main_dsn
   unset main_password
@@ -309,7 +315,8 @@ SQL
 # table access, and a restore that was not repaired still passes it while every query is denied.
 # SELECT from an application table, then INSERT into it, all rolled back. A row the table itself
 # refuses (class 23: NOT NULL, key, check) means the privilege check already passed. Any other
-# error, such as permission denied, fails the probe.
+# error, such as permission denied, fails the probe. The password goes over stdin, but it proves
+# privileges, not authentication: under a `trust` loopback pg_hba line the server never checks it.
 restore_access_probe() {
   restore_read_main_dsn
   local probe
@@ -457,6 +464,11 @@ case "$cmd" in
     file="${1:?usage: mia restore <dump file>}"
     [ -s "$file" ] || die "missing or empty dump: $file"
     [ -f /opt/mia/tag.env ] || die "deploy once before restoring"
+    # A job timer that fires while the database is dropped, half restored or half repaired would
+    # touch it: `mia job` takes no state lock. Pause the jobs now; they stay paused until the
+    # operator has checked readiness and resumes them, also after a post-step abort.
+    install -m 600 /dev/null "$jobs_paused"
+    echo "mia: jobs are paused for the restore; after readiness run: sudo mia jobs resume"
     compose stop caddy app >/dev/null 2>&1 || true
     compose up -d postgres
     wait_healthy postgres

@@ -10,6 +10,10 @@ One run:
   5. upload ciphertext, then manifest, to gs://<bucket>/15min/ and verify both objects.
   6. the first success of each UTC day is uploaded again under daily/.
 
+A slot is skipped (reason code `state_lock_busy`, exit 0) while `mia restore`, `mia deploy` or
+another state-changing `mia` command holds /var/lock/mia-state.lock: a dump taken in the middle of
+a restore is a partial database, and it would be uploaded as the newest good backup.
+
 Standard library only. It logs reason codes and never a key, dump content or provider payload.
 `--status` prints the age of the last good backup and exits 1 when it is stale.
 """
@@ -33,6 +37,7 @@ import backup_lib
 from backup_lib import BackupError
 
 BUCKET_NAME = backup_lib.BUCKET_NAME
+STATE_LOCK = Path("/var/lock/mia-state.lock")  # the lock `mia` takes for deploy, restore and more
 RUN_DIR = re.compile(r"run-\d{8}T\d{6}Z-\d+")
 FAILURE_KEYS = ("last_failure_utc", "last_failure_code")
 
@@ -43,6 +48,7 @@ class Config:
     project: str = ""
     secret: str = backup_lib.SECRET_NAME
     work_dir: Path = Path("/var/lib/mia/backup-offsite")
+    state_lock: Path = STATE_LOCK
     compose_file: str = "/opt/mia/compose.yaml"
     tag_env: str = "/opt/mia/tag.env"
     database: str = backup_lib.DATABASE
@@ -64,6 +70,7 @@ class Config:
             project=environ.get("MIA_BACKUP_PROJECT", ""),
             secret=environ.get("MIA_BACKUP_SECRET", backup_lib.SECRET_NAME),
             work_dir=Path(environ.get("MIA_BACKUP_WORK_DIR", "/var/lib/mia/backup-offsite")),
+            state_lock=Path(environ.get("MIA_STATE_LOCK", str(STATE_LOCK))),
         )
 
 
@@ -126,6 +133,32 @@ def acquire_lock(work_dir: Path):
         handle.close()
         return None
     return handle
+
+
+def state_lock_busy(path: Path) -> bool:
+    """True when a state-changing `mia` command holds the shared lock, so this slot must not dump.
+
+    It only asks: the lock is taken and dropped at once, and the file is never created. If there is
+    no lock file, or it can not be opened, nobody can be holding it and the backup goes ahead: a
+    missed backup costs more than a dump taken beside a command that left no lock to see.
+    """
+    try:
+        import fcntl
+    except ImportError:  # not Linux: development machines only, the VM always has fcntl
+        return False
+    try:
+        descriptor = os.open(path, os.O_RDONLY)
+    except OSError:
+        return False
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return True
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(descriptor)
 
 
 # --- the steps ------------------------------------------------------------------------------
@@ -381,6 +414,9 @@ def main(argv=None, *, runner=None, environ=None, now: datetime | None = None) -
         return 2
 
     config.work_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if state_lock_busy(config.state_lock):
+        log("skipped code=state_lock_busy")
+        return 0
     lock = acquire_lock(config.work_dir)
     if lock is None:
         log("already running; skipping this slot")
@@ -390,7 +426,9 @@ def main(argv=None, *, runner=None, environ=None, now: datetime | None = None) -
         (config.work_dir / "runs").mkdir(exist_ok=True, mode=0o700)
         result = run_backup(config, runner, now)
     except BackupError as error:
-        log(f"failed code={error.code} detail={error.detail}")
+        # The code only. error.detail can carry gcloud, pg_dump or openssl stderr, which is
+        # provider text and must never reach journald (AGENTS.md: reason codes and booleans).
+        log(f"failed code={error.code}")
         record_failure(config, now, error.code)
         return 1
     finally:

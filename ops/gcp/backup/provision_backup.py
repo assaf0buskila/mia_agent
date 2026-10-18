@@ -13,13 +13,17 @@ Assaf's PC after he says go; `plan` (the default) prints every command and runs 
   * the VM's service account may add and read objects (objectCreator + objectViewer). It can
     not delete or overwrite one, so a compromised VM can not destroy the history;
   * a regional secret mia-backup-key readable by that service account, holding the key.
+An existing bucket is left as it is only after its location, uniform access and public access
+prevention are checked against those decisions; a mismatch stops `apply` before it changes anything.
 The key goes to Secret Manager through stdin and is never printed. An existing key version is never
-replaced: rotating the key would orphan every older backup. Standard library only.
+replaced: rotating the key would orphan every older backup, and `apply` prints the id of --key-file
+for the owner to compare with a backup manifest's key_id. Standard library only.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import shlex
@@ -63,7 +67,7 @@ class Plan:
         return ["gcloud", "services", "enable", *APIS, self.flag]
 
     def bucket_exists(self) -> list[str]:
-        return ["gcloud", "storage", "buckets", "describe", self.url, self.flag]
+        return ["gcloud", "storage", "buckets", "describe", self.url, "--format=json", self.flag]
 
     def bucket_create(self) -> list[str]:
         return [
@@ -191,6 +195,64 @@ def parse_inputs(args: argparse.Namespace) -> tuple[str, str, str, str | None]:
     return args.project, bucket, account, key
 
 
+def _first(document: dict, *paths: tuple[str, ...]):
+    """The first value found under any of the key paths, or None."""
+    for path in paths:
+        node = document
+        for key in path:
+            node = node.get(key) if isinstance(node, dict) else None
+        if node is not None:
+            return node
+    return None
+
+
+def bucket_posture(stdout: bytes) -> tuple[list[str], list[str]]:
+    """What an EXISTING bucket gets wrong against the owner decisions, and what could not be read.
+
+    `apply` leaves an existing bucket as it is, so it must first know the bucket is regional in
+    me-west1, uniformly controlled and closed to public access. A fact gcloud's output does not
+    state is reported as unverified rather than guessed: the owner then checks it by hand.
+    """
+    try:
+        document = json.loads(stdout.decode("utf-8", "replace") or "null")
+    except ValueError:
+        document = None
+    document = document if isinstance(document, dict) else {}
+    problems: list[str] = []
+    unverified: list[str] = []
+
+    location = _first(document, ("location",))
+    if location is None:
+        unverified.append("location")
+    elif str(location).lower() != backup_lib.REGION:
+        problems.append(f"location is {str(location).lower()}, expected {backup_lib.REGION}")
+
+    uniform = _first(
+        document,
+        ("uniform_bucket_level_access",),
+        ("uniformBucketLevelAccess",),
+        ("iamConfiguration", "uniformBucketLevelAccess", "enabled"),
+        ("iam_configuration", "uniform_bucket_level_access", "enabled"),
+    )
+    if uniform is None:
+        unverified.append("uniform bucket-level access")
+    elif uniform is not True:
+        problems.append("uniform bucket-level access is off")
+
+    prevention = _first(
+        document,
+        ("public_access_prevention",),
+        ("publicAccessPrevention",),
+        ("iamConfiguration", "publicAccessPrevention"),
+        ("iam_configuration", "public_access_prevention"),
+    )
+    if prevention is None:
+        unverified.append("public access prevention")
+    elif str(prevention).lower() != "enforced":
+        problems.append(f"public access prevention is {str(prevention).lower()}, not enforced")
+    return problems, unverified
+
+
 def print_plan(plan: Plan) -> None:
     print("PLAN ONLY: nothing below has been run. `apply` runs it, in this order.\n")
     print("\n\n".join(plan.printable()))
@@ -216,8 +278,26 @@ def apply(plan: Plan, runner) -> int:
     if done.returncode != 0:
         return fail("enabling the APIs", done)
 
-    if run(plan.bucket_exists()).returncode == 0:
+    described = run(plan.bucket_exists())
+    if described.returncode == 0:
+        problems, unverified = bucket_posture(described.stdout)
+        if problems:
+            print(
+                f"provision: {plan.url} exists but breaks the owner decisions: "
+                f"{'; '.join(problems)}. Nothing was changed. Fix the bucket, or choose another "
+                "with --bucket.",
+                file=sys.stderr,
+            )
+            return 1
         print(f"bucket {plan.url} exists; left as it is")
+        stated = {"location", "uniform bucket-level access", "public access prevention"}
+        for fact in sorted(stated - set(unverified)):
+            print(f"  its {fact} matches the owner decision")
+        for fact in unverified:
+            print(
+                f"  warning: could not read the bucket's {fact} from gcloud's output; "
+                "check it in the console before relying on this bucket"
+            )
     else:
         done = run(plan.bucket_create())
         if done.returncode != 0:
@@ -249,6 +329,13 @@ def apply(plan: Plan, runner) -> int:
         return fail("listing the secret versions", existing)
     if existing.stdout.strip():
         print("a key version already exists; it is never replaced")
+        if plan.key is not None:
+            # apply cannot read the stored key. The id is a fingerprint, never the key: compare it
+            # with the key_id of a backup manifest to know the offline copy is the stored key.
+            print(
+                f"the key id of --key-file is {backup_lib.key_id(plan.key)}; it must equal the "
+                "key_id in a backup manifest, otherwise the offline copy is not the stored key"
+            )
     elif plan.key is None:
         print(
             "no key stored yet. Next:\n"

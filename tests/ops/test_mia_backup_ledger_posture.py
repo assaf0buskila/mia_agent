@@ -9,17 +9,15 @@ result. The SQL is proven twice: its shape with fakes, and its behaviour on a re
 
 from __future__ import annotations
 
-import json
 import os
 import re
+from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
 
 import backup_lib
 import ledger_posture
 import pytest
-
-from tests.ops.fakes import FakeRunner
 
 GRANTS = """\
 -- the reviewed V2-15 grant set (a stand-in for the real file)
@@ -39,6 +37,7 @@ def test_the_roles_and_schema_are_the_ones_v2_14_and_v2_15_name():
     assert ledger_posture.SCHEMA == "assaf_os"
     assert ledger_posture.OWNER_ROLE == "assaf_os_owner"
     assert ledger_posture.LEDGER_ROLE == "assaf_os_ledger"
+    assert ledger_posture.RETENTION_ROLE == "assaf_os_retention"
     assert ledger_posture.POSTURE_CHECKS == (
         "schema_owner",
         "object_owner",
@@ -97,6 +96,37 @@ def test_anything_else_in_a_grant_file_is_refused(text):
     assert error_code(lambda: ledger_posture.parse_grants(text)) == "ledger_grants_invalid"
 
 
+def test_the_real_ledger_grant_statements_are_a_valid_grant_file():
+    """V2-10 review r1: the README names `ledger_grant_statements()` as the input. Prove it."""
+    from app.services.os_ledger import role_policy
+
+    assert ledger_posture.RETENTION_ROLE == role_policy.RETENTION_ROLE
+    real_grants = role_policy.ledger_grant_statements()
+    assert len(real_grants) > 20
+    parsed = ledger_posture.parse_grants("\n".join(real_grants))
+    assert len(parsed) == len(real_grants)
+    assert all("assaf_os" in statement for statement in parsed)
+
+
+def test_the_provisioning_plan_is_not_a_grant_file_so_the_runbook_must_not_say_it_is():
+    """The reapply plan starts with CREATE ROLE and revokes from named roles; it is refused."""
+    import importlib.util
+
+    from app.services.os_ledger.role_policy import ledger_grant_statements
+
+    root = Path(__file__).resolve().parents[2]
+    spec = importlib.util.spec_from_file_location(
+        "v210_provision_ledger", root / "ops/assaf-os/provision_ledger.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    plan = module.provision_statements("mia-vm", "reapply")
+    text = "\n".join(line for line in plan if not line.startswith("--"))
+    assert error_code(lambda: ledger_posture.parse_grants(text)) == "ledger_grants_invalid"
+    # what the runbook calls the grant file is the plan's tail: exactly the grant statements
+    assert tuple(plan[-len(ledger_grant_statements()) :]) == ledger_grant_statements()
+
+
 # --- the generated SQL -----------------------------------------------------------------------
 
 
@@ -145,6 +175,13 @@ def test_the_grants_are_applied_after_the_revokes_so_they_are_not_undone():
     assert sql.rindex("REVOKE ALL ON ALL ROUTINES") < sql.index("GRANT SELECT ON assaf_os.x")
 
 
+def test_the_retention_role_is_an_accepted_grantee_in_the_posture_query():
+    sql = ledger_posture.posture_sql()
+    assert "rolname = 'assaf_os_retention'" in sql
+    # it joins the owner and the ledger role in the allowed set; PUBLIC (grantee 0) never does
+    assert "UNION SELECT oid FROM retention_role" in sql and "grantee <> 0" in sql
+
+
 def test_role_names_are_plain_identifiers_before_they_reach_any_sql():
     for bad in ["", "Owner", "a-b", "x; DROP DATABASE mia", "a b", "1abc", "a" * 64]:
         assert (
@@ -174,7 +211,9 @@ def test_the_posture_query_returns_one_count_per_check_in_a_fixed_order():
 
 def test_the_scratch_roles_are_created_only_when_missing_and_cannot_log_in():
     sql = ledger_posture.ensure_roles_sql()
-    assert sql.count("IF NOT EXISTS") == 2 and sql.count("NOLOGIN") == 2
+    # owner, ledger and (V2-15 creates it too) retention
+    assert sql.count("IF NOT EXISTS") == 3 and sql.count("NOLOGIN") == 3
+    assert "assaf_os_retention" in sql
     assert "SUPERUSER" not in sql.replace("NOSUPERUSER", "")
 
 
@@ -325,91 +364,21 @@ def test_verify_only_reads_and_does_not_need_a_grant_file():
     assert not failing.passed
 
 
-# --- the command line (the production restore path) ---------------------------------------------
+# --- drill only: no command line, no door to the VM database -------------------------------------
 
 
-def cli(arguments, db=None):
-    db = db or Db()
+def test_the_module_is_drill_only_it_has_no_command_line_and_no_door_to_the_vm_database():
+    """V2-10 review r1: `mia restore` re-grants through V2-15's provision_ledger.py alone.
 
-    def handler(call):
-        statement = call.argv[call.argv.index("-c") + 1]
-        return db(statement)
-
-    runner = FakeRunner(handler, real=())
-    return ledger_posture.main(arguments, runner=runner), runner, db
-
-
-@pytest.fixture
-def grants_file(tmp_path):
-    path = tmp_path / "ledger-grants.sql"
-    path.write_text(GRANTS, encoding="utf-8")
-    return path
-
-
-def test_plan_prints_the_sql_and_runs_nothing(grants_file, capsys):
-    code, runner, _ = cli(["plan", "--grants-file", str(grants_file)])
-    out = capsys.readouterr().out
-    assert code == 0 and runner.calls == []
-    assert "ALTER SCHEMA assaf_os OWNER TO assaf_os_owner" in out and "AS ledger_destructive" in out
-
-
-def test_apply_runs_through_compose_against_the_production_database(grants_file, capsys):
-    code, runner, db = cli(["apply", "--grants-file", str(grants_file)])
-    assert code == 0 and db.kinds() == ["present", "apply", "posture"]
-    for call in runner.calls:
-        assert call.argv[:11] == [
-            "docker",
-            "compose",
-            "-p",
-            "mia",
-            "-f",
-            "/opt/mia/compose.yaml",
-            "--env-file",
-            "/opt/mia/tag.env",
-            "exec",
-            "-T",
-            "postgres",
-        ]
-        assert call.argv[11:17] == ["psql", "-U", "mia", "-d", "mia", "-v"]
-        assert "ON_ERROR_STOP=1" in call.argv
-    report = json.loads(capsys.readouterr().out)
-    assert report["passed"] is True and report["schema_present"] is True
-
-
-def test_apply_never_creates_roles_in_production(grants_file):
-    _, _, db = cli(["apply", "--grants-file", str(grants_file)])
-    assert "roles" not in db.kinds()
-
-
-def test_apply_exits_one_when_the_posture_does_not_pass(grants_file, capsys):
-    code, _, _ = cli(["apply", "--grants-file", str(grants_file)], Db(posture="0|0|1|0|0"))
-    assert code == 1 and json.loads(capsys.readouterr().out)["passed"] is False
-
-
-def test_apply_without_a_grant_file_is_a_usage_error(capsys):
-    with pytest.raises(SystemExit) as raised:
-        cli(["apply"])
-    assert raised.value.code == 2
-
-
-def test_apply_with_a_missing_or_unsafe_grant_file_changes_nothing(tmp_path, capsys):
-    code, runner, _ = cli(["apply", "--grants-file", str(tmp_path / "nope.sql")])
-    assert code == 2 and runner.calls == []
-    bad = tmp_path / "bad.sql"
-    bad.write_text("DROP TABLE assaf_os.os_events;", encoding="utf-8")
-    code, runner, _ = cli(["apply", "--grants-file", str(bad)])
-    assert code == 2 and runner.calls == []
-
-
-def test_verify_reads_only(capsys):
-    code, runner, db = cli(["verify"])
-    assert code == 0 and db.kinds() == ["present", "posture"]
-    assert not any("ALTER" in c.text or "GRANT" in c.text for c in runner.calls)
-
-
-def test_on_a_vm_without_the_ledger_schema_apply_is_a_pass_that_changes_nothing(grants_file):
-    code, _, db = cli(["apply", "--grants-file", str(grants_file)], Db(present=False))
-    assert code == 0 and db.kinds() == ["present"]
+    This module used to carry a `plan/apply/verify` command that ran psql inside the VM's compose
+    postgres as the superuser, which was a second, unreviewed production grant path. The drill
+    imports `evaluate` only, against a scratch server on Assaf's PC.
+    """
+    for name in ("main", "vm_run_sql", "build_parser", "read_grants", "COMPOSE_FILE", "TAG_ENV"):
+        assert not hasattr(ledger_posture, name), name
+    source = Path(ledger_posture.__file__).read_text(encoding="utf-8")
+    for fragment in ("__main__", "argparse", "docker", "compose", "/opt/mia"):
+        assert fragment not in source, fragment
 
 
 # --- a real PostgreSQL --------------------------------------------------------------------------
@@ -435,11 +404,14 @@ def pg():
     suffix = uuid4().hex[:12]
     database = f"v210_{suffix}"
     roles = SimpleNamespace(
-        owner=f"v210_owner_{suffix}", ledger=f"v210_ledger_{suffix}", other=f"v210_other_{suffix}"
+        owner=f"v210_owner_{suffix}",
+        ledger=f"v210_ledger_{suffix}",
+        other=f"v210_other_{suffix}",
+        retention=f"v210_retention_{suffix}",
     )
     admin = psycopg.connect(dsn(parsed.database), autocommit=True)
     admin.execute(f"CREATE DATABASE {database}")
-    for role in (roles.owner, roles.ledger, roles.other):
+    for role in (roles.owner, roles.ledger, roles.other, roles.retention):
         admin.execute(f"CREATE ROLE {role} NOLOGIN")
     conn = psycopg.connect(dsn(database), autocommit=True)
     # What pg_restore --no-owner --no-privileges leaves behind: everything owned by the
@@ -470,14 +442,19 @@ def pg():
     yield SimpleNamespace(run=run_sql, scalar=scalar, roles=roles, conn=conn)
     conn.close()
     admin.execute(f"DROP DATABASE {database} WITH (FORCE)")
-    for role in (roles.owner, roles.ledger, roles.other):
-        admin.execute(f"DROP ROLE {role}")
+    for role in (roles.owner, roles.ledger, roles.other, roles.retention):
+        admin.execute(f"DROP ROLE IF EXISTS {role}")
     admin.close()
 
 
 def real(pg, grants_text, **options):
     return ledger_posture.evaluate(
-        pg.run, grants_text=grants_text, owner=pg.roles.owner, ledger=pg.roles.ledger, **options
+        pg.run,
+        grants_text=grants_text,
+        owner=pg.roles.owner,
+        ledger=pg.roles.ledger,
+        retention=pg.roles.retention,
+        **options,
     )
 
 
@@ -570,9 +547,29 @@ def test_pg_drift_after_a_good_restore_is_caught(pg, statement, failing):
     assert not result.passed and result.violations[failing] > 0
 
 
+def test_pg_the_retention_role_may_hold_grants_but_nobody_else_may(pg):
+    """V2-14b gives retention its own grants (SELECT/DELETE on two tables). It is not a stranger."""
+    assert real(pg, grants_for(pg)).passed
+    pg.conn.execute(f"GRANT USAGE ON SCHEMA assaf_os TO {pg.roles.retention}")
+    pg.conn.execute(f"GRANT SELECT, DELETE ON assaf_os.os_events TO {pg.roles.retention}")
+    assert real(pg, None, apply=False).passed
+    pg.conn.execute(f"GRANT SELECT ON assaf_os.os_events TO {pg.roles.other}")
+    result = real(pg, None, apply=False)
+    assert not result.passed and result.violations["other_grantees"] > 0
+    # the ledger role, unlike retention, may never delete
+    pg.conn.execute(f"REVOKE SELECT ON assaf_os.os_events FROM {pg.roles.other}")
+    pg.conn.execute(f"GRANT DELETE ON assaf_os.os_events TO {pg.roles.ledger}")
+    assert real(pg, None, apply=False).violations["ledger_destructive"] > 0
+
+
 def test_pg_a_missing_owner_role_is_a_violation_not_a_silent_pass(pg):
     result = ledger_posture.evaluate(
-        pg.run, grants_text=None, apply=False, owner="v210_no_such_role", ledger=pg.roles.ledger
+        pg.run,
+        grants_text=None,
+        apply=False,
+        owner="v210_no_such_role",
+        ledger=pg.roles.ledger,
+        retention=pg.roles.retention,
     )
     assert not result.passed and result.violations["schema_owner"] == 1
 
@@ -585,7 +582,11 @@ def test_pg_a_database_without_the_schema_passes(pg):
 
 def test_pg_roles_for_a_scratch_server_are_created_once_and_without_login(pg):
     pg.conn.execute(f"DROP ROLE IF EXISTS {pg.roles.other}")
-    sql = ledger_posture.ensure_roles_sql(owner=pg.roles.owner, ledger=pg.roles.other)
+    pg.conn.execute(f"DROP ROLE IF EXISTS {pg.roles.retention}")
+    sql = ledger_posture.ensure_roles_sql(
+        owner=pg.roles.owner, ledger=pg.roles.other, retention=pg.roles.retention
+    )
     assert pg.run(sql).returncode == 0 and pg.run(sql).returncode == 0
-    assert not pg.scalar(f"SELECT rolcanlogin FROM pg_roles WHERE rolname = '{pg.roles.other}'")
-    assert pg.scalar(f"SELECT rolinherit FROM pg_roles WHERE rolname = '{pg.roles.other}'") is False
+    for role in (pg.roles.other, pg.roles.retention):
+        assert not pg.scalar(f"SELECT rolcanlogin FROM pg_roles WHERE rolname = '{role}'")
+        assert pg.scalar(f"SELECT rolinherit FROM pg_roles WHERE rolname = '{role}'") is False

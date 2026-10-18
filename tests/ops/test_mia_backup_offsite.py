@@ -18,6 +18,7 @@ import pytest
 from tests.ops import fakes
 from tests.ops.fakes import BUCKET, KEY, PLAINTEXT, TOC, FakeRunner, FakeVm
 
+ROOT = Path(__file__).resolve().parents[2]
 NOW = datetime(2026, 10, 15, 12, 5, 3, tzinfo=UTC)
 SHIPPED_ITERATIONS = backup_lib.PBKDF2_ITERATIONS  # read before any test lowers it
 DUMP = "15min/mia-20261015T120503Z.dump.enc"
@@ -31,7 +32,12 @@ def cheap_kdf(monkeypatch):
 
 @pytest.fixture
 def env(tmp_path):
-    return {"MIA_BACKUP_BUCKET": BUCKET, "MIA_BACKUP_WORK_DIR": str(tmp_path / "work")}
+    return {
+        "MIA_BACKUP_BUCKET": BUCKET,
+        "MIA_BACKUP_WORK_DIR": str(tmp_path / "work"),
+        # never the machine's real lock: a developer may have a `mia` running
+        "MIA_STATE_LOCK": str(tmp_path / "mia-state.lock"),
+    }
 
 
 def run_main(env, vm, now=NOW, argv=()):
@@ -166,6 +172,26 @@ def test_failed_dump_uploads_nothing_and_leaves_no_files(env):
 
 
 @pytest.mark.parametrize(
+    ("fault", "reason", "tool_text"),
+    [
+        ({"secret_rc": 1}, "key_unavailable", "PERMISSION_DENIED"),
+        ({"dump_rc": 1}, "dump_failed", "pg_dump: error"),
+        ({"cp_fail_containing": ("15min/",)}, "upload_failed", "ERROR: upload failed"),
+    ],
+)
+def test_a_failure_logs_its_reason_code_only_never_tool_or_provider_text(
+    env, capsys, fault, reason, tool_text
+):
+    """V2-10 review r1 / AGENTS.md: log reason codes and booleans, never provider payloads."""
+    code, _ = run_main(env, FakeVm(**fault))
+    err = capsys.readouterr().err
+    assert code == 1
+    assert f"failed code={reason}" in err
+    assert tool_text not in err and "detail" not in err
+    assert state(env)["last_failure_code"] == reason
+
+
+@pytest.mark.parametrize(
     ("toc", "rc", "reason"),
     [
         ("", 1, "dump_unreadable"),
@@ -287,6 +313,66 @@ def test_an_overlapping_run_is_skipped_not_stacked(env, capsys):
         code, runner = run_main(env, FakeVm())
     assert code == 0 and runner.calls == []
     assert "already running" in capsys.readouterr().err
+
+
+def test_a_slot_is_skipped_with_a_reason_code_while_mia_holds_the_state_lock(
+    env, capsys, monkeypatch
+):
+    """V2-10 review r1: `mia restore` and deploy hold the state lock; a dump then is partial.
+
+    The timer fires on its own schedule, so the run asks for the same lock before it touches the
+    database. Nothing is dumped or uploaded and nothing is recorded as a failure: the next slot,
+    15 minutes later, takes the backup, and `--status` goes stale after three missed slots.
+    """
+    asked: list[Path] = []
+
+    def busy(path):
+        asked.append(path)
+        return True
+
+    monkeypatch.setattr(backup_offsite, "state_lock_busy", busy)
+    code, runner = run_main(env, FakeVm())
+    assert code == 0 and runner.calls == []
+    err = capsys.readouterr().err
+    assert "skipped code=state_lock_busy" in err
+    assert asked == [Path(env["MIA_STATE_LOCK"])]
+    assert not (work_dir(env) / "state.json").exists() and leftovers(env) == []
+
+
+def test_the_state_lock_is_the_one_mia_takes_and_defaults_to_its_path():
+    script = (ROOT / "ops/gcp/vm/mia").read_text(encoding="utf-8")
+    assert "exec 9>/var/lock/mia-state.lock" in script
+    assert backup_offsite.STATE_LOCK == Path("/var/lock/mia-state.lock")
+    assert backup_offsite.Config(bucket="b").state_lock == backup_offsite.STATE_LOCK
+
+
+def test_a_state_lock_nobody_holds_or_that_does_not_exist_never_stops_the_backup(env, tmp_path):
+    lock = Path(env["MIA_STATE_LOCK"])
+    assert not lock.exists()
+    assert backup_offsite.state_lock_busy(lock) is False
+    assert not lock.exists()  # asking never creates it
+    code, _ = run_main(env, FakeVm())
+    assert code == 0 and state(env)["last_object"] == DUMP
+    lock.write_text("", encoding="utf-8")
+    assert backup_offsite.state_lock_busy(lock) is False
+    code, _ = run_main(env, FakeVm(), now=NOW + timedelta(minutes=15))
+    assert code == 0
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="flock is POSIX-only; the VM runs Linux")
+def test_a_real_held_state_lock_is_seen_and_released_for_the_next_slot(env, capsys):
+    import fcntl
+
+    lock = Path(env["MIA_STATE_LOCK"])
+    with open(lock, "w", encoding="utf-8") as held:  # what `exec 9>/var/lock/mia-state.lock` does
+        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        assert backup_offsite.state_lock_busy(lock) is True
+        code, runner = run_main(env, FakeVm())
+        assert code == 0 and runner.calls == []
+        assert "skipped code=state_lock_busy" in capsys.readouterr().err
+    assert backup_offsite.state_lock_busy(lock) is False  # the check itself leaves no lock behind
+    code, _ = run_main(env, FakeVm(), now=NOW + timedelta(minutes=15))
+    assert code == 0
 
 
 @pytest.mark.parametrize("bucket", ["", "UPPER", "a", "has space", "gs://bucket", "bucket/sub"])

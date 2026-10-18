@@ -5,8 +5,9 @@ Both are owner-gated and are never run by these tests; every gcloud and systemct
 
 from __future__ import annotations
 
+import json
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import backup_lib
@@ -24,16 +25,27 @@ BUCKET = "mia-assafweb-mia-backups"
 SA = "serviceAccount:mia-vm@mia-assafweb.iam.gserviceaccount.com"
 
 
+COMPLIANT_BUCKET = {
+    "name": BUCKET,
+    "location": "ME-WEST1",
+    "uniform_bucket_level_access": True,
+    "public_access_prevention": "enforced",
+}
+
+
 @dataclass
 class FakeGcloud:
     bucket: bool = False
     secret: bool = False
     version: bool = False
+    # what `gcloud storage buckets describe --format=json` prints for an existing bucket
+    described: dict = field(default_factory=lambda: dict(COMPLIANT_BUCKET))
 
     def handler(self, call):
         text = call.text
         if "storage buckets describe" in text:
-            return backup_lib.Result(0 if self.bucket else 1, b"", b"")
+            body = json.dumps(self.described).encode() if self.described is not None else b""
+            return backup_lib.Result(0 if self.bucket else 1, body if self.bucket else b"", b"")
         if "storage buckets create" in text:
             self.bucket = True
         elif "secrets describe" in text:
@@ -158,6 +170,76 @@ def test_an_existing_key_version_is_never_replaced(key_file):
     assert code == 0 and not runner.commands("secrets versions add")
 
 
+def test_an_existing_key_version_shows_the_id_of_the_offline_copy_to_compare(key_file, capsys):
+    """V2-10 review r1: apply cannot read the stored key, so the owner compares ids by eye.
+
+    The offline copy must be the key the stored version holds. Its id (a fingerprint, never the
+    key) is printed next to the "never replaced" line, to be compared with a manifest's key_id.
+    """
+    gcloud = FakeGcloud(bucket=True, secret=True, version=True)
+    run(["apply", "--project", PROJECT, "--key-file", str(key_file)], gcloud)
+    out = capsys.readouterr().out
+    assert "a key version already exists; it is never replaced" in out
+    assert backup_lib.key_id(KEY) in out and KEY not in out
+    # without a key file there is nothing to compare, and nothing extra is printed
+    run(["apply", "--project", PROJECT], FakeGcloud(bucket=True, secret=True, version=True))
+    assert "key id" not in capsys.readouterr().out
+
+
+def changing_commands(runner) -> list[str]:
+    verbs_that_change = ("update", "add-iam-policy-binding", "create", "versions add")
+    return [c for c in verbs(runner) if any(v in c for v in verbs_that_change)]
+
+
+@pytest.mark.parametrize(
+    ("override", "problem"),
+    [
+        ({"location": "US"}, "location"),
+        ({"location": "EU"}, "location"),
+        ({"uniform_bucket_level_access": False}, "uniform"),
+        ({"public_access_prevention": "inherited"}, "public access prevention"),
+    ],
+)
+def test_an_existing_bucket_that_breaks_an_owner_decision_is_refused_before_any_change(
+    key_file, capsys, override, problem
+):
+    """V2-10 review r1: `exists; left as it is` must not mean `exists, and public by accident`."""
+    gcloud = FakeGcloud(bucket=True, described={**COMPLIANT_BUCKET, **override})
+    code, runner, _ = run(["apply", "--project", PROJECT, "--key-file", str(key_file)], gcloud)
+    captured = capsys.readouterr()
+    assert code == 1 and problem in captured.err
+    # only the API enablement ran before the refusal: no lifecycle, no IAM, no secret, no key
+    assert changing_commands(runner) == []
+    assert KEY not in captured.out + captured.err
+
+
+def test_an_existing_bucket_that_matches_is_left_alone_and_said_to_match(key_file, capsys):
+    code, runner, _ = run(
+        ["apply", "--project", PROJECT, "--key-file", str(key_file)],
+        FakeGcloud(bucket=True),
+    )
+    out = capsys.readouterr().out
+    assert code == 0 and not runner.commands("storage buckets create")
+    for fact in ("location", "uniform bucket-level access", "public access prevention"):
+        assert f"its {fact} matches the owner decision" in out
+    assert "warning" not in out
+
+
+def test_a_bucket_description_gcloud_does_not_state_is_warned_about_not_trusted(key_file, capsys):
+    gcloud = FakeGcloud(bucket=True, described=None)  # empty output: nothing can be compared
+    code, _, _ = run(["apply", "--project", PROJECT, "--key-file", str(key_file)], gcloud)
+    captured = capsys.readouterr()
+    assert code == 0
+    for fact in ("location", "uniform", "public access prevention"):
+        assert f"could not read the bucket's {fact}" in captured.out
+
+
+def test_the_bucket_description_is_asked_for_as_json(key_file):
+    _, runner, _ = run(["apply", "--project", PROJECT], FakeGcloud(bucket=True))
+    [describe] = runner.commands("storage buckets describe")
+    assert "--format=json" in describe.argv
+
+
 def test_a_second_run_creates_nothing(key_file):
     gcloud = FakeGcloud()
     run(["apply", "--project", PROJECT, "--key-file", str(key_file)], gcloud)
@@ -253,8 +335,8 @@ def install(vm, *arguments, which=None, is_root=lambda: True):
 def test_install_copies_scripts_units_and_config_into_place(vm):
     code, runner = install(vm, "--project", PROJECT)
     assert code == 0
-    # ledger_posture.py rides along so the production restore path can re-own assaf_os.
-    for name in ("backup_lib.py", "backup_offsite.py", "ledger_posture.py"):
+    assert install_on_vm.SCRIPTS == ("backup_lib.py", "backup_offsite.py")
+    for name in install_on_vm.SCRIPTS:
         assert (vm / "opt/mia/backup" / name).read_bytes() == (BACKUP / name).read_bytes()
     for name in ("mia-backup-offsite.service", "mia-backup-offsite.timer"):
         assert (vm / "etc/systemd/system" / name).read_bytes() == (BACKUP / name).read_bytes()
@@ -270,6 +352,17 @@ def test_the_restore_drill_is_not_installed_on_the_vm(vm):
     install(vm)
     installed = {p.name for p in (vm / "opt/mia/backup").iterdir()}
     assert "restore_drill.py" not in installed and "provision_backup.py" not in installed
+
+
+def test_ledger_posture_never_goes_to_the_vm(vm):
+    """V2-10 review r1: it re-owns assaf_os and applies an operator grant file as the superuser.
+
+    That is a second, unreviewed production grant path beside `mia restore`'s one (V2-15's
+    provision_ledger.py, section 18.1). It belongs to the PC drill only.
+    """
+    install(vm)
+    assert "ledger_posture.py" not in {p.name for p in (vm / "opt/mia/backup").iterdir()}
+    assert "ledger_posture.py" not in install_on_vm.SCRIPTS
 
 
 def test_install_reloads_systemd_but_does_not_enable_or_start_anything_by_default(vm):

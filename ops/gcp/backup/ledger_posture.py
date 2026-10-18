@@ -1,34 +1,35 @@
-"""Give schema assaf_os its owner and its grants back after a restore (V2-10).
+"""Give schema assaf_os its owner and its grants back after a restore, in the DRILL (V2-10).
 
-`mia restore` and the restore drill run pg_restore with --no-owner --no-privileges. A restored
-assaf_os therefore belongs to the restoring role and its functions fall back to the default ACL
-(EXECUTE for PUBLIC). The ledger job then refuses to run. This module repairs that and proves it:
+DRILL ONLY. The restore drill (restore_drill.py, on Assaf's PC) restores a backup into a scratch
+server with `pg_restore --no-owner --no-privileges`, which leaves a restored assaf_os owned by the
+restoring role with its functions back at the default ACL (EXECUTE for PUBLIC). This module repairs
+that on the scratch server and proves it. It is never installed on the VM and has no command line:
+`mia restore` repairs the real database through V2-15's provision_ledger.py alone
+(V2_PG_CONTRACTS.md 18.1), so there is exactly one reviewed grant path in production.
 
   1. re-own the schema and every table, view, sequence, function and type in it to assaf_os_owner;
   2. revoke everything from PUBLIC;
-  3. re-apply the reviewed grant set (the file V2-15's provision_ledger.py prints), which may only
-     contain GRANT, REVOKE and ALTER DEFAULT PRIVILEGES statements that name assaf_os;
+  3. re-apply the reviewed grant set, which may only contain GRANT, REVOKE and ALTER DEFAULT
+     PRIVILEGES statements that name assaf_os. The input is exactly the lines of V2-15's
+     `ledger_grant_statements()` (see the runbook), not the provisioning plan;
   4. run a read-only posture check and fail unless it is clean.
 
 The posture check here is a floor, not V2-15's exact grant-map validator: it catches a wrong owner,
-any PUBLIC grant, any grantee other than the two ledger roles, and DELETE or TRUNCATE for the ledger
-role. When V2-15 lands, its validator should be run in addition (see the runbook).
+any PUBLIC grant, any grantee other than the owner, the ledger role and the retention role (V2-14b
+gives retention its own two-table grants; its exact map is the real validator's job), and DELETE or
+TRUNCATE for the ledger role. The VM step runs V2-15's exact validator for real.
 
 A database without the schema passes and nothing is changed. A database with the schema and no grant
 file fails: the posture can not be proven. Standard library only. The statements are the only
-interface to PostgreSQL, so the same code runs against the VM (compose exec) and the drill's scratch
-server. Roles are never created here unless the caller asks; the drill asks, production never does.
+interface to PostgreSQL, so the caller decides which server they reach. Roles are created only when
+the caller asks, and only the drill asks.
 """
 
 from __future__ import annotations
 
-import argparse
-import json
 import re
-import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from pathlib import Path
 
 import backup_lib
 from backup_lib import BackupError
@@ -36,6 +37,7 @@ from backup_lib import BackupError
 SCHEMA = "assaf_os"
 OWNER_ROLE = "assaf_os_owner"
 LEDGER_ROLE = "assaf_os_ledger"
+RETENTION_ROLE = "assaf_os_retention"
 POSTURE_CHECKS = (
     "schema_owner",
     "object_owner",
@@ -43,9 +45,6 @@ POSTURE_CHECKS = (
     "other_grantees",
     "ledger_destructive",
 )
-
-COMPOSE_FILE = "/opt/mia/compose.yaml"
-TAG_ENV = "/opt/mia/tag.env"
 
 _IDENTIFIER = re.compile(r"[a-z_][a-z0-9_]{0,62}")
 _ALLOWED_STATEMENT = re.compile(
@@ -155,12 +154,16 @@ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{ledger}') THEN
     CREATE ROLE {ledger} NOLOGIN NOINHERIT NOSUPERUSER;
   END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{retention}') THEN
+    CREATE ROLE {retention} NOLOGIN NOINHERIT NOSUPERUSER;
+  END IF;
 END
 $roles$"""
 
 _POSTURE = """\
 WITH owner_role AS (SELECT oid FROM pg_roles WHERE rolname = '{owner}'),
 ledger_role AS (SELECT oid FROM pg_roles WHERE rolname = '{ledger}'),
+retention_role AS (SELECT oid FROM pg_roles WHERE rolname = '{retention}'),
 acl AS (
   SELECT 'schema'::text AS kind, a.grantee, a.privilege_type::text AS privilege_type
   FROM pg_namespace n,
@@ -206,7 +209,8 @@ SELECT
   (SELECT count(*) FROM acl WHERE grantee = 0) AS public_grants,
   (SELECT count(*) FROM acl
     WHERE grantee <> 0
-      AND grantee NOT IN (SELECT oid FROM owner_role UNION SELECT oid FROM ledger_role))
+      AND grantee NOT IN (SELECT oid FROM owner_role UNION SELECT oid FROM ledger_role
+                          UNION SELECT oid FROM retention_role))
     AS other_grantees,
   (SELECT count(*) FROM acl
     WHERE kind = 'relation' AND privilege_type IN ('DELETE', 'TRUNCATE')
@@ -217,8 +221,14 @@ def schema_present_sql() -> str:
     return f"SELECT count(*) FROM pg_namespace WHERE nspname = '{SCHEMA}'"
 
 
-def ensure_roles_sql(owner: str = OWNER_ROLE, ledger: str = LEDGER_ROLE) -> str:
-    return _ENSURE_ROLES.replace("{owner}", role_name(owner)).replace("{ledger}", role_name(ledger))
+def ensure_roles_sql(
+    owner: str = OWNER_ROLE, ledger: str = LEDGER_ROLE, retention: str = RETENTION_ROLE
+) -> str:
+    return (
+        _ENSURE_ROLES.replace("{owner}", role_name(owner))
+        .replace("{ledger}", role_name(ledger))
+        .replace("{retention}", role_name(retention))
+    )
 
 
 def apply_sql(grants: list[str], owner: str = OWNER_ROLE) -> str:
@@ -233,8 +243,14 @@ def apply_sql(grants: list[str], owner: str = OWNER_ROLE) -> str:
     return ";\n".join(statements) + ";\n"
 
 
-def posture_sql(owner: str = OWNER_ROLE, ledger: str = LEDGER_ROLE) -> str:
-    return _POSTURE.replace("{owner}", role_name(owner)).replace("{ledger}", role_name(ledger))
+def posture_sql(
+    owner: str = OWNER_ROLE, ledger: str = LEDGER_ROLE, retention: str = RETENTION_ROLE
+) -> str:
+    return (
+        _POSTURE.replace("{owner}", role_name(owner))
+        .replace("{ledger}", role_name(ledger))
+        .replace("{retention}", role_name(retention))
+    )
 
 
 def parse_posture(output: str) -> dict[str, int]:
@@ -273,6 +289,7 @@ def evaluate(
     create_roles: bool = False,
     owner: str = OWNER_ROLE,
     ledger: str = LEDGER_ROLE,
+    retention: str = RETENTION_ROLE,
 ) -> LedgerOutcome:
     """Re-own and re-grant assaf_os when it is there, then prove the result. Fails closed."""
     outcome = LedgerOutcome()
@@ -297,7 +314,7 @@ def evaluate(
             return outcome
         outcome.add("ledger_grants", True, f"{len(grants)} statements")
         if create_roles:
-            created = run_sql(ensure_roles_sql(owner, ledger))
+            created = run_sql(ensure_roles_sql(owner, ledger, retention))
             if not outcome.add(
                 "ledger_roles",
                 created.returncode == 0,
@@ -312,7 +329,7 @@ def evaluate(
         ):
             return outcome
 
-    answer = run_sql(posture_sql(owner, ledger))
+    answer = run_sql(posture_sql(owner, ledger, retention))
     try:
         if answer.returncode != 0:
             raise BackupError("ledger_posture_unreadable", "the posture query failed")
@@ -327,104 +344,3 @@ def evaluate(
         "clean" if not failing else ", ".join(f"{n}={outcome.violations[n]}" for n in failing),
     )
     return outcome
-
-
-# --- the production restore path ---------------------------------------------------------------
-
-
-def vm_run_sql(
-    runner, docker: str, compose_file: str, tag_env: str, user: str, database: str
-) -> RunSql:
-    """psql inside the compose postgres container, the same door `mia backup` uses."""
-    base = [
-        docker,
-        "compose",
-        "-p",
-        "mia",
-        "-f",
-        compose_file,
-        "--env-file",
-        tag_env,
-        "exec",
-        "-T",
-        "postgres",
-        "psql",
-        "-U",
-        user,
-        "-d",
-        database,
-        "-v",
-        "ON_ERROR_STOP=1",
-        "-X",
-        "-At",
-    ]
-    return lambda sql: runner.run([*base, "-c", sql], timeout=300)
-
-
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Re-own and re-grant schema assaf_os on the VM's database after a restore."
-    )
-    parser.add_argument(
-        "command",
-        choices=("plan", "apply", "verify"),
-        help="plan prints the SQL; apply changes the database; verify only reads",
-    )
-    parser.add_argument(
-        "--grants-file",
-        type=Path,
-        help="the reviewed V2-15 GRANT set (required for plan with grants and apply)",
-    )
-    parser.add_argument("--compose-file", default=COMPOSE_FILE)
-    parser.add_argument("--tag-env", default=TAG_ENV)
-    parser.add_argument("--docker", default="docker")
-    parser.add_argument("--db-user", default="mia")
-    parser.add_argument("--database", default="mia")
-    return parser
-
-
-def read_grants(path: Path) -> str:
-    try:
-        return path.read_text(encoding="utf-8")
-    except OSError as error:
-        raise BackupError("ledger_grants_invalid", f"cannot read {path.name}") from error
-
-
-def main(argv=None, *, runner=None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
-    if args.command == "apply" and args.grants_file is None:
-        parser.error("apply needs --grants-file")
-    runner = runner if runner is not None else backup_lib.Runner()
-
-    grants_text = None
-    try:
-        if args.grants_file is not None:
-            grants_text = read_grants(args.grants_file)
-            grants = parse_grants(grants_text)
-        else:
-            grants = []
-    except BackupError as error:
-        print(
-            f"mia-ledger-posture: refused code={error.code} detail={error.detail}", file=sys.stderr
-        )
-        return 2
-
-    if args.command == "plan":
-        print(
-            f"-- apply\n{apply_sql(grants)}\n-- then verify (must return only zeros)\n"
-            f"{posture_sql()};"
-        )
-        return 0
-
-    run_sql = vm_run_sql(
-        runner, args.docker, args.compose_file, args.tag_env, args.db_user, args.database
-    )
-    outcome = evaluate(run_sql, grants_text=grants_text, apply=args.command == "apply")
-    report = {"passed": outcome.passed, "checks": outcome.checks, **outcome.as_report()}
-    print(json.dumps(report, indent=2, sort_keys=True))
-    return 0 if outcome.passed else 1
-
-
-if __name__ == "__main__":
-    sys.exit(main())
