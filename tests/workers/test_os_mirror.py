@@ -611,10 +611,12 @@ def test_start_if_enabled_spawns_exactly_one_publisher(monkeypatch) -> None:
         os_mirror_service_account_json='{"type":"service_account"}',
         assaf_os_workspace_id="ws-1",
     )
-    # owner_os_ledger_database_url is V2-15's field; it is not on master yet.
+    # owner_os_ledger_database_url is V2-15's Settings field (on master since 497210e): override it.
     ready = SimpleNamespace(
-        **loaded.model_dump(),
-        owner_os_ledger_database_url="postgresql+psycopg://ledger@127.0.0.1:1/x",
+        **{
+            **loaded.model_dump(),
+            "owner_os_ledger_database_url": "postgresql+psycopg://ledger@127.0.0.1:1/x",
+        },
     )
     os_mirror.start_if_enabled(loaded)
     assert spawned == []
