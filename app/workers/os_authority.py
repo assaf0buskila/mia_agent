@@ -119,8 +119,11 @@ FENCED_REPLY = {
 }
 FENCE_PROBE_BUDGET_SECONDS = 20.0
 
-Phase = Literal["drain", "switch", "revert"]
-PHASES = ("drain", "switch", "revert")
+# The ``mia-env`` key flips of the cutover, in order. The freeze stays ON from ``drain`` through
+# ``switch`` and ``mirror`` and is lifted only by ``open``: the first non-import write is its
+# own go.
+Phase = Literal["drain", "switch", "mirror", "open", "revert"]
+PHASES = ("drain", "switch", "mirror", "open", "revert")
 
 
 class Refusal(Exception):
@@ -928,6 +931,12 @@ def cmd_status(ctx: Context) -> Result:
             "at": document.get("recorded_at") or document.get("last_probe_at")
             or document.get("activated_at"),
         }
+    def observed(call: Callable[[], Any]) -> Any:
+        try:
+            return call()
+        except Exception:  # an unreadable observation is null, never a driver message
+            return None
+
     document = {
         "command": "status",
         "ok": True,
@@ -942,7 +951,13 @@ def cmd_status(ctx: Context) -> Result:
             "authority_epoch": configured,
             "epoch_matches": configured == snapshot.epoch,
             "freeze": settings.assaf_os_freeze,
+            "mirror_enabled": getattr(settings, "assaf_os_mirror_enabled", False),
         },
+        # The two facts the cutover decisions turn on: whether any business write has been made at
+        # this epoch (the point of no simple rollback), and whether the mirror is verified.
+        "non_import_receipts": observed(
+            lambda: deps.probes.non_import_receipts(deps.workspace, snapshot.epoch)),
+        "mirror": observed(lambda: deps.probes.mirror(deps.workspace)) or "unknown",
         "evidence": evidence,
     }
     return Result(True, document)
@@ -1081,7 +1096,7 @@ def cmd_fence(ctx: Context) -> Result:
 def rollback_steps(epoch: int) -> list[str]:
     return [
         "Core is fenced: the ledger refuses every write. The Sheet is exactly as captured.",
-        "mia-env: " + ", ".join(plan_lines("revert", epoch)[0:3])
+        "mia-env: " + ", ".join(plan_lines("revert", epoch))
         + " (keep MIA_ASSAF_OS_FREEZE=true), then: sudo mia settings; confirm /health "
         "deployment.commit_sha is the approved SHA.",
         "Apps Script: set Script Property ASSAF_OS_MODE back to LIVE (no republish). Confirm the "
@@ -1116,39 +1131,80 @@ def cmd_rollback(ctx: Context) -> Result:
 
 
 def plan_lines(phase: str, epoch: int) -> list[str]:
-    if phase == "drain":
+    """The ``mia-env`` keys one phase flips. Each phase is its own owner go (section 16)."""
+    if phase == "drain":  # T1: the freeze starts
         return ["MIA_ASSAF_OS_FREEZE=true"]
-    if phase == "switch":
+    if phase == "switch":  # T6: the backend moves; the freeze STAYS on
         return [
             "MIA_ASSAF_OS_BACKEND=postgres",
             "MIA_ASSAF_OS_LEDGER_ENABLED=true",
             f"MIA_ASSAF_OS_AUTHORITY_EPOCH={epoch}",
-            "MIA_ASSAF_OS_FREEZE=false",
         ]
-    return [
+    if phase == "mirror":  # T7: the Sheets mirror starts (its workbook id and key are set already)
+        return ["MIA_ASSAF_OS_MIRROR_ENABLED=true"]
+    if phase == "open":  # the first non-import write is admitted
+        return ["MIA_ASSAF_OS_FREEZE=false"]
+    return [  # revert: the way back to Sheets (rollback), the freeze untouched
         "MIA_ASSAF_OS_BACKEND=sheets",
         "MIA_ASSAF_OS_LEDGER_ENABLED=false",
         "MIA_ASSAF_OS_AUTHORITY_EPOCH=0",
+        "MIA_ASSAF_OS_MIRROR_ENABLED=false",
     ]
+
+
+PLAN_NOTES = {
+    "drain": [
+        "the freeze refuses every new proposal; approve and reject still pass, so the drain can "
+        "settle every pending item",
+    ],
+    "switch": [
+        "MIA_ASSAF_OS_FREEZE stays true: no write is admitted until the 'open' phase",
+        "then check /health deployment.commit_sha and: sudo mia os-authority status "
+        "(settings.epoch_matches must be true)",
+    ],
+    "mirror": [
+        "MIA_OS_MIRROR_SPREADSHEET_ID and MIA_OS_MIRROR_SERVICE_ACCOUNT_JSON must already be set "
+        "to the NEW mirror workbook and its service account (never the archive workbook)",
+        "then check: sudo mia os-authority status (mirror must become verified)",
+    ],
+    "open": [
+        "this admits the first non-import write; after the first receipt there is no simple "
+        "rollback to Sheets",
+        "then check: sudo mia os-authority status (settings.freeze must be false)",
+    ],
+    "revert": [
+        "the freeze is untouched: set MIA_ASSAF_OS_FREEZE=false only after the Script is LIVE "
+        "again",
+    ],
+}
 
 
 def cmd_freeze_plan(ctx: Context, *, phase: str) -> Result:
     """The exact ``mia-env`` keys to flip for a phase, then ``mia settings``. Prints; changes
-    nothing, and never touches Secret Manager."""
+    nothing, and never touches Secret Manager. A phase that follows another refuses to print
+    until the settings the job reads show that the earlier one was applied."""
     if phase not in PHASES:
         raise Refusal("phase_invalid")
+    settings = ctx.deps.settings
     epoch = 0
-    if phase in ("switch", "revert"):
+    if phase != "drain":
         snapshot = _state(ctx)
         epoch = snapshot.epoch
-        if phase == "switch" and snapshot.states["core"] != "active":
+        if phase in ("switch", "mirror", "open") and snapshot.states["core"] != "active":
             raise Refusal("authority_state_invalid")
+        if phase in ("switch", "mirror") and settings.assaf_os_freeze is not True:
+            raise Refusal("freeze_off")
+        if phase in ("mirror", "open") and not (
+            settings.assaf_os_backend == "postgres"
+            and settings.assaf_os_ledger_enabled is True
+            and settings.assaf_os_authority_epoch == epoch
+        ):
+            raise Refusal("switch_not_applied")
     lines = [
         f"# os-authority freeze-plan --phase {phase}: set exactly these keys in Secret Manager "
         "secret mia-env, then run: sudo mia settings",
         *plan_lines(phase, epoch),
-        "# then check /health deployment.commit_sha and: sudo mia os-authority status "
-        "(settings.epoch_matches must be true after a switch)",
+        *(f"# {note}" for note in PLAN_NOTES[phase]),
     ]
     return Result(True, {"command": "freeze-plan", "ok": True, "phase": phase,
                          "keys": plan_lines(phase, epoch)}, text="\n".join(lines) + "\n")

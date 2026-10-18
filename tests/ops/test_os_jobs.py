@@ -1,6 +1,6 @@
 """V2-31: the privileged Assaf OS jobs on the VM (V2_PG_CONTRACTS.md section 3.1 and 16, E8).
 
-``mia os-authority``, ``mia os-provision retention`` and ``mia os-job`` are case arms of the VM
+``mia os-authority``, ``mia os-provision`` and ``mia os-job`` are case arms of the VM
 control script; their services are profile-off entries of the compose file. The arms run here in
 bash with Compose, ``install``, ``chown`` and ``flock`` stubbed and the host paths redirected, so
 nothing touches docker, ``/etc/mia`` or a lock.
@@ -251,6 +251,14 @@ def run_arm(tmp_path, name, argv, **host_options):
      "os-authority preflight --drain --final-accept --approved-sha " + SHA),
     (["freeze-plan", "--phase", "switch", "--approved-sha", SHA],
      "os-authority freeze-plan --phase switch --approved-sha " + SHA),
+    (["freeze-plan", "--phase", "drain", "--approved-sha", SHA],
+     "os-authority freeze-plan --phase drain --approved-sha " + SHA),
+    (["freeze-plan", "--phase", "mirror", "--approved-sha", SHA],
+     "os-authority freeze-plan --phase mirror --approved-sha " + SHA),
+    (["freeze-plan", "--phase", "open", "--approved-sha", SHA],
+     "os-authority freeze-plan --phase open --approved-sha " + SHA),
+    (["freeze-plan", "--phase", "revert", "--approved-sha", SHA],
+     "os-authority freeze-plan --phase revert --approved-sha " + SHA),
 ])
 def test_os_authority_passes_exactly_the_command_flags_and_sha_to_the_job(tmp_path, argv, tail):
     code, output = run_arm(tmp_path, "os-authority", argv)
@@ -312,15 +320,20 @@ def test_os_authority_takes_the_state_lock_like_the_other_owner_gated_commands()
 # --------------------------------------------------------------------------- mia os-provision
 
 
-def test_os_provision_runs_the_deployed_script_with_the_operators_sha(tmp_path):
-    code, output = run_arm(tmp_path, "os-provision", ["retention", "--approved-sha", SHA])
+@pytest.mark.parametrize("which,script,flags", [
+    ("retention", "provision_retention.py", "--target mia-vm --apply"),
+    ("runtime", "provision_ledger.py", "--target mia-vm --mode provision --apply"),
+])
+def test_os_provision_runs_the_deployed_script_with_the_operators_sha(
+    tmp_path, which, script, flags
+):
+    code, output = run_arm(tmp_path, "os-provision", [which, "--approved-sha", SHA])
     assert code == 0, output
     assert "compose --profile os-ledger run --rm --no-deps -T --user root" in output
     assert "/src/v1/ops/assaf-os:/app/ops/assaf-os:ro" in output
     assert "/etc-mia:/etc/mia" in output.replace("-v " + tmp_path.as_posix(), "")
     assert "--entrypoint sh os-ledger-migrate" in output
-    assert "provision_retention.py --target mia-vm --apply --approved-sha" in output
-    assert output.rstrip().endswith(f"sh {SHA}")
+    assert f"/app/ops/assaf-os/{script} {flags} --approved-sha {SHA}" in output
     assert "secret" not in output
 
 
@@ -328,8 +341,11 @@ def test_os_provision_runs_the_deployed_script_with_the_operators_sha(tmp_path):
     [],
     ["retention"],
     ["retention", "--approved-sha"],
-    ["runtime", "--approved-sha", SHA],
+    ["bogus", "--approved-sha", SHA],
+    ["both", "--approved-sha", SHA],
+    ["--approved-sha", SHA, "retention"],
     ["retention", "--approved-sha", "short"],
+    ["runtime", "--approved-sha", "A" * 40],
     ["retention", "--approved-sha", SHA, "--apply"],
     ["retention", "--sha", SHA],
 ])
@@ -338,14 +354,14 @@ def test_os_provision_refuses_before_compose_runs(tmp_path, argv):
     assert code == 1 and "compose" not in output, output
 
 
-def test_os_provision_refuses_a_bad_tag_and_a_missing_or_linked_script(tmp_path):
+@pytest.mark.parametrize("which", ["retention", "runtime"])
+def test_os_provision_refuses_a_bad_tag_and_a_missing_or_linked_script(tmp_path, which):
     for tag in ("../x", "-x", "a b"):
-        code, output = run_arm(tmp_path, "os-provision", ["retention", "--approved-sha", SHA],
-                               tag=tag)
+        code, output = run_arm(tmp_path, "os-provision", [which, "--approved-sha", SHA], tag=tag)
         assert code == 1 and "compose" not in output, tag
     host(tmp_path, tag="v2")
     (tmp_path / "src/v2/ops/assaf-os/provision_retention.py").unlink()
-    program = (stubs(tmp_path) + f"set -- retention --approved-sha {SHA}\n"
+    program = (stubs(tmp_path) + f"set -- {which} --approved-sha {SHA}\n"
                + redirected(arm("os-provision"), tmp_path))
     proc = _run_step(program, tmp_path)
     assert proc.returncode == 1 and "provision_retention.py missing" in proc.stderr
@@ -411,3 +427,10 @@ def test_os_import_takes_the_state_lock_and_the_others_a_job_lock():
     scheduled = text.split("      os-verifier|os-retention)\n", 1)[1]
     scheduled = scheduled.split("      os-import)", 1)[0]
     assert 'mia-job-$os_job.lock' in scheduled and "flock -n 8" in scheduled
+
+
+def test_the_phases_the_wrapper_accepts_are_the_phases_the_cli_has():
+    from app.workers import os_authority as cli
+
+    match = re.search(r'\[\[ "\$2" =~ \^\(([a-z|]+)\)\$ \]\]', arm("os-authority"))
+    assert match and tuple(match.group(1).split("|")) == cli.PHASES

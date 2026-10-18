@@ -721,6 +721,17 @@ def test_the_drain_records_what_is_still_open_and_fails_on_any(ready):
 # --------------------------------------------------------------------------- freeze-plan
 
 
+def keys_of(run) -> list[str]:
+    return [line for line in run.out.splitlines() if not line.startswith("#")]
+
+
+def apply_switch(world, epoch=1):
+    """What `mia settings` does after the operator sets the switch keys in mia-env."""
+    world.settings.assaf_os_backend = "postgres"
+    world.settings.assaf_os_ledger_enabled = True
+    world.settings.assaf_os_authority_epoch = epoch
+
+
 def test_freeze_plan_prints_the_exact_keys_and_changes_nothing(ready):
     drain = ready.run("freeze-plan")
     assert drain.code == 0 and "MIA_ASSAF_OS_FREEZE=true\n" in drain.out
@@ -730,19 +741,67 @@ def test_freeze_plan_prints_the_exact_keys_and_changes_nothing(ready):
     assert early.code == 1 and codes(early) == ["authority_state_invalid"]
     assert ready.run("activate").code == 0
     switch = ready.run("freeze-plan", "--phase", "switch")
-    lines = [line for line in switch.out.splitlines() if not line.startswith("#")]
-    assert lines == [
+    # The freeze STAYS on through the switch and the mirror: no write is admitted until `open`.
+    assert keys_of(switch) == [
         "MIA_ASSAF_OS_BACKEND=postgres", "MIA_ASSAF_OS_LEDGER_ENABLED=true",
-        "MIA_ASSAF_OS_AUTHORITY_EPOCH=1", "MIA_ASSAF_OS_FREEZE=false",
+        "MIA_ASSAF_OS_AUTHORITY_EPOCH=1",
     ]
+    assert "MIA_ASSAF_OS_FREEZE stays true" in switch.out
+    apply_switch(ready)
+    mirror = ready.run("freeze-plan", "--phase", "mirror")
+    assert keys_of(mirror) == ["MIA_ASSAF_OS_MIRROR_ENABLED=true"]
+    assert "MIA_OS_MIRROR_SPREADSHEET_ID" in mirror.out and "NEW mirror workbook" in mirror.out
+    opened = ready.run("freeze-plan", "--phase", "open")
+    assert keys_of(opened) == ["MIA_ASSAF_OS_FREEZE=false"]
+    assert "first non-import write" in opened.out
     revert = ready.run("freeze-plan", "--phase", "revert")
-    assert [line for line in revert.out.splitlines() if not line.startswith("#")] == [
+    assert keys_of(revert) == [
         "MIA_ASSAF_OS_BACKEND=sheets", "MIA_ASSAF_OS_LEDGER_ENABLED=false",
-        "MIA_ASSAF_OS_AUTHORITY_EPOCH=0",
+        "MIA_ASSAF_OS_AUTHORITY_EPOCH=0", "MIA_ASSAF_OS_MIRROR_ENABLED=false",
     ]
     assert before.states["core"] == "shadow" and ready.state().epoch == 1
-    for text in (drain.out, switch.out, revert.out):
+    assert ready.state().states["core"] == "active", "printing a plan changes no state"
+    for text in (drain.out, switch.out, mirror.out, opened.out, revert.out):
         assert SECRET not in text and PEPPER not in text
+
+
+def test_each_later_phase_refuses_until_the_earlier_one_is_applied(ready):
+    assert ready.run("activate").code == 0
+    for phase in ("mirror", "open"):
+        run = ready.run("freeze-plan", "--phase", phase)
+        assert run.code == 1 and codes(run) == ["switch_not_applied"], phase
+    # A switch applied for the wrong epoch, or only half of it, is not applied.
+    for settings in (
+        {"assaf_os_backend": "postgres", "assaf_os_ledger_enabled": True,
+         "assaf_os_authority_epoch": 2},
+        {"assaf_os_backend": "postgres", "assaf_os_ledger_enabled": False,
+         "assaf_os_authority_epoch": 1},
+        {"assaf_os_backend": "sheets", "assaf_os_ledger_enabled": True,
+         "assaf_os_authority_epoch": 1},
+    ):
+        for name, value in settings.items():
+            setattr(ready.settings, name, value)
+        run = ready.run("freeze-plan", "--phase", "open")
+        assert codes(run) == ["switch_not_applied"], settings
+    apply_switch(ready)
+    assert ready.run("freeze-plan", "--phase", "open").code == 0
+
+
+def test_switch_and_mirror_refuse_when_the_freeze_is_already_off(ready):
+    assert ready.run("activate").code == 0
+    apply_switch(ready)
+    ready.settings.assaf_os_freeze = False
+    for phase in ("switch", "mirror"):
+        run = ready.run("freeze-plan", "--phase", phase)
+        assert run.code == 1 and codes(run) == ["freeze_off"], phase
+    # Opening is what turns the freeze off, and a repeat of it is harmless.
+    assert ready.run("freeze-plan", "--phase", "open").code == 0
+
+
+def test_mirror_open_and_switch_need_an_active_core(ready):
+    for phase in ("switch", "mirror", "open"):
+        run = ready.run("freeze-plan", "--phase", phase)
+        assert run.code == 1 and codes(run) == ["authority_state_invalid"], phase
 
 
 def test_freeze_plan_after_a_re_arm_names_the_new_epoch(ready):
@@ -758,6 +817,25 @@ def test_freeze_plan_after_a_re_arm_names_the_new_epoch(ready):
 # --------------------------------------------------------------------------- status and hygiene
 
 
+def test_status_shows_the_boundary_and_the_mirror_the_cutover_decisions_turn_on(ready):
+    ready.run("activate")
+    assert ready.run("status").out["non_import_receipts"] == 0
+    commit_direct(ready.env, ctx(), [task("TAS_w1")])
+    assert ready.run("status").out["non_import_receipts"] == 1
+    for state in ("verified", "unverified", "empty"):
+        ready.probes.mirror_state = state
+        assert ready.run("status").out["mirror"] == state
+
+
+def test_status_reports_an_unreadable_observation_as_null_without_its_message(ready, caplog):
+    ready.probes.broken = {"receipts", "mirror"}
+    with caplog.at_level(logging.DEBUG):
+        run = ready.run("status")
+    assert run.code == 0
+    assert run.out["non_import_receipts"] is None and run.out["mirror"] == "unknown"
+    assert DRIVER_TEXT not in json.dumps(run.out) + run.err + caplog.text
+
+
 def test_status_reports_authority_settings_and_evidence_without_secrets(ready, caplog):
     ready.settings.assaf_os_authority_epoch = 1
     with caplog.at_level(logging.DEBUG):
@@ -765,8 +843,9 @@ def test_status_reports_authority_settings_and_evidence_without_secrets(ready, c
     assert run.code == 0
     assert run.out["settings"] == {
         "backend": "sheets", "ledger_enabled": False, "authority_epoch": 1,
-        "epoch_matches": True, "freeze": True,
+        "epoch_matches": True, "freeze": True, "mirror_enabled": False,
     }
+    assert run.out["non_import_receipts"] == 0 and run.out["mirror"] == "empty"
     assert run.out["evidence"][cli.DRAIN]["epoch"] == 1
     assert run.out["evidence"][cli.ACTIVATION] is None
     assert SECRET not in json.dumps(run.out) + caplog.text

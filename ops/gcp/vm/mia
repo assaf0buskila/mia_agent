@@ -18,11 +18,12 @@ usage: sudo mia <command>
   os-authority <init|preflight|freeze-plan|activate|fence|rollback|status> --approved-sha <sha>
                         the Assaf OS authority fence and cutover steps (V2-31, owner-gated;
                         ops/assaf-os/CUTOVER_RUNBOOK.md): init [--rearm], preflight [--drain
-                        --final-accept], freeze-plan [--phase drain|switch|revert], activate,
-                        fence, rollback, status
-  os-provision retention --approved-sha <sha>
-                        give the os-retention job its database credential (E8): a password for
-                        assaf_os_retention and the job-only /etc/mia/os-retention.env
+                        --final-accept], freeze-plan [--phase drain|switch|mirror|open|revert],
+                        activate, fence, rollback, status
+  os-provision <runtime|retention> --approved-sha <sha>
+                        give the ledger its database credentials: the runtime role and its DSN in
+                        runtime.env (FORK-PROD-ORDER step 4), or the os-retention password and the
+                        job-only /etc/mia/os-retention.env (E8)
   os-job <os-import|os-verifier|os-retention> [args]
                         run one privileged OS job now (never a timer of this script)
   telegram-webhook     register https://<public url>/v1/telegram/webhook with Telegram
@@ -489,7 +490,7 @@ case "$cmd" in
         --drain|--final-accept|--rearm)
           os_authority_args+=("$1"); shift ;;
         --phase)
-          [ "$#" -ge 2 ] && [[ "$2" =~ ^(drain|switch|revert)$ ]] || die "--phase is drain, switch or revert"
+          [ "$#" -ge 2 ] && [[ "$2" =~ ^(drain|switch|mirror|open|revert)$ ]] || die "--phase is drain, switch, mirror, open or revert"
           os_authority_args+=("$1" "$2"); shift 2 ;;
         *) die "os-authority: option refused: $1" ;;
       esac
@@ -506,11 +507,18 @@ case "$cmd" in
       "$os_authority_command" "${os_authority_args[@]}"
     ;;
   os-provision)
-    # E8: the retention credential. The scripts are the ones deployed with the running tag, mounted
-    # into that image (as `restore` does for provision_ledger.py); /etc/mia is writable only here,
-    # because the script creates the one job-only env file in it.
-    [ "$#" -eq 3 ] && [ "$1" = retention ] && [ "$2" = --approved-sha ] \
-      || die "usage: mia os-provision retention --approved-sha <sha>"
+    # The two ledger credentials. `runtime` is FORK-PROD-ORDER step 4 (V2-15: the ledger runtime role and
+    # MIA_OWNER_OS_LEDGER_DATABASE_URL in runtime.env). `retention` is E8 (the os-retention password and
+    # its job-only env file). The scripts are the ones deployed with the running tag, mounted into that
+    # image as `restore` does for provision_ledger.py. /etc/mia is writable only here, because each
+    # script stages its DSN in a VM-owned file there before it commits.
+    [ "$#" -eq 3 ] && [ "$2" = --approved-sha ] \
+      || die "usage: mia os-provision <runtime|retention> --approved-sha <sha>"
+    case "$1" in
+      runtime)   provision_args=(provision_ledger.py --target mia-vm --mode provision --apply) ;;
+      retention) provision_args=(provision_retention.py --target mia-vm --apply) ;;
+      *) die "usage: mia os-provision <runtime|retention> --approved-sha <sha>" ;;
+    esac
     [[ "$3" =~ ^[0-9a-f]{40}$ ]] || die "exact approved SHA required"
     [ -f /opt/mia/tag.env ] || die "not deployed yet"
     single_key_env /etc/mia/os-ledger-migrate.env MIA_OS_LEDGER_MIGRATION_DATABASE_URL \
@@ -524,8 +532,8 @@ case "$cmd" in
     compose --profile os-ledger run --rm --no-deps -T --user root \
       -v "$scripts:/app/ops/assaf-os:ro" -v /etc/mia:/etc/mia \
       --entrypoint sh os-ledger-migrate \
-      -c 'exec python /app/ops/assaf-os/provision_retention.py --target mia-vm --apply --approved-sha "$1"' \
-      sh "$3"
+      -c 'exec python "$@"' \
+      sh "/app/ops/assaf-os/${provision_args[0]}" "${provision_args[@]:1}" --approved-sha "$3"
     ;;
   os-job)
     os_job="${1:?usage: mia os-job <os-import|os-verifier|os-retention> [args]}"; shift
