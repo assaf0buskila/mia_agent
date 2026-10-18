@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from xml.etree import ElementTree as ET
-from zipfile import ZIP_STORED, ZipFile
+from zipfile import ZIP_STORED, ZipFile, ZipInfo
 
 from app.prototypes import assaf_os_export_provenance as oracle
 from app.prototypes.assaf_os_domain import ENTITIES, ID_KEYS, SCHEMA
@@ -20,6 +20,15 @@ NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 PKG = "http://schemas.openxmlformats.org/package/2006/relationships"
 JOURNAL = "_assaf_os_accepted"
+_EPOCH = (2026, 1, 1, 0, 0, 0)
+
+
+def _member(archive: ZipFile, name: str, body, compression: int = ZIP_STORED) -> None:
+    """Write a member with a fixed timestamp, so the same tables are the same bytes (and the same
+    source digest) whenever they are built. ``writestr(name, ...)`` would stamp the current time."""
+    info = ZipInfo(name, _EPOCH)
+    info.compress_type = compression
+    archive.writestr(info, body)
 
 
 def column(number: int) -> str:
@@ -64,7 +73,7 @@ def make_xlsx(path, cells="", *, extra=None, compression=ZIP_STORED):
     parts.update(extra or {})
     with ZipFile(path, "w", compression=compression) as archive:
         for name, body in parts.items():
-            archive.writestr(name, body)
+            _member(archive, name, body, compression)
     return path
 
 
@@ -94,9 +103,9 @@ def write_book(path, tables):
                     else:
                         cell.set("t", "inlineStr")
                         ET.SubElement(ET.SubElement(cell, "is"), "t").text = str(value or "")
-            archive.writestr(f"xl/worksheets/s{index}.xml", ET.tostring(sheet))
-        archive.writestr("xl/workbook.xml", ET.tostring(book))
-        archive.writestr("xl/_rels/workbook.xml.rels", ET.tostring(relationships))
+            _member(archive, f"xl/worksheets/s{index}.xml", ET.tostring(sheet))
+        _member(archive, "xl/workbook.xml", ET.tostring(book))
+        _member(archive, "xl/_rels/workbook.xml.rels", ET.tostring(relationships))
     return path
 
 

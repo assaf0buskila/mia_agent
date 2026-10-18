@@ -31,6 +31,28 @@ def test_os_import_xlsx_types_and_hidden_sheet(tmp_path):
     assert book.source_digest == read_xlsx(path).source_digest
 
 
+def test_os_import_synthetic_books_are_byte_reproducible(tmp_path, monkeypatch):
+    """A fixture's source digest must not depend on the clock: zip members carry a DOS time, and
+    "the same workbook" in the epoch tests would otherwise differ across a 2-second boundary."""
+    import time
+
+    from tests.fixtures.workbooks.synthetic import write_book
+
+    tables = {"one": [["a", 1]], "_two": [["b"]]}
+    built = (
+        write_book(tmp_path / "a.xlsx", tables).read_bytes(),
+        make_xlsx(tmp_path / "b.xlsx", '<c r="A1"><v>1</v></c>').read_bytes(),
+    )
+    real = time.localtime
+    monkeypatch.setattr(
+        time, "localtime", lambda seconds=None: real((seconds or time.time()) + 90_000_000))
+    later = (
+        write_book(tmp_path / "c.xlsx", tables).read_bytes(),
+        make_xlsx(tmp_path / "d.xlsx", '<c r="A1"><v>1</v></c>').read_bytes(),
+    )
+    assert built == later
+
+
 @pytest.mark.parametrize("name", ["/escape", "../escape", "xl/../escape", "C:/escape",
                                  "\\escape", "xl\\..\\escape"])
 def test_os_import_xlsx_refuses_member_paths(tmp_path, name):
