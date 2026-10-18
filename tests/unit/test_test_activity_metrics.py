@@ -97,6 +97,10 @@ def test_guarded_flags_exclude_only_the_two_activities_and_preserve_records(sess
             occurred_from="2026-10-16T13:30:00+00:00",
             occurred_to="2026-10-16T13:40:00+00:00",
         ) == 0
+        assert store.list_captured_website_leads(
+            occurred_from="2026-10-16T13:30:00+00:00",
+            occurred_to="2026-10-16T13:40:00+00:00",
+        ) == []
         assert store.count_captured_website_leads(
             occurred_from="2026-10-16T13:40:00+00:00",
             occurred_to="2026-10-16T13:41:00+00:00",
@@ -106,6 +110,21 @@ def test_guarded_flags_exclude_only_the_two_activities_and_preserve_records(sess
             session, source_activity_pairs=pairs, contact_id=contact_id, apply=True
         )
         assert repeated.changed == 0
+
+
+def test_two_test_only_activities_leave_no_captured_lead(sessions) -> None:
+    pairs, contact_id = _capture_pair(sessions)
+    with sessions() as session:
+        mark_reviewed_test_activities(
+            session,
+            source_activity_pairs=pairs,
+            contact_id=contact_id,
+            apply=True,
+        )
+
+        store = LeadStore(session)
+        assert store.count_captured_website_leads() == 0
+        assert store.list_captured_website_leads() == []
 
 
 def test_guard_mismatch_aborts_without_flags(sessions) -> None:
