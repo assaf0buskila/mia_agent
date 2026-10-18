@@ -41,6 +41,8 @@ from app.services.os_ledger.ids import (
     hex_id,
     is_uuid,
     mutation_json,
+    refuse_live_dependents,
+    same_record,
 )
 from app.services.os_ledger.validate_full import domain_error
 
@@ -420,6 +422,10 @@ class PgLedgerTx:
               request_id: str) -> tuple[api.RecordDict, ...]:
         """Compare-and-set every mutation, then validate and maintain summaries (§5.3).
 
+        The compare-and-set is strict (§22 E22): ``before`` must equal the stored record, not only
+        its revision. A record that lands in its FORK-DELETE end state must have no live
+        dependents (§22 E20, ``has_dependents``, any kind), judged on the batch's result.
+
         Atomic on its own: it runs inside a SAVEPOINT, so on any failure none of its writes
         remain and the transaction stays usable (a service can still record a terminal
         ``target_changed`` receipt).
@@ -437,7 +443,7 @@ class PgLedgerTx:
             raise self.poisoned from None
         self._in_apply = True
         try:
-            result = tuple(self._apply_one(m, source, request_id) for m in mutations)
+            result = tuple(self._apply_one(m, source, request_id, mutations) for m in mutations)
             self._validator.validate(self, mutations)
             self._summaries.on_apply(self, mutations)
             savepoint.commit()
@@ -453,13 +459,13 @@ class PgLedgerTx:
         finally:
             self._in_apply = False
 
-    def _apply_one(self, mutation: api.Mutation, source: str,
-                   request_id: str) -> api.RecordDict:
+    def _apply_one(self, mutation: api.Mutation, source: str, request_id: str,
+                   batch: Sequence[api.Mutation]) -> api.RecordDict:
         entity, key = self._entity(mutation.entity), mutation.record_id
         if not isinstance(key, str) or not isinstance(mutation.after, Mapping):
             raise integrity("apply_mutation_shape")
         current = self._one(
-            f"SELECT revision, deleted_at FROM assaf_os.os_{entity} "
+            f"SELECT {record_columns(entity)} FROM assaf_os.os_{entity} "
             "WHERE workspace_id = :ws AND record_id = :id", {"id": key})
         before = mutation.before
         revision = before["revision"] if before is not None else 0
@@ -477,6 +483,11 @@ class PgLedgerTx:
             matches = False
         if not matches or not valid_revision:
             raise api.LedgerError("target_changed")
+        # §22 E22: a strict compare-and-set. The revision matches, so a different record means the
+        # before-image was not built from the stored row; the summaries read it, so refuse.
+        if before is not None and not same_record(before, wire(entity, current)):
+            raise integrity("apply_before_image")
+        refuse_live_dependents(self, mutation, batch)  # §22 E20
         system = {api.ID_KEYS[entity], "revision"} | ({"person_id"} if entity == "leads" else set())
         try:
             inputs = canonical_input(entity, {k: v for k, v in mutation.after.items()

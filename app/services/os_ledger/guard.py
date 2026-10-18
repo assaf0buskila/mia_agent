@@ -11,6 +11,11 @@ The runtime never holds the privileged migration DSN, so the guard reuses V2-15'
 
 Every refusal is ``ledger_unavailable``, logged ``os_ledger op=guard outcome=refused
 reason=<code>`` (reason codes only, never DB error text).
+
+Every ledger engine connects with ``CONNECT_TIMEOUT_S``, so a dead database refuses quickly
+(``db_unreachable``, or the guard's own sanitized ``ledger_role_denied``) instead of holding a
+caller for the operating system's own connect timeout. The Sheets fence's read,
+``authority.core_state``, adds a statement timeout on top.
 """
 
 from __future__ import annotations
@@ -32,6 +37,9 @@ from app.services.os_ledger import api
 _LOG = logging.getLogger("mia.os_ledger")
 REVALIDATE_SECONDS = 600
 FSYNC_SQL = "SHOW fsync"
+# Keeps a dead database from eating a caller's budget (a cold decide has 30 s and the Sheets fence
+# reads here first). libpq reads a connect_timeout below 2 s as 2 s.
+CONNECT_TIMEOUT_S = 3
 
 # The per-transaction guard and the workspace lock in one round trip. The lock CTE is
 # materialized so the row lock is always taken; the authority rows are read by a SEPARATE
@@ -145,7 +153,8 @@ def engine_for(dsn: str, *, reason: str = "ledger_dsn_invalid") -> Engine:
         engine = _ENGINES.get(dsn)
         if engine is None:
             try:
-                engine = create_engine(pinned, pool_pre_ping=True, pool_size=5, max_overflow=5)
+                engine = create_engine(pinned, pool_pre_ping=True, pool_size=5, max_overflow=5,
+                                       connect_args={"connect_timeout": CONNECT_TIMEOUT_S})
             except Exception:  # noqa: BLE001 - e.g. a driver that is not installed
                 raise refuse(reason) from None
             _ENGINES[dsn] = engine

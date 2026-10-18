@@ -3,7 +3,8 @@
 ``PREFIXES``, ``DATE_KEYS``, ``dependencies`` and ``envelope`` are verbatim copies of the
 prototype ledger's ``PREFIXES``, ``DATE_KEYS``, ``_dependencies``/``_lookup`` and ``_envelope``
 (``app/prototypes/assaf_os_ledger.py``, V2-13's oracle, never edited). A ported test pins each copy
-to the prototype. Nothing here touches a database.
+to the prototype. Nothing here opens a connection; the two apply rules (§22 E20/E22) work through
+the ``LedgerTx`` they are handed.
 """
 
 from __future__ import annotations
@@ -70,6 +71,79 @@ def mutation_json(mutation: api.Mutation) -> dict[str, Any]:
         "before": None if mutation.before is None else dict(mutation.before),
         "after": dict(mutation.after),
     }
+
+
+# ---- the shared apply rules (§22 E20, E22) -----------------------------------------------------
+# PgLedgerTx.apply and the FakeLedger's apply both call these two functions, so the rules cannot
+# drift between the implementations; the conformance suite runs them on both.
+
+MAX_DEPENDENT_REFS = 20  # §5.2: has_dependents.details.dependents holds at most 20 refs
+
+
+def same_record(before: Mapping[str, Any], stored: Mapping[str, Any]) -> bool:
+    """§22 E22: ``before`` is the stored record, judged by the canonical record digest.
+
+    The digest covers every field (the id key, the revision, each input and a lead's person_id),
+    so a difference in any of them counts, not only in the revision. A value that is not plain
+    JSON cannot be the stored record.
+    """
+    try:
+        return api.digest(dict(before)) == api.digest(dict(stored))
+    except (TypeError, ValueError):
+        return False
+
+
+def lands_in_end_state(mutation: api.Mutation) -> bool:
+    """§22 E20: the write moves an EXISTING record into its FORK-DELETE end state.
+
+    That is an update whose ``after`` is in ``api.FORK_DELETE_END_STATE`` and whose ``before`` was
+    not, or a tombstone (the task end state and a delete everywhere else). A create is not an
+    update, so a first import may hold a cancelled work with live payments, and an update that
+    keeps a record in its end state is not a new landing. A restore leaves the deleted state.
+    """
+    if mutation.before is None or mutation.op == "restore":
+        return False
+    if mutation.op == "tombstone":
+        return True
+    end = api.FORK_DELETE_END_STATE.get(mutation.entity)
+    if end is None:
+        return False
+    column, value = end
+    return mutation.after.get(column) == value and mutation.before.get(column) != value
+
+
+def refuse_live_dependents(tx: api.LedgerTx, mutation: api.Mutation,
+                           batch: Sequence[api.Mutation]) -> None:
+    """§22 E20: a record may not land in its end state while a live record still refers to it.
+
+    ``apply`` calls this for each mutation once its compare-and-set (§5.3) and the strict
+    before-image check (§22 E22) have passed, and before its domain validation, so the refusal is
+    ``has_dependents`` and not a domain error. It holds for any kind (proposal, owner_direct,
+    owner_undo or import); ``apply`` is atomic, so the batch then writes nothing.
+
+    Liveness is judged on the batch's RESULT, so a work cancelled together with its payments passes
+    in either order and a payment created in the same batch against the record still blocks:
+    a stored referrer counts unless the batch rewrites it, and a rewritten one counts by its
+    ``after``.
+    """
+    if not lands_in_end_state(mutation):
+        return
+    rewritten = {(m.entity, m.record_id): m for m in batch}
+    blocking = {
+        (ref.entity, ref.record_id)
+        for ref in tx.dependents(mutation.entity, mutation.record_id)
+        if (ref.entity, ref.record_id) not in rewritten
+    }
+    for (entity, record_id), other in rewritten.items():
+        if any(referrer == entity and target == mutation.entity
+               and other.after.get(field) == mutation.record_id
+               for referrer, field, target in api.DEPENDENTS) and api.is_live(
+                entity, dict(other.after), deleted=other.op == "tombstone"):
+            blocking.add((entity, record_id))
+    if blocking:
+        raise api.LedgerError("has_dependents", details={"dependents": [
+            {"entity": entity, "record_id": record_id}
+            for entity, record_id in sorted(blocking)[:MAX_DEPENDENT_REFS]]})
 
 
 # ---- verbatim prototype copies (app/prototypes/assaf_os_ledger.py) ---------------------------

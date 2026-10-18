@@ -96,7 +96,8 @@ grants after a `--no-owner --no-privileges` restore; on a database without
 identity WITH ADMIN TRUE, SET FALSE, INHERIT FALSE, the one edge this runner allows.
 
 The runtime map denies DELETE/TRUNCATE everywhere (V2-14b gives DELETE only to the
-retention role, on two tables); events, receipts and audit are INSERT/SELECT only; the migration journal and authority fence are not runtime-writable.
+retention role, on two tables); events, receipts and audit are INSERT/SELECT only; the
+migration journal and authority fence are not runtime-writable.
 Record/proposal/outbox updates need their own explicit column allowlists. Runtime
 role and main app role must differ. The main DSN must independently fail closed on
 superuser/elevated attributes or ledger access, including in authority preflight.

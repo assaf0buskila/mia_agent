@@ -22,7 +22,10 @@ def test_v2_sql_creates_schema_and_preserves_existing_contact_history(monkeypatc
     engine = create_engine(url, connect_args={"options": f"-csearch_path={schema}"})
     try:
         root = Path(__file__).resolve().parents[2]
-        paths = sorted((root / "migrations").glob("20260910_*v2.sql"))
+        paths = [
+            *sorted((root / "migrations").glob("20260910_*v2.sql")),
+            root / "migrations" / "20261016_crm_activity_is_test.sql",
+        ]
         assert {p.name for p in paths} >= {"20260910_crm_v2.sql", "20260910_site_v2.sql"}
         monkeypatch.setattr("app.db.migrate.list_migration_files", lambda: paths)
         with engine.begin() as conn:

@@ -39,8 +39,15 @@ from tests.services.os_ledger.test_summaries_property_engine import (
 )
 
 FAKE_SEEDS = range(8)
-PG_SEEDS = (101, 202, 303)
-POST_APPLY_REASONS = {"client_not_found", "work_not_found", "refund_original_not_found"}
+# Seeds whose 70-step sequences reach the post-apply refusals (both reasons between them), so the
+# PG run is not vacuous after §22 E20 moved the live-referrer refusals into apply.
+PG_SEEDS = (100, 113, 140)
+# §22 E20 (V2-16 final) refuses a tombstone under a LIVE referrer in apply (has_dependents), and
+# V2-16's apply already validates each mutation in full, so the post-apply validators see only a
+# tombstone whose referrers are not live. A refund is live unless cancelled, and a cancelled
+# refund carries no original, so the post-apply refund_original_not_found is now unreachable. The
+# refund graph is still covered by the scripted re-point scenarios below, where apply refuses it.
+POST_APPLY_REASONS = {"client_not_found", "work_not_found"}
 
 
 def needs_pg():
@@ -97,27 +104,47 @@ def script(twin, steps):
         both = twin.both(lambda side, m=mutations, n=number: side.commit(
             m, f"00000000-0000-4000-8000-{n:012d}"))
         assert both[0] == both[1], both
-        outcomes.append(both[0][0] if both[0][0] == "ok" else both[0][2])
+        # A refusal is reported by its reason, or by its code when it has none (E20's
+        # has_dependents comes from apply itself, before any validator).
+        outcomes.append(both[0][0] if both[0][0] == "ok" else (both[0][2] or both[0][1]))
         compare_state(twin, f"step {number}")
     return outcomes
 
 
 SCENARIOS = {
-    # a cancelled payment is not live, so has_dependents ignores it; the state check does not
+    # §22 E20 (V2-16 final): the live work blocks the client's tombstone in apply itself
+    # (has_dependents), before any validator; the cancelled payment is not live and does not.
     "client_with_a_cancelled_payment": (
         [[client(), work(), payment(kind=PAYMENT_CANCELLED)],
          [tombstone("clients", client().after)]],
-        ["ok", "client_not_found"]),
+        ["ok", "has_dependents"]),
     "work_with_a_done_task": (
         [[client(), work(), task(work_id="WOR_w1", person_id="PER_c1", status=TASK_DONE)],
          [tombstone("works", work().after)]],
         ["ok", "work_not_found"]),
+    # §22 E20: a live refund now blocks tombstoning its original in apply (has_dependents) ...
     "original_with_a_refund": (
         [[client(), work(), payment()],
          [payment("PAY_r1", kind=PAYMENT_REFUND, original_payment_id="PAY_p1",
                   actual_amount_ils=400)],
          [tombstone("payments", payment().after)]],
+        ["ok", "ok", "has_dependents"]),
+    # ... so the post-apply refund-graph refusal is reached by re-pointing the refund instead.
+    "a_refund_repointed_to_a_missing_original": (
+        [[client(), work(), payment()],
+         [payment("PAY_r1", kind=PAYMENT_REFUND, original_payment_id="PAY_p1",
+                  actual_amount_ils=400)],
+         [update(payment("PAY_r1", kind=PAYMENT_REFUND, original_payment_id="PAY_p1",
+                         actual_amount_ils=400).after, original_payment_id="PAY_none")]],
         ["ok", "ok", "refund_original_not_found"]),
+    "a_refund_repointed_to_a_cancelled_payment": (
+        [[client(), work(), payment(), payment("PAY_p2")],
+         [payment("PAY_r1", kind=PAYMENT_REFUND, original_payment_id="PAY_p1",
+                  actual_amount_ils=400)],
+         [update(payment("PAY_p2").after, kind=PAYMENT_CANCELLED)],
+         [update(payment("PAY_r1", kind=PAYMENT_REFUND, original_payment_id="PAY_p1",
+                         actual_amount_ils=400).after, original_payment_id="PAY_p2")]],
+        ["ok", "ok", "ok", "refund_original_not_found"]),
     "a_tombstoned_referrer_does_not_count": (
         [[client(), work(), time_entry()],
          [tombstone("time", time_entry().after)],

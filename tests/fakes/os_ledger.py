@@ -32,6 +32,7 @@ from app.prototypes.assaf_os_ledger import DATE_KEYS, PREFIXES, _dependencies, _
 from app.prototypes.assaf_os_primary import LocalPrimaryError
 from app.prototypes.assaf_os_summaries import SummaryInputError, build_summaries
 from app.services.os_ledger import api
+from app.services.os_ledger.ids import refuse_live_dependents, same_record
 
 _POINTS = {"after_apply", "after_receipt", "before_commit", "commit_unknown"}
 _STATES = ("shadow", "active", "fenced", "restoring")
@@ -771,7 +772,7 @@ class _Tx:
         self._scope()
         original = copy.deepcopy(self.data)  # apply is atomic on its own (the SAVEPOINT rule)
         try:
-            result = [self._apply_one(m, source, request_id) for m in mutations]
+            result = [self._apply_one(m, source, request_id, mutations) for m in mutations]
             self._check_references(mutations)
             if self.ledger.validator is None:
                 try:
@@ -797,7 +798,7 @@ class _Tx:
             self.data.update(original)
             raise
 
-    def _apply_one(self, mutation, source, request_id):
+    def _apply_one(self, mutation, source, request_id, batch):
         entity, key = mutation.entity, mutation.record_id
         table = self._table("os_" + entity)
         current = table.get(key)
@@ -815,6 +816,10 @@ class _Tx:
             matches = False
         if not matches or not valid_revision:
             raise api.LedgerError("target_changed")
+        # §22 E22: a strict compare-and-set (a LedgerError, as on PG, not a fake invariant).
+        if before is not None and not same_record(before, _wire(current, entity)):
+            raise api.LedgerError("ledger_integrity_failed", reason="apply_before_image")
+        refuse_live_dependents(self, mutation, batch)  # §22 E20, the one shared rule
         system = {api.ID_KEYS[entity], "revision"} | ({"person_id"} if entity == "leads" else set())
         try:
             inputs = canonical_input(entity, {k: v for k, v in mutation.after.items()

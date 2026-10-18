@@ -6,12 +6,13 @@ The legal and illegal edges, the epoch bumps and their idempotency run in
 """
 
 import os
+import socket
 import threading
 import time
 from types import SimpleNamespace
 
 import pytest
-from app.services.os_ledger import api, authority
+from app.services.os_ledger import api, authority, guard, role_policy
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import ProgrammingError
 
@@ -56,6 +57,91 @@ def test_core_state_is_ledger_unavailable_when_the_database_fails(pg):
     with pytest.raises(api.LedgerError) as caught:
         api.core_authority_state(settings_of(pg, owner_os_ledger_database_url=gone))
     assert caught.value.code == "ledger_unavailable"
+
+
+# ---- the fence's read is bounded (the 30 s cold-decide budget) ---------------------------------
+
+
+@pytest.fixture
+def silent_database():
+    """A TCP listener that completes the handshake in the kernel backlog and never says a byte:
+    a database that went away mid-connection. Returns the port."""
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen(8)
+    try:
+        yield server.getsockname()[1]
+    finally:
+        server.close()
+        guard.dispose_engines()
+
+
+def silent_settings(port):
+    dsn = f"postgresql+psycopg://assaf_os_ledger@127.0.0.1:{port}/mia_ledger_test"
+    return SimpleNamespace(
+        owner_os_ledger_database_url=dsn, database_url=dsn.replace("assaf_os_ledger", "mia_app"),
+        assaf_os_workspace_id=WORKSPACE)
+
+
+def test_the_fence_timeouts_are_short_against_the_cold_decide_budget():
+    # libpq reads a connect_timeout below 2 s as 2 s; the budget a cold decide has is 30 s.
+    assert 2 <= guard.CONNECT_TIMEOUT_S <= 5
+    assert 0 < authority.FENCE_STATEMENT_TIMEOUT_MS <= 5000
+
+
+def test_core_state_gives_up_on_a_silent_database_within_the_connect_timeout(
+        silent_database, monkeypatch):
+    """Its own connection (the guard is stubbed out to isolate the read): bounded, then
+    ledger_unavailable, never a wait on the operating system's own connect timeout."""
+    assert guard.CONNECT_TIMEOUT_S <= 5
+    monkeypatch.setattr(authority, "guard_for",
+                        lambda *args: SimpleNamespace(ensure=lambda: None))
+    started = time.monotonic()
+    with pytest.raises(api.LedgerError) as caught:
+        authority.core_state(silent_settings(silent_database))
+    assert time.monotonic() - started < guard.CONNECT_TIMEOUT_S + 6
+    assert (caught.value.code, caught.value.reason) == ("ledger_unavailable", "read_failed")
+
+
+def test_core_state_behind_the_guard_also_gives_up_on_a_silent_database(silent_database):
+    """The §5.5 guard's first validation connects too, so it is bounded the same way (and keeps
+    its sanitized refusal: validate_ledger_role turns every catalog failure into one code)."""
+    assert guard.CONNECT_TIMEOUT_S <= 5
+    started = time.monotonic()
+    with pytest.raises(api.LedgerError) as caught:
+        authority.core_state(silent_settings(silent_database))
+    assert time.monotonic() - started < guard.CONNECT_TIMEOUT_S + 6
+    assert (caught.value.code, caught.value.reason) == (
+        "ledger_unavailable", role_policy.DENIED)
+
+
+def test_core_state_is_cut_off_by_the_statement_timeout_when_the_table_is_locked(pg):
+    """A migration holding ACCESS EXCLUSIVE on os_authority must not hold a fence read for the
+    whole cold-decide budget: the statement timeout (lock waits included) ends it."""
+    settings = settings_of(pg)
+    assert api.core_authority_state(settings) == "active"  # the guard has passed and is cached
+    locked, release = threading.Event(), threading.Event()
+
+    def migration():
+        with admin_engine(pg).begin() as c:
+            c.execute(text("LOCK TABLE assaf_os.os_authority IN ACCESS EXCLUSIVE MODE"))
+            locked.set()
+            release.wait(12)
+
+    holder = threading.Thread(target=migration)
+    holder.start()
+    try:
+        assert locked.wait(10)
+        started = time.monotonic()
+        with pytest.raises(api.LedgerError) as caught:
+            authority.core_state(settings)
+        elapsed = time.monotonic() - started
+    finally:
+        release.set()
+        holder.join(15)
+    assert (caught.value.code, caught.value.reason) == ("ledger_unavailable", "read_failed")
+    assert elapsed < authority.FENCE_STATEMENT_TIMEOUT_MS / 1000 + 4
+    assert authority.core_state(settings) == "active"  # the lock gone, it reads again
 
 
 @pytest.mark.parametrize("statement", [
