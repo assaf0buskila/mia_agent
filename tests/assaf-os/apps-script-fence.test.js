@@ -68,9 +68,11 @@ function workbookRows(h) {
 
 function assertUntouched(h, touched, rowsBefore, label) {
   assert.deepEqual(touched, { openById: 0, lock: 0, batchUpdate: 0 }, `${label}: no workbook, lock or batch write`);
-  assert.deepEqual(h.metrics(), {
-    getValues: 0, getFormulas: 0, getLastRow: 0, getLastColumn: 0, getDataRange: 0, setDataValidation: 0, batchUpdate: 0,
-  }, `${label}: no sheet read or validation write`);
+  // Every counter the harness keeps (reads, validation writes, batch reads and writes, whatever it
+  // learns to count next) is zero: a fenced entry point never reaches a sheet.
+  const counters = h.metrics();
+  assert.ok(Object.keys(counters).length >= 7, "the harness still counts reads and writes");
+  assert.deepEqual(Object.entries(counters).filter(([, count]) => count !== 0), [], `${label}: no sheet read or write`);
   assert.equal(workbookRows(h), rowsBefore, `${label}: the workbook is exactly as it was`);
 }
 

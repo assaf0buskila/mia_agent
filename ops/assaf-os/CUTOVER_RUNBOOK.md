@@ -256,6 +256,11 @@ present throughout; jobs paused and a verified backup before **each** of T1, T3,
   `tests/workers/test_os_freeze_paths.py`.
 - **Settle**: Assaf approves or rejects every pending proposal and open Telegram card (a card also
   expires on its own). An unknown receipt is resolved by looking up its receipt, never by replaying it.
+- **Known limit while frozen**: do not tap a website-lead "prepare" card (or ask Mia to prepare a lead)
+  between T1 and the `open` phase. The freeze refuses it (`os_frozen`, nothing sent), but
+  `assaf_os_leads._create_final_proposal` (V2-28's file) records every refusal after its claim as an
+  uncertain write, so the same lead then answers `lead_source_pending_review` after the freeze lifts and
+  needs an owner repair. Leads wait until `open`.
 - **Verify**: `sudo mia os-authority status --approved-sha S` shows `settings.freeze: true`;
   a new proposal on the phone is refused; `/health` SHA is `S`.
 - **Rollback**: `MIA_ASSAF_OS_FREEZE=false`, `sudo mia settings`. Nothing else changed.
