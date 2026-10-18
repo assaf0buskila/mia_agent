@@ -16,6 +16,9 @@ Stricter pins sit on top:
     ``authorize.py``) and ``._mutation_proof`` (outside ``owner_sessions.py``), as an attribute,
     a constant ``getattr``/``setattr``/``hasattr`` or a keyword argument
     (``dataclasses.replace(p, _mutation_proof=...)``).
+  * review r2: any private name of ``authorize`` (``_register``, ``_mint``, ``_MINTED`` and every
+    other ``authorize._*``) outside ``authorize.py``, and the private field names as exact string
+    constants (``vars(p)['_mutation_proof']``, ``replace(p, **{'_mutation_proof': x})``).
 Aliases are followed through plain, annotated, tuple and walrus assignments, ``sys.modules[...]``,
 ``vars(...)`` and ``__dict__``. Planted violations are scratch files under ``tmp_path``.
 """
@@ -32,6 +35,8 @@ APP = REPO / "app"
 API = "app.services.os_ledger.api"
 DIRECT = "app.services.os_ledger.owner_direct"
 SESSIONS = "app.api.owner_sessions"
+AUTHORIZE = "app.services.os_ledger.authorize"
+AUTHORIZE_FILE = "app/services/os_ledger/authorize.py"
 CONTEXT_NAMES = frozenset({"_issue", "_CAPABILITY", "TrustedOwnerContext"})
 CONTEXT_ATTRS = frozenset({"_issue", "_CAPABILITY"})
 PROOF_NAMES = frozenset({"_mutation_proven", "_attach_mutation_proof", "_MutationProof"})
@@ -137,6 +142,8 @@ class Scanner(ast.NodeVisitor):
             self.findings.add((line, "mutation_proof", name))
         if name in {f"{module}.__dict__" for module in GUARDED_MODULES}:
             self.findings.add((line, "module_table", name))
+        if name.startswith(AUTHORIZE + "._"):
+            self.findings.add((line, "authorize_private", name))
 
     def _field(self, line: int, attr: str) -> None:
         if attr in PRIVATE_FIELDS:
@@ -189,6 +196,10 @@ class Scanner(ast.NodeVisitor):
             self.findings.add((node.lineno, "module_table", table))
         self.generic_visit(node)
 
+    def visit_Constant(self, node: ast.Constant) -> None:
+        if isinstance(node.value, str):
+            self._field(getattr(node, "lineno", 0), node.value)
+
     def visit_keyword(self, node: ast.keyword) -> None:
         if node.arg:
             self._field(getattr(node, "lineno", 0), node.arg)
@@ -229,6 +240,8 @@ def disallowed(findings: list[tuple[int, str, str]], relative: str) -> list[tupl
                 name == f"{SESSIONS}._mutation_proven"):
             continue
         if rule == "private_field" and relative in FIELD_ALLOW_LIST.get(name, frozenset()):
+            continue
+        if rule == "authorize_private" and relative == AUTHORIZE_FILE:
             continue
         out.append((line, rule, name))
     return out
@@ -382,6 +395,25 @@ PLANTED = {
         "    return dataclasses.replace(read, _mutation_proof=proven)\n"),
     "proof_setattr": ("app/x/evil.py",
                       "def f(q):\n    setattr(q, '_mutation_proof', 1)\n"),
+    # review r2: authorize's own private entry points, and the field names as plain strings
+    "authorize_register": ("app/x/evil.py",
+                           "from app.services.os_ledger import authorize\n"
+                           "def f(c):\n    return authorize._register(c)\n"),
+    "authorize_mint": ("app/x/evil.py",
+                       "from app.services.os_ledger import authorize\n"
+                       "authorize._mint('OS', 1, None, op='x', scopes=frozenset(),\n"
+                       "                expires=None)\n"),
+    "authorize_registry_write": ("app/x/evil.py",
+                                 "from app.services.os_ledger import authorize as a\n"
+                                 "a._MINTED[1] = None\n"),
+    "authorize_private_import": ("app/x/evil.py",
+                                 "from app.services.os_ledger.authorize import _register\n"),
+    "proof_by_vars": ("app/x/evil.py", "def f(p):\n    return vars(p)['_mutation_proof']\n"),
+    "proof_by_dict_unpack": ("app/x/evil.py",
+                             "import dataclasses\n"
+                             "def f(p, x):\n"
+                             "    return dataclasses.replace(p, **{'_mutation_proof': x})\n"),
+    "capability_by_dict": ("app/x/evil.py", "def f(c):\n    return c.__dict__['_capability']\n"),
 }
 
 
@@ -409,6 +441,10 @@ def test_substrings_and_unrelated_symbols_are_never_flagged(tmp_path):
         "api.LedgerError('kill_switch')\n"
         "def g(spec):\n    return spec.read_capability, spec._capabilities, spec.capability\n"
         "execute_capability = 1\n"
+        "from app.services.os_ledger import authorize\n"
+        "authorize.from_owner_read\n"
+        "authorize.require\n"
+        "label = 'the _capability field'\n"
     )
     scratch = tmp_path / "app" / "x" / "fine.py"
     scratch.parent.mkdir(parents=True)

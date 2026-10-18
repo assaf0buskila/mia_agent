@@ -87,6 +87,20 @@ def channel_ctx(channel: str, *, job: str = "verifier", **fields):
     return make_ctx(channel, scopes=frozenset(), browser_mutation_verified=False, **fields)
 
 
+def malformed(ctx, op) -> str | None:
+    """``code:reason`` for a REGISTERED copy, so require's well-formedness checks are what refuse it
+    (an unregistered copy would stop at context_not_issued first; review r2)."""
+    try:
+        authorize.require(authorize._register(ctx), op)
+    except api.LedgerError as exc:
+        assert exc.write_outcome == "not_started"
+        return f"{exc.code}:{exc.reason}"
+    return None
+
+
+MALFORMED = "invalid_trusted_context:context_malformed"
+
+
 def refusal(ctx, op) -> str | None:
     try:
         authorize.require(ctx, op)
@@ -225,29 +239,29 @@ def test_require_refuses_anything_that_is_not_a_trusted_context(value):
     ids=lambda fields: next(iter(fields)),
 )
 def test_a_malformed_os_context_is_invalid(fields):
-    # replace() keeps the capability, so only require's own checks can refuse these.
+    # A registered replace() copy keeps the capability: only the well-formedness checks refuse it.
     ctx = dataclasses.replace(os_ctx(), **fields)
-    assert refusal(ctx, "read") == "invalid_trusted_context"
+    assert malformed(ctx, "read") == MALFORMED
 
 
 @pytest.mark.parametrize("channel", CHANNELS[1:])
 def test_only_an_os_context_may_claim_a_verified_browser_mutation(channel):
     ctx = dataclasses.replace(channel_ctx(channel), browser_mutation_verified=True)
     for op in OPERATIONS:
-        assert refusal(ctx, op) == "invalid_trusted_context"
+        assert malformed(ctx, op) == MALFORMED
 
 
 @pytest.mark.parametrize("channel", ["ASSISTANT_CLAUDE", "ASSISTANT_GPT"])
 @pytest.mark.parametrize("credential_id", [None, "", "AC_short", "ac_" + "a" * 32])
 def test_an_assistant_context_needs_a_well_formed_credential_id(channel, credential_id):
     ctx = dataclasses.replace(channel_ctx(channel), credential_id=credential_id)
-    assert refusal(ctx, "read_rules") == "invalid_trusted_context"
+    assert malformed(ctx, "read_rules") == MALFORMED
 
 
 @pytest.mark.parametrize("scopes", [set(), {"mirror", "verifier"}, {"admin"}])
 def test_a_worker_context_holds_exactly_one_known_job(scopes):
     ctx = dataclasses.replace(channel_ctx("WORKER"), scopes=frozenset(scopes))
-    assert refusal(ctx, "read") == "invalid_trusted_context"
+    assert malformed(ctx, "read") == MALFORMED
 
 
 @pytest.mark.parametrize("channel", CHANNELS)

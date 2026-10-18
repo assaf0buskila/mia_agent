@@ -149,7 +149,8 @@ def _owner(value: Any, settings: Any, *, op: str, code: str = "owner_auth_requir
 
 
 def _aware_future(value: Any) -> bool:
-    return isinstance(value, datetime) and value.utcoffset() is not None and value > _now()
+    # An exact datetime only: a subclass could override comparison (review r2).
+    return type(value) is datetime and value.utcoffset() is not None and value > _now()
 
 
 def _binding(settings: Any, *, op: str) -> tuple[str, int]:
@@ -183,10 +184,16 @@ def _register(ctx: api.TrustedOwnerContext) -> api.TrustedOwnerContext:
     return ctx
 
 
+def _same_objects(snapshot: tuple[Any, ...], current: tuple[Any, ...]) -> bool:
+    # By identity, never ==: a field swapped for an always-equal subclass must not match (r2).
+    return len(snapshot) == len(current) and all(a is b for a, b in zip(snapshot, current,
+                                                                        strict=True))
+
+
 def _minted_unchanged(ctx: api.TrustedOwnerContext) -> bool:
     with _MINTED_LOCK:
         entry = _MINTED.get(id(ctx))
-    return entry is not None and entry[0]() is ctx and entry[1] == _fields(ctx)
+    return entry is not None and entry[0]() is ctx and _same_objects(entry[1], _fields(ctx))
 
 
 def _mint(channel: str, owner: int, settings: Any, *, op: str, scopes: frozenset[str],
@@ -211,7 +218,7 @@ def _session(principal: Any, settings: Any, *, op: str) -> tuple[int, frozenset[
     if not _aware_future(principal.expires_at):
         raise _refuse(op, "owner_auth_required", "session_expired")
     scopes = principal.scopes
-    if not isinstance(scopes, frozenset) or not all(type(s) is str for s in scopes):
+    if type(scopes) is not frozenset or not all(type(s) is str for s in scopes):
         raise _refuse(op, "owner_auth_required", "principal_invalid")
     return owner, scopes & OS_SCOPES, principal.expires_at
 
@@ -368,7 +375,7 @@ def _validate(ctx: Any) -> None:
         and type(ctx.authority_epoch) is int and ctx.authority_epoch >= 1
         and type(scopes) is frozenset and all(type(s) is str for s in scopes)
         and type(ctx.browser_mutation_verified) is bool
-        and isinstance(ctx.auth_expires_at, datetime)
+        and type(ctx.auth_expires_at) is datetime
         and ctx.auth_expires_at.utcoffset() is not None
     )
     if well_formed:

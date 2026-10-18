@@ -162,3 +162,54 @@ def test_a_principal_without_a_proof_or_with_a_foreign_object_is_not_proven():
     assert not owner_sessions._mutation_proven(principal())
     assert not owner_sessions._mutation_proven(
         dataclasses.replace(principal(), _mutation_proof=object()))
+
+
+# ---------------------------------------------------------------------------------------------
+# Review r2: snapshots compare by identity, and only exact frozenset/datetime types are accepted
+
+
+class AlwaysEqualSet(frozenset):
+    def __eq__(self, other):
+        return True
+
+    __hash__ = frozenset.__hash__
+
+
+class AlwaysEqualTime(datetime):
+    def __eq__(self, other):
+        return True
+
+    __hash__ = datetime.__hash__
+
+
+def test_a_proven_principal_widened_by_an_always_equal_set_is_refused():
+    proven = owner_sessions._attach_mutation_proof(
+        principal(scopes=frozenset({"assaf-os:read", "assaf-os:propose"})))
+    object.__setattr__(proven, "scopes", AlwaysEqualSet(ALL_OS))
+    with pytest.raises(api.LedgerError) as exc:
+        authorize.from_owner_mutation(proven, settings())
+    assert exc.value.code in {"browser_mutation_verification_required", "owner_auth_required"}
+
+
+def test_a_proven_principal_given_an_always_equal_far_expiry_is_refused():
+    proven = owner_sessions._attach_mutation_proof(principal())
+    far = AlwaysEqualTime(2099, 1, 1, tzinfo=UTC)
+    object.__setattr__(proven, "expires_at", far)
+    with pytest.raises(api.LedgerError) as exc:
+        authorize.from_owner_mutation(proven, settings())
+    assert exc.value.code in {"browser_mutation_verification_required", "owner_auth_required"}
+
+
+def test_a_context_revived_by_an_always_equal_expiry_is_refused():
+    ctx = read_ctx()
+    object.__setattr__(ctx, "auth_expires_at", AlwaysEqualTime(2099, 1, 1, tzinfo=UTC))
+    assert refused_by_require(ctx, "read") == "invalid_trusted_context"
+    expired = read_ctx()
+    object.__setattr__(expired, "auth_expires_at", AlwaysEqualTime(2000, 1, 1, tzinfo=UTC))
+    assert refused_by_require(expired, "read") == "invalid_trusted_context"
+
+
+def test_a_context_given_an_always_equal_scope_set_is_refused():
+    ctx = read_ctx()
+    object.__setattr__(ctx, "scopes", AlwaysEqualSet(DIRECT))
+    assert refused_by_require(ctx, "read") == "invalid_trusted_context"

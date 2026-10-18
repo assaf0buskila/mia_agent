@@ -131,7 +131,11 @@ def _mutation_proven(principal: Any) -> bool:
     proof = principal._mutation_proof
     if type(proof) is not _MutationProof or proof._principal is None:
         return False
-    return proof._principal() is principal and proof._fields == _principal_fields(principal)
+    current = _principal_fields(principal)
+    # By identity, never ==: a field swapped for an always-equal subclass must not match (r2).
+    return proof._principal() is principal and proof._fields is not None and len(
+        proof._fields) == len(current) and all(
+        a is b for a, b in zip(proof._fields, current, strict=True))
 
 
 class OwnerLoginBody(BaseModel):
