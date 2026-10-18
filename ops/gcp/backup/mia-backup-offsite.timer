@@ -1,0 +1,12 @@
+# Every 15 minutes at :05 :20 :35 :50, clear of the due-scan timer's :00 :15 :30 :45.
+# Persistent=true runs one catch-up backup after the VM was down at a scheduled time.
+[Unit]
+Description=Mia encrypted off-host database backup, every 15 minutes
+
+[Timer]
+OnCalendar=*:5/15
+Persistent=true
+Unit=mia-backup-offsite.service
+
+[Install]
+WantedBy=timers.target

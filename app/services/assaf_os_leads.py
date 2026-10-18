@@ -28,7 +28,8 @@ from app.db.models import (
 )
 from app.domain.approvals import DECISION_APPROVED, DECISION_PENDING, DECISION_REJECTED
 from app.integrations.llm_client import LlmError, parse_json_object
-from app.services.assaf_os import AssafOsError, AssafOsPort, ProposeRequest
+from app.services.assaf_os import AssafOsError, ProposeRequest
+from app.services.os_backend import get_os_backend
 from app.services.owner_actions import (
     ACTION_OWNER_EXTERNAL_WRITE,
     RESOURCE_OWNER_PROPOSAL,
@@ -564,7 +565,7 @@ def _create_final_proposal(
         corrected_phone=corrected_phone,
         corrected_email=corrected_email,
     )
-    port = AssafOsPort(settings, principal.actor_id, actor_source="MIA")
+    port = get_os_backend(settings, principal.actor_id, actor="MIA")
     if _duplicate_in_snapshot(port.snapshot(), lead_input):
         raise ValueError("lead_already_exists")
     stable_identity = {
@@ -882,7 +883,7 @@ def recover_expired_approved_crm_lead(
     current_binding = current_source_binding(store, binding)
     if _json(current_binding) != _json(binding):
         raise ValueError("source_changed")
-    port = AssafOsPort(settings, principal.actor_id, actor_source="MIA")
+    port = get_os_backend(settings, principal.actor_id, actor="MIA")
     remote = port.proposal(str(parameters["proposal_id"]))
     receipt = port.receipt(str(parameters["request_id"]))
     if (

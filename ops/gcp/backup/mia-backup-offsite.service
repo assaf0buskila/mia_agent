@@ -1,0 +1,23 @@
+# Mia encrypted off-host database backup. Installed by install_on_vm.py (owner-gated), run by
+# mia-backup-offsite.timer every 15 minutes. One run takes a consistent pg_dump of database mia,
+# encrypts it with the key from Secret Manager and uploads it to the private bucket.
+# It only reads the database; it never starts, stops or changes any Mia service.
+[Unit]
+Description=Mia encrypted off-host database backup
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Everything the run writes (the plaintext dump while it exists) is private to root.
+UMask=0077
+EnvironmentFile=/etc/mia/backup-offsite.env
+# systemd's default PATH has no /snap/bin, which is where Ubuntu's gcloud lives.
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin
+Environment=HOME=/root
+Environment=CLOUDSDK_CONFIG=/var/lib/mia/backup-offsite/gcloud
+ExecStart=/usr/bin/python3 /opt/mia/backup/backup_offsite.py
+# A hung pg_dump or upload must not block the next slots for long.
+TimeoutStartSec=25min
+Nice=10

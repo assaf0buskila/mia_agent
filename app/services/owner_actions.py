@@ -434,7 +434,8 @@ def execute_approved_owner_action_with_adapters(
         )
 
     if envelope["kind"] == "assaf_os.approve":
-        from app.services.assaf_os import AssafOsError, AssafOsPort, DecisionRequest
+        from app.services.assaf_os import AssafOsError, DecisionRequest
+        from app.services.os_backend import get_os_backend
 
         def schema(kind, values):
             return (
@@ -454,7 +455,7 @@ def execute_approved_owner_action_with_adapters(
 
         def connected(kind):
             try:
-                AssafOsPort(settings, principal.actor_id, actor_source="TELEGRAM_APPROVAL")
+                get_os_backend(settings, principal.actor_id, actor="TELEGRAM_APPROVAL")
                 return kind == "assaf_os.approve"
             except AssafOsError:
                 return False
@@ -463,7 +464,7 @@ def execute_approved_owner_action_with_adapters(
             del kind
             # TELEGRAM_APPROVAL is intentionally valid only for the final decision.
             # The server performs the pending-target read under the non-deciding MIA source.
-            port = AssafOsPort(settings, principal.actor_id, actor_source="MIA")
+            port = get_os_backend(settings, principal.actor_id, actor="MIA")
             current = port.proposal(str(values["proposal_id"]))
             result = {
                 "proposal": current,
@@ -496,7 +497,7 @@ def execute_approved_owner_action_with_adapters(
 
         def run(kind, values):
             del kind
-            port = AssafOsPort(settings, principal.actor_id, actor_source="TELEGRAM_APPROVAL")
+            port = get_os_backend(settings, principal.actor_id, actor="TELEGRAM_APPROVAL")
             receipt = port.decide(
                 "approve",
                 str(values["proposal_id"]),
@@ -1038,10 +1039,11 @@ def reject_assaf_os_owner_action(
     if not store.claim_provider_write(scope="approval", key=operation_key):
         return OwnerActionExecution("already_handled")
     try:
-        from app.services.assaf_os import AssafOsPort, DecisionRequest
+        from app.services.assaf_os import DecisionRequest
+        from app.services.os_backend import get_os_backend
 
-        result = AssafOsPort(
-            settings, principal.actor_id, actor_source="TELEGRAM_APPROVAL"
+        result = get_os_backend(
+            settings, principal.actor_id, actor="TELEGRAM_APPROVAL"
         ).decide(
             "reject",
             str(parameters["proposal_id"]),
