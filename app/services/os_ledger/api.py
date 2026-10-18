@@ -474,6 +474,12 @@ class LedgerTx(Protocol):
     def undo_receipt_of(self, request_id: str) -> ReceiptRow | None: ...
     # Status pending; bumps pending_seq.
     def insert_proposal(self, draft: ProposalDraft) -> ProposalRow: ...
+    # Atomic. A strict compare-and-set (§22 E22): an update, tombstone or restore whose `before`
+    # differs from the stored record (the canonical record digest, not only the revision) raises
+    # ledger_integrity_failed, so build every before-image from tx.get. A mutation that moves an
+    # existing record into its FORK_DELETE_END_STATE (or tombstones it) raises has_dependents while
+    # a live record still refers to it, whatever the kind (§22 E20); liveness is judged on the
+    # batch's result. A stale revision is still target_changed.
     def apply(
         self, mutations: Sequence[Mutation], *, source: Source, request_id: str
     ) -> tuple[RecordDict, ...]: ...

@@ -40,6 +40,11 @@ BUMP_EDGES = frozenset({("fenced", "shadow"), ("restoring", "active")})
 _BUMP_TARGETS = frozenset(target for _, target in BUMP_EDGES)
 _OWNER_RE = re.compile(r"[0-9]{1,20}")
 _FINGERPRINT_RE = re.compile(r"[0-9a-f]{64}")
+# The Sheets fence reads core_state before every Sheets write, and a cold decide has a 30 s budget.
+# The read is one indexed lookup, so 3 s is generous; the statement timeout also covers a wait on
+# a lock (a migration holding ACCESS EXCLUSIVE on os_authority). The connect timeout is
+# guard.CONNECT_TIMEOUT_S, which every ledger engine carries.
+FENCE_STATEMENT_TIMEOUT_MS = 3000
 
 
 def _changed(reason: str) -> api.LedgerError:
@@ -239,12 +244,17 @@ def core_state(settings: Any) -> api.AuthorityState | None:
     None when that workspace has no ``os_workspaces`` row (the Sheets call proceeds). Behind the
     §5.5 guard; any failure is ``ledger_unavailable``. ``api.core_authority_state`` has already
     returned None when no ledger DSN is configured.
+
+    The read is bounded so that it cannot eat a caller's budget: the connection times out after
+    ``guard.CONNECT_TIMEOUT_S`` and the statement (lock waits included) after
+    ``FENCE_STATEMENT_TIMEOUT_MS``; both end as ``ledger_unavailable`` (``read_failed``).
     """
     dsn = getattr(settings, "owner_os_ledger_database_url", "")
     workspace_id = getattr(settings, "assaf_os_workspace_id", "") or ""
     guard_for(dsn, getattr(settings, "database_url", "")).ensure()
     try:
         with engine_for(dsn).connect() as conn:
+            conn.exec_driver_sql(f"SET LOCAL statement_timeout = {FENCE_STATEMENT_TIMEOUT_MS}")
             row = conn.execute(text(
                 "SELECT current_user::text AS current_role, session_user::text AS session_role, "
                 "w.workspace_id IS NOT NULL AS present, a.state FROM (VALUES (1)) AS one(x) "
