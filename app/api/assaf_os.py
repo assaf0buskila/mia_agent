@@ -4,27 +4,29 @@ from __future__ import annotations
 
 import re
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from starlette.concurrency import run_in_threadpool
 
 from app.api.owner_sessions import OwnerSessionPrincipal, owner_mutation_scope, owner_scope
 from app.core.config import Settings, get_settings
-from app.services.assaf_os import AssafOsError, AssafOsPort, DecisionRequest, ProposeRequest
+from app.services.assaf_os import AssafOsError, DecisionRequest, ProposeRequest
 from app.services.assaf_os_snapshot_cache import read_cached_snapshot, remember_snapshot
+from app.services.os_backend import OsBackend, get_os_backend, parse_snapshot_query
 
 router = APIRouter(prefix="/v1/owner/os/unified", tags=["owner-os-unified"])
 _ID = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{2,63}$")
 _REQUEST = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$")
 
 
-def _port(settings: Settings, owner: OwnerSessionPrincipal) -> AssafOsPort:
+def _port(settings: Settings, owner: OwnerSessionPrincipal) -> OsBackend:
     try:
-        return AssafOsPort(settings, owner.owner_id, actor_source="OS")
+        return get_os_backend(settings, owner.owner_id, actor="OS", principal=owner)
     except AssafOsError as exc:
         raise HTTPException(exc.status, exc.code) from None
 
 
 async def _run(call):
+    # A LedgerError is deliberately not caught: it reaches the v2 handler (section 5.2 envelope).
     try:
         return await run_in_threadpool(call)
     except AssafOsError as exc:
@@ -42,15 +44,23 @@ async def schema(
 
 @router.get("")
 async def snapshot(
+    request: Request,
     background: BackgroundTasks,
     owner: OwnerSessionPrincipal = Depends(owner_scope("assaf-os:read")),
     settings: Settings = Depends(get_settings),
 ):
     port = _port(settings, owner)
+    if port.kind == "postgres":
+        # Section 10.2: the postgres route parses the query allow-list (an invalid query is a
+        # LedgerError). Under sheets the query is ignored, exactly as before V2-17.
+        query = parse_snapshot_query(request.scope.get("query_string", b""))
+        return await _run(lambda: port.snapshot(query))
     result = await _run(port.snapshot)
-    # V2-42: refresh the instant-open cache once the response is on the wire. This is the only
-    # caller of remember_snapshot, it never raises, and it cannot change or delay this response.
-    background.add_task(remember_snapshot, settings, owner.owner_id, result)
+    if port.kind == "sheets":
+        # V2-42: refresh the instant-open cache once the response is on the wire. This is the only
+        # caller of remember_snapshot, it never raises, and it cannot change or delay this
+        # response. The cache holds Sheets snapshots only, so only this backend feeds it.
+        background.add_task(remember_snapshot, settings, owner.owner_id, result)
     return result
 
 
