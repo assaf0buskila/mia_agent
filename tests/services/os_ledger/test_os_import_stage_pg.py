@@ -4,9 +4,9 @@ Runs only on the named disposable PostgreSQL 16 (``MIA_OS_LEDGER_TEST_POSTGRES_U
 database ``mia_ledger_test``), in a database of its own that it creates and drops. It writes with
 SQL shaped exactly like ``insert_import_batch``, ``insert_import_rows`` and ``set_import_status``
 (erratum E1-rev), so every CHECK, width and unique key of the real schema judges the rows
-``prepare`` produces. The ledger-level behaviour (the
-transaction kind guard, the status machine, promote) is the conformance suite's and
-``test_os_import_promote.py``'s, on the fake now and on the ``pg`` ledger case once V2-16 lands.
+``prepare`` produces. The ledger-level behaviour (the transaction kind guard, the status machine,
+stage, promote) is the conformance suite's and ``test_os_import_stage.py``'s and
+``test_os_import_promote.py``'s, on the fake and on the V2-16 ``pg`` ledger case.
 """
 
 import json

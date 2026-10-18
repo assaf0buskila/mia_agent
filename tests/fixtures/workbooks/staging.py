@@ -1,7 +1,7 @@
 """Shared helpers for the V2-30 stage and promote tests, written against ``LedgerEnv`` only.
 
 They use the ledger through ``api`` protocols and the ``rows``/``version`` observers, so the same
-tests run on the FakeLedger now and on PostgreSQL once V2-16 supplies its ``LedgerEnv``.
+tests run on the FakeLedger and on the V2-16 PostgreSQL ``LedgerEnv``.
 """
 
 from __future__ import annotations
@@ -50,10 +50,13 @@ def record_rows(env, table: str) -> dict[str, dict]:
 
 
 class E20Ledger:
-    """A ledger wrapped with erratum E20: an update into a FORK-DELETE end state refuses
-    ``has_dependents`` while a live dependent exists, applied one mutation at a time.
+    """A ledger that applies one mutation at a time and refuses ``has_dependents`` for an update
+    into a FORK-DELETE end state while a live dependent exists (erratum E20, read strictly).
 
-    It records the order in which records reach ``apply``. Everything else is the inner ledger.
+    The shared V2-16 ``apply`` judges liveness on the batch's result, so write order cannot matter
+    there. This wrapper is the stricter reading: a promote that is right under it is right under
+    both. It records the order in which records reach ``apply``. Everything else is the inner
+    ledger.
     """
 
     def __init__(self, inner) -> None:

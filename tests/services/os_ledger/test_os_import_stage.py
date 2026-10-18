@@ -1,5 +1,6 @@
-"""Staging a workbook through the frozen ledger API (erratum E1-rev), on the fake and, once V2-16
-supplies the ``pg`` ledger case, on PostgreSQL. Nothing here reads a real workbook."""
+"""Staging a workbook through the frozen ledger API (erratum E1-rev), on the fake and, when
+``MIA_OS_LEDGER_TEST_POSTGRES_URL`` is set, on the V2-16 PostgreSQL ledger (the ``pg`` case of
+the ``ledger`` fixture). Nothing here reads a real workbook."""
 
 import hashlib
 from copy import deepcopy

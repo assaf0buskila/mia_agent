@@ -1,14 +1,15 @@
 """Promotion of a staged batch through the frozen ledger API (contract section 15, E1-rev, E20).
 
-Runs on the FakeLedger now and on PostgreSQL once V2-16 supplies the ``pg`` ledger case. The
-workbooks are synthetic; the prototype stays the normalization oracle."""
+Runs on the FakeLedger and, when ``MIA_OS_LEDGER_TEST_POSTGRES_URL`` is set, on the V2-16 PostgreSQL
+ledger (the ``pg`` case of the ``ledger`` fixture). The workbooks are synthetic; the prototype
+stays the normalization oracle."""
 
 from datetime import timedelta
 
 import pytest
 from app.services.os_ledger import api
 from app.services.os_ledger import promote as promote_module
-from app.services.os_ledger.import_workbook import manifest_digest, stage
+from app.services.os_ledger.import_workbook import manifest_digest, prepare, stage
 from app.services.os_ledger.promote import promote
 
 from tests.fakes.contexts import make_ctx
@@ -286,6 +287,22 @@ def test_promote_follows_the_batch_status_machine_in_the_ledger(shadow, tmp_path
     refused("import_status_invalid", lambda: run(shadow, result))
     assert snapshot(shadow) == before and shadow.rows("os_clients") == []
     assert batch_row(shadow, result)["status"] == "failed"
+
+
+def test_a_batch_that_was_never_staged_is_refused_and_leaves_no_trace(shadow, tmp_path):
+    batch = prepare(workbook(tmp_path, tables_from_records(synthetic_records())),
+                    workspace_id=IMPORT_WS, authority_epoch=1)
+    before = snapshot(shadow)
+    # PostgreSQL raises the batch foreign key as ledger_integrity_failed; the fake models the same
+    # constraint as its own invariant assertion. Either way the whole transaction rolls back.
+    with pytest.raises((api.LedgerError, AssertionError)) as caught:
+        promote(shadow, worker(), batch, manifest_digest(batch))
+    if isinstance(caught.value, api.LedgerError):
+        assert (caught.value.code, caught.value.reason) == (
+            "ledger_integrity_failed", "import_status_batch_fk")
+    else:
+        assert "import_status_batch_fk" in str(caught.value)
+    assert snapshot(shadow) == before and shadow.rows("os_clients") == []
 
 
 def test_an_orphan_blocks_promotion_unless_the_signed_manifest_cancels_it(shadow, tmp_path):
