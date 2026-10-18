@@ -282,7 +282,7 @@ def _database_url() -> str:
 def _disposable_runtime(database_url: str, config: dict[str, str]):
     from app.core.config import Settings, get_settings
     from app.db.base import Base
-    from app.db.migrate import _split_statements
+    from app.db.migrate import _apply_file, _split_statements
     from app.main import app
     from fastapi.testclient import TestClient
     from sqlalchemy import create_engine, text
@@ -317,6 +317,9 @@ def _disposable_runtime(database_url: str, config: dict[str, str]):
             for _ in range(2):
                 for statement in _split_statements(migration.read_text(encoding="utf-8")):
                     connection.execute(text(statement))
+            # ADD CONSTRAINT has no IF NOT EXISTS: re-runs go through the runner's savepoints.
+            for _ in range(2):
+                _apply_file(connection, migration.parent / "20261015_owner_os_session_chains.sql")
             auth_grants = {
                 "owner_os_login_challenges": "SELECT, INSERT, UPDATE",
                 "owner_os_login_proofs": "INSERT",

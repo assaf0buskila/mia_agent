@@ -28,7 +28,8 @@ install -d -m 700 /var/lib/mia/caddy-data /var/lib/mia/caddy-config /var/lib/mia
 if [ ! -f /etc/mia/runtime.env ]; then
   db_password="$(openssl rand -hex 24)"
   umask 077
-  printf 'POSTGRES_DB=mia\nPOSTGRES_USER=mia\nPOSTGRES_PASSWORD=%s\n' "$db_password" > /etc/mia/postgres.env
+  # POSTGRES_INITDB_ARGS: a new cluster's TCP lines use scram-sha-256 instead of initdb's `trust` (E21).
+  printf 'POSTGRES_DB=mia\nPOSTGRES_USER=mia\nPOSTGRES_PASSWORD=%s\nPOSTGRES_INITDB_ARGS=--auth-host=scram-sha-256\n' "$db_password" > /etc/mia/postgres.env
   printf 'MIA_DATABASE_URL=postgresql://mia:%s@127.0.0.1:5432/mia\n' "$db_password" > /etc/mia/runtime.env
 fi
 

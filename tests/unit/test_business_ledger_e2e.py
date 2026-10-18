@@ -29,7 +29,7 @@ from uuid import uuid4
 import pytest
 from app.core.config import Settings, get_settings
 from app.db.base import Base
-from app.db.migrate import _split_statements
+from app.db.migrate import _apply_file, _split_statements
 from app.db.models import CrmContactRow
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import make_url
@@ -402,6 +402,10 @@ def live_ledger_runtime():
                 for _ in range(2):
                     for sql in _split_statements(migration.read_text(encoding="utf-8")):
                         connection.execute(text(sql))
+            # ADD CONSTRAINT has no IF NOT EXISTS: re-runs go through the runner's savepoints.
+            chains = repo / "migrations" / "20261015_owner_os_session_chains.sql"
+            for _ in range(2):
+                _apply_file(connection, chains)
             auth_grants = {
                 "owner_os_login_challenges": "SELECT, INSERT, UPDATE",
                 "owner_os_login_proofs": "INSERT",

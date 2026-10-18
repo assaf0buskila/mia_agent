@@ -198,10 +198,16 @@ def test_core_authority_state_is_none_without_a_dsn():
     assert api.core_authority_state(Settings(_env_file=None)) is None
 
 
-def test_lazy_entry_points_fail_closed_before_v2_16_lands():
+def test_lazy_entry_points_fail_closed_when_the_implementation_is_missing(monkeypatch):
     class WithDsn:
         owner_os_ledger_database_url = "postgresql://ledger@127.0.0.1:1/x"
 
+    # §22 E13: V2-16 has landed, so simulate a missing implementation module.
+    monkeypatch.setattr(
+        api.importlib,
+        "import_module",
+        lambda *a, **k: (_ for _ in ()).throw(ImportError("x")),
+    )
     with pytest.raises(api.LedgerError) as caught:
         api.core_authority_state(WithDsn())
     assert (caught.value.code, caught.value.reason) == (

@@ -25,6 +25,12 @@ services:
     network_mode: host
     command: ["postgres", "-c", "listen_addresses=127.0.0.1", "-c", "shared_buffers=128MB"]
     env_file: [/etc/mia/postgres.env]
+    environment:
+      # initdb runs once, for a NEW data directory. Without this it writes `trust` for 127.0.0.1 and
+      # ::1 above the scram line the image appends, and with host networking any process on the VM
+      # is then the superuser. The unix socket keeps its default: every VM tool reaches PostgreSQL
+      # through it as `mia`. An existing cluster is fixed by ops/gcp/vm/pg-hba-harden.sh (E21).
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
     volumes:
       - /var/lib/mia/postgres:/var/lib/postgresql/data
     healthcheck:

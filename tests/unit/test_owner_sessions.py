@@ -64,8 +64,12 @@ def _schema(session: Session) -> None:
           session_hash TEXT PRIMARY KEY, owner_id TEXT NOT NULL,
           workspace_id TEXT NOT NULL, login_proof_hash TEXT NOT NULL, scopes TEXT NOT NULL,
           expires_at TIMESTAMP NOT NULL, revoked_at TIMESTAMP,
-          created_at TIMESTAMP NOT NULL)
+          created_at TIMESTAMP NOT NULL,
+          chain_id TEXT, chain_started_at TIMESTAMP, authenticated_at TIMESTAMP,
+          first_used_at TIMESTAMP, rotated_at TIMESTAMP, grace_until TIMESTAMP,
+          successor_hash TEXT)
         """,
+        "CREATE INDEX ix_owner_os_sessions_chain ON owner_os_sessions(chain_id)",
         """
         CREATE TABLE owner_os_revocations (
           owner_id TEXT PRIMARY KEY, revoked_before TIMESTAMP NOT NULL)

@@ -20,6 +20,7 @@ POSTGRES_ONLY = frozenset(
         "20261011_owner_os_sessions.sql",
         # Registered as PostgreSQL-only, but kept OUT of this runner's directory.
         "20261015_assaf_os_ledger.sql",
+        "20261015_owner_os_session_chains.sql",
     }
 )
 

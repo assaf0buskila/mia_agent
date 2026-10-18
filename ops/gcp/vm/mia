@@ -17,8 +17,10 @@ usage: sudo mia <command>
                         explicitly apply ledger schema after owner go and V2-14a
   telegram-webhook      register https://<public url>/v1/telegram/webhook with Telegram
   go-live               after DNS points here: https enable, jobs resume, webhook, first ingest
-  restore <dump>        replace the database with a pg_dump custom-format file
-  backup                write a database dump to /var/lib/mia/backups
+  restore <dump>        replace the database with a pg_dump custom-format file, give the
+                        roles their ownership and grants back, and only then start the services.
+                        It pauses the jobs first; resume them with `jobs resume` once ready
+  backup               write a database dump to /var/lib/mia/backups
   status                containers, health and timers
   logs [service]        follow logs (postgres, migrate, app, caddy)
 EOF
@@ -28,6 +30,9 @@ die() { echo "mia: $*" >&2; exit 1; }
 https_marker="${MIA_HTTPS_MARKER:-/etc/mia/https-enabled}"
 jobs_paused="${MIA_JOBS_PAUSED:-/etc/mia/jobs-paused}"
 jobs=(mia-due-scan mia-ingest-knowledge)
+# Every dump leaves the personal statement line detail out (FORK-BACKUP). A restored pending
+# batch has no lines, and the first os-retention run finishes it as `restored_without_detail`.
+dump_exclude=(--exclude-table-data=assaf_os.os_statement_batch_lines)
 
 compose() {
   local profile=()
@@ -58,7 +63,12 @@ try:
 except urllib.error.HTTPError as error:
     sys.exit(f"mia: cannot read secret mia-env (HTTP {error.code}); run ops/gcp/push-settings.ps1")
 data = json.loads(response.read())["payload"]["data"]
-owned = re.compile(r"^(MIA_DATABASE_URL|POSTGRES_\w+|PG\w+)\s*=")
+# VM-owned names never come from mia-env: the ledger DSNs and the posture live in the VM-owned
+# /etc/mia/runtime.env and /etc/mia/os-ledger-migrate.env. Only the ledger family is owned here
+# (MIA_OWNER_OS_LEDGER_*, MIA_OS_LEDGER_*, MIA_APP_ROLE_POSTURE). The rest of MIA_OWNER_OS_*
+# (the enable flags, the Google keys, the session secret and DSN that provision_auth.py wrote into
+# mia-env) stays settable from mia-env and must not be added to this pattern.
+owned = re.compile(r"^(MIA_DATABASE_URL|POSTGRES_\w+|PG\w+|MIA_OWNER_OS_LEDGER_\w+|MIA_OS_LEDGER_\w+|MIA_APP_ROLE_POSTURE)\s*=")
 assignment = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
 lines = []
 for raw in base64.b64decode(data).decode("utf-8").splitlines():
@@ -136,6 +146,220 @@ WantedBy=timers.target
 EOF
   systemctl daemon-reload
   systemctl enable --now mia-due-scan.timer mia-ingest-knowledge.timer >/dev/null
+}
+
+# --- after pg_restore: give the roles back what a restore strips (V2-10) ----------------------
+#
+# `pg_restore --no-owner --no-privileges` leaves every object owned by mia and every grant gone,
+# so mia_app could not read its own tables and assaf_os would lose its owner and its grants.
+# `mia restore` runs post_restore_reapply between pg_restore and start_services, under the
+# /var/lock/mia-state.lock it already holds, so nothing below may flock that file again. A failure
+# prints one fixed reason code and stops with the services DOWN. Every step is idempotent: fix
+# the cause and run `mia restore` again. Nothing here prints DSNs, passwords or row data.
+# Step 2's provision_ledger.py does print the DDL and GRANT statements it ran, and step 1's
+# helper prints one JSON line; neither prints a secret.
+app_role_dir=/opt/mia/app-role-demote
+
+restore_note() { echo "mia: post-restore $*"; }
+
+restore_fail() {
+  echo "mia: restore stopped, the services stay down: reason=$1" >&2
+  exit 1
+}
+
+# SQL as the superuser mia (docker exec, unix socket) against one database.
+restore_sql() {
+  local database="$1"; shift
+  compose exec -T postgres psql -X -qAt -v ON_ERROR_STOP=1 -U mia -d "$database" "$@"
+}
+
+# Step 1, V2-14a: ownership of every public object and the grants go back to mia_app.
+restore_demote_reapply() {
+  local exists
+  exists="$(restore_sql postgres -c "SELECT 1 FROM pg_roles WHERE rolname='mia_app'")" \
+    || restore_fail restore_catalog_unreadable
+  if [ "$exists" != 1 ]; then
+    restore_note "app_role_reapply skipped reason=app_role_not_demoted"
+    return 0
+  fi
+  [ -f "$app_role_dir/app_role_demote.py" ] && [ -f "$app_role_dir/sql/app-role-demote.sql" ] \
+    || restore_fail app_role_reapply_unavailable
+  # Called directly, never through app-role-demote.sh: this process holds the state lock and the
+  # wrapper's flock -n on the same file would report it busy.
+  python3 "$app_role_dir/app_role_demote.py" --reapply || restore_fail app_role_reapply_failed
+  restore_note "app_role_reapply ok"
+}
+
+# Step 2, V2-15: assaf_os gets its owner, its revokes and its exact grants back. The script is
+# the one deployed with the running image, mounted into that image, run as root because it reads
+# /etc/mia/runtime.env. /etc/mia is mounted READ-ONLY: a restore never writes a VM-owned file. A
+# ledger runtime role that is missing (a fresh cluster) is therefore created only from a DSN that
+# is already staged in runtime.env; with nothing staged the script refuses before it creates
+# anything and the restore stops: provision it explicitly first (provision_ledger.py --mode
+# provision, per the runbook). A database without assaf_os has nothing to repair.
+restore_ledger_reapply() {
+  local present tag script
+  present="$(restore_sql mia -c "SELECT to_regnamespace('assaf_os') IS NOT NULL")" \
+    || restore_fail restore_catalog_unreadable
+  if [ "$present" != t ]; then
+    restore_note "ledger_reapply skipped reason=ledger_schema_absent"
+    return 0
+  fi
+  tag="$(sed -n 's/^MIA_TAG=//p' /opt/mia/tag.env)"
+  [[ "$tag" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || restore_fail ledger_reapply_unavailable
+  script="/opt/mia/src/$tag/ops/assaf-os/provision_ledger.py"
+  [ -f "$script" ] && [ ! -L "$script" ] || restore_fail ledger_reapply_unavailable
+  [ -f /etc/mia/os-ledger-migrate.env ] || restore_fail ledger_reapply_unavailable
+  # The same key check `mia os-ledger` makes: compose must not read any other key from this file.
+  awk '
+      /^[[:space:]]*(#|$)/ { next }
+      !/^MIA_OS_LEDGER_MIGRATION_DATABASE_URL=('\''[^'\'']*'\''|"[^"]*"|[^[:space:]'\''"]+)[[:space:]]*$/ { exit 1 }
+    ' /etc/mia/os-ledger-migrate.env || restore_fail ledger_reapply_unavailable
+  compose --profile os-ledger run --rm --no-deps -T --user root \
+    -v "$script:/app/ops/assaf-os/provision_ledger.py:ro" -v /etc/mia:/etc/mia:ro \
+    --entrypoint sh os-ledger-migrate \
+    -c 'exec python /app/ops/assaf-os/provision_ledger.py --target mia-vm --mode reapply --apply --approved-sha "$MIA_BUILD_SHA"' \
+    || restore_fail ledger_reapply_failed
+  restore_note "ledger_reapply ok"
+}
+
+# The main DSN's role and password, from the VM-owned runtime.env. Only the canonical loopback
+# form V2-14a and bootstrap write is accepted. The password lives in a shell variable until it is
+# piped to the probe on stdin; it is never an argument and never printed.
+restore_read_main_dsn() {
+  local count line
+  count="$(grep -c '^MIA_DATABASE_URL=' /etc/mia/runtime.env 2>/dev/null)" || true
+  [ "$count" = 1 ] || restore_fail main_dsn_invalid
+  line="$(grep '^MIA_DATABASE_URL=' /etc/mia/runtime.env)"
+  [[ "$line" =~ ^MIA_DATABASE_URL=postgresql://([a-z_][a-z0-9_]*):([0-9a-f]+)@127\.0\.0\.1:5432/mia$ ]] \
+    || restore_fail main_dsn_invalid
+  main_role="${BASH_REMATCH[1]}"
+  main_password="${BASH_REMATCH[2]}"
+}
+
+# Step 3: V2-14's own posture validator, run for real in the deployed image on the real main DSN.
+# Only once the main DSN is the demoted role: before the cutover it is still the superuser mia.
+# It proves the role's catalog posture, not its password: while the cluster's loopback pg_hba
+# line is `trust` (the postgres image's initdb default, ahead of POSTGRES_HOST_AUTH_METHOD), a
+# wrong password still connects. Closing that line is ops/gcp/vm/pg-hba-harden.sh (E21), step 1a of
+# docs/runbooks/APP_ROLE_DEMOTE.md; new clusters get scram from initdb (compose.yaml, bootstrap.sh).
+restore_main_role_validate() {
+  restore_read_main_dsn
+  unset main_password
+  if [ "$main_role" != mia_app ]; then
+    restore_note "main_role_validation skipped reason=main_dsn_not_demoted"
+    return 0
+  fi
+  local check
+  IFS= read -r -d '' check <<'PY' || true
+import os
+
+from sqlalchemy import create_engine, text
+
+from app.db.os_ledger_migrate import _validate_main_role_catalog
+from app.db.session import sqlalchemy_database_url
+
+engine = create_engine(
+    sqlalchemy_database_url(os.environ["MIA_DATABASE_URL"]), connect_args={"connect_timeout": 10}
+)
+with engine.connect() as conn:
+    if not conn.scalar(text("SELECT session_user = current_user AND current_user = 'mia_app'")):
+        raise SystemExit(1)
+    _validate_main_role_catalog(conn, "mia_app")
+PY
+  compose run --rm --no-deps -T --entrypoint python app -c "$check" >/dev/null 2>&1 \
+    || restore_fail main_role_validation_failed
+  restore_note "main_role_validation ok"
+}
+
+# Step 4: every owner session issued before the restore is revoked. The owner-auth database
+# (assaf_os_auth) is not part of this restore, but the data its sessions act on just went back
+# in time. Mirrors OwnerSessionStore.revoke_all_for_authenticated_owner for every owner it knows:
+# revoked_before moves forward (never back) and the open sessions are closed. Before the owner
+# auth exists (no database, no tables) there is no session to revoke: skipped, with the reason.
+restore_revoke_owner_sessions() {
+  local present tables
+  present="$(restore_sql postgres -c "SELECT 1 FROM pg_database WHERE datname='assaf_os_auth'")" \
+    || restore_fail owner_session_revoke_failed
+  if [ "$present" != 1 ]; then
+    restore_note "owner_session_revoke skipped reason=owner_auth_database_absent"
+    return 0
+  fi
+  tables="$(restore_sql assaf_os_auth -c "SELECT count(*) FROM pg_class WHERE relnamespace = 'public'::regnamespace AND relkind = 'r' AND relname IN ('owner_os_sessions', 'owner_os_revocations', 'owner_os_login_proofs')")" \
+    || restore_fail owner_session_revoke_failed
+  case "$tables" in
+    0)
+      restore_note "owner_session_revoke skipped reason=owner_auth_tables_absent"
+      return 0
+      ;;
+    3) ;;
+    *) restore_fail owner_session_revoke_failed ;;
+  esac
+  restore_sql assaf_os_auth -1 <<'SQL' || restore_fail owner_session_revoke_failed
+SET LOCAL lock_timeout = '5s';
+SET LOCAL statement_timeout = '30s';
+INSERT INTO public.owner_os_revocations (owner_id, revoked_before)
+SELECT owner_id, now()
+FROM (
+  SELECT owner_id FROM public.owner_os_sessions
+  UNION SELECT owner_id FROM public.owner_os_login_proofs
+  UNION SELECT owner_id FROM public.owner_os_revocations
+) AS owners
+ON CONFLICT (owner_id) DO UPDATE
+SET revoked_before = GREATEST(public.owner_os_revocations.revoked_before, EXCLUDED.revoked_before);
+UPDATE public.owner_os_sessions SET revoked_at = now() WHERE revoked_at IS NULL;
+SQL
+  restore_note "owner_session_revoke ok"
+}
+
+# Step 5: a REAL access probe as the main DSN role. V2-14's posture check does not look at public
+# table access, and a restore that was not repaired still passes it while every query is denied.
+# SELECT from an application table, then INSERT into it, all rolled back. A row the table itself
+# refuses (class 23: NOT NULL, key, check) means the privilege check already passed. Any other
+# error, such as permission denied, fails the probe. The password goes over stdin, but it proves
+# privileges, not authentication: under a `trust` loopback pg_hba line the server never checks it.
+restore_access_probe() {
+  restore_read_main_dsn
+  local probe
+  IFS= read -r -d '' probe <<'SQL' || true
+BEGIN;
+SET LOCAL statement_timeout = '30s';
+DO $probe$
+DECLARE target text;
+BEGIN
+  SELECT quote_ident(c.relname) INTO target FROM pg_class c
+  WHERE c.relnamespace = 'public'::regnamespace AND c.relkind = 'r'
+    AND NOT EXISTS (SELECT 1 FROM pg_trigger t WHERE t.tgrelid = c.oid AND NOT t.tgisinternal)
+  ORDER BY c.relname LIMIT 1;
+  IF target IS NULL THEN
+    RAISE EXCEPTION 'no application table to probe';
+  END IF;
+  EXECUTE format('SELECT 1 FROM public.%s LIMIT 1', target);
+  BEGIN
+    EXECUTE format('INSERT INTO public.%s DEFAULT VALUES', target);
+  EXCEPTION WHEN integrity_constraint_violation THEN
+    NULL;
+  END;
+END
+$probe$;
+ROLLBACK;
+SQL
+  printf '%s\n' "$main_password" | compose exec -T postgres sh -c \
+    'IFS= read -r PGPASSWORD; export PGPASSWORD; exec psql -X -qAt -v ON_ERROR_STOP=1 -h 127.0.0.1 -U "$1" -d mia -c "$2"' \
+    sh "$main_role" "$probe" >/dev/null 2>&1 \
+    || { unset main_password; restore_fail app_role_access_probe_failed; }
+  unset main_password
+  restore_note "access_probe ok role=$main_role"
+}
+
+post_restore_reapply() {
+  set +x
+  restore_demote_reapply
+  restore_ledger_reapply
+  restore_main_role_validate
+  restore_revoke_owner_sessions
+  restore_access_probe
+  restore_note "complete"
 }
 
 cmd="${1:-}"; shift || true
@@ -241,12 +465,17 @@ case "$cmd" in
     file="${1:?usage: mia restore <dump file>}"
     [ -s "$file" ] || die "missing or empty dump: $file"
     [ -f /opt/mia/tag.env ] || die "deploy once before restoring"
+    # A job timer that fires while the database is dropped, half restored or half repaired would
+    # touch it: `mia job` takes no state lock. Pause the jobs now; they stay paused until the
+    # operator has checked readiness and resumes them, also after a post-step abort.
+    install -m 600 /dev/null "$jobs_paused"
+    echo "mia: jobs are paused for the restore; after readiness run: sudo mia jobs resume"
     compose stop caddy app >/dev/null 2>&1 || true
     compose up -d postgres
     wait_healthy postgres
     if compose exec -T postgres psql -U mia -d mia -tAc "select count(*) from information_schema.tables where table_schema='public'" 2>/dev/null | grep -qv '^0$'; then
       safety="/var/lib/mia/backups/pre-restore-$(date -u +%Y%m%dT%H%M%SZ).dump"
-      compose exec -T postgres pg_dump -U mia -d mia --format=custom > "$safety"
+      compose exec -T postgres pg_dump -U mia -d mia --format=custom "${dump_exclude[@]}" > "$safety"
       chmod 600 "$safety"
       echo "mia: existing database saved to $safety"
     fi
@@ -254,11 +483,13 @@ case "$cmd" in
       -c "DROP DATABASE IF EXISTS mia WITH (FORCE)" -c "CREATE DATABASE mia OWNER mia"
     compose exec -T postgres pg_restore -U mia -d mia --no-owner --no-privileges --exit-on-error < "$file"
     echo "mia: restored $(compose exec -T postgres psql -U mia -d mia -tAc "select count(*) from information_schema.tables where table_schema='public'") tables"
+    # Roles and grants come back BEFORE anything can reach the database. Any failure stops here.
+    post_restore_reapply
     start_services
     ;;
   backup)
     file="/var/lib/mia/backups/mia-$(date -u +%Y%m%dT%H%M%SZ).dump"
-    compose exec -T postgres pg_dump -U mia -d mia --format=custom > "$file"
+    compose exec -T postgres pg_dump -U mia -d mia --format=custom "${dump_exclude[@]}" > "$file"
     chmod 600 "$file"
     echo "$file"
     ;;
