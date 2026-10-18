@@ -816,6 +816,7 @@ class CrmActivityRow(Base):
     action: Mapped[str] = mapped_column(Text, default="")
     result: Mapped[str] = mapped_column(Text, default="")
     source_ref: Mapped[str] = mapped_column(String(255))
+    is_test: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
     created_at: Mapped[str] = mapped_column(String(64), default="")
 
 
