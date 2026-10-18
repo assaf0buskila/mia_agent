@@ -455,7 +455,8 @@ class Generator:
                if before.get("kind") != PAYMENT_REFUND else
                # §22 E20 now refuses tombstoning an original under a live refund (has_dependents)
                # before validation, so the refund side is re-pointed instead: to any payment, a
-               # tombstoned or cancelled one, or none, keeping refund_original_not_found reachable.
+               # tombstoned or cancelled one, or none, so apply's refund-graph refusals stay
+               # exercised.
                [{"original_payment_id": r.choice((*model["payments"], "PAY_none"))}]),
             "time": [{"minutes": r.randint(0, 300)}, {"date": r.choice(DATES)},
                      {"status": r.choice((TIME_ACTIVE, TIME_CANCELLED))},
