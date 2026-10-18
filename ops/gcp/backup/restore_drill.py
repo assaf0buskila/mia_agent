@@ -380,9 +380,7 @@ def _drill(
         finally:
             key_file.unlink(missing_ok=True)
         if not report.check(
-            "decrypt",
-            opened.returncode == 0,
-            "" if opened.returncode == 0 else backup_lib.tail(opened.stderr),
+            "decrypt", opened.returncode == 0, backup_lib.exit_detail("openssl", opened.returncode)
         ):
             return
         if not report.check(
@@ -411,7 +409,7 @@ def _drill(
             schema.returncode == 0 and not findings,
             f"{len(findings)} grants to PUBLIC"
             if findings
-            else ("" if schema.returncode == 0 else backup_lib.tail(schema.stderr)),
+            else backup_lib.exit_detail("pg_restore", schema.returncode),
         )
 
     # 3. the scratch server must not be production
@@ -433,7 +431,7 @@ def _drill(
     if not report.check(
         "scratch_created",
         created_db.returncode == 0,
-        "" if created_db.returncode == 0 else backup_lib.tail(created_db.stderr),
+        backup_lib.exit_detail("psql", created_db.returncode),
     ):
         return
     report.data["scratch_database"] = scratch
@@ -445,7 +443,7 @@ def _drill(
             report.check(
                 "restore",
                 restored.returncode == 0,
-                "" if restored.returncode == 0 else backup_lib.tail(restored.stderr),
+                backup_lib.exit_detail("pg_restore", restored.returncode),
             )
         if restored.returncode == 0:
             with timed("checks"):

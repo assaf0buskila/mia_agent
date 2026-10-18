@@ -183,6 +183,8 @@ class FakeScratch:
     migrations: str = "5|20261011_owner_reminders.sql"
     public_acl_entries: int = 0
     restore_rc: int = 0
+    restore_stderr: bytes = b"pg_restore: error"
+    fail_stderr: bytes = b"ERROR: simulated failure"  # what a failing psql statement prints
     ledger_present: bool = False
     ledger_posture: str = "0|0|0|0|0"
     fail_statements: tuple[str, ...] = ()
@@ -214,7 +216,7 @@ class FakeScratch:
             statement = call.argv[call.argv.index("-c") + 1]
             self.sql.append(statement)
             if any(part in statement for part in self.fail_statements):
-                return backup_lib.Result(1, b"", b"ERROR: simulated failure")
+                return backup_lib.Result(1, b"", self.fail_stderr)
             return backup_lib.Result(0, self._answer(statement).encode(), b"")
         if tool == "pg_restore":
             if "--list" in call.argv:
@@ -223,7 +225,7 @@ class FakeScratch:
                 return backup_lib.Result(0, self.schema_sql.encode(), b"")
             self.restored_into.append(call.argv[call.argv.index("-d") + 1])
             self.restored_bytes.append(call.stdin_path.read_bytes())
-            failure = b"pg_restore: error" if self.restore_rc else b""
+            failure = self.restore_stderr if self.restore_rc else b""
             return backup_lib.Result(self.restore_rc, b"", failure)
         return None
 

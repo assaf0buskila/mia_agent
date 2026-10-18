@@ -324,7 +324,14 @@ def test_mia_calls_the_real_script_with_flags_it_accepts_and_the_pin_the_driver_
         "GRANT CONNECT ON DATABASE mia TO assaf_os_ledger;",
     ):
         assert statement in plan, statement
-    assert plan[-1].startswith("GRANT ") and "assaf_os_ledger" in plan[-1]
+    # the plan ends with the whole reviewed grant set, in order: V2-15's, then V2-14b's retention
+    # grants. Pinning plan[-1] to one role broke when V2-14b appended its own grants.
+    from app.services.os_ledger.role_policy import ledger_grant_statements
+
+    grants = ledger_grant_statements()
+    assert len(grants) > 1
+    assert tuple(plan[-len(grants):]) == grants
+    assert "GRANT USAGE ON SCHEMA assaf_os TO assaf_os_retention;" in grants  # V2-14b is in it
 
 
 def test_the_restore_arm_pauses_the_jobs_before_it_drops_the_database():
@@ -713,14 +720,9 @@ class Drill:
 
     def build(self) -> None:
         """A production-like `mia`: V2-14a demoted, V2-14's real ledger, V2-15's real provision."""
-        from app.db.os_ledger_migrate import apply_ledger_migrations
-
         self.reset()
         self.psql("postgres", "CREATE DATABASE mia OWNER mia; CREATE DATABASE assaf_os_auth "
                   "OWNER mia;")
-        spec = importlib.util.spec_from_file_location("v210_demote", DEMOTE_PY)
-        demote = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(demote)
         self.psql("mia", """
             CREATE TABLE public.drill_accounts (id serial PRIMARY KEY, name text NOT NULL);
             CREATE TABLE public.drill_notes (id bigserial PRIMARY KEY, body text);
@@ -728,9 +730,7 @@ class Drill:
             INSERT INTO public.drill_accounts(name) VALUES ('kept-one'), ('kept-two');
             INSERT INTO public.drill_notes(body) VALUES ('note');
         """, user="mia")
-        # V2-14a's reviewed SQL, exactly as `stage` would run it
-        self.psql("mia", demote.transaction(f"ALTER ROLE mia_app PASSWORD '{PASSWORD}';\n"),
-                  user="mia")
+        self.stage_main_role()
         migration = (ROOT / "migrations/20261011_owner_os_sessions.sql").read_text(encoding="utf-8")
         self.psql("assaf_os_auth", migration, user="mia")
         self.psql("assaf_os_auth", """
@@ -747,17 +747,33 @@ class Drill:
             INSERT INTO owner_os_revocations(owner_id, revoked_before)
             VALUES ('1001', now() - interval '30 days');
         """, user="mia")
-        # V2-14's real migration, as the superuser `mia`: assaf_os, its tables, functions, trigger
-        # and the owner role, with the demoted main role checked inside the transaction.
+        self.migrate_ledger()
+        self.psql("mia", "INSERT INTO assaf_os.os_workspaces(workspace_id, owner_id, epoch) "
+                  "VALUES ('assaf-os', '1001', 1);", user="mia")
+        self.provision_ledger_roles()
+
+    def stage_main_role(self, *, check: bool = True):
+        """V2-14a's reviewed SQL, exactly as `stage` would run it (the demoted role mia_app)."""
+        spec = importlib.util.spec_from_file_location("v210_demote", DEMOTE_PY)
+        demote = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(demote)
+        return self.psql("mia", demote.transaction(f"ALTER ROLE mia_app PASSWORD '{PASSWORD}';\n"),
+                         user="mia", check=check)
+
+    def migrate_ledger(self) -> None:
+        """V2-14's real migration, as the superuser `mia`: assaf_os, its tables, functions, trigger
+        and the owner role, with the demoted main role checked inside the transaction."""
+        from app.db.os_ledger_migrate import apply_ledger_migrations
+
         engine = self.engine("mia")
         try:
             apply_ledger_migrations(engine, main_role="mia_app")
         finally:
             engine.dispose()
-        self.psql("mia", "INSERT INTO assaf_os.os_workspaces(workspace_id, owner_id, epoch) "
-                  "VALUES ('assaf-os', '1001', 1);", user="mia")
-        # V2-15's real provisioning: the runtime and retention roles, the exact grant map, and
-        # the runtime DSN staged in the drill's runtime.env (the VM-owned file), then validated.
+
+    def provision_ledger_roles(self) -> None:
+        """V2-15's real provisioning: the runtime and retention roles, the exact grant map, and
+        the runtime DSN staged in the drill's runtime.env (the VM-owned file), then validated."""
         self.write_runtime_env(f"MIA_DATABASE_URL=postgresql://mia_app:{PASSWORD}@127.0.0.1:5432/mia\n")
         self.ledger("provision", check=True)
         staged = [
@@ -766,6 +782,29 @@ class Drill:
         ]
         assert len(staged) == 1, "provision must stage exactly one ledger DSN"
         self.ledger_line = staged[0] + "\n"
+
+    def recreate_database(self) -> None:
+        """The empty `mia` a new VM has: exactly the two statements the README gives as the way out
+        of a restore that ran first, plus the app's tables the deploy's own `migrate` made."""
+        self.psql("postgres", "DROP DATABASE IF EXISTS mia WITH (FORCE); "
+                  "CREATE DATABASE mia OWNER mia;")
+        self.psql("mia", "CREATE TABLE public.new_vm_accounts (id serial PRIMARY KEY, name text);",
+                  user="mia")
+
+    def documented_order(self) -> None:
+        """The README's recovery order, before any restore: V2-14a's stage, V2-14's migration,
+        V2-15's provision."""
+        self.stage_main_role()
+        self.migrate_ledger()
+        self.provision_ledger_roles()
+
+    def build_new_vm(self, *, prepared: bool) -> None:
+        """A freshly bootstrapped VM: the superuser `mia` and an empty `mia` database. Roles are
+        cluster-global, so the old VM's roles are gone too (`reset` drops them)."""
+        self.reset()
+        self.recreate_database()
+        if prepared:
+            self.documented_order()
 
     def write_runtime_env(self, text: str) -> None:
         self.runtime_env.write_text(text, encoding="utf-8", newline="\n")
@@ -821,6 +860,31 @@ class Drill:
             CREATE TABLE public.old_accounts (id serial PRIMARY KEY, name text NOT NULL);
             INSERT INTO public.old_accounts(name) VALUES ('old');
         """, user="mia")
+
+    batch_proposal = "PRP_DRILL_BATCH"
+
+    def add_private_batch_line(self) -> str:
+        """A real pending statement batch and one private line of it, in V2-14b's real tables.
+
+        Inserted as the migration identity `mia`. Returns the private text that must never reach
+        a dump.
+        """
+        private = "PRIVATE-LINE-DETAIL"
+        self.psql("mia", f"""
+            INSERT INTO assaf_os.os_proposals(workspace_id, proposal_id, request_id, request_digest,
+                envelope_digest, owner_id, epoch, approval_id, rejection_id, entity, record_id,
+                expected_revision, mutations, dependency_digest, source, kind, status, created_at,
+                expires_at)
+            VALUES ('assaf-os', '{self.batch_proposal}', gen_random_uuid(), repeat('a', 64),
+                repeat('b', 64), '1001', 1, gen_random_uuid(), gen_random_uuid(), 'statements',
+                'STM_' || repeat('c', 32), 0, '[]'::jsonb, repeat('d', 64), 'ASSISTANT_PASTE',
+                'statement_batch', 'pending', now(), now() + interval '1 day');
+            INSERT INTO assaf_os.os_statement_batch_lines(workspace_id, proposal_id, line_key,
+                occurrence_index, detail)
+            VALUES ('assaf-os', '{self.batch_proposal}', repeat('e', 64), 0,
+                '{{"merchant": "{private}"}}');
+        """, user="mia")
+        return private
 
     def add_unreviewed_ledger_table(self) -> None:
         """An object V2-15's exact validator does not know: no reapply makes this posture clean."""
@@ -935,6 +999,16 @@ def _ledger_engine(rig: Drill):
     return rig.engine("assaf_os_ledger")
 
 
+def _assert_both_real_validators(rig: Drill) -> None:
+    """V2-14's posture validator and V2-15's exact validator, on the restored database."""
+    from app.db.os_ledger_migrate import _validate_main_role_catalog
+    from app.services.os_ledger.role_policy import validate_ledger_catalog
+
+    with rig.engine("postgres").begin() as conn:
+        _validate_main_role_catalog(conn, "mia_app")
+        validate_ledger_catalog(conn, main_role="mia_app", migration_role="mia")
+
+
 def test_drill_a_restore_gives_both_postures_back_and_only_then_starts_the_services(drill):
     from app.db.os_ledger_migrate import _validate_main_role_catalog
     from app.services.os_ledger.role_policy import validate_ledger_catalog, validate_ledger_role
@@ -1033,30 +1107,51 @@ def test_drill_restoring_the_same_dump_twice_is_idempotent(drill):
     assert drill.scalar("mia", "SELECT count(*) FROM public.drill_accounts") == "2"
 
 
-def test_drill_the_safety_dump_keeps_the_data_but_not_the_batch_line_detail(drill):
-    """V2-14b's batch-line table is not in the merged schema yet; this stand-in table is the shape.
+def test_drill_the_dumps_keep_the_data_but_not_the_batch_line_detail(drill):
+    """V2-14b's real `os_statement_batch_lines` (merged in #168) is in the schema this drill builds.
 
-    The live database gets it, the safety dump of that live database must not carry its rows. The
-    post-step is skipped here because V2-15's exact validator, rightly, rejects an unknown table.
+    A pending statement batch holds private line detail until its purge. Neither the safety dump
+    that `mia restore` takes of the live database nor the off-site dump may carry that detail, while
+    the rest of the data (the parent proposal, the public tables) stays in both. The restore of the
+    off-site dump runs the whole post-step, so it must also pass V2-14's and V2-15's real
+    validators on the real table.
     """
-    dump = drill.dump("source.dump")
-    drill.psql("mia", """
-        CREATE TABLE assaf_os.os_statement_batch_lines (id serial PRIMARY KEY, detail text);
-        INSERT INTO assaf_os.os_statement_batch_lines(detail) VALUES ('PRIVATE-LINE-DETAIL');
-    """, user="mia")
-    with_lines = drill.dump("with-lines.dump")
-    result = drill.restore(dump, skip_post_step=True)
-    assert result.rc == 0 and result.finished, result.err
+    private = drill.add_private_batch_line()
+    data = "TABLE DATA assaf_os os_statement_batch_lines"
+    shape = "TABLE assaf_os os_statement_batch_lines"
+
+    # The control: without the exclusion the detail is in the dump, so its absence below means
+    # something. A custom-format dump is compressed, so the readable proof is the restore script.
+    unfiltered = drill.tmp / "unfiltered.dump"
+    drill.tool("pg_dump", "-d", "mia", "--format=custom", stdout=unfiltered)
+    assert data in drill.tool("pg_restore", "--list", stdin=unfiltered)
+    assert private in drill.tool("pg_restore", "-f", "-", stdin=unfiltered)
+
+    # the off-site dump of the live database (the flag backup_lib passes), and the safety dump
+    offsite = drill.dump("offsite.dump")
+    result = drill.restore(offsite)  # the post-step is ON: no skip_post_step
+    assert result.rc == 0 and result.finished, result.err + result.out
+    assert "mia: post-restore complete" in result.out and "skipped" not in result.out
     [safety] = list((drill.tmp / "backups").glob("pre-restore-*.dump"))
-    listing = drill.tool("pg_restore", "--list", stdin=safety)
-    assert "TABLE assaf_os os_statement_batch_lines" in listing  # the shape survives
-    assert "TABLE DATA assaf_os os_statement_batch_lines" not in listing  # the detail does not
-    assert "TABLE DATA public drill_accounts" in listing
-    assert "PRIVATE-LINE-DETAIL" not in safety.read_bytes().decode("latin-1")
-    # the offsite dump of the same database obeys the same rule
-    source = drill.tool("pg_restore", "--list", stdin=with_lines)
-    assert "TABLE assaf_os os_statement_batch_lines" in source
-    assert "TABLE DATA assaf_os os_statement_batch_lines" not in source
+    for dump in (offsite, safety):
+        listing = drill.tool("pg_restore", "--list", stdin=dump)
+        assert shape in listing  # the shape survives
+        assert data not in listing  # the detail does not
+        assert "TABLE DATA assaf_os os_proposals" in listing  # the rest of the ledger does
+        assert "TABLE DATA public drill_accounts" in listing
+        script = drill.tool("pg_restore", "-f", "-", stdin=dump)
+        assert private not in script  # not even as text in the restore script
+        assert drill.batch_proposal in script
+
+    # the restore came back with the shape, the parent row and no private detail, and it is valid
+    count = "SELECT count(*) FROM assaf_os.{table}"
+    assert drill.scalar("mia", count.format(table="os_statement_batch_lines")) == "0"
+    assert drill.scalar("mia", count.format(table="os_proposals")
+                        + f" WHERE proposal_id = '{drill.batch_proposal}'") == "1"
+    _assert_both_real_validators(drill)
+    owner = ("SELECT pg_get_userbyid(relowner) FROM pg_class "
+             "WHERE oid = 'assaf_os.os_statement_batch_lines'::regclass")
+    assert drill.scalar("mia", owner) == "assaf_os_owner"
 
 
 def test_drill_a_posture_the_real_validator_rejects_stops_the_restore_and_is_retryable(drill):
@@ -1169,6 +1264,82 @@ def test_drill_a_missing_ledger_runtime_role_is_recreated_from_the_staged_dsn_wi
     assert drill.ledger_line in result.env_after  # the staged DSN is untouched
     assert any("/etc/mia:/etc/mia:ro" in call for call in result.calls)
     assert not drill.write_log.exists()  # and the read-only mount was never even tried
+
+
+def test_drill_a_new_vm_that_restores_first_stops_and_the_stage_then_refuses(drill):
+    """The fresh-cluster finding, reproduced: restoring before the roles exist has no way forward.
+
+    A new VM has no mia_app and no ledger roles. A dump that holds assaf_os stops at step 2, and
+    V2-14a's stage, run afterwards on the restored database, refuses (`pg_restore --no-privileges`
+    left PUBLIC EXECUTE on the assaf_os functions). The README therefore puts the roles first.
+    """
+    dump = drill.dump("old-vm.dump")
+    drill.build_new_vm(prepared=False)
+    result = drill.restore(dump, dsn_role="mia", stage_ledger=False)
+    assert result.rc == 1 and not result.finished and not result.started
+    assert "reason=ledger_reapply_failed" in result.err
+    assert "ledger_provision_refused" in result.err
+    assert result.jobs_paused
+    assert not drill.write_log.exists()  # the read-only mount was never written through
+
+    refused = drill.stage_main_role(check=False)  # V2-14a on the restored database
+    assert refused.returncode != 0 and "app_role_ledger_access_unsafe" in refused.stderr
+    roles = "SELECT count(*) FROM pg_roles WHERE rolname = 'mia_app'"
+    assert drill.scalar("postgres", roles) == "0"
+
+
+def test_drill_a_new_vm_that_restored_first_recovers_by_recreating_the_database_empty(drill):
+    """The way out the README gives for a restore that ran before the roles existed.
+
+    The failed restore created nothing cluster-wide (the ledger script refused before CREATE ROLE),
+    so the new VM is intact; only its database holds the half-repaired restore. Recreate it empty,
+    run the documented order, restore again.
+    """
+    dump = drill.dump("old-vm.dump")
+    drill.build_new_vm(prepared=False)
+    first = drill.restore(dump, dsn_role="mia", stage_ledger=False)
+    assert first.rc == 1 and "reason=ledger_reapply_failed" in first.err
+
+    drill.recreate_database()
+    drill.documented_order()
+    second = drill.restore(dump)
+    assert second.rc == 0 and second.finished and second.started, second.err + second.out
+    assert "mia: post-restore complete" in second.out
+    _assert_both_real_validators(drill)
+    assert drill.scalar("mia", "SELECT count(*) FROM public.drill_accounts") == "2"
+    assert len(list((drill.tmp / "backups").glob("pre-restore-*.dump"))) == 2  # each kept its own
+
+
+def test_drill_a_new_vm_restores_when_the_roles_are_made_first_in_the_documented_order(drill):
+    """The README's recovery order, proven: stage, migrate and provision first, then restore."""
+    dump = drill.dump("old-vm.dump")
+    drill.build_new_vm(prepared=True)
+    result = drill.restore(dump)
+    assert result.rc == 0 and result.finished and result.started, result.err + result.out
+    for note in ("app_role_reapply ok", "ledger_reapply ok", "main_role_validation ok",
+                 "access_probe ok role=mia_app", "complete"):
+        assert f"mia: post-restore {note}" in result.out, result.out
+    # a new VM has no owner-auth database: that one step is the only one skipped
+    assert "owner_session_revoke skipped reason=owner_auth_database_absent" in result.out
+    assert result.out.count("skipped") == 1
+    assert PASSWORD not in "\n".join(result.calls) + result.out + result.err
+    assert not drill.write_log.exists()  # the restore never wrote /etc/mia
+    assert any("/etc/mia:/etc/mia:ro" in call for call in result.calls)
+
+    _assert_both_real_validators(drill)
+    # the old VM's data is back, readable by the runtime roles of THIS VM, and not deletable
+    assert drill.scalar("mia", "SELECT count(*) FROM public.drill_accounts") == "2"
+    assert drill.scalar("mia", "SELECT count(*) FROM assaf_os.os_workspaces") == "1"
+    from app.services.os_ledger.role_policy import validate_ledger_role
+    from sqlalchemy.orm import Session
+
+    ledger, main = _ledger_engine(drill), drill.engine("mia_app")
+    try:
+        with Session(ledger) as db:
+            validate_ledger_role(db, main, migration_role="mia")
+    finally:
+        ledger.dispose()
+        main.dispose()
 
 
 def test_the_read_only_guard_really_blocks_a_write_into_the_env_files_directory(tmp_path):

@@ -22,7 +22,10 @@
 #   1. every role a live DSN uses must have a SCRAM verifier, or nothing is changed. The fixed list is
 #      mia, mia_app (when present), assaf_os_session, assaf_os_ledger and assaf_os_retention; the
 #      users found in the VM-owned DSN files are added. A role that is absent, or cannot log in, is
-#      not a DSN role. `mia` must exist. A DSN with no password is refused too.
+#      not a DSN role. `mia` must exist. A DSN with no password, or in a form this script cannot
+#      parse (so cannot log in with afterwards), is refused too. Since V2-14b, V2-15 creates
+#      assaf_os_retention as LOGIN with no password (E8), so after that provision it blocks --apply
+#      until V2-31 gives it a verifier: run this before the V2-15 provision (FORK-PROD-ORDER).
 #   2. pg_hba.conf is copied (cmp-verified) to pg_hba.conf.pre-e21-<UTC time> next to it.
 #   3. the new file must parse (pg_hba_file_rules shows no error and no TCP trust line), or the backup
 #      is put back before any reload.
@@ -267,7 +270,8 @@ case "$mode" in
     echo "roles_without_scram=$(join "${roles_without_scram[@]}")"
     echo "dsn_without_password=$(join "${dsn_without_password[@]}")"
     echo "dsn_unverified=$(join "${dsn_unverified[@]}")"
-    if [ "${#roles_without_scram[@]}" -eq 0 ] && [ "${#dsn_without_password[@]}" -eq 0 ]; then
+    if [ "${#roles_without_scram[@]}" -eq 0 ] && [ "${#dsn_without_password[@]}" -eq 0 ] \
+      && [ "${#dsn_unverified[@]}" -eq 0 ]; then
       echo "apply_ready=true"
     else
       echo "apply_ready=false"
@@ -290,6 +294,13 @@ case "$mode" in
     if [ "${#dsn_without_password[@]}" -gt 0 ]; then
       echo "dsn_without_password=$(join "${dsn_without_password[@]}")"
       refuse hba_dsn_without_password 2
+    fi
+    # A DSN in a form this script cannot parse (another host, localhost, a query string) is never
+    # logged in with after the reload and its role is not in the scram check, so a password that was
+    # never really checked under `trust` would fail afterwards with no rollback. Rewrite it first.
+    if [ "${#dsn_unverified[@]}" -gt 0 ]; then
+      echo "dsn_unverified=$(join "${dsn_unverified[@]}")"
+      refuse hba_dsn_unverified 2
     fi
     [ "$rule_errors" = 0 ] || refuse hba_rules_invalid_before_change 2
     backup="$hba_file.pre-e21-$(date -u +%Y%m%dT%H%M%SZ)"

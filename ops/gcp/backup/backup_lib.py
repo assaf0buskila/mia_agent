@@ -124,8 +124,21 @@ def write_private(path: Path, text: str) -> None:
 
 
 def tail(data: bytes, limit: int = 200) -> str:
-    """The end of a tool's stderr, for a log line. Never call this on stdout."""
+    """The end of a tool's stderr, for a log line. Never call this on stdout.
+
+    Only for a console line that is not recorded. A restore error prints the key or the row that
+    failed, so it never goes into a report (see exit_detail).
+    """
     return data.decode("utf-8", "replace").strip().replace("\n", " | ")[-limit:]
+
+
+def exit_detail(tool: str, returncode: int) -> str:
+    """What a drill report may say about a failed tool: which one and its exit code, nothing else.
+
+    A report is printed and written to a file that the runbook has recorded in a committed
+    document. Anything a tool prints about why it failed may hold row data.
+    """
+    return "" if returncode == 0 else f"{tool} exit {returncode}"
 
 
 # --- the dump listing -----------------------------------------------------------------------

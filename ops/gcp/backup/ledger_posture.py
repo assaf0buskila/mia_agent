@@ -318,14 +318,14 @@ def evaluate(
             if not outcome.add(
                 "ledger_roles",
                 created.returncode == 0,
-                "" if created.returncode == 0 else backup_lib.tail(created.stderr),
+                backup_lib.exit_detail("psql", created.returncode),
             ):
                 return outcome
         done = run_sql(apply_sql(grants, owner))
         if not outcome.add(
             "ledger_reown_regrant",
             done.returncode == 0,
-            "" if done.returncode == 0 else backup_lib.tail(done.stderr),
+            backup_lib.exit_detail("psql", done.returncode),
         ):
             return outcome
 

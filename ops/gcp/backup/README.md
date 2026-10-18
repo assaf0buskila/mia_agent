@@ -131,7 +131,10 @@ relations, the ledger checks below, scratch database dropped. With `--latest` it
 the newest backup is older than 45 minutes. The whole run must finish inside the 2 hour RTO.
 
 Run it before the timer is enabled, then monthly, and after any key change or schema migration.
-Record the report in `HANDOFF.md` under the SHA it was run at. RTO caveat: the drill times a
+Record the report in `HANDOFF.md` under the SHA it was run at. It names a failed tool and its exit
+code and never the tool's own error text (a restore error can print the key or row that failed), so
+it holds no row data; a run that refuses prints the tool's error on stderr only, which is not part of
+the report. RTO caveat: the drill times a
 restore on the PC, not the VM. A real recovery adds the SSH, upload and `mia restore` time on an
 `e2-small`.
 
@@ -174,8 +177,8 @@ Details that matter:
   V2-15's `validate_ledger_catalog`. It needs `/etc/mia/os-ledger-migrate.env` (the same single key
   `mia os-ledger` accepts). A ledger runtime role that does not exist (a fresh cluster) is created only
   from a DSN already staged in `runtime.env`; with nothing staged the script refuses before it creates
-  anything, its transaction rolls back and the restore stops with `ledger_reapply_failed`. Provision it
-  explicitly first (`provision_ledger.py --mode provision`, V2-15 runbook), then run `mia restore` again.
+  anything, its transaction rolls back and the restore stops with `ledger_reapply_failed`. A new VM
+  must have its roles made **before** the restore, not after a failed one: see "Fresh cluster" below.
 - `mia settings` and `mia deploy` drop `MIA_OWNER_OS_LEDGER_*`, `MIA_OS_LEDGER_*` and
   `MIA_APP_ROLE_POSTURE` from `mia-env`: the ledger DSNs and the posture are VM-owned. The other
   `MIA_OWNER_OS_*` settings (enable flags, Google keys, session secret and DSN, origin) still come
@@ -214,16 +217,59 @@ Reason codes (stderr, a fixed set; nothing else is printed about the cause):
 | `app_role_reapply_unavailable` | `mia_app` exists but `/opt/mia/app-role-demote/app_role_demote.py` or `sql/app-role-demote.sql` is missing. Reinstall them from the approved source (V2-14a runbook). |
 | `app_role_reapply_failed` | the helper failed. It prints its own `reason=app_role_...` line just above. |
 | `ledger_reapply_unavailable` | the restored database has `assaf_os`, but `MIA_TAG` in `/opt/mia/tag.env` is unusable, the deployed `provision_ledger.py` is missing under `/opt/mia/src/<tag>/`, or `/etc/mia/os-ledger-migrate.env` is missing or holds another key. |
-| `ledger_reapply_failed` | `provision_ledger.py` refused or could not run (it prints only `ledger_provision_refused` or `ledger_owner_go_sha_required`). Usual causes: the image has no 40-hex `MIA_BUILD_SHA`, `mia_app` is missing, `/etc/mia/runtime.env` does not hold a valid ledger DSN for an existing role, the ledger runtime role does not exist and no DSN is staged for it (provision it explicitly, then restore again), or V2-15's exact validator rejects the restored `assaf_os` (an object it does not know, a PUBLIC privilege). The transaction rolled back, so the schema is as the restore left it. |
+| `ledger_reapply_failed` | `provision_ledger.py` refused or could not run (it prints only `ledger_provision_refused` or `ledger_owner_go_sha_required`). Usual causes: the image has no 40-hex `MIA_BUILD_SHA`, `mia_app` is missing, `/etc/mia/runtime.env` does not hold a valid ledger DSN for an existing role, the ledger runtime role does not exist and no DSN is staged for it (a new VM: "Fresh cluster" below, and do not just restore again), or V2-15's exact validator rejects the restored `assaf_os` (an object it does not know, a PUBLIC privilege). The transaction rolled back, so the schema is as the restore left it. |
 | `main_dsn_invalid` | `/etc/mia/runtime.env` does not hold exactly one canonical `MIA_DATABASE_URL`. |
 | `main_role_validation_failed` | the real validator rejected the main role (unsafe attribute, database owner, membership, or access to `assaf_os`), or the deployed image could not run it. Until the `trust` lines are closed (step 1a) a wrong DSN password does not fail here. |
 | `owner_session_revoke_failed` | the owner-auth database could not be updated, or only some of its tables exist. |
 | `app_role_access_probe_failed` | the main DSN role cannot SELECT or INSERT on an application table (permission denied, or no application table at all). The restore is not usable. While loopback is still `trust` this proves privileges, not the password. |
 
-Fresh cluster (a new VM with no `mia_app`, or with `mia_app` but no ledger runtime role and no DSN
-staged for it): a dump that contains `assaf_os` stops at `ledger_reapply_failed`. Step 2 pins the main
-role and never writes the runtime DSN. Recreate the roles explicitly first (V2-14a `stage`, then V2-15
-provision), then run `mia restore` again.
+#### Fresh cluster: a new VM, after the old one is lost
+
+A new VM has the superuser `mia` and the database `mia` the deploy made. It has no `mia_app`, no
+`assaf_os_*` role and no staged ledger DSN, because roles live in the cluster and not in a dump.
+**Do not run `mia restore` first** when the dump holds `assaf_os`:
+
+- Step 1 is skipped (`mia_app` does not exist) and step 2 stops with `ledger_reapply_failed`: it pins
+  the demoted main role and never writes the runtime DSN, so it refuses before it creates a role.
+- There is then no way forward on that database. V2-14a's `stage` refuses on the restored database
+  with `app_role_ledger_access_unsafe` (`pg_restore --no-privileges` left PUBLIC EXECUTE on the
+  `assaf_os` functions, and only the V2-15 reapply that needs `mia_app` clears it), and V2-15's
+  `--mode provision` refuses because there is no `mia_app`.
+
+Make the roles first, on the new VM's own database, in the order production used, and restore last:
+
+1. V2-14a: the demote, `docs/runbooks/APP_ROLE_DEMOTE.md` steps 2 to 6. The stage creates `mia_app`
+   and the activation moves the main DSN to it.
+2. V2-14: `sudo mia os-ledger migrate --approved-sha <sha>` creates `assaf_os` and `assaf_os_owner`.
+3. V2-15: `provision_ledger.py --target mia-vm --mode provision --apply --approved-sha <sha>`
+   (`ops/assaf-os/LEDGER_ROLE.md`) creates `assaf_os_ledger` and `assaf_os_retention`, and stages
+   this VM's own ledger DSN in `runtime.env`.
+4. `sudo mia restore <dump>`. Steps 1 and 2 now find their roles and the staged DSN. Step 4 is
+   skipped on a new VM (`owner_auth_database_absent`): the owner-auth database is not part of this
+   restore, and `provision_auth.py` makes it.
+
+If `mia restore` already ran first, nothing cluster-wide was created (the ledger script refused before
+`CREATE ROLE`), so only the database needs resetting. On a new VM it holds nothing but the failed
+restore, and `/var/lib/mia/backups` keeps that restore's safety dump:
+
+```bash
+sudo docker compose -p mia -f /opt/mia/compose.yaml --env-file /opt/mia/tag.env exec -T postgres \
+  psql -U mia -d postgres -v ON_ERROR_STOP=1 \
+  -c 'DROP DATABASE IF EXISTS mia WITH (FORCE)' -c 'CREATE DATABASE mia OWNER mia'
+```
+
+Then make the application tables the way the first deploy did (`sudo docker compose -p mia -f
+/opt/mia/compose.yaml --env-file /opt/mia/tag.env run --rm --no-deps -T migrate`) and run steps 1 to
+4. Never reset a database that holds data you need. The drill proves the order, the failure of the
+other order and this recovery against the real scripts: `test_drill_a_new_vm_*` in
+`tests/ops/test_restore_reapply.py`.
+
+**Open gap, not closed by this change.** `mia` has no command for step 3. The restore arm wires only
+`--mode reapply`. Running `--mode provision` (as root, with `/etc/mia` writable, under
+`/var/lock/mia-state.lock`, with the image's `MIA_BUILD_SHA`) is FORK-PROD-ORDER step 4, which V2-31's
+owner-approved cutover runbook owns. That runbook must carry this new-VM order, and the command must
+exist, before the ledger is activated: until then a lost VM cannot be rebuilt from these backups once
+`assaf_os` holds data. Production has no `assaf_os` today, so nothing is exposed yet.
 
 ### On Assaf's PC: the drill uses `ledger_posture.py`
 
@@ -263,9 +309,13 @@ server; every statement, validator and refusal is the script's own. It dumps a d
 postures, restores it through the same flags, and asserts: V2-14's `_validate_main_role_catalog` and
 V2-15's `validate_ledger_catalog` and `validate_ledger_role` pass, `mia_app` can SELECT and INSERT,
 the runtime role keeps its password and reads (but cannot delete) the ledger data, `/etc/mia` is
-never written, `revoked_before` is set, the safety dump has no batch-line data, the jobs are paused,
-and a failing step leaves the services down and is retryable. It fails, rather than skips, when V2-15
-is missing. The cases that need the server skip only when
+never written, `revoked_before` is set, the jobs are paused, and a failing step leaves the services
+down and is retryable. With a real pending statement batch (V2-14b's `os_statement_batch_lines`) in
+the live database, neither the safety dump nor the off-site dump carries a row of it, a control dump
+without the exclusion does, and the restore of the off-site dump still passes both validators. It
+also proves the new-VM cases under "Fresh cluster": the documented order restores, the other order
+does not, and the recovery from it works. It fails, rather than skips, when V2-15 is missing. The
+cases that need the server skip only when
 `MIA_RESTORE_DRILL_TEST_POSTGRES_URL` is unset:
 
 ```bash

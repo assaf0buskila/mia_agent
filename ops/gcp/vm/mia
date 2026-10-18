@@ -241,7 +241,8 @@ restore_read_main_dsn() {
 # Only once the main DSN is the demoted role: before the cutover it is still the superuser mia.
 # It proves the role's catalog posture, not its password: while the cluster's loopback pg_hba
 # line is `trust` (the postgres image's initdb default, ahead of POSTGRES_HOST_AUTH_METHOD), a
-# wrong password still connects. Hardening that is an owner-gated V2-14a follow-up.
+# wrong password still connects. Closing that line is ops/gcp/vm/pg-hba-harden.sh (E21), step 1a of
+# docs/runbooks/APP_ROLE_DEMOTE.md; new clusters get scram from initdb (compose.yaml, bootstrap.sh).
 restore_main_role_validate() {
   restore_read_main_dsn
   unset main_password

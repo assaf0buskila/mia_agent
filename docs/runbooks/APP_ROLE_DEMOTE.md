@@ -92,7 +92,8 @@ their redaction before provisioning; they are outside this helper's logging cont
 
    ```bash
    H=/opt/mia/src/<approved-tag>/ops/gcp/vm/pg-hba-harden.sh
-   sudo bash "$H" --check      # exit 1 until applied: expect hardened=false, apply_ready=true
+   sudo bash "$H" --check      # exit 1 until applied: expect hardened=false, apply_ready=true,
+                               # dsn_unverified=none (anything else: fix that DSN first, see below)
    sudo bash "$H" --apply      # expect applied=true hardened=true
    curl --fail --silent --show-error http://127.0.0.1:8000/health/ready
    sudo bash "$H" --check      # expect hardened=true (exit 0)
@@ -152,8 +153,16 @@ What `--apply` does, in this order, and nothing else (it never deploys, restarts
 1. Refuses unless every role a live DSN uses has a SCRAM verifier. The fixed list is `mia`, `mia_app` (when
    present), `assaf_os_session`, `assaf_os_ledger` and `assaf_os_retention`; the users found in the
    VM-owned DSN files (`runtime.env`, `os-ledger-migrate.env`, `settings.env`) are added. A role that does not
-   exist yet, or cannot log in (`assaf_os_retention` before V2-14b), is not a DSN role. `mia` must exist.
-   A live DSN with no password is refused too. Nothing is changed on a refusal.
+   exist yet, or cannot log in (the NOLOGIN `assaf_os_owner`), is not a DSN role. `mia` must exist.
+   A live DSN with no password is refused too (`hba_dsn_without_password`), and so is one in a form the
+   script cannot parse (`hba_dsn_unverified`: another host, `localhost`, a query string), because its login
+   could not be tried after the reload. Rewrite it as `postgresql://<role>:<password>@127.0.0.1:<port>/<db>`
+   first. Nothing is changed on a refusal.
+
+   Since V2-14b, V2-15's provision creates `assaf_os_retention` as LOGIN with **no password** (E8). From
+   then on it is a DSN role without a verifier and blocks `--apply` (`hba_role_without_scram`) until V2-31
+   gives it one. Run step 1a before the V2-15 provision, as FORK-PROD-ORDER does (step 1a, then the demote,
+   then the ledger at step 4).
 2. Copies `pg_hba.conf` to `pg_hba.conf.pre-e21-<UTC time>` in the same directory and compares the copy.
 3. Rewrites every `host*` line whose method is `trust` (127.0.0.1, `::1`, and `replication`) to
    `scram-sha-256`, keeping columns and comments. The new file must parse with no TCP `trust` rule left, or
@@ -176,6 +185,12 @@ get only `POSTGRES_INITDB_ARGS=--auth-host=scram-sha-256` (`compose.yaml`, `boot
 After it, `mia restore`'s main-role validator and access probe really do prove the password: a wrong one is
 refused at the TCP line.
 
+**The deploy that brings `compose.yaml` restarts PostgreSQL once.** The `postgres` service gained
+`environment: POSTGRES_INITDB_ARGS`, which changes its configuration, so the next `mia deploy`
+(`compose up -d`) recreates that container: a brief database restart, with the data volume and the cluster's
+`pg_hba.conf` untouched (initdb arguments only act on a new data directory). Expect `/health/ready` to fail
+for a few seconds during that deploy, and do that deploy before step 1a, as FORK-PROD-ORDER already orders it.
+
 | Reason code | Meaning and what to do |
 |---|---|
 | `hba_root_required` | not run as root (exit 1). |
@@ -184,6 +199,7 @@ refused at the TCP line.
 | `hba_file_unusable`, `hba_rules_unreadable`, `hba_roles_unreadable` | the server did not answer the catalog query as expected (exit 2). Nothing was changed. |
 | `hba_role_without_scram` | a login role a DSN uses has no SCRAM verifier, or `mia` is missing (exit 2). The role names are printed on `roles_without_scram=`. Set the password again (`ALTER ROLE ... PASSWORD`) under `password_encryption = 'scram-sha-256'` and update the DSN, then retry. |
 | `hba_dsn_without_password` | a live DSN names a role with no password (exit 2); it would be locked out. |
+| `hba_dsn_unverified` | a live DSN is in a form the script cannot parse, so its login could not be checked after the change (exit 2). `dsn_unverified=` names the setting. Rewrite it in the canonical loopback form, then retry. `--check` shows `apply_ready=false` for it. |
 | `hba_rules_invalid_before_change` | the current `pg_hba.conf` already has a syntax error (exit 2). Fix it first. |
 | `hba_rewrite_failed` | the copy or rewrite failed (exit 1). The file is restored if it had been touched. |
 | `hba_rewrite_invalid_restored` | the rewritten file still had a TCP `trust` rule (for example in an `include`d file) or did not parse (exit 1). The backup was put back. |

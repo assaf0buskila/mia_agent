@@ -159,6 +159,7 @@ def test_the_script_checks_the_roles_the_contract_names_before_it_changes_anythi
     apply_arm = SCRIPT.split("\n  --apply)\n", 1)[1]
     assert apply_arm.index("hba_role_without_scram") < apply_arm.index("pre-e21-")
     assert apply_arm.index("hba_dsn_without_password") < apply_arm.index("pre-e21-")
+    assert apply_arm.index("hba_dsn_unverified") < apply_arm.index("pre-e21-")
     assert "SCRAM-SHA-256" in SCRIPT and "rolcanlogin" in SCRIPT
 
 
@@ -513,7 +514,10 @@ def test_apply_refuses_when_a_live_dsn_role_has_no_scram_password(cluster, role,
 
 
 def test_a_role_that_cannot_log_in_or_does_not_exist_is_not_a_dsn_role(cluster):
-    """assaf_os_retention is NOLOGIN until V2-14b, and V2-15 creates the others later."""
+    """A NOLOGIN role (the owner, or a retention role made before V2-14b) holds no DSN, and the
+    roles V2-15 has not created yet do not exist. Since V2-14b, V2-15 makes assaf_os_retention LOGIN
+    with no password (E8), so once provisioned it blocks apply until V2-31 gives it a verifier:
+    the case parametrised above pins that, and the runbook runs step 1a before the provision."""
     cluster.psql("CREATE ROLE assaf_os_retention NOLOGIN; CREATE ROLE assaf_os_owner NOLOGIN")
     done, values = cluster.run("--apply")
     assert done.returncode == 0, done.stdout + done.stderr
@@ -555,15 +559,44 @@ def test_every_readable_dsn_form_is_logged_in_with_after_the_change(cluster):
     done, values = cluster.run("--apply")
     assert done.returncode == 0, done.stdout + done.stderr
     assert values["logins_verified"] == "4" and values["dsn_unverified"] == "none"
-    # and a form the script does not understand is said so, not silently trusted
-    cluster.run("--rollback")
-    cluster.write_env(
-        "settings.env",
-        f"MIA_OWNER_OS_SESSION_DATABASE_URL=postgresql://mia_app:{app}@db.example:{port}/mia\n",
-    )
+
+
+@pytest.mark.parametrize(
+    "dsn",
+    [
+        "postgresql://mia_app:{app}@db.example:{port}/mia",
+        "postgresql://mia_app:{app}@localhost:{port}/mia",
+        "postgresql://mia_app:{app}@127.0.0.1:{port}/mia?sslmode=disable",
+    ],
+)
+def test_a_dsn_form_the_script_cannot_verify_is_refused_before_any_change(cluster, dsn):
+    """V2-10 review r1: a form whose login is never tried must stop the change, not just be listed.
+
+    It used to be reported as `dsn_unverified` while apply went on: after the reload its login was
+    never checked and its role was not in the scram check, so `mia os-ledger migrate` or
+    `mia restore` step 2 could fail afterwards, with no rollback. It now stops the change the way a
+    DSN with no password does, and the operator rewrites the DSN in the canonical form.
+    """
+    key = "MIA_OWNER_OS_SESSION_DATABASE_URL"
+    app, port = cluster.app_password, cluster.port
+    cluster.write_env("settings.env", f"{key}=" + dsn.format(app=app, port=port) + "\n")
+    before = cluster.hba_text()
     done, values = cluster.run("--apply")
-    assert done.returncode == 0
-    assert values["dsn_unverified"] == "MIA_OWNER_OS_SESSION_DATABASE_URL"
+    assert done.returncode == 2, done.stdout + done.stderr
+    assert "reason=hba_dsn_unverified" in done.stdout
+    assert values["dsn_unverified"] == key
+    assert cluster.hba_text() == before and cluster.backups() == []
+    assert cluster.tcp("mia", "not-the-password")  # nothing was reloaded: trust is still open
+    assert app not in done.stdout + done.stderr
+
+    check, check_values = cluster.run("--check")
+    assert check_values["dsn_unverified"] == key and check_values["apply_ready"] == "false"
+
+    # written in the canonical form, the same apply goes through and logs in with it
+    cluster.write_env("settings.env", f"{key}=postgresql://mia_app:{app}@127.0.0.1:{port}/mia\n")
+    done, values = cluster.run("--apply")
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert values["dsn_unverified"] == "none" and values["logins_verified"] == "2"
 
 
 def test_a_dsn_with_no_password_is_refused_before_any_change(cluster):

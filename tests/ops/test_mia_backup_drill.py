@@ -6,12 +6,14 @@ local scratch server that has no database called mia, and it never starts a serv
 
 from __future__ import annotations
 
+import ast
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
 import backup_offsite
+import ledger_posture
 import pytest
 import restore_drill
 
@@ -271,6 +273,54 @@ def test_a_failed_restore_is_reported_and_the_scratch_database_is_still_dropped(
     assert scratch.statements("DROP DATABASE") == [
         f"DROP DATABASE IF EXISTS {SCRATCH} WITH (FORCE)"
     ]
+
+
+ROW_VALUE = "PRIVATE-ROW-VALUE"
+LEAKY = (
+    'pg_restore: error: COPY failed for table "leads": ERROR: duplicate key value\n'
+    f"DETAIL:  Key (id)=({ROW_VALUE}) already exists."
+)
+
+
+@pytest.mark.parametrize(
+    ("make_scratch", "check", "detail"),
+    [
+        (lambda: FakeScratch(restore_rc=3, restore_stderr=LEAKY.encode()), "restore",
+         "pg_restore exit 3"),
+        (lambda: FakeScratch(fail_statements=("CREATE DATABASE",), fail_stderr=LEAKY.encode()),
+         "scratch_created", "psql exit 1"),
+    ],
+)
+def test_the_report_holds_an_exit_code_never_the_text_a_tool_printed(
+    pair, tmp_path, make_scratch, check, detail
+):
+    """V2-10 review r1: the README has the report recorded in HANDOFF.md, a committed file.
+
+    A failed restore's constraint error carries a DETAIL line with the key's value, and a failed
+    COPY prints the row. The report keeps the tool and its exit code and nothing else.
+    """
+    report, _, _ = drill(pair, tmp_path, make_scratch())
+    entry = next(item for item in report["checks"] if item["name"] == check)
+    assert entry["ok"] is False and entry["detail"] == detail
+    assert ROW_VALUE not in json.dumps(report)
+
+
+@pytest.mark.parametrize("module", [restore_drill, ledger_posture])
+def test_no_report_entry_is_built_from_a_tools_stderr(module):
+    """The two behaviour cases above name the paths they cover; this one covers all of them."""
+    tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
+    entries = 0
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+            continue
+        if node.func.attr not in ("check", "add") or not isinstance(node.func.value, ast.Name):
+            continue
+        if node.func.value.id not in ("report", "outcome"):
+            continue
+        entries += 1
+        used = {inner.attr for inner in ast.walk(node) if isinstance(inner, ast.Attribute)}
+        assert not used & {"tail", "stderr"}, f"{module.__name__}:{node.lineno}"
+    assert entries > 5  # the walk found the report entries, so the assertion above looked at them
 
 
 @pytest.mark.parametrize(
