@@ -24,6 +24,7 @@ from app.api.inbound_common import (
     transcript_duration_ms,
 )
 from app.core.config import get_settings
+from app.core.deadlines import remaining_seconds
 from app.core.errors import MiaError
 from app.core.logging import log_comm
 from app.core.owner_timing import owner_stage
@@ -149,7 +150,6 @@ async def process_telegram_owner_update(
             automation_mode=settings.automation_mode.value,
         )
         return
-    deadline_at = monotonic() + settings.owner_turn_timeout_seconds
     delivery_state: dict[str, bool] = {}
     session = get_session_factory()()
     try:
@@ -161,15 +161,67 @@ async def process_telegram_owner_update(
             _mark_claimed(store, [work], "processed")
             session.commit()
             return
-        if voice_file_id:
-            work["file_id"] = voice_file_id
-            with owner_stage("stt", source_ref=work.get("id", "")):
-                work, voice_failure_stage, voice_latency_ms = await _transcribe_telegram_voice(
-                    item=work,
-                    media=port,
-                    transcribe_port=transcribe_port,
+        with owner_stage("input_preprocess", source_ref=item.get("id", "")):
+            if voice_file_id:
+                work["file_id"] = voice_file_id
+                with owner_stage("stt", source_ref=work.get("id", "")):
+                    work, voice_failure_stage, voice_latency_ms = await _transcribe_telegram_voice(
+                        item=work,
+                        media=port,
+                        transcribe_port=transcribe_port,
+                    )
+                if voice_failure_stage:
+                    persist_tool_outcome(
+                        store,
+                        provider="telegram",
+                        channel=Channel.TELEGRAM,
+                        inbound_provider_event_id=work["id"],
+                        conversation_id=event_conversation_id(work),
+                        lead_id=None,
+                        outcome=transcription_outcome(
+                            transcribed=False,
+                            latency_ms=voice_latency_ms,
+                        ),
+                    )
+                    session.commit()
+                    log_comm(
+                        channel=Channel.TELEGRAM.value,
+                        provider="telegram",
+                        actor_type="owner",
+                        direction="in",
+                        external_message_id=work["id"],
+                        conversation_id=event_conversation_id(work),
+                        policy_result=voice_failure_stage,
+                        latency_ms=voice_latency_ms,
+                        success=False,
+                        automation_mode=settings.automation_mode.value,
+                    )
+                    sent = await _send_transcription_failure_reply(
+                        item=work,
+                        port=port,
+                        kill_switch=False,
+                        automation_mode=settings.automation_mode,
+                    )
+                    store.mark_webhook(
+                        provider="telegram",
+                        provider_event_id=work["id"],
+                        status="sent" if sent else "failed",
+                    )
+                    session.commit()
+                    return
+                store.save_transcript(
+                    provider="telegram",
+                    provider_event_id=work["id"],
+                    channel=Channel.TELEGRAM.value,
+                    external_id=work["from"],
+                    actor_role="owner",
+                    transcript=work.get("text") or "",
+                    stt_provider=work.get("stt_provider", ""),
+                    stt_model=work.get("stt_model", ""),
+                    language=work.get("language", ""),
+                    duration_ms=transcript_duration_ms(work),
+                    confidence=work.get("confidence", ""),
                 )
-            if voice_failure_stage:
                 persist_tool_outcome(
                     store,
                     provider="telegram",
@@ -178,78 +230,30 @@ async def process_telegram_owner_update(
                     conversation_id=event_conversation_id(work),
                     lead_id=None,
                     outcome=transcription_outcome(
-                        transcribed=False,
-                        latency_ms=voice_latency_ms,
+                        transcribed=True, latency_ms=stt_latency_ms(work)
                     ),
                 )
                 session.commit()
-                log_comm(
-                    channel=Channel.TELEGRAM.value,
-                    provider="telegram",
-                    actor_type="owner",
-                    direction="in",
-                    external_message_id=work["id"],
-                    conversation_id=event_conversation_id(work),
-                    policy_result=voice_failure_stage,
-                    latency_ms=voice_latency_ms,
-                    success=False,
-                    automation_mode=settings.automation_mode.value,
-                )
-                sent = await _send_transcription_failure_reply(
-                    item=work,
-                    port=port,
-                    kill_switch=False,
-                    automation_mode=settings.automation_mode,
-                )
-                store.mark_webhook(
-                    provider="telegram",
-                    provider_event_id=work["id"],
-                    status="sent" if sent else "failed",
-                )
-                session.commit()
-                return
-            store.save_transcript(
-                provider="telegram",
-                provider_event_id=work["id"],
-                channel=Channel.TELEGRAM.value,
-                external_id=work["from"],
-                actor_role="owner",
-                transcript=work.get("text") or "",
-                stt_provider=work.get("stt_provider", ""),
-                stt_model=work.get("stt_model", ""),
-                language=work.get("language", ""),
-                duration_ms=transcript_duration_ms(work),
-                confidence=work.get("confidence", ""),
-            )
-            persist_tool_outcome(
-                store,
-                provider="telegram",
-                channel=Channel.TELEGRAM,
-                inbound_provider_event_id=work["id"],
-                conversation_id=event_conversation_id(work),
-                lead_id=None,
-                outcome=transcription_outcome(transcribed=True, latency_ms=stt_latency_ms(work)),
-            )
-            session.commit()
-        if photo_file_id and not voice_file_id:
-            with owner_stage("image", source_ref=work.get("id", ""), tool="telegram"):
-                work = await _see_telegram_photo(
-                    item=work,
-                    media=port,
-                    photo_file_id=photo_file_id,
-                )
-        inbound = _inbound_from_work(work)
-        key = event_conversation_id(inbound)
-        enqueue_turn(key, inbound)
-        with owner_stage("coalesce", source_ref=inbound.get("id", "")):
-            await asyncio.sleep(COALESCE_WAIT_S)
-        claimed = claim_burst(key, inbound["id"])
-        if claimed is None:
-            await asyncio.sleep(OWNER_TURN_TIMEOUT_S)
-            claimed = take_if_still_pending(key, inbound["id"])
+            if photo_file_id and not voice_file_id:
+                with owner_stage("image", source_ref=work.get("id", ""), tool="telegram"):
+                    work = await _see_telegram_photo(
+                        item=work,
+                        media=port,
+                        photo_file_id=photo_file_id,
+                    )
+            inbound = _inbound_from_work(work)
+            key = event_conversation_id(inbound)
+            enqueue_turn(key, inbound)
+            with owner_stage("coalesce", source_ref=inbound.get("id", "")):
+                await asyncio.sleep(COALESCE_WAIT_S)
+            claimed = claim_burst(key, inbound["id"])
             if claimed is None:
-                return
-        merged = merge_claimed_items(claimed)
+                await asyncio.sleep(OWNER_TURN_TIMEOUT_S)
+                claimed = take_if_still_pending(key, inbound["id"])
+                if claimed is None:
+                    return
+            merged = merge_claimed_items(claimed)
+        deadline_at = monotonic() + settings.owner_turn_timeout_seconds
         typing_stop = asyncio.Event()
         typing_task = asyncio.create_task(
             _renew_typing(
@@ -271,7 +275,13 @@ async def process_telegram_owner_update(
                     delivery_state=delivery_state,
                 )
             )
-            remaining = max(0.0, deadline_at - monotonic())
+            # Same arithmetic as every child bound inside the turn, taken from the
+            # one module that owns it rather than recomputed here. `deadline_at` is
+            # a definite float by this point (assigned above, after preprocessing),
+            # so `remaining_seconds` cannot return None; the floor stays because a
+            # turn whose budget is already spent must pass timeout=0, not a
+            # negative, to `asyncio.wait`.
+            remaining = max(0.0, remaining_seconds(deadline_at) or 0.0)
             done, _pending = await asyncio.wait({loop_task}, timeout=remaining)
             if not done:
                 # The deadline is externally visible, but the DB lifecycle remains
