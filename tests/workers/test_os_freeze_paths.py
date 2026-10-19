@@ -116,8 +116,14 @@ def app_sources() -> list[tuple[str, str]]:
     ]
 
 
-def method_sites(source: str, methods: frozenset[str]) -> list[tuple[str, str, int]]:
-    """(enclosing function, method, line) for every ``<anything>.<method>(...)`` call."""
+def method_sites(
+    source: str, methods: frozenset[str], *, with_arguments: bool = False
+) -> list[tuple[str, str, int]]:
+    """(enclosing function, method, line) for every ``<anything>.<method>(...)`` call.
+
+    ``with_arguments`` keeps only the calls that pass something: ``session.commit()`` never does,
+    a ledger ``commit(ctx, request)`` always does.
+    """
     found: list[tuple[str, str, int]] = []
 
     def walk(node: ast.AST, stack: tuple[str, ...]) -> None:
@@ -129,6 +135,7 @@ def method_sites(source: str, methods: frozenset[str]) -> list[tuple[str, str, i
                 isinstance(child, ast.Call)
                 and isinstance(child.func, ast.Attribute)
                 and child.func.attr in methods
+                and (child.args or child.keywords or not with_arguments)
             ):
                 found.append((stack[-1] if stack else "<module>", child.func.attr, child.lineno))
             walk(child, stack)
@@ -168,6 +175,57 @@ def test_the_census_scanner_sees_every_call_form():
         ("a", "propose"), ("b", "decide"), ("d", "propose"), ("<module>", "propose"),
     ]
     assert method_sites("def f():\n    return propose(1)\n", frozenset({"propose"})) == []
+
+
+def test_the_scanner_tells_a_database_commit_from_a_ledger_commit():
+    source = (
+        "def tx():\n    session.commit()\n    conn.commit()\n"
+        "def intent():\n    ledger.commit(ctx, request)\n    ledger.undo(ctx, request_id)\n"
+        "    batches.submit(ctx, body)\n    ledger.abandon(ctx, request_id=1)\n"
+        "    executor.commit(op='x')\n"
+    )
+    verbs = frozenset({"commit", "undo", "submit", "abandon"})
+    assert [(n, m) for n, m, _ in method_sites(source, verbs, with_arguments=True)] == [
+        ("intent", "commit"), ("intent", "undo"), ("intent", "submit"), ("intent", "abandon"),
+        ("intent", "commit"),
+    ]
+    assert len(method_sites(source, verbs)) == 7, "without the filter every commit() counts"
+
+
+# The ledger-side intents of contract I8 (section 2): commit, undo, batch submit and the assistant
+# submit are new intents the T1 freeze must refuse (503 os_frozen); abandon writes no business
+# change, so the freeze allows it. None exists in app/ at this base: V2-24 (commit, undo, abandon),
+# V2-26 (the statement batch submit) and V2-37 (the assistant submit) land after this chunk, and
+# each must add its call site here, classified, in the same change. Keys are
+# (file, enclosing function, method) like the sites above; values say why.
+LEDGER_INTENT_SITES: dict[tuple[str, str, str], str] = {}
+LEDGER_ALLOWED_SITES: dict[tuple[str, str, str], str] = {}
+LEDGER_INTENT_VERBS = frozenset({"undo", "submit", "abandon"})
+
+
+def ledger_intent_sites() -> set[tuple[str, str, str]]:
+    found: set[tuple[str, str, str]] = set()
+    for relative, source in app_sources():
+        for function, method, _ in method_sites(source, LEDGER_INTENT_VERBS):
+            found.add((relative, function, method))
+        # A database transaction's commit() takes no argument; a ledger commit always does.
+        for function, method, _ in method_sites(source, frozenset({"commit"}), with_arguments=True):
+            found.add((relative, function, method))
+    return found
+
+
+def test_every_ledger_intent_site_in_app_is_classified():
+    found = ledger_intent_sites()
+    classified = LEDGER_INTENT_SITES.keys() | LEDGER_ALLOWED_SITES.keys()
+    assert found == classified, (
+        f"unclassified: {sorted(found - classified)}; stale: {sorted(classified - found)}. "
+        "A commit, undo, batch submit or assistant submit is a new intent: the freeze must refuse "
+        "it (I8) and a test must drive it with the freeze on, as the OS intents below are."
+    )
+    assert not (LEDGER_INTENT_SITES.keys() & LEDGER_ALLOWED_SITES.keys())
+    assert all(site[2] != "abandon" for site in LEDGER_INTENT_SITES), (
+        "abandon writes no business change: the freeze allows it, so it is never an intent site"
+    )
 
 
 def test_every_propose_and_decide_site_in_app_is_classified():

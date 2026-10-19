@@ -60,7 +60,7 @@ fill) and [APP_ROLE_DEMOTE.md](../../docs/runbooks/APP_ROLE_DEMOTE.md) (step 2 i
 | 4 | Provision the ledger roles, then the validator | G07 | Re-run (idempotent); see the staged-DSN rule |
 | 5 | `mia os-authority init` | G08 | Idempotent; nothing to undo before an import |
 | 6 | Rehearsal (V2-35a, V2-35) on a copy | G09 | The copy is thrown away |
-| 7 | Wave 6: T1 to T7, the first write, phone acceptance | G10 to G21 | Section 5 |
+| 7 | Wave 6: T1 to T7, the first write, phone acceptance | G10 to G24 | Section 5 |
 
 Every production step above pauses the jobs and takes a verified backup first (section 0). Steps 1 to
 5 touch no business data: the OS stays on Sheets until T6.
@@ -188,7 +188,7 @@ time proves nothing and fails.
 | File | Written by | Used by | Notes |
 |---|---|---|---|
 | `drain.json` | `preflight --drain --final-accept` | `sheets_pending_proposals` | Epoch, SHA and freeze bound |
-| `preflight.json` | `preflight` | `capture_before_fence` and the rest | Holds `fence_probe_at` |
+| `preflight.json` | `preflight`, and the drain once it sees the Script live | `capture_before_fence`, `sheets_pending_proposals` | Holds `fence_probe_at` and, after a lifted fence, `fence_broken_at` |
 | `activation.json` | `activate` | the record | The ledger state, not this file, is the authority |
 | `backup.json` | operator | `backup_too_old` | V2-10 `backup_offsite.py --status` output |
 | `restore-drill.json` | operator | `restore_drill_too_old` | V2-10 `restore_drill.py --report` output |
@@ -225,13 +225,18 @@ frontend v2 reader (V2-21), recorded by hand after the release.
 ```
 
 `journal.json`: the data-row count of each of the five `_assaf_os_*` tabs of the archive workbook, read
-in the Sheets UI (`accepted`, `proposals`, `receipts`, `replay`, `issues`; header row not counted), with
-`max_rows` the Script's `ASSAF_OS_MAX_ROWS` (2000). The check fails above 90 percent of the cap, and a
-measure older than 7 days is stale.
+in the Sheets UI (header row not counted). **The file must name exactly these five tabs, no more and no
+fewer: `_assaf_os_accepted`, `_assaf_os_proposals`, `_assaf_os_receipts`, `_assaf_os_replay` and
+`_assaf_os_issues`, and `max_rows` must be exactly 2000**, the Script's `ASSAF_OS_MAX_ROWS`. The CLI pins
+both to `UnifiedRuntime.gs` (a test reads them back from its source), so a missing tab, an extra or
+misspelled one, or another cap fails the check (detail `tabs` or `max_rows`): after a section 5 rollback
+to Sheets the Script enforces that same cap, and a tab left out of the measure is a tab that can hit
+`metadata_capacity_exceeded` there. The check fails above 90 percent of the cap on any tab (`at_cap`), and
+a measure older than 7 days is stale.
 
 <!-- evidence:journal.json -->
 ```json
-{"v": 1, "measured_at": "[UTC-5H]", "max_rows": 2000, "tabs": {"_assaf_os_proposals": 32, "_assaf_os_receipts": 19, "_assaf_os_replay": 51}}
+{"v": 1, "measured_at": "[UTC-5H]", "max_rows": 2000, "tabs": {"_assaf_os_accepted": 0, "_assaf_os_proposals": 32, "_assaf_os_receipts": 19, "_assaf_os_replay": 51, "_assaf_os_issues": 0}}
 ```
 
 `manifest.json`: **the sign-off record**. It is not a cryptographic signature: it is Assaf's explicit
@@ -299,7 +304,10 @@ present throughout; jobs paused and a verified backup before **each** of T1, T3,
      `schema` call straight through the existing transport (not through the factory, which refuses
      under `postgres`). Only the exact unsigned reply a Script with no readable config gives counts as
      fenced. It records `fence_probe_at` in `preflight.json`: the earliest probe of an **unbroken** run
-     of `unavailable` for this epoch and SHA. A probe that sees the Script live restarts the clock.
+     of `unavailable` for this epoch and SHA. A probe that sees the Script live restarts the clock, and
+     when a fence had already been recorded it also records `fence_broken_at`, the first time the Script
+     was seen live again, which voids any `drain.json` taken before it. The T2 drain is such a probe: it
+     sees the Script live, so it records that break itself.
   3. Put **warning-only protection on every tab** of the archive workbook, hidden tabs included
      (unhide, protect with "Show a warning when editing this range", hide again), and rename the
      workbook to exactly `ARCHIVE – edits ignored` (the dash is an en dash, U+2013). Warning protection
@@ -307,7 +315,16 @@ present throughout; jobs paused and a verified backup before **each** of T1, T3,
 - **Verify**: `preflight` prints `sheets: unavailable`; each tab's protection is read back and recorded;
   the workbook name is read back.
 - **Rollback**: set `ASSAF_OS_MODE` back to `LIVE`, remove the protection, rename the workbook back,
-  then the freeze rollback of T1.
+  then the freeze rollback of T1. **Then run `sudo mia os-authority preflight --approved-sha S` once
+  while the Script is LIVE again.** It exits 1 (`sheets_not_fenced` and, if a fence had been recorded,
+  `sheets_pending_proposals`), which is the expected answer here: its job is to write `fence_broken_at`.
+  The rollback lifts the fence and the freeze without touching the ledger, so the epoch and the SHA do
+  not change, and without that record the CLI has nothing to tell the retry from the aborted attempt: it
+  would carry the aborted attempt's `fence_probe_at` forward and accept its `drain.json` and any capture
+  taken while the Sheet was live. **A retry redoes T1, T2 (a new drain, with the Sheet live and the
+  freeze on), T3 and T4 with new captures taken after the new fence.** Never reuse a drain, a capture or
+  a `manifest.json` of the aborted attempt. If the refusal `sheets_pending_proposals`
+  (`drain_before_fence_break`) shows at T6, the remedy is that same redo of T2 and T3.
 - *Naming conflict, for the coordinator*: the pasted V2-35 issue says `ARCHIVE - read only`; the frozen
   contract section 16 says `ARCHIVE – edits ignored`. This runbook follows the contract.
 
@@ -320,10 +337,11 @@ present throughout; jobs paused and a verified backup before **each** of T1, T3,
 - **Drift proof**: `uv run --offline python scripts/os_workbook_diff.py capture1.xlsx capture2.xlsx`
   (local, no network). It prints the number of changed cells and their `(sheet, cell)` refs, never the
   values. **It must be zero.** That count is `drift_changed_cells` in the sign-off.
-- **Stage**: `sudo mia os-job os-import <arguments V2-30 documents in its --help>`, on the capture that
-  will be signed. It runs as the ledger **runtime** role (no privileged DSN) from the deployed tag's
-  `scripts/`. Unaccepted and id-less rows are quarantined, never dropped. Resolve every quarantined row
-  without a bypass.
+- **Go G24** staging the import into the production ledger. **Stage**:
+  `sudo mia os-job os-import <arguments V2-30 documents in its --help>`, on the capture that will be
+  signed. It writes staging rows to the production ledger (nothing is promoted until G12), and it runs as
+  the ledger **runtime** role (no privileged DSN) from the deployed tag's `scripts/`. Unaccepted and
+  id-less rows are quarantined, never dropped. Resolve every quarantined row without a bypass.
 - **Verify**: zero unresolved quarantine; the manifest counts, ids, revisions, per-currency totals,
   refund chains and references equal the capture.
 - **Rollback**: nothing is promoted; a staged batch is inert. Re-staging an unchanged workbook after a
@@ -417,22 +435,31 @@ Allowed **only** while `non_import_receipts` is 0 at the current epoch. After th
 - **Then, in this order**, as the command prints:
   1. `sudo mia os-authority freeze-plan --phase revert --approved-sha S` prints
      `MIA_ASSAF_OS_BACKEND=sheets`, `MIA_ASSAF_OS_LEDGER_ENABLED=false`,
-     `MIA_ASSAF_OS_AUTHORITY_EPOCH=0`, `MIA_ASSAF_OS_MIRROR_ENABLED=false`. Keep
+     `MIA_ASSAF_OS_AUTHORITY_EPOCH=0`, `MIA_ASSAF_OS_MIRROR_ENABLED=false`. It refuses
+     (`authority_state_invalid`) while `core` is still `active`, so run the command above first. Keep
      `MIA_ASSAF_OS_FREEZE=true`. Set them, `sudo mia settings`, check `/health` SHA.
   2. Apps Script: set `ASSAF_OS_MODE` back to `LIVE` (no republish). Confirm the Sheet answers: the Mia OS
      page loads from Sheets. Remove the tab protection and rename the workbook back.
   3. `MIA_ASSAF_OS_FREEZE=false`, `sudo mia settings`.
-- **Try again later**: `sudo mia os-authority init --rearm --approved-sha S` moves `core` from `fenced` to
-  `shadow` with **one** epoch bump (idempotent; it refuses after a business write). Then repeat T1 to T7
-  from a fresh drain, a fresh fence and new captures: the import request id and batch key include the
-  epoch, so the same workbook imports again at the new epoch. There is no `fenced` to `active`.
+- **Go G23** the re-arm. **Try again later**: `sudo mia os-authority init --rearm --approved-sha S` moves
+  `core` from `fenced` to `shadow` with **one** epoch bump (idempotent; it refuses after a business
+  write). It flips the authority state on production, so it needs its own go even though the rollback
+  that came before it had one. Then repeat T1 to T7 from a fresh drain, a fresh fence and new captures:
+  the import request id and batch key include the epoch, so the same workbook imports again at the new
+  epoch. There is no `fenced` to `active`.
 
 ## 6. After the first non-import receipt
 
 Never switch back to Sheets, never delete receipts, never replay an uncertain write to fix a latency
-number. `sudo mia os-authority fence --approved-sha S` fences `core` (and `statements` if active) and
-stops all ledger writes; it is idempotent. Recovery after that is a restore (`fenced` to `restoring`,
-then `active` with an epoch bump) under its own go and plan, not an automated command of this tool.
+number.
+
+- **Go G22** the ledger fence. `sudo mia os-authority fence --approved-sha S` fences `core` (and
+  `statements` if active) and stops all ledger writes; it is idempotent. It flips the authority state
+  on production, so it is **not pre-approved**: it needs Assaf's explicit statement in chat for that one
+  use. If he wants it to be a standing emergency stop, he says so in chat and the operator records his
+  words in `OS_CUTOVER_GO_NO_GO.md`; until then it is not one.
+- **Afterwards**: recovery is a restore (`fenced` to `restoring`, then `active` with an epoch bump) under
+  its own go (G21) and plan, not an automated command of this tool.
 
 ## 7. Reason codes
 
@@ -447,7 +474,7 @@ refuses on any `fail` and on any `pending`.
 | `capture_before_fence` | The signed capture time is later than the unbroken `fence_probe_at` | A capture before the fence: take new ones (T4) |
 | `main_role_unsafe` | The main DSN passes the V2-14a posture check | Step 2 not enforced |
 | `ledger_role_unsafe` | The V2-15 grant-map validator passes | Step 4 not done, or a posture drifted |
-| `sheets_pending_proposals` | `drain.json`: zero pending, taken before the fence, same epoch and SHA | Settle and redo T2 |
+| `sheets_pending_proposals` | `drain.json`: zero pending, taken before the fence and after any lifted fence (`fence_broken_at`), same epoch and SHA | Settle and redo T2, then T3's probe (`drain_after_fence`, `drain_before_fence_break`) |
 | `sheets_unknown_receipts` | Zero Sheets receipts unknown | Resolve by receipt, never replay |
 | `approval_cards_open` | Every `assaf_os.approve` card is terminal | Settle or let it expire |
 | `backup_too_old` | `backup.json` shows a dump under 1 h old | Re-run `--status` after a fresh backup |
@@ -455,14 +482,14 @@ refuses on any `fail` and on any `pending`.
 | `mirror_not_verified` | The mirror is empty or verified | Wait for a verified mirror, or fix the conflict |
 | `manifest_not_signed` | `manifest.json` verifies every binding of section 2 | Re-sign the exact digest |
 | `fe_v2_reader_not_live` | `fe-v2.json` carries the Cloudflare version and bundle hash | Record the live reader |
-| `journal_capacity` | `journal.json`: fresh, every tab at most 90 percent of the cap | Archive rows or raise the cap |
+| `journal_capacity` | `journal.json`: fresh, exactly the five tabs and `max_rows` 2000, each tab at most 90 percent of the cap | Fix the file (`tabs`, `max_rows`), or archive rows (`at_cap`) |
 
 Other refusals of the CLI:
 
 | Code | Meaning |
 |---|---|
 | `workspace_missing` | `init` has not run (step 5) |
-| `authority_state_invalid` | The command does not apply to the current `core` state |
+| `authority_state_invalid` | The command does not apply to the current `core` state (for example `freeze-plan --phase revert` before `rollback` has fenced it) |
 | `final_accept_flag_required` | `preflight --drain` needs `--final-accept` |
 | `drain_requires_live_sheet` | The drain snapshot needs a live Sheet; run it before T3 |
 | `switch_not_applied` | `freeze-plan --phase mirror` or `open` before the switch is in the settings |
@@ -500,3 +527,6 @@ Each needs its own explicit statement in chat, for that step only.
 | G19 | A rollback before the first non-import receipt |
 | G20 | Each later feature release |
 | G21 | Each restore |
+| G22 | `fence`: stopping all ledger writes after the first non-import receipt (not pre-approved) |
+| G23 | `init --rearm`: `fenced` to `shadow` with one epoch bump, to try again after a rollback |
+| G24 | Staging the import into the production ledger (`os-job os-import`), before the promote of G12 |

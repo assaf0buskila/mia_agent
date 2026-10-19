@@ -186,6 +186,71 @@ def test_every_owner_go_of_the_phone_acceptance_list_is_a_go_here():
         assert needle in plain(table), needle
 
 
+GATE_MARK = re.compile(r"\bG\d\d\b")
+HEADING = re.compile(r"^#{2,3} ", re.M)
+
+# Every command that changes production state, the section that runs it, and the owner gate that
+# must be marked there. An unmarked line reads as runnable without a go (the runbook's own rule).
+GATED_COMMANDS = [
+    ("### Step 3", r"sudo mia os-ledger migrate", "G06", False),
+    ("### Step 4", r"sudo mia os-provision runtime", "G07", False),
+    ("### Step 4", r"sudo mia os-provision retention", "G07", False),
+    ("### Step 5", r"sudo mia os-authority init --approved-sha S", "G08", False),
+    ("### T4", r"sudo mia os-job os-import", "G24", True),
+    ("### T5", r"sudo mia os-job os-import", "G12", False),
+    ("### T6", r"sudo mia os-authority activate", "G13", False),
+    ("## 5. ", r"sudo mia os-authority rollback", "G19", False),
+    ("## 5. ", r"sudo mia os-authority init --rearm", "G23", True),
+    ("## 6. ", r"sudo mia os-authority fence", "G22", True),
+]
+
+
+def section_of(heading: str) -> str:
+    starts = [m.start() for m in HEADING.finditer(RUNBOOK)] + [len(RUNBOOK)]
+    for begin, end in zip(starts, starts[1:], strict=False):
+        if RUNBOOK[begin:end].startswith(heading):
+            return RUNBOOK[begin:end]
+    raise AssertionError(heading)
+
+
+def bullet_with(section: str, command: str) -> str:
+    """The top-level bullet of a section (its indented lines included) that runs a command."""
+    for bullet in re.split(r"^(?=- )", section, flags=re.M):
+        if re.search(command, bullet):
+            return bullet
+    raise AssertionError(command)
+
+
+@pytest.mark.parametrize("heading,command,gate,same_bullet", GATED_COMMANDS)
+def test_every_production_changing_command_is_marked_with_its_owner_gate(
+    heading, command, gate, same_bullet
+):
+    section = section_of(heading)
+    assert re.search(command, section), (heading, command)
+    assert gate in GATE_MARK.findall(section), (heading, command, gate)
+    if same_bullet:
+        # No other line to hide the go on: the command and its gate sit in one bullet.
+        assert gate in GATE_MARK.findall(bullet_with(section, command)), (heading, command, gate)
+
+
+def test_the_owner_gate_list_covers_every_gate_a_step_marks_and_the_three_added_flips():
+    body, table = RUNBOOK.split("## 8. Owner gates, in one list", 1)
+    rows = dict(re.findall(r"^\| (G\d\d) \| (.+) \|$", table, re.M))
+    numbers = list(rows)
+    assert numbers == [f"G{n:02d}" for n in range(1, len(numbers) + 1)], "contiguous, in order"
+    assert numbers[-1] == "G24", "G22 fence, G23 re-arm and G24 staging were added after G21"
+    assert set(GATE_MARK.findall(body)) <= set(numbers), "a step marks a gate the list lacks"
+    assert {"G22", "G23", "G24"} <= set(GATE_MARK.findall(body))
+    assert "`fence`" in rows["G22"] and "`init --rearm`" in rows["G23"]
+    assert "staging" in rows["G24"].lower() and "os-import" in rows["G24"]
+    assert "G10 to G24" in RUNBOOK and "G10 to G21" not in RUNBOOK
+
+
+def test_fence_is_not_a_standing_emergency_stop_unless_the_owner_wrote_it_down():
+    section = section_of("## 6. ")
+    assert "not pre-approved" in section and "G22" in section
+
+
 def test_every_sudo_mia_command_is_a_command_of_the_vm_script():
     arms = set(re.findall(r"^  ([a-z|-]+)\)$", SCRIPT, re.M))
     commands = {name for arm_ in arms for name in arm_.split("|")}

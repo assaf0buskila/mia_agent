@@ -12,7 +12,8 @@ outcome=<ok|refused> reason=<code>``.
 
 Evidence lives in one VM-owned directory (``MIA_OS_AUTHORITY_DIR``, default
 ``/var/lib/mia/os-authority``). This job writes ``drain.json`` (``preflight --drain``),
-``preflight.json`` (``preflight``) and ``activation.json`` (``activate``). The operator places
+``preflight.json`` (``preflight``, and ``preflight --drain`` once it has seen the Script live: that
+sighting ends the run of fenced probes) and ``activation.json`` (``activate``). The operator places
 ``backup.json``, ``restore-drill.json``, ``fe-v2.json``, ``journal.json`` and ``manifest.json``
 there (formats: ops/assaf-os/CUTOVER_RUNBOOK.md). The activation preconditions are the fixed table
 in ``PRECONDITIONS``; ``activate`` re-evaluates every one of them and moves ``core`` from
@@ -73,6 +74,15 @@ CLOCK_SKEW = timedelta(seconds=60)
 # A journal tab above this share of ASSAF_OS_MAX_ROWS leaves no room for the drain and the final
 # reconcile, so it counts as at the cap.
 JOURNAL_HEADROOM = 0.9
+# The Script's own row cap (UnifiedRuntime.gs ASSAF_OS_MAX_ROWS) and its five journal tabs
+# (ASSAF_OS_META). The measure must name exactly these tabs and carry exactly this cap: a missing
+# tab or a larger cap would let a full journal pass. tests/workers/test_os_authority_probes.py reads
+# both back from the Script's source, the way FENCED_REPLY is pinned.
+JOURNAL_MAX_ROWS = 2000
+JOURNAL_TABS = (
+    "_assaf_os_accepted", "_assaf_os_proposals", "_assaf_os_receipts", "_assaf_os_replay",
+    "_assaf_os_issues",
+)
 
 PRIVILEGED_DSN_ENV = "MIA_OS_LEDGER_MIGRATION_DATABASE_URL"
 MAIN_DSN_ENV = "MIA_DATABASE_URL"
@@ -608,6 +618,55 @@ def _fence_time(doc: Mapping[str, Any] | None, epoch: int, sha: str) -> datetime
     return _time(doc.get("fence_probe_at"))
 
 
+def _fence_broken(doc: Mapping[str, Any] | None, epoch: int, sha: str) -> datetime | None:
+    """The first time, for this epoch and release, the Script was seen live again after a fence had
+    been established (the T3 rollback lifts it without touching the ledger, so the epoch and the
+    SHA do not change). A drain taken before it was taken while the freeze may have been lifted."""
+    if (
+        doc is None
+        or doc.get("kind") != "preflight"
+        or doc.get("epoch") != epoch
+        or doc.get("release_sha") != sha
+    ):
+        return None
+    return _time(doc.get("fence_broken_at"))
+
+
+def _fence_record(
+    previous: Mapping[str, Any] | None, epoch: int, sha: str, state: str, now: datetime
+) -> dict[str, Any]:
+    """The fence evidence (``preflight.json``) after one observation of the Script.
+
+    ``fence_probe_at`` is the earliest probe of an unbroken run of ``unavailable``: it is carried
+    through further ``unavailable`` probes and dropped by any other observation. Seeing the Script
+    live right after a fence had been established is the break: ``fence_broken_at`` records it, is
+    kept by every later observation of this epoch and release, and is never moved earlier. An
+    ``unknown`` probe ends the run but proves nothing about the Script, so it is no break.
+    """
+    carried = _fence_time(previous, epoch, sha)
+    broken = _fence_broken(previous, epoch, sha)
+    document: dict[str, Any] = {
+        "v": 1, "kind": "preflight", "epoch": epoch, "release_sha": sha,
+        "sheets": state, "last_probe_at": _iso(now),
+    }
+    if state == "unavailable":
+        # A later capture is only provably after the fence if no probe in between saw the Script
+        # live.
+        document["fence_probe_at"] = _iso(carried if carried is not None else now)
+    elif state == "live" and carried is not None:
+        broken = now
+    if broken is not None:
+        document["fence_broken_at"] = _iso(broken)
+    return document
+
+
+def _read_fence_record(ctx: Context) -> dict[str, Any] | None:
+    try:
+        return ctx.deps.evidence.read(PREFLIGHT)
+    except EvidenceError:
+        return None
+
+
 def _pass(code: str) -> Check:
     return Check(code, "pass")
 
@@ -695,6 +754,11 @@ def _check_pending(ctx: Context, snapshot: api.AuthoritySnapshot) -> Check:
         return _fail(code, "drain_evidence_invalid")
     if document["sheets_pending"] != 0:
         return _fail(code, "nonzero")
+    broken_at = _fence_broken(ctx.fence_doc, snapshot.epoch, ctx.approved_sha)
+    if broken_at is not None and recorded < broken_at:
+        # The fence was lifted after this drain (the T3 rollback): proposals made while the freeze
+        # was lifted are not in it. Redo T2 (and T3) for the retry.
+        return _fail(code, "drain_before_fence_break")
     fenced_at = _fence_time(ctx.fence_doc, snapshot.epoch, ctx.approved_sha)
     if fenced_at is None:
         return Check(code, "pending", "fence_not_recorded")
@@ -785,13 +849,19 @@ def _check_journal(ctx: Context, snapshot: api.AuthoritySnapshot) -> Check:
         set(document) != {"v", "measured_at", "max_rows", "tabs"}
         or document.get("v") != 1
         or measured is None or cap is None or cap <= 0
-        or not isinstance(tabs, dict) or not tabs
+        or not isinstance(tabs, dict)
         or any(_strict_int(rows) is None or rows < 0 for rows in tabs.values())
     ):
         return _fail(code, "invalid")
+    # Headroom is only proven against the cap the Script enforces, over every tab it writes: an
+    # operator-supplied cap or a shorter tab list could pass a journal that is already full.
+    if cap != JOURNAL_MAX_ROWS:
+        return _fail(code, "max_rows")
+    if set(tabs) != set(JOURNAL_TABS):
+        return _fail(code, "tabs")
     if not -CLOCK_SKEW <= ctx.now - measured <= JOURNAL_MAX_AGE:
         return _fail(code, "stale")
-    if max(tabs.values()) > JOURNAL_HEADROOM * cap:
+    if max(tabs.values()) > JOURNAL_HEADROOM * JOURNAL_MAX_ROWS:
         return _fail(code, "at_cap")
     return _pass(code)
 
@@ -969,21 +1039,10 @@ def cmd_preflight(ctx: Context, *, drain: bool, final_accept: bool) -> Result:
     if drain:
         return _drain(ctx, snapshot, final_accept=final_accept)
     ctx.mode = "preflight"
-    previous: dict[str, Any] | None
-    try:
-        previous = deps.evidence.read(PREFLIGHT)
-    except EvidenceError:
-        previous = None
     state, _ = ctx.fence()
-    carried = _fence_time(previous, snapshot.epoch, ctx.approved_sha)
-    document: dict[str, Any] = {
-        "v": 1, "kind": "preflight", "epoch": snapshot.epoch, "release_sha": ctx.approved_sha,
-        "sheets": state, "last_probe_at": _iso(ctx.now),
-    }
-    if state == "unavailable":
-        # The earliest probe of an unbroken run of "unavailable": a later capture is only
-        # provably after the fence if no probe in between saw the Script live.
-        document["fence_probe_at"] = _iso(carried) if carried is not None else _iso(ctx.now)
+    document = _fence_record(
+        _read_fence_record(ctx), snapshot.epoch, ctx.approved_sha, state, ctx.now
+    )
     ctx.fence_doc = document
     checks = run_checks(ctx, snapshot)
     document["checks"] = [check.as_dict() for check in checks]
@@ -1009,6 +1068,12 @@ def _drain(ctx: Context, snapshot: api.AuthoritySnapshot, *, final_accept: bool)
     state, _ = ctx.fence()
     if state != "live":
         raise Refusal("drain_requires_live_sheet")
+    # The probe saw the Script live: record it in the fence evidence BEFORE the mutating snapshot,
+    # so a drain that dies half-way still ends the unbroken run of "unavailable" and, when a fence
+    # had been established, voids the old drain.json. The drain itself is then the first thing
+    # recorded after the break.
+    deps.evidence.write(PREFLIGHT, _fence_record(
+        _read_fence_record(ctx), snapshot.epoch, ctx.approved_sha, state, ctx.now))
     pending = deps.probes.sheets_snapshot_pending()
     unknown = deps.probes.unknown_receipts()
     cards = deps.probes.open_cards()
@@ -1191,6 +1256,12 @@ def cmd_freeze_plan(ctx: Context, *, phase: str) -> Result:
         snapshot = _state(ctx)
         epoch = snapshot.epoch
         if phase in ("switch", "mirror", "open") and snapshot.states["core"] != "active":
+            raise Refusal("authority_state_invalid")
+        if phase == "revert" and snapshot.states["core"] not in ("fenced", "shadow"):
+            # The way back to Sheets is printed once `rollback` has fenced the ledger. While core is
+            # active the Sheets fence still refuses every write (authority_moved), and a ledger that
+            # is being restored is nobody's way back; a shadow ledger (never activated, or re-armed)
+            # owns no data, so the settings may return to Sheets.
             raise Refusal("authority_state_invalid")
         if phase in ("switch", "mirror") and settings.assaf_os_freeze is not True:
             raise Refusal("freeze_off")

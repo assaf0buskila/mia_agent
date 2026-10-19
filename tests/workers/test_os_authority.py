@@ -175,7 +175,34 @@ def signed_manifest(captured: datetime, signed: datetime, **over: Any) -> dict:
     return document
 
 
-def good_evidence(world: World) -> None:
+# The five journal tabs of the archive workbook (UnifiedRuntime.gs ASSAF_OS_META), spelled out here
+# on purpose: test_os_authority_probes.py pins the CLI's own list to the Script's source, and these
+# literals are what an operator is told to measure.
+JOURNAL_NAMES = (
+    "_assaf_os_accepted", "_assaf_os_proposals", "_assaf_os_receipts", "_assaf_os_replay",
+    "_assaf_os_issues",
+)
+
+
+def journal_tabs(**over: Any) -> dict[str, Any]:
+    """A fresh `journal.json` tab map: every journal tab, the ones the cutover grew a little."""
+    tabs: dict[str, Any] = dict.fromkeys(JOURNAL_NAMES, 0)
+    tabs.update({"_assaf_os_proposals": 32, "_assaf_os_receipts": 19, "_assaf_os_replay": 51})
+    tabs.update(over)
+    return tabs
+
+
+def journal_document(*, measured: datetime | None = None, **over: Any) -> dict[str, Any]:
+    tabs = over.pop("tabs", None)
+    document = {
+        "v": 1, "measured_at": stamp(measured or at(hours=-5)), "max_rows": 2000,
+        "tabs": journal_tabs() if tabs is None else tabs,
+    }
+    return document | over
+
+
+def operator_evidence(world: World) -> None:
+    """The four files the operator places (`backup`, `restore-drill`, `fe-v2`, `journal`)."""
     world.put(cli.BACKUP, {
         "healthy": True, "age_minutes": 10, "last_success_utc": stamp(at(minutes=-10)),
         "last_object": "15min/mia.dump.enc",
@@ -187,10 +214,11 @@ def good_evidence(world: World) -> None:
         "v": 1, "cloudflare_version": "ce8332db-4a1e", "bundle_sha256": "c" * 64,
         "recorded_at": stamp(at(days=-1)),
     })
-    world.put(cli.JOURNAL, {
-        "v": 1, "measured_at": stamp(at(hours=-5)), "max_rows": 2000,
-        "tabs": {"_assaf_os_proposals": 32, "_assaf_os_receipts": 19, "_assaf_os_replay": 51},
-    })
+    world.put(cli.JOURNAL, journal_document())
+
+
+def good_evidence(world: World) -> None:
+    operator_evidence(world)
     world.put(cli.DRAIN, {
         "v": 1, "kind": "drain", "recorded_at": stamp(at(hours=-3)), "epoch": 1,
         "release_sha": SHA, "freeze": True, "sheets_pending": 0, "sheets_unknown_receipts": 0,
@@ -295,7 +323,7 @@ BREAKERS = {
         signed_manifest(at(minutes=-90), at(minutes=-30), signoff_manifest_digest="0" * 64)),
     "fe_v2_reader_not_live": lambda w: w.drop(cli.FRONTEND),
     "journal_capacity": lambda w: w.put(
-        cli.JOURNAL, {**w.get(cli.JOURNAL), "tabs": {"_assaf_os_proposals": 1900}}),
+        cli.JOURNAL, {**w.get(cli.JOURNAL), "tabs": journal_tabs(_assaf_os_proposals=1900)}),
 }
 
 
@@ -414,13 +442,62 @@ def test_a_manifest_of_the_wrong_shape_is_not_signed(ready):
 
 def test_the_journal_headroom_is_ninety_percent_of_the_cap(ready):
     for rows, ok in ((1800, True), (1801, False)):
-        ready.put(cli.JOURNAL, {**ready.get(cli.JOURNAL), "tabs": {"_assaf_os_replay": rows}})
+        ready.put(cli.JOURNAL, journal_document(tabs=journal_tabs(_assaf_os_replay=rows)))
         assert (ready.run("preflight").code == 0) is ok
-    ready.put(
-        cli.JOURNAL,
-        {**ready.get(cli.JOURNAL), "tabs": {"x": 1}, "measured_at": stamp(at(days=-8))},
-    )
+    ready.put(cli.JOURNAL, journal_document(measured=at(days=-8)))
     assert ready.run("preflight").code == 1
+
+
+def journal_detail(run: Run) -> str:
+    return next(c for c in run.out["checks"] if c["code"] == "journal_capacity")["detail"]
+
+
+@pytest.mark.parametrize("tabs", [
+    {"anything": 0},
+    {"_assaf_os_replay": 51},  # the one-tab file the old check passed
+    {name: 0 for name in JOURNAL_NAMES if name != "_assaf_os_accepted"},
+    {name: 0 for name in JOURNAL_NAMES if name != "_assaf_os_issues"},
+    {**dict.fromkeys(JOURNAL_NAMES, 0), "_assaf_os_extra": 0},
+    # five entries, but one is not a journal tab: a count alone proves nothing
+    {**{name: 0 for name in JOURNAL_NAMES if name != "_assaf_os_issues"}, "_assaf_os_issue": 0},
+    # the three tabs the runbook example used to list
+    {"_assaf_os_proposals": 32, "_assaf_os_receipts": 19, "_assaf_os_replay": 51},
+], ids=["anything", "one-tab", "no-accepted", "no-issues", "extra", "misspelled", "three-tabs"])
+def test_the_journal_measure_must_name_exactly_the_five_journal_tabs(ready, tabs):
+    # `_assaf_os_accepted` at 1950 of 2000 is the case that must never pass by being left out.
+    ready.put(cli.JOURNAL, journal_document(tabs=tabs))
+    run = ready.run("activate")
+    assert run.code == 1 and codes(run) == ["journal_capacity"]
+    assert journal_detail(run) == "tabs"
+    assert ready.state().states["core"] == "shadow"
+
+
+def test_a_full_accepted_tab_blocks_activation_when_it_is_measured(ready):
+    ready.put(cli.JOURNAL, journal_document(tabs=journal_tabs(_assaf_os_accepted=1950)))
+    run = ready.run("activate")
+    assert codes(run) == ["journal_capacity"] and journal_detail(run) == "at_cap"
+
+
+@pytest.mark.parametrize("cap,detail", [
+    (1, "max_rows"), (1999, "max_rows"), (2001, "max_rows"), (100_000, "max_rows"),
+    (0, "invalid"), (-2000, "invalid"), (True, "invalid"), ("2000", "invalid"), (2000.0, "invalid"),
+    (None, "invalid"),
+])
+def test_the_journal_cap_is_the_scripts_own_cap_and_nothing_else(ready, cap, detail):
+    # A larger number would let a full tab through (1950 of 100000); a smaller one is not the
+    # Script's cap. Only the value the Script enforces (ASSAF_OS_MAX_ROWS) proves any headroom.
+    ready.put(cli.JOURNAL, journal_document(tabs=journal_tabs(_assaf_os_accepted=1950),
+                                            max_rows=cap))
+    run = ready.run("activate")
+    assert run.code == 1 and codes(run) == ["journal_capacity"]
+    assert journal_detail(run) == detail
+
+
+def test_the_journal_measure_still_needs_every_tab_to_be_a_count(ready):
+    for bad in (-1, True, 1.5, "7", None):
+        ready.put(cli.JOURNAL, journal_document(tabs=journal_tabs(_assaf_os_receipts=bad)))
+        run = ready.run("activate")
+        assert codes(run) == ["journal_capacity"] and journal_detail(run) == "invalid", bad
 
 
 # --------------------------------------------------------------------------- init
@@ -652,6 +729,193 @@ def test_a_capture_taken_before_the_continuous_fence_cannot_activate(ready):
     assert codes(ready.run("activate")) == ["capture_before_fence"]
 
 
+# ----------------------------------------------------- abort and retry of T3 (one epoch, one SHA)
+#
+# The T3 rollback sets ASSAF_OS_MODE back to LIVE and lifts the freeze without touching the ledger,
+# so the epoch and the SHA do not change: the only thing that can tell a retry from the aborted
+# attempt is what the probes saw. The fence time of the aborted attempt must never be carried into
+# the retry, and the drain taken before it must not be reused.
+
+
+def drain_at(world: World, hours: float) -> Run:
+    """T2: the one signed snapshot, taken while the Sheet is live and the freeze is on."""
+    world.probes.fence = ("live", "")
+    world.clock[0] = at(hours=hours)
+    return world.run("preflight", "--drain", "--final-accept")
+
+
+def fence_at(world: World, hours: float) -> Run:
+    """T3: the Script is fenced, and the preflight right after it records the fence time."""
+    world.probes.fence = ("unavailable", "")
+    world.clock[0] = at(hours=hours)
+    return world.run("preflight")
+
+
+def script_live_again(world: World, hours: float) -> Run:
+    """The T3 rollback as the runbook documents it: the Script is LIVE, and one preflight runs."""
+    world.probes.fence = ("live", "")
+    world.clock[0] = at(hours=hours)
+    return world.run("preflight")
+
+
+def sign_capture(world: World, captured: float, signed: float) -> None:
+    world.put(cli.MANIFEST, signed_manifest(at(hours=captured), at(hours=signed)))
+
+
+def activate_now(world: World) -> Run:
+    """T6: the operator's evidence is placed fresh, right before `activate` (it is dated to NOW)."""
+    operator_evidence(world)
+    world.probes.fence = ("unavailable", "")
+    world.clock[0] = NOW
+    return world.run("activate")
+
+
+def started(world: World) -> World:
+    assert world.run("init").code == 0
+    return world
+
+
+def failing(run: Run) -> dict[str, str]:
+    return {c["code"]: c["detail"] for c in run.out["checks"] if c["status"] != "pass"}
+
+
+def test_a_retry_that_redoes_the_drain_does_not_carry_the_aborted_fence_time(any_world):
+    world = started(any_world)
+    assert drain_at(world, -10).code == 0
+    assert fence_at(world, -9).code == 0
+    assert world.get(cli.PREFLIGHT)["fence_probe_at"] == stamp(at(hours=-9))
+    # The T3 rollback (the Script is LIVE), then T2 is redone while the Sheet is live. The drain
+    # itself saw the Script live, so it ends the unbroken run of `unavailable` on its own.
+    assert drain_at(world, -7).code == 0
+    record = world.get(cli.PREFLIGHT)
+    assert record["sheets"] == "live" and "fence_probe_at" not in record
+    assert fence_at(world, -6).code == 0
+    assert world.get(cli.PREFLIGHT)["fence_probe_at"] == stamp(at(hours=-6))
+    sign_capture(world, -5, -4)
+    run = activate_now(world)
+    assert run.code == 0, run.err
+    assert [c["status"] for c in run.out["checks"]] == ["pass"] * len(cli.PRECONDITIONS)
+    assert world.state().states["core"] == "active"
+
+
+def test_the_documented_rollback_voids_the_old_drain_and_the_captures_of_the_live_window(
+    any_world,
+):
+    world = started(any_world)
+    assert drain_at(world, -10).code == 0
+    assert fence_at(world, -9).code == 0
+    # T3 rollback: ASSAF_OS_MODE back to LIVE, then ONE preflight while the Script is live. Its
+    # exit 1 (`sheets_not_fenced`) is the expected answer; it records that the fence was lifted.
+    live = script_live_again(world, -8)
+    assert live.code == 1 and codes(live) == ["sheets_not_fenced", "sheets_pending_proposals"]
+    record = world.get(cli.PREFLIGHT)
+    assert record["sheets"] == "live" and "fence_probe_at" not in record
+    assert record["fence_broken_at"] == stamp(at(hours=-8))
+    assert script_live_again(world, -7.5).code == 1
+    assert world.get(cli.PREFLIGHT)["fence_broken_at"] == stamp(at(hours=-8)), "kept, not moved"
+    # The aborted attempt is NOT redone properly: capture #1 is taken while the Sheet is live and
+    # the freeze is lifted, and the Script is fenced again with the old drain.
+    sign_capture(world, -6.5, -5)
+    assert fence_at(world, -6).code == 1
+    assert world.get(cli.PREFLIGHT)["fence_probe_at"] == stamp(at(hours=-6))
+    assert world.get(cli.PREFLIGHT)["fence_broken_at"] == stamp(at(hours=-8))
+    run = activate_now(world)
+    assert run.code == 1 and codes(run) == ["capture_before_fence", "sheets_pending_proposals"]
+    assert failing(run) == {
+        "capture_before_fence": "capture_not_after_fence",
+        "sheets_pending_proposals": "drain_before_fence_break",
+    }
+    assert world.state().states["core"] == "shadow"
+    assert not (world.dir / cli.ACTIVATION).exists()
+    # The retry the runbook prescribes clears both: the old manifest.json is void, T2 again, the
+    # fence again, new captures.
+    world.drop(cli.MANIFEST)
+    for name in (cli.BACKUP, cli.DRILL, cli.FRONTEND, cli.JOURNAL):
+        # Placed for the refused activate and dated NOW, which this test's clock has gone back
+        # from: a real retry places fresh files, so the old ones go with the old manifest.
+        world.drop(name)
+    assert drain_at(world, -4).code == 0
+    assert fence_at(world, -3.5).code == 0
+    sign_capture(world, -3, -2.5)
+    assert activate_now(world).code == 0
+    assert world.state().states["core"] == "active"
+
+
+def test_a_drain_that_dies_after_seeing_the_sheet_live_leaves_the_old_drain_void(any_world):
+    world = started(any_world)
+    assert drain_at(world, -10).code == 0
+    assert fence_at(world, -9).code == 0
+    world.probes.broken = {"snapshot"}
+    died = drain_at(world, -7)
+    assert codes(died) == ["internal_error"]
+    world.probes.broken = set()
+    assert world.get(cli.DRAIN)["recorded_at"] == stamp(at(hours=-10)), "the old drain is kept"
+    assert fence_at(world, -6).code == 1
+    sign_capture(world, -5, -4)
+    run = activate_now(world)
+    assert codes(run) == ["sheets_pending_proposals"]
+    assert failing(run) == {"sheets_pending_proposals": "drain_before_fence_break"}
+
+
+def test_the_drain_records_that_it_saw_the_sheet_live(any_ready):
+    ready = any_ready
+    assert ready.get(cli.PREFLIGHT)["fence_probe_at"] == stamp(at(hours=-2))
+    ready.probes.fence = ("live", "")
+    assert ready.run("preflight", "--drain", "--final-accept").code == 0
+    record = ready.get(cli.PREFLIGHT)
+    assert (record["kind"], record["epoch"], record["release_sha"], record["sheets"]) == (
+        "preflight", 1, SHA, "live")
+    assert record["last_probe_at"] == stamp(NOW) and "fence_probe_at" not in record
+    assert record["fence_broken_at"] == stamp(NOW)
+    ready.probes.fence = ("unavailable", "")
+    run = ready.run("activate")  # no fence has been recorded since the drain
+    assert run.code == 1 and codes(run) == ["capture_before_fence", "sheets_pending_proposals"]
+    assert failing(run) == {
+        "capture_before_fence": "no_fence_probe", "sheets_pending_proposals": "fence_not_recorded",
+    }
+
+
+def test_a_live_preflight_before_any_fence_does_not_void_the_drain(any_world):
+    world = started(any_world)
+    assert drain_at(world, -10).code == 0
+    # A sanity preflight while the Script is still live: no fence was established, none is broken.
+    assert script_live_again(world, -9.5).code == 1
+    assert "fence_broken_at" not in world.get(cli.PREFLIGHT)
+    assert fence_at(world, -9).code == 0
+    sign_capture(world, -8, -7)
+    assert activate_now(world).code == 0, "the freeze held since the drain: it need not be redone"
+
+
+def test_an_unknown_probe_ends_the_unbroken_run_but_is_not_a_sighting_of_the_live_sheet(
+    any_world,
+):
+    world = started(any_world)
+    assert drain_at(world, -10).code == 0
+    assert fence_at(world, -9).code == 0
+    world.probes.fence = ("unknown", "transport")
+    world.clock[0] = at(hours=-8)
+    assert world.run("preflight").code == 1
+    record = world.get(cli.PREFLIGHT)
+    assert record["sheets"] == "unknown" and "fence_probe_at" not in record
+    assert "fence_broken_at" not in record, "a transport error does not void the drain"
+    assert fence_at(world, -7).code == 0
+    assert world.get(cli.PREFLIGHT)["fence_probe_at"] == stamp(at(hours=-7))
+
+
+def test_a_refused_drain_does_not_touch_the_fence_record(ready):
+    before = (ready.dir / cli.PREFLIGHT).read_bytes()
+    assert ready.run("preflight", "--drain").code == 1  # no --final-accept
+    ready.probes.fence = ("live", "")
+    ready.settings.assaf_os_freeze = False
+    assert codes(ready.run("preflight", "--drain", "--final-accept")) == ["freeze_off"]
+    ready.settings.assaf_os_freeze = True
+    for sheets in (("unavailable", ""), ("unknown", "transport")):
+        ready.probes.fence = sheets
+        assert codes(ready.run("preflight", "--drain", "--final-accept")) == [
+            "drain_requires_live_sheet"]
+    assert (ready.dir / cli.PREFLIGHT).read_bytes() == before
+
+
 def test_the_whole_cutover_in_order_with_cli_written_evidence(any_world):
     world = any_world
     world.settings.os_statement_pepper = PEPPER
@@ -669,8 +933,7 @@ def test_the_whole_cutover_in_order_with_cli_written_evidence(any_world):
     world.put(cli.DRILL, {"started_utc": stamp(at(days=-1)), "passed": True})
     world.put(cli.FRONTEND, {"v": 1, "cloudflare_version": "ce8332db-4a1e",
                              "bundle_sha256": "c" * 64, "recorded_at": stamp(at(days=-2))})
-    world.put(cli.JOURNAL, {"v": 1, "measured_at": stamp(at(hours=-1)), "max_rows": 2000,
-                            "tabs": {"_assaf_os_replay": 51}})
+    world.put(cli.JOURNAL, journal_document(measured=at(hours=-1)))
     world.clock[0] = NOW
     preflight = world.run("preflight")
     assert preflight.code == 0 and preflight.out["ready_to_activate"] is True
@@ -754,15 +1017,36 @@ def test_freeze_plan_prints_the_exact_keys_and_changes_nothing(ready):
     opened = ready.run("freeze-plan", "--phase", "open")
     assert keys_of(opened) == ["MIA_ASSAF_OS_FREEZE=false"]
     assert "first non-import write" in opened.out
+    assert before.states["core"] == "shadow" and ready.state().epoch == 1
+    assert ready.state().states["core"] == "active", "printing a plan changes no state"
+    # The way back is printed only once `rollback` has fenced the ledger (see the next test).
+    assert ready.run("rollback").code == 0
+    fenced = ready.state()
     revert = ready.run("freeze-plan", "--phase", "revert")
     assert keys_of(revert) == [
         "MIA_ASSAF_OS_BACKEND=sheets", "MIA_ASSAF_OS_LEDGER_ENABLED=false",
         "MIA_ASSAF_OS_AUTHORITY_EPOCH=0", "MIA_ASSAF_OS_MIRROR_ENABLED=false",
     ]
-    assert before.states["core"] == "shadow" and ready.state().epoch == 1
-    assert ready.state().states["core"] == "active", "printing a plan changes no state"
+    assert ready.state() == fenced, "printing a plan changes no state"
     for text in (drain.out, switch.out, mirror.out, opened.out, revert.out):
         assert SECRET not in text and PEPPER not in text
+
+
+def test_the_way_back_is_printed_only_after_the_rollback_fenced_the_ledger(ready):
+    assert ready.run("activate").code == 0
+    apply_switch(ready)
+    early = ready.run("freeze-plan", "--phase", "revert")
+    # While core is active the Sheets fence still refuses every write (`authority_moved`): the
+    # plan would make the settings say `sheets` over a ledger that still owns the data.
+    assert early.code == 1 and codes(early) == ["authority_state_invalid"]
+    assert "MIA_ASSAF_OS_BACKEND" not in json.dumps(early.out), "no key is printed on a refusal"
+    assert ready.state().states["core"] == "active"
+    assert ready.run("rollback").code == 0
+    assert ready.run("freeze-plan", "--phase", "revert").code == 0
+    assert ready.run("freeze-plan", "--phase", "revert").code == 0  # idempotent
+    # A ledger that is being restored is nobody's way back to Sheets.
+    ready.env.transition(WORKSPACE, "core", "restoring", expected_epoch=1, actor_owner_id=OWNER_ID)
+    assert codes(ready.run("freeze-plan", "--phase", "revert")) == ["authority_state_invalid"]
 
 
 def test_each_later_phase_refuses_until_the_earlier_one_is_applied(ready):

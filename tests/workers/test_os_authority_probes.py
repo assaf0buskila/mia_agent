@@ -83,6 +83,21 @@ def test_the_fenced_reply_is_the_one_the_script_source_gives():
     assert json.loads(literal) == cli.FENCED_REPLY
 
 
+def test_the_journal_tabs_and_cap_are_the_ones_the_script_source_gives():
+    # `journal_capacity` measures the archive workbook's journal tabs against the Script's own cap.
+    # The Script's source is the only authority for both, so the CLI's constants are read back from
+    # it here, the way FENCED_REPLY is, and cannot drift from it without a test failing.
+    source = (ROOT / "ops" / "assaf-os" / "UnifiedRuntime.gs").read_text(encoding="utf-8")
+    cap = re.findall(r"^var ASSAF_OS_MAX_ROWS = (\d+);$", source, re.M)
+    assert len(cap) == 1, "UnifiedRuntime.gs must declare ASSAF_OS_MAX_ROWS exactly once"
+    assert int(cap[0]) == cli.JOURNAL_MAX_ROWS
+    block = re.search(r"^var ASSAF_OS_META = \{\n(.*?)^\};$", source, re.S | re.M)
+    assert block, "UnifiedRuntime.gs must declare ASSAF_OS_META as a block"
+    names = re.findall(r'^\s+\w+: \{ name: "(_assaf_os_[a-z]+)"', block.group(1), re.M)
+    assert len(names) == 5, names
+    assert sorted(names) == sorted(cli.JOURNAL_TABS) and len(set(cli.JOURNAL_TABS)) == 5
+
+
 def test_an_unsigned_fenced_reply_is_unavailable():
     post = Transport(wrap(json.dumps(cli.FENCED_REPLY), ""))
     assert cli.fence_state(settings(), OWNER, post=post) == ("unavailable", "")
