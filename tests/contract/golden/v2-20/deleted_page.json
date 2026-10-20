@@ -1,0 +1,18 @@
+{
+  "api_version": "assaf-os.v2",
+  "authority_epoch": 1,
+  "entity": "tasks",
+  "next_cursor": null,
+  "observed_version": 2,
+  "records": [
+    {
+      "due_date": "2026-10-01",
+      "revision": 2,
+      "status": "בוצע",
+      "task_id": "TAS_t3",
+      "title": "לשלוח חשבונית"
+    }
+  ],
+  "source": "postgresql",
+  "workspace_id": "test"
+}
