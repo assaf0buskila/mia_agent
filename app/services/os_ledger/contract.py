@@ -93,7 +93,7 @@ _MONTH = re.compile(r"[0-9]{4}-[0-9]{2}")
 # fromisoformat alone also takes basic, week, hour-only and comma forms the frontend refuses.
 _ISO = re.compile(
     r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}(?::[0-9]{2}(?:\.[0-9]+)?)?"
-    r"(?:Z|[+-][0-9]{2}:[0-9]{2})"
+    r"(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])"
 )
 _MAX_SAFE_INTEGER = 2**53 - 1
 _FIELD_TYPES = frozenset(

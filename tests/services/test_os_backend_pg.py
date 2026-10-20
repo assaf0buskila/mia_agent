@@ -790,6 +790,27 @@ def test_proposal_from_another_epoch_is_refused(world):
         world.backend.proposal(pending["proposal_id"])
 
 
+class EpochSkewedReader:
+    """A reader whose ``proposal`` returns a row of another epoch, past its own I12 filter."""
+
+    def __init__(self, ledger):
+        self._ledger = ledger
+
+    def __getattr__(self, name):
+        return getattr(self._ledger, name)
+
+    def proposal(self, ctx, proposal_id):
+        row = self._ledger.proposal(ctx, proposal_id)
+        return dataclasses.replace(row, epoch=row.epoch + 1)
+
+
+def test_the_backend_refuses_a_row_of_another_epoch_even_if_the_reader_returns_one(world):
+    """The backend's own I12 check stands behind the reader's filter (V2-20 integration review)."""
+    pending = world.backend.propose(request())
+    with refused("authority_changed"):
+        make(world, ledger=EpochSkewedReader(world.ledger)).proposal(pending["proposal_id"])
+
+
 def test_proposal_reads_through_the_read_only_reader_never_a_write_transaction(world):
     """Section 22 E14(1), now that V2-18's LedgerReader.proposal exists."""
     pending = world.backend.propose(request())

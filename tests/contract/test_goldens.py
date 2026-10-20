@@ -947,7 +947,10 @@ def test_a_receipt_lists_at_most_500_records_like_the_frontend():
     ["20261016T120000Z", "2026-W42-5T12:00:00Z", "2026-10-16T12Z", "2026-10-16T12:00:00,5Z",
      "2026-10-16T12:00:00+00", "2026-10-16", "2026-10-16T12:00:00", "2026-10-16 12:00:00Z",
      "2026-10-16T12:00:00+0000", "２０２６-10-16T12:00:00Z",
-     "2026-13-16T12:00:00Z", "2026-10-16T12:00:00.Z"],
+     "2026-13-16T12:00:00Z", "2026-10-16T12:00:00.Z",
+     # fromisoformat folds zone minutes >= 60 into the hour; Date.parse refuses them (review nit).
+     "2026-10-16T12:00+05:60", "2026-10-16T12:00+00:60", "2026-10-16T12:00+00:99",
+     "2026-10-16T12:00+12:75"],
 )
 def test_a_timestamp_is_only_the_calendar_form_with_a_zone(value):
     for key in ("server_now", "committed_at"):
