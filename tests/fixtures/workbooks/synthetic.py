@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
+from dataclasses import dataclass
 from xml.etree import ElementTree as ET
 from zipfile import ZIP_STORED, ZipFile, ZipInfo
 
@@ -77,11 +78,39 @@ def make_xlsx(path, cells="", *, extra=None, compression=ZIP_STORED):
     return path
 
 
-def write_book(path, tables):
-    """A workbook of inline-string sheets; a sheet named ``_...`` is hidden."""
+@dataclass(frozen=True)
+class Typed:
+    """A raw cell for ``write_book``: ``value`` is the ``<v>`` text (None: no ``<v>``), ``t`` the
+    cell type attribute (None: numeric, ``"d"``: an ISO date) and ``style`` an index into the
+    cell formats below. Anything that is not a ``Typed`` keeps ``write_book``'s inline-string or
+    number path."""
+
+    value: str | None
+    t: str | None = None
+    style: int = 0
+
+
+STYLE_GENERAL, STYLE_DATE, STYLE_DATETIME = 0, 1, 2
+_STYLES = (
+    f'<styleSheet xmlns="{NS}"><numFmts count="1">'
+    '<numFmt numFmtId="165" formatCode="yyyy\\-mm\\-dd\\ hh:mm:ss"/></numFmts>'
+    '<cellXfs count="3"><xf numFmtId="0"/><xf numFmtId="14"/><xf numFmtId="165"/></cellXfs>'
+    '</styleSheet>'
+)
+
+
+def write_book(path, tables, *, date_1904=False):
+    """A workbook of inline-string sheets; a sheet named ``_...`` is hidden.
+
+    A ``Typed`` cell carries a number format (a styles part is written only then), and
+    ``date_1904`` sets the workbook's date system."""
     book = ET.Element("workbook", xmlns=NS)
+    if date_1904:
+        ET.SubElement(book, "workbookPr", date1904="1")
     sheets = ET.SubElement(book, "sheets")
     relationships = ET.Element("Relationships", xmlns=PKG)
+    styled = any(isinstance(value, Typed) and value.style for table in tables.values()
+                 for values in table for value in values)
     with ZipFile(path, "w", compression=ZIP_STORED) as archive:
         for index, (name, table) in enumerate(tables.items(), 1):
             ET.SubElement(sheets, "sheet", {
@@ -98,12 +127,23 @@ def write_book(path, tables):
                 row = ET.SubElement(data, "row", r=str(row_number))
                 for col, value in enumerate(values, 1):
                     cell = ET.SubElement(row, "c", r=f"{column(col)}{row_number}")
-                    if type(value) in {int, float}:
+                    if isinstance(value, Typed):
+                        if value.style:
+                            cell.set("s", str(value.style))
+                        if value.t:
+                            cell.set("t", value.t)
+                        if value.value is not None:
+                            ET.SubElement(cell, "v").text = value.value
+                    elif type(value) in {int, float}:
                         ET.SubElement(cell, "v").text = str(value)
                     else:
                         cell.set("t", "inlineStr")
                         ET.SubElement(ET.SubElement(cell, "is"), "t").text = str(value or "")
             _member(archive, f"xl/worksheets/s{index}.xml", ET.tostring(sheet))
+        if styled:
+            ET.SubElement(relationships, "Relationship", {
+                "Id": "rStyles", "Type": f"{REL}/styles", "Target": "styles.xml"})
+            _member(archive, "xl/styles.xml", _STYLES)
         _member(archive, "xl/workbook.xml", ET.tostring(book))
         _member(archive, "xl/_rels/workbook.xml.rels", ET.tostring(relationships))
     return path

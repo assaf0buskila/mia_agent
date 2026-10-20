@@ -11,11 +11,18 @@ workspace and the requested epoch. It never invents a Google workbook id, a sour
 time or a human approval. Acceptance comes from the workbook's native accepted journal, and that is
 not owner approval either: the signed manifest digest is.
 
+Typed date cells (a date-formatted number, a ``t="d"`` cell) are read by the field they sit in
+(erratum E27, ``xlsx_dates``): a ``date`` column becomes ``YYYY-MM-DD`` and a ``datetime``
+column (``created_at``, ``updated_at``, the journal's ``accepted_at``) the UTC instant of its
+Asia/Jerusalem wall-clock time. A date anywhere else, or an unsafe one, quarantines the row.
+A string keeps its path.
+
 Nothing here logs a cell value, a name, an amount or an id. Log lines are reason codes and counts.
 """
 
 from __future__ import annotations
 
+import decimal
 import json
 import logging
 import re
@@ -29,13 +36,17 @@ from uuid import uuid5
 from app.prototypes import assaf_os_export_provenance as physical
 from app.prototypes.assaf_os_domain import SCHEMA, _canonical_record, validate_state
 from app.prototypes.assaf_os_primary import LocalPrimaryError
-from app.services.os_ledger import api
+from app.services.os_ledger import api, xlsx_dates
 from app.services.os_ledger.xlsx import Cell, Sheet, Workbook
 
 _LOG = logging.getLogger("mia.os_import")
 _ID = re.compile(r"[A-Za-z][A-Za-z0-9_-]{2,63}")
 _HEX = re.compile(r"[0-9a-f]{64}")
 OWNER_EXPORT = "owner_export:"
+IMPORT_JOB_SCOPES = frozenset({"import"})  # what ``authorize.for_worker("import", ...)`` mints
+# The accepted journal's one time column. Entity tabs say which of their columns are dates or
+# datetimes in the physical descriptor (``NATIVE_FIELDS[entity][i]["type"]``).
+_JOURNAL_KINDS = {"accepted_at": xlsx_dates.DATETIME}
 _ROW_CHUNK = 500
 
 
@@ -96,20 +107,27 @@ def _rows(sheet: Sheet) -> dict[int, dict[int, Cell]]:
     return result
 
 
-def _value(cell: Cell | None) -> Any:
-    if cell is None or cell.value is None:
-        return ""
-    if cell.date_format or cell.kind == "iso_date":
-        # Section 15 does not specify how a date serial maps to the native raw value (a datetime
-        # needs the spreadsheet time zone). Keep the source cell and quarantine the row rather
-        # than guess a date or time-zone coercion.
+def _date(cell: Cell, kind: str | None, date_1904: bool) -> str:
+    """A typed date cell, read by what its field is (erratum E27, ``xlsx_dates``).
+
+    Only a ``date`` or ``datetime`` field has a binding. A date in any other field has none, so the
+    row is quarantined rather than guessed at.
+    """
+    if kind not in {xlsx_dates.DATE_ONLY, xlsx_dates.DATETIME}:
         raise WorkbookImportError("date_serial_binding_unspecified")
-    if cell.kind == "error":
-        raise WorkbookImportError("cell_error")
-    if cell.kind != "number":
-        return cell.value
-    number = Decimal(cell.value)
-    if abs(number) > physical.MAX_SAFE_INTEGER:
+    try:
+        if cell.kind == "iso_date":
+            return xlsx_dates.from_iso(cell.value, kind)
+        return xlsx_dates.from_serial(cell.value, kind, date_1904=date_1904)
+    except xlsx_dates.DateValueError:
+        raise WorkbookImportError(xlsx_dates.REASON) from None
+
+
+def _number(text: str) -> Any:
+    number = Decimal(text)
+    # Comparisons are exact; ``abs`` and arithmetic round in the context and overflow on
+    # 1E+999999999.
+    if not -physical.MAX_SAFE_INTEGER <= number <= physical.MAX_SAFE_INTEGER:
         raise WorkbookImportError("unsafe_numeric_value")
     if number == number.to_integral_value():
         return int(number)
@@ -119,7 +137,25 @@ def _value(cell: Cell | None) -> Any:
     return result
 
 
-def _journal(tables, issues):
+def _value(cell: Cell | None, kind: str | None = None, *, date_1904: bool = False) -> Any:
+    """One cell's native raw value. ``kind`` is the field's type in the physical descriptor."""
+    if cell is None or cell.value is None:
+        return ""
+    if cell.date_format or cell.kind == "iso_date":
+        return _date(cell, kind, date_1904)
+    if cell.kind == "error":
+        raise WorkbookImportError("cell_error")
+    if cell.kind != "number":
+        return cell.value
+    try:
+        return _number(cell.value)
+    except (decimal.DecimalException, ArithmeticError):
+        # An exponent beyond the decimal context (Overflow, InvalidOperation) is a number the
+        # importer will not carry: a quarantine reason, never a crash.
+        raise WorkbookImportError("unsafe_numeric_value") from None
+
+
+def _journal(tables, issues, date_1904=False):
     history: dict[tuple[str, str], list[dict]] = {}
     invalid: set[tuple[str, str]] = set()
     for _, rows in tables:
@@ -131,9 +167,12 @@ def _journal(tables, issues):
             try:
                 if any(c.formula is not None for c in cells.values()):
                     raise WorkbookImportError("formula_in_journal")
-                if any(col > len(physical.ACCEPTED_HEADERS) for col in cells):
+                # A blank cell right of the journal's columns is formatting, not data.
+                if any(col > len(physical.ACCEPTED_HEADERS) and c.value not in (None, "")
+                       for col, c in cells.items()):
                     raise WorkbookImportError("invalid_journal_row")
-                row = {key: _value(cells.get(index))
+                row = {key: _value(cells.get(index), _JOURNAL_KINDS.get(key),
+                                   date_1904=date_1904)
                        for index, key in enumerate(physical.ACCEPTED_HEADERS, 1)}
                 entity, identity, revision = row["entity"], row["record_id"], row["revision"]
                 if (entity not in api.ENTITIES or not isinstance(identity, str)
@@ -192,8 +231,11 @@ def prepare(workbook: Workbook, *, workspace_id: str, authority_epoch: int) -> S
     for sheet in workbook.sheets:
         rows = _rows(sheet)
         header = rows.get(1, {})
+        # Blank trailing header cells (formatted but empty columns) are not part of the header.
+        width = max((index for index, cell in header.items() if cell.value not in (None, "")),
+                    default=0)
         headers = tuple(header.get(index, Cell(None)).value or ""
-                        for index in range(1, max(header, default=0) + 1))
+                        for index in range(1, width + 1))
         if any(cell.formula is not None for cell in header.values()):
             issues.append("formula_in_headers")
         entity = next((entity for entity in api.ENTITIES
@@ -215,7 +257,7 @@ def prepare(workbook: Workbook, *, workspace_id: str, authority_epoch: int) -> S
             issues.append("entity_sheet_missing")
         elif len(tables) > 1:
             issues.append("entity_sheet_ambiguous")
-    accepted = _journal(journal_tables, issues)
+    accepted = _journal(journal_tables, issues, workbook.date_1904)
     pending = []
     for entity in api.ENTITIES:
         for sheet, rows in entity_tables[entity]:
@@ -230,7 +272,10 @@ def prepare(workbook: Workbook, *, workspace_id: str, authority_epoch: int) -> S
                 for index in range(1, len(physical.NATIVE_FIELDS[entity]) + 1):
                     cell = cells.get(index)
                     try:
-                        values.append(_value(cell))
+                        values.append(_value(
+                            cell, physical.NATIVE_FIELDS[entity][index - 1]["type"],
+                            date_1904=workbook.date_1904,
+                        ))
                     except WorkbookImportError as exc:
                         values.append(cell.value if cell else "")
                         reasons.append(str(exc))
@@ -421,8 +466,15 @@ def import_rows(batch: StagedWorkbook) -> list[api.ImportRow]:
 
 
 def _require_worker(ctx_worker: api.TrustedOwnerContext) -> None:
+    """The WORKER channel, minted for the import job and for nothing else.
+
+    ``authorize.for_worker("import", ...)`` binds ``scopes == frozenset({"import"})``; a worker
+    minted for another job (retention, mirror, ...) must not stage or promote an import.
+    """
     if ctx_worker.channel != "WORKER":
         raise api.LedgerError("channel_operation_denied", reason="import_requires_worker")
+    if ctx_worker.scopes != IMPORT_JOB_SCOPES:
+        raise api.LedgerError("scope_denied", reason="worker_job_denied")
 
 
 def require_batch_binding(ctx_worker: api.TrustedOwnerContext, batch: StagedWorkbook) -> None:
