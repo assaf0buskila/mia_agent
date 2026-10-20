@@ -15,9 +15,11 @@ from types import SimpleNamespace
 
 import pytest
 from app.core.config import MiaEnv, Settings
+from app.db.session import get_session_factory, init_db
+from app.db.store import LeadStore
 from app.services import assaf_os
 from app.services.os_backend_pg import PageQuery, PostgresOsBackend
-from app.services.os_ledger import api, contract
+from app.services.os_ledger import api, authorize, contract
 
 from tests.contract.shapes import v2_20
 from tests.contract.shapes.v2_20 import (
@@ -31,6 +33,8 @@ from tests.contract.shapes.v2_20 import (
 from tests.fakes.contexts import make_ctx
 from tests.fakes.os_ledger_builders import commit_direct, counts, tombstone, update
 from tests.fakes.os_ledger_env import OWNER_ID, WORKSPACE
+from tests.services.os_ledger.test_authorize_constructors import OWNER as MIA_OWNER
+from tests.services.os_ledger.test_authorize_constructors import card, principal, proven
 
 
 @pytest.fixture
@@ -100,81 +104,156 @@ def test_a_missing_ledger_implementation_fails_closed_at_construction(world, mon
         make(world, ledger=None)
 
 
-# ---- the context seam (section 9 constructors) -------------------------------------------------
+# ---- the context seam: V2-19's real authorize (section 9; section 22 E24(2)) ---------------------
+#
+# Each channel's constructor builds the context, then ``authorize.require(ctx, op)`` enforces the
+# section 9 channel x operation matrix on that very context, before the ledger is asked anything.
 
 
-class Authorize:
-    """A stand-in for app.services.os_ledger.authorize (V2-19) recording how it was called."""
-
-    def __init__(self, ctx):
-        self.ctx, self.calls = ctx, []
-
-    def _issue(self, name, principal, settings):
-        self.calls.append((name, principal, settings))
-        return self.ctx
-
-    def from_owner_read(self, principal, settings):
-        return self._issue("from_owner_read", principal, settings)
-
-    def from_owner_mutation(self, principal, settings):
-        return self._issue("from_owner_mutation", principal, settings)
-
-    def from_mia_tool(self, principal, settings):
-        return self._issue("from_mia_tool", principal, settings)
-
-    def from_telegram_decision(self, approval, settings):
-        return self._issue("from_telegram_decision", approval, settings)
+def authorize_settings():
+    """What V2-19's real constructors mint against: the world's workspace and epoch."""
+    return v2_20.settings_for(assaf_os_workspace_id=WORKSPACE)
 
 
-def with_authorize(world, monkeypatch, actor, principal):
-    stub = Authorize(make_ctx("MIA" if actor == "MIA" else "OS", owner=int(OWNER_ID),
-                              workspace=WORKSPACE))
-    monkeypatch.setattr("app.services.os_backend_pg._load_authorize", lambda: stub)
-    backend = make(world, actor=actor, principal=principal, contexts=None)
-    return backend, stub
+def spy_authorize(monkeypatch):
+    """Record every V2-19 constructor and ``require`` call, then run the real one."""
+    calls = []
+    for name in ("from_owner_read", "from_owner_mutation", "from_mia_tool",
+                 "from_telegram_decision"):
+
+        def constructor(principal, settings, _name=name, _real=getattr(authorize, name)):
+            ctx = _real(principal, settings)
+            calls.append((_name, principal, ctx))
+            return ctx
+
+        monkeypatch.setattr(authorize, name, constructor)
+
+    def require(ctx, op, _real=authorize.require):
+        calls.append(("require", op, ctx))
+        return _real(ctx, op)
+
+    monkeypatch.setattr(authorize, "require", require)
+    return calls
 
 
-def test_an_os_backend_uses_the_read_constructor_for_reads_and_the_mutation_one_for_writes(
-    world, monkeypatch
-):
-    principal = SimpleNamespace(owner_id=OWNER_ID)
-    backend, stub = with_authorize(world, monkeypatch, "OS", principal)
+def real_backend(world, actor, principal):
+    return make(world, actor=actor, principal=principal, contexts=None,
+                settings=authorize_settings())
+
+
+def admitted(calls):
+    """``(constructor, op)`` pairs: each context is checked by exactly one ``require``, at once."""
+    pairs = []
+    for built, checked in zip(calls[::2], calls[1::2], strict=True):
+        assert built[0] != "require" and checked[0] == "require"
+        assert checked[2] is built[2]
+        pairs.append((built[0], checked[1]))
+    return pairs
+
+
+def every_read(backend, pending):
     backend.schema()
-    proposal = backend.propose(assaf_os.ProposeRequest(
-        request_id=uuid_v4(1), entity="tasks", record_id=None, expected_revision=0,
-        input={"title": "x", "status": "לביצוע"}))
-    backend.decide("reject", proposal["proposal_id"],
-                   assaf_os.DecisionRequest(request_id=proposal["rejection_request_id"]))
-    assert [call[0] for call in stub.calls] == [
-        "from_owner_read", "from_owner_mutation", "from_owner_mutation"]
-    assert all(call[1] is principal and call[2] is world.settings for call in stub.calls)
+    backend.snapshot()
+    backend.pending()
+    backend.deleted("tasks")
+    backend.receipt(uuid_v4(0x9990))
+    backend.proposal_request(pending["request_id"])
+    backend.proposal(pending["proposal_id"])
 
 
-def test_a_mia_backend_uses_the_mia_tool_constructor_and_cannot_decide(world, monkeypatch):
-    principal = SimpleNamespace(actor_id=OWNER_ID)
-    backend, stub = with_authorize(world, monkeypatch, "MIA", principal)
-    backend.schema()
-    before, built = counts(world.env), len(stub.calls)
+def approve_request(pending):
+    return assaf_os.DecisionRequest(request_id=pending["approval_request_id"])
+
+
+def test_an_os_backend_builds_each_context_then_requires_its_section_9_op(world, monkeypatch):
+    calls = spy_authorize(monkeypatch)
+    session = proven(principal())
+    backend = real_backend(world, "OS", session)
+    pending = backend.propose(request())
+    every_read(backend, pending)
+    backend.decide("reject", pending["proposal_id"],
+                   assaf_os.DecisionRequest(request_id=pending["rejection_request_id"]))
+    assert admitted(calls) == [
+        ("from_owner_mutation", "propose"), *[("from_owner_read", "read")] * 7,
+        ("from_owner_mutation", "decide")]
+    assert all(call[1] is session for call in calls if call[0] != "require")
+    assert all(call[2].channel == "OS" for call in calls)
+
+
+def test_a_mia_backend_requires_read_or_propose_and_never_builds_a_decision(world, monkeypatch):
+    calls = spy_authorize(monkeypatch)
+    backend = real_backend(world, "MIA", MIA_OWNER)
+    pending = backend.propose(request())
+    every_read(backend, pending)
+    assert pending["actor_source"] == "MIA"
+    assert admitted(calls) == [("from_mia_tool", "propose"), *[("from_mia_tool", "read")] * 7]
+    before, built = counts(world.env), len(calls)
     with refused("owner_approval_required"):
-        backend.decide("approve", "PRO_x", assaf_os.DecisionRequest(request_id=uuid_v4(2)))
-    # The refusal comes before any context is built, so the model never even reaches the ledger.
-    assert counts(world.env) == before and len(stub.calls) == built
-    assert {call[0] for call in stub.calls} == {"from_mia_tool"}
+        backend.decide("approve", pending["proposal_id"], approve_request(pending))
+    # I5: refused before any context is built, so the model never even reaches the ledger.
+    assert counts(world.env) == before and len(calls) == built
 
 
-def test_a_telegram_decision_uses_the_telegram_constructor_with_the_approval(world, monkeypatch):
-    approval = SimpleNamespace(approval_id="ap-1")
-    backend, stub = with_authorize(world, monkeypatch, "TELEGRAM_APPROVAL", approval)
-    with refused("proposal_not_found"):
-        backend.decide("approve", "PRO_missing", assaf_os.DecisionRequest(request_id=uuid_v4(3)))
-    assert stub.calls[-1][:2] == ("from_telegram_decision", approval)
+@pytest.fixture
+def approval_store():
+    init_db()
+    session = get_session_factory()()
+    try:
+        yield LeadStore(session)
+    finally:
+        session.rollback()
+        session.close()
 
 
-def test_a_missing_authorize_module_fails_closed(world, monkeypatch):
+def test_a_telegram_decision_builds_its_context_from_the_card_then_requires_decide(
+    world, monkeypatch, approval_store
+):
+    pending = world.backend.propose(request())
+    row = card(approval_store)
+    calls = spy_authorize(monkeypatch)
+    receipt = real_backend(world, "TELEGRAM_APPROVAL", row).decide(
+        "approve", pending["proposal_id"], approve_request(pending))
+    assert receipt["status"] == "committed"
+    assert admitted(calls) == [("from_telegram_decision", "decide")]
+    assert calls[0][1] is row and calls[0][2].channel == "TELEGRAM_APPROVAL"
+
+
+@pytest.mark.parametrize(
+    ("scopes", "operation"),
+    [({"assaf-os:read", "assaf-os:approve"}, "propose"),
+     ({"assaf-os:read", "assaf-os:propose"}, "decide")],
+)
+def test_the_real_require_refuses_a_session_without_the_scope_of_its_op(world, scopes, operation):
+    """from_owner_mutation admits any write scope; only require knows which one the op needs."""
+    pending = world.backend.propose(request())
+    backend = real_backend(world, "OS", proven(principal(scopes=scopes)))
+    before = counts(world.env)
+    with refused("scope_denied"):
+        if operation == "propose":
+            backend.propose(request(request_id=uuid_v4(0x302)))
+        else:
+            backend.decide("approve", pending["proposal_id"], approve_request(pending))
+    assert counts(world.env) == before
+
+
+def test_an_absent_authorize_module_fails_closed_and_writes_nothing(world, monkeypatch):
+    pending = world.backend.propose(request())
     monkeypatch.setitem(sys.modules, "app.services.os_ledger.authorize", None)
-    backend = make(world, contexts=None)
-    with refused("ledger_unavailable"):
-        backend.schema()
+    before = counts(world.env)
+    attempts = [
+        ("OS", lambda backend: backend.schema()),
+        ("OS", lambda backend: backend.propose(request(request_id=uuid_v4(0x303)))),
+        ("OS", lambda backend: backend.decide(
+            "approve", pending["proposal_id"], approve_request(pending))),
+        ("MIA", lambda backend: backend.propose(request(request_id=uuid_v4(0x304)))),
+        ("TELEGRAM_APPROVAL", lambda backend: backend.decide(
+            "approve", pending["proposal_id"], approve_request(pending))),
+    ]
+    for actor, attempt in attempts:
+        with refused("ledger_unavailable") as caught:
+            attempt(real_backend(world, actor, None))
+        assert caught.value.write_outcome == "not_started"
+    assert counts(world.env) == before
 
 
 def test_a_context_that_is_not_trusted_is_refused(world):
@@ -640,8 +719,27 @@ def test_proposal_from_another_epoch_is_refused(world):
     pending = world.backend.propose(request())
     table = world.ledger._workspaces[WORKSPACE]["tables"]["os_proposals"]
     table[pending["proposal_id"]] = dataclasses.replace(table[pending["proposal_id"]], epoch=2)
-    with refused("authority_changed"):
+    # Section 22 E14(1): the read-only reader applies the I12 epoch filter of pending(), so a
+    # proposal of another epoch is not there at all (it was authority_changed on the old
+    # write-transaction path). Either way no body of another epoch leaves.
+    with refused("proposal_not_found"):
         world.backend.proposal(pending["proposal_id"])
+
+
+def test_proposal_reads_through_the_read_only_reader_never_a_write_transaction(world):
+    """Section 22 E14(1), now that V2-18's LedgerReader.proposal exists."""
+    pending = world.backend.propose(request())
+    spy = Spy(world.ledger)
+    assert make(world, ledger=spy).proposal(pending["proposal_id"]) == pending
+    assert spy.calls == ["proposal"]
+
+
+def test_a_proposal_stays_readable_under_the_kill_switch_like_pending(world):
+    pending = world.backend.propose(request())
+    world.knobs.kill_switch = True
+    before = counts(world.env)
+    assert world.backend.proposal(pending["proposal_id"]) == pending
+    assert counts(world.env) == before
 
 
 def test_approve_commits_and_returns_receipt_v2_with_the_current_record(world):
@@ -816,6 +914,171 @@ def test_ledger_errors_pass_through_unchanged(world):
         world.backend.snapshot()
 
 
+# ---- every failure leaves as a LedgerError ----------------------------------------------------
+#
+# The backend raises LedgerError and nothing else: never an AssafOsError (the v1 WriteDispatch
+# boundary would stamp a 5xx one ``not_started``) and never a raw exception. A failure before the
+# ledger write is asked for is ``not_started``; one after it is ``unknown`` (section 5.2).
+
+FAULTS = [
+    pytest.param(RuntimeError("boom"), id="runtime"),
+    pytest.param(assaf_os.AssafOsError("ledger_unavailable", 503), id="assaf_os_503"),
+    pytest.param(assaf_os.AssafOsError("source_unavailable", 502), id="assaf_os_502"),
+    pytest.param(KeyError("key"), id="key"),
+    pytest.param(TypeError("type"), id="type"),
+]
+
+
+def only_a_ledger_error(attempt) -> api.LedgerError:
+    with pytest.raises(Exception) as caught:  # noqa: PT011 - the type is what is asserted
+        attempt()
+    assert type(caught.value) is api.LedgerError, repr(caught.value)
+    return caught.value
+
+
+class Faulty:
+    """The world's ledger with one method replaced by one that raises ``fault``."""
+
+    def __init__(self, ledger, name, fault):
+        self._ledger, self._name, self._fault = ledger, name, fault
+
+    def __getattr__(self, name):
+        if name == self._name:
+            def fail(*_args, **_kwargs):
+                raise self._fault
+            return fail
+        return getattr(self._ledger, name)
+
+
+READS = {
+    "schema": (lambda backend, pending: backend.schema(), "head"),
+    "snapshot_head": (lambda backend, pending: backend.snapshot(), "head"),
+    "snapshot_page": (lambda backend, pending: backend.snapshot(), "page"),
+    "snapshot_summary": (lambda backend, pending: backend.snapshot(), "monthly_summary"),
+    "snapshot_labels": (lambda backend, pending: backend.snapshot(), "labels"),
+    "snapshot_pending_count": (lambda backend, pending: backend.snapshot(), "pending"),
+    "pending": (lambda backend, pending: backend.pending(), "pending"),
+    "deleted": (lambda backend, pending: backend.deleted("tasks"), "deleted"),
+    "receipt": (lambda backend, pending: backend.receipt(uuid_v4(0x9991)), "receipt"),
+    "proposal_request": (
+        lambda backend, pending: backend.proposal_request(pending["request_id"]),
+        "creation_request"),
+    "proposal": (lambda backend, pending: backend.proposal(pending["proposal_id"]), "proposal"),
+}
+WRITES = {
+    "propose": (lambda backend, pending: backend.propose(request(request_id=uuid_v4(0x310))),
+                "propose"),
+    "decide": (lambda backend, pending: backend.decide(
+        "approve", pending["proposal_id"], approve_request(pending)), "decide"),
+}
+
+
+@pytest.mark.parametrize("fault", FAULTS)
+@pytest.mark.parametrize("method", sorted(READS))
+def test_a_read_that_fails_in_the_ledger_is_ledger_unavailable(world, method, fault):
+    pending = world.backend.propose(request())
+    attempt, broken = READS[method]
+    backend = make(world, ledger=Faulty(world.ledger, broken, fault))
+    error = only_a_ledger_error(lambda: attempt(backend, pending))
+    assert (error.code, error.write_outcome) == ("ledger_unavailable", "not_started")
+
+
+@pytest.mark.parametrize("fault", FAULTS)
+@pytest.mark.parametrize("method", sorted(WRITES))
+def test_a_write_that_fails_once_the_ledger_was_asked_is_unknown_never_not_started(
+    world, method, fault
+):
+    pending = world.backend.propose(request())
+    attempt, broken = WRITES[method]
+    backend = make(world, ledger=Faulty(world.ledger, broken, fault))
+    error = only_a_ledger_error(lambda: attempt(backend, pending))
+    assert (error.code, error.write_outcome) == ("unknown", "unknown")
+
+
+@pytest.mark.parametrize(("method", "reader"), [("propose", "read_proposal_v2"),
+                                                ("decide", "read_receipt_v2")])
+def test_a_write_whose_answer_breaks_the_contract_is_unknown(world, monkeypatch, method, reader):
+    """The ledger answered, so the write may have happened: never ``not_started``."""
+    pending = world.backend.propose(request())
+
+    def broken(*_args, **_kwargs):
+        raise contract.ContractError("probe")
+
+    monkeypatch.setattr(contract, reader, broken)
+    error = only_a_ledger_error(lambda: WRITES[method][0](world.backend, pending))
+    assert (error.code, error.write_outcome) == ("unknown", "unknown")
+
+
+class FaultyContexts:
+    def __init__(self, fault):
+        self._fault = fault
+
+    def _fail(self):
+        raise self._fault
+
+    for_read = for_propose = for_decide = _fail
+
+
+@pytest.mark.parametrize("fault", FAULTS)
+@pytest.mark.parametrize("method", sorted(READS) + sorted(WRITES))
+def test_a_context_that_cannot_be_built_is_ledger_unavailable_and_writes_nothing(
+    world, method, fault
+):
+    pending = world.backend.propose(request())
+    attempt = {**READS, **WRITES}[method][0]
+    backend = make(world, contexts=FaultyContexts(fault))
+    before = counts(world.env)
+    error = only_a_ledger_error(lambda: attempt(backend, pending))
+    assert (error.code, error.write_outcome) == ("ledger_unavailable", "not_started")
+    assert counts(world.env) == before
+
+
+@pytest.mark.parametrize("fault", FAULTS)
+@pytest.mark.parametrize(("name", "calls"), [("from_owner_read", ("schema",)),
+                                             ("from_owner_mutation", ("propose",)),
+                                             ("require", ("schema", "propose"))])
+def test_an_authorize_call_that_fails_unexpectedly_is_ledger_unavailable(
+    world, monkeypatch, fault, name, calls
+):
+    def fail(*_args, **_kwargs):
+        raise fault
+
+    monkeypatch.setattr(authorize, name, fail)
+    backend = real_backend(world, "OS", proven(principal()))
+    before = counts(world.env)
+    for call in calls:
+        attempt = backend.schema if call == "schema" else lambda: backend.propose(request())
+        error = only_a_ledger_error(attempt)
+        assert (error.code, error.write_outcome) == ("ledger_unavailable", "not_started")
+    assert counts(world.env) == before
+
+
+@pytest.mark.parametrize("fault", FAULTS)
+def test_a_ledger_that_cannot_be_built_is_ledger_unavailable(world, monkeypatch, fault):
+    def build(_settings):
+        raise fault
+
+    monkeypatch.setattr(api, "build_ledger", build)
+    error = only_a_ledger_error(lambda: make(world, ledger=None))
+    assert error.code == "ledger_unavailable"
+
+
+def test_a_query_whose_members_cannot_be_read_is_invalid_query(world):
+    class Exploding:
+        @property
+        def entity(self):
+            raise RuntimeError("boom")
+
+    error = only_a_ledger_error(lambda: world.backend.snapshot(Exploding()))
+    assert error.code == "invalid_query"
+
+
+def test_every_construction_refusal_is_a_ledger_error(world):
+    sheets = Settings(_env_file=None, env=MiaEnv.TEST, telegram_owner_user_ids=OWNER_ID)
+    for changes in ({"owner": "999"}, {"actor": "WORKER"}, {"settings": sheets}):
+        only_a_ledger_error(lambda changes=changes: make(world, **changes))
+
+
 def test_no_body_is_labelled_google_sheets_and_none_has_a_v1_key(world):
     pending = world.backend.propose(request())
     decided = decide(world, "approve", pending)
@@ -844,10 +1107,22 @@ def test_logs_carry_reason_codes_and_never_record_text(world, caplog):
     assert "os_backend_pg" in text and "reason=os_frozen" in text
 
 
+class ProvenSurface:
+    """``LedgerEnv`` plus ``LedgerReader.proposal``. ``conformance/test_proposal_reader.py`` proves
+    that one on the fake and PG through ``_impl``, because ``LEDGER_SURFACE`` (V2-16f's file)
+    predates section 22 E14(1)."""
+
+    def __init__(self, env):
+        self._env = env
+
+    def __getattr__(self, name):
+        return self._env._impl.proposal if name == "proposal" else getattr(self._env, name)
+
+
 def test_the_backend_touches_only_the_surface_the_conformance_suite_proves(world):
     """``LedgerEnv`` exposes exactly the methods V2-16's PG ledger must pass the suite for, so a
     backend that works over it works over PG."""
-    backend = make(world, ledger=world.env)
+    backend = make(world, ledger=ProvenSurface(world.env))
     pending = backend.propose(request())
     decide(world, "approve", pending)
     second = backend.propose(request(request_id=uuid_v4(0x305)))

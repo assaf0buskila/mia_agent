@@ -10,9 +10,14 @@ section 10.2 body, built by ``contract``. Three rules hold throughout:
 * A body leaves only if the strict reader of ``contract`` accepts it. A ledger answer that breaks
   the contract is ``ledger_integrity_failed`` (503), never a half-right body.
 * Logs carry an operation, an outcome, a reason code and a duration. Never a body, a record, an id.
+* Every refusal is a ``LedgerError`` (section 5.2), never an ``AssafOsError`` or a raw exception.
+  A failure before the ledger is asked to write is ``not_started``; once it was asked, a failure
+  is ``unknown``, because the write may have happened. Nothing here claims ``not_started`` then.
 
 The trusted owner context comes from V2-19's ``authorize`` module, resolved lazily through the
-``contexts`` seam. A deployment without it fails closed with 503 ``ledger_unavailable``.
+``contexts`` seam: each constructor is followed by ``authorize.require(ctx, op)``, so the section 9
+channel x operation matrix is enforced on that very context (section 22 E24). A deployment without
+the module fails closed with 503 ``ledger_unavailable``.
 """
 
 from __future__ import annotations
@@ -64,10 +69,14 @@ def _checked_entity(entity: Any) -> str:
 
 
 def _checked_query(query: Any) -> tuple[str, str | None, int, str | None]:
-    entity = _checked_entity(getattr(query, "entity", "tasks"))
-    after = getattr(query, "after", None)
-    limit = getattr(query, "limit", DEFAULT_LIMIT)
-    since = getattr(query, "since", None)
+    try:
+        entity = getattr(query, "entity", "tasks")
+        after = getattr(query, "after", None)
+        limit = getattr(query, "limit", DEFAULT_LIMIT)
+        since = getattr(query, "since", None)
+    except Exception:  # a query whose members cannot be read is no query at all
+        raise _invalid_query() from None
+    entity = _checked_entity(entity)
     _checked_page_args(after, limit)
     if since is not None and (
         type(since) is not str or len(since) > MAX_SINCE_CHARS or not _TOKEN.fullmatch(since)
@@ -115,6 +124,9 @@ def _load_authorize() -> Any:
     except ImportError:
         _LOG.warning("os_backend_pg op=authorize outcome=refused reason=authorize_missing")
         raise api.LedgerError("ledger_unavailable", reason="authorize_missing") from None
+    except Exception:  # a module that fails to import still fails closed, as a LedgerError
+        _LOG.warning("os_backend_pg op=authorize outcome=refused reason=authorize_broken")
+        raise api.LedgerError("ledger_unavailable", reason="authorize_broken") from None
 
 
 class AuthorizeContexts:
@@ -123,35 +135,59 @@ class AuthorizeContexts:
     ``principal`` is what the channel entry point authenticated: the session principal for OS, the
     tool principal for MIA, the ApprovalRow for a Telegram decision. It is passed through
     untouched. The constructors re-check the numeric owner, the scopes and the mutation proof.
+    Each constructor is followed by ``authorize.require(ctx, op)`` with the section 9 operation of
+    the call (section 22 E24(2)): ``read``, ``propose`` or ``decide``.
     """
 
     def __init__(self, settings: Any, actor: str, principal: Any) -> None:
         self._settings, self._actor, self._principal = settings, actor, principal
 
+    def _admit(self, build: Callable[[Any], Any], op: str) -> api.TrustedOwnerContext:
+        authorize = _load_authorize()
+        try:
+            ctx = build(authorize)
+            authorize.require(ctx, op)
+        except api.LedgerError:
+            raise
+        except Exception:  # never a raw exception: authorization failed, nothing was asked
+            _LOG.warning("os_backend_pg op=authorize outcome=refused reason=authorize_failed")
+            raise api.LedgerError("ledger_unavailable", reason="authorize_failed") from None
+        return ctx
+
     def for_read(self) -> api.TrustedOwnerContext:
+        principal, settings = self._principal, self._settings
         if self._actor == "OS":
-            return _load_authorize().from_owner_read(self._principal, self._settings)
+            return self._admit(lambda a: a.from_owner_read(principal, settings), "read")
         if self._actor == "MIA":
-            return _load_authorize().from_mia_tool(self._principal, self._settings)
+            return self._admit(lambda a: a.from_mia_tool(principal, settings), "read")
         raise api.LedgerError("channel_operation_denied")
 
     def for_propose(self) -> api.TrustedOwnerContext:
+        principal, settings = self._principal, self._settings
         if self._actor == "OS":
-            return _load_authorize().from_owner_mutation(self._principal, self._settings)
+            return self._admit(lambda a: a.from_owner_mutation(principal, settings), "propose")
         if self._actor == "MIA":
-            return _load_authorize().from_mia_tool(self._principal, self._settings)
+            return self._admit(lambda a: a.from_mia_tool(principal, settings), "propose")
         raise api.LedgerError("channel_operation_denied")
 
     def for_decide(self) -> api.TrustedOwnerContext:
+        principal, settings = self._principal, self._settings
         if self._actor == "OS":
-            return _load_authorize().from_owner_mutation(self._principal, self._settings)
+            return self._admit(lambda a: a.from_owner_mutation(principal, settings), "decide")
         if self._actor == "TELEGRAM_APPROVAL":
-            return _load_authorize().from_telegram_decision(self._principal, self._settings)
+            return self._admit(lambda a: a.from_telegram_decision(principal, settings), "decide")
         raise api.LedgerError("owner_approval_required")
 
 
 # ---------------------------------------------------------------------------------------------
 # The backend
+
+
+@dataclass
+class _Dispatch:
+    """Set immediately before a write asks the ledger: after that, a failure is ``unknown``."""
+
+    started: bool = False
 
 
 class PostgresOsBackend:
@@ -187,7 +223,15 @@ class PostgresOsBackend:
         if actor not in _ACTORS:
             raise api.LedgerError("channel_operation_denied")
         self._settings, self._actor = settings, actor
-        self._ledger = ledger if ledger is not None else api.build_ledger(settings)
+        if ledger is None:
+            try:
+                ledger = api.build_ledger(settings)
+            except api.LedgerError:
+                raise
+            except Exception:  # a ledger that cannot be built is unavailable, never a raw error
+                _LOG.warning("os_backend_pg op=build outcome=refused reason=ledger_build_failed")
+                raise api.LedgerError("ledger_unavailable", reason="ledger_build_failed") from None
+        self._ledger = ledger
         self._contexts = contexts if contexts is not None else AuthorizeContexts(
             settings, actor, principal)
         self._clock = clock if clock is not None else (lambda: datetime.now(UTC))
@@ -196,8 +240,15 @@ class PostgresOsBackend:
     # ---- plumbing --------------------------------------------------------------------------
 
     @contextlib.contextmanager
-    def _operation(self, op: str) -> Iterator[None]:
+    def _operation(self, op: str) -> Iterator[_Dispatch]:
+        """Log the call, and make every failure a ``LedgerError`` with an honest outcome.
+
+        A write marks ``dispatch.started`` immediately before it asks the ledger. From then on the
+        write may have happened, so an unexpected failure, or an answer the contract refuses, is
+        ``unknown`` (the client recovers by reading, I1) and never ``not_started``.
+        """
         started = time.monotonic()
+        dispatch = _Dispatch()
 
         def log(outcome: str, reason: str) -> None:
             _LOG.info(
@@ -206,14 +257,23 @@ class PostgresOsBackend:
             )
 
         try:
-            yield
+            yield dispatch
         except api.LedgerError as exc:
             log("refused", exc.reason or exc.code)
             raise
         except contract.ContractError as exc:
             reason = "contract_" + re.sub(r"[^a-z0-9_]", "_", exc.reason)[:48]
+            if dispatch.started:
+                log("unknown", reason)
+                raise api.LedgerError("unknown", reason=reason) from None
             log("refused", reason)
             raise api.LedgerError("ledger_integrity_failed", reason=reason) from None
+        except Exception:  # never a raw error, and never an AssafOsError that reads not_started
+            if dispatch.started:
+                log("unknown", "backend_unexpected")
+                raise api.LedgerError("unknown", reason="backend_unexpected") from None
+            log("refused", "backend_unexpected")
+            raise api.LedgerError("ledger_unavailable", reason="backend_unexpected") from None
         log("ok", "none")
 
     @staticmethod
@@ -268,9 +328,10 @@ class PostgresOsBackend:
                 contract.schema_body(ctx.workspace, head.authority_epoch))
 
     def snapshot(self, query: Any = None) -> dict[str, Any]:
-        entity, after, limit, since = _checked_query(query if query is not None else PageQuery())
-        token = api.parse_since(since) if since is not None else None
         with self._operation("snapshot"):
+            entity, after, limit, since = _checked_query(
+                query if query is not None else PageQuery())
+            token = api.parse_since(since) if since is not None else None
             ctx = self._read_ctx()
             # Order matters. The head is read first, so the ``since`` token is never newer than
             # the data: a change in between shows on the next poll. Every other read comes after
@@ -296,8 +357,8 @@ class PostgresOsBackend:
 
     def pending(self, *, after: str | None = None, limit: int = DEFAULT_LIMIT) -> dict[str, Any]:
         """``GET /pending``: the pending ``proposal``-kind items, newest ledger view."""
-        _checked_page_args(after, limit)
         with self._operation("pending"):
+            _checked_page_args(after, limit)
             ctx = self._read_ctx()
             page = self._ledger.pending(ctx, after=after, limit=limit)
             return contract.read_pending_list(contract.pending_body(
@@ -310,9 +371,9 @@ class PostgresOsBackend:
         self, entity: str, *, after: str | None = None, limit: int = DEFAULT_LIMIT
     ) -> dict[str, Any]:
         """``GET /deleted``: tombstoned rows of one entity, most recently deleted first."""
-        _checked_page_args(after, limit)
-        _checked_entity(entity)
         with self._operation("deleted"):
+            _checked_page_args(after, limit)
+            _checked_entity(entity)
             ctx = self._read_ctx()
             page = self._ledger.deleted(ctx, cast(api.Entity, entity), after=after, limit=limit)
             return contract.read_deleted_page(contract.deleted_body(
@@ -350,11 +411,9 @@ class PostgresOsBackend:
         del budget  # the ledger has no remote call to bound
         with self._operation("proposal"):
             ctx = self._read_ctx()
-            # LedgerReader has no proposal-by-id yet, so this read is admitted as a write
-            # transaction: it fails closed under the kill switch and a fenced core (I8), and on PG
-            # it takes the workspace lock. A read-only API from V2-16/V2-18 replaces it.
-            with self._ledger.transaction(ctx, domain="core", kind="proposal") as tx:
-                row = tx.proposal(proposal_id)
+            # Section 22 E14(1): V2-18's read-only reader (section 8 isolation, never writes). It
+            # applies the I12 epoch filter of pending(), so a row of another epoch is None.
+            row = self._ledger.proposal(ctx, proposal_id)
             if row is None or row.kind != "proposal":
                 raise api.LedgerError("proposal_not_found")
             if row.epoch != ctx.authority_epoch:
@@ -366,12 +425,14 @@ class PostgresOsBackend:
     # ---- writes ----------------------------------------------------------------------------
 
     def propose(self, request: Any) -> dict[str, Any]:
-        with self._operation("propose"):
+        with self._operation("propose") as dispatch:
             ctx = self._trusted(self._contexts.for_propose())
-            row = self._ledger.propose(ctx, api.ProposeInput(
+            proposal = api.ProposeInput(
                 request_id=request.request_id, entity=request.entity,
                 record_id=request.record_id, expected_revision=request.expected_revision,
-                input=dict(request.input)))
+                input=dict(request.input))
+            dispatch.started = True
+            row = self._ledger.propose(ctx, proposal)
             # A replay returns the stored row whatever its status (I1), so the guard names them.
             return contract.read_proposal_v2(
                 contract.proposal_v2(row, authority_epoch=ctx.authority_epoch),
@@ -384,10 +445,12 @@ class PostgresOsBackend:
             raise api.LedgerError("validation_error", details={"reason": "invalid_decision"})
         if self._actor == "MIA":
             raise api.LedgerError("owner_approval_required")  # I5: the model never decides
-        with self._operation("decide"):
+        with self._operation("decide") as dispatch:
             ctx = self._trusted(self._contexts.for_decide())
-            result = self._ledger.decide(ctx, proposal_id, request.request_id, operation)
-            return self._receipt_body(result, ctx, request.request_id)
+            decision_id = request.request_id
+            dispatch.started = True
+            result = self._ledger.decide(ctx, proposal_id, decision_id, operation)
+            return self._receipt_body(result, ctx, decision_id)
 
 
 __all__ = ["AuthorizeContexts", "ContextSource", "PageQuery", "PostgresOsBackend"]
