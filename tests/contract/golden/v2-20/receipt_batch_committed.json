@@ -1,0 +1,19 @@
+{
+  "actor_source": "ASSISTANT_PASTE",
+  "api_version": "assaf-os.v2",
+  "authority_epoch": 1,
+  "commit_version": 2,
+  "committed_at": "2026-10-16T12:00:00.000Z",
+  "kind": "statement_batch",
+  "observed_version": 2,
+  "proposal_id": "PRO_00000000000040008000000000001005",
+  "reason_codes": [],
+  "records": [],
+  "request_id": "00000000-0000-4000-8000-000000001003",
+  "server_now": "2026-10-16T12:00:00.000Z",
+  "source": "postgresql",
+  "status": "committed",
+  "undo": null,
+  "undo_of": null,
+  "workspace_id": "test"
+}

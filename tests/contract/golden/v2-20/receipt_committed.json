@@ -1,0 +1,29 @@
+{
+  "actor_source": "OS",
+  "api_version": "assaf-os.v2",
+  "authority_epoch": 1,
+  "commit_version": 2,
+  "committed_at": "2026-10-16T12:00:00.000Z",
+  "kind": "proposal",
+  "observed_version": 2,
+  "proposal_id": "PRO_00000000000040008000000000001006",
+  "reason_codes": [],
+  "records": [
+    {
+      "entity": "tasks",
+      "record": {
+        "revision": 1,
+        "status": "לביצוע",
+        "task_id": "TAS_00000000000040008000000000001003",
+        "title": "לבדוק חשבונית"
+      }
+    }
+  ],
+  "request_id": "00000000-0000-4000-8000-000000001004",
+  "server_now": "2026-10-16T12:00:00.000Z",
+  "source": "postgresql",
+  "status": "committed",
+  "undo": null,
+  "undo_of": null,
+  "workspace_id": "test"
+}

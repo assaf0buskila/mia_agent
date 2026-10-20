@@ -206,7 +206,7 @@ def test_model_contact_must_be_present_in_current_owner_text(monkeypatch):
         def __init__(self, *_args, **_kwargs):
             raise AssertionError("provider touched")
 
-    monkeypatch.setattr("app.tools.owner.assaf_os.AssafOsPort", ExplodingPort)
+    monkeypatch.setattr("app.services.assaf_os.AssafOsPort", ExplodingPort)
     result = _assaf_os_propose(
         context(None, owner_text="create Dana"),
         {
@@ -225,7 +225,7 @@ def test_model_contact_provenance_rejects_substring_collision(monkeypatch):
         def __init__(self, *_args, **_kwargs):
             raise AssertionError("provider touched")
 
-    monkeypatch.setattr("app.tools.owner.assaf_os.AssafOsPort", ExplodingPort)
+    monkeypatch.setattr("app.services.assaf_os.AssafOsPort", ExplodingPort)
     result = _assaf_os_propose(
         context(None, owner_text="create notdana@example.com or 105012345678"),
         {
@@ -326,7 +326,7 @@ def test_unreviewable_oversized_card_never_creates_owner_approval(monkeypatch):
             )
             return value
 
-    monkeypatch.setattr("app.tools.owner.assaf_os.AssafOsPort", FakePort)
+    monkeypatch.setattr("app.services.assaf_os.AssafOsPort", FakePort)
     result = _assaf_os_propose(
         context(None),
         {
@@ -354,7 +354,7 @@ def test_mia_proposal_uses_script_ids_and_creates_exact_ten_minute_telegram_card
         def propose(self, _request):
             return pending()
 
-    monkeypatch.setattr("app.tools.owner.assaf_os.AssafOsPort", FakePort)
+    monkeypatch.setattr("app.services.assaf_os.AssafOsPort", FakePort)
     try:
         result = _assaf_os_propose(
             context(store),
@@ -407,7 +407,7 @@ def test_exact_script_approval_id_is_committed_once_after_telegram_decision(monk
                 "proposal_id": proposal_id,
             }
 
-    monkeypatch.setattr("app.tools.owner.assaf_os.AssafOsPort", FakePort)
+    monkeypatch.setattr("app.services.assaf_os.AssafOsPort", FakePort)
     monkeypatch.setattr("app.services.assaf_os.AssafOsPort", FakePort)
     monkeypatch.setattr(
         "app.services.owner_actions._aware",
@@ -476,7 +476,7 @@ def test_terminal_script_decision_is_never_reported_as_committed(monkeypatch, te
         def decide(self, _operation, proposal_id, _request):
             return {"status": terminal, "proposal_id": proposal_id}
 
-    monkeypatch.setattr("app.tools.owner.assaf_os.AssafOsPort", FakePort)
+    monkeypatch.setattr("app.services.assaf_os.AssafOsPort", FakePort)
     monkeypatch.setattr("app.services.assaf_os.AssafOsPort", FakePort)
     monkeypatch.setattr(
         "app.services.owner_actions._aware",
@@ -528,7 +528,7 @@ def test_kill_switch_blocks_telegram_approval_before_port_construction(monkeypat
         def propose(self, _request):
             return pending()
 
-    monkeypatch.setattr("app.tools.owner.assaf_os.AssafOsPort", ProposalPort)
+    monkeypatch.setattr("app.services.assaf_os.AssafOsPort", ProposalPort)
     try:
         proposed = _assaf_os_propose(
             context(store, source_ref="tg:kill:1"),

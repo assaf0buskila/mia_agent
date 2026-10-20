@@ -563,6 +563,9 @@ class LedgerReader(Protocol):  # V2-18 implements on PG
     ) -> dict[str, dict[str, str]]: ...
     # The v1 monthly row shape, unchanged.
     def monthly_summary(self, ctx: TrustedOwnerContext) -> tuple[dict[str, Any], ...]: ...
+    # §22 E14(1): one stored proposal by id, read-only (§8 isolation), any status or kind; None
+    # when absent or of another epoch (the I12 filter of pending()).
+    def proposal(self, ctx: TrustedOwnerContext, proposal_id: str) -> ProposalRow | None: ...
 
 
 class AuthorityAdmin(Protocol):  # privileged DSN, CLI jobs only
