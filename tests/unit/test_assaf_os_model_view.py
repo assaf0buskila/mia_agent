@@ -16,9 +16,10 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from app.capabilities.types import Principal
 from app.domain.owner import assaf_os_follow_up as follow
 from app.domain.owner.assaf_os_follow_up import MODEL_VIEW_MAX_CHARS, snapshot_model_view
-from app.services.os_ledger import api, contract
+from app.services.os_ledger import api, authorize, contract
 from app.tools.registries.owner_tools import execute_tool
 
 from tests.contract.shapes import v2_20
@@ -33,6 +34,7 @@ from tests.fakes.os_ledger_builders import (
     time_entry,
     work,
 )
+from tests.fakes.os_ledger_env import OWNER_ID, WORKSPACE
 from tests.unit.test_assaf_os_follow_up import bind_port
 from tests.unit.test_assaf_os_follow_up import context as base_context
 from tests.unit.test_assaf_os_tools import REQUEST, settings
@@ -867,3 +869,35 @@ def test_the_postgres_tools_read_the_ledger_without_touching_the_sheets_port(wor
     for tool, arguments in (("assaf_os_snapshot", {}), ("assaf_os_follow_up", {}),
                             ("assaf_os_receipt", {"request_id": uuid_v4(0x9971)})):
         assert execute_tool(tool, arguments, pg_context(now=v2_20.NOW)).ok
+
+
+def test_the_tools_reach_the_ledger_through_the_real_factory_with_the_tool_principal(
+    world, monkeypatch
+):
+    """V2-20 review r2, finding 4: _port is V2-17's get_os_backend(..., principal=ctx.principal).
+
+    Nothing is patched between the tool and the ledger but ``api.build_ledger``: the real
+    factory builds the real PostgresOsBackend, whose real V2-19 ``from_mia_tool`` needs the
+    numeric owner principal of the turn, then ``require(ctx, "read")``.
+    """
+    monkeypatch.setattr(api, "build_ledger", lambda _settings: world.ledger)
+    principals = []
+    real = authorize.from_mia_tool
+
+    def from_mia_tool(principal, settings):
+        principals.append(principal)
+        return real(principal, settings)
+
+    monkeypatch.setattr(authorize, "from_mia_tool", from_mia_tool)
+    principal = Principal.owner(source="telegram", actor_id=OWNER_ID)
+    config = settings(
+        telegram_owner_user_ids=OWNER_ID, assaf_os_backend="postgres",
+        assaf_os_ledger_enabled=True, assaf_os_authority_epoch=1, assaf_os_workspace_id=WORKSPACE)
+    ctx = base_context(None, settings=config, principal=principal, now=v2_20.NOW)
+    result = execute_tool("assaf_os_snapshot", {}, ctx)
+    assert result.ok and result.evidence == "assaf_os_ledger_snapshot"
+    parsed = json.loads(result.text)
+    assert parsed["view"] == OVERVIEW and parsed["workspace_id"] == WORKSPACE
+    receipt = execute_tool("assaf_os_receipt", {"request_id": uuid_v4(0x9972)}, ctx)
+    assert json.loads(receipt.text)["source"]["source"] == "postgresql"
+    assert principals and all(seen is principal for seen in principals)

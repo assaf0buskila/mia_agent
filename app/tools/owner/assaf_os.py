@@ -40,7 +40,11 @@ def assaf_os_enabled(ctx: ToolContext) -> bool:
 
 
 def _port(ctx: ToolContext) -> OsBackend:
-    return get_os_backend(ctx.settings, ctx.principal.actor_id, actor="MIA")
+    # The principal is what V2-19's from_mia_tool needs under backend=postgres (the numeric owner
+    # of this turn); the Sheets port ignores it.
+    return get_os_backend(
+        ctx.settings, ctx.principal.actor_id, actor="MIA", principal=ctx.principal
+    )
 
 
 def _json(value: object) -> str:
