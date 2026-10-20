@@ -425,6 +425,101 @@ def test_a_workbook_record_that_the_ledger_deleted_is_refused(shadow, tmp_path):
     assert snapshot(shadow) == before
 
 
+# ---- V2-30b: erratum E20 end to end, through the shared apply, with no strict wrapper -------
+# The cases above use ``E20Ledger``, the strictest reading, to prove write order. These run the
+# promote against the ledger itself (the fake and PostgreSQL ``apply``), which judges liveness on
+# the batch's result: a record may not land in its FORK-DELETE end state while a live record still
+# refers to it, but a work cancelled together with its payments is fine in either order.
+
+
+def cancelled_usd_work(*, cancel_payment=False):
+    """Epoch 2's workbook: WOR_USD is cancelled; PAY_USD is cancelled too only when asked."""
+    records = synthetic_records()
+    records["works"][1] = {**records["works"][1], "status": "בוטלה"}
+    revisions = {"WOR_USD": 2}
+    if cancel_payment:
+        records["payments"][1] = {**records["payments"][1], "kind": "בוטל"}
+        revisions["PAY_USD"] = 2
+    return records, revisions
+
+
+def at_epoch_two(shadow, tmp_path, name, **kwargs):
+    records, revisions = cancelled_usd_work(**kwargs)
+    return staged(shadow, tmp_path, records, epoch=2, revisions=revisions, name=name)
+
+
+def test_a_workbook_edit_that_cancels_a_work_with_a_live_payment_is_has_dependents(
+    shadow, tmp_path
+):
+    run(shadow, staged(shadow, tmp_path))
+    next_epoch(shadow, epoch=1)
+    second = at_epoch_two(shadow, tmp_path, "second.xlsx")
+    assert second.status == "validated"  # a cancelled work with a live payment is a valid import
+    before = snapshot(shadow)
+    error = refused("has_dependents", lambda: run(shadow, second, epoch=2))
+    assert error.status == 409
+    assert dict(error.details) == {"dependents": [{"entity": "payments", "record_id": "PAY_USD"}]}
+    # The whole promote rolled back: no receipt, no version bump, the batch still promotable.
+    assert snapshot(shadow) == before
+    assert batch_row(shadow, second)["status"] == "validated"
+    assert record_rows(shadow, "os_works")["WOR_USD"]["inputs"]["status"] == "פעילה"
+    assert record_rows(shadow, "os_works")["WOR_USD"]["revision"] == 1
+    # Cancelling the payment in the same workbook is a different batch and it commits.
+    third = at_epoch_two(shadow, tmp_path, "third.xlsx", cancel_payment=True)
+    out = run(shadow, third, epoch=2)
+    assert (out.created, out.updated, out.unchanged, out.cancelled) == (0, 2, 4, 0)
+    assert record_rows(shadow, "os_works")["WOR_USD"]["inputs"]["status"] == "בוטלה"
+    assert record_rows(shadow, "os_payments")["PAY_USD"]["inputs"]["kind"] == "בוטל"
+    assert batch_row(shadow, third)["status"] == "imported"
+
+
+@pytest.mark.parametrize("reverse", [False, True], ids=["dependents-first", "parents-first"])
+def test_signed_cancellations_commit_in_either_write_order_on_the_shared_apply(
+    shadow, tmp_path, monkeypatch, reverse
+):
+    run(shadow, staged(shadow, tmp_path, chain_records()))
+    next_epoch(shadow, epoch=1)
+    if reverse:  # the client, work and payments before the records that refer to them
+        monkeypatch.setattr(promote_module, "_CANCEL_ORDER", tuple(
+            reversed(promote_module._CANCEL_ORDER)))
+    second = staged(shadow, tmp_path, epoch=2, name="second.xlsx")
+    out = run(shadow, second, epoch=2, cancellations=CHAIN_CANCELLATIONS)
+    assert out.cancelled == 7 and out.unchanged == 6
+    assert record_rows(shadow, "os_tasks")["TAS_TWO"]["deleted_at"] is not None
+    assert record_rows(shadow, "os_clients")["PER_TWO"]["inputs"]["status"] == "לא פעיל"
+    assert record_rows(shadow, "os_works")["WOR_TWO"]["inputs"]["status"] == "בוטלה"
+    for payment_id in ("PAY_ABC", "PAY_ZED", "PAY_YYY", "PAY_BBB"):
+        assert record_rows(shadow, "os_payments")[payment_id]["inputs"]["kind"] == "בוטל"
+    assert batch_row(shadow, second)["status"] == "imported"
+
+
+def test_a_signed_cancellation_cannot_strand_a_live_dependent_the_batch_leaves_alone(
+    shadow, tmp_path
+):
+    """The orphan rule and E20 meet: cancelling only the client of a live work is refused before
+    the ledger is written (the work is an unsigned orphan), and a work that stays in the workbook
+    cannot name the missing client, so it is quarantined rather than promoted."""
+    run(shadow, staged(shadow, tmp_path, chain_records()))
+    next_epoch(shadow, epoch=1)
+    second = staged(shadow, tmp_path, epoch=2, name="second.xlsx")
+    before = snapshot(shadow)
+    only_client = [{"entity": "clients", "record_id": "PER_TWO"}]
+    error = refused("import_orphan_rows", lambda: run(
+        shadow, second, epoch=2, cancellations=only_client))
+    assert error.details == {"counts": {"works": 1, "payments": 4, "tasks": 1}}
+    assert snapshot(shadow) == before
+    tables = tables_from_records(chain_records())
+    tables["clients"] = [row for row in tables["clients"] if "PER_TWO" not in row]
+    # PER_TWO leaves the workbook but WOR_TWO and what refers to it stay.
+    stranded = stage(shadow, worker(2), workbook(tmp_path, tables, "stranded.xlsx"))
+    assert stranded.status == "quarantined"
+    before = snapshot(shadow)  # staging persists its own import rows; promote adds nothing
+    refused("import_quarantine_unresolved", lambda: run(
+        shadow, stranded, epoch=2, cancellations=only_client))
+    assert snapshot(shadow) == before
+    assert record_rows(shadow, "os_clients")["PER_TWO"]["inputs"]["status"] == "פעיל"
+
+
 def test_a_custom_expiry_window_is_the_proposal_expiry(shadow, tmp_path):
     result = staged(shadow, tmp_path)
     run(shadow, result, undo_window_seconds=45)

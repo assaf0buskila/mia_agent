@@ -1,5 +1,6 @@
 """Pure staging of synthetic physical workbooks; the prototype stays the normalization oracle."""
 
+import decimal
 import hashlib
 import json
 from copy import deepcopy
@@ -15,11 +16,14 @@ from app.services.os_ledger.import_workbook import (
     prepare,
     quarantine_count,
     quarantine_reasons,
+    staged_records,
 )
 from app.services.os_ledger.xlsx import Cell, read_xlsx
 
 from tests.fixtures.workbooks.synthetic import (
     JOURNAL,
+    STYLE_DATE,
+    Typed,
     synthetic_records,
     synthetic_tables,
     tables_from_records,
@@ -180,8 +184,9 @@ def test_os_import_prepare_cli_counts_and_digest_only(tmp_path, capsys):
     digest = manifest_digest(prepared(tmp_path, name="again.xlsx"))
     # The same bytes under another name are the same batch: the digest is of the content.
     assert output.out == (
-        "os_import op=stage outcome=ok reason=dry_run rows=6 quarantined=0\n"
-        f"os_import op=manifest outcome=ok reason=prepared rows=6 quarantined=0 digest={digest}\n"
+        "os_import op=stage outcome=ok reason=dry_run rows=6 quarantined=0 issues=0\n"
+        "os_import op=manifest outcome=ok reason=prepared rows=6 quarantined=0 issues=0 "
+        f"digest={digest}\n"
     )
     assert output.err == ""
 
@@ -195,8 +200,10 @@ def test_os_import_prepare_cli_quarantine_lists_reason_counts_never_values(tmp_p
     assert main([str(path), "--workspace", "synthetic-workspace", "--epoch", "1"]) == 2
     output = capsys.readouterr()
     assert output.err == ""
-    # One quarantined row, plus the batch issue its absence causes (works lose their client).
-    first = "os_import op=stage outcome=quarantined reason=dry_run rows=6 quarantined=2\n"
+    # One quarantined row, plus the batch issue its absence causes (works lose their client):
+    # the two are counted apart, never summed.
+    first = ("os_import op=stage outcome=quarantined reason=dry_run rows=6 quarantined=1 "
+             "issues=1\n")
     assert output.out.startswith(first)
     assert "reason=accepted_input_changed rows=1\n" in output.out
     assert "reason=state_validation_failed rows=1\n" in output.out
@@ -236,3 +243,133 @@ def test_os_import_prepare_cli_refuses_and_sanitizes_errors(capsys, argv, reason
     output = capsys.readouterr()
     assert output.out == ""
     assert output.err == f"os_import op=stage outcome=refused reason={reason}\n"
+
+
+# ---- V2-30b: numeric overflow, trailing blank columns, the CLI's two counts ----------------
+
+PAYMENT_FIELDS = [field["key"] for field in oracle.NATIVE_FIELDS["payments"]]
+AMOUNT = PAYMENT_FIELDS.index("actual_amount_ils")
+
+
+def overflowing(text):
+    tables = synthetic_tables()
+    tables["payments"][1][AMOUNT] = Typed(text)  # PAY_ILS, as a raw numeric cell
+    return tables
+
+
+@pytest.mark.parametrize("text", [
+    "1E+999999999", "-1E+999999999", "1E+99999999999999999999", "1E-999999999",
+    "1E-99999999999999999999",
+])
+def test_os_import_prepare_an_extreme_exponent_is_unsafe_numeric_value_not_a_crash(
+    tmp_path, text
+):
+    # abs(Decimal("1E+999999999")) raises decimal.Overflow and the constructor raises
+    # decimal.InvalidOperation for a larger exponent; neither may escape the importer.
+    batch = prepared(tmp_path, overflowing(text))
+    paid = next(row for row in batch.rows if row.record_id == "PAY_ILS")
+    assert paid.status == "quarantined" and "unsafe_numeric_value" in paid.quarantine
+    assert quarantine_reasons(batch)["unsafe_numeric_value"] == 1
+    assert quarantine_count(batch) > 0
+
+
+def test_os_import_prepare_an_extreme_exponent_in_the_journal_is_an_issue_not_a_crash(tmp_path):
+    tables = synthetic_tables()
+    tables[JOURNAL][1][2] = Typed("1E+999999999")  # the revision column
+    batch = prepared(tmp_path, tables)
+    assert "invalid_journal_acceptance" in batch.issues
+    assert quarantine_count(batch) > 0
+
+
+def test_os_import_prepare_cli_prints_the_overflow_as_a_quarantine_reason_never_a_value(
+    tmp_path, capsys
+):
+    from scripts.os_import import main
+
+    path = write_book(tmp_path / "overflow.xlsx", overflowing("1E+999999999"))
+    assert main([str(path), "--workspace", "synthetic-workspace", "--epoch", "1"]) == 2
+    output = capsys.readouterr()
+    assert output.err == ""
+    assert "reason=unsafe_numeric_value rows=1\n" in output.out
+    assert "999999999" not in output.out
+
+
+def test_os_import_prepare_cli_refuses_any_decimal_error_that_escapes(
+    tmp_path, capsys, monkeypatch
+):
+    import scripts.os_import as cli
+
+    def overflow(*args, **kwargs):
+        raise decimal.Overflow()
+
+    monkeypatch.setattr(cli, "prepare", overflow)
+    path = write_book(tmp_path / "synthetic.xlsx", synthetic_tables())
+    assert cli.main([str(path), "--workspace", "synthetic-workspace", "--epoch", "1"]) == 1
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert output.err == "os_import op=stage outcome=refused reason=unsafe_numeric_value\n"
+
+
+def with_blank_trailing_columns(tables):
+    """Blank cells right of every row of every tab: an empty string, then a formatted blank."""
+    return {name: [[*row, "", Typed(None, style=STYLE_DATE)] for row in table]
+            for name, table in tables.items()}
+
+
+def test_os_import_prepare_blank_trailing_columns_map_like_none(tmp_path):
+    clean = prepared(tmp_path, name="clean.xlsx")
+    wide = prepared(tmp_path, with_blank_trailing_columns(synthetic_tables()), name="wide.xlsx")
+    assert wide.issues == () and quarantine_count(wide) == 0
+    assert [(r.entity, r.record_id, r.status, r.quarantine) for r in wide.rows] == [
+        (r.entity, r.record_id, r.status, r.quarantine) for r in clean.rows]
+    assert staged_records(wide) == staged_records(clean)
+    assert manifest(wide)["input_digests"] == manifest(clean)["input_digests"]
+    assert manifest(wide)["counts"] == manifest(clean)["counts"] and len(clean.rows) == 6
+
+
+@pytest.mark.parametrize("tab", ["clients", JOURNAL])
+def test_os_import_prepare_blank_trailing_columns_on_one_tab_map_like_none(tmp_path, tab):
+    tables = synthetic_tables()
+    tables[tab] = with_blank_trailing_columns({tab: tables[tab]})[tab]
+    batch = prepared(tmp_path, tables)
+    assert batch.issues == () and quarantine_count(batch) == 0
+
+
+def test_os_import_prepare_a_named_extra_header_column_still_does_not_match(tmp_path):
+    tables = synthetic_tables()
+    tables["clients"][0] = [*tables["clients"][0], "unknown column"]
+    batch = prepared(tmp_path, tables)
+    assert "entity_sheet_missing" in batch.issues and "unsupported_sheet_headers" in batch.issues
+
+
+def test_os_import_prepare_a_value_under_a_blank_header_is_still_unexpected(tmp_path):
+    tables = with_blank_trailing_columns(synthetic_tables())
+    tables["clients"][1][-2] = "stray"  # under the blank header cell
+    batch = prepared(tmp_path, tables)
+    assert batch.rows[0].entity == "clients"
+    assert "unexpected_row_columns" in batch.rows[0].quarantine
+    assert [row.status for row in batch.rows[1:]] == ["staged"] * 5
+
+
+def test_os_import_prepare_cli_counts_rows_and_batch_issues_apart(tmp_path, capsys):
+    from scripts.os_import import main
+
+    # A batch issue only: a nonempty tab with unknown headers quarantines no row.
+    tables = synthetic_tables()
+    tables["stray"] = [["unknown header"], ["value"]]
+    path = write_book(tmp_path / "issue.xlsx", tables)
+    assert main([str(path), "--workspace", "synthetic-workspace", "--epoch", "1"]) == 2
+    out = capsys.readouterr().out
+    assert out.startswith(
+        "os_import op=stage outcome=quarantined reason=dry_run rows=6 quarantined=0 issues=1\n")
+    assert "op=manifest outcome=quarantined reason=prepared rows=6 quarantined=0 issues=1 " in out
+    # A quarantined row only: an edited leaf payment, with no batch issue.
+    tables = synthetic_tables()
+    tables["payments"][2][PAYMENT_FIELDS.index("notes")] = "Unaccepted edit"
+    path = write_book(tmp_path / "row.xlsx", tables)
+    assert main([str(path), "--workspace", "synthetic-workspace", "--epoch", "1"]) == 2
+    out = capsys.readouterr().out
+    assert out.startswith(
+        "os_import op=stage outcome=quarantined reason=dry_run rows=6 quarantined=1 issues=0\n")
+    assert "op=manifest outcome=quarantined reason=prepared rows=6 quarantined=1 issues=0 " in out
+    assert "Unaccepted edit" not in out
