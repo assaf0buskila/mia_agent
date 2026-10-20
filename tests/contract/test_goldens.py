@@ -899,3 +899,53 @@ def test_a_golden_mirror_is_the_version_the_since_token_names(name):
     version, _pending_seq, mirror_part = body["since"].split(".")
     assert int(mirror_part) == body["mirror"]["verified_version"] == int(version)
     assert body["mirror"]["state"] == "verified"
+
+
+# ---- never laxer than the frontend reader (V2-20 review r2, finding 3) ---------------------------
+
+
+def receipt_with(records: int) -> dict:
+    body = golden("receipt_committed")
+    body["records"] = body["records"] * records
+    return body
+
+
+def test_a_receipt_lists_at_most_500_records_like_the_frontend():
+    assert contract.READERS["receipt"](receipt_with(500))
+    for count in (501, 5000):
+        refused(contract.READERS["receipt"], receipt_with(count))
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["20261016T120000Z", "2026-W42-5T12:00:00Z", "2026-10-16T12Z", "2026-10-16T12:00:00,5Z",
+     "2026-10-16T12:00:00+00", "2026-10-16", "2026-10-16T12:00:00", "2026-10-16 12:00:00Z",
+     "2026-10-16T12:00:00+0000", "２０２６-10-16T12:00:00Z",
+     "2026-13-16T12:00:00Z", "2026-10-16T12:00:00.Z"],
+)
+def test_a_timestamp_is_only_the_calendar_form_with_a_zone(value):
+    for key in ("server_now", "committed_at"):
+        body = golden("receipt_committed")
+        body[key] = value
+        refused(contract.READERS["receipt"], body)
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["2026-10-16T12:00Z", "2026-10-16T12:00:00Z", "2026-10-16T12:00:00.000Z",
+     "2026-10-16T12:00:00.123456789Z", "2026-10-16T12:00:00+02:00", "2026-10-16T12:00-05:30"],
+)
+def test_the_calendar_form_with_a_zone_is_accepted(value):
+    body = golden("receipt_committed")
+    body["server_now"] = body["committed_at"] = value
+    assert contract.READERS["receipt"](body)
+
+
+def test_an_integer_too_large_for_a_float_is_refused_not_a_crash():
+    body = golden("receipt_committed")
+    body["records"][0]["record"]["revision"] = 10**400
+    refused(contract.READERS["receipt"], body)
+    schema = golden("schema")
+    field = next(f for tab in schema["tabs"] for f in tab["fields"] if "minimum" in f)
+    field["minimum"] = 10**400
+    refused(contract.READERS["schema"], schema)

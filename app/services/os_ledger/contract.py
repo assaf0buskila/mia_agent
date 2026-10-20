@@ -67,6 +67,8 @@ MIRROR_STATES: tuple[str, ...] = ("verified", "lagging", "unknown", "conflict", 
 UNDO_STATES: tuple[str, ...] = ("available", "undone", "expired", "none")
 LABEL_KEYS: tuple[str, ...] = ("clients.person_id", "works.work_id")
 MAX_PAGE_RECORDS = 200
+# A receipt lists at most this many records, like the frontend reader (review r2, finding 3).
+MAX_RECEIPT_RECORDS = 500
 MAX_MONTHLY_ROWS = 600
 MAX_REASON_CODES = 20
 MAX_LABEL_CHARS = 120
@@ -87,6 +89,12 @@ _UUID = re.compile(
 _TOKEN = re.compile(r"[\x21-\x7e]{1,512}")
 _SINCE = re.compile(r"[0-9]{1,19}\.[0-9]{1,19}\.[0-9]{1,19}")
 _MONTH = re.compile(r"[0-9]{4}-[0-9]{2}")
+# The calendar form Date.parse reads the same everywhere: YYYY-MM-DDTHH:MM[:SS[.f+]](Z|+-HH:MM).
+# fromisoformat alone also takes basic, week, hour-only and comma forms the frontend refuses.
+_ISO = re.compile(
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}(?::[0-9]{2}(?:\.[0-9]+)?)?"
+    r"(?:Z|[+-][0-9]{2}:[0-9]{2})"
+)
 _MAX_SAFE_INTEGER = 2**53 - 1
 _FIELD_TYPES = frozenset(
     {"text", "id", "enum", "date", "month", "datetime", "integer", "decimal", "money_ils",
@@ -542,11 +550,18 @@ def _is_uuid(value: Any) -> bool:
 
 
 def _is_iso(value: Any) -> bool:
-    if not _is_text(value, 40):
+    if not _is_text(value, 40) or _ISO.fullmatch(value) is None:
         return False
     try:
         return datetime.fromisoformat(value.replace("Z", "+00:00")).tzinfo is not None
     except ValueError:
+        return False
+
+
+def _is_finite(value: int | float) -> bool:
+    try:
+        return math.isfinite(value)
+    except OverflowError:  # an integer beyond any float, which JSON.parse makes Infinity
         return False
 
 
@@ -570,7 +585,7 @@ def _is_loose_record(value: Any) -> bool:
             if not _is_text(item):
                 return False
         elif type(item) in {int, float}:
-            if not math.isfinite(item):
+            if not _is_finite(item):
                 return False
         else:
             return False
@@ -631,7 +646,7 @@ def _read_field(value: Any) -> None:
     if ("ref" in value and not _is_text(value["ref"], 128)) or (
         "note" in value and not _is_text(value["note"], 300)
     ) or ("minimum" in value and not (
-        type(value["minimum"]) in {int, float} and math.isfinite(value["minimum"])
+        type(value["minimum"]) in {int, float} and _is_finite(value["minimum"])
     )):
         _fail("schema_field")
 
@@ -856,7 +871,7 @@ def read_receipt_v2(value: Any) -> dict[str, Any]:
     if (
         status not in (*RECEIPT_STATUSES, "unknown") or not _is_uuid(value["request_id"])
         or not _reason_codes(value["reason_codes"]) or not _is_iso(value["server_now"])
-        or not isinstance(value["records"], list)
+        or not isinstance(value["records"], list) or len(value["records"]) > MAX_RECEIPT_RECORDS
     ):
         _fail("receipt_shape")
     if status == "unknown":
