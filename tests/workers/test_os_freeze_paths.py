@@ -32,8 +32,10 @@ import pytest
 from app.api import assaf_os as api
 from app.api.owner_os_boundary import OwnerOSBoundary, owner_http_error, owner_validation_error
 from app.capabilities.types import Principal
+from app.core import config as config_module
 from app.core.config import Settings
 from app.db.base import Base
+from app.db.models import ApprovalRow
 from app.db.session import make_engine
 from app.db.store import LeadStore
 from app.domain.approvals import DECISION_APPROVED, DECISION_REJECTED
@@ -53,6 +55,14 @@ from fastapi.testclient import TestClient
 from sqlalchemy.orm import sessionmaker
 from starlette.exceptions import HTTPException
 
+from tests.contract.shapes import v2_20
+from tests.fakes.os_ledger_builders import counts
+from tests.fakes.os_ledger_env import OWNER_ID as LEDGER_OWNER
+from tests.fakes.os_ledger_env import WORKSPACE as LEDGER_WORKSPACE
+from tests.services import os_v2_28_support as v228
+from tests.services import test_os_backend_pg as backend_pg
+from tests.services.os_ledger.test_authorize_constructors import principal as session_principal
+from tests.services.os_ledger.test_authorize_constructors import proven
 from tests.unit import test_assaf_os as assaf
 from tests.unit import test_owner_sessions as auth
 from tests.unit import test_website_lead_approval as leads
@@ -74,8 +84,25 @@ OS_INTENT_SITES = {
 OS_DECISION_SITES = {
     ("app/api/assaf_os.py", "approve", "decide"): "POST /proposals/{id}/approve",
     ("app/api/assaf_os.py", "reject", "decide"): "POST /proposals/{id}/reject",
-    ("app/services/owner_actions.py", "run", "decide"): "Telegram approve",
-    ("app/services/owner_actions.py", "reject_assaf_os_owner_action", "decide"): "Telegram reject",
+    # V2-28: Telegram approve (run) and reject both decide a Sheets card through this one helper.
+    ("app/services/owner_actions.py", "_decide_sheets_card", "decide"): "Telegram approve, reject",
+}
+# The PostgreSQL ledger's own sites (V2-20, V2-28). No Script is behind them: the ledger core is
+# the gate. Its ``propose`` refuses ``os_frozen`` while ``assaf_os_freeze`` is on, before any
+# transaction. Its ``decide`` admits only ``assaf_os_backend == "postgres"`` with core authority
+# ``active``. So in T1 (backend ``sheets``, core ``shadow``) none of them can write, and neither
+# can a decision once the ledger is fenced. A frozen ACTIVE ledger still settles its pending
+# proposals, as the Script does in T1. Driven below, against the FakeLedger the conformance
+# suite holds to the PostgreSQL core, with V2-19's real ``authorize``.
+PG_INTENT_SITES = {
+    ("app/services/os_backend_pg.py", "propose", "propose"): "PostgresOsBackend: OS screen, Mia",
+    ("app/services/assaf_os_leads.py", "_create_final_ledger_proposal", "propose"): (
+        "website lead card under postgres"),
+}
+PG_DECISION_SITES = {
+    ("app/services/os_backend_pg.py", "decide", "decide"): "PostgresOsBackend approve, reject",
+    ("app/services/owner_actions.py", "execute_ledger_owner_decision", "decide"): (
+        "Telegram approve, reject of a ledger card"),
 }
 # The same method names with no Apps Script behind them.
 LOOK_ALIKES = {
@@ -234,11 +261,12 @@ def test_every_propose_and_decide_site_in_app_is_classified():
         for relative, source in app_sources()
         for function, method, _ in method_sites(source, frozenset({"propose", "decide"}))
     }
-    classified = OS_INTENT_SITES.keys() | OS_DECISION_SITES.keys() | LOOK_ALIKES.keys()
+    groups = (OS_INTENT_SITES, OS_DECISION_SITES, PG_INTENT_SITES, PG_DECISION_SITES, LOOK_ALIKES)
+    classified = set().union(*(group.keys() for group in groups))
     assert found == classified, (
         f"unclassified: {sorted(found - classified)}; stale: {sorted(classified - found)}"
     )
-    assert not (OS_INTENT_SITES.keys() & OS_DECISION_SITES.keys())
+    assert sum(len(group) for group in groups) == len(classified), "a site is in two groups"
 
 
 def test_the_look_alikes_never_reach_the_script():
@@ -297,7 +325,10 @@ def test_only_the_port_and_the_authority_probe_can_send_to_the_script():
         assert not opens_connections(source), relative
 
 
-def test_every_sheets_api_writer_reads_the_allow_list_the_freeze_subtracts_from():
+def test_every_sheets_api_writer_reads_the_allow_list_the_freeze_subtracts_from(monkeypatch):
+    # A coerced §3.3 value anywhere earlier in this process subtracts the OS workbook for good
+    # (config._OS_CONFIG_COERCED is sticky by design), so the control below needs a clean process.
+    monkeypatch.setattr(config_module, "_OS_CONFIG_COERCED", set())
     seen: dict[str, int] = {}
     for relative, source in app_sources():
         count = source.count("allowed_sheets_spreadsheet_ids(")
@@ -348,6 +379,7 @@ class Env:
     sessions: object
     tmp_path: Path
     caplog: pytest.LogCaptureFixture
+    authority: str = "shadow"  # the core authority state the decision is made under
 
 
 @dataclass
@@ -390,9 +422,9 @@ def transport(config, calls: list[str]):
     return respond
 
 
-def open_authority(monkeypatch) -> None:
+def open_authority(monkeypatch, state: str = "shadow") -> None:
     """Core authority is `shadow` (the pre-cutover state), so only the freeze can refuse."""
-    monkeypatch.setattr(ledger_api, "core_authority_state", lambda settings: "shadow")
+    monkeypatch.setattr(ledger_api, "core_authority_state", lambda settings: state)
 
 
 def new_store(tmp_path: Path):
@@ -433,6 +465,7 @@ def drive_http(env: Env, freeze: bool, op: str) -> Outcome:
         key = "approval_request_id" if op == "approve" else "rejection_request_id"
         body, url = {"request_id": pending[key]}, f"{ROUTE}/proposals/{assaf.PROPOSAL}/{op}"
         port._remember_decision_binding(config, auth.OWNER_ID, pending)
+        open_authority(env.monkeypatch, env.authority)
     with ledger_client(env.sessions, config) as browser:
         login = auth._login(browser)
         headers = {"Origin": auth.ORIGIN, "X-CSRF-Token": login["csrf_token"]}
@@ -517,18 +550,19 @@ def drive_telegram(env: Env, freeze: bool, decision: str) -> Outcome:
             now=datetime.now(UTC),
         )
         config.assaf_os_freeze = freeze  # T1 starts after the card exists
+        open_authority(env.monkeypatch, env.authority)
         calls.clear()
         if decision == DECISION_APPROVED:
             result = execute_approved_owner_action_with_adapters(
                 store, settings=config, principal=actor, proposal_id=decided.proposal_id,
             )
-            assert result.status == "executed", result.status
+            settled = {"executed"}
         else:
             result = reject_assaf_os_owner_action(
                 store, settings=config, principal=actor, proposal_id=decided.proposal_id,
             )
-            assert result.status in {"executed", "rejected"}, result.status
-        return Outcome(None, calls)
+            settled = {"executed", "rejected"}
+        return Outcome(None if result.status in settled else result.status, calls)
     finally:
         session.close()
         engine.dispose()
@@ -540,21 +574,23 @@ INTENT_DRIVERS: dict[tuple[str, str, str], Callable[[Env, bool], Outcome]] = {
     ("app/tools/owner/assaf_os.py", "_assaf_os_propose", "propose"): drive_tool,
     ("app/services/assaf_os_leads.py", "_create_final_proposal", "propose"): drive_leads,
 }
-DECISION_DRIVERS: dict[tuple[str, str, str], tuple[str, Callable[[Env, bool], Outcome]]] = {
-    ("app/api/assaf_os.py", "approve", "decide"): (
-        "approve", lambda env, freeze: drive_http(env, freeze, "approve")),
-    ("app/api/assaf_os.py", "reject", "decide"): (
-        "reject", lambda env, freeze: drive_http(env, freeze, "reject")),
-    ("app/services/owner_actions.py", "run", "decide"): (
-        "approve", lambda env, freeze: drive_telegram(env, freeze, DECISION_APPROVED)),
-    ("app/services/owner_actions.py", "reject_assaf_os_owner_action", "decide"): (
-        "reject", lambda env, freeze: drive_telegram(env, freeze, DECISION_REJECTED)),
+SHEETS_CARD = ("app/services/owner_actions.py", "_decide_sheets_card", "decide")
+# Keyed by (site, the Script operation): one site may send either decision.
+DECISION_DRIVERS: dict[tuple[tuple[str, str, str], str], Callable[[Env, bool], Outcome]] = {
+    (("app/api/assaf_os.py", "approve", "decide"), "approve"): lambda env, freeze: drive_http(
+        env, freeze, "approve"),
+    (("app/api/assaf_os.py", "reject", "decide"), "reject"): lambda env, freeze: drive_http(
+        env, freeze, "reject"),
+    (SHEETS_CARD, "approve"): lambda env, freeze: drive_telegram(env, freeze, DECISION_APPROVED),
+    (SHEETS_CARD, "reject"): lambda env, freeze: drive_telegram(env, freeze, DECISION_REJECTED),
 }
 
 
 def test_every_classified_site_has_a_driver_and_nothing_else_does():
     assert set(INTENT_DRIVERS) == set(OS_INTENT_SITES)
-    assert set(DECISION_DRIVERS) == set(OS_DECISION_SITES)
+    assert {site for site, _ in DECISION_DRIVERS} == set(OS_DECISION_SITES)
+    assert set(PG_INTENT_DRIVERS) == set(PG_INTENT_SITES)
+    assert {site for site, _ in PG_DECISION_DRIVERS} == set(PG_DECISION_SITES)
 
 
 @pytest.fixture
@@ -578,12 +614,25 @@ def test_the_same_intent_reaches_the_script_before_the_freeze(env, site):
     assert "propose" in outcome.calls, (site, outcome)
 
 
-@pytest.mark.parametrize("site", sorted(DECISION_DRIVERS), ids=lambda s: f"{s[0]}::{s[1]}")
-def test_a_decision_still_reaches_the_script_under_the_freeze(env, site):
-    operation, driver = DECISION_DRIVERS[site]
-    outcome = driver(env, True)
-    assert outcome.refused is None, (site, outcome)
-    assert operation in outcome.calls, (site, outcome)
+def decision_id(key) -> str:
+    (relative, function, _), operation = key
+    return f"{relative}::{function}::{operation}"
+
+
+@pytest.mark.parametrize("key", sorted(DECISION_DRIVERS), ids=decision_id)
+def test_a_decision_still_reaches_the_script_under_the_freeze(env, key):
+    outcome = DECISION_DRIVERS[key](env, True)
+    assert outcome.refused is None, (key, outcome)
+    assert key[1] in outcome.calls, (key, outcome)
+
+
+@pytest.mark.parametrize("key", sorted(DECISION_DRIVERS), ids=decision_id)
+def test_a_sheets_decision_is_fenced_once_the_ledger_holds_the_authority(env, key):
+    """After activate the Script may not settle anything: the port's fence refuses first."""
+    env.authority = "active"
+    outcome = DECISION_DRIVERS[key](env, True)
+    assert outcome.refused is not None, (key, outcome)
+    assert key[1] not in outcome.calls, "the Script was never asked to decide"
 
 
 def propose_request(config) -> port.ProposeRequest:
@@ -628,3 +677,169 @@ def test_a_refused_intent_logs_a_reason_code_and_no_visitor_text(env, caplog):
     lines = [r.getMessage() for r in caplog.records if r.name == "mia.os_backend"]
     assert "os_backend op=fence outcome=refused reason=os_frozen operation=propose" in lines
     assert "Follow up" not in caplog.text and "לביצוע" not in caplog.text
+
+
+# ------------------------------------------- the PostgreSQL ledger sites (V2-20, V2-28): drive
+
+
+@dataclass
+class LedgerOutcome:
+    refused: str | None  # the refusal code or the card status, if the path ended in one
+    wrote: bool  # any ledger row, receipt or version change, or a new owner card
+
+
+# The ledger states a site can meet once the freeze is on (the card or proposal was made before):
+# - "drain": core still active (after activate), only the freeze is on;
+# - "t1": the Sheets drain itself, so the backend says sheets;
+# - "fenced": the ledger handed the authority back (rollback).
+NO_AUTHORITY = ("t1", "fenced")
+
+
+def no_script(*_args, **_kwargs):
+    pytest.fail("a ledger path must never reach the Apps Script")
+
+
+def pg_backend(env: Env):
+    """V2-20's world (core active) behind a PostgresOsBackend with V2-19's real OS contexts."""
+    env.monkeypatch.setattr(port, "_post", no_script)
+    world = v2_20.build_world()
+    return world, backend_pg.real_backend(world, "OS", proven(session_principal()))
+
+
+def drive_pg_backend_propose(env: Env, freeze: bool) -> LedgerOutcome:
+    world, backend = pg_backend(env)
+    world.knobs.freeze = freeze
+    before = counts(world.env)
+    try:
+        backend.propose(backend_pg.request())
+    except ledger_api.LedgerError as error:
+        return LedgerOutcome(error.code, counts(world.env) != before)
+    return LedgerOutcome(None, counts(world.env) != before)
+
+
+def drive_pg_backend_decide(env: Env, state: str, operation: str) -> LedgerOutcome:
+    world, backend = pg_backend(env)
+    pending = backend.propose(backend_pg.request())  # made before the freeze
+    world.knobs.freeze = True
+    if state == "t1":
+        world.knobs.backend = "sheets"
+    elif state == "fenced":
+        world.ledger.transition(LEDGER_WORKSPACE, "core", "fenced", expected_epoch=1,
+                                actor_owner_id=LEDGER_OWNER)
+    key = "approval_request_id" if operation == "approve" else "rejection_request_id"
+    before = counts(world.env)
+    try:
+        backend.decide(operation, pending["proposal_id"],
+                       port.DecisionRequest(request_id=pending[key]))
+    except ledger_api.LedgerError as error:
+        return LedgerOutcome(error.code, counts(world.env) != before)
+    return LedgerOutcome(None, counts(world.env) != before)
+
+
+def v228_world(env: Env, settings: Settings):
+    """V2-28's FakeLedger workspace (core active) with V2-19's real ``authorize`` module."""
+    env.monkeypatch.setattr(port, "_post", no_script)
+    world = v228.LedgerWorld(settings).install(env.monkeypatch, authorize=False)
+    return world, LeadStore(v228.make_store_factory(env.tmp_path)())
+
+
+def owner_cards(store) -> int:
+    return store.session.query(ApprovalRow).count()
+
+
+def drive_pg_lead(env: Env, freeze: bool) -> LedgerOutcome:
+    world, store = v228_world(env, v228.pg_settings(assaf_os_freeze=freeze))
+    try:
+        v228.seed_lead_source(store)
+        before = (len(world.ledger.rows("os_proposals")), owner_cards(store))
+        try:
+            prepare_selected_crm_lead(
+                store, settings=world.settings,
+                principal=Principal.owner(source="telegram", actor_id=v228.OWNER),
+                contact_id="crm-contact-1", conversation_id="site-current", path="לימוד",
+                summary="", next_step="",
+            )
+        except Exception as error:
+            refused = refusal(error)
+        else:
+            refused = None
+        after = (len(world.ledger.rows("os_proposals")), owner_cards(store))
+        # A definite refusal releases the preparation claim: no pending_review is left behind.
+        assert all(status != "pending_review" for _, status in v228.provider_claims(store))
+        return LedgerOutcome(refused, after != before)
+    finally:
+        store.session.close()
+
+
+def drive_pg_telegram(env: Env, state: str, operation: str) -> LedgerOutcome:
+    """A ledger card decided by the owner BEFORE the freeze, executed or rejected AFTER it."""
+    world, store = v228_world(env, v228.pg_settings())
+    actor = Principal.owner(source="telegram", actor_id=v228.OWNER)
+    decision = DECISION_APPROVED if operation == "approve" else DECISION_REJECTED
+    try:
+        card = v228.ledger_owner_action(store, world.settings, world.propose_lead())
+        store.session.commit()
+        decide_owner_action(store, principal=actor, approval_id=card.approval_id,
+                            decision=decision, now=datetime.now(UTC))
+        store.session.commit()
+        changes = {"assaf_os_freeze": True}
+        if state == "t1":
+            changes["assaf_os_backend"] = "sheets"
+        elif state == "fenced":
+            world.ledger.transition(v228.WORKSPACE, "core", "fenced", expected_epoch=1,
+                                    actor_owner_id=v228.OWNER)
+        world.settings = world.settings.model_copy(update=changes)
+        receipts = len(world.receipts())
+        if operation == "approve":
+            result = execute_approved_owner_action_with_adapters(
+                store, settings=world.settings, principal=actor, proposal_id=card.proposal_id)
+            settled = {"executed"}
+        else:
+            result = reject_assaf_os_owner_action(
+                store, settings=world.settings, principal=actor, proposal_id=card.proposal_id)
+            settled = {"executed", "rejected"}
+        wrote = len(world.receipts()) != receipts
+        return LedgerOutcome(None if result.status in settled else result.status, wrote)
+    finally:
+        store.session.close()
+
+
+PG_INTENT_DRIVERS: dict[tuple[str, str, str], Callable[[Env, bool], LedgerOutcome]] = {
+    ("app/services/os_backend_pg.py", "propose", "propose"): drive_pg_backend_propose,
+    ("app/services/assaf_os_leads.py", "_create_final_ledger_proposal", "propose"): drive_pg_lead,
+}
+PG_DECISION_DRIVERS: dict[tuple[tuple[str, str, str], str], Callable[[Env, str], LedgerOutcome]] = {
+    (("app/services/os_backend_pg.py", "decide", "decide"), "approve"): lambda env, state: (
+        drive_pg_backend_decide(env, state, "approve")),
+    (("app/services/os_backend_pg.py", "decide", "decide"), "reject"): lambda env, state: (
+        drive_pg_backend_decide(env, state, "reject")),
+    (("app/services/owner_actions.py", "execute_ledger_owner_decision", "decide"), "approve"): (
+        lambda env, state: drive_pg_telegram(env, state, "approve")),
+    (("app/services/owner_actions.py", "execute_ledger_owner_decision", "decide"), "reject"): (
+        lambda env, state: drive_pg_telegram(env, state, "reject")),
+}
+
+
+@pytest.mark.parametrize("site", sorted(PG_INTENT_DRIVERS), ids=lambda s: f"{s[0]}::{s[1]}")
+def test_a_ledger_intent_is_refused_os_frozen_and_writes_nothing(env, site):
+    assert PG_INTENT_DRIVERS[site](env, True) == LedgerOutcome("os_frozen", wrote=False)
+
+
+@pytest.mark.parametrize("site", sorted(PG_INTENT_DRIVERS), ids=lambda s: f"{s[0]}::{s[1]}")
+def test_the_same_ledger_intent_writes_before_the_freeze(env, site):
+    assert PG_INTENT_DRIVERS[site](env, False) == LedgerOutcome(None, wrote=True)
+
+
+@pytest.mark.parametrize("state", NO_AUTHORITY)
+@pytest.mark.parametrize("key", sorted(PG_DECISION_DRIVERS), ids=decision_id)
+def test_a_ledger_decision_writes_nothing_unless_the_ledger_holds_the_authority(env, key, state):
+    outcome = PG_DECISION_DRIVERS[key](env, state)
+    # The backend raises the ledger's code; a Telegram card maps every refusal to not_connected.
+    refusals = {"backend_not_postgres", "authority_not_active", "not_connected"}
+    assert outcome.refused in refusals and not outcome.wrote, (key, state, outcome)
+
+
+@pytest.mark.parametrize("key", sorted(PG_DECISION_DRIVERS), ids=decision_id)
+def test_a_frozen_active_ledger_still_settles_its_pending_proposals(env, key):
+    """The control: the same decision does write when only the freeze is on (I8 drain)."""
+    assert PG_DECISION_DRIVERS[key](env, "drain") == LedgerOutcome(None, wrote=True)
