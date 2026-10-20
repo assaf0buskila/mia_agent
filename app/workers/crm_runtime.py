@@ -181,6 +181,19 @@ def telegram_receipt_handler(
     return handle
 
 
+def legacy_sheet_projection_enabled(settings: Settings) -> bool:
+    """Whether the worker may import from and project into the legacy CRM Sheet.
+
+    V2-28 review of this flag (formerly ``not settings.assaf_os_enabled``): the legacy CRM Sheet
+    projection is a second lead record, so it stays off whenever Assaf OS owns leads, and always
+    under ``assaf_os_backend=postgres``, where the ledger is the only lead authority (I3), even if
+    ``assaf_os_enabled`` is off. Under ``sheets`` the result is exactly the old expression.
+    """
+    if getattr(settings, "assaf_os_backend", "sheets") == "postgres":
+        return False
+    return not settings.assaf_os_enabled
+
+
 def start_crm_runtime(
     settings: Settings,
     session_factory: Callable[[], Session],
@@ -192,7 +205,7 @@ def start_crm_runtime(
         sheets=build_sheets_port(settings),
         telegram_handler=telegram_receipt_handler(session_factory, settings),
         allowed_telegram_recipient_ids=frozenset(settings.telegram_owner_user_id_set()),
-        legacy_sheet_projection_enabled=not settings.assaf_os_enabled,
+        legacy_sheet_projection_enabled=legacy_sheet_projection_enabled(settings),
     )
     stopped = Event()
 

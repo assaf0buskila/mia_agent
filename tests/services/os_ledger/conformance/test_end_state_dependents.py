@@ -120,22 +120,26 @@ def test_the_same_update_commits_once_nothing_live_depends_on_the_record(ledger,
 def test_an_approved_proposal_that_gained_a_dependent_since_it_was_made_is_refused(
         ledger, entity):
     """The proposal's dependency digest covers the record and what it references, not its
-    referrers, so a work added after the proposal reaches ``apply`` and meets the rule there."""
+    referrers, so a work added after the proposal reaches ``apply`` and meets the rule there.
+    §22 E26: decide then finishes the proposal ``target_changed`` (reason ``has_dependents``)
+    instead of raising and leaving it pending forever; nothing is applied, and once the blockers
+    are gone a NEW proposal commits (test_decide_apply_refusals.py pins the receipt itself)."""
     lane = WriteLane(ledger, "owner_direct")
     lane.write(SEED[entity]())
     record = lane.get(entity, RECORD[entity])
     proposal = ledger.propose(ctx(), api.ProposeInput(
         rid(), entity, RECORD[entity], record["revision"], END_PATCH[entity]))
     lane.write(BLOCKERS[entity]())
-    before = snapshot(ledger)
-    error = has_dependents(lambda: ledger.decide(
-        ctx(), proposal.proposal_id, proposal.approval_id, "approve"))
-    assert dict(error.details) == {"dependents": refs(FOUND[entity])}
-    assert snapshot(ledger) == before
-    assert {p["proposal_id"]: p["status"] for p in ledger.rows("os_proposals")}[
-        proposal.proposal_id] == "pending"
-    lane.write(clear_blockers(lane, entity))
     result = ledger.decide(ctx(), proposal.proposal_id, proposal.approval_id, "approve")
+    assert (result.receipt.status, result.receipt.reason_codes) == (
+        "target_changed", ("has_dependents",))
+    assert lane.get(entity, RECORD[entity]) == record
+    assert {p["proposal_id"]: p["status"] for p in ledger.rows("os_proposals")}[
+        proposal.proposal_id] == "target_changed"
+    lane.write(clear_blockers(lane, entity))
+    again = ledger.propose(ctx(), api.ProposeInput(
+        rid(), entity, RECORD[entity], record["revision"], END_PATCH[entity]))
+    result = ledger.decide(ctx(), again.proposal_id, again.approval_id, "approve")
     assert result.receipt.status == "committed"
     column, value = api.FORK_DELETE_END_STATE[entity]
     assert lane.get(entity, RECORD[entity])[column] == value
