@@ -353,10 +353,17 @@ class Settings(BaseSettings):
         }
         configured.add(self.resolved_sheets_spreadsheet_id())
         configured.add(LOCKED_SPREADSHEET_ID)
-        # The OS mirror workbook is never a write target. The OS workbook stops being one once it
-        # is frozen or PostgreSQL holds the authority.
+        # The OS mirror workbook is never a write target (§22 E9). The OS workbook stops being one
+        # once T1 has started: it is frozen, or PostgreSQL holds the authority. Only an exact,
+        # cleanly loaded "sheets" backend with the freeze exactly off keeps it; a coerced or
+        # unexpected value fails toward subtracting, never toward allowing.
         configured.discard(self.os_mirror_spreadsheet_id.strip())
-        if self.assaf_os_freeze or self.assaf_os_backend == "postgres":
+        still_on_sheets = (
+            self.assaf_os_backend == "sheets"
+            and self.assaf_os_freeze is False
+            and not _OS_CONFIG_COERCED & {"assaf_os_backend", "assaf_os_freeze"}
+        )
+        if not still_on_sheets:
             configured.discard(self.assaf_os_workbook_id.strip())
         return frozenset(configured)
 

@@ -12,6 +12,11 @@ statement; the database enforces every V2-14/14b key and CHECK as the backstop.
   ``ledger_integrity_failed`` (reason ``<name>``) here, before any write.
 * ``purpose="expire"`` admits only ``proposal()``, ``finish(status="expired")`` and
   ``connection``; anything else raises ``AssertionError("ledger_invariant:expire_scope")``.
+* ``apply`` validates each mutation through ``checks.transition`` and the core computes the
+  dependency digest and the propose check through ``checks`` too: ``FullCoreChecks`` (V2-16, over
+  the complete record state) or ``ScopedCoreChecks`` (§22 E23, the part of the state a write can
+  affect; ``build_ledger()``'s default). The section at the end of this module says why the part
+  decides exactly what the whole does.
 Nothing here logs a record field, an amount or DB error text.
 """
 
@@ -20,22 +25,33 @@ from __future__ import annotations
 import json
 import logging
 import threading
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import date, datetime, timedelta
-from typing import Any
+from typing import Any, Protocol
 
 from sqlalchemy import text
 from sqlalchemy.engine import Connection
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.services.os_ledger import api, role_policy
-from app.services.os_ledger.domain import DomainError, canonical_input, validate_transition
+from app.services.os_ledger.domain import (
+    ENTITIES,
+    ENUMS,
+    ID_KEYS,
+    DomainError,
+    _canonical_record,
+    canonical_input,
+    lead_contact_dependencies,
+    validate_state,
+    validate_transition,
+)
 from app.services.os_ledger.ids import (
     DATE_KEYS,
     FUSED_KINDS,
     TERMINAL,
+    dependency_digest,
     envelope_digest,
     fused_rejection_id,
     hex_id,
@@ -44,6 +60,7 @@ from app.services.os_ledger.ids import (
     refuse_live_dependents,
     same_record,
 )
+from app.services.os_ledger.summaries import MAX_SAFE_INTEGER, build_summaries
 from app.services.os_ledger.validate_full import domain_error
 
 _LOG = logging.getLogger("mia.os_ledger")
@@ -150,7 +167,7 @@ class PgLedgerTx:
     def __init__(self, conn: Connection, ctx: api.TrustedOwnerContext, *, kind: str,
                  purpose: str, now: datetime, version: int,
                  uuid4: Callable[[], str], undo_window_s: Callable[[], int],
-                 validator: Any, summaries: Any) -> None:
+                 validator: Any, summaries: Any, checks: Any = None) -> None:
         self.ctx = ctx
         self.now = now
         self.version = version
@@ -164,6 +181,7 @@ class PgLedgerTx:
         self._undo_window_s = undo_window_s
         self._validator = validator
         self._summaries = summaries
+        self.checks = checks if checks is not None else FullCoreChecks()
         self.current_version = version  # moves with finish(); reads report it as observed
         self.pending_seq = 0  # reads: the snapshot's pending_seq and states (head())
         self.states: dict[str, str] = {}
@@ -443,7 +461,8 @@ class PgLedgerTx:
             raise self.poisoned from None
         self._in_apply = True
         try:
-            result = tuple(self._apply_one(m, source, request_id, mutations) for m in mutations)
+            result = tuple(self._apply_one(m, source, request_id, mutations, mutations[:index])
+                           for index, m in enumerate(mutations))
             self._validator.validate(self, mutations)
             self._summaries.on_apply(self, mutations)
             savepoint.commit()
@@ -460,7 +479,8 @@ class PgLedgerTx:
             self._in_apply = False
 
     def _apply_one(self, mutation: api.Mutation, source: str, request_id: str,
-                   batch: Sequence[api.Mutation]) -> api.RecordDict:
+                   batch: Sequence[api.Mutation],
+                   earlier: Sequence[api.Mutation] = ()) -> api.RecordDict:
         entity, key = self._entity(mutation.entity), mutation.record_id
         if not isinstance(key, str) or not isinstance(mutation.after, Mapping):
             raise integrity("apply_mutation_shape")
@@ -493,9 +513,10 @@ class PgLedgerTx:
             inputs = canonical_input(entity, {k: v for k, v in mutation.after.items()
                                                if k not in system})
             # A restore has no target in the non-deleted projection; its identity is the
-            # compare-and-set above.
-            validate_transition(entity, None if mutation.op == "restore" else before,
-                                dict(mutation.after), self.snapshot_records())
+            # compare-and-set above. validate_transition over the state so far (the batch's
+            # earlier mutations are written), scoped by default (§22 E23).
+            self.checks.transition(self, entity, None if mutation.op == "restore" else before,
+                                   dict(mutation.after), tuple(earlier))
         except DomainError as exc:
             raise domain_error(exc) from None
         raw_date = inputs.get(DATE_KEYS.get(entity))
@@ -557,11 +578,12 @@ class PgLedgerTx:
         stored.update({api.ID_KEYS[entity]: key, "revision": after_revision})
         if entity == "leads":
             stored["person_id"] = typed["person_id"]
-        records = self._load_records()[entity]
-        if tombstone:
-            records.pop(key, None)
-        else:
-            records[key] = stored
+        if self._records is not None:  # keep a loaded full snapshot current; never load it here
+            records = self._records[entity]
+            if tombstone:
+                records.pop(key, None)
+            else:
+                records[key] = stored
         return dict(stored)
 
     def _batch_line_count(self, proposal_id: str) -> int:
@@ -811,3 +833,360 @@ class PgLedgerTx:
         if len(ids) > limit:
             raise api.LedgerError("local_record_limit")
         return ids
+
+
+# ---- §22 E23 (V2-16b): the core checks, scoped to what a write can affect --------------------
+#
+# V2-16 decided three things over the transaction's COMPLETE record state (``snapshot_records``):
+# ``apply`` ran ``validate_transition`` for each mutation, ``decide`` and ``propose`` computed the
+# dependency digest, and ``propose`` also ran ``validate_state`` and ``build_summaries`` over the
+# prospective state. ``FullCoreChecks`` keeps exactly that and is the reference.
+# ``ScopedCoreChecks`` (``build_ledger()``'s default) calls the SAME domain functions with only
+# the part of the state that decides them, read through a ``CoreReader``. The property tests
+# (``tests/services/os_ledger/test_core_scoping_property.py``) prove the two equal call by call
+# (same accept/reject, same code and reason, same digest) on the FakeLedger and on PostgreSQL.
+#
+# Why a part decides ``validate_state``. Its checks are per record: the canonical form, a record's
+# client and work (``_validate_work_dependency``), a refund's original and the sum of that
+# original's refunds (``_validate_payment_graph``), an expense's source key. Each reads only the
+# records the checked record names (a refund also its siblings). On a part that is CLOSED (it
+# holds every record a member's check reads, whenever that record exists) every member gets the
+# result it gets on the whole state, and the members keep their relative order, so the first
+# failure and its reason code are the same. A record outside the part passes on the whole state:
+# the state before the write was valid (every committed state passed the check), so only a record
+# whose check reads something the write changed can fail. Those are the SEEDS:
+#   * the written record itself;
+#   * a written work's referrers (their checks read its person, path and currency) and a written
+#     payment's refunds (they read their original). A written client is read only for its
+#     presence, which no write removes (validate_transition keeps a tombstoned record in view);
+#   * inside one ``apply``, the live referrers of the batch's earlier tombstones: the state after
+#     a tombstone is a valid state minus that record, so only what named it can fail there;
+#   * a created lead's contact twins and an expense's source twins.
+# ``build_summaries`` can refuse a valid canonical state only by overflowing a sum, and every sum
+# it takes is bounded by the workspace's total money (times 60 for an hourly rate) or its total
+# minutes. So the scoped check runs it only when those bounds allow an overflow, and then over the
+# whole prospective state: the outcome is the full one by construction (V2-18's
+# ``IncrementalSummaries`` uses the same bound). The dependency digest is a filter over the state,
+# so a part that holds every record the filter keeps, in id order, gives the same digest.
+
+_DEPENDENT = ("works", "payments", "time", "tasks")  # validate_state's reference phase, in order
+_REFUND = ENUMS["payment_kind"][1]
+# What a record's check looks up: (field, the entity that field names).
+_NAMES: Mapping[str, tuple[tuple[str, str], ...]] = {
+    "works": (("person_id", "clients"),),
+    "payments": (("person_id", "clients"), ("work_id", "works"),
+                 ("original_payment_id", "payments")),
+    "time": (("person_id", "clients"), ("work_id", "works")),
+    "tasks": (("person_id", "clients"), ("work_id", "works")),
+}
+# Whose checks look a record up: (referrer entity, field), per named entity.
+_NAMED_BY: Mapping[str, tuple[tuple[str, str], ...]] = {
+    "clients": tuple((entity, "person_id") for entity in _DEPENDENT),
+    "works": (("payments", "work_id"), ("time", "work_id"), ("tasks", "work_id")),
+    "payments": (("payments", "original_payment_id"),),
+}
+# The referrers whose checks read a written record's CONTENT (a client only for its presence).
+_CONTENT_READERS = {entity: _NAMED_BY[entity] for entity in ("works", "payments")}
+# What build_summaries sums: (field, 0 for money or 1 for minutes).
+_MEASURES = {"payments": ("actual_amount_ils", 0), "expenses": ("amount_ils", 0),
+             "time": ("minutes", 1)}
+
+
+class CoreReader(Protocol):
+    """Reads of the transaction's CURRENT live records (tombstones excluded), as wire records."""
+
+    def live(self, entity: str, ids: Iterable[Any]) -> dict[str, api.RecordDict]:
+        """The live records of ``entity`` with one of these ids, by id."""
+
+    def referrers(self, entity: str, field: str, ids: Iterable[Any]) -> list[api.RecordDict]:
+        """The live records of ``entity`` whose ``field`` is one of ``ids``."""
+
+    def same_source(self, source_type: Any, source_key: Any) -> list[api.RecordDict]:
+        """The live expenses with exactly this (source_type, source_key)."""
+
+    def contact_leads(self) -> list[api.RecordDict]:
+        """The live leads with a phone or an email (no other lead can be a contact twin)."""
+
+    def magnitudes(self) -> tuple[int, int]:
+        """(the sum of the live payment and expense amounts, the sum of the live minutes)."""
+
+    def snapshot(self) -> dict[str, list[api.RecordDict]]:
+        """Every live record, per entity in id order (the summary fallback only)."""
+
+
+class PgCoreReader:
+    """``CoreReader`` on the transaction's connection, under the runtime role's SELECT grants.
+
+    Ids are primary-key reads; a referrer read filters one typed column of one table."""
+
+    def __init__(self, tx: PgLedgerTx) -> None:
+        self._tx = tx
+
+    def _rows(self, entity: str, where: str, params: Mapping[str, Any]) -> list[Any]:
+        if entity not in api.ENTITIES:
+            raise integrity("scope_entity")
+        return self._tx._exec(
+            f"SELECT {record_columns(entity)} FROM assaf_os.os_{entity} WHERE workspace_id = :ws "
+            f'AND deleted_at IS NULL AND {where} ORDER BY record_id COLLATE "C"', params).all()
+
+    def live(self, entity: str, ids: Iterable[Any]) -> dict[str, api.RecordDict]:
+        wanted = sorted({value for value in ids if isinstance(value, str)})
+        if not wanted:
+            return {}
+        return {row.record_id: wire(entity, row)
+                for row in self._rows(entity, "record_id = ANY(:ids)", {"ids": wanted})}
+
+    def referrers(self, entity: str, field: str, ids: Iterable[Any]) -> list[api.RecordDict]:
+        if entity not in api.ENTITIES or field not in TYPED_COLUMNS[entity]:
+            raise integrity("scope_column")
+        wanted = sorted({value for value in ids if isinstance(value, str)})
+        if not wanted:
+            return []
+        return [wire(entity, row)
+                for row in self._rows(entity, f"{field} = ANY(:ids)", {"ids": wanted})]
+
+    def same_source(self, source_type: Any, source_key: Any) -> list[api.RecordDict]:
+        if not (isinstance(source_type, str) and isinstance(source_key, str)):
+            return []  # a stored source is text, so nothing else equals it
+        return [wire("expenses", row) for row in self._rows(
+            "expenses", "source_type = :type AND assaf_os.expense_source_key_sha256(source_key) "
+            "= assaf_os.expense_source_key_sha256(CAST(:key AS text)) AND source_key = :key",
+            {"type": source_type, "key": source_key})]
+
+    def contact_leads(self) -> list[api.RecordDict]:
+        return [wire("leads", row) for row in self._rows(
+            "leads", "(inputs ->> 'phone' IS NOT NULL OR inputs ->> 'email' IS NOT NULL)", {})]
+
+    def magnitudes(self) -> tuple[int, int]:
+        row = self._tx._exec(
+            "SELECT (SELECT COALESCE(sum(amount_minor), 0) FROM assaf_os.os_payments "
+            "WHERE workspace_id = :ws AND deleted_at IS NULL) + (SELECT COALESCE("
+            "sum(amount_minor), 0) FROM assaf_os.os_expenses WHERE workspace_id = :ws "
+            "AND deleted_at IS NULL) AS money, (SELECT COALESCE(sum(minutes), 0) "
+            "FROM assaf_os.os_time WHERE workspace_id = :ws AND deleted_at IS NULL) AS minutes"
+        ).one()
+        return int(row.money), int(row.minutes)
+
+    def snapshot(self) -> dict[str, list[api.RecordDict]]:
+        return self._tx.snapshot_records()
+
+
+class _Part:
+    """A part of the prospective state (the live records with ``changes`` laid over them), closed
+    under every lookup ``validate_state`` makes. ``close()`` returns the live records it holds
+    (a changed record's live version too, so ``validate_transition`` keeps its place)."""
+
+    def __init__(self, reader: CoreReader,
+                 changes: Mapping[tuple[str, str], Mapping[str, Any]]) -> None:
+        self._reader = reader
+        self._changes = {key: dict(record) for key, record in changes.items()}
+        self.stored: dict[str, dict[str, api.RecordDict]] = {e: {} for e in ENTITIES}
+        self._fetched: set[tuple[str, str]] = set()
+        self._asked: set[tuple[str, str, str]] = set()
+        self._sources: set[tuple[str, str]] = set()
+        self._ids: dict[str, set[str]] = {}
+        self._refs: dict[tuple[str, str], set[str]] = {}
+        self._new_sources: list[tuple[str, str]] = []
+        self._todo: list[tuple[str, Mapping[str, Any]]] = [
+            (entity, record) for (entity, _), record in self._changes.items()]
+        for entity, key in self._changes:
+            self._want(entity, key)
+
+    def _want(self, entity: str, value: Any) -> None:
+        if isinstance(value, str) and value and (entity, value) not in self._fetched:
+            self._ids.setdefault(entity, set()).add(value)
+
+    def ask(self, entity: str, field: str, value: Any) -> None:
+        """Include the live records of ``entity`` whose ``field`` is ``value``."""
+        if isinstance(value, str) and value and (entity, field, value) not in self._asked:
+            self._refs.setdefault((entity, field), set()).add(value)
+
+    def add(self, entity: str, record: api.RecordDict) -> None:
+        """Include a live record; it is prospective too unless the write replaces it."""
+        key = record[ID_KEYS[entity]]
+        self._fetched.add((entity, key))
+        if key in self.stored[entity]:
+            return
+        self.stored[entity][key] = record
+        if (entity, key) not in self._changes:
+            self._todo.append((entity, record))
+
+    def _expand(self) -> None:
+        for entity, record in self._todo:
+            for field, named in _NAMES.get(entity, ()):
+                self._want(named, record.get(field))
+            if entity == "payments" and record.get("kind") == _REFUND:
+                self.ask("payments", "original_payment_id", record.get("original_payment_id"))
+            source = (record.get("source_type"), record.get("source_key"))
+            if (entity == "expenses" and all(isinstance(part, str) for part in source)
+                    and source not in self._sources):
+                self._sources.add(source)
+                self._new_sources.append(source)
+        self._todo = []
+
+    def close(self) -> dict[str, list[api.RecordDict]]:
+        self._expand()
+        while self._ids or self._refs or self._new_sources:
+            ids, self._ids = self._ids, {}
+            for entity in ENTITIES:
+                wanted = ids.get(entity)
+                if wanted:
+                    found = self._reader.live(entity, wanted)
+                    self._fetched.update((entity, value) for value in wanted)
+                    for key in sorted(found):
+                        self.add(entity, found[key])
+            refs, self._refs = self._refs, {}
+            for (entity, field), values in sorted(refs.items()):
+                self._asked.update((entity, field, value) for value in values)
+                for record in self._reader.referrers(entity, field, values):
+                    self.add(entity, record)
+            sources, self._new_sources = self._new_sources, []
+            for source_type, source_key in sources:
+                for record in self._reader.same_source(source_type, source_key):
+                    self.add("expenses", record)
+            self._expand()
+        return {entity: [self.stored[entity][key] for key in sorted(self.stored[entity])]
+                for entity in ENTITIES}
+
+
+def _laid_over(records: Mapping[str, Sequence[Mapping[str, Any]]],
+               mutations: Sequence[api.Mutation]) -> dict[str, list[dict[str, Any]]]:
+    """V2-16's prospective state: each ``after`` replaces its record and goes last."""
+    prospective = {entity: [dict(r) for r in rows] for entity, rows in records.items()}
+    for m in mutations:
+        key = ID_KEYS[m.entity]
+        prospective[m.entity] = [r for r in prospective[m.entity]
+                                 if r[key] != m.record_id] + [dict(m.after)]
+    return prospective
+
+
+def scoped_transition(reader: CoreReader, entity: Any, before: Any, after: Any,
+                      earlier: Sequence[api.Mutation] = ()) -> None:
+    """``validate_transition(entity, before, after, S)`` for S = the reader's live records.
+
+    ``earlier`` is the part of the ``apply`` batch already written: the live referrers of its
+    tombstones are the only records of S that can be invalid (see the section comment)."""
+    if entity not in ENTITIES:
+        raise DomainError("invalid_entity")
+    _canonical_record(entity, after)  # validate_transition's record-free first check
+    key = after[ID_KEYS[entity]]
+    part = _Part(reader, {(entity, key): after})
+    for referrer, field in _CONTENT_READERS.get(entity, ()):
+        part.ask(referrer, field, key)
+    for mutation in earlier:
+        if mutation.op == "tombstone":
+            for referrer, field in _NAMED_BY.get(mutation.entity, ()):
+                part.ask(referrer, field, mutation.record_id)
+    if entity == "leads" and before is None:
+        for lead in lead_contact_dependencies(after, reader.contact_leads()):
+            part.add("leads", lead)
+    validate_transition(entity, before, after, part.close())
+
+
+def full_proposal_check(records: Mapping[str, Sequence[Mapping[str, Any]]],
+                        mutations: Sequence[api.Mutation]) -> None:
+    """V2-16's ``propose`` check over the complete record state ``records`` (the reference)."""
+    prospective = {entity: [dict(r) for r in rows] for entity, rows in records.items()}
+    for m in mutations:
+        key = api.ID_KEYS[m.entity]
+        prospective[m.entity] = [r for r in prospective[m.entity]
+                                 if r[key] != m.record_id] + [dict(m.after)]
+        validate_transition(m.entity, m.before, dict(m.after), records)
+    validate_state(prospective)
+    build_summaries(prospective)
+
+
+def scoped_proposal_check(reader: CoreReader, mutations: Sequence[api.Mutation]) -> None:
+    """``full_proposal_check`` on the part of the state the proposal can affect."""
+    for m in mutations:
+        scoped_transition(reader, m.entity, m.before, dict(m.after))
+    changes = {(m.entity, m.record_id): dict(m.after) for m in mutations}
+    part = _Part(reader, changes)
+    for entity, key in changes:
+        for referrer, field in _CONTENT_READERS.get(entity, ()):
+            part.ask(referrer, field, key)
+    validate_state(_laid_over(part.close(), mutations))
+    # Every after is canonical now, so build_summaries can only overflow a sum (section comment).
+    totals = list(reader.magnitudes())
+    for (entity, key), after in changes.items():
+        if entity in _MEASURES:
+            field, which = _MEASURES[entity]
+            old = part.stored[entity].get(key)
+            totals[which] += after[field] - (old[field] if old is not None else 0)
+    if not (60 * totals[0] < MAX_SAFE_INTEGER and totals[1] <= MAX_SAFE_INTEGER):
+        build_summaries(_laid_over(reader.snapshot(), mutations))
+
+
+def dependency_part(reader: CoreReader,
+                    mutations: Sequence[api.Mutation]) -> dict[str, list[api.RecordDict]]:
+    """Every live record ``ids.dependencies`` keeps for these mutations, per entity in id order
+    (the target, its client and work, a lead's contact twins, a payment's original and refunds,
+    an expense's source twins), so ``dependency_digest`` over it equals the full one."""
+    kept: dict[str, dict[str, api.RecordDict]] = {entity: {} for entity in ENTITIES}
+    ids: dict[str, set[str]] = {entity: set() for entity in ENTITIES}
+
+    def keep(entity: str, records: Iterable[api.RecordDict]) -> None:
+        for record in records:
+            kept[entity][record[ID_KEYS[entity]]] = record
+
+    def want(entity: str, value: Any) -> None:
+        if isinstance(value, str):
+            ids[entity].add(value)
+
+    for m in mutations:
+        candidate = m.after
+        want(m.entity, m.record_id)
+        if candidate.get("person_id"):
+            want("clients", candidate["person_id"])
+        if candidate.get("work_id") and m.entity != "works":
+            want("works", candidate["work_id"])
+        if m.entity == "leads":
+            keep("leads", lead_contact_dependencies(candidate, reader.contact_leads(),
+                                                    m.record_id))
+        if m.entity == "payments":
+            named = [value for value in (m.record_id, candidate.get("original_payment_id"))
+                     if isinstance(value, str)]
+            for value in named:
+                want("payments", value)
+            keep("payments", reader.referrers("payments", "original_payment_id", named))
+        if m.entity == "expenses":
+            keep("expenses", reader.same_source(candidate["source_type"],
+                                                candidate["source_key"]))
+    for entity in ENTITIES:
+        keep(entity, reader.live(entity, ids[entity]).values())
+    return {entity: [kept[entity][key] for key in sorted(kept[entity])] for entity in ENTITIES}
+
+
+def scoped_dependency_digest(reader: CoreReader, mutations: Sequence[api.Mutation]) -> str:
+    return dependency_digest(dependency_part(reader, mutations), mutations)
+
+
+class FullCoreChecks:
+    """V2-16's core checks over the transaction's complete record state: the reference."""
+
+    def transition(self, tx: Any, entity: Any, before: Any, after: Any,
+                   earlier: Sequence[api.Mutation] = ()) -> None:
+        validate_transition(entity, before, after, tx.snapshot_records())
+
+    def dependency_digest(self, tx: Any, mutations: Sequence[api.Mutation]) -> str:
+        return dependency_digest(tx.snapshot_records(), mutations)
+
+    def proposal(self, tx: Any, mutations: Sequence[api.Mutation]) -> None:
+        full_proposal_check(tx.snapshot_records(), mutations)
+
+
+class ScopedCoreChecks:
+    """The same checks on the part of the state a write can affect (§22 E23, section comment)."""
+
+    def __init__(self, reader: Callable[[Any], CoreReader] = PgCoreReader) -> None:
+        self._reader = reader
+
+    def transition(self, tx: Any, entity: Any, before: Any, after: Any,
+                   earlier: Sequence[api.Mutation] = ()) -> None:
+        scoped_transition(self._reader(tx), entity, before, after, earlier)
+
+    def dependency_digest(self, tx: Any, mutations: Sequence[api.Mutation]) -> str:
+        return scoped_dependency_digest(self._reader(tx), mutations)
+
+    def proposal(self, tx: Any, mutations: Sequence[api.Mutation]) -> None:
+        scoped_proposal_check(self._reader(tx), mutations)

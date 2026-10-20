@@ -179,16 +179,41 @@ async def _execute_assaf_os_owner_decision(
     def execute():
         from app.db.session import get_session_factory
         from app.services.owner_actions import (
+            ACTION_OWNER_EXTERNAL_WRITE,
+            RESOURCE_OWNER_PROPOSAL,
             OwnerActionExecution,
             execute_approved_owner_action_with_adapters,
+            execute_ledger_owner_decision,
+            is_ledger_owner_action,
+            read_owner_action,
             reject_assaf_os_owner_action,
         )
 
         session = get_session_factory()()
+        ledger_card = False
         try:
             thread_store = LeadStore(session)
             principal = Principal.owner(source="telegram", actor_id=actor_id)
             operation_key = f"{proposal_id}:{'execute' if decision == 'approve' else 'reject'}"
+            ledger_card = is_ledger_owner_action(
+                read_owner_action(
+                    thread_store.get_approval_by_resource(
+                        RESOURCE_OWNER_PROPOSAL, proposal_id, ACTION_OWNER_EXTERNAL_WRITE
+                    )
+                )
+            )
+            if ledger_card:
+                # V2-28: a ledger card is answered by its receipt, so a leftover claim is never a
+                # sticky unknown here; the decision UUID stored on the card is the only id used.
+                outcome = execute_ledger_owner_decision(
+                    thread_store,
+                    settings=settings,
+                    principal=principal,
+                    proposal_id=proposal_id,
+                    decision=decision,
+                )
+                session.commit()
+                return outcome
             if thread_store.get_provider_write_status(
                 scope="approval", key=operation_key
             ) in {"provider_claimed", "pending_review"}:
@@ -211,6 +236,13 @@ async def _execute_assaf_os_owner_decision(
             return outcome
         except Exception:
             session.rollback()
+            if ledger_card:
+                # Recovery for a ledger card is a receipt read on the next callback, by the same
+                # stored decision UUID. No claim is parked, so nothing sticks as unknown.
+                _log.info(
+                    "owner_callback op=ledger_decision outcome=unknown reason=worker_failed"
+                )
+                return OwnerActionExecution("unknown")
             # A preflight transport failure happens before execute_owner_action can
             # create its effect claim. Make that uncertainty sticky as well: the
             # already-approved callback must not become a blind provider retry.
@@ -511,6 +543,7 @@ async def _handle_callback(
             "expired": "האישור פג. צריך להכין בקשת אישור חדשה.",
             "rejected": "ההצעה כבר נדחתה ולא בוצעה.",
             "policy_denied": "מתג העצירה פעיל. הפעולה לא בוצעה.",
+            "not_started": "הפעולה לא נשלחה ולא בוצעה. אפשר לנסות שוב מאוחר יותר.",
         }.get(outcome.status, "הפעולה לא בוצעה.")
     if resolved is not None and decision == "reject":
         rejected_row = store.get_approval_by_approval_id(token)
@@ -539,6 +572,7 @@ async def _handle_callback(
                 "expired": "ההצעה פגה ולא בוצעה.",
                 "target_changed": "היעד השתנה וההצעה לא בוצעה.",
                 "policy_denied": "מתג העצירה פעיל. הדחייה לא נשלחה לגיליון.",
+                "not_started": "הדחייה נשמרה, אבל לא נשלחה לגיליון. ההצעה תפוג ולא תבוצע.",
             }.get(rejected.status, reply_text)
     # Every branch above either interpolates only server-escaped HTML (bold()/code()
     # from resolve_owner_callback_result) or a fixed Hebrew literal, except

@@ -473,6 +473,13 @@ class FakeLedger:
         with self._read(ctx) as tx:
             return tuple(copy.deepcopy(tx.data["monthly_wire"]))
 
+    def proposal(self, ctx, proposal_id):
+        """§22 E14(1): one stored proposal, read-only, any status or kind; None when absent or of
+        another epoch (the I12 filter of ``pending``)."""
+        with self._read(ctx) as tx:
+            row = tx.proposal(proposal_id) if isinstance(proposal_id, str) else None
+            return row if row is not None and row.epoch == ctx.authority_epoch else None
+
     # ---- LedgerCore ---------------------------------------------------------------------------
 
     def propose(self, ctx, req):
@@ -613,7 +620,12 @@ class FakeLedger:
                         tx.apply(proposal.mutations, source=proposal.source,
                                  request_id=decision_id)
                     except api.LedgerError as exc:
-                        if exc.code not in {"target_changed", "lead_already_exists"}:
+                        # §22 E26: an apply-time has_dependents ends the proposal
+                        # target_changed (reason has_dependents); every other refusal keeps
+                        # its behaviour and ledger_integrity_failed is re-raised.
+                        if exc.code == "has_dependents":
+                            reasons = ("has_dependents",)
+                        elif exc.code not in {"target_changed", "lead_already_exists"}:
                             raise
                         status = "target_changed"
             receipt = tx.finish(proposal, status=status, receipt_request_id=decision_id,

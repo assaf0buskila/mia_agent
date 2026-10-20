@@ -44,13 +44,7 @@ from typing import Any
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.services.os_ledger import api
-from app.services.os_ledger.domain import (
-    ENUMS,
-    DomainError,
-    canonical_input,
-    validate_state,
-    validate_transition,
-)
+from app.services.os_ledger.domain import ENUMS, DomainError, canonical_input
 from app.services.os_ledger.guard import (
     ADMISSION_SQL,
     AUTHORITY_SQL,
@@ -64,18 +58,20 @@ from app.services.os_ledger.guard import (
 from app.services.os_ledger.ids import (
     PREFIXES,
     default_uuid4,
-    dependency_digest,
     envelope_digest,
     hex_id,
     proposal_request_digest,
 )
-from app.services.os_ledger.summaries import (
-    FullSummaries,
-    SummaryInputError,
-    build_summaries,
-    monthly_rows,
+from app.services.os_ledger.summaries import FullSummaries, SummaryInputError, monthly_rows
+from app.services.os_ledger.tx import (
+    FullCoreChecks,
+    PgLedgerTx,
+    ScopedCoreChecks,
+    database_error,
+    held,
+    integrity,
+    wire,
 )
-from app.services.os_ledger.tx import PgLedgerTx, database_error, held, integrity, wire
 from app.services.os_ledger.validate_full import FullStateValidator, domain_error
 
 __all__ = ["PgLedger", "build_ledger", "dispose_engines"]
@@ -149,12 +145,16 @@ class PgLedger:
                  clock: Callable[[], datetime] | None = None,
                  uuid4: Callable[[], str] = default_uuid4,
                  validator: api.StateValidator | None = None,
-                 summaries: api.SummaryMaintainer | None = None) -> None:
+                 summaries: api.SummaryMaintainer | None = None,
+                 checks: Any = None) -> None:
         self.settings = settings
         self.clock = clock
         self.uuid4 = uuid4
         self.validator = validator or FullStateValidator()
         self.summaries = summaries or FullSummaries()
+        # The transition, dependency-digest and propose checks (§22 E23): V2-16's full ones by
+        # default here; build_ledger() passes the scoped ones the property tests prove equal.
+        self.checks = checks or FullCoreChecks()
         self._guard = guard
         self._engine = engine
         self._cursors = _Cursors(getattr(settings, "owner_os_cursor_secret", "") or "")
@@ -207,7 +207,7 @@ class PgLedger:
         return PgLedgerTx(conn, ctx, kind=kind, purpose=purpose, now=now,
                           version=int(row.version), uuid4=self.uuid4,
                           undo_window_s=self._undo_window_s, validator=self.validator,
-                          summaries=self.summaries)
+                          summaries=self.summaries, checks=self.checks)
 
     # ---- LedgerStore ---------------------------------------------------------------------
 
@@ -361,20 +361,14 @@ class PgLedger:
             ):
                 raise api.LedgerError("target_changed")
             record_id = req.record_id or hex_id(PREFIXES[req.entity], self.uuid4)
-            records = tx.snapshot_records()
             try:
-                mutations = (self._promotion(records, before, record_id, req.expected_revision)
+                mutations = (self._promotion(tx.get("clients", before["person_id"]), before,
+                                             record_id, req.expected_revision)
                              if promote else self._single(req.entity, before, record_id,
                                                           req.expected_revision, values))
-                prospective = {entity: [dict(r) for r in rows]
-                               for entity, rows in records.items()}
-                for m in mutations:
-                    key = api.ID_KEYS[m.entity]
-                    prospective[m.entity] = [r for r in prospective[m.entity]
-                                             if r[key] != m.record_id] + [dict(m.after)]
-                    validate_transition(m.entity, m.before, dict(m.after), records)
-                validate_state(prospective)
-                build_summaries(prospective)
+                # Each transition, then validate_state and build_summaries over the prospective
+                # state (tx.full_proposal_check), scoped by default (§22 E23).
+                self.checks.proposal(tx, mutations)
             except (DomainError, SummaryInputError) as exc:
                 raise domain_error(exc, "validation_error") from None
             if req.entity == "leads" and tx.lead_person_taken(
@@ -388,7 +382,8 @@ class PgLedger:
                                       details={"reason": "invalid_approval_expiry"})
             return tx.insert_proposal(api.ProposalDraft(
                 "proposal", ctx.channel, req.request_id, request_digest, req.entity, record_id,
-                req.expected_revision, mutations, dependency_digest(records, mutations), expiry))
+                req.expected_revision, mutations, self.checks.dependency_digest(tx, mutations),
+                expiry))
 
     def _single(self, entity: str, before: dict | None, record_id: str, expected: int,
                 values: dict[str, Any]) -> tuple[api.Mutation, ...]:
@@ -400,13 +395,14 @@ class PgLedger:
         return (api.Mutation(entity, record_id, "upsert", before, after),)
 
     @staticmethod
-    def _promotion(records: dict[str, list[dict]], before: dict, record_id: str,
+    def _promotion(existing: dict | None, before: dict, record_id: str,
                    expected: int) -> tuple[api.Mutation, ...]:
+        """The lead's conversion plus its client. ``existing`` is the live client whose id is
+        the lead's ``person_id`` (V2-16 looked it up in the full snapshot: the same record)."""
         client_status = ENUMS["client_status"][0]
         lead_after = before | {"status": ENUMS["lead_status"][-1], "revision": expected + 1}
         mutations = [api.Mutation("leads", record_id, "upsert", before, lead_after)]
         person = before["person_id"]
-        existing = next((r for r in records["clients"] if r["person_id"] == person), None)
         if existing is None:
             client = canonical_input("clients", {
                 "name": before["name"], "phone": before.get("phone") or None,
@@ -449,15 +445,22 @@ class PgLedger:
             elif tx.now >= proposal.expires_at:
                 status = "expired"
             elif decision == "approve":
-                if dependency_digest(tx.snapshot_records(),
-                                     proposal.mutations) != proposal.dependency_digest:
+                if (self.checks.dependency_digest(tx, proposal.mutations)
+                        != proposal.dependency_digest):
                     status = "target_changed"
                 else:
                     try:
                         tx.apply(proposal.mutations, source=proposal.source,
                                  request_id=decision_id)
                     except api.LedgerError as exc:
-                        if exc.code not in {"target_changed", "lead_already_exists"}:
+                        # §22 E26: a live referrer added since the proposal (the digest does
+                        # not cover referrers) ends it target_changed, reason has_dependents,
+                        # instead of leaving it pending. apply is atomic, so only the
+                        # receipt and its event are written. Every other refusal keeps its
+                        # behaviour; ledger_integrity_failed is re-raised (§22 E22, §5.2).
+                        if exc.code == "has_dependents":
+                            reasons = ("has_dependents",)
+                        elif exc.code not in {"target_changed", "lead_already_exists"}:
                             raise
                         status = "target_changed"
             receipt = tx.finish(proposal, status=status, receipt_request_id=decision_id,
@@ -617,15 +620,19 @@ class PgLedger:
 def build_ledger(settings: Any, *, clock: Callable[[], datetime] | None = None,
                  uuid4: Callable[[], str] = default_uuid4,
                  validator: api.StateValidator | None = None,
-                 summaries: api.SummaryMaintainer | None = None) -> PgLedger:
+                 summaries: api.SummaryMaintainer | None = None,
+                 checks: Any = None) -> PgLedger:
     """The PG ``api.Ledger`` on ``settings.owner_os_ledger_database_url``.
 
     ``ledger_unavailable`` when the ledger DSN or the main DSN is missing or not PostgreSQL. The
     switches (``assaf_os_ledger_enabled``, the kill switch, the backend, the epoch) are read at
     every call, not here, so the retention worker's ``purpose="expire"`` keeps working while the
-    ledger is off (I11). The defaults are the full validator and the full summary recompute;
-    V2-18 replaces them only after its equivalence property tests. ``clock`` is a test seam: by
-    default ``tx.now`` is the database ``now()`` of the transaction.
+    ledger is off (I11). V2-18 (the handoff): the ledger is ``reads.ReadModelLedger`` and the
+    defaults are ``ScopedStateValidator`` and ``IncrementalSummaries``, which the V2-18 property
+    tests prove equal to the full validator and the full summary recompute (pass those to opt
+    out). V2-16b (§22 E23): the core checks default to ``tx.ScopedCoreChecks``, which
+    ``test_core_scoping_property.py`` proves equal to V2-16's ``tx.FullCoreChecks``. ``clock`` is
+    a test seam: by default ``tx.now`` is the database ``now()``.
     """
     dsn = getattr(settings, "owner_os_ledger_database_url", "") or ""
     main = getattr(settings, "database_url", "") or ""
@@ -634,5 +641,13 @@ def build_ledger(settings: Any, *, clock: Callable[[], datetime] | None = None,
     if not main:
         raise refuse("main_dsn_missing")
     guard = guard_for(dsn, main)
-    return PgLedger(settings, guard=guard, engine=engine_for(dsn), clock=clock, uuid4=uuid4,
-                    validator=validator, summaries=summaries)
+    # The V2-18 handoff, imported here because reads.py imports this module.
+    from app.services.os_ledger.reads import ReadModelLedger
+    from app.services.os_ledger.summaries_incremental import IncrementalSummaries
+    from app.services.os_ledger.validate_scoped import ScopedStateValidator
+
+    return ReadModelLedger(
+        settings, guard=guard, engine=engine_for(dsn), clock=clock, uuid4=uuid4,
+        validator=validator if validator is not None else ScopedStateValidator(),
+        summaries=summaries if summaries is not None else IncrementalSummaries(),
+        checks=checks if checks is not None else ScopedCoreChecks())

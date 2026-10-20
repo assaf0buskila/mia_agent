@@ -47,6 +47,17 @@ jobs:
           caddy:2.11.4-alpine@sha256:5f5c8640aae01df9654968d946d8f1a56c497f1dd5c5cda4cf95ab7c14d58648
           caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
       - run: uv run pytest --basetemp=.cache/pytest-ci
+      # The suite above fails when the export differs from the committed golden tree (section
+      # 10.4), so this uploads exactly what the export produces. The frontend vendors it by hash
+      # and records the backend SHA, so on a pull request the name carries the head SHA, not the
+      # merge commit that github.sha is there.
+      - name: Upload the contract golden fixtures
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: os-contract-golden-${{ github.event.pull_request.head.sha || github.sha }}
+          path: tests/contract/golden
+          if-no-files-found: error
+          retention-days: 30
 
   postgres:
     runs-on: ubuntu-latest
@@ -251,7 +262,7 @@ jobs:
       - name: Normal migration isolation and explicit ledger migration contracts
         run: |
           rc=0
-          uv run pytest tests/db/test_assaf_os_ledger_migration.py tests/services/test_os_ledger_role_policy.py tests/db/test_assaf_os_ledger_addendum.py tests/services/os_ledger tests/api/os_v2 -rs --basetemp=.cache/os-ledger-ci > .cache/os-ledger-ci.log 2>&1 || rc=$?
+          uv run pytest tests/db/test_assaf_os_ledger_migration.py tests/services/test_os_ledger_role_policy.py tests/db/test_assaf_os_ledger_addendum.py tests/services/os_ledger tests/api/os_v2 tests/workers/test_os_mirror_outbox.py -rs --basetemp=.cache/os-ledger-ci > .cache/os-ledger-ci.log 2>&1 || rc=$?
           cat .cache/os-ledger-ci.log
           exit $rc
       - name: Skip guard

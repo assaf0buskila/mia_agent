@@ -22,7 +22,7 @@ SUITE_RUN = (
     "rc=0\n"
     "uv run pytest tests/db/test_assaf_os_ledger_migration.py "
     "tests/services/test_os_ledger_role_policy.py tests/db/test_assaf_os_ledger_addendum.py "
-    "tests/services/os_ledger tests/api/os_v2 -rs "
+    "tests/services/os_ledger tests/api/os_v2 tests/workers/test_os_mirror_outbox.py -rs "
     "--basetemp=.cache/os-ledger-ci > .cache/os-ledger-ci.log 2>&1 || rc=$?\n"
     "cat .cache/os-ledger-ci.log\n"
     "exit $rc\n"

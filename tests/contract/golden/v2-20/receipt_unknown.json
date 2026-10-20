@@ -1,0 +1,21 @@
+{
+  "actor_source": null,
+  "api_version": "assaf-os.v2",
+  "authority_epoch": 1,
+  "commit_version": null,
+  "committed_at": null,
+  "kind": null,
+  "observed_version": 1,
+  "proposal_id": null,
+  "reason_codes": [
+    "receipt_not_found"
+  ],
+  "records": [],
+  "request_id": "00000000-0000-4000-8000-000000009999",
+  "server_now": "2026-10-16T12:00:00.000Z",
+  "source": "postgresql",
+  "status": "unknown",
+  "undo": null,
+  "undo_of": null,
+  "workspace_id": "test"
+}

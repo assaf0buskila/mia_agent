@@ -5,8 +5,9 @@ from __future__ import annotations
 import hmac
 import json
 import logging
+import weakref
 from collections.abc import Callable, Generator
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from functools import lru_cache
 from typing import Annotated, Any
@@ -69,7 +70,9 @@ ACTION_SCOPES = frozenset({"quick_leads.create", "reminders.write"})
 BUSINESS_READ_SCOPES = frozenset({"business-ledger:read"})
 BUSINESS_WRITE_SCOPES = frozenset({"business-ledger:write"})
 ASSAF_OS_READ_SCOPES = frozenset({"assaf-os:read"})
-ASSAF_OS_WRITE_SCOPES = frozenset({"assaf-os:propose", "assaf-os:approve"})
+# assaf-os:direct (V2-19, §9): owner-direct commit, undo and abandon. Cookie sessions only, like
+# every scope here; granting it is the configured owner scope set (a wave-6 config step).
+ASSAF_OS_WRITE_SCOPES = frozenset({"assaf-os:propose", "assaf-os:approve", "assaf-os:direct"})
 KNOWN_SCOPES = (
     READ_SCOPES
     | ACTION_SCOPES
@@ -81,13 +84,58 @@ KNOWN_SCOPES = (
 
 _logger = logging.getLogger(__name__)
 
-
 @dataclass(frozen=True)
 class OwnerSessionPrincipal:
     owner_id: str
     scopes: frozenset[str]
     session_hash: str
     expires_at: datetime
+    _mutation_proof: object | None = field(default=None, repr=False, compare=False)
+
+
+# V2-19 (§9): the browser mutation proof. Module-private: only owner_mutation_scope attaches one,
+# after the exact Origin, the session and CSRF have all passed, and
+# authorize.from_owner_mutation admits an OS ledger context only for a principal it proves.
+# Each proof is bound, once, to the exact principal it was attached to and a snapshot of its
+# fields (review r1), so it cannot be borrowed onto another principal or survive a widening
+# ``replace``/``__setattr__``. tests/unit/test_trusted_context_ast.py pins who may touch it.
+def _principal_fields(principal: OwnerSessionPrincipal) -> tuple[Any, ...]:
+    return (principal.owner_id, principal.scopes, principal.session_hash, principal.expires_at)
+
+
+class _MutationProof:
+    __slots__ = ("_principal", "_fields")
+
+    def __init__(self) -> None:
+        self._principal: weakref.ref[OwnerSessionPrincipal] | None = None
+        self._fields: tuple[Any, ...] | None = None
+
+    def _bind(self, principal: OwnerSessionPrincipal) -> None:
+        if self._principal is not None:
+            raise RuntimeError("mutation proof already bound")
+        self._principal = weakref.ref(principal)
+        self._fields = _principal_fields(principal)
+
+
+def _attach_mutation_proof(principal: OwnerSessionPrincipal) -> OwnerSessionPrincipal:
+    proof = _MutationProof()
+    proven = replace(principal, _mutation_proof=proof)
+    proof._bind(proven)
+    return proven
+
+
+def _mutation_proven(principal: Any) -> bool:
+    """True only for the exact, unmodified principal ``owner_mutation_scope`` returned."""
+    if type(principal) is not OwnerSessionPrincipal:
+        return False
+    proof = principal._mutation_proof
+    if type(proof) is not _MutationProof or proof._principal is None:
+        return False
+    current = _principal_fields(principal)
+    # By identity, never ==: a field swapped for an always-equal subclass must not match (r2).
+    return proof._principal() is principal and proof._fields is not None and len(
+        proof._fields) == len(current) and all(
+        a is b for a, b in zip(proof._fields, current, strict=True))
 
 
 class OwnerLoginBody(BaseModel):
@@ -149,6 +197,12 @@ def _feature_settings(settings: Settings) -> tuple[str, str]:
 
 def _require_origin(request: Request, settings: Settings) -> str:
     expected, _ = _feature_settings(settings)
+    if "authorization" in request.headers:
+        # V2-19 (I4, §9): the owner surface is cookie-session only. A request carrying any
+        # Authorization header (bearer, basic, even empty) is refused before anything else is
+        # read, whatever session, Origin or CSRF it also carries.
+        _logger.warning("owner_auth reason=authorization_header")
+        raise _error(401, "owner_auth_required")
     supplied = request.headers.get("origin", "")
     if not supplied or supplied == "null" or supplied != expected:
         raise _error(403, "origin_denied")
@@ -651,7 +705,8 @@ def owner_mutation_scope(
                 supplied_proof_hash,
             ):
                 raise _error(401, "owner_auth_required")
-        return principal
+        # Origin, session and CSRF (and the fresh login when required) have all passed.
+        return _attach_mutation_proof(principal)
 
     return dependency
 

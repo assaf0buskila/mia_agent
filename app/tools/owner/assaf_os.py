@@ -12,12 +12,18 @@ from pydantic import ValidationError
 
 from app.domain.owner.assaf_os_follow_up import (
     FOLLOW_UP_MAX_CHARS,
+    FOLLOW_UP_SCOPE_V1,
+    FOLLOW_UP_SCOPE_V2,
+    MODEL_VIEW_MAX_CHARS,
     follow_up_check,
     receipt_check,
+    snapshot_overview_view,
     unknown_check,
 )
 from app.services.assaf_os import REQUEST_PATTERN, AssafOsError, ProposeRequest
 from app.services.os_backend import OsBackend, get_os_backend
+from app.services.os_ledger.api import ENTITIES, LedgerError
+from app.services.os_ledger.contract import ContractError, body_shape
 from app.services.owner_actions import propose_owner_action
 from app.services.phone_identity import normalize_new_input_phone
 from app.tools.owner.types import OUTCOME_PARTIAL, ToolContext, ToolResult
@@ -34,11 +40,72 @@ def assaf_os_enabled(ctx: ToolContext) -> bool:
 
 
 def _port(ctx: ToolContext) -> OsBackend:
-    return get_os_backend(ctx.settings, ctx.principal.actor_id, actor="MIA")
+    # The principal is what V2-19's from_mia_tool needs under backend=postgres (the numeric owner
+    # of this turn); the Sheets port ignores it.
+    return get_os_backend(
+        ctx.settings, ctx.principal.actor_id, actor="MIA", principal=ctx.principal
+    )
 
 
 def _json(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+# Under backend=postgres a snapshot is one page of one entity (section 10.2). The model view reads
+# the first VIEW_LIMIT rows of every entity (section 22 E14.2: Mia's overview does not shrink to
+# tasks) and the first VIEW_LIMIT pending proposals (E25: never a second /pending page); the
+# follow-up check reads tasks and leads, each up to MAX_PAGES pages of PAGE_LIMIT rows (the
+# 1,000-row cap of the Sheets snapshot).
+V2_VIEW_LIMIT = 50
+V2_PAGE_LIMIT = 200
+V2_MAX_PAGES = 5
+
+
+def _uses_ledger(ctx: ToolContext) -> bool:
+    """True when the backend factory builds the ledger backend, which speaks the v2 contract."""
+    return getattr(ctx.settings, "assaf_os_backend", "sheets") == "postgres"
+
+
+def _ledger_snapshot(ctx: ToolContext) -> ToolResult:
+    from app.services.os_backend_pg import PageQuery
+
+    backend = _port(ctx)
+    pages = [
+        backend.snapshot(PageQuery(entity=entity, limit=V2_VIEW_LIMIT)) for entity in ENTITIES
+    ]
+    shapes = {body_shape(page) for page in pages}
+    if "mixed" in shapes:
+        return ToolResult(ok=False, error="mixed_contract_shapes")
+    # Section 22 E25: what awaits approval, as under Sheets. The FIRST /pending page only.
+    pending = backend.pending(limit=V2_VIEW_LIMIT)
+    shapes.add(body_shape(pending))
+    if "mixed" in shapes:
+        return ToolResult(ok=False, error="mixed_contract_shapes")
+    try:
+        if shapes != {"v2"}:
+            raise ContractError("not_a_v2_body")
+        text = snapshot_overview_view(pages, pending=pending)
+    except ContractError:
+        return ToolResult(ok=False, error="invalid_response")
+    return ToolResult(
+        ok=True, text=text, max_chars=MODEL_VIEW_MAX_CHARS, evidence="assaf_os_ledger_snapshot"
+    )
+
+
+def _ledger_follow_up_pages(ctx: ToolContext) -> list[Any]:
+    from app.services.os_backend_pg import PageQuery
+
+    backend = _port(ctx)
+    pages: list[Any] = []
+    for entity in ("tasks", "leads"):
+        after = None
+        for _ in range(V2_MAX_PAGES):
+            page = backend.snapshot(PageQuery(entity=entity, after=after, limit=V2_PAGE_LIMIT))
+            pages.append(page)
+            after = page.get("next_cursor") if isinstance(page, dict) else None
+            if not isinstance(after, str) or not after:
+                break
+    return pages
 
 
 def _assaf_os_snapshot(ctx: ToolContext, arguments: dict[str, Any]) -> ToolResult:
@@ -46,13 +113,15 @@ def _assaf_os_snapshot(ctx: ToolContext, arguments: dict[str, Any]) -> ToolResul
     if not assaf_os_enabled(ctx):
         return ToolResult(ok=False, error="assaf os is unavailable")
     try:
+        if _uses_ledger(ctx):
+            return _ledger_snapshot(ctx)
         return ToolResult(
             ok=True,
             text=_json(_port(ctx).snapshot()),
             max_chars=16_000,
             evidence="assaf_os_signed_snapshot",
         )
-    except AssafOsError as exc:
+    except (AssafOsError, LedgerError) as exc:
         return ToolResult(ok=False, error=exc.code)
 
 
@@ -68,9 +137,11 @@ def _assaf_os_receipt(ctx: ToolContext, arguments: dict[str, Any]) -> ToolResult
             ok=True,
             text=_json(check),
             outcome=OUTCOME_PARTIAL if check["state"] == "unknown" else "",
-            evidence="assaf_os_signed_receipt",
+            evidence=(
+                "assaf_os_ledger_receipt" if _uses_ledger(ctx) else "assaf_os_signed_receipt"
+            ),
         )
-    except AssafOsError as exc:
+    except (AssafOsError, LedgerError) as exc:
         check = unknown_check("exact_historical_write_only", exc.code)
         check["source"] = {"kind": "assaf_os_receipt_read_failed", "request_id": request_id}
         check["next_action"] = "query_original_receipt_without_replaying_mutation"
@@ -85,21 +156,23 @@ def _assaf_os_follow_up(ctx: ToolContext, arguments: dict[str, Any]) -> ToolResu
         return ToolResult(ok=False, error="assaf os is unavailable")
     if arguments:
         return ToolResult(ok=False, error="invalid_arguments")
+    ledger = _uses_ledger(ctx)
+    scope = FOLLOW_UP_SCOPE_V2 if ledger else FOLLOW_UP_SCOPE_V1
     try:
-        check = follow_up_check(_port(ctx).snapshot())
+        check = follow_up_check(_ledger_follow_up_pages(ctx) if ledger else _port(ctx).snapshot())
         rendered = _json(check)
         if len(rendered) > FOLLOW_UP_MAX_CHARS:
-            check = unknown_check("shared_sheet_new_leads_and_open_tasks", "output_limit")
+            check = unknown_check(scope, "output_limit")
             rendered = _json(check)
         return ToolResult(
             ok=True, text=rendered, max_chars=FOLLOW_UP_MAX_CHARS,
             outcome=OUTCOME_PARTIAL if check["state"] == "unknown" else "",
-            evidence="assaf_os_signed_snapshot",
+            evidence="assaf_os_ledger_snapshot" if ledger else "assaf_os_signed_snapshot",
         )
-    except AssafOsError as exc:
+    except (AssafOsError, LedgerError) as exc:
         return ToolResult(
             ok=False, error=exc.code,
-            text=_json(unknown_check("shared_sheet_new_leads_and_open_tasks", exc.code)),
+            text=_json(unknown_check(scope, exc.code)),
         )
 
 
@@ -287,6 +360,7 @@ def _assaf_os_propose(ctx: ToolContext, arguments: dict[str, Any]) -> ToolResult
         )
     except (
         AssafOsError,
+        LedgerError,
         ValidationError,
         ValueError,
         TypeError,
@@ -294,5 +368,6 @@ def _assaf_os_propose(ctx: ToolContext, arguments: dict[str, Any]) -> ToolResult
         json.JSONDecodeError,
     ) as exc:
         return ToolResult(
-            ok=False, error=exc.code if isinstance(exc, AssafOsError) else "invalid_arguments"
+            ok=False,
+            error=exc.code if isinstance(exc, AssafOsError | LedgerError) else "invalid_arguments",
         )
