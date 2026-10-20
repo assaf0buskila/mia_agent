@@ -24,9 +24,11 @@ from app.services.os_ledger import api
 from tests.fakes.contexts import make_ctx
 from tests.fakes.os_ledger import FakeLedger
 from tests.fakes.os_ledger_builders import (
+    TASK_OPEN,
     abandon_draft,
     client,
     commit_direct,
+    commit_import,
     commit_undo,
     expense,
     lead,
@@ -35,6 +37,7 @@ from tests.fakes.os_ledger_builders import (
     time_entry,
     tombstone,
     update,
+    wire,
     work,
 )
 from tests.fakes.os_ledger_env import NOW, OWNER_ID, WORKSPACE, Knobs, LedgerEnv
@@ -102,8 +105,12 @@ def settings_for(**changes) -> Settings:
     return Settings(**values)
 
 
-def build_world(*, actor: str = "OS", mirror=None, **knob_overrides) -> World:
-    """A prepared workspace (epoch 1, core active) behind a PostgresOsBackend, all deterministic."""
+def build_world(*, actor: str = "OS", mirror=None, before_active=None, **knob_overrides) -> World:
+    """A prepared workspace (epoch 1, core active) behind a PostgresOsBackend, all deterministic.
+
+    ``before_active(env, owner)`` runs while core is still ``shadow``, the only state an import
+    promote runs in (section 15), just before core becomes active.
+    """
     knobs = Knobs(**knob_overrides)
     ids = Counter(0x1000)
     ledger = FakeLedger(
@@ -121,12 +128,14 @@ def build_world(*, actor: str = "OS", mirror=None, **knob_overrides) -> World:
         now=ledger._now, advance=ledger.advance,
     )
     ledger.ensure_workspace(WORKSPACE, OWNER_ID, 1)
-    ledger.transition(WORKSPACE, "core", "active", expected_epoch=1, actor_owner_id=OWNER_ID)
     channel = actor
     owner = make_ctx(
         channel, owner=int(OWNER_ID), workspace=WORKSPACE, scopes=OWNER_SCOPES,
         browser_mutation_verified=True,
     )
+    if before_active is not None:
+        before_active(env, owner)
+    ledger.transition(WORKSPACE, "core", "active", expected_epoch=1, actor_owner_id=OWNER_ID)
     contexts = StaticContexts(read=owner, mutate=owner)
     settings = settings_for(assaf_os_authority_epoch=knobs.settings_epoch)
     backend = PostgresOsBackend(
@@ -384,6 +393,21 @@ def receipt_batch_committed(world: World) -> dict:
     return world.backend.receipt(approval_id)
 
 
+IMPORT_MANIFEST = api.digest({"manifest": "v2-20-golden"})
+
+
+def _imported(env: LedgerEnv, owner: api.TrustedOwnerContext) -> None:
+    """A V2-30 import promote while core is shadow: one task at its manifest revision."""
+    after = wire("tasks", "TAS_i1", 4, title="משימה מיובאת", status=TASK_OPEN)
+    commit_import(env, owner, [api.Mutation("tasks", "TAS_i1", "upsert", None, after)],
+                  IMPORT_MANIFEST, batch_id=uuid_v4(0x7010))
+
+
+def receipt_import_committed(world: World) -> dict:
+    """An import receipt (section 22 E14(3)): committed, and it may list no record."""
+    return world.backend.receipt(api.import_request_uuid(1, IMPORT_MANIFEST))
+
+
 def proposal_request_pending(world: World) -> dict:
     proposal = proposal_create(world)
     return world.backend.proposal_request(proposal["request_id"])
@@ -391,6 +415,28 @@ def proposal_request_pending(world: World) -> dict:
 
 def proposal_request_committed(world: World) -> dict:
     proposal = proposal_create(world)
+    decide(world, "approve", proposal)
+    return world.backend.proposal_request(proposal["request_id"])
+
+
+def proposal_request_rejected(world: World) -> dict:
+    proposal = proposal_create(world)
+    decide(world, "reject", proposal)
+    return world.backend.proposal_request(proposal["request_id"])
+
+
+def proposal_request_expired(world: World) -> dict:
+    proposal = proposal_create(world)
+    world.ledger.advance(601)
+    decide(world, "approve", proposal)
+    return world.backend.proposal_request(proposal["request_id"])
+
+
+def proposal_request_target_changed(world: World) -> dict:
+    proposal = proposal_update(world)
+    before = current(world, "tasks", "TAS_t1")
+    commit_direct(world.env, world.owner, [update(before, title="שונה בינתיים")],
+                  request_id=uuid_v4(0x7001))
     decide(world, "approve", proposal)
     return world.backend.proposal_request(proposal["request_id"])
 
@@ -442,8 +488,12 @@ SHAPES: dict[str, Callable[[], dict]] = {
     "receipt_direct_abandoned": _in_world(receipt_direct_abandoned),
     "receipt_superseded": _in_world(receipt_superseded),
     "receipt_batch_committed": _in_world(receipt_batch_committed),
+    "receipt_import_committed": _in_world(receipt_import_committed, before_active=_imported),
     "proposal_request_pending": _in_world(proposal_request_pending),
     "proposal_request_committed": _in_world(proposal_request_committed),
+    "proposal_request_rejected": _in_world(proposal_request_rejected),
+    "proposal_request_expired": _in_world(proposal_request_expired),
+    "proposal_request_target_changed": _in_world(proposal_request_target_changed),
     "proposal_request_unknown": _in_world(proposal_request_unknown),
     "proposal_request_abandoned": _in_world(proposal_request_abandoned),
     "proposal_request_superseded": _in_world(proposal_request_superseded),
@@ -473,8 +523,12 @@ READER_OF: dict[str, str] = {
     "receipt_direct_abandoned": "receipt",
     "receipt_superseded": "receipt",
     "receipt_batch_committed": "receipt",
+    "receipt_import_committed": "receipt",
     "proposal_request_pending": "proposal_request",
     "proposal_request_committed": "proposal_request",
+    "proposal_request_rejected": "proposal_request",
+    "proposal_request_expired": "proposal_request",
+    "proposal_request_target_changed": "proposal_request",
     "proposal_request_unknown": "proposal_request",
     "proposal_request_abandoned": "proposal_request",
     "proposal_request_superseded": "proposal_request",

@@ -243,8 +243,34 @@ def test_the_unknown_receipt_shape_is_all_null():
 def test_the_proposal_request_goldens_carry_every_new_status():
     seen = {golden(n)["proposal"]["status"] for n in NAMES
             if n.startswith("proposal_request") and golden(n)["proposal"]}
-    assert seen == {"pending", "committed", "abandoned", "superseded"}
+    # Every status a proposal can end in (review r2, finding 9: rejected, expired and
+    # target_changed too), so the frontend's recovery reader sees an exported body of each.
+    assert seen == {"pending", "committed", "rejected", "expired", "target_changed", "abandoned",
+                    "superseded"}
     assert golden("proposal_request_unknown")["reason_codes"] == ["proposal_request_unknown"]
+
+
+@pytest.mark.parametrize("status", ["rejected", "expired", "target_changed"])
+def test_a_decided_proposal_request_golden_pairs_the_proposal_with_its_receipt(status):
+    body = golden(f"proposal_request_{status}")
+    assert body["status"] == "found" and body["reason_codes"] == []
+    proposal, receipt = body["proposal"], body["receipt"]
+    assert proposal["status"] == receipt["status"] == status
+    assert proposal["proposal_id"] == receipt["proposal_id"]
+    key = "rejection_request_id" if status == "rejected" else "approval_request_id"
+    assert receipt["request_id"] == proposal[key]
+
+
+def test_the_receipt_goldens_cover_every_v2_20_kind():
+    """owner_undo is V2-24's shape (tests/contract/shapes/v2_24.py, section 10.4), not V2-20's."""
+    kinds = {golden(n)["kind"] for n in NAMES if n.startswith("receipt_")} - {None}
+    assert kinds == {"proposal", "owner_direct", "statement_batch", "import"}
+    body = golden("receipt_import_committed")
+    assert (body["kind"], body["status"], body["actor_source"]) == ("import", "committed",
+                                                                    "IMPORT")
+    # Section 22 E14(3): a committed import receipt may list no record.
+    assert body["records"] == [] and body["undo"] is None and body["undo_of"] is None
+    assert body["committed_at"] and body["commit_version"] >= 1
 
 
 def test_a_promotion_proposal_carries_lead_and_client_states():
