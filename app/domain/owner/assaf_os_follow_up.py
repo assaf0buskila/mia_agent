@@ -428,11 +428,21 @@ def _receipt_check_v2(
         if records is None:
             result["reason_codes"] = ["receipt_evidence_incomplete"]
             return result
-        result.update(
-            state="completed",
-            reason_codes=["exact_write_committed"],
-            next_action="read_current_record_if_checking_business_completion",
-        )
+        if receipt["kind"] == "owner_direct":
+            result["source"]["undo_state"] = receipt["undo"]["state"]
+        if receipt["kind"] == "owner_direct" and receipt["undo"]["state"] == "undone":
+            # Committed, then undone: the exact write is no longer in place.
+            result.update(
+                state="blocked",
+                reason_codes=["exact_write_undone"],
+                next_action="review_with_owner_before_preparing_a_new_exact_proposal",
+            )
+        else:
+            result.update(
+                state="completed",
+                reason_codes=["exact_write_committed"],
+                next_action="read_current_record_if_checking_business_completion",
+            )
         result["source"].update(
             proposal_id=receipt["proposal_id"],
             commit_version=receipt["commit_version"],
@@ -445,7 +455,11 @@ def _receipt_check_v2(
 def _committed_records(
     receipt: dict[str, Any], now: datetime | None
 ) -> list[dict[str, Any]] | None:
-    """The committed records as ``{entity, record_id, revision}``, or None when not proven."""
+    """The records as ``{entity, record_id, current_revision}``, or None when not proven.
+
+    ``receipt_v2.records`` are the CURRENT records (section 10.2), not the committed ones, so the
+    revision is named for what it is: a later edit or an undo may have moved it on.
+    """
     committed_at = datetime.fromisoformat(receipt["committed_at"].replace("Z", "+00:00"))
     if committed_at.timestamp() > (now or datetime.now(UTC)).timestamp() + 300:
         return None
@@ -464,7 +478,8 @@ def _committed_records(
             or not 1 <= revision <= 1_000_000
         ):
             return None
-        records.append({"entity": item["entity"], "record_id": record_id, "revision": revision})
+        records.append(
+            {"entity": item["entity"], "record_id": record_id, "current_revision": revision})
     return records
 
 

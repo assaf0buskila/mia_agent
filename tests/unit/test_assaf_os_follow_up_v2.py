@@ -408,11 +408,41 @@ def test_a_committed_v2_receipt_proves_that_exact_write_only(world):
     assert source["actor_source"] == "OS" and source["proposal_id"] == pending["proposal_id"]
     assert source["commit_version"] == receipt["commit_version"]
     assert source["committed_at"] == receipt["committed_at"]
+    # receipt_v2.records are the CURRENT records (section 10.2), so the revision is the current one,
+    # and the key says so: the v1 result's "revision" meant the committed revision.
     assert source["records"] == [{
-        "entity": "tasks", "record_id": pending["record_id"], "revision": 1}]
+        "entity": "tasks", "record_id": pending["record_id"], "current_revision": 1}]
+    assert "undo_state" not in source  # Mia's own proposals are never undoable (I5)
     rendered = text(check)
-    for forbidden in ("google_sheets", "workbook_id", '"mode"', "בדיקה"):
+    for forbidden in ("google_sheets", "workbook_id", '"mode"', "בדיקה", '"revision"'):
         assert forbidden not in rendered
+
+
+@pytest.mark.parametrize(("name", "undo_state"), [("receipt_direct_committed", "available"),
+                                                  ("receipt_direct_undo_expired", "expired")])
+def test_an_owner_direct_commit_still_in_place_is_completed_with_its_undo_state(name, undo_state):
+    receipt = v2_20.SHAPES[name]()
+    check = receipt_check(receipt, receipt["request_id"], now=NOW)
+    assert check["state"] == "completed" and check["reason_codes"] == ["exact_write_committed"]
+    assert check["source"]["receipt_kind"] == "owner_direct"
+    assert check["source"]["undo_state"] == undo_state
+    assert [set(r) for r in check["source"]["records"]] == [
+        {"entity", "record_id", "current_revision"}]
+
+
+def test_an_undone_owner_direct_commit_is_blocked_never_completed():
+    """The receipt still says committed, but the undo reversed the write: no completion claim."""
+    receipt = v2_20.SHAPES["receipt_direct_undone"]()
+    assert receipt["status"] == "committed" and receipt["undo"]["state"] == "undone"
+    check = receipt_check(receipt, receipt["request_id"], now=NOW)
+    assert check["state"] == "blocked" and check["reason_codes"] == ["exact_write_undone"]
+    assert check["next_action"] == "review_with_owner_before_preparing_a_new_exact_proposal"
+    source = check["source"]
+    assert source["undo_state"] == "undone" and source["receipt_kind"] == "owner_direct"
+    # The records are the current ones, after the undo: revision 3 is the undo's write.
+    assert source["records"] == [
+        {"entity": "tasks", "record_id": "TAS_t1", "current_revision": 3}]
+    assert "completed" not in text(check)
 
 
 def test_a_committed_batch_receipt_with_no_record_still_proves_the_write(world):
