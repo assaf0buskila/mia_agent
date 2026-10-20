@@ -57,11 +57,25 @@ BUDGETS_MS = {"page_p95": 50.0, "write_p95": 800.0}
 # Raised after the 2026-10-18 run (0.5 cpu / 1 GB, 20k records, concurrent pg_dump): page p95
 # 91 ms (p50 12-17 ms; the tail is CPU contention with pg_dump), write p95 1.1 s, of which the
 # full-state load and validate_transition in V2-16's ``apply`` are most (``write_breakdown``).
-# V2-16b (§22 E23) scoped those core checks: on the same setup write p95 went from 1.9 s to
-# 0.31 s, so the write cap is the §8 budget again. The page cap stays raised: page p95 86 ms,
-# and even head() (one row) is 66 ms at p95, so the tail is CPU contention with pg_dump, not the
-# query shape of V2-18's readers.
+# V2-16b (§22 E23) scoped those core checks. On the same setup (V2-16 final base, whose E20/E22
+# checks had raised write p95 to 1.91 s), two runs gave write p95 0.31 s and 0.34 s, so the write
+# cap is the §8 budget again. The page cap stays raised: page p95 86 ms and 89 ms, and even head()
+# (one row) is 66 ms at p95, so the tail is CPU contention with pg_dump, not the query shape of
+# V2-18's readers. The §8 page target (50 ms) is a recorded fork for the owner.
 RAISED_CAPS_MS = {"page_p95": 100.0, "write_p95": BUDGETS_MS["write_p95"]}
+# A budget run counts only under the load §8 names (V2-16b review): this container limit, and a
+# concurrent pg_dump loop that completed at least one dump and never failed.
+REQUIRED_LIMITS = "0.5 cpu / 1 GB"
+
+
+def within_caps(result: dict) -> bool:
+    """True only for a run made under the claimed load AND within both raised caps."""
+    dump = result.get("concurrent_pg_dump") or {}
+    under_load = (dump.get("enabled") is True and dump.get("completed", 0) > 0
+                  and dump.get("failed", 0) == 0 and result.get("pg_limits") == REQUIRED_LIMITS)
+    return bool(under_load
+                and result["page_p95_ms"] <= RAISED_CAPS_MS["page_p95"]
+                and result["write_p95_ms"] <= RAISED_CAPS_MS["write_p95"])
 MIX = {"leads": 0.10, "clients": 0.10, "works": 0.10, "payments": 0.25, "time": 0.225,
        "expenses": 0.125, "tasks": 0.10}
 _CLAIM_FIELDS = ("person_id", "work_id", "original_payment_id", "currency", "source_type",
@@ -402,8 +416,7 @@ def run(args: argparse.Namespace) -> dict:
             "compare": {name: distribution(values) for name, values in compare.items() if values},
             "budgets_ms": BUDGETS_MS, "raised_caps_ms": RAISED_CAPS_MS,
         }
-        result["within_caps"] = (result["page_p95_ms"] <= RAISED_CAPS_MS["page_p95"]
-                                 and result["write_p95_ms"] <= RAISED_CAPS_MS["write_p95"])
+        result["within_caps"] = within_caps(result)
         admin.dispose()
         return result
     finally:
