@@ -18,7 +18,7 @@ from app.core.config import MiaEnv, Settings
 from app.db.session import get_session_factory, init_db
 from app.db.store import LeadStore
 from app.services import assaf_os
-from app.services.os_backend_pg import PageQuery, PostgresOsBackend
+from app.services.os_backend_pg import PENDING_COUNT_ATTEMPTS, PageQuery, PostgresOsBackend
 from app.services.os_ledger import api, authorize, contract
 
 from tests.contract.shapes import v2_20
@@ -401,6 +401,70 @@ def test_the_pending_count_walks_every_page(world, monkeypatch):
     for n in range(5):
         propose(world, "tasks", {"title": f"t{n}", "status": "לביצוע"})
     assert world.backend.snapshot()["pending_count"] == 5
+
+
+def watch_pending(world, during=None):
+    """Record the ``after`` of every pending read; ``during(n, after)`` runs before read n."""
+    real, afters = world.ledger.pending, []
+
+    def pending(ctx, *, after, limit):
+        afters.append(after)
+        if during is not None:
+            during(len(afters), after)
+        return real(ctx, after=after, limit=limit)
+
+    world.ledger.pending = pending
+    return afters
+
+
+def test_a_finish_between_pending_pages_restarts_the_count_from_page_one(world, monkeypatch):
+    """V2-20 review r2, finding 7: the client sent no cursor, so a cursor the count itself held
+    must never surface as cursor_invalidated. LedgerReader has no count read, so the count starts
+    again from page 1."""
+    monkeypatch.setattr("app.services.os_backend_pg.PENDING_COUNT_PAGE", 2)
+    proposals = [propose(world, "tasks", {"title": f"t{n}", "status": "לביצוע"})
+                 for n in range(5)]
+
+    def finish_between_pages(number, _after):
+        if number == 2:  # after page 1 of the first count, before page 2
+            decide(world, "reject", proposals[0])
+
+    afters = watch_pending(world, finish_between_pages)
+    assert world.backend.snapshot()["pending_count"] == 4
+    assert afters[0] is None and afters[1] is not None and afters[2] is None
+    assert len(afters) == 2 + 2  # the broken attempt's two reads, then two pages of four
+
+
+def test_a_count_that_never_settles_fails_closed_after_a_few_attempts(world, monkeypatch):
+    monkeypatch.setattr("app.services.os_backend_pg.PENDING_COUNT_PAGE", 2)
+    for n in range(5):
+        propose(world, "tasks", {"title": f"t{n}", "status": "לביצוע"})
+
+    def always_invalidated(_number, after):
+        if after is not None:
+            raise api.LedgerError("cursor_invalidated", details={"observed_version": 1})
+
+    afters = watch_pending(world, always_invalidated)
+    with refused("ledger_unavailable") as caught:
+        world.backend.snapshot()
+    assert caught.value.reason == "pending_count_unstable"
+    assert afters.count(None) == PENDING_COUNT_ATTEMPTS
+    assert len(afters) == 2 * PENDING_COUNT_ATTEMPTS
+
+
+def test_only_an_invalidated_count_cursor_is_retried(world, monkeypatch):
+    monkeypatch.setattr("app.services.os_backend_pg.PENDING_COUNT_PAGE", 2)
+    for n in range(5):
+        propose(world, "tasks", {"title": f"t{n}", "status": "לביצוע"})
+
+    def forged(_number, after):
+        if after is not None:
+            raise api.LedgerError("invalid_cursor")
+
+    afters = watch_pending(world, forged)
+    with refused("invalid_cursor"):
+        world.backend.snapshot()
+    assert afters.count(None) == 1
 
 
 # ---- snapshot: the since token -----------------------------------------------------------------

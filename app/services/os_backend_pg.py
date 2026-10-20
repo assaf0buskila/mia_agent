@@ -47,6 +47,9 @@ MAX_SINCE_CHARS = 64
 # ``pending_count`` pages through the pending list; a very long list is refused, not guessed.
 PENDING_COUNT_PAGE = 200
 PENDING_COUNT_MAX_PAGES = 50
+# A finish() between two pages invalidates the count's own cursor: start again from page 1, this
+# many times at most, then fail closed (V2-20 review r2, finding 7; LedgerReader has no count).
+PENDING_COUNT_ATTEMPTS = 3
 
 
 def _invalid_query() -> api.LedgerError:
@@ -301,6 +304,21 @@ class PostgresOsBackend:
                                     lag_s=None)
 
     def _pending_count(self, ctx: api.TrustedOwnerContext) -> int:
+        """The pending proposals, counted page by page (LedgerReader has no count read).
+
+        The cursor is the count's own, never a client's. So when a finish() between two pages
+        invalidates it, the count starts again from page 1, up to ``PENDING_COUNT_ATTEMPTS``
+        times, and then fails closed: ``cursor_invalidated`` never reaches the client from here.
+        """
+        for _ in range(PENDING_COUNT_ATTEMPTS):
+            try:
+                return self._count_pending_pages(ctx)
+            except api.LedgerError as exc:
+                if exc.code != "cursor_invalidated":
+                    raise
+        raise api.LedgerError("ledger_unavailable", reason="pending_count_unstable")
+
+    def _count_pending_pages(self, ctx: api.TrustedOwnerContext) -> int:
         total, after = 0, None
         for _ in range(PENDING_COUNT_MAX_PAGES):
             page = self._ledger.pending(ctx, after=after, limit=PENDING_COUNT_PAGE)
