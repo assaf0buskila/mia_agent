@@ -737,7 +737,7 @@ def test_the_postgres_tools_read_the_ledger_without_touching_the_sheets_port(wor
     def trap(*_args, **_kwargs):
         raise AssertionError("the Sheets port was constructed under backend=postgres")
 
-    monkeypatch.setattr("app.tools.owner.assaf_os.AssafOsPort", trap)
+    monkeypatch.setattr("app.services.assaf_os.AssafOsPort", trap)
     use_backend(monkeypatch, world.backend)
     for tool, arguments in (("assaf_os_snapshot", {}), ("assaf_os_follow_up", {}),
                             ("assaf_os_receipt", {"request_id": uuid_v4(0x9971)})):

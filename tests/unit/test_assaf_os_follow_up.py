@@ -103,7 +103,7 @@ def bind_port(monkeypatch, *, view=None, proof=None, error=None):
         def __getattr__(self, name):
             raise AssertionError(f"unexpected provider effect: {name}")
 
-    monkeypatch.setattr("app.tools.owner.assaf_os.AssafOsPort", ReadOnlyPort)
+    monkeypatch.setattr("app.services.assaf_os.AssafOsPort", ReadOnlyPort)
     return calls
 
 
@@ -243,7 +243,7 @@ def test_private_numeric_owner_gate_precedes_any_provider_read(monkeypatch, tool
     def trap(*_args, **_kwargs):
         raise AssertionError("provider accessed by unauthorized principal")
 
-    monkeypatch.setattr("app.tools.owner.assaf_os.AssafOsPort", trap)
+    monkeypatch.setattr("app.services.assaf_os.AssafOsPort", trap)
     result = execute_tool(tool, args, context(None, **override))
     assert not result.ok and not result.approval_id
 
@@ -320,7 +320,7 @@ def test_unexpected_arguments_are_rejected_before_provider_construction(monkeypa
     def trap(*_args, **_kwargs):
         raise AssertionError("invalid arguments reached provider")
 
-    monkeypatch.setattr("app.tools.owner.assaf_os.AssafOsPort", trap)
+    monkeypatch.setattr("app.services.assaf_os.AssafOsPort", trap)
     assert not execute_tool("assaf_os_follow_up", {"owner_id": OWNER}, context(None)).ok
     assert not execute_tool("assaf_os_receipt", {"request_id": "bad"}, context(None)).ok
 

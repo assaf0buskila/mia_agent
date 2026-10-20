@@ -20,7 +20,8 @@ from app.domain.owner.assaf_os_follow_up import (
     snapshot_overview_view,
     unknown_check,
 )
-from app.services.assaf_os import REQUEST_PATTERN, AssafOsError, AssafOsPort, ProposeRequest
+from app.services.assaf_os import REQUEST_PATTERN, AssafOsError, ProposeRequest
+from app.services.os_backend import OsBackend, get_os_backend
 from app.services.os_ledger.api import ENTITIES, LedgerError
 from app.services.os_ledger.contract import ContractError, body_shape
 from app.services.owner_actions import propose_owner_action
@@ -38,8 +39,8 @@ def assaf_os_enabled(ctx: ToolContext) -> bool:
     )
 
 
-def _port(ctx: ToolContext) -> AssafOsPort:
-    return AssafOsPort(ctx.settings, ctx.principal.actor_id, actor_source="MIA")
+def _port(ctx: ToolContext) -> OsBackend:
+    return get_os_backend(ctx.settings, ctx.principal.actor_id, actor="MIA")
 
 
 def _json(value: object) -> str:

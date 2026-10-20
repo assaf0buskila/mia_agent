@@ -344,9 +344,12 @@ def test_dependents_ignore_referrers_that_are_not_live(ledger):
     assert dependents(ledger, "clients", "PER_c1") == {("works", "WOR_w1"), ("payments", "PAY_p1")}
     assert dependents(ledger, "works", "WOR_w1") == {("payments", "PAY_p1")}
     assert dependents(ledger, "payments", "PAY_p1") == set()
-    commit_direct(ledger, ctx(), [update(current(ledger, "works", "WOR_w1"),
-                                         status=WORK_CANCELLED)])
-    assert dependents(ledger, "clients", "PER_c1") == {("payments", "PAY_p1")}
+    # §22 E20: an update can no longer cancel a work under a live payment, so this case builds
+    # the cancelled-work referrer by a create (a first import may hold one). The cancelled work is
+    # ignored and its live payment is still reported, which is what the case pins.
+    commit_direct(ledger, ctx(), [client("PER_c2"), work("WOR_w2", "PER_c2", status=WORK_CANCELLED),
+                                  payment("PAY_p2", "PER_c2", "WOR_w2")])
+    assert dependents(ledger, "clients", "PER_c2") == {("payments", "PAY_p2")}
 
 
 # --- abandoned wins; one event and at most one outbox row per finish -------------------------
