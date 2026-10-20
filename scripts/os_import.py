@@ -10,11 +10,15 @@ amount, an id or a path.
         [--cancellations FILE.json] [--manifest-out FILE.json]
 
 Exit status: 0 prepared and promotable, 2 prepared but quarantined, 1 refused.
+
+The summary counts ``quarantined`` (rows set aside) and ``issues`` (problems with the batch itself,
+such as an unknown tab) apart; promotion needs both to be zero.
 """
 
 from __future__ import annotations
 
 import argparse
+import decimal
 import json
 import sys
 from pathlib import Path
@@ -85,16 +89,28 @@ def main(argv: list[str] | None = None) -> int:
     except (XlsxError, WorkbookImportError) as exc:
         print(f"os_import op=stage outcome=refused reason={exc}", file=sys.stderr)
         return 1
-    rows, blocked = len(batch.rows), quarantine_count(batch)
-    outcome = "ok" if not blocked else "quarantined"
-    print(f"os_import op=stage outcome={outcome} reason=dry_run rows={rows} quarantined={blocked}")
+    except (decimal.DecimalException, ArithmeticError):
+        # Cell-level numeric failures are quarantine reasons in ``prepare``; this is the backstop
+        # that keeps any other decimal error from printing a traceback.
+        print("os_import op=stage outcome=refused reason=unsafe_numeric_value", file=sys.stderr)
+        return 1
+    # Two counts, never summed: rows the importer set aside, and problems with the batch itself
+    # (a missing or unknown tab, a failed state validation). Promotion needs both to be zero.
+    rows = len(batch.rows)
+    quarantined = sum(row.status == "quarantined" for row in batch.rows)
+    issues = len(batch.issues)
+    outcome = "ok" if not quarantine_count(batch) else "quarantined"
+    print(
+        f"os_import op=stage outcome={outcome} reason=dry_run rows={rows} "
+        f"quarantined={quarantined} issues={issues}"
+    )
     for reason, count in quarantine_reasons(batch).items():
         print(f"os_import op=stage_reason outcome=quarantined reason={reason} rows={count}")
     print(
         f"os_import op=manifest outcome={outcome} reason=prepared rows={rows} "
-        f"quarantined={blocked} digest={api.digest(document)}"
+        f"quarantined={quarantined} issues={issues} digest={api.digest(document)}"
     )
-    return 0 if not blocked else 2
+    return 0 if outcome == "ok" else 2
 
 
 if __name__ == "__main__":
