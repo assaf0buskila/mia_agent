@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 from app.core.config import Settings
 from app.services.os_ledger import api
+from app.services.os_ledger import guard as ledger_guard
 from app.services.os_ledger import mirror_projection as mp
 from app.services.os_ledger.outbox import LEASE_TTL, MirrorState, destination_binding
 from app.workers import os_mirror
@@ -412,6 +413,85 @@ def test_publisher_logs_a_pause_once_and_never_calls_out(world: World, caplog) -
     assert paused == ["os_mirror op=tick outcome=paused reason=kill_switch"]
 
 
+@pytest.mark.parametrize(("fail", "stuck"), [("read", "unknown"), ("write", "delayed")])
+def test_publisher_recovers_an_unknown_or_delayed_mirror_before_the_next_anti_entropy(
+    world: World, fail: str, stuck: str
+) -> None:
+    publisher = os_mirror.MirrorPublisher(
+        settings_provider=lambda: world.settings,
+        deps_factory=lambda _settings: world.deps,
+        clock=world.clock,
+    )
+    world.seed()
+    assert publisher.tick().outcome == "verified"
+    world.reader.commit("tasks", {**TASK, "title": "moved"})  # no outbox row: only a full pass
+    world.clock.advance(900)
+    if fail == "read":
+        world.sheets.fail_next_read = True
+    else:
+        world.sheets.fail_next_write = "not_sent"
+    assert publisher.tick().outcome == stuck
+    assert world.state().status == stuck
+    world.clock.advance(5)
+    assert publisher.tick().outcome == "idle"  # a floor, so a 429 never becomes a write loop
+    world.clock.advance(os_mirror.RECOVERY_RETRY.total_seconds())
+    recovered = publisher.tick()
+    assert recovered.outcome == "verified"
+    assert world.state().status == "synced"
+    assert world.state().verified_version == world.reader.version
+    # The unknown write had landed: it is read back, never rewritten.
+    assert len(world.sheets.writes) == (2 if fail == "read" else 3)
+
+
+# ---------------------------------------------------------------------------------------------
+# Production wiring (review r1 F1)
+
+FAKE_ACCOUNT = (
+    '{"type":"service_account","client_email":"m@example.com","private_key":"-----BEGIN KEY"}'
+)
+
+
+def test_build_deps_accepts_the_bare_postgresql_dsn_that_provisioning_writes(monkeypatch):
+    # provision_ledger.py writes runtime.env with a bare postgresql:// DSN. Engines are lazy.
+    monkeypatch.setattr(ledger_guard, "_ENGINES", {})
+    monkeypatch.setattr(ledger_guard, "_GUARDS", {})
+    dsn = "postgresql://ledger:x@127.0.0.1:1/mia"
+    settings = mirror_settings(
+        os_mirror_service_account_json=FAKE_ACCOUNT,
+        assaf_os_workspace_id="ws-1",
+        owner_os_ledger_database_url=dsn,
+        database_url="postgresql://mia:x@127.0.0.1:1/mia",
+    )
+    deps = os_mirror.build_deps(settings)
+    engine = deps.outbox._engine
+    assert engine.dialect.driver == "psycopg"
+    assert engine is ledger_guard.engine_for(dsn)
+
+
+def test_an_unexpected_deps_failure_is_a_coded_deferral_with_a_retry(world: World, caplog):
+    caplog.set_level(logging.INFO, logger="mia.os_mirror")
+    built: list[int] = []
+
+    def deps_factory(_settings: Settings) -> os_mirror.MirrorDeps:
+        built.append(1)
+        if len(built) == 1:
+            raise ModuleNotFoundError("No module named 'psycopg2'")
+        return world.deps
+
+    publisher = os_mirror.MirrorPublisher(
+        settings_provider=lambda: world.settings, deps_factory=deps_factory, clock=world.clock
+    )
+    world.seed()
+    assert publisher.tick() == os_mirror.TickResult("deferred", "deps_failed")
+    assert publisher.tick() == os_mirror.TickResult("deferred", "deps_backoff")
+    world.clock.advance(os_mirror.DEPS_RETRY.total_seconds())
+    assert publisher.tick().outcome == "verified"
+    assert built == [1, 1]
+    messages = [r.getMessage() for r in caplog.records]
+    assert "os_mirror op=start outcome=deferred reason=deps_failed" in messages
+    assert not any("psycopg2" in m for m in messages)
+
+
 # ---------------------------------------------------------------------------------------------
 # §20 gate: no personal lines.
 
@@ -525,6 +605,20 @@ def test_anti_entropy_on_a_synced_mirror_reads_and_never_writes(world: World) ->
     assert (result.outcome, result.reason) == ("verified", "readback_equal")
     assert len(world.sheets.writes) == 1
     assert world.state().last_verified_at == world.clock()
+
+
+def test_a_failed_drift_read_on_a_synced_mirror_leaves_it_synced(world: World) -> None:
+    world.seed()
+    world.tick()
+    verified_at = world.state().last_verified_at
+    world.clock.advance(900)
+    world.sheets.fail_next_read = True
+    result = world.tick(anti_entropy=True)
+    assert (result.outcome, result.events) == ("delayed", 0)
+    state = world.state()
+    assert (state.status, state.last_error_code) == ("synced", None)
+    assert state.last_verified_at == verified_at
+    assert len(world.sheets.writes) == 1
 
 
 # ---------------------------------------------------------------------------------------------

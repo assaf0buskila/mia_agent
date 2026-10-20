@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import http.client
 import io
 import json
 import logging
@@ -242,6 +243,9 @@ def _http_error(code: int) -> HTTPError:
         (URLError(TimeoutError()), "mirror_timeout", True),
         (TimeoutError(), "mirror_timeout", True),
         (ConnectionResetError(), "mirror_io_failed", True),
+        # http.client errors are not OSError: a truncated body or a bad status line.
+        (http.client.IncompleteRead(b"partial"), "mirror_io_failed", True),
+        (http.client.BadStatusLine("x"), "mirror_io_failed", True),
     ],
 )
 def test_write_errors_say_whether_the_request_may_have_landed(

@@ -13,10 +13,11 @@ or a CRM workbook). Each tick (``run_once``):
 6. equal: rows ``sent`` and ``verified_version`` advances by the GREATEST rule; an error after the
    send: ``unknown``, read back before any rewrite; a mismatch: ``conflict``.
 
-Anti-entropy runs every ``os_mirror_anti_entropy_seconds`` even with an empty queue. On a synced
-mirror it only reads, and drift sets ``conflict`` (``drift``) and is never imported. ``conflict``
-clears only through a full rewrite whose readback is equal. Logs carry reason codes, counts and
-timings only (I7).
+Anti-entropy runs every ``os_mirror_anti_entropy_seconds`` even with an empty queue, and
+``RECOVERY_RETRY`` after an ``unknown`` or ``delayed`` tick. On a synced mirror it only reads:
+drift sets ``conflict`` (``drift``) and is never imported, and a failed read leaves it synced.
+``conflict`` clears only through a full rewrite whose readback is equal. Logs carry reason codes,
+counts and timings only (I7).
 """
 
 from __future__ import annotations
@@ -55,6 +56,8 @@ _LOG = logging.getLogger("mia.os_mirror")
 TICK_SECONDS = 5.0
 CLAIM_LIMIT = 100
 DEPS_RETRY = timedelta(seconds=60)
+# An unknown or delayed mirror is retried after this floor, not left until anti-entropy.
+RECOVERY_RETRY = timedelta(seconds=60)
 _PUBLISHING = frozenset({"shadow", "active"})
 _BODY_KEYS = frozenset({"authority_epoch", "refs", "full"})
 _REF_KEYS = frozenset({"entity", "record_id", "revision"})
@@ -199,6 +202,9 @@ def _publish(
         try:
             before = deps.transport.batch_get(mp.read_ranges())
         except MirrorTransportError as exc:
+            if drift_check:
+                # Nothing was written and nothing was learned: the mirror stays synced.
+                return TickResult("delayed", exc.code, 0)
             return _transport_failed(deps, events, state, version, now, exc.code, sent=False)
         if mp.readback_equal(projection, before):
             return _verified(deps, events, version, now, before)
@@ -364,6 +370,7 @@ class MirrorPublisher:
         self._deps: MirrorDeps | None = None
         self._deps_retry_at: datetime | None = None
         self._last_anti_entropy: datetime | None = None
+        self._recover_at: datetime | None = None
         self._last_pause: str | None = None
 
     def __repr__(self) -> str:
@@ -388,14 +395,28 @@ class MirrorPublisher:
                 self._deps_retry_at = now + DEPS_RETRY
                 _LOG.warning("os_mirror op=start outcome=deferred reason=%s", exc.code)
                 return TickResult("deferred", exc.code)
+            except Exception:  # noqa: BLE001 - e.g. a missing driver; a code, never the error
+                self._deps_retry_at = now + DEPS_RETRY
+                _LOG.warning("os_mirror op=start outcome=deferred reason=deps_failed")
+                return TickResult("deferred", "deps_failed")
         interval = timedelta(seconds=int(getattr(settings, "os_mirror_anti_entropy_seconds", 900)))
-        due = self._last_anti_entropy is None or now - self._last_anti_entropy >= interval
+        due = (
+            self._last_anti_entropy is None
+            or now - self._last_anti_entropy >= interval
+            or (self._recover_at is not None and now >= self._recover_at)
+        )
         result = run_once(self._deps, settings, now=now, lease_owner=self.lease_owner,
                           anti_entropy=due)
         if result.reason == "mirror_target_changed":
             self._deps = None  # rebuilt on the next tick; the pinned binding then refuses
         if due and result.outcome not in {"paused", "deferred", "refused"}:
             self._last_anti_entropy = now
+        if result.outcome in {"unknown", "delayed"}:
+            # Read back (or rewrite) on a full pass soon, even with an empty queue. The floor
+            # keeps a 429 from becoming a write every tick.
+            self._recover_at = now + RECOVERY_RETRY
+        elif result.outcome in {"verified", "conflict"}:
+            self._recover_at = None
         return result
 
     def run_forever(self, stop: threading.Event) -> None:
@@ -417,10 +438,13 @@ def _worker_context(settings: Any) -> Any:
 
 
 def build_deps(settings: Any) -> MirrorDeps:
-    """The production wiring: Sheets transport, V2-16 reader, PG outbox on the ledger DSN."""
-    from sqlalchemy import create_engine
+    """The production wiring: Sheets transport, V2-16 reader, PG outbox on the ledger DSN.
 
+    The outbox shares the reader's engine: ``guard.engine_for`` pins psycopg3 (provisioning
+    writes a bare ``postgresql://`` DSN), sets the connect timeout, and refuses a bad DSN as
+    ``ledger_unavailable``."""
     from app.integrations.sheets_mirror import SheetsMirrorTransport
+    from app.services.os_ledger.guard import engine_for
 
     spreadsheet_id = str(settings.os_mirror_spreadsheet_id or "")
     transport = SheetsMirrorTransport(
@@ -430,7 +454,7 @@ def build_deps(settings: Any) -> MirrorDeps:
     if not dsn:
         raise api.LedgerError("ledger_unavailable", reason="dsn_missing")
     reader = api.build_ledger(settings)
-    engine = create_engine(dsn, pool_pre_ping=True, pool_size=1, max_overflow=0)
+    engine = engine_for(dsn)
     return MirrorDeps(
         reader=reader,
         context=lambda: _worker_context(settings),

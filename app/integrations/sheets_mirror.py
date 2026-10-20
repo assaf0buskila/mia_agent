@@ -12,6 +12,7 @@ error: errors carry a reason code and whether the request may have landed (``sen
 
 from __future__ import annotations
 
+import http.client
 import json
 import logging
 import math
@@ -209,7 +210,7 @@ class SheetsMirrorTransport:
             raise MirrorTransportError("mirror_io_failed", sent=write) from None
         except TimeoutError:
             raise MirrorTransportError("mirror_timeout", sent=write) from None
-        except OSError:
+        except (OSError, http.client.HTTPException):  # e.g. IncompleteRead, which is no OSError
             raise MirrorTransportError("mirror_io_failed", sent=write) from None
         if len(raw) > MAX_RESPONSE_BYTES:
             raise MirrorTransportError("mirror_response_invalid", sent=write)
