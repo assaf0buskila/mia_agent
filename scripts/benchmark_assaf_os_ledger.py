@@ -61,7 +61,8 @@ BUDGETS_MS = {"page_p95": 50.0, "write_p95": 800.0}
 # checks had raised write p95 to 1.91 s), two runs gave write p95 0.31 s and 0.34 s, so the write
 # cap is the §8 budget again. The page cap stays raised: page p95 86 ms and 89 ms, and even head()
 # (one row) is 66 ms at p95, so the tail is CPU contention with pg_dump, not the query shape of
-# V2-18's readers. The §8 page target (50 ms) is a recorded fork for the owner.
+# V2-18's readers. §22 E23a: that is not a fork. The 100 ms page cap stands; the 50 ms target is a
+# post-cutover improvement (E23(c) indexes or a read-path change) only if phone timings show it.
 RAISED_CAPS_MS = {"page_p95": 100.0, "write_p95": BUDGETS_MS["write_p95"]}
 # A budget run counts only under the load §8 names (V2-16b review): this container limit, and a
 # concurrent pg_dump loop that completed at least one dump and never failed.
