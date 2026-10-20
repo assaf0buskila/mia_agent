@@ -20,8 +20,9 @@ still resolves.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterable, Mapping
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from app.domain.approvals import (
@@ -49,6 +50,31 @@ _NOT_EXECUTED = "עדיין לא בוצע."
 _MAX_CARD_VALUE_CHARS = 300
 _DEFAULT_TIMEZONE = "Asia/Jerusalem"
 _MAX_TELEGRAM_APPROVAL_CARD_CHARS = 3_800
+
+# V2-28 (V2_PG_CONTRACTS.md section 13). A ledger proposal reaches Telegram as this compatibility
+# body: the v2 proposal fields, with ``input``/``before``/``after`` projected from the proposal's
+# immutable mutations. It is the same shape V2-20's ``proposal_v2`` emits, so a card stored by the
+# Mia tool and a card stored by the website-lead path compare through one view.
+LEDGER_PROPOSAL_API = "assaf-os.v2"
+_LEDGER_GUARD_VERSION = 1
+# The byte-stable proposal view: the immutable identity and effect of one proposal. ``status``
+# (pending -> terminal), ``input`` (derived from before/after), the binding fields and the epoch
+# are excluded; the ledger itself enforces the epoch (I12) and the exactly-once decision.
+_LEDGER_VIEW_KEYS = (
+    "workspace_id",
+    "proposal_id",
+    "request_id",
+    "approval_request_id",
+    "rejection_request_id",
+    "kind",
+    "entity",
+    "record_id",
+    "expected_revision",
+    "expires_at",
+    "before",
+    "after",
+)
+_HTTPS_ORIGIN = re.compile(r"https://[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?(?::[0-9]{1,5})?")
 
 _ASSAF_OS_ENTITY_LABELS = {
     "leads": "ליד",
@@ -475,12 +501,19 @@ def _card_assaf_os(parameters: Mapping[str, Any], target: Mapping[str, Any]) -> 
             ),
         ]
     )
+    if is_ledger_proposal(proposal):
+        # The ledger, not the shared Sheet, holds the authority under backend=postgres.
+        title = "עדכון ב-Assaf OS"
+        note = "האישור יכתוב את הרשומה המוצעת ב-Assaf OS לאחר בדיקת יעד חוזרת."
+    else:
+        title = "עדכון בגיליון העסקי המשותף"
+        note = "האישור יעדכן את הרשומה המוצעת בגיליון המשותף לאחר בדיקת יעד חוזרת."
     return _card(
-        "עדכון בגיליון העסקי המשותף",
+        title,
         fields,
         section("לפני ואחרי", changes) if changes else "",
         section("מקור פרטי קשר", provenance_lines) if provenance_lines else "",
-        note="האישור יעדכן את הרשומה המוצעת בגיליון המשותף לאחר בדיקת יעד חוזרת.",
+        note=note,
     )
 
 
@@ -551,10 +584,130 @@ def assaf_os_proposal_is_reviewable(envelope: Mapping[str, Any]) -> bool:
         proposal = target.get("proposal")
         if not isinstance(proposal, dict):
             return False
+        if is_ledger_proposal(proposal):
+            # Only a single generic proposal is decided from Telegram (I5). A statement batch,
+            # an owner-direct commit or an import never gets a card, so never a button.
+            if proposal.get("kind") != "proposal":
+                return False
+            proposal_view_bytes(proposal)  # every view key present and well-formed
         card = _card_assaf_os(parameters, target)
         return bool(card) and len(card) <= _MAX_TELEGRAM_APPROVAL_CARD_CHARS
     except Exception:  # noqa: BLE001 - malformed proposals must fail closed
         return False
+
+
+def is_ledger_proposal(proposal: object) -> bool:
+    """True for a v2 (ledger) proposal body; a v1 Apps Script body is never one."""
+    return isinstance(proposal, Mapping) and proposal.get("api_version") == LEDGER_PROPOSAL_API
+
+
+def _utc_millis(value: object) -> str:
+    """One timestamp format for the view: UTC, millisecond precision (truncated), ``Z``."""
+    if isinstance(value, str):
+        value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if not isinstance(value, datetime) or value.tzinfo is None:
+        raise ValueError("proposal_view_timestamp")
+    return value.astimezone(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _plain_record(record: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    if record is None:
+        return None
+    return json.loads(json.dumps(dict(record), ensure_ascii=False, allow_nan=False))
+
+
+def _changed_input(entity: str, before: Mapping[str, Any] | None, after: Mapping[str, Any]):
+    from app.services.assaf_os import INPUT_FIELDS
+
+    keys = INPUT_FIELDS.get(entity, frozenset())
+    return {
+        key: after[key]
+        for key in after
+        if key in keys and (before is None or before.get(key) != after.get(key))
+    }
+
+
+def ledger_proposal_body(row: Any) -> dict[str, Any]:
+    """The card body of one ledger ``ProposalRow``, projected from its immutable mutations.
+
+    A single-record proposal shows the changed input fields and the whole record before and
+    after. A lead promotion (``promote_lead``) shows the lead and its client, before and after.
+    Any other shape (a bulk, a batch, an import) has no card and raises ``ValueError``.
+    """
+    if getattr(row, "kind", None) != "proposal":
+        raise ValueError("ledger_card_kind")
+    mutations = tuple(row.mutations)
+    if row.entity == "promote_lead":
+        by_entity = {mutation.entity: mutation for mutation in mutations}
+        if len(mutations) != 2 or set(by_entity) != {"leads", "clients"}:
+            raise ValueError("ledger_card_promotion")
+        lead, client = by_entity["leads"], by_entity["clients"]
+        changed: dict[str, Any] = {}
+        before: Any = {"lead": _plain_record(lead.before), "client": _plain_record(client.before)}
+        after: Any = {"lead": _plain_record(lead.after), "client": _plain_record(client.after)}
+    elif len(mutations) == 1:
+        mutation = mutations[0]
+        before = _plain_record(mutation.before)
+        after = _plain_record(mutation.after)
+        changed = _changed_input(mutation.entity, before, after)
+    else:
+        raise ValueError("ledger_card_mutations")
+    return {
+        "api_version": LEDGER_PROPOSAL_API,
+        "workspace_id": row.workspace_id,
+        "authority_epoch": row.epoch,
+        "status": row.status,
+        "proposal_id": row.proposal_id,
+        "request_id": row.request_id,
+        "approval_request_id": row.approval_id,
+        "rejection_request_id": row.rejection_id,
+        "approval_guard_version": _LEDGER_GUARD_VERSION,
+        "actor_source": row.source,
+        "kind": row.kind,
+        "expires_at": _utc_millis(row.expires_at),
+        "entity": row.entity,
+        "record_id": row.record_id,
+        "expected_revision": row.expected_revision,
+        "input": changed,
+        "before": before,
+        "after": after,
+    }
+
+
+def proposal_view_bytes(body: Mapping[str, Any]) -> bytes:
+    """The byte-stable proposal view ``current_target`` compares (V2-28, section 13).
+
+    Canonical JSON (sorted keys, no whitespace) of the immutable keys only, with the timestamp
+    normalized. Key order, ``Z`` versus ``+00:00``, the status and the binding fields never change
+    the bytes; any change to the identity, the decision ids or the effect does.
+    """
+    if not isinstance(body, Mapping):
+        raise ValueError("proposal_view_body")
+    view: dict[str, Any] = {}
+    for key in _LEDGER_VIEW_KEYS:
+        if key not in body:
+            raise ValueError("proposal_view_" + key)
+        view[key] = body[key]
+    view["expires_at"] = _utc_millis(view["expires_at"])
+    return json.dumps(
+        view, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode("utf-8")
+
+
+def render_ledger_batch_notice(*, origin: str = "") -> str:
+    """The only Telegram surface a statement batch ever gets: a notice with a link, no button.
+
+    Batches are decided from OS only (I5), after a line-by-line review, so this text carries no
+    callback token and the caller attaches no keyboard. ``origin`` is the OS app origin
+    (``owner_os_origin``); anything but a plain https origin is dropped.
+    """
+    link = origin.strip()
+    link_line = esc(link) if _HTTPS_ORIGIN.fullmatch(link) else "Assaf OS"
+    return join_sections(
+        bold("דף חיובים ממתין לבדיקה ב-Assaf OS"),
+        "האישור נעשה רק בתוך Assaf OS, אחרי סקירת השורות. אין כאן כפתור אישור.",
+        f"{bold('פתיחה')}: {link_line}",
+    )
 
 
 def _card_business(parameters: Mapping[str, Any], target: Mapping[str, Any], kind: str) -> str:
