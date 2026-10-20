@@ -6,8 +6,9 @@ Two proofs over random commit/undo/decide sequences (``test_summaries_property_e
   code and reason;
 * end to end: the twin's reference ledger (full validator) and the ledger under test agree on every
   step's outcome and on every row.
-The scripted cases pin the refusals only a post-apply check can see (a tombstone whose live,
-cancelled or done referrers ``has_dependents`` would not count).
+The scripted cases pin the refusals only a post-apply check can see (a tombstone whose referrers
+are not live: cancelled or done), and, since §22 E20, the has_dependents refusals apply makes
+itself and apply's own refund-graph refusals.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from tests.fakes.os_ledger_builders import (
     PAYMENT_CANCELLED,
     PAYMENT_REFUND,
     TASK_DONE,
+    WORK_CANCELLED,
     client,
     payment,
     task,
@@ -82,7 +84,7 @@ def test_pg_scoped_equals_full_over_random_sequences():
         stats = run(pg_twin(seed, validator=dual), seed, 70)
         seen |= check(dual, f"pg seed {seed}")
         assert stats["accepted"] > 10, stats
-    assert seen & POST_APPLY_REASONS, seen
+    assert POST_APPLY_REASONS <= seen, seen  # the seeds reach both post-apply refusals
 
 
 # --- scripted: the refusals that only the post-apply state shows --------------------------
@@ -118,6 +120,12 @@ SCENARIOS = {
         [[client(), work(), payment(kind=PAYMENT_CANCELLED)],
          [tombstone("clients", client().after)]],
         ["ok", "has_dependents"]),
+    # A cancelled work is not live, so E20 lets the client's tombstone through to the post-apply
+    # check, which refuses it (review: pins a post-apply client_not_found deterministically).
+    "client_with_a_cancelled_work": (
+        [[client(), work(status=WORK_CANCELLED)],
+         [tombstone("clients", client().after)]],
+        ["ok", "client_not_found"]),
     "work_with_a_done_task": (
         [[client(), work(), task(work_id="WOR_w1", person_id="PER_c1", status=TASK_DONE)],
          [tombstone("works", work().after)]],
@@ -129,7 +137,9 @@ SCENARIOS = {
                   actual_amount_ils=400)],
          [tombstone("payments", payment().after)]],
         ["ok", "ok", "has_dependents"]),
-    # ... so the post-apply refund-graph refusal is reached by re-pointing the refund instead.
+    # ... so the refund graph is exercised by re-pointing the refund, which apply's own
+    # per-mutation validation refuses (the post-apply refund-graph check is a backstop E20 makes
+    # unreachable).
     "a_refund_repointed_to_a_missing_original": (
         [[client(), work(), payment()],
          [payment("PAY_r1", kind=PAYMENT_REFUND, original_payment_id="PAY_p1",
