@@ -49,8 +49,9 @@ def _json(value: object) -> str:
 
 # Under backend=postgres a snapshot is one page of one entity (section 10.2). The model view reads
 # the first VIEW_LIMIT rows of every entity (section 22 E14.2: Mia's overview does not shrink to
-# tasks); the follow-up check reads tasks and leads, each up to MAX_PAGES pages of PAGE_LIMIT rows
-# (the 1,000-row cap of the Sheets snapshot).
+# tasks) and the first VIEW_LIMIT pending proposals (E25: never a second /pending page); the
+# follow-up check reads tasks and leads, each up to MAX_PAGES pages of PAGE_LIMIT rows (the
+# 1,000-row cap of the Sheets snapshot).
 V2_VIEW_LIMIT = 50
 V2_PAGE_LIMIT = 200
 V2_MAX_PAGES = 5
@@ -71,10 +72,15 @@ def _ledger_snapshot(ctx: ToolContext) -> ToolResult:
     shapes = {body_shape(page) for page in pages}
     if "mixed" in shapes:
         return ToolResult(ok=False, error="mixed_contract_shapes")
+    # Section 22 E25: what awaits approval, as under Sheets. The FIRST /pending page only.
+    pending = backend.pending(limit=V2_VIEW_LIMIT)
+    shapes.add(body_shape(pending))
+    if "mixed" in shapes:
+        return ToolResult(ok=False, error="mixed_contract_shapes")
     try:
         if shapes != {"v2"}:
             raise ContractError("not_a_v2_body")
-        text = snapshot_overview_view(pages)
+        text = snapshot_overview_view(pages, pending=pending)
     except ContractError:
         return ToolResult(ok=False, error="invalid_response")
     return ToolResult(

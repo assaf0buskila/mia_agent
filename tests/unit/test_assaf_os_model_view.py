@@ -506,6 +506,90 @@ def test_a_single_page_is_not_an_overview(world):
         overview(world.backend.snapshot(query("tasks")))
 
 
+# ---- the first /pending page in the overview (section 22 E25) ------------------------------------
+
+PROPOSAL_KEYS = {"status", "proposal_id", "request_id", "approval_request_id",
+                 "rejection_request_id", "approval_guard_version", "actor_source", "kind",
+                 "expires_at", "entity", "record_id", "expected_revision", "input", "before",
+                 "after"}
+
+
+def awaiting(world):
+    """Three pending proposals with third-party text: a create, an update and a promotion."""
+    propose(world, "tasks", {"title": INJECTION, "status": "לביצוע", "notes": LONG_TEXT})
+    propose(world, "tasks", {"title": f"{INJECTION} עדכון"}, record_id="TAS_t1", revision=1)
+    propose(world, "promote_lead", {}, record_id="LEA_l1", revision=1)
+    return world.backend.pending()
+
+
+def free_text_is_wrapped(item) -> bool:
+    """Every string inside input, before and after sits in an untrusted_text wrapper."""
+    return all(path.endswith(("/untrusted_text",)) for key in ("input", "before", "after")
+               for path, _ in strings(item[key], f"/{key}"))
+
+
+def test_the_overview_adds_the_first_pending_page_with_its_free_text_wrapped(world):
+    pending = awaiting(world)
+    parsed = json.loads(overview(first_pages(world), pending=pending))
+    block = parsed["pending"]
+    assert block["observed_version"] == pending["observed_version"]
+    assert block["items_returned"] == len(block["items"]) == 3 and block["items_omitted"] == 0
+    assert block["more_pages"] is False and parsed["truncated"] is False
+    assert parsed["pending_count"] == 3
+    assert [item["proposal_id"] for item in block["items"]] == [
+        item["proposal_id"] for item in pending["items"]]
+    for shown, item in zip(block["items"], pending["items"], strict=True):
+        assert set(shown) == PROPOSAL_KEYS  # the binding is the overview's, said once
+        assert free_text_is_wrapped(shown)
+        for key in PROPOSAL_KEYS - {"input", "before", "after"}:
+            assert shown[key] == item[key], key
+    assert block["items"][2]["after"]["lead"]["status"] == {"untrusted_text": "הפך ללקוח"}
+
+
+def test_an_instruction_in_a_pending_proposal_never_reaches_the_model_raw(world):
+    parsed = json.loads(overview(first_pages(world), pending=awaiting(world)))
+    hits = [path for path, text in strings(parsed["pending"])
+            if "Ignore previous instructions" in text]
+    assert len(hits) >= 4  # the create's input and after, the update's input and after
+    assert all(path.endswith("/untrusted_text") for path in hits)
+
+
+def test_many_large_pending_proposals_stay_inside_the_cap_dealt_round_robin():
+    w = big_world()
+    for n in range(60):
+        propose(w, "tasks", {"title": f"{LONG_TEXT} {n}", "status": "לביצוע",
+                             "notes": LONG_TEXT})
+    pending = w.backend.pending()
+    assert len(pending["items"]) == 50 and pending["next_cursor"] is not None
+    pages = first_pages(w)
+    view = overview(pages, pending=pending)
+    assert len(view) <= MODEL_VIEW_MAX_CHARS
+    parsed = json.loads(view)
+    block = parsed["pending"]
+    assert parsed["truncated"] is True
+    assert parsed["truncation_marker"] == follow.MODEL_VIEW_TRUNCATION_MARKER
+    assert block["items_returned"] + block["items_omitted"] == 50 and block["more_pages"] is True
+    assert [item["proposal_id"] for item in block["items"]] == [
+        item["proposal_id"] for item in pending["items"][:block["items_returned"]]]
+    assert all(free_text_is_wrapped(item) for item in block["items"])
+    counts = [b["records_returned"] for b in parsed["entities"].values()]
+    counts.append(block["items_returned"])
+    assert max(counts) - min(counts) <= 1 and min(counts) >= 1
+
+
+def test_a_pending_page_of_another_ledger_or_one_the_reader_refuses_has_no_overview(world):
+    pending = awaiting(world)
+    for broken in (pending | {"workspace_id": "other"}, pending | {"authority_epoch": 2},
+                   pending | {"extra": 1}, {**pending, "items": [pending["items"][0] | {"x": 1}]},
+                   world.backend.snapshot(query("tasks"))):
+        with pytest.raises(contract.ContractError):
+            overview(first_pages(world), pending=broken)
+
+
+def test_an_overview_without_a_pending_page_has_no_pending_block(world):
+    assert "pending" not in json.loads(overview(first_pages(world)))
+
+
 # ---- the owner tools ---------------------------------------------------------------------------
 
 
@@ -534,27 +618,65 @@ class Recording:
     kind = "postgres"
 
     def __init__(self, backend):
-        self.backend, self.seen = backend, []
+        self.backend, self.seen, self.pending_seen = backend, [], []
 
     def snapshot(self, q=None):
         self.seen.append(q)
         return self.backend.snapshot(q)
 
+    def pending(self, **query):
+        self.pending_seen.append(query)
+        return self.backend.pending(**query)
+
 
 def test_the_postgres_snapshot_tool_reads_the_first_page_of_every_entity(world, monkeypatch):
-    """E14.2: the overview is not tasks only. It reads all 7 entities, one first page each."""
+    """E14.2: the overview is not tasks only. It reads all 7 entities, one first page each, and
+    E25: the first /pending page."""
+    awaiting(world)
     recording = Recording(world.backend)
     use_backend(monkeypatch, recording)
     result = execute_tool("assaf_os_snapshot", {}, pg_context())
     assert result.ok and result.evidence == "assaf_os_ledger_snapshot"
     assert [(q.entity, q.after, q.since, q.limit) for q in recording.seen] == [
         (entity, None, None, 50) for entity in api.ENTITIES]
+    assert recording.pending_seen == [{"limit": 50}]
     assert result.max_chars == MODEL_VIEW_MAX_CHARS
     payload = result.payload()["result"]
     assert payload == result.text and len(payload) <= MODEL_VIEW_MAX_CHARS
     parsed = json.loads(payload)
     assert parsed["view"] == OVERVIEW and sorted(parsed["entities"]) == sorted(api.ENTITIES)
-    assert payload == overview(first_pages(world))
+    assert parsed["pending"]["items_returned"] == 3
+    assert payload == overview(first_pages(world), pending=world.backend.pending())
+
+
+def test_the_postgres_snapshot_tool_never_walks_a_second_pending_page(world, monkeypatch):
+    for n in range(55):
+        propose(world, "tasks", {"title": f"t{n}", "status": "לביצוע"})
+    recording = Recording(world.backend)
+    use_backend(monkeypatch, recording)
+    result = execute_tool("assaf_os_snapshot", {}, pg_context())
+    assert result.ok and recording.pending_seen == [{"limit": 50}]
+    block = json.loads(result.text)["pending"]
+    assert block["more_pages"] is True and block["items_returned"] + block["items_omitted"] == 50
+    assert json.loads(result.text)["pending_count"] == 55
+
+
+@pytest.mark.parametrize(("change", "error"), [
+    (lambda b: b | {"workspace_id": "other"}, "invalid_response"),
+    (lambda b: b | {"extra": 1}, "invalid_response"),
+    (lambda b: b | {"mode": "TEST"}, "mixed_contract_shapes"),
+])
+def test_a_pending_page_that_is_not_this_ledgers_leaves_the_model_nothing(
+    world, monkeypatch, change, error
+):
+    class ChangedPending(Recording):
+        def pending(self, **query):
+            return change(super().pending(**query))
+
+    awaiting(world)
+    use_backend(monkeypatch, ChangedPending(world.backend))
+    result = execute_tool("assaf_os_snapshot", {}, pg_context())
+    assert not result.ok and result.error == error and not result.text
 
 
 def test_the_postgres_snapshot_tool_hands_a_big_ledger_over_whole_and_marked(monkeypatch):
@@ -613,6 +735,9 @@ def test_a_v2_body_the_reader_refuses_is_not_shown_to_the_model(world, monkeypat
     class Broken:
         def snapshot(self, q=None):
             return world.backend.snapshot() | {"extra": 1}
+
+        def pending(self, **query):
+            return world.backend.pending(**query)
 
     use_backend(monkeypatch, Broken())
     result = execute_tool("assaf_os_snapshot", {}, pg_context())

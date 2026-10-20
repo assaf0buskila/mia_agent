@@ -612,7 +612,44 @@ def _overview_pages(pages: Any) -> list[dict[str, Any]]:
     return ordered
 
 
-def snapshot_overview_view(pages: Any, *, max_chars: int = MODEL_VIEW_MAX_CHARS) -> str:
+_PENDING_LANE = "pending"
+_PROPOSAL_FREE_TEXT = ("input", "before", "after")
+_BINDING_KEYS = ("api_version", "source", "workspace_id", "authority_epoch")
+
+
+def _untrusted_tree(value: Any) -> Any:
+    """Every string inside ``value`` wrapped as untrusted text; everything else as it is."""
+    if isinstance(value, str):
+        return _untrusted(value)
+    if isinstance(value, dict):
+        return {key: _untrusted_tree(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_untrusted_tree(item) for item in value]
+    return value
+
+
+def _pending_item(item: Mapping[str, Any]) -> dict[str, Any]:
+    """One pending ``proposal_v2`` for the model: the binding is the overview's, said once, and
+    every string of its input and its before and after states is wrapped (section 22 E25)."""
+    shown = {key: value for key, value in item.items() if key not in _BINDING_KEYS}
+    for key in _PROPOSAL_FREE_TEXT:
+        shown[key] = _untrusted_tree(item[key])
+    return shown
+
+
+def _overview_pending(pending: Any, ordered: list[dict[str, Any]]) -> dict[str, Any]:
+    body = contract.read_pending_list(pending)
+    first = ordered[0]
+    if (body["workspace_id"], body["authority_epoch"]) != (
+        first["workspace_id"], first["authority_epoch"]
+    ):
+        raise contract.ContractError("overview_binding")
+    return body
+
+
+def snapshot_overview_view(
+    pages: Any, *, pending: Any = None, max_chars: int = MODEL_VIEW_MAX_CHARS
+) -> str:
     """The first page of EVERY entity as one JSON document for the model (section 22 E14.2).
 
     Mia's overview under ``backend=postgres`` keeps the reach of the Sheets snapshot: all seven
@@ -621,19 +658,32 @@ def snapshot_overview_view(pages: Any, *, max_chars: int = MODEL_VIEW_MAX_CHARS)
     be read at different versions, and ``consistent_read`` says when they were. The summary, the
     pending count and the mirror come from the newest page.
 
+    ``pending`` is the FIRST ``/pending`` page (section 22 E25: under Sheets, Mia saw what awaits
+    approval), of the same workspace and epoch. It is shown as a ``pending`` block of those
+    proposals, each with every string of its input, before and after wrapped as untrusted text.
+    No further page is read: ``more_pages`` says when there is one.
+
     The document is valid JSON of at most ``max_chars``. Free text, labels included, is wrapped as
-    ``{"untrusted_text": ...}``. When it does not fit, the oldest months go first, then records are
-    dealt out one entity at a time, in entity order, so a long entity never starves another (the
-    counts differ by at most one). Each entity keeps a prefix of its page. Whatever was left out is
-    counted, and ``truncated`` with the fixed ``truncation_marker`` says so.
+    ``{"untrusted_text": ...}``. When it does not fit, the oldest months go first, then rows are
+    dealt out one lane at a time (the pending proposals, then each entity in entity order), so a
+    long lane never starves another (the counts differ by at most one). Each lane keeps a prefix of
+    its page. Whatever was left out is counted, and ``truncated`` with the fixed
+    ``truncation_marker`` says so.
     """
     ordered = _overview_pages(pages)
+    pending_body = _overview_pending(pending, ordered) if pending is not None else None
     newest = max(ordered, key=lambda page: page["observed_version"])  # the first of equals
     entities = tuple(contract.ENTITIES)
+    lanes = (_PENDING_LANE, *entities) if pending_body is not None else entities
     records = {
         page["entity"]: [_wrap_record(page["entity"], record) for record in page["records"]]
         for page in ordered
     }
+    if pending_body is not None:
+        records[_PENDING_LANE] = [_pending_item(item) for item in pending_body["items"]]
+    versions = {page["observed_version"] for page in ordered}
+    if pending_body is not None:
+        versions.add(pending_body["observed_version"])
     labels = {key: {} for key in contract.LABEL_KEYS}
     for page in sorted(ordered, key=lambda page: page["observed_version"]):
         for key in contract.LABEL_KEYS:
@@ -659,10 +709,21 @@ def snapshot_overview_view(pages: Any, *, max_chars: int = MODEL_VIEW_MAX_CHARS)
             for key in contract.LABEL_KEYS
         }
 
+    def pending_block(body: Mapping[str, Any], counts: Mapping[str, int]) -> dict[str, Any]:
+        shown = counts[_PENDING_LANE]
+        return {
+            "observed_version": body["observed_version"],
+            "items": records[_PENDING_LANE][:shown],
+            "items_returned": shown,
+            "items_omitted": len(records[_PENDING_LANE]) - shown,
+            "more_pages": body["next_cursor"] is not None,
+        }
+
     def render(counts: Mapping[str, int], kept_months: int) -> str:
-        left_out = sum(len(records[entity]) - counts[entity] for entity in entities)
+        left_out = sum(len(records[lane]) - counts[lane] for lane in lanes)
         truncated = left_out > 0 or len(every_month) > kept_months
-        return _compact({
+        extra = {} if pending_body is None else {"pending": pending_block(pending_body, counts)}
+        return _compact(extra | {
             "view": OVERVIEW_VIEW,
             "api_version": newest["api_version"],
             "source": newest["source"],
@@ -670,7 +731,7 @@ def snapshot_overview_view(pages: Any, *, max_chars: int = MODEL_VIEW_MAX_CHARS)
             "authority_epoch": newest["authority_epoch"],
             "observed_version": newest["observed_version"],
             "observed_at": newest["observed_at"],
-            "consistent_read": len({page["observed_version"] for page in ordered}) == 1,
+            "consistent_read": len(versions) == 1,
             "coverage": "complete",
             "entities": {
                 page["entity"]: {
@@ -695,7 +756,7 @@ def snapshot_overview_view(pages: Any, *, max_chars: int = MODEL_VIEW_MAX_CHARS)
             "untrusted_text_notice": MODEL_VIEW_NOTICE,
         })
 
-    empty = dict.fromkeys(entities, 0)
+    empty = dict.fromkeys(lanes, 0)
     kept_months = len(monthly)
     if len(render(empty, kept_months)) > max_chars:
         kept_months = _largest_fit(kept_months, lambda n: len(render(empty, n)) <= max_chars)
@@ -703,15 +764,15 @@ def snapshot_overview_view(pages: Any, *, max_chars: int = MODEL_VIEW_MAX_CHARS)
         raise contract.ContractError("model_view_too_large")
 
     def rounds(count: int) -> dict[str, int]:
-        return {entity: min(count, len(records[entity])) for entity in entities}
+        return {lane: min(count, len(records[lane])) for lane in lanes}
 
     def fits(count: int) -> bool:
         return len(render(rounds(count), kept_months)) <= max_chars
 
     counts = rounds(_largest_fit(max(len(rows) for rows in records.values()), fits))
-    for entity in entities:  # one more row where one still fits, in entity order
-        if counts[entity] < len(records[entity]):
-            more = counts | {entity: counts[entity] + 1}
+    for lane in lanes:  # one more row where one still fits, in lane order
+        if counts[lane] < len(records[lane]):
+            more = counts | {lane: counts[lane] + 1}
             if len(render(more, kept_months)) <= max_chars:
                 counts = more
     return render(counts, kept_months)
