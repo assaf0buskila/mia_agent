@@ -620,7 +620,12 @@ class FakeLedger:
                         tx.apply(proposal.mutations, source=proposal.source,
                                  request_id=decision_id)
                     except api.LedgerError as exc:
-                        if exc.code not in {"target_changed", "lead_already_exists"}:
+                        # §22 E26: an apply-time has_dependents ends the proposal
+                        # target_changed (reason has_dependents); every other refusal keeps
+                        # its behaviour and ledger_integrity_failed is re-raised.
+                        if exc.code == "has_dependents":
+                            reasons = ("has_dependents",)
+                        elif exc.code not in {"target_changed", "lead_already_exists"}:
                             raise
                         status = "target_changed"
             receipt = tx.finish(proposal, status=status, receipt_request_id=decision_id,
