@@ -55,7 +55,7 @@ class Sheet {
 
 class Workbook {
   constructor(id) { this.id = id; this.sheets = new Map(); this.nextId = 1; this.resetMetrics(); }
-  resetMetrics() { this.metrics = { getValues: 0, getFormulas: 0, getLastRow: 0, getLastColumn: 0, getDataRange: 0, setDataValidation: 0, batchUpdate: 0 }; }
+  resetMetrics() { this.metrics = { getValues: 0, getFormulas: 0, getLastRow: 0, getLastColumn: 0, getDataRange: 0, setDataValidation: 0, batchUpdate: 0, batchGet: 0 }; }
   add(name, headers, maxRows) { const sheet = new Sheet(this, this.nextId++, name, headers, maxRows); this.sheets.set(name, sheet); return sheet; }
   getSheetByName(name) { return this.sheets.get(name) || null; }
   getId() { return this.id; }
@@ -116,7 +116,20 @@ function createHarness(options = {}) {
       },
     },
     LockService: { getScriptLock: () => ({ tryLock: () => true, releaseLock() {} }) },
-    Sheets: { Spreadsheets: { batchUpdate: (body, id) => { if (id !== binding.workbook_id) throw new Error("wrong_workbook"); workbook.metrics.batchUpdate += 1; batches.push(body.requests); body.requests.forEach(applyRequest); } } },
+    Sheets: { Spreadsheets: {
+      batchUpdate: (body, id) => { if (id !== binding.workbook_id) throw new Error("wrong_workbook"); workbook.metrics.batchUpdate += 1; batches.push(body.requests); body.requests.forEach(applyRequest); },
+      Values: { batchGet: (id, body) => {
+        if (id !== binding.workbook_id || body.majorDimension !== "ROWS" || body.valueRenderOption !== "UNFORMATTED_VALUE" || body.dateTimeRenderOption !== "FORMATTED_STRING") throw new Error("invalid_batch_read");
+        workbook.metrics.batchGet += 1;
+        return { spreadsheetId: id, valueRanges: body.ranges.map((range) => {
+          const match = /^'([^']+)'!A1:([A-Z])(\d+)$/.exec(range); if (!match) throw new Error("invalid_range");
+          const sheet = workbook.getSheetByName(match[1]); if (!sheet) throw new Error("missing_sheet");
+          const rows = Number(match[3]), columns = match[2].charCodeAt(0) - 64;
+          const values = Array.from({ length: rows }, (_, row) => Array.from({ length: columns }, (_, column) => sheet.value(row + 1, column + 1)));
+          return { range, majorDimension: "ROWS", values };
+        }) };
+      } },
+    } },
     Utilities: {
       Charset: { UTF_8: "UTF_8" }, DigestAlgorithm: { SHA_256: "SHA_256" },
       newBlob: (value) => ({ getBytes: () => [...Buffer.from(value, "utf8")] }),

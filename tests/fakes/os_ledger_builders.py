@@ -241,6 +241,52 @@ def fresh_workspace(env, name: str, *, core="shadow", statements="shadow",
             env.transition(name, domain, step, expected_epoch=1, actor_owner_id=owner)
 
 
+IMPORT_WORKSPACE = "ws-import"
+WRITE_KINDS = ("proposal", "owner_direct", "import")
+
+
+class WriteLane:
+    """One write kind and the workspace it lives in (§5.3, §22 E20/E22).
+
+    ``owner_direct`` and ``proposal`` use the active ``test`` workspace; ``import`` a shadow one.
+    ``write`` commits through the kind's service-shaped helper (``commit_import`` for an import);
+    ``attempt`` is the write under test and may raise, which rolls the transaction back. A
+    ``proposal`` attempt opens a ``proposal`` transaction and calls ``apply`` only, so nothing of
+    it is ever committed.
+    """
+
+    def __init__(self, env, kind: str) -> None:
+        assert kind in WRITE_KINDS, kind
+        self.env, self.kind = env, kind
+        self.context = ctx(workspace=IMPORT_WORKSPACE) if kind == "import" else ctx()
+        if kind == "import":
+            fresh_workspace(env, IMPORT_WORKSPACE)
+
+    def get(self, entity: str, record_id: str, *, include_deleted=False) -> dict | None:
+        kind = "import" if self.kind == "import" else "owner_direct"
+        with self.env.transaction(self.context, domain="core", kind=kind) as tx:
+            return tx.get(entity, record_id, include_deleted=include_deleted)
+
+    def write(self, mutations: Sequence[api.Mutation]):
+        if self.kind == "import":
+            return commit_import(self.env, self.context, mutations,
+                                 api.digest({"manifest": rid()}))
+        return commit_direct(self.env, self.context, mutations)
+
+    def attempt(self, mutations: Sequence[api.Mutation]):
+        if self.kind != "proposal":
+            return self.write(mutations)
+        with self.env.transaction(self.context, domain="core", kind="proposal") as tx:
+            return tx.apply(mutations, source="OS", request_id=rid())
+
+
+def snapshot(env) -> dict:
+    """Every table a ledger write can touch, over every workspace: a refusal must leave it equal."""
+    tables = ("os_workspaces", *("os_" + entity for entity in api.ENTITIES), "os_proposals",
+              "os_receipts", "os_events", "os_outbox", "os_summary_monthly")
+    return {name: env.rows(name) for name in tables}
+
+
 def uuid_of(value: int) -> str:
     return str(UUID(int=value))
 

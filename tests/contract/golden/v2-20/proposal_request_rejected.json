@@ -1,0 +1,58 @@
+{
+  "api_version": "assaf-os.v2",
+  "authority_epoch": 1,
+  "observed_version": 2,
+  "proposal": {
+    "actor_source": "OS",
+    "after": {
+      "revision": 1,
+      "status": "לביצוע",
+      "task_id": "TAS_00000000000040008000000000001003",
+      "title": "לבדוק חשבונית"
+    },
+    "api_version": "assaf-os.v2",
+    "approval_guard_version": 1,
+    "approval_request_id": "00000000-0000-4000-8000-000000001004",
+    "authority_epoch": 1,
+    "before": null,
+    "entity": "tasks",
+    "expected_revision": 0,
+    "expires_at": "2026-10-16T12:10:00.000Z",
+    "input": {
+      "status": "לביצוע",
+      "title": "לבדוק חשבונית"
+    },
+    "kind": "proposal",
+    "proposal_id": "PRO_00000000000040008000000000001006",
+    "record_id": "TAS_00000000000040008000000000001003",
+    "rejection_request_id": "00000000-0000-4000-8000-000000001005",
+    "request_id": "00000000-0000-4000-8000-00000000a001",
+    "source": "postgresql",
+    "status": "rejected",
+    "workspace_id": "test"
+  },
+  "reason_codes": [],
+  "receipt": {
+    "actor_source": "OS",
+    "api_version": "assaf-os.v2",
+    "authority_epoch": 1,
+    "commit_version": 2,
+    "committed_at": null,
+    "kind": "proposal",
+    "observed_version": 2,
+    "proposal_id": "PRO_00000000000040008000000000001006",
+    "reason_codes": [],
+    "records": [],
+    "request_id": "00000000-0000-4000-8000-000000001005",
+    "server_now": "2026-10-16T12:00:00.000Z",
+    "source": "postgresql",
+    "status": "rejected",
+    "undo": null,
+    "undo_of": null,
+    "workspace_id": "test"
+  },
+  "request_id": "00000000-0000-4000-8000-00000000a001",
+  "source": "postgresql",
+  "status": "found",
+  "workspace_id": "test"
+}
