@@ -31,10 +31,25 @@ an issue, chat or commit. The copy contains private business data.
    `ASSAF OS REHEARSAL TEST SCRIPT - <run-id>`. Check the project ID differs from
    production and the editor was opened from the copy. Inspect existing triggers
    and deployments. Before running any function, replace all binding properties
-   in step 5. Use the reviewed release's `schema.js`, `core.js`, `runtime.js`,
-   `UnifiedRuntime.gs`, `UnifiedSheets.gs`, `appsscript.json`; verify the bundle
-   digest. Ensure Advanced Sheets **v4** is enabled. Installable triggers must be
-   verified separately; do not assume they are copied or reinstall the workbook.
+   in step 5. Install the reviewed release's six files: the five source files below,
+   plus `appsscript.json`. Verify the bundle digest, which covers the five source
+   files only (rule below). Ensure Advanced Sheets **v4** is enabled. Installable
+   triggers must be verified separately; do not assume they are copied or reinstall
+   the workbook.
+
+   **Bundle digest rule.**
+   - Take `schema.js`, `core.js`, `runtime.js`, `UnifiedSheets.gs`, `UnifiedRuntime.gs`,
+     in that order, from `ops/assaf-os/`. `appsscript.json` is excluded.
+   - For each file: convert CRLF to LF, trim trailing whitespace, and end with exactly
+     one newline.
+   - Join the five files with a newline, and take the SHA-256 of the UTF-8 bytes.
+
+   This reproduces the recorded Script version 10 digest `660e6c72…5801f89` from
+   backend `bda48fa`. From the repository root, at the release's commit:
+
+   ```powershell
+   python -c "import hashlib,pathlib; f=['schema.js','core.js','runtime.js','UnifiedSheets.gs','UnifiedRuntime.gs']; t=[pathlib.Path('ops/assaf-os',n).read_bytes().decode('utf-8').replace('\r\n','\n').rstrip()+'\n' for n in f]; print(hashlib.sha256('\n'.join(t).encode('utf-8')).hexdigest())"
+   ```
 4. Generate the rehearsal HMAC locally, once. From the repository root run:
 
    ```powershell
