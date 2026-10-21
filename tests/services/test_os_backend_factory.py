@@ -1086,6 +1086,8 @@ CALL_SITES = {
     "app/tools/owner/assaf_os.py": 1,
     "app/services/assaf_os_leads.py": 2,
     "app/services/owner_actions.py": 4,
+    # V2-31: the read-only Sheets probe of the cutover CLI (pending proposals count, actor MIA).
+    "app/workers/os_authority.py": 1,
 }
 
 
@@ -1101,4 +1103,4 @@ def test_every_constructor_site_calls_the_factory():
                     assert keywords["actor"].value in {"OS", "MIA", "TELEGRAM_APPROVAL"}
                     assert "actor_source" not in keywords
                     seen[relative] = seen.get(relative, 0) + 1
-    assert seen == CALL_SITES and sum(seen.values()) == 8
+    assert seen == CALL_SITES and sum(seen.values()) == 9
