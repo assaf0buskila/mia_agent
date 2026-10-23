@@ -300,9 +300,10 @@ present throughout; jobs paused and a verified backup before **each** of T1, T3,
   and `MIA_ASSAF_OS_MIRROR_ENABLED=false`. Set them together with `MIA_ASSAF_OS_FREEZE=false`, then
   `sudo mia settings`. The ledger and the Sheet are
   unchanged, but **the drain is void**: once the freeze is lifted the owner can make OS-screen
-  proposals again (they have no Telegram card, so no other check sees them). **A retry redoes T1 and
-  T2**: its `freeze-plan --phase drain` sets the old `drain.json` aside, and a drain taken more than
-  2 hours before `fence_probe_at` is refused anyway (`sheets_pending_proposals`, detail
+  proposals again (they have no Telegram card, so no other check sees them). So the exit itself, the
+  `--phase revert` plan above, **sets `drain.json` aside** (`drain-superseded-<UTC>.json`), and so
+  does the retry's `freeze-plan --phase drain`. **A retry redoes T1 and T2.** A drain taken more than
+  2 hours before `fence_probe_at` is refused as a backstop (`sheets_pending_proposals`, detail
   `drain_stale`). Never reuse a drain of an earlier freeze.
 
 ### T2: final reconcile
@@ -512,7 +513,8 @@ Allowed **only** while `non_import_receipts` is 0 at the current epoch. After th
 - **Then, in this order**, as the command prints:
   1. `sudo mia os-authority freeze-plan --phase revert --approved-sha S` prints
      `MIA_ASSAF_OS_BACKEND=sheets`, `MIA_ASSAF_OS_LEDGER_ENABLED=false`,
-     `MIA_ASSAF_OS_AUTHORITY_EPOCH=0`, `MIA_ASSAF_OS_MIRROR_ENABLED=false`. It refuses
+     `MIA_ASSAF_OS_AUTHORITY_EPOCH=0`, `MIA_ASSAF_OS_MIRROR_ENABLED=false`, and sets `drain.json`
+     aside (it ends the freeze that drain belongs to). It refuses
      (`authority_state_invalid`) while `core` is still `active`, so run the command above first. Keep
      `MIA_ASSAF_OS_FREEZE=true`. Set them, `sudo mia settings`, check `/health` SHA.
   2. Apps Script: set `ASSAF_OS_MODE` back to `LIVE` (no republish). Confirm the Sheet answers: the Mia OS

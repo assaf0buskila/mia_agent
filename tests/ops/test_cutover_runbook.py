@@ -276,8 +276,14 @@ def test_the_t1_and_t2_rollbacks_say_a_retry_redoes_t2_and_the_old_drain_is_set_
     flat = re.sub(r"\s+", " ", section_of("### T1"))
     assert "Each freeze starts a new drain" in flat and "drain-superseded-<UTC>.json" in flat
     rollback = flat.split("**Rollback**", 1)[1]
-    assert "A retry redoes T1 and T2" in rollback and "sets the old `drain.json` aside" in rollback
-    assert "`drain_stale`" in rollback
+    assert "A retry redoes T1 and T2" in rollback and "`drain_stale`" in rollback
+    # V2-31b review 2: the exit itself (the revert plan) voids the drain, the drain phase does too,
+    # and the age bound is only the backstop.
+    assert "the `--phase revert` plan above, **sets `drain.json` aside**" in rollback
+    assert "and so does the retry's `freeze-plan --phase drain`" in rollback
+    assert "as a backstop" in rollback
+    step = re.sub(r"\s+", " ", section_of("## 5. "))
+    assert "and sets `drain.json` aside (it ends the freeze that drain belongs to)" in step
     t2 = re.sub(r"\s+", " ", section_of("### T2")).split("**Rollback**", 1)[1]
     assert "A retry redoes T2" in t2 and "sets it aside" in t2
     # The numbers and names the text states are the CLI's own.

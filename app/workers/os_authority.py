@@ -14,8 +14,8 @@ Evidence lives in one VM-owned directory (``MIA_OS_AUTHORITY_DIR``, default
 ``/var/lib/mia/os-authority``). This job writes ``drain.json`` (``preflight --drain``),
 ``preflight.json`` (``preflight``, and ``preflight --drain`` once it has seen the Script live: that
 sighting ends the run of fenced probes) and ``activation.json`` (``activate``). ``freeze-plan
---phase drain`` starts a freeze and so sets an earlier ``drain.json`` aside: a drain belongs to
-one freeze. The operator places
+--phase drain`` starts a freeze and ``--phase revert`` ends one (the exit from every aborted
+window), and each sets ``drain.json`` aside: a drain belongs to one freeze. The operator places
 ``backup.json``, ``restore-drill.json``, ``fe-v2.json``, ``journal.json`` and ``manifest.json``
 there (formats: ops/assaf-os/CUTOVER_RUNBOOK.md). The activation preconditions are the fixed table
 in ``PRECONDITIONS``; ``activate`` re-evaluates every one of them and moves ``core`` from
@@ -256,8 +256,14 @@ class EvidenceStore:
         try:
             if not (path.is_symlink() or path.exists()):
                 return False
-            os.replace(path, path.with_name(
-                f"{path.stem}-superseded-{self.aside_stamp(moment)}{path.suffix}"))
+            target = path.with_name(
+                f"{path.stem}-superseded-{self.aside_stamp(moment)}{path.suffix}")
+            for attempt in range(2, 1000):  # two set-asides in one second never overwrite
+                if not target.exists():
+                    break
+                target = path.with_name(
+                    f"{path.stem}-superseded-{self.aside_stamp(moment)}-{attempt}{path.suffix}")
+            os.replace(path, target)
         except OSError:
             raise Refusal("evidence_unwritable") from None
         return True
@@ -1379,6 +1385,8 @@ PLAN_NOTES = {
     "revert": [
         "the freeze is untouched: set MIA_ASSAF_OS_FREEZE=false only after the Script is LIVE "
         "again",
+        "the drain of this freeze is void once it is lifted: an existing drain.json is set aside "
+        "(renamed drain-superseded-<UTC>.json), so a retry redoes T2",
     ],
 }
 
@@ -1387,8 +1395,9 @@ def cmd_freeze_plan(ctx: Context, *, phase: str) -> Result:
     """The exact ``mia-env`` keys to flip for a phase, then ``mia settings``. Prints, and never
     touches Secret Manager or the ledger. A phase that follows another refuses to print until the
     settings the job reads show that the earlier one was applied. The one thing it changes is the
-    evidence of an earlier freeze: ``--phase drain`` starts a freeze, so it sets an existing
-    ``drain.json`` aside (each freeze starts a new drain) and refuses if it cannot.
+    evidence of a freeze: ``--phase drain`` starts a freeze and ``--phase revert`` ends one, so
+    each sets an existing ``drain.json`` aside (a drain belongs to one freeze) and refuses if it
+    cannot.
 
     Every phase reads the ledger for the epoch (E29: the drain plan names it, since the ledger keys
     are set at T1). The drain phase needs ``core=shadow``: a freeze only starts a cutover that has
@@ -1411,6 +1420,12 @@ def cmd_freeze_plan(ctx: Context, *, phase: str) -> Result:
             # is being restored is nobody's way back; a shadow ledger (never activated, or re-armed)
             # owns no data, so the settings may return to Sheets.
             raise Refusal("authority_state_invalid")
+        if phase == "revert":
+            # The exit from every aborted window ends the freeze, so it voids the drain of that
+            # freeze too: once the freeze is lifted the owner can make OS-screen proposals that no
+            # card and no check shows. Without this the 2 h age bound is the only thing between an
+            # old drain and the next fence (V2-31b review 2).
+            ctx.deps.evidence.set_aside(DRAIN, ctx.now)
         if phase in ("switch", "mirror") and settings.assaf_os_freeze is not True:
             raise Refusal("freeze_off")
         if phase == "switch" and not (

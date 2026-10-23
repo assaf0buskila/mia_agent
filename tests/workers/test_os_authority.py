@@ -1115,10 +1115,44 @@ def test_freeze_plan_drain_sets_the_old_drain_aside_so_each_freeze_starts_a_new_
     assert kept[0] == "drain-superseded-" + cli.EvidenceStore.aside_stamp(at(hours=-9)) + ".json"
     again = world.run("freeze-plan")  # nothing left to set aside
     assert again.code == 0 and superseded(world) == kept
-    # Only the drain phase starts a freeze: the other phases leave a drain alone.
+    # A phase that starts or ends a freeze voids its drain (V2-31b review 2: the drain phase, and
+    # the revert phase, the documented exit from every aborted window). A refused plan voids none.
     world.put(cli.DRAIN, {"v": 1})
-    assert world.run("freeze-plan", "--phase", "revert").code == 0
+    assert codes(world.run("freeze-plan", "--phase", "switch")) == ["authority_state_invalid"]
     assert (world.dir / cli.DRAIN).exists() and superseded(world) == kept
+    assert world.run("freeze-plan", "--phase", "revert").code == 0
+    assert not (world.dir / cli.DRAIN).exists()
+    after_revert = superseded(world)
+    assert len(after_revert) == 2 and set(kept) < set(after_revert), "none overwritten"
+    assert json.loads((world.dir / sorted(set(after_revert) - set(kept))[0]).read_text()) == {
+        "v": 1}
+
+
+def test_an_aborted_window_closed_by_the_revert_plan_cannot_lend_its_drain(any_world):
+    """V2-31b review 2: drain 10:00, revert 10:10, an OS proposal 10:20, the keys set by hand at
+    10:30 WITHOUT the drain phase, fence 10:40. The 2 h bound would pass (40 minutes), so the revert
+    plan itself must have voided the drain."""
+    world = started(any_world)
+    base = at(hours=-3)  # 10:00
+
+    def clock(minutes: int) -> None:
+        world.clock[0] = base + timedelta(minutes=minutes)
+
+    assert drain_at(world, -3).code == 0  # 10:00 T1/T2, then the window is aborted
+    clock(10)
+    revert = world.run("freeze-plan", "--phase", "revert")  # 10:10 the documented exit
+    assert revert.code == 0 and not (world.dir / cli.DRAIN).exists()
+    # 10:20: an OS-screen proposal (no card). 10:30: the keys are set by hand, with no drain phase.
+    clock(40)
+    run = fence_at(world, -3 + 40 / 60)  # 10:40: the Script is fenced and probed
+    assert run.code == 1 and codes(run) == ["sheets_pending_proposals"]
+    assert hard(run) == {"sheets_pending_proposals": "no_drain_evidence"}
+    sign_capture(world, -2, -1.9)
+    refused = activate_now(world)
+    assert refused.code == 1 and codes(refused) == ["sheets_pending_proposals"]
+    assert failing(refused) == {"sheets_pending_proposals": "no_drain_evidence"}
+    assert world.state().states["core"] == "shadow"
+    assert not (world.dir / cli.ACTIVATION).exists()
 
 
 def test_freeze_plan_drain_works_before_any_evidence_directory_exists(world):
