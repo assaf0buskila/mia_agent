@@ -1,0 +1,14 @@
+{
+  "api_version": "assaf-os.v2",
+  "authority_epoch": 1,
+  "observed_version": 1,
+  "proposal": null,
+  "reason_codes": [
+    "proposal_request_unknown"
+  ],
+  "receipt": null,
+  "request_id": "00000000-0000-4000-8000-000000009998",
+  "source": "postgresql",
+  "status": "unknown",
+  "workspace_id": "test"
+}

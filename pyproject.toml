@@ -21,6 +21,9 @@ mia-telegram-webhook = "app.workers.register_telegram_webhook:main"
 mia-wipe-data = "app.workers.wipe_data:main"
 mia-sheets-maintain = "app.workers.maintain_sheets:main"
 mia-mark-test-activities = "app.workers.mark_test_activities:main"
+os-authority = "app.workers.os_authority:main"
+os-verifier = "app.workers.os_verifier:main"
+os-retention = "app.workers.os_retention:main"
 
 [dependency-groups]
 dev = [

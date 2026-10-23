@@ -60,6 +60,59 @@ services:
     env_file: [/etc/mia/os-ledger-migrate.env, /etc/mia/runtime.env]
     restart: "no"
 
+  # V2-31: the privileged Assaf OS jobs. Every one is profile-off (the profile carries the job's
+  # name), runs only when `mia os-authority` or `mia os-job` starts it, is never a dependency of
+  # `app`, and reads its own job-only env file. The app service must stay the LAST service here.
+  os-authority:
+    # The authority fence and the cutover (section 16). It needs the privileged ledger DSN (the
+    # same root-owned file `mia os-ledger` uses, checked to carry that one key), the demoted MAIN
+    # DSN and the ledger runtime DSN (runtime.env, which wins), and the Assaf OS settings
+    # (settings.env: the freeze, the backend, the epoch, the HMAC secret, the pepper).
+    image: mia:${MIA_TAG:?MIA_TAG is required}
+    profiles: [os-authority]
+    network_mode: host
+    entrypoint: ["os-authority"]
+    env_file: [/etc/mia/settings.env, /etc/mia/os-ledger-migrate.env, /etc/mia/runtime.env]
+    volumes:
+      # The evidence directory (drain, preflight and activation written by the job; backup, drill,
+      # frontend, journal and manifest placed by the operator). Owned by the job's user.
+      - /var/lib/mia/os-authority:/var/lib/mia/os-authority
+    restart: "no"
+
+  os-import:
+    # The owner's xlsx capture into the ledger (V2-30, phase by phase). scripts/ is not in the
+    # image (the wheel ships `app` only), so the deployed tag's scripts are mounted read-only, as
+    # `mia os-provision` mounts ops/assaf-os. It runs as the ledger RUNTIME role: no privileged DSN.
+    image: mia:${MIA_TAG:?MIA_TAG is required}
+    profiles: [os-import]
+    network_mode: host
+    entrypoint: ["python", "/app/scripts/os_import.py"]
+    env_file: [/etc/mia/settings.env, /etc/mia/runtime.env]
+    volumes:
+      - /opt/mia/src/${MIA_TAG:?MIA_TAG is required}/scripts:/app/scripts:ro
+      - /var/lib/mia/os-import:/var/lib/mia/os-import:ro
+    restart: "no"
+
+  os-verifier:
+    # V2-18: recompute the summaries in full and flag drift. Ledger runtime role only.
+    image: mia:${MIA_TAG:?MIA_TAG is required}
+    profiles: [os-verifier]
+    network_mode: host
+    entrypoint: ["os-verifier"]
+    env_file: [/etc/mia/settings.env, /etc/mia/runtime.env]
+    restart: "no"
+
+  os-retention:
+    # V2-26: `expire_due` as the runtime role, then the purge and audit deletes as the retention
+    # role. Its DSN, MIA_OS_LEDGER_RETENTION_DATABASE_URL, is in this service's job-only file and
+    # nowhere else: not in mia-env, not in runtime.env (E8). `mia os-provision retention` creates it.
+    image: mia:${MIA_TAG:?MIA_TAG is required}
+    profiles: [os-retention]
+    network_mode: host
+    entrypoint: ["os-retention"]
+    env_file: [/etc/mia/settings.env, /etc/mia/runtime.env, /etc/mia/os-retention.env]
+    restart: "no"
+
   app:
     image: mia:${MIA_TAG:?MIA_TAG is required}
     network_mode: host

@@ -9,7 +9,10 @@ claim that cannot be blindly retried.
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
+import logging
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -30,10 +33,14 @@ from app.domain.approvals import (
     new_approval_id,
 )
 from app.integrations.telegram_format import esc
+from app.services.os_ledger import api as ledger_api
 
 ACTION_OWNER_EXTERNAL_WRITE = "owner_external_write"
 RESOURCE_OWNER_PROPOSAL = "owner_proposal"
 MAX_OWNER_ACTION_BYTES = 16 * 1024
+# V2-19's trusted-context constructors, loaded lazily: a deployment without them fails closed.
+AUTHORIZE_MODULE = "app.services.os_ledger.authorize"
+_LOG = logging.getLogger("mia.owner_actions")
 
 
 @dataclass(frozen=True)
@@ -66,6 +73,46 @@ class OwnerActionTerminal(RuntimeError):
     def __init__(self, status: str):
         self.status = status
         super().__init__(status)
+
+
+class OwnerActionNotStarted(RuntimeError):
+    """The decision was refused before anything was dispatched (section 5.2 ``not_started``).
+
+    Raised only on ``WriteDispatch.not_started`` proof, e.g. by the V2-17 Sheets fence, so the
+    claim is safe to release: a later tap decides afresh instead of parking a sticky unknown.
+    """
+
+    def __init__(self, reason: str):
+        self.reason = reason
+        super().__init__(reason)
+
+
+# The V2-17 Sheets fence's own refusals (assaf_os.AssafOsPort._fence), raised before dispatch.
+_FENCE_REFUSALS = frozenset({"authority_moved", "ledger_unavailable"})
+
+
+def _decide_sheets_card(make_port, operation: str, proposal_id: str, request_id: str):
+    """One Telegram decision on an Apps Script card.
+
+    Only a fence refusal that the dispatch counter proves came before dispatch is
+    ``OwnerActionNotStarted``. Any other failure is left to the caller as uncertain.
+    """
+    from contextlib import nullcontext
+
+    from app.core.owner_write import WriteDispatch, current_write_dispatch
+    from app.services.assaf_os import AssafOsError, DecisionRequest
+
+    outer = current_write_dispatch()
+    context = WriteDispatch(operation).activate() if outer is None else nullcontext(outer)
+    with context as dispatch:
+        try:
+            return make_port().decide(
+                operation, proposal_id, DecisionRequest(request_id=request_id)
+            )
+        except AssafOsError as exc:
+            if exc.code in _FENCE_REFUSALS and dispatch.not_started:
+                raise OwnerActionNotStarted(exc.code) from None
+            raise
 
 
 def typed_composio_binding(settings, toolkit: str, *, port: object | None = None) -> dict[str, Any]:
@@ -341,6 +388,11 @@ def execute_owner_action(
         # write committed, so this execution claim is safe to retire.
         store.release_operation(scope="approval", key=operation_key)
         return OwnerActionExecution(exc.status)
+    except OwnerActionNotStarted as exc:
+        # Proven never dispatched (section 5.2): retire the claim, never pending_review.
+        store.release_operation(scope="approval", key=operation_key)
+        _LOG.info("owner_actions op=execute outcome=not_started reason=%s", exc.reason)
+        return OwnerActionExecution("not_started")
     except Exception:  # provider may have applied the write before transport failed
         store.mark_provider_write_pending_review(scope="approval", key=operation_key)
         return OwnerActionExecution("unknown")
@@ -361,6 +413,398 @@ def execute_owner_action(
     # stored `row.result` above stays raw -- that is an internal record, never
     # rendered as HTML.
     return OwnerActionExecution("executed", esc(str(text)))
+
+
+# ---------------------------------------------------------------------------------------------
+# V2-28: Telegram approve/reject cards decided on the ledger (V2_PG_CONTRACTS.md section 13).
+#
+# 1. The card's parameters JSON carries the proposal's decision UUIDs (36 chars): ``request_id``
+#    is its approval id and ``rejection_request_id`` its rejection id. ApprovalRow.approval_id
+#    (String(32)) stays the Telegram callback token and never holds a ledger id.
+# 2. The ApprovalRow compare-and-set (decide_owner_action) is committed before the ledger call.
+# 3. Then ``ledger.decide`` runs with V2-19's ``from_telegram_decision`` context.
+# 4. Recovery is ``ledger.receipt(decision_id)``: a ledger card never parks in a sticky
+#    ``unknown``. A new decision id is never minted; a later owner callback reads the receipt and,
+#    only when none exists, decides again with the same stored id (the ledger is exactly-once on
+#    that id). Within one call nothing is re-sent: after an unknown commit, recovery is a read.
+
+_LEDGER_ALREADY_EXECUTED_TEXT = "הפעולה כבר בוצעה ואושרה לפי הקבלה השמורה."
+_LEDGER_REJECTED_TEXT = "ההצעה ב-Assaf OS נדחתה."
+_LEDGER_UNKNOWN_TEXT = (
+    "תוצאת ההחלטה אינה ודאית. לא נשלחה החלטה חדשה; הבדיקה הבאה תקרא את הקבלה לפי אותו מזהה."
+)
+_LEDGER_UNAVAILABLE_TEXT = "Assaf OS אינו זמין כרגע. לא נכתבה רשומה ואפשר לנסות שוב."
+_LEDGER_REJECT_UNAVAILABLE_TEXT = (
+    "הדחייה נשמרה כאן, אך Assaf OS אינו זמין כרגע. ההצעה נשארת שם ממתינה עד שתפוג."
+)
+# When no clean receipt read preceded the refusal, an earlier tap may already have committed:
+# say only that nothing new was sent (review r1, I2).
+_LEDGER_UNAVAILABLE_NEUTRAL_TEXT = "Assaf OS אינו זמין כרגע. לא נשלחה החלטה חדשה; אפשר לנסות שוב."
+_LEDGER_REJECT_UNAVAILABLE_NEUTRAL_TEXT = (
+    "הדחייה נשמרה כאן, אך Assaf OS אינו זמין כרגע ולא נשלחה דחייה חדשה. אפשר לנסות שוב."
+)
+_SHEETS_CARD_REJECT_TEXT = "הדחייה נשמרה. ההצעה מהגיליון הישן לא תיכתב ותפוג מעצמה."
+_LEDGER_TERMINAL = frozenset({"rejected", "expired", "target_changed", "committed"})
+
+
+def _ledger_log(op: str, outcome: str, reason: str, started: float) -> None:
+    # I7: reason codes and a duration only, never an id, a body or a record.
+    _LOG.info(
+        "owner_actions op=%s outcome=%s reason=%s ms=%d",
+        op,
+        outcome,
+        reason,
+        int((time.monotonic() - started) * 1000),
+    )
+
+
+def is_ledger_owner_action(envelope: Mapping[str, Any] | None) -> bool:
+    """True for an ``assaf_os.approve`` card whose proposal lives on the ledger (a v2 body)."""
+    if not isinstance(envelope, Mapping) or envelope.get("kind") != "assaf_os.approve":
+        return False
+    target = envelope.get("target")
+    proposal = target.get("proposal") if isinstance(target, Mapping) else None
+    from app.domain.owner.proposal_cards import is_ledger_proposal
+
+    return is_ledger_proposal(proposal)
+
+
+def load_ledger_authorize() -> Any:
+    """V2-19's ``authorize`` module. Missing: ``ledger_unavailable`` before any write."""
+    try:
+        return importlib.import_module(AUTHORIZE_MODULE)
+    except ImportError:
+        raise ledger_api.LedgerError("ledger_unavailable", reason="authorize_missing") from None
+
+
+def _ledger_card_binding(envelope: Mapping[str, Any]) -> tuple[str, str, str, str] | None:
+    """``(proposal_id, approval_uuid, rejection_uuid, creation_request_id)`` or None."""
+    parameters = envelope.get("parameters")
+    target = envelope.get("target")
+    if not isinstance(parameters, Mapping) or not isinstance(target, Mapping):
+        return None
+    proposal = target.get("proposal")
+    if set(parameters) != {"proposal_id", "request_id", "rejection_request_id"} or not isinstance(
+        proposal, Mapping
+    ):
+        return None
+    try:
+        approval_id = ledger_api.canonical_uuid(parameters["request_id"])
+        rejection_id = ledger_api.canonical_uuid(parameters["rejection_request_id"])
+        creation_id = ledger_api.canonical_uuid(proposal.get("request_id"))
+    except ledger_api.LedgerError:
+        return None
+    proposal_id = parameters["proposal_id"]
+    if (
+        not isinstance(proposal_id, str)
+        or not proposal_id
+        or approval_id == rejection_id
+        or proposal.get("kind") != "proposal"
+        or proposal.get("proposal_id") != proposal_id
+        or proposal.get("approval_request_id") != approval_id
+        or proposal.get("rejection_request_id") != rejection_id
+    ):
+        return None
+    return proposal_id, approval_id, rejection_id, creation_id
+
+
+def _record_ledger_outcome(
+    store, row, *, decision: str, proposal_id: str, status: str
+) -> OwnerActionExecution:
+    """Map one receipt status to the owner outcome and record it on the ApprovalRow."""
+    moment = datetime.now(UTC).isoformat()
+    if decision == "approve" and status == "committed":
+        row.executed_at = moment
+        row.execution_operation_id = f"{row.resource_id}:execute"[:64]
+        row.result = "committed"
+        store.session.flush()
+        return OwnerActionExecution("executed", esc(f"Assaf OS committed: {proposal_id}"))
+    if decision == "reject" and status == "rejected":
+        row.executed_at = moment
+        row.execution_operation_id = f"{row.resource_id}:reject"[:64]
+        row.result = "rejected"
+        store.session.flush()
+        return OwnerActionExecution("executed", _LEDGER_REJECTED_TEXT)
+    terminal = status if status in _LEDGER_TERMINAL else "target_changed"
+    row.result = f"terminal:{terminal}"[:255]
+    store.session.flush()
+    return OwnerActionExecution(terminal)
+
+
+def _ledger_receipt_outcome(
+    store,
+    row,
+    result: Any,
+    *,
+    decision: str,
+    proposal_id: str,
+    decision_ids: tuple[str, str],
+) -> OwnerActionExecution | None:
+    """The outcome a found receipt proves, or None when no receipt exists."""
+    if result is None or not getattr(result, "found", False):
+        return None
+    receipt = result.receipt
+    if (
+        receipt is None
+        or receipt.proposal_id != proposal_id
+        or receipt.request_id not in decision_ids
+    ):
+        # A receipt for another proposal under our id would be an integrity failure: say so.
+        return OwnerActionExecution("unknown", _LEDGER_UNKNOWN_TEXT)
+    return _record_ledger_outcome(
+        store, row, decision=decision, proposal_id=proposal_id, status=receipt.status
+    )
+
+
+def _ledger_refusal(
+    exc: ledger_api.LedgerError, *, decision: str, no_prior_receipt: bool = False
+) -> OwnerActionExecution:
+    """A definite refusal of this call; a later callback may try again.
+
+    ``no_prior_receipt`` is True only after this call's receipt reads succeeded and found
+    nothing. Only then may the text say that no record was written.
+    """
+    if exc.code == "kill_switch":
+        return OwnerActionExecution("policy_denied")
+    if exc.code in {"decision_request_mismatch", "invalid_request_id", "validation_error"}:
+        return OwnerActionExecution("unbound")
+    if no_prior_receipt:
+        text = (
+            _LEDGER_UNAVAILABLE_TEXT if decision == "approve" else _LEDGER_REJECT_UNAVAILABLE_TEXT
+        )
+    else:
+        text = (
+            _LEDGER_UNAVAILABLE_NEUTRAL_TEXT
+            if decision == "approve"
+            else _LEDGER_REJECT_UNAVAILABLE_NEUTRAL_TEXT
+        )
+    return OwnerActionExecution("not_connected", text)
+
+
+def _ledger_target_matches(
+    store, ledger, ctx, envelope: Mapping[str, Any], *, proposal_id: str, creation_id: str
+) -> bool:
+    """``current_target``: the byte-stable proposal view, plus the website-lead source."""
+    from app.domain.owner.proposal_cards import ledger_proposal_body, proposal_view_bytes
+
+    target = envelope["target"]
+    current = ledger.creation_request(ctx, creation_id)
+    if not current.found or current.proposal is None:
+        return False
+    if current.proposal.proposal_id != proposal_id:
+        return False
+    try:
+        fresh = proposal_view_bytes(ledger_proposal_body(current.proposal))
+        stored = proposal_view_bytes(target["proposal"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    if fresh != stored:
+        return False
+    binding = target.get("source_binding")
+    if isinstance(binding, Mapping):
+        from app.services.assaf_os_leads import current_source_binding
+
+        try:
+            now_bound = current_source_binding(store, binding)
+        except (KeyError, TypeError, ValueError):
+            return False
+        if _canonical(now_bound) != _canonical(dict(binding)):
+            return False
+    return True
+
+
+def execute_ledger_owner_decision(
+    store,
+    *,
+    settings,
+    principal: Principal,
+    proposal_id: str,
+    decision: str,
+) -> OwnerActionExecution:
+    """Decide one ledger card from Telegram, exactly once, after the ApprovalRow CAS.
+
+    ``decision`` is ``approve`` or ``reject``. The ApprovalRow must already carry the owner's
+    matching decision. A receipt for either of the card's decision ids is the answer; otherwise
+    an approve re-validates the exact target, the CAS is committed, and the ledger decides with
+    the stored UUID under the TELEGRAM_APPROVAL context. The Mia (model) context only reads.
+    """
+    started = time.monotonic()
+    op = f"ledger_{decision}"
+    if decision not in {"approve", "reject"}:
+        return OwnerActionExecution("unbound")
+    if not _valid_owner(principal) or principal.actor_id not in (
+        settings.telegram_owner_user_id_set()
+    ):
+        return OwnerActionExecution("unauthorized")
+    row = store.get_approval_by_resource(
+        RESOURCE_OWNER_PROPOSAL, proposal_id, ACTION_OWNER_EXTERNAL_WRITE
+    )
+    envelope = read_owner_action(row)
+    if (
+        row is None
+        or envelope is None
+        or row.actor_id != principal.actor_id
+        or not is_ledger_owner_action(envelope)
+    ):
+        return OwnerActionExecution("unbound")
+    binding = _ledger_card_binding(envelope)
+    if binding is None:
+        _ledger_log(op, "refused", "card_binding_invalid", started)
+        return OwnerActionExecution("unbound")
+    # ``proposal_id`` names the owner action (op_...); the ledger has its own id.
+    ledger_proposal_id, approval_id, rejection_id, creation_id = binding
+    wanted = DECISION_APPROVED if decision == "approve" else DECISION_REJECTED
+    if row.decision != wanted:
+        return OwnerActionExecution("not_approved" if decision == "approve" else "unbound")
+    if str(row.executed_at or "").strip():
+        return OwnerActionExecution(
+            "already_handled", _LEDGER_ALREADY_EXECUTED_TEXT if decision == "approve" else ""
+        )
+    if not getattr(settings, "assaf_os_enabled", False) or settings.kill_switch:
+        _ledger_log(op, "refused", "policy_denied", started)
+        return OwnerActionExecution("policy_denied")
+    if getattr(settings, "assaf_os_backend", "sheets") != "postgres":
+        _ledger_log(op, "refused", "backend_not_postgres", started)
+        return _ledger_refusal(ledger_api.LedgerError("backend_not_postgres"), decision=decision)
+    decision_id = approval_id if decision == "approve" else rejection_id
+    decision_ids = (approval_id, rejection_id)
+    try:
+        ledger = ledger_api.build_ledger(settings)
+        authorize_module = load_ledger_authorize()
+        read_ctx = authorize_module.from_mia_tool(principal, settings)
+        # Recovery is a read: a stored receipt for either decision id is the whole answer.
+        for request_id in (decision_id, rejection_id if decision == "approve" else approval_id):
+            found = _ledger_receipt_outcome(
+                store,
+                row,
+                ledger.receipt(read_ctx, request_id),
+                decision=decision,
+                proposal_id=ledger_proposal_id,
+                decision_ids=decision_ids,
+            )
+            if found is not None:
+                _ledger_log(op, found.status, "receipt_found", started)
+                return found
+        if str(row.result or "").startswith("terminal:"):
+            # A locally refused card stays refused; only a receipt can say otherwise.
+            return OwnerActionExecution(str(row.result).split(":", 1)[1] or "target_changed")
+        if decision == "approve" and not _ledger_target_matches(
+            store,
+            ledger,
+            read_ctx,
+            envelope,
+            proposal_id=ledger_proposal_id,
+            creation_id=creation_id,
+        ):
+            _ledger_log(op, "target_changed", "proposal_view_changed", started)
+            return _record_ledger_outcome(
+                store,
+                row,
+                decision=decision,
+                proposal_id=ledger_proposal_id,
+                status="target_changed",
+            )
+    except ledger_api.LedgerError as exc:
+        _ledger_log(op, "refused", exc.reason or exc.code, started)
+        return _ledger_refusal(exc, decision=decision)
+    # The ApprovalRow CAS is durable before the ledger ever sees the decision.
+    store.session.commit()
+    try:
+        decide_ctx = authorize_module.from_telegram_decision(row, settings)
+        result = ledger.decide(decide_ctx, ledger_proposal_id, decision_id, decision)
+    except ledger_api.LedgerError as exc:
+        if exc.code == "already_decided" or exc.write_outcome == "unknown":
+            # The other decision won, or the COMMIT outcome is unknown: read, never re-send.
+            if exc.code == "already_decided":
+                read_id = rejection_id if decision == "approve" else approval_id
+            else:
+                read_id = decision_id
+            return _ledger_recover(
+                store,
+                row,
+                ledger,
+                read_ctx,
+                read_id,
+                decision=decision,
+                proposal_id=ledger_proposal_id,
+                decision_ids=decision_ids,
+                op=op,
+                reason=exc.code,
+                started=started,
+            )
+        if exc.code == "proposal_not_found":
+            _ledger_log(op, "target_changed", exc.code, started)
+            return _record_ledger_outcome(
+                store,
+                row,
+                decision=decision,
+                proposal_id=ledger_proposal_id,
+                status="target_changed",
+            )
+        _ledger_log(op, "refused", exc.reason or exc.code, started)
+        # This call's receipt reads succeeded and found nothing, and the decide was refused
+        # definitely, so "no record was written" is provable here.
+        return _ledger_refusal(exc, decision=decision, no_prior_receipt=True)
+    except Exception:  # noqa: BLE001 - an unclassified failure is uncertain: recover by reading
+        return _ledger_recover(
+            store,
+            row,
+            ledger,
+            read_ctx,
+            decision_id,
+            decision=decision,
+            proposal_id=ledger_proposal_id,
+            decision_ids=decision_ids,
+            op=op,
+            reason="decide_failed",
+            started=started,
+        )
+    outcome = _ledger_receipt_outcome(
+        store,
+        row,
+        result,
+        decision=decision,
+        proposal_id=ledger_proposal_id,
+        decision_ids=decision_ids,
+    )
+    if outcome is None:
+        _ledger_log(op, "unknown", "receipt_missing", started)
+        return OwnerActionExecution("unknown", _LEDGER_UNKNOWN_TEXT)
+    _ledger_log(op, outcome.status, "decided", started)
+    return outcome
+
+
+def _ledger_recover(
+    store,
+    row,
+    ledger,
+    read_ctx,
+    request_id: str,
+    *,
+    decision: str,
+    proposal_id: str,
+    decision_ids: tuple[str, str],
+    op: str,
+    reason: str,
+    started: float,
+) -> OwnerActionExecution:
+    """One receipt read after an uncertain or lost decide. Nothing is re-sent here."""
+    try:
+        found = _ledger_receipt_outcome(
+            store,
+            row,
+            ledger.receipt(read_ctx, request_id),
+            decision=decision,
+            proposal_id=proposal_id,
+            decision_ids=decision_ids,
+        )
+    except Exception:  # noqa: BLE001 - the read failed too: the next callback reads again
+        found = None
+    if found is None:
+        _ledger_log(op, "unknown", reason, started)
+        return OwnerActionExecution("unknown", _LEDGER_UNKNOWN_TEXT)
+    _ledger_log(op, found.status, "recovered_" + reason, started)
+    return found
 
 
 def execute_approved_owner_action_with_adapters(
@@ -418,6 +862,15 @@ def execute_approved_owner_action_with_adapters(
     envelope = read_owner_action(row)
     if envelope is None:
         return OwnerActionExecution("unbound")
+    if is_ledger_owner_action(envelope):
+        # V2-28: a ledger card is decided on the ledger and recovered by its receipt.
+        return execute_ledger_owner_decision(
+            store,
+            settings=settings,
+            principal=principal,
+            proposal_id=proposal_id,
+            decision="approve",
+        )
 
     # Finance actions use the same durable approval/claim engine, but dispatch
     # before constructing any unrelated Composio, CRM or Google provider.
@@ -434,7 +887,8 @@ def execute_approved_owner_action_with_adapters(
         )
 
     if envelope["kind"] == "assaf_os.approve":
-        from app.services.assaf_os import AssafOsError, AssafOsPort, DecisionRequest
+        from app.services.assaf_os import AssafOsError
+        from app.services.os_backend import get_os_backend
 
         def schema(kind, values):
             return (
@@ -453,17 +907,23 @@ def execute_approved_owner_action_with_adapters(
             )
 
         def connected(kind):
+            if getattr(settings, "assaf_os_backend", "sheets") == "postgres":
+                # V2-28: once the ledger holds the authority an Apps Script proposal is never
+                # decided; the card ends as a definite no-write.
+                return False
             try:
-                AssafOsPort(settings, principal.actor_id, actor_source="TELEGRAM_APPROVAL")
+                get_os_backend(settings, principal.actor_id, actor="TELEGRAM_APPROVAL")
                 return kind == "assaf_os.approve"
-            except AssafOsError:
+            except (AssafOsError, ledger_api.LedgerError) as exc:
+                # A LedgerError is handled here explicitly (V2-17 review): no card is connected.
+                _LOG.info("owner_actions op=connect outcome=refused reason=%s", exc.code)
                 return False
 
         def target(kind, values):
             del kind
             # TELEGRAM_APPROVAL is intentionally valid only for the final decision.
             # The server performs the pending-target read under the non-deciding MIA source.
-            port = AssafOsPort(settings, principal.actor_id, actor_source="MIA")
+            port = get_os_backend(settings, principal.actor_id, actor="MIA")
             current = port.proposal(str(values["proposal_id"]))
             result = {
                 "proposal": current,
@@ -496,11 +956,13 @@ def execute_approved_owner_action_with_adapters(
 
         def run(kind, values):
             del kind
-            port = AssafOsPort(settings, principal.actor_id, actor_source="TELEGRAM_APPROVAL")
-            receipt = port.decide(
+            receipt = _decide_sheets_card(
+                lambda: get_os_backend(
+                    settings, principal.actor_id, actor="TELEGRAM_APPROVAL"
+                ),
                 "approve",
                 str(values["proposal_id"]),
-                DecisionRequest(request_id=str(values["request_id"])),
+                str(values["request_id"]),
             )
             status = receipt.get("status")
             if status != "committed":
@@ -1033,20 +1495,36 @@ def reject_assaf_os_owner_action(
         or row.actor_id != principal.actor_id
     ):
         return OwnerActionExecution("unbound")
+    if is_ledger_owner_action(envelope):
+        return execute_ledger_owner_decision(
+            store,
+            settings=settings,
+            principal=principal,
+            proposal_id=proposal_id,
+            decision="reject",
+        )
+    if getattr(settings, "assaf_os_backend", "sheets") == "postgres":
+        # V2-28: an Apps Script proposal is never decided once the ledger holds the authority.
+        # The rejection stays local and the remote proposal expires without a write.
+        return OwnerActionExecution("not_connected", _SHEETS_CARD_REJECT_TEXT)
     parameters = envelope["parameters"]
     operation_key = f"{proposal_id}:reject"
     if not store.claim_provider_write(scope="approval", key=operation_key):
         return OwnerActionExecution("already_handled")
     try:
-        from app.services.assaf_os import AssafOsPort, DecisionRequest
+        from app.services.os_backend import get_os_backend
 
-        result = AssafOsPort(
-            settings, principal.actor_id, actor_source="TELEGRAM_APPROVAL"
-        ).decide(
+        result = _decide_sheets_card(
+            lambda: get_os_backend(settings, principal.actor_id, actor="TELEGRAM_APPROVAL"),
             "reject",
             str(parameters["proposal_id"]),
-            DecisionRequest(request_id=str(parameters["rejection_request_id"])),
+            str(parameters["rejection_request_id"]),
         )
+    except OwnerActionNotStarted as exc:
+        # Proven never dispatched (section 5.2): retire the claim, never pending_review.
+        store.release_operation(scope="approval", key=operation_key)
+        _LOG.info("owner_actions op=reject outcome=not_started reason=%s", exc.reason)
+        return OwnerActionExecution("not_started")
     except Exception:  # remote may have accepted before transport failed
         store.mark_provider_write_pending_review(scope="approval", key=operation_key)
         return OwnerActionExecution("unknown")
