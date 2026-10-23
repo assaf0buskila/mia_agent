@@ -93,7 +93,8 @@ their redaction before provisioning; they are outside this helper's logging cont
    ```bash
    H=/opt/mia/src/<approved-tag>/ops/gcp/vm/pg-hba-harden.sh
    sudo bash "$H" --check      # exit 1 until applied: expect hardened=false, apply_ready=true,
-                               # dsn_unverified=none (anything else: fix that DSN first, see below)
+                               # dsn_unverified=none (anything else: fix that DSN first, see below);
+                               # dsn_keys_checked= lists every DSN key it will log in with afterwards
    sudo bash "$H" --apply      # expect applied=true hardened=true
    curl --fail --silent --show-error http://127.0.0.1:8000/health/ready
    sudo bash "$H" --check      # expect hardened=true (exit 0)
@@ -151,8 +152,11 @@ superuser. Confirm first, read-only: `sudo docker exec mia-postgres-1 sh -c 'gre
 What `--apply` does, in this order, and nothing else (it never deploys, restarts or fetches settings):
 
 1. Refuses unless every role a live DSN uses has a SCRAM verifier. The fixed list is `mia`, `mia_app` (when
-   present), `assaf_os_session`, `assaf_os_ledger` and `assaf_os_retention`; the users found in the
-   VM-owned DSN files (`runtime.env`, `os-ledger-migrate.env`, `settings.env`) are added. A role that does not
+   present), `assaf_os_session`, `assaf_os_ledger` and `assaf_os_retention`; the users of every
+   `*DATABASE_URL` key in the DSN files (`runtime.env`, `settings.env`, `os-ledger-migrate.env`,
+   `os-retention.env`; V2-10b, E28) are added, including `MIA_OWNER_OS_READ_DATABASE_URL` and
+   `MIA_OWNER_OS_ACTION_DATABASE_URL`. Run `--check` well before the window: a surprise key there blocks
+   `--apply` until it is fixed. A role that does not
    exist yet, or cannot log in (the NOLOGIN `assaf_os_owner`), is not a DSN role. `mia` must exist.
    A live DSN with no password is refused too (`hba_dsn_without_password`), and so is one in a form the
    script cannot parse (`hba_dsn_unverified`: another host, `localhost`, a query string), because its login

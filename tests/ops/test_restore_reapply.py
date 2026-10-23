@@ -600,6 +600,166 @@ def test_a_main_dsn_that_is_not_the_canonical_loopback_one_stops_the_restore(tmp
     assert not result.started and PASSWORD not in result.log + result.out + result.err
 
 
+# --- V2-10b: nothing starts the services on a half-restored database ---------------------------
+#
+# A restore that stops after DROP DATABASE leaves the services down only until another command
+# (`mia deploy`, `settings`, `https enable`, `go-live`) calls start_services. The marker closes
+# that: written before DROP DATABASE, removed only when every post-restore step succeeded.
+
+RESTORE_MARKER = "/etc/mia/restore-incomplete"
+
+ARM_STUB = r"""
+mark() { if [ -e "$MIA_RESTORE_INCOMPLETE" ]; then echo present; else echo absent; fi; }
+log() { printf '%s\n' "$*" >> "$STUB_LOG"; }
+compose() {
+  case "$*" in
+    *"information_schema.tables"*) echo 5 ;;
+    *"DROP DATABASE"*) log "DROP marker=$(mark)" ;;
+    *"pg_restore"*) log "PG_RESTORE marker=$(mark)"; cat > /dev/null ;;
+    *"pg_dump"*) log "SAFETY_DUMP marker=$(mark)"; echo dump ;;
+    *) : ;;
+  esac
+}
+wait_healthy() { :; }
+post_restore_reapply() {
+  log "POST marker=$(mark)"
+  if [ "$STUB_FAIL" = post ]; then
+    echo "mia: restore stopped, the services stay down: reason=stub" >&2
+    exit 1
+  fi
+}
+start_services() { log "START marker=$(mark)"; }
+"""
+
+
+def run_restore_arm(tmp_path: Path, *, fail: str = "", dump: bool = True) -> SimpleNamespace:
+    """The real restore arm of `mia`, with compose, the post-step and start_services stubbed."""
+    paths = vm_paths(tmp_path)
+    (tmp_path / "backups").mkdir()
+    (tmp_path / "tag.env").write_text("MIA_TAG=testtag\n")
+    dump_file = tmp_path / "mia.dump"
+    if dump:
+        dump_file.write_bytes(b"PGDMP")
+    marker, log = tmp_path / "restore-incomplete", tmp_path / "arm.log"
+    script = "\n".join([
+        _localize(_prelude(), paths),
+        ARM_STUB,
+        f"set -- {_posix(dump_file)}",
+        _localize(_arm("restore"), paths),
+    ])
+    done = _run_bash(script, tmp_path, {
+        "STUB_LOG": _posix(log),
+        "STUB_FAIL": fail,
+        "MIA_RESTORE_INCOMPLETE": _posix(marker),
+        "MIA_JOBS_PAUSED": _posix(tmp_path / "jobs-paused"),
+        "MIA_HTTPS_MARKER": _posix(tmp_path / "no-https"),
+    })
+    return SimpleNamespace(
+        rc=done.returncode,
+        err=done.stderr,
+        lines=log.read_text().splitlines() if log.exists() else [],
+        marker=marker.exists(),
+    )
+
+
+def run_start_services(tmp_path: Path, *, marker: bool) -> SimpleNamespace:
+    path, log = tmp_path / "restore-incomplete", tmp_path / "svc.log"
+    if marker:
+        path.write_text("")
+    script = "\n".join([
+        _prelude(),
+        r"""compose() { printf 'compose %s\n' "$*" >> "$STUB_LOG"; }
+wait_healthy() { printf 'wait %s\n' "$*" >> "$STUB_LOG"; }
+start_services""",
+    ])
+    done = _run_bash(script, tmp_path, {
+        "STUB_LOG": _posix(log),
+        "MIA_RESTORE_INCOMPLETE": _posix(path),
+        "MIA_HTTPS_MARKER": _posix(tmp_path / "no-https"),
+        "MIA_JOBS_PAUSED": _posix(tmp_path / "no-jobs-marker"),
+    })
+    return SimpleNamespace(
+        rc=done.returncode, err=done.stderr,
+        lines=log.read_text().splitlines() if log.exists() else [],
+    )
+
+
+def test_the_restore_arm_writes_the_marker_before_it_drops_and_removes_it_after_the_repair():
+    code = _code(_arm("restore"))
+    mark = code.index('install -m 600 /dev/null "$restore_incomplete"')
+    drop = code.index("DROP DATABASE")
+    restore = code.index("pg_restore -U mia -d mia")
+    post = code.index("post_restore_reapply")
+    clear = code.index('rm -f "$restore_incomplete"')
+    start = code.index("start_services")
+    assert mark < drop < restore < post < clear < start
+    assert code.count("$restore_incomplete") == 2  # written once, removed once
+    assert f'restore_incomplete="${{MIA_RESTORE_INCOMPLETE:-{RESTORE_MARKER}}}"' in SCRIPT
+
+
+def test_start_services_refuses_while_the_marker_exists_before_it_touches_compose():
+    body = _code(_function("start_services"))
+    refusal = body.index('die "restore_incomplete: run mia restore again"')
+    assert '[ ! -e "$restore_incomplete" ]' in body and refusal < body.index("compose ")
+    # the four other commands that bring the services up all go through that one function
+    for name in ("deploy", "settings", "https", "go-live", "restore"):
+        assert "start_services" in _arm(name), name
+
+
+def test_the_state_lock_refusals_name_the_retry_because_a_backup_dump_holds_the_lock_too():
+    refusals = re.findall(r'flock -n 9 \|\| die "([^"]*)"', SCRIPT)
+    assert len(refusals) == 2  # the shared case, and `os-import`
+    retry = "another Mia operation (or a backup dump) is running; try again in a minute"
+    assert set(refusals) == {retry}
+    assert "another Mia operation is already running" not in SCRIPT
+    # the per-job locks (fd 8) keep their own wording
+    assert SCRIPT.count('flock -n 8 || { echo "mia: $name is already running"; exit 0; }') == 1
+
+
+def test_a_restore_marks_the_database_incomplete_across_the_drop_and_clears_it_only_at_the_end(
+    tmp_path,
+):
+    result = run_restore_arm(tmp_path)
+    assert result.rc == 0, result.err
+    # a failure before the drop (the safety dump) leaves the database intact, so no marker yet
+    assert result.lines == [
+        "SAFETY_DUMP marker=absent",
+        "DROP marker=present",
+        "PG_RESTORE marker=present",
+        "POST marker=present",
+        "START marker=absent",
+    ]
+    assert not result.marker
+
+
+def test_a_post_restore_failure_leaves_the_marker_and_never_starts_the_services(tmp_path):
+    result = run_restore_arm(tmp_path, fail="post")
+    assert result.rc == 1 and "reason=stub" in result.err
+    assert result.lines[-1] == "POST marker=present"
+    assert not any(line.startswith("START") for line in result.lines)
+    assert result.marker  # the next deploy, settings, https or go-live now refuses
+
+
+def test_a_restore_refused_before_it_touches_anything_leaves_no_marker(tmp_path):
+    result = run_restore_arm(tmp_path, dump=False)
+    assert result.rc == 1 and "missing or empty dump" in result.err
+    assert result.lines == [] and not result.marker
+
+
+def test_start_services_refuses_with_the_reason_while_the_marker_exists(tmp_path):
+    result = run_start_services(tmp_path, marker=True)
+    assert result.rc == 1
+    assert "mia: restore_incomplete: run mia restore again" in result.err
+    assert result.lines == []  # compose was never reached
+
+
+def test_start_services_starts_the_services_once_the_marker_is_gone(tmp_path):
+    result = run_start_services(tmp_path, marker=False)
+    assert result.rc == 0, result.err
+    assert result.lines[0] == "compose up -d --remove-orphans postgres migrate app"
+    assert "wait app" in result.lines
+
+
 def test_the_probe_is_a_select_and_an_insert_that_is_rolled_back():
     body = _function("restore_access_probe")
     for fragment in ("SELECT 1 FROM public.", "INSERT INTO public.", "DEFAULT VALUES", "ROLLBACK;"):
@@ -951,6 +1111,8 @@ class Drill:
             "MIA_DATABASE_URL": f"postgresql://mia_app:{PASSWORD}@127.0.0.1:{self.port}/mia",
             "MIA_HTTPS_MARKER": _posix(t / "no-https"),
             "MIA_JOBS_PAUSED": _posix(t / "no-jobs-marker"),
+            # V2-10b: the restore arm writes this before DROP DATABASE, never in the real /etc/mia
+            "MIA_RESTORE_INCOMPLETE": _posix(t / "restore-incomplete"),
         })
         calls = log.read_text().splitlines()
         return SimpleNamespace(
@@ -959,6 +1121,7 @@ class Drill:
             started=any("up -d --remove-orphans postgres migrate app" in c for c in calls),
             env_after=self.runtime_env.read_text(encoding="utf-8"),
             jobs_paused=(t / "no-jobs-marker").exists(),
+            incomplete=(t / "restore-incomplete").exists(),
         )
 
 
@@ -1023,6 +1186,7 @@ def test_drill_a_restore_gives_both_postures_back_and_only_then_starts_the_servi
     dump = drill.dump("source.dump")
     result = drill.restore(dump)
     assert result.rc == 0 and result.finished, result.err + result.out
+    assert not result.incomplete  # removed only after every step passed, right before the start
 
     # the order on the wire: restore, helper, ledger, validator, revoke, probe, then start
     def first(*needles: str) -> int:
@@ -1164,6 +1328,8 @@ def test_drill_a_posture_the_real_validator_rejects_stops_the_restore_and_is_ret
     assert "ledger_provision_refused" in result.err  # the script's one sanitized code
     assert not result.started
     assert result.jobs_paused  # and they stay paused: nothing may touch a half-repaired database
+    # V2-10b: and the database stays marked, so no other command starts the services on it
+    assert result.incomplete
     # the helper ran and stopped before the later steps
     assert not any("read -r PGPASSWORD" in c for c in result.calls)
     assert drill.scalar("assaf_os_auth", "SELECT count(*) FROM owner_os_sessions "
@@ -1177,6 +1343,7 @@ def test_drill_a_posture_the_real_validator_rejects_stops_the_restore_and_is_ret
     retry = drill.restore(clean)
     assert retry.rc == 0 and retry.finished, retry.err + retry.out
     assert "mia: post-restore complete" in retry.out
+    assert not retry.incomplete  # the restore that succeeds is what clears it
 
 
 def test_drill_the_real_probe_catches_a_table_the_validator_never_looks_at(drill):
