@@ -80,6 +80,23 @@ class PgShaped:
             raise api.LedgerError("ledger_integrity_failed", reason=name) from None
 
 
+class CollidesOnce(PgShaped):
+    """The first import transaction fails with ``error`` before it writes; later ones are real."""
+
+    def __init__(self, env, error, log=None):
+        super().__init__(env, log)
+        self.error = error
+
+    @contextmanager
+    def transaction(self, ctx, **kwargs):
+        if not self.calls:
+            self.calls.append(kwargs.get("kind"))
+            self.log.append(("transaction", kwargs.get("kind")))
+            raise self.error
+        with super().transaction(ctx, **kwargs) as tx:
+            yield tx
+
+
 class Broken:
     """A ledger that fails the transaction with one chosen error (nothing is ever written)."""
 
@@ -231,10 +248,35 @@ def test_a_same_epoch_restage_reports_already_staged_and_writes_nothing(
     assert run(cli, shadow, args(path, "--stage")) == 0
     again = capsys.readouterr()
     assert again.out == (
-        "os_import op=stage outcome=ok reason=already_staged rows=6 quarantined=0 issues=0\n")
+        "os_import op=stage outcome=ok reason=already_staged rows=6 quarantined=0 issues=0 "
+        "batch=validated_or_imported\n")
     assert again.err == ""
     assert snapshot(shadow) == before
     assert [b["status"] for b in batches(shadow)] == ["validated"]
+
+
+def test_a_restage_after_the_promote_does_not_claim_the_batch_is_validated(
+    shadow, cli, tmp_path, capsys
+):
+    path = book(tmp_path)
+    digest = dry_digest(cli, path, capsys)
+    assert run(cli, shadow, args(path, "--stage")) == 0
+    assert run(cli, shadow, args(path, "--promote", digest)) == 0
+    capsys.readouterr()
+    assert [b["status"] for b in batches(shadow)] == ["imported"]
+    before = snapshot(shadow)
+    ledger = PgShaped(shadow)
+    assert run(cli, shadow, args(path, "--stage"), ledger=ledger) == 0
+    again = capsys.readouterr()
+    # The ledger has no batch reader (LedgerTx), so the CLI proves the settled row is there and
+    # names what the workbook and the row together allow: never a "validated" it cannot know.
+    assert again.out == (
+        "os_import op=stage outcome=ok reason=already_staged rows=6 quarantined=0 issues=0 "
+        "batch=validated_or_imported\n")
+    assert "batch=validated " not in again.out and again.err == ""
+    assert ledger.calls == ["import", "import"], "the stage, then the read-only row probe"
+    assert snapshot(shadow) == before
+    assert [b["status"] for b in batches(shadow)] == ["imported"]
 
 
 def test_restaging_a_quarantined_workbook_is_already_staged_but_still_not_promotable(
@@ -254,7 +296,7 @@ def test_restaging_a_quarantined_workbook_is_already_staged_but_still_not_promot
     again = capsys.readouterr()
     assert again.out.splitlines()[0] == (
         "os_import op=stage outcome=quarantined reason=already_staged rows=6 quarantined=1 "
-        "issues=1")
+        "issues=1 batch=quarantined")
     assert snapshot(shadow) == before
 
 
@@ -273,14 +315,48 @@ def test_the_next_epoch_stages_the_same_workbook_as_a_new_batch(shadow, cli, tmp
 
 
 @pytest.mark.parametrize("reason", ["import_batch_pk", "integrity_23505"])
-def test_both_spellings_of_the_batch_key_collision_are_already_staged(
+def test_both_spellings_of_the_batch_key_collision_are_already_staged_when_the_row_is_there(
     shadow, cli, tmp_path, capsys, reason
 ):
     path = book(tmp_path)
-    broken = Broken(api.LedgerError("ledger_integrity_failed", reason=reason))
-    assert run(cli, shadow, args(path, "--stage"), ledger=broken) == 0
+    assert run(cli, shadow, args(path, "--stage")) == 0
+    capsys.readouterr()
+    before = snapshot(shadow)
+    ledger = CollidesOnce(shadow, api.LedgerError("ledger_integrity_failed", reason=reason))
+    assert run(cli, shadow, args(path, "--stage"), ledger=ledger) == 0
     assert capsys.readouterr().out == (
-        "os_import op=stage outcome=ok reason=already_staged rows=6 quarantined=0 issues=0\n")
+        "os_import op=stage outcome=ok reason=already_staged rows=6 quarantined=0 issues=0 "
+        "batch=validated_or_imported\n")
+    assert ledger.calls == ["import", "import"] and snapshot(shadow) == before
+
+
+@pytest.mark.parametrize("reason", ["import_batch_pk", "integrity_23505"])
+def test_a_collision_with_no_matching_batch_row_is_re_raised_with_its_own_code(
+    shadow, cli, tmp_path, capsys, reason
+):
+    """A unique key other than the batch's (a future one) must not read as 'already staged'."""
+    path = book(tmp_path)
+    before = snapshot(shadow)
+    ledger = CollidesOnce(shadow, api.LedgerError("ledger_integrity_failed", reason=reason))
+    assert run(cli, shadow, args(path, "--stage"), ledger=ledger) == 1
+    refusal = capsys.readouterr()
+    assert refusal.out == ""
+    assert refusal.err == (
+        f"os_import op=stage outcome=refused reason=ledger_integrity_failed detail={reason}\n")
+    assert ledger.calls == ["import", "import"], "the stage, then the row probe that found none"
+    assert snapshot(shadow) == before and batches(shadow) == []
+
+
+def test_the_row_probe_failing_is_a_refusal_with_the_probes_own_code(
+    shadow, cli, tmp_path, capsys
+):
+    path = book(tmp_path)
+    collision = api.LedgerError("ledger_integrity_failed", reason="integrity_23505")
+    ledger = Broken(collision)  # the stage AND the probe both fail with the collision
+    assert run(cli, shadow, args(path, "--stage"), ledger=ledger) == 1
+    assert capsys.readouterr().err == (
+        "os_import op=stage outcome=refused reason=ledger_integrity_failed "
+        "detail=integrity_23505\n")
 
 
 @pytest.mark.parametrize("error,line", [
