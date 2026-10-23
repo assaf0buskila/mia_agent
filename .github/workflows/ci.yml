@@ -274,6 +274,54 @@ jobs:
           fi
           grep -Eq '[0-9]+ passed' .cache/os-ledger-ci.log || { echo "::error::no passing summary"; exit 1; }
 
+  # V2-31b: the cutover tooling's PostgreSQL cases (the fence CLI, the freeze census, the job and
+  # runbook suites, the backend factory). They create cluster-global roles and leave them behind,
+  # so they get a cluster of their own: on the os-ledger-migration-postgres cluster the roles of
+  # one fixture would make the other's validate_ledger_role refuse a role with footprints in two
+  # databases.
+  os-cutover-postgres:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: mia_ledger_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d mia_ledger_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      MIA_OS_LEDGER_TEST_POSTGRES_URL: postgresql+psycopg://postgres@localhost:5432/mia_ledger_test
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.8.15"
+          python-version: "3.12"
+      - run: uv sync --frozen --group dev
+      - run: mkdir -p .cache
+      - name: Cutover tooling on PostgreSQL 16
+        run: |
+          rc=0
+          uv run pytest tests/workers/test_os_authority.py tests/workers/test_os_authority_probes.py tests/workers/test_os_authority_live_pg.py tests/workers/test_os_freeze_paths.py tests/ops/test_os_jobs.py tests/ops/test_provision_retention.py tests/ops/test_cutover_runbook.py tests/services/test_os_backend_factory.py -rs --basetemp=.cache/os-cutover-ci > .cache/os-cutover-ci.log 2>&1 || rc=$?
+          cat .cache/os-cutover-ci.log
+          exit $rc
+      # A PostgreSQL case exists only when the URL reaches it, and a POSIX case only on POSIX: a
+      # skip here means one of them stopped running.
+      - name: Skip guard
+        if: always()
+        run: |
+          test -s .cache/os-cutover-ci.log || { echo "::error::no pytest log"; exit 1; }
+          if grep -Eq '^SKIPPED|[0-9]+ skipped' .cache/os-cutover-ci.log; then
+            echo "::error::a cutover test skipped a case while the ledger PostgreSQL URL is set"; exit 1
+          fi
+          grep -Eq '[0-9]+ passed' .cache/os-cutover-ci.log || { echo "::error::no passing summary"; exit 1; }
+
   container:
     runs-on: ubuntu-latest
     needs: [checks, postgres, quick-leads-postgres, owner-os-postgres, os-ledger-postgres, os-ledger-migration-postgres]
