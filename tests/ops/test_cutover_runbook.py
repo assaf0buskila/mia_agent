@@ -9,14 +9,16 @@ and every ``sudo mia`` command is a command of the VM script.
 
 from __future__ import annotations
 
+import contextlib
 import copy
+import io
 import json
 import re
 from datetime import timedelta
 from pathlib import Path
 
 import pytest
-from app.services.os_ledger import api
+from app.services.os_ledger import api, mirror_projection
 from app.workers import os_authority as cli
 
 from tests.fakes.os_ledger_env import OWNER_ID
@@ -274,6 +276,58 @@ def test_the_t1_and_t2_rollbacks_say_a_retry_redoes_t2_and_the_old_drain_is_set_
     assert "more than 2 hours before `fence_probe_at`" in flat
     assert re.search(r"^\| `drain\.json` \|.*drain-superseded-.*\(`drain_stale`\)", RUNBOOK, re.M)
     assert "`drain_stale`" in RUNBOOK.split("## 7. Reason codes", 1)[1]
+
+
+def t7_create_step() -> str:
+    t7 = section_of("### T7")
+    start = t7.index("- **Create the eight tabs**")
+    return t7[start:t7.index("- **Command**", start)]
+
+
+def test_t7_creates_the_eight_mirror_tabs_from_the_mirror_schema_in_code():
+    # V2-31b finding 7 (E11.4): the runbook must say how the tabs are created and where their names
+    # and headers come from, not only that they must exist.
+    step = t7_create_step()
+    flat = re.sub(r"\s+", " ", step)
+    precondition = re.sub(r"\s+", " ", section_of("### T7").split("- **Create the eight tabs**")[0])
+    # The tabs the precondition names are exactly the module's, in its order.
+    named = precondition.split("There is no", 1)[0].split("exact names:", 1)[1]
+    assert tuple(re.findall(r"`([^`]+)`", named)) == mirror_projection.MIRROR_TABS
+    assert "create them with the next bullet" in precondition
+    # The header source it cites exists, by name and by path.
+    for cited in ("MIRROR_TABS", "headers()", "_SUMMARY_FIELDS"):
+        assert cited in flat, cited
+    assert hasattr(mirror_projection, "MIRROR_TABS") and callable(mirror_projection.headers)
+    assert hasattr(mirror_projection, "_SUMMARY_FIELDS")
+    for path in ("app/services/os_ledger/mirror_projection.py",
+                 "app/prototypes/assaf_os_export_schema.json", "ops/assaf-os/schema.js"):
+        assert path in flat and (ROOT / path).is_file(), path
+    assert "no `addSheet` call" in precondition and "Leave them empty" in flat
+
+
+def test_the_t7_print_command_prints_each_tab_with_its_header_row():
+    command = re.search(r'`uv run --offline python -X utf8 -c "(.+?)"`', t7_create_step(), re.S)
+    assert command, "the step shows the command"
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        exec(compile(command.group(1), "<runbook T7>", "exec"), {})  # noqa: S102
+    lines = out.getvalue().splitlines()
+    assert len(lines) == 8
+    expected_headers = {"סיכום": "summary"} | {
+        tab: entity for entity, tab in mirror_projection.ENTITY_TABS.items()}
+    for line, tab in zip(lines, mirror_projection.MIRROR_TABS, strict=True):
+        cells = line.split(" | ")
+        assert cells[0] == tab
+        assert tuple(cells[1:]) == mirror_projection.headers(expected_headers[tab])
+    # The worker really writes row 1 itself (so the tabs can be left empty).
+    first = mirror_projection.write_ranges(
+        mirror_projection.Projection(0, {tab: (mirror_projection.headers(expected_headers[tab]),)
+                                         for tab in mirror_projection.MIRROR_TABS}), None)
+    assert [rows[0] for _, rows in first] == [
+        list(mirror_projection.headers(expected_headers[tab]))
+        for tab in mirror_projection.MIRROR_TABS]
+    assert [anchor for anchor, _ in first] == [
+        mirror_projection.tab_anchor(tab) for tab in mirror_projection.MIRROR_TABS]
 
 
 def test_the_text_says_an_unknown_probe_does_not_void_the_captures():

@@ -406,11 +406,29 @@ present throughout; jobs paused and a verified backup before **each** of T1, T3,
 
 - **Go G15** enable mirror to the pinned **new** mirror workbook.
 - **Precondition**: the mirror workbook is new, shared only with the mirror service account, and already
-  has the eight mirror tabs with their exact names and headers: `סיכום` and the seven entity tabs
+  has the eight mirror tabs with their exact names: `סיכום` and the seven entity tabs
   `לידים`, `לקוחות`, `עבודות`, `תקבולים`, `שעות עבודה`, `הוצאות והשקעות`, `משימות`. There is no
-  `addSheet` call, so the tabs must exist first. `MIA_OS_MIRROR_SPREADSHEET_ID` and
+  `addSheet` call, so a missing tab fails the write and the tabs must exist first (contract E11.4):
+  create them with the next bullet. `MIA_OS_MIRROR_SPREADSHEET_ID` and
   `MIA_OS_MIRROR_SERVICE_ACCOUNT_JSON` are already set to it, and never to the archive workbook.
   Reference columns show raw ids in this release.
+- **Create the eight tabs** (by hand, in the Google account, before the command below). The names and
+  the header row of every tab come from one place in the code: `MIRROR_TABS` and `headers()` in
+  `app/services/os_ledger/mirror_projection.py` (the V2-29 mirror schema). The seven entity labels are
+  read from `app/prototypes/assaf_os_export_schema.json`, and the `סיכום` labels are its
+  `_SUMMARY_FIELDS` (the `summary` tab of `ops/assaf-os/schema.js`). Print them, from a clean checkout at
+  `S` on Assaf's PC (local, no network; `-X utf8` because the output is Hebrew, so redirect to a file if
+  your console garbles it):
+
+  `uv run --offline python -X utf8 -c "import app.services.os_ledger.mirror_projection as m; [print(t, *m.headers('summary' if t == m.SUMMARY_TAB else next(e for e, n in m.ENTITY_TABS.items() if n == t)), sep=' | ') for t in m.MIRROR_TABS]"`
+
+  It prints eight lines, `<tab> | <header 1> | <header 2> | ...`, in the order of the tabs. In the new
+  workbook add one tab per line, named exactly as printed and in that order (rename the default tab
+  for the first; a leftover default tab is never read or written). **Leave them empty**: the worker
+  writes every tab in full from `A1` on its first projection, the header row included, from the same
+  `headers()`, and reads it back. If you type the headers anyway, they must be the printed ones. Do
+  not add a settings tab (the archive workbook's is not a mirror tab). The service account needs edit
+  access.
 - **Command**: `sudo mia os-authority freeze-plan --phase mirror --approved-sha S` prints
   `MIA_ASSAF_OS_MIRROR_ENABLED=true`. Set it, `sudo mia settings`. The worker projects the whole import
   (an `import` event is a full projection) and reads it back.
