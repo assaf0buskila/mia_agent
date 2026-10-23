@@ -630,6 +630,43 @@ def test_a_dsn_form_the_script_cannot_verify_is_refused_before_any_change(cluste
     assert values["dsn_unverified"] == "none" and values["logins_verified"] == "2"
 
 
+@pytest.mark.parametrize(
+    ("lines", "unverified"),
+    [
+        # Compose's dotenv is last-wins: the script must not log in with the first line only.
+        (
+            "MIA_OWNER_OS_READ_DATABASE_URL={good}\nMIA_OWNER_OS_READ_DATABASE_URL={bad}\n",
+            "MIA_OWNER_OS_READ_DATABASE_URL",
+        ),
+        ("MIA_FOO_DATABASE_URL=\nMIA_FOO_DATABASE_URL={bad}\n", "MIA_FOO_DATABASE_URL"),
+        # Settings is case-insensitive and dotenv takes `export KEY=`: forms the scan cannot see.
+        ("mia_owner_os_read_database_url={bad}\n", "settings.env:noncanonical_key"),
+        ("export MIA_BAR_DATABASE_URL={bad}\n", "settings.env:noncanonical_key"),
+        ("MIA_BAZ_DATABASE_URL ={bad}\n", "settings.env:noncanonical_key"),
+    ],
+)
+def test_a_duplicate_or_noncanonical_dsn_key_is_refused_before_any_change(
+    cluster, lines, unverified
+):
+    """V2-10b review r1 finding 1: the preflight must read the line the app and Compose read.
+
+    A repeated key (last-wins elsewhere), a lowercase key, `export KEY=` or `KEY =` is a DSN the
+    script cannot be sure it checked, so it stops the change the way an unverifiable form does.
+    """
+    app, port = cluster.app_password, cluster.port
+    good = f"postgresql://mia_app:{app}@127.0.0.1:{port}/mia"
+    bad = f"postgresql://mia_app:wrong-{app}@127.0.0.1:{port}/mia"
+    cluster.write_env("settings.env", lines.format(good=good, bad=bad))
+    before = cluster.hba_text()
+    done, values = cluster.run("--apply")
+    assert done.returncode == 2, done.stdout + done.stderr
+    assert "reason=hba_dsn_unverified" in done.stdout
+    assert unverified in values["dsn_unverified"].split(",")
+    assert cluster.hba_text() == before and cluster.backups() == []
+    assert cluster.tcp("mia", "not-the-password")  # nothing was reloaded: trust is still open
+    assert app not in done.stdout + done.stderr
+
+
 def test_a_dsn_with_no_password_is_refused_before_any_change(cluster):
     cluster.write_env(
         "runtime.env", f"MIA_DATABASE_URL=postgresql://mia@127.0.0.1:{cluster.port}/mia\n"
