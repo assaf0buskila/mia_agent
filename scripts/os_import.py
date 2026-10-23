@@ -23,8 +23,11 @@ as the ledger runtime role: no privileged DSN.
 
 ``--stage`` writes the batch and its rows (``import_workbook.stage``); nothing is promoted. Exit 0
 staged clean, 2 staged but quarantined or failed (the batch can never be promoted). Staging the
-same workbook again at the same epoch finds the batch there and reports ``already_staged`` with
-the exit status the first staging had; any other ledger error keeps its code and exits 1.
+same workbook again at the same epoch collides on the batch key; if the ledger holds that batch row
+it reports ``already_staged`` with the exit status the first staging had (``batch=`` says what the
+row can be: ``validated_or_imported`` for a clean workbook, since a promote moves it on, or
+``quarantined`` or ``failed``). A collision with no batch row, and any other ledger error, keeps
+its code and exits 1.
 ``--promote`` re-reads the same workbook and promotes it (``promote.promote``) with the manifest
 digest the owner approved, and the cancellations he signed. Exit 0 committed or replayed, 1 refused.
 
@@ -198,15 +201,38 @@ def _refusal(op: str, exc: api.LedgerError) -> None:
 
 
 def _staged(reason: str, status: str, rows: int, quarantined: int, issues: int,
-            reasons: dict[str, int]) -> int:
+            reasons: dict[str, int], batch: str | None = None) -> int:
     outcome = "ok" if status == "validated" else status
-    print(
+    line = (
         f"os_import op=stage outcome={outcome} reason={reason} rows={rows} "
         f"quarantined={quarantined} issues={issues}"
     )
+    print(line if batch is None else f"{line} batch={batch}")
     for why, count in reasons.items():
         print(f"os_import op=stage_reason outcome=quarantined reason={why} rows={count}")
     return 0 if status == "validated" else 2
+
+
+def _batch_is_there(deps: Deps, ctx: api.TrustedOwnerContext, batch_id: str) -> bool:
+    """Whether the ledger holds a settled import batch row with this id for the context.
+
+    ``LedgerTx`` has no batch reader, so this is the read the import API allows:
+    ``insert_import_rows`` with no rows writes nothing and names the row's state. A settled batch
+    is ``import_status_invalid`` (its rows are insert-only once it settles); a missing one is
+    ``ledger_integrity_failed`` with reason ``import_row_batch_fk``. The transaction ends in a
+    rollback or an empty commit. Any other answer is the probe's own failure and propagates under
+    its own code.
+    """
+    try:
+        with deps.ledger.transaction(ctx, domain="core", kind="import") as tx:
+            tx.insert_import_rows(batch_id, ())
+    except api.LedgerError as exc:
+        if exc.code == "import_status_invalid":
+            return True
+        if exc.code == "ledger_integrity_failed" and exc.reason == "import_row_batch_fk":
+            return False
+        raise
+    return False  # a batch still ``staged`` outside its own transaction is not a settled one
 
 
 def _stage(deps: Deps, ctx: api.TrustedOwnerContext, workbook: Any) -> int:
@@ -215,21 +241,29 @@ def _stage(deps: Deps, ctx: api.TrustedOwnerContext, workbook: Any) -> int:
     except api.LedgerError as exc:
         if exc.code != "ledger_integrity_failed" or exc.reason not in _BATCH_ALREADY_THERE:
             raise
+        collision = exc
     else:
         return _staged(
             "persisted", result.status, result.rows, result.quarantined,
             len(result.batch.issues), dict(result.reasons),
         )
-    # The batch is in the ledger already. ``prepare`` is pure and deterministic, so the workbook
-    # alone says what the first staging settled the batch as: quarantined, failed or validated.
+    # A unique-key collision is "already staged" only when the batch row is in the ledger; any
+    # other key (a future one) keeps its own error.
     batch = prepare(
         workbook, workspace_id=ctx.workspace, authority_epoch=ctx.authority_epoch,
     )
+    if not _batch_is_there(deps, ctx, batch.batch_id):
+        raise collision
+    # What the row is settled as cannot be read (``LedgerTx`` has no batch reader), so the line
+    # claims only what is certain. ``prepare`` is deterministic: a workbook with quarantined rows
+    # or issues settled as ``quarantined`` or ``failed``, both terminal. A clean one settled as
+    # ``validated`` and is ``imported`` once promoted, so the line names both and claims neither.
     quarantined = sum(row.status == "quarantined" for row in batch.rows)
     status = "quarantined" if quarantined else ("failed" if batch.issues else "validated")
     return _staged(
         "already_staged", status, len(batch.rows), quarantined, len(batch.issues),
         quarantine_reasons(batch) if status != "validated" else {},
+        batch="validated_or_imported" if status == "validated" else status,
     )
 
 
