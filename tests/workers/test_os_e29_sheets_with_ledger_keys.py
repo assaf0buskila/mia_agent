@@ -435,13 +435,46 @@ def test_e_the_readers_of_the_two_settings_are_the_reviewed_ones():
     assert set(found) == set(READERS), sorted(set(found) ^ set(READERS))
 
 
-def test_e_no_script_reads_the_two_environment_keys():
-    names = ("MIA_ASSAF_OS_LEDGER_ENABLED", "MIA_ASSAF_OS_AUTHORITY_EPOCH")
+ENV_KEYS = ("MIA_ASSAF_OS_LEDGER_ENABLED", "MIA_ASSAF_OS_AUTHORITY_EPOCH")
+SCRIPT_FOLDERS = ("scripts", "ops", "deploy")
+DOCUMENT_SUFFIXES = {".md", ".pyc"}  # prose and bytecode: the runbook names the keys on purpose
+
+
+def env_key_users(root: Path) -> list[str]:
+    """Every file under the script folders that names either environment key. Suffixless files
+    count (``ops/gcp/vm/mia`` is the VM script, ``deploy/Dockerfile`` a build file): only prose and
+    bytecode are skipped."""
     users = []
-    for folder in ("scripts", "ops", "deploy"):
-        for path in (ROOT / folder).rglob("*"):
-            if path.suffix in {".py", ".sh", ".ps1", ".yaml", ".yml", ".json"} and path.is_file():
-                text = path.read_text(encoding="utf-8", errors="ignore")
-                if any(name in text for name in names):
-                    users.append(path.relative_to(ROOT).as_posix())
-    assert users == [], users
+    for folder in SCRIPT_FOLDERS:
+        for path in sorted((root / folder).rglob("*")):
+            if (
+                path.is_file()
+                and path.suffix not in DOCUMENT_SUFFIXES
+                and "__pycache__" not in path.parts
+                and any(key in path.read_text(encoding="utf-8", errors="ignore")
+                        for key in ENV_KEYS)
+            ):
+                users.append(path.relative_to(root).as_posix())
+    return users
+
+
+def test_e_no_script_reads_the_two_environment_keys():
+    assert env_key_users(ROOT) == []
+
+
+def test_e_the_script_census_reads_files_with_no_suffix_too(tmp_path):
+    # V2-31b review 4: the census skipped files with no suffix, such as the VM script `mia`.
+    plain = tmp_path / "ops" / "gcp" / "vm" / "mia"
+    plain.parent.mkdir(parents=True)
+    plain.write_text("export MIA_ASSAF_OS_LEDGER_ENABLED=true\n", encoding="utf-8")
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "tool.py").write_text("X = 'MIA_ASSAF_OS_AUTHORITY_EPOCH'\n")
+    (tmp_path / "deploy").mkdir()
+    (tmp_path / "deploy" / "Dockerfile").write_text("ENV MIA_ASSAF_OS_AUTHORITY_EPOCH=1\n")
+    (tmp_path / "ops" / "NOTES.md").write_text("MIA_ASSAF_OS_LEDGER_ENABLED, in prose\n")
+    assert env_key_users(tmp_path) == [
+        "scripts/tool.py", "ops/gcp/vm/mia", "deploy/Dockerfile"]
+    # ...and the real tree really has suffixless files in the census (it is not vacuous).
+    suffixless = [p for folder in SCRIPT_FOLDERS for p in (ROOT / folder).rglob("*")
+                  if p.is_file() and not p.suffix]
+    assert ROOT / "ops/gcp/vm/mia" in suffixless
