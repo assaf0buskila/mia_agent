@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Close loopback `trust` in the VM's PostgreSQL (V2_PG_CONTRACTS.md section 22, E21). Owner-operated.
+# Close loopback `trust` in the VM's PostgreSQL (V2_PG_CONTRACTS.md section 22, E21 and E28). Owner-operated.
 #
 #   sudo pg-hba-harden.sh --check      read-only: say what pg_hba.conf allows and whether --apply is safe
 #   sudo pg-hba-harden.sh --apply      back up pg_hba.conf, trust -> scram-sha-256 on TCP lines, reload
@@ -15,17 +15,24 @@
 # (unix socket) lines are NOT touched, deliberately: the socket exists only inside the postgres
 # container, and `mia backup|restore`, app_role_demote.py, backup_offsite.py, provision_auth.py and
 # the restore drill all reach PostgreSQL as `mia` through `docker compose exec` over it. Rewriting
-# them would lock the operator out of the very tools that restore and demote. (Deviation from the
-# literal text of E21, reported with the change.)
+# them would lock the operator out of the very tools that restore and demote. This is the rule E28
+# records: E21 hardens the TCP (`host`) lines only, and the container-local socket stays `trust`.
 #
 # Safety, in this order:
 #   1. every role a live DSN uses must have a SCRAM verifier, or nothing is changed. The fixed list is
 #      mia, mia_app (when present), assaf_os_session, assaf_os_ledger and assaf_os_retention; the
-#      users found in the VM-owned DSN files are added. A role that is absent, or cannot log in, is
+#      users found in the DSN files are added. A role that is absent, or cannot log in, is
 #      not a DSN role. `mia` must exist. A DSN with no password, or in a form this script cannot
 #      parse (so cannot log in with afterwards), is refused too. Since V2-14b, V2-15 creates
 #      assaf_os_retention as LOGIN with no password (E8), so after that provision it blocks --apply
-#      until V2-31 gives it a verifier: run this before the V2-15 provision (FORK-PROD-ORDER).
+#      until `mia os-provision retention` gives it a verifier: run this before the V2-15 provision
+#      (FORK-PROD-ORDER), or after the retention one.
+#      Which DSNs (E28): the keys listed in dsn_sources below (the app's and the jobs', including
+#      MIA_OWNER_OS_READ_DATABASE_URL, MIA_OWNER_OS_ACTION_DATABASE_URL and the job-only
+#      os-retention.env key), PLUS every key that looks like `*DATABASE_URL` in runtime.env,
+#      settings.env, os-ledger-migrate.env and os-retention.env. An empty value is skipped. Each one
+#      is scram-checked before the change and logged in with after the reload. --check prints the
+#      KEY NAMES it would refuse (never a value), so a surprise key can be fixed before the window.
 #   2. pg_hba.conf is copied (cmp-verified) to pg_hba.conf.pre-e21-<UTC time> next to it.
 #   3. the new file must parse (pg_hba_file_rules shows no error and no TCP trust line), or the backup
 #      is put back before any reload.
@@ -53,13 +60,18 @@ euid="${MIA_HBA_EUID:-$EUID}"
 
 # Roles whose DSNs the VM runs. Others found in its DSN files are added to this list.
 fixed_roles=(mia mia_app assaf_os_session assaf_os_ledger assaf_os_retention)
-# file (under $etc_dir) and key of every DSN a service of the VM reads
+# file (under $etc_dir) and key of every DSN a service of the VM reads (E28: the floor of the scan)
 dsn_sources=(
   "runtime.env MIA_DATABASE_URL"
   "runtime.env MIA_OWNER_OS_LEDGER_DATABASE_URL"
   "os-ledger-migrate.env MIA_OS_LEDGER_MIGRATION_DATABASE_URL"
   "settings.env MIA_OWNER_OS_SESSION_DATABASE_URL"
+  "settings.env MIA_OWNER_OS_READ_DATABASE_URL"
+  "settings.env MIA_OWNER_OS_ACTION_DATABASE_URL"
+  "os-retention.env MIA_OS_LEDGER_RETENTION_DATABASE_URL"
 )
+# Files in which EVERY `*DATABASE_URL` key is scanned too, so a DSN no list names cannot slip past.
+dsn_scan_files=(runtime.env settings.env os-ledger-migrate.env os-retention.env)
 
 usage() {
   echo "usage: pg-hba-harden.sh --check | --apply | --rollback" >&2
@@ -118,13 +130,37 @@ roles_checked=() roles_without_scram=()
 dsn_ok='^postgres(ql)?([+][a-z0-9]+)?://([a-z_][a-z0-9_]*):([^@:/[:space:]]+)@127\.0\.0\.1:([0-9]{2,5})/([a-z_][a-z0-9_]*)$'
 dsn_bare='^postgres(ql)?([+][a-z0-9]+)?://([a-z_][a-z0-9_]*)@127\.0\.0\.1:([0-9]{2,5})/([a-z_][a-z0-9_]*)$'
 
+dsn_targets=()
+
+# One "file key" target, once: a key listed in dsn_sources and also found by the scan counts once.
+add_dsn_target() {
+  local candidate="$1" seen
+  for seen in "${dsn_targets[@]+"${dsn_targets[@]}"}"; do
+    if [ "$seen" = "$candidate" ]; then return 0; fi
+  done
+  dsn_targets+=("$candidate")
+}
+
 # Reads the DSN files for the role, password, port and database of each live DSN. Values are kept in
 # shell variables only; they are never printed, and never an argument.
 scan_dsns() {
-  local entry file key path line value
+  local entry file key path line value found
   dsn_keys=() dsn_roles=() dsn_passwords=() dsn_ports=() dsn_databases=()
   dsn_without_password=() dsn_unverified=()
+  dsn_targets=()
   for entry in "${dsn_sources[@]}"; do
+    add_dsn_target "$entry"
+  done
+  # E28: every `*DATABASE_URL` key of the scanned files, whatever its name (key names only, here).
+  for file in "${dsn_scan_files[@]}"; do
+    path="$etc_dir/$file"
+    [ -r "$path" ] || continue
+    found="$(grep -oE '^[A-Z0-9_]*DATABASE_URL=' "$path" || true)"
+    while IFS= read -r key; do
+      if [ -n "$key" ]; then add_dsn_target "$file ${key%=}"; fi
+    done <<<"$found"
+  done
+  for entry in "${dsn_targets[@]}"; do
     file="${entry%% *}"
     key="${entry#* }"
     path="$etc_dir/$file"
@@ -135,6 +171,8 @@ scan_dsns() {
     case "$value" in
       \'*\' | \"*\") value="${value:1:${#value}-2}" ;;
     esac
+    # An empty value is no DSN: nothing connects with it, so nothing can lock out.
+    [ -n "$value" ] || continue
     if [[ "$value" =~ $dsn_ok ]]; then
       dsn_keys+=("$key")
       dsn_roles+=("${BASH_REMATCH[3]}")
@@ -268,6 +306,8 @@ case "$mode" in
     emit_state
     echo "roles_checked=$(join "${roles_checked[@]}")"
     echo "roles_without_scram=$(join "${roles_without_scram[@]}")"
+    # KEY NAMES only (E28): which DSNs --apply will log in with, and which it would refuse.
+    echo "dsn_keys_checked=$(join "${dsn_keys[@]}")"
     echo "dsn_without_password=$(join "${dsn_without_password[@]}")"
     echo "dsn_unverified=$(join "${dsn_unverified[@]}")"
     if [ "${#roles_without_scram[@]}" -eq 0 ] && [ "${#dsn_without_password[@]}" -eq 0 ] \
@@ -349,6 +389,7 @@ case "$mode" in
     echo "applied=true"
     echo "backup=$backup"
     echo "logins_verified=${#dsn_keys[@]}"
+    echo "dsn_keys_checked=$(join "${dsn_keys[@]}")"
     echo "dsn_unverified=$(join "${dsn_unverified[@]}")"
     ;;
 
