@@ -391,6 +391,26 @@ def test_the_t7_print_command_prints_each_tab_with_its_header_row():
         mirror_projection.tab_anchor(tab) for tab in mirror_projection.MIRROR_TABS]
 
 
+def test_the_t3_rollback_requires_the_live_sighting_and_the_break_record_and_reruns_on_unknown():
+    # V2-31b review 3: the step whose whole job is to record fence_broken_at must say how to know
+    # that it did, and what to do on an `unknown` probe (which writes no break).
+    rollback = re.sub(r"\s+", " ", section_of("### T3")).split("- **Rollback**", 1)[1]
+    step = rollback.split("The rollback lifts the fence", 1)[0]
+    assert "do not go on until both of these hold" in step
+    assert '(a) its JSON prints `"sheets": "live"`' in step
+    assert "(b) `sudo cat /var/lib/mia/os-authority/preflight.json` shows `fence_broken_at`" in step
+    assert '`"sheets": "unknown"`' in step and "**run it again**" in step
+    # The names it relies on are the CLI's own: the evidence file, the key, and the printed state.
+    assert cli.PREFLIGHT == "preflight.json"
+    fenced = {"v": 1, "kind": "preflight", "epoch": 1, "release_sha": SHA, "sheets": "unavailable",
+              "fence_probe_at": stamp(NOW)}
+    live = cli._fence_record(fenced, 1, SHA, "live", NOW + timedelta(minutes=5))
+    assert live["sheets"] == "live" and live["fence_broken_at"] == stamp(
+        NOW + timedelta(minutes=5))
+    unknown = cli._fence_record(fenced, 1, SHA, "unknown", NOW + timedelta(minutes=6))
+    assert unknown["sheets"] == "unknown" and "fence_broken_at" not in unknown
+
+
 def test_the_text_says_an_unknown_probe_does_not_void_the_captures():
     # V2-31b finding 3: the CLI carries fence_probe_at through `unknown`; the runbook must say so
     # at the two places an operator meets it (T3's probe and T6's preflight).

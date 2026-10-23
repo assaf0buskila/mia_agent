@@ -349,9 +349,15 @@ present throughout; jobs paused and a verified backup before **each** of T1, T3,
 - **Verify**: `preflight` prints `sheets: unavailable`; each tab's protection is read back and recorded;
   the workbook name is read back.
 - **Rollback**: set `ASSAF_OS_MODE` back to `LIVE`, remove the protection, rename the workbook back,
-  then the freeze rollback of T1. **Then run `sudo mia os-authority preflight --approved-sha S` once
-  while the Script is LIVE again.** It exits 1 (`sheets_not_fenced` and, if a fence had been recorded,
-  `sheets_pending_proposals`), which is the expected answer here: its job is to write `fence_broken_at`.
+  then the freeze rollback of T1. **Then run `sudo mia os-authority preflight --approved-sha S` while
+  the Script is LIVE again, and do not go on until both of these hold: (a) its JSON prints
+  `"sheets": "live"`, and (b) `sudo cat /var/lib/mia/os-authority/preflight.json` shows
+  `fence_broken_at`** (a fence was recorded at T3, so a sighting of the live Script writes it). If the
+  JSON prints `"sheets": "unknown"` (a timeout, a transport error) the probe saw nothing and wrote no
+  break: **run it again**, as often as it takes, until (a) and (b) hold; a rollback closed on an
+  `unknown` leaves the aborted attempt's `fence_probe_at` and `drain.json` usable. The command exits 1
+  (`sheets_not_fenced` and, if a fence had been recorded, `sheets_pending_proposals`), which is the
+  expected answer here: its job is to write `fence_broken_at`.
   The rollback lifts the fence and the freeze without touching the ledger, so the epoch and the SHA do
   not change, and without that record the CLI has nothing to tell the retry from the aborted attempt: it
   would carry the aborted attempt's `fence_probe_at` forward and accept its `drain.json` and any capture
