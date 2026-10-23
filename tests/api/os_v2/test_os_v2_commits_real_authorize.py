@@ -17,6 +17,7 @@ from app.api import owner_sessions
 from app.services.os_ledger import api, authorize, owner_direct
 
 from tests.api.os_v2.v2_19_support import OS_SCOPES, OwnerApp, ledger_world, owner_settings
+from tests.fakes.os_ledger_builders import CLIENT_ACTIVE, PATH_LEARN, WORK_ACTIVE
 
 ROOT = "/v1/owner/os/unified"
 DIRECT = "assaf-os:direct"
@@ -125,6 +126,31 @@ def test_the_four_routes_mint_and_check_through_the_real_authorize(owner, world,
         ("from_owner_mutation", ""), ("require", "abandon"),
         ("from_owner_read", ""), ("require", "read"),
     ]
+
+
+def test_an_undo_with_a_live_dependent_is_a_409_undo_conflict_and_writes_nothing(owner, world):
+    """§22 E26 over HTTP: ``undo_conflict``, never the ledger's own ``has_dependents``."""
+    headers = owner.login()
+    client = owner.client.post(ROOT + "/commits", json={
+        "request_id": uuid4_str(), "op": "create", "entity": "clients", "record_id": None,
+        "expected_revision": 0, "patch": {"name": "C", "status": CLIENT_ACTIVE}}, headers=headers)
+    person = client.json()["records"][0]["record"]["person_id"]
+    created_work = owner.client.post(ROOT + "/commits", json={
+        "request_id": uuid4_str(), "op": "create", "entity": "works", "record_id": None,
+        "expected_revision": 0, "patch": {"person_id": person, "title": "W", "path": PATH_LEARN,
+                                          "status": WORK_ACTIVE, "currency": "ILS"}},
+        headers=headers)
+    assert created_work.status_code == 200, created_work.text
+    work_id = created_work.json()["records"][0]["record"]["work_id"]
+    version = world.version()
+    refused = owner.client.post(ROOT + f"/commits/{client.json()['request_id']}/undo",
+                                json={"undo_request_id": uuid4_str()}, headers=headers)
+    assert refused.status_code == 409, refused.text
+    envelope = refused.json()["error"]
+    assert envelope["code"] == "undo_conflict" and envelope["write_outcome"] == "not_started"
+    assert envelope["details"] == {"reason": "dependent_exists", "changed": [
+        {"entity": "works", "record_id": work_id}]}
+    assert world.version() == version
 
 
 def test_a_session_without_the_direct_scope_is_refused_before_authorize(owner, world, calls):
