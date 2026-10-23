@@ -99,6 +99,17 @@ Rollback: `sudo systemctl disable --now mia-backup-offsite.timer`, remove the tw
   `mia deploy` or another state-changing `mia` command holds `/var/lock/mia-state.lock`: a dump taken
   in the middle of a restore is a partial database and would be uploaded as the newest good backup.
   The next slot takes the backup; `--status` goes stale after three missed slots.
+- The run holds that lock **shared** from before the key fetch until the dump is on disk (not during the
+  upload), so a restore cannot start between the check and the dump. The flip side, in one line: a
+  `mia` command (or `pg-hba-harden.sh --apply|--rollback`) started during those seconds reports
+  `another Mia operation (or a backup dump) is running; try again in a minute`, and works on retry.
+- A slot is also **skipped** (`skipped code=restore_incomplete`, exit 0, no failure recorded) while
+  `/etc/mia/restore-incomplete` exists. `mia restore` writes it before it drops the database and removes
+  it only after every post-restore step succeeded, so a restore that aborted (`ledger_reapply_failed`
+  and the other reason codes below) is never dumped and uploaded as the newest good backup. Until the
+  next successful `mia restore` the backups are skipped and `--status` goes stale: that is intended.
+- If the 25 minute `TimeoutStartSec` stops a run, systemd's SIGTERM is turned into a normal exit by the
+  entry point, so the run directory (the plaintext dump and the key file) is removed on the way out.
 - **There is no alert yet.** A failing backup is visible only by looking. Wiring `--status` into
   the health alert is a follow-up; until then check weekly and after every deploy.
 
@@ -153,7 +164,19 @@ The restore arm runs the repair between `pg_restore` and `start_services`, under
 prints `mia: restore stopped, the services stay down: reason=<code>` and exits 1. The services
 stay DOWN: `app` and `caddy` were stopped first and `start_services` is never reached. Every step
 is idempotent, so after fixing the cause run `sudo mia restore <same dump>` again (it takes a new
-safety dump first). The steps, in this order:
+safety dump first).
+
+**The services stay down until a restore succeeds (V2-10b).** `mia restore` writes
+`/etc/mia/restore-incomplete` (root, 0600) after its safety dump and just before `DROP DATABASE`,
+and removes it only after every step below succeeded, right before it starts the services. While the
+marker exists `start_services` refuses with `mia: restore_incomplete: run mia restore again`, and
+that is what `mia deploy`, `mia settings`, `mia https enable` and `mia go-live` all end in. **Operator
+note:** the deploy that fixes the cause of a `ledger_reapply_failed` (say, an image with a proper
+`MIA_BUILD_SHA`) will build, fetch settings and then stop at that refusal, by design: run
+`sudo mia restore <same dump>` again, and the services start at the end of it. A restore that stops
+before `DROP DATABASE` (a missing dump, a failed safety dump) changed nothing and leaves no marker.
+The off-host backup also skips its slots while the marker exists (see "Watching it"). The steps, in
+this order:
 
 | # | Step | Skipped, with a logged reason, when |
 |---|---|---|
@@ -198,7 +221,8 @@ Details that matter:
 - `mia restore` pauses the jobs itself, before it drops anything (the `jobs-paused` marker `mia jobs
   pause` makes), because `mia job` takes no state lock and a timer firing mid-restore would touch a
   half-restored or half-repaired database. They stay paused, also after an abort: check readiness, then
-  `sudo mia jobs resume`. The 15-minute backup timer skips its slots while the restore holds the lock.
+  `sudo mia jobs resume`. The 15-minute backup timer skips its slots while the restore holds the lock,
+  and after an abort for as long as the `restore-incomplete` marker exists.
 - Loopback authentication is not proven by steps 3 and 5 while `pg_hba.conf` still has the image's
   default `trust` lines for `127.0.0.1` and `::1` (V2_PG_CONTRACTS.md section 22, E21): a wrong password
   still connects, so these steps prove the role's posture and its privileges, not its password. Close
@@ -217,11 +241,37 @@ Reason codes (stderr, a fixed set; nothing else is printed about the cause):
 | `app_role_reapply_unavailable` | `mia_app` exists but `/opt/mia/app-role-demote/app_role_demote.py` or `sql/app-role-demote.sql` is missing. Reinstall them from the approved source (V2-14a runbook). |
 | `app_role_reapply_failed` | the helper failed. It prints its own `reason=app_role_...` line just above. |
 | `ledger_reapply_unavailable` | the restored database has `assaf_os`, but `MIA_TAG` in `/opt/mia/tag.env` is unusable, the deployed `provision_ledger.py` is missing under `/opt/mia/src/<tag>/`, or `/etc/mia/os-ledger-migrate.env` is missing or holds another key. |
-| `ledger_reapply_failed` | `provision_ledger.py` refused or could not run (it prints only `ledger_provision_refused` or `ledger_owner_go_sha_required`). Usual causes: the image has no 40-hex `MIA_BUILD_SHA`, `mia_app` is missing, `/etc/mia/runtime.env` does not hold a valid ledger DSN for an existing role, the ledger runtime role does not exist and no DSN is staged for it (a new VM: "Fresh cluster" below, and do not just restore again), or V2-15's exact validator rejects the restored `assaf_os` (an object it does not know, a PUBLIC privilege). The transaction rolled back, so the schema is as the restore left it. |
+| `ledger_reapply_failed` | `provision_ledger.py` refused or could not run (it prints only `ledger_provision_refused` or `ledger_owner_go_sha_required`). Usual causes: the image has no 40-hex `MIA_BUILD_SHA`, `mia_app` is missing, `/etc/mia/runtime.env` does not hold a valid ledger DSN for an existing role, the ledger runtime role does not exist and no DSN is staged for it (a new VM: "Fresh cluster" below, and do not just restore again), or V2-15's exact validator rejects the restored `assaf_os` (an object it does not know, a PUBLIC privilege), or **the dump is older than the ledger schema the running image expects** (see "A dump older than the current ledger schema" below: repeating the restore with this image can never pass). The transaction rolled back, so the schema is as the restore left it. The services stay down until a restore succeeds (the `restore-incomplete` marker). |
 | `main_dsn_invalid` | `/etc/mia/runtime.env` does not hold exactly one canonical `MIA_DATABASE_URL`. |
 | `main_role_validation_failed` | the real validator rejected the main role (unsafe attribute, database owner, membership, or access to `assaf_os`), or the deployed image could not run it. Until the `trust` lines are closed (step 1a) a wrong DSN password does not fail here. |
 | `owner_session_revoke_failed` | the owner-auth database could not be updated, or only some of its tables exist. |
 | `app_role_access_probe_failed` | the main DSN role cannot SELECT or INSERT on an application table (permission denied, or no application table at all). The restore is not usable. While loopback is still `trust` this proves privileges, not the password. |
+
+#### A dump older than the current ledger schema (`ledger_reapply_failed` that repeats)
+
+**Cause.** Once a later ledger migration ships (a table, column or grant the dump does not have), a
+dump taken before it, restored with the current image, always fails step 2: the reapply issues grants
+on objects the dump does not hold, and V2-15's exact validator expects the newer catalog. Fixing the
+usual causes and running `mia restore` again then loops, and `mia os-ledger migrate` refuses on the
+unrepaired posture, so the way forward is not to retry with the same image.
+
+**The way out.** Restore with the image whose ledger schema matches the dump, then move forward:
+
+1. `sudo mia deploy <the tag whose ledger schema matches the dump>`. The marker makes `start_services`
+   refuse (by design, the database is half restored), so expect that refusal at the end of the deploy:
+   the old image is built and `tag.env` points at it, which is all the next step needs. `mia deploy`
+   needs `/opt/mia/src/<tag>` and `mia` keeps only the three newest sources, so an older tag has to be
+   put back first (a normal approved upload of that commit).
+2. `sudo mia restore <dump>`. The reapply now matches the schema; the services start at the end.
+3. Roll forward to the current image: `sudo mia deploy <current tag>`.
+4. `sudo mia os-ledger migrate --approved-sha <sha>` applies the ledger migrations the dump predates.
+5. `sudo mia os-provision runtime --approved-sha <sha>` re-provisions the runtime role's grants and
+   DSN for the new schema.
+
+**Record it.** The cutover or ledger runbook should record which image tag matches which dump (the
+dump's `created_at_utc` against the deploy that was running then), so a restore under pressure does
+not need this deduction. Nothing is exposed today: V2-14 and V2-14b migrate together and production
+has no `assaf_os` yet.
 
 #### Fresh cluster: a new VM, after the old one is lost
 
@@ -241,10 +291,12 @@ Make the roles first, on the new VM's own database, in the order production used
 1. V2-14a: the demote, `docs/runbooks/APP_ROLE_DEMOTE.md` steps 2 to 6. The stage creates `mia_app`
    and the activation moves the main DSN to it.
 2. V2-14: `sudo mia os-ledger migrate --approved-sha <sha>` creates `assaf_os` and `assaf_os_owner`.
-3. V2-15: `provision_ledger.py --target mia-vm --mode provision --apply --approved-sha <sha>`
-   (`ops/assaf-os/LEDGER_ROLE.md`) creates `assaf_os_ledger` and `assaf_os_retention`, and stages
-   this VM's own ledger DSN in `runtime.env`.
-4. `sudo mia restore <dump>`. Steps 1 and 2 now find their roles and the staged DSN. Step 4 is
+3. V2-15: `sudo mia os-provision runtime --approved-sha <sha>` (`ops/assaf-os/LEDGER_ROLE.md`)
+   creates `assaf_os_ledger` and `assaf_os_retention`, and stages this VM's own ledger DSN in
+   `runtime.env`.
+4. E8: `sudo mia os-provision retention --approved-sha <sha>` gives `assaf_os_retention` its password
+   and writes the job-only `/etc/mia/os-retention.env`.
+5. `sudo mia restore <dump>`. Steps 1 and 2 now find their roles and the staged DSN. Step 4 is
    skipped on a new VM (`owner_auth_database_absent`): the owner-auth database is not part of this
    restore, and `provision_auth.py` makes it.
 
@@ -260,16 +312,21 @@ sudo docker compose -p mia -f /opt/mia/compose.yaml --env-file /opt/mia/tag.env 
 
 Then make the application tables the way the first deploy did (`sudo docker compose -p mia -f
 /opt/mia/compose.yaml --env-file /opt/mia/tag.env run --rm --no-deps -T migrate`) and run steps 1 to
-4. Never reset a database that holds data you need. The drill proves the order, the failure of the
-other order and this recovery against the real scripts: `test_drill_a_new_vm_*` in
-`tests/ops/test_restore_reapply.py`.
+5. The failed restore left the `restore-incomplete` marker: the services stay down until that last
+`mia restore` succeeds, which is what removes it. Never reset a database that holds data you need.
+The drill proves the order, the failure of the other order and this recovery against the real
+scripts: `test_drill_a_new_vm_*` in `tests/ops/test_restore_reapply.py`.
 
-**Open gap, not closed by this change.** `mia` has no command for step 3. The restore arm wires only
-`--mode reapply`. Running `--mode provision` (as root, with `/etc/mia` writable, under
-`/var/lock/mia-state.lock`, with the image's `MIA_BUILD_SHA`) is FORK-PROD-ORDER step 4, which V2-31's
-owner-approved cutover runbook owns. That runbook must carry this new-VM order, and the command must
-exist, before the ledger is activated: until then a lost VM cannot be rebuilt from these backups once
-`assaf_os` holds data. Production has no `assaf_os` today, so nothing is exposed yet.
+**The new-VM provision command (V2-31).** Steps 3 and 4 are `mia os-provision runtime|retention
+--approved-sha <sha>`; there is no gap left. What the command does, so the order above can be
+trusted: it takes `/var/lock/mia-state.lock` (a backup dump in progress makes it report busy: retry),
+refuses unless `/opt/mia/tag.env` exists, `/etc/mia/os-ledger-migrate.env` holds exactly its one key
+and `--approved-sha` is a 40-hex SHA, then runs `provision_ledger.py --target mia-vm --mode provision`
+(`runtime`) or `provision_retention.py --target mia-vm` (`retention`) from the **deployed tag's**
+`/opt/mia/src/<MIA_TAG>/ops/assaf-os/` (both files must be there), mounted read-only into the
+`os-ledger-migrate` image and run as root with `/etc/mia` mounted **writable**, because each script
+stages its DSN in a VM-owned file there before it commits. The approved SHA must equal the image's
+`MIA_BUILD_SHA`. A lost VM is therefore rebuilt as: deploy the integrated tag, steps 1 to 5 above.
 
 ### On Assaf's PC: the drill uses `ledger_posture.py`
 
@@ -332,8 +389,9 @@ cluster on its own port inside that container and never touch anything else.
 ## A real recovery from these backups
 
 1. Pause the timer so a half-restored database is not backed up: `sudo systemctl stop
-   mia-backup-offsite.timer`. (A slot that fires during `mia restore` is skipped anyway, but the
-   window between a failed restore and the next try is not covered by the lock.)
+   mia-backup-offsite.timer`. (This is belt and braces: a slot that fires during `mia restore` is
+   skipped by the lock, and after a failed restore by the `restore-incomplete` marker, until a restore
+   succeeds.)
 2. Download the newest pair: `gcloud storage cp gs://<bucket>/15min/mia-<stamp>.dump.enc
    gs://<bucket>/15min/mia-<stamp>.manifest.json .`. Check the manifest's `ciphertext_sha256`.
 3. Decrypt with the offline key (iterations are in the manifest, today 600000):
