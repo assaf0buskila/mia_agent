@@ -402,6 +402,12 @@ def test_the_text_says_a_rollback_counts_again_after_the_fence_and_prints_no_ste
     assert "leaves `core` **fenced** and prints **no steps**" in section
     assert "follow section 6" in section
     assert "slipped in between" in RUNBOOK.split("## 7. Reason codes", 1)[1]
+    # V2-31b review: the post-fence refusal has its own reason, named where the operator reads it.
+    assert "`rollback_after_first_write,core_left_fenced`" in section
+    assert "`\"core\": \"fenced\"`" in section and "Read the second reason" in section
+    codes_table = RUNBOOK.split("## 7. Reason codes", 1)[1]
+    assert re.search(r"^\| `core_left_fenced` \|", codes_table, re.M)
+    assert "it adds `core_left_fenced`" in codes_table
 
 
 def test_the_archive_name_is_the_contracts_en_dash_literal():

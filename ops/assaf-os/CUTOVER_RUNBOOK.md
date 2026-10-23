@@ -502,9 +502,13 @@ Allowed **only** while `non_import_receipts` is 0 at the current epoch. After th
   then refuses every write) and prints the steps. It is idempotent. It counts the non-import receipts
   before the fence **and again after it**: the first phone actions (G16, G17) happen exactly while a
   rollback is still allowed, and a commit can land between the check and the fence. If the second count
-  is nonzero it refuses `rollback_after_first_write`, leaves `core` **fenced** and prints **no steps**
-  (no revert, no "the Sheet is as captured"). That is the section 6 state: the ledger owns a business
-  write, so do not return to Sheets; follow section 6.
+  is nonzero it refuses `rollback_after_first_write,core_left_fenced` (with `"core": "fenced"` in the
+  JSON), leaves `core` **fenced** and prints **no steps** (no revert, no "the Sheet is as captured").
+  That is the section 6 state: the ledger owns a business write and now refuses every OS write
+  (`authority_not_active`), so do not return to Sheets; follow section 6. **Read the second reason**:
+  a refusal of `rollback_after_first_write` alone (the first count) means the ledger is still LIVE and
+  nothing was changed; with `core_left_fenced` the ledger is fenced. A repeat of the command once `core`
+  is fenced answers the same two reasons.
 - **Then, in this order**, as the command prints:
   1. `sudo mia os-authority freeze-plan --phase revert --approved-sha S` prints
      `MIA_ASSAF_OS_BACKEND=sheets`, `MIA_ASSAF_OS_LEDGER_ENABLED=false`,
@@ -568,7 +572,8 @@ Other refusals of the CLI:
 | `drain_requires_live_sheet` | The drain snapshot needs a live Sheet; run it before T3 |
 | `drain_keys_not_applied` | `freeze-plan --phase switch` while `MIA_ASSAF_OS_LEDGER_ENABLED=true` and `MIA_ASSAF_OS_AUTHORITY_EPOCH=E` (set at T1) are not in the settings the job reads |
 | `switch_not_applied` | `freeze-plan --phase mirror` or `open` before the switch is in the settings |
-| `rollback_after_first_write`, `rearm_after_first_write` | A non-import receipt exists at this epoch. `rollback` also counts again after it fences `core`: if a commit slipped in between, `core` stays fenced and nothing is printed (section 5, then section 6) |
+| `rollback_after_first_write`, `rearm_after_first_write` | A non-import receipt exists at this epoch. Alone, `rollback_after_first_write` means nothing was changed and `core` is still live. `rollback` also counts again after it fences `core`: if a commit slipped in between, it adds `core_left_fenced` (below) and prints nothing else (section 5, then section 6) |
+| `core_left_fenced` | Always printed after `rollback_after_first_write`: `core` is **fenced** (`"core": "fenced"` in the JSON), the ledger refuses every OS write and the Sheet is NOT the record. Follow section 6; never return to Sheets |
 | `authority_changed:<reason>` | Another owner or epoch, or a transition the state machine does not allow |
 | `ledger_unavailable:<reason>` | The pepper does not match its pin, or the ledger cannot be read |
 | `evidence_unwritable` | The evidence directory cannot be written |

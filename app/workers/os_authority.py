@@ -144,11 +144,13 @@ PHASES = ("drain", "switch", "mirror", "open", "revert")
 
 
 class Refusal(Exception):
-    """A fixed refusal: the codes are printed, nothing else is."""
+    """A fixed refusal: the codes are printed, nothing else is. ``document`` adds fixed keys to the
+    JSON document (a state name, never a value read from outside)."""
 
-    def __init__(self, *codes: str) -> None:
+    def __init__(self, *codes: str, document: Mapping[str, str] | None = None) -> None:
         super().__init__(",".join(codes))
         self.codes = list(codes)
+        self.document = dict(document or {})
 
 
 class EvidenceError(Exception):
@@ -1269,6 +1271,15 @@ def rollback_steps(epoch: int) -> list[str]:
     ]
 
 
+def _rollback_refused(core: str) -> Refusal:
+    """``rollback_after_first_write``, and when ``core`` is fenced by now, also ``core_left_fenced``
+    with ``core: fenced`` in the document (the ledger refuses every write; follow section 6)."""
+    if core == "fenced":
+        return Refusal(
+            "rollback_after_first_write", "core_left_fenced", document={"core": "fenced"})
+    return Refusal("rollback_after_first_write")
+
+
 def cmd_rollback(ctx: Context) -> Result:
     """Allowed only before the first non-import receipt at the current epoch.
 
@@ -1278,6 +1289,11 @@ def cmd_rollback(ctx: Context) -> Result:
     AFTER the fence: once ``core`` is fenced nothing more can commit, so the second count is final.
     A write that got in refuses the rollback and prints nothing about Sheets: ``core`` stays
     fenced, which is the section 6 path (the ledger now owns a business write).
+
+    The two refusals must not read the same: before the fence the ledger is still LIVE; after it
+    every OS write is refused ``authority_not_active``. The second one (and a repeat that finds
+    ``core`` already fenced) adds the reason ``core_left_fenced`` and ``core: fenced`` to the
+    document.
     """
     deps = ctx.deps
     snapshot = _state(ctx)
@@ -1285,7 +1301,7 @@ def cmd_rollback(ctx: Context) -> Result:
     if core == "restoring":
         raise Refusal("authority_state_invalid")
     if deps.probes.non_import_receipts(deps.workspace, snapshot.epoch):
-        raise Refusal("rollback_after_first_write")
+        raise _rollback_refused(core)
     try:
         if core != "fenced":
             snapshot = deps.admin.transition(
@@ -1295,7 +1311,7 @@ def cmd_rollback(ctx: Context) -> Result:
     except api.LedgerError as error:
         raise _ledger_refusal(error) from None
     if deps.probes.non_import_receipts(deps.workspace, snapshot.epoch):
-        raise Refusal("rollback_after_first_write")
+        raise _rollback_refused("fenced")
     return Result(True, {"command": "rollback", "ok": True, "outcome": "fenced",
                          "next_steps": rollback_steps(snapshot.epoch),
                          **_snapshot_document(snapshot)})
@@ -1530,7 +1546,8 @@ def run(
         deps = (deps_factory or live_deps)(env)
         return finish(_dispatch(Context(deps, args.approved_sha), args))
     except Refusal as refusal:
-        return finish(Result(False, {"command": args.command, "ok": False}, refusal.codes))
+        return finish(Result(
+            False, {"command": args.command, "ok": False, **refusal.document}, refusal.codes))
     except api.LedgerError as error:
         return finish(Result(False, {"command": args.command, "ok": False},
                              _ledger_refusal(error).codes))

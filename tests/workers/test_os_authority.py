@@ -771,6 +771,10 @@ def test_rollback_after_the_first_business_write_is_refused_and_changes_nothing(
     run = ready.run("rollback")
     assert run.code == 1 and codes(run) == ["rollback_after_first_write"]
     assert ready.state().states["core"] == "active"
+    # V2-31b review: this refusal (count 1) leaves the ledger LIVE, and says nothing else. The
+    # post-fence refusal of the race below must never read the same.
+    assert run.out == {"command": "rollback", "ok": False}
+    assert "core_left_fenced" not in run.err
     assert ready.run("fence").code == 0  # roll forward: fence is still available
 
 
@@ -802,9 +806,11 @@ def test_a_commit_between_the_receipt_count_and_the_fence_refuses_the_rollback(a
         ready.env, lambda: landed.append(commit_direct(ready.env, ctx(), [task("TAS_race")])))
     run = ready.run("rollback")
     assert len(landed) == 1, "the commit landed after the count and before the fence"
-    assert run.code == 1 and codes(run) == ["rollback_after_first_write"]
+    # V2-31b review: the refusal says that core was LEFT FENCED (a second reason, and the state in
+    # the document), so it cannot be read as the count-1 refusal where the ledger is still live.
+    assert run.code == 1 and codes(run) == ["rollback_after_first_write", "core_left_fenced"]
     # Nothing a rollback prints: no 'Sheet is exactly as captured', no revert-to-Sheets steps.
-    assert run.out == {"command": "rollback", "ok": False}
+    assert run.out == {"command": "rollback", "ok": False, "core": "fenced"}
     assert "exactly as captured" not in json.dumps(run.out) + run.err + str(run.out)
     assert "next_steps" not in run.out and "MIA_ASSAF_OS" not in run.err
     # Core stays fenced: the ledger refuses every further write, which is the section 6 state.
@@ -812,8 +818,9 @@ def test_a_commit_between_the_receipt_count_and_the_fence_refuses_the_rollback(a
     with pytest.raises(api.LedgerError, match="^authority_not_active$"):
         commit_direct(ready.env, ctx(), [task("TAS_after")])
     ready.deps.admin = ready.env
-    again = ready.run("rollback")  # a repeat is refused by the first count already
-    assert again.code == 1 and codes(again) == ["rollback_after_first_write"]
+    again = ready.run("rollback")  # a repeat is refused by the first count, with core fenced
+    assert again.code == 1 and codes(again) == ["rollback_after_first_write", "core_left_fenced"]
+    assert again.out == {"command": "rollback", "ok": False, "core": "fenced"}
     assert ready.run("fence").code == 0 and ready.state().states["core"] == "fenced"
 
 
