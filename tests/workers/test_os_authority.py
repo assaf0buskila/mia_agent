@@ -62,6 +62,7 @@ class FakeProbes:
         self.mirror_state = "empty"
         self.broken: set[str] = set()
         self.snapshots = 0
+        self.promote_calls: list[tuple[str, int, str]] = []
         self.closed = False
 
     def _use(self, name):
@@ -104,8 +105,25 @@ class FakeProbes:
             if row["kind"] != "import" and row["epoch"] == epoch
         )
 
+    def import_promoted(self, workspace, epoch, manifest_digest):
+        self._use("promoted")
+        self.promote_calls.append((workspace, epoch, manifest_digest))
+        return import_receipt_exists(self.env, epoch, manifest_digest)
+
     def close(self):
         self.closed = True
+
+
+def import_receipt_exists(env, epoch: int, manifest_digest: str) -> bool:
+    """What ``promote`` leaves behind (V2-30, E1-rev): a committed import receipt at this epoch whose
+    request id is ``import_request_uuid(epoch, digest)`` and whose proposal carries the digest."""
+    proposals = {row["proposal_id"]: row for row in env.rows("os_proposals")}
+    return any(
+        row["kind"] == "import" and row["status"] == "committed" and row["epoch"] == epoch
+        and str(row["request_id"]) == api.import_request_uuid(epoch, manifest_digest)
+        and proposals.get(row["proposal_id"], {}).get("dependency_digest") == manifest_digest
+        for row in env.rows("os_receipts")
+    )
 
 
 CASES = ["fake", *(["pg"] if pg_enabled() else [])]
@@ -175,6 +193,19 @@ def signed_manifest(captured: datetime, signed: datetime, **over: Any) -> dict:
     return document
 
 
+# Every signed manifest of this module carries the same object, so the same digest.
+MANIFEST_DIGEST = signed_manifest(NOW, NOW)["manifest_digest"]
+
+
+def promote_import(world: World, digest: str | None = None) -> None:
+    """T5: the import receipt ``promote`` writes at the current epoch, bound to the signed digest."""
+    digest = digest or MANIFEST_DIGEST
+    epoch = world.state().epoch
+    if not import_receipt_exists(world.env, epoch, digest):
+        commit_import(world.env, ctx(epoch=epoch), [task(f"TAS_p{epoch}_{digest[:6]}")], digest,
+                      epoch=epoch)
+
+
 # The five journal tabs of the archive workbook (UnifiedRuntime.gs ASSAF_OS_META), spelled out here
 # on purpose: test_os_authority_probes.py pins the CLI's own list to the Script's source, and these
 # literals are what an operator is told to measure.
@@ -217,7 +248,10 @@ def operator_evidence(world: World) -> None:
     world.put(cli.JOURNAL, journal_document())
 
 
-def good_evidence(world: World) -> None:
+def good_evidence(world: World, *, promoted: bool = True) -> None:
+    """Every file a ready cutover has, and (unless ``promoted`` is False) T5's import receipt."""
+    if promoted:
+        promote_import(world)
     operator_evidence(world)
     world.put(cli.DRAIN, {
         "v": 1, "kind": "drain", "recorded_at": stamp(at(hours=-3)), "epoch": 1,
@@ -498,6 +532,110 @@ def test_the_journal_measure_still_needs_every_tab_to_be_a_count(ready):
         ready.put(cli.JOURNAL, journal_document(tabs=journal_tabs(_assaf_os_receipts=bad)))
         run = ready.run("activate")
         assert codes(run) == ["journal_capacity"] and journal_detail(run) == "invalid", bad
+
+
+# ----------------------------------------- the import must be promoted (V2-31b finding 8)
+#
+# `promote` (V2-30, E1-rev) writes a committed import receipt whose request id is
+# import_request_uuid(epoch, manifest_digest), and a proposal that carries the digest. Without it,
+# activation would pass on an empty ledger and only the phone check at T6 would catch it. This is
+# one more check of `activate` and `preflight`; it is not one of the contract's 15 preconditions.
+
+
+def unpromoted(world: World) -> World:
+    """A cutover that is ready in every way but one: T5's promote was skipped."""
+    assert world.run("init").code == 0
+    good_evidence(world, promoted=False)
+    return world
+
+
+def gates(run: Run) -> dict[str, str]:
+    return {g["code"]: g["status"] + ":" + g.get("detail", "") for g in run.out["gates"]}
+
+
+def test_activate_after_a_skipped_promote_is_refused(any_world):
+    world = unpromoted(any_world)
+    before = world.state()
+    run = world.run("activate")
+    assert run.code == 1 and codes(run) == ["import_not_promoted"]
+    assert gates(run) == {"import_not_promoted": "pending:no_import_receipt"}
+    assert [c["status"] for c in run.out["checks"]] == ["pass"] * len(cli.PRECONDITIONS)
+    assert world.state() == before and before.states["core"] == "shadow"
+    assert not (world.dir / cli.ACTIVATION).exists()
+    # The same cutover with T5 done activates, and the probe was asked about the SIGNED digest at
+    # THIS epoch.
+    promote_import(world)
+    ok = world.run("activate")
+    assert ok.code == 0 and gates(ok) == {"import_not_promoted": "pass:"}
+    assert world.probes.promote_calls == [(WORKSPACE, 1, MANIFEST_DIGEST)] * 2
+    assert world.state().states["core"] == "active"
+
+
+def test_a_promote_of_another_manifest_does_not_count(any_world):
+    world = unpromoted(any_world)
+    commit_import(world.env, ctx(), [task("TAS_other")], "e" * 64)  # an import, not the signed one
+    run = world.run("activate")
+    assert run.code == 1 and codes(run) == ["import_not_promoted"]
+    assert world.state().states["core"] == "shadow"
+
+
+def test_a_promote_at_an_earlier_epoch_does_not_count(any_world):
+    world = any_world
+    assert world.run("init").code == 0
+    good_evidence(world)  # promoted at epoch 1
+    assert world.run("activate").code == 0
+    assert world.run("rollback").code == 0
+    assert world.run("init", "--rearm").code == 0
+    world.env.knobs.settings_epoch = 2
+    good_evidence(world, promoted=False)
+    for name in (cli.DRAIN, cli.PREFLIGHT):
+        world.put(name, {**world.get(name), "epoch": 2})
+    assert world.state().epoch == 2
+    run = world.run("activate")  # the epoch-1 receipt binds the same digest, at the old epoch
+    assert run.code == 1 and codes(run) == ["import_not_promoted"]
+    assert world.probes.promote_calls[-1] == (WORKSPACE, 2, MANIFEST_DIGEST)
+    promote_import(world)
+    assert world.run("activate").code == 0
+    assert (world.state().epoch, world.state().states["core"]) == (2, "active")
+
+
+def test_the_promote_check_needs_a_signed_manifest_and_adds_nothing_without_one(world):
+    assert world.run("init").code == 0
+    good_evidence(world, promoted=False)
+    world.drop(cli.MANIFEST)
+    run = world.run("preflight")
+    assert run.code == 0 and run.out["gates"] == []
+    assert codes(world.run("activate")) == ["capture_before_fence", "manifest_not_signed"]
+    # An unsigned manifest is the manifest check's refusal, not a promote question.
+    world.put(cli.MANIFEST, signed_manifest(at(minutes=-90), at(minutes=-30),
+                                            signoff_manifest_digest="0" * 64))
+    assert codes(world.run("activate")) == ["manifest_not_signed"]
+    assert world.probes.promote_calls == []
+
+
+def test_a_probe_error_on_the_promote_check_fails_it_closed_and_leaks_nothing(ready, caplog):
+    ready.probes.broken = {"promoted"}
+    with caplog.at_level(logging.DEBUG):
+        run = ready.run("activate")
+    assert run.code == 1 and codes(run) == ["import_not_promoted"]
+    assert gates(run) == {"import_not_promoted": "fail:probe_error"}
+    assert "driver-text" not in json.dumps(run.out) + run.err + caplog.text
+    assert SECRET not in json.dumps(run.out) + run.err + caplog.text
+    assert ready.state().states["core"] == "shadow"
+
+
+def test_preflight_shows_the_promote_check_and_is_not_ready_without_it(any_world):
+    world = unpromoted(any_world)
+    run = world.run("preflight")
+    assert run.code == 0, "an operator step that is not there yet is pending, not a failure"
+    assert run.out["ready_to_activate"] is False
+    assert gates(run) == {"import_not_promoted": "pending:no_import_receipt"}
+    assert len(run.out["checks"]) == len(cli.PRECONDITIONS), "the contract's 15 stay the 15"
+    assert "gates" not in world.get(cli.PREFLIGHT), "the fence evidence file is unchanged"
+    promote_import(world)
+    run = world.run("preflight")
+    assert run.code == 0 and run.out["ready_to_activate"] is True
+    assert gates(run) == {"import_not_promoted": "pass:"}
 
 
 # --------------------------------------------------------------------------- init
@@ -811,7 +949,9 @@ def script_live_again(world: World, hours: float) -> Run:
 
 
 def sign_capture(world: World, captured: float, signed: float) -> None:
+    """T5: Assaf signs the manifest, and the import is promoted at the current epoch."""
     world.put(cli.MANIFEST, signed_manifest(at(hours=captured), at(hours=signed)))
+    promote_import(world)
 
 
 def activate_now(world: World) -> Run:
@@ -1153,6 +1293,7 @@ def test_the_whole_cutover_in_order_with_cli_written_evidence(any_world):
     world.clock[0] = at(hours=-5)
     assert world.run("preflight").code == 0
     world.put(cli.MANIFEST, signed_manifest(at(hours=-4), at(hours=-3)))
+    promote_import(world)
     world.put(cli.BACKUP, {"last_success_utc": stamp(at(minutes=-5))})
     world.put(cli.DRILL, {"started_utc": stamp(at(days=-1)), "passed": True})
     world.put(cli.FRONTEND, {"v": 1, "cloudflare_version": "ce8332db-4a1e",

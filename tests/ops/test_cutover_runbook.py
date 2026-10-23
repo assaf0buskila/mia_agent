@@ -22,7 +22,15 @@ from app.services.os_ledger import api, mirror_projection
 from app.workers import os_authority as cli
 
 from tests.fakes.os_ledger_env import OWNER_ID
-from tests.workers.test_os_authority import NOW, SHA, World, at, good_evidence, stamp
+from tests.workers.test_os_authority import (
+    NOW,
+    SHA,
+    World,
+    at,
+    good_evidence,
+    promote_import,
+    stamp,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 RUNBOOK = (ROOT / "ops/assaf-os/CUTOVER_RUNBOOK.md").read_text(encoding="utf-8")
@@ -71,6 +79,7 @@ def documented_world(tmp_path, *, mutate=None) -> World:
         if mutate and mutate[0] == name:
             document = mutate[1](document)
         world.put(name, document)
+    promote_import(world, digest)  # T5: the shown manifest's digest, promoted at this epoch
     return world
 
 
