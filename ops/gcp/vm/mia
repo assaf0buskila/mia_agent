@@ -31,7 +31,7 @@ usage: sudo mia <command>
   restore <dump>        replace the database with a pg_dump custom-format file, give the
                         roles their ownership and grants back, and only then start the services.
                         It pauses the jobs first; resume them with `jobs resume` once ready
-  backup               write a database dump to /var/lib/mia/backups
+  backup                write a database dump to /var/lib/mia/backups
   status                containers, health and timers
   logs [service]        follow logs (postgres, migrate, app, caddy)
 EOF
@@ -54,6 +54,11 @@ single_key_env() {
 }
 https_marker="${MIA_HTTPS_MARKER:-/etc/mia/https-enabled}"
 jobs_paused="${MIA_JOBS_PAUSED:-/etc/mia/jobs-paused}"
+# V2-10b: `mia restore` writes this before DROP DATABASE and removes it only after every post-restore
+# step succeeded. While it exists, start_services refuses (deploy, settings, https enable and
+# go-live all end in it) and the off-host backup skips its slots (backup_offsite.py reads the same
+# path), so neither a half-restored database gets its services back nor is dumped as the newest backup.
+restore_incomplete="${MIA_RESTORE_INCOMPLETE:-/etc/mia/restore-incomplete}"
 jobs=(mia-due-scan mia-ingest-knowledge)
 # V2-31: the privileged Assaf OS jobs (the compose profile and service carry the job's name).
 # os-authority has its own command (`mia os-authority`, exact SHA go); the others run through
@@ -130,6 +135,7 @@ wait_healthy() {
 }
 
 start_services() {
+  [ ! -e "$restore_incomplete" ] || die "restore_incomplete: run mia restore again"
   compose up -d --remove-orphans postgres migrate app
   wait_healthy app
   if [ -f "$https_marker" ]; then
@@ -395,7 +401,7 @@ cmd="${1:-}"; shift || true
 case "$cmd" in
   deploy|settings|https|restore|go-live|os-ledger|os-authority|os-provision)
     exec 9>/var/lock/mia-state.lock
-    flock -n 9 || die "another Mia operation is already running"
+    flock -n 9 || die "another Mia operation (or a backup dump) is running; try again in a minute"
     ;;
 esac
 
@@ -555,7 +561,7 @@ case "$cmd" in
       os-import)
         # Run by the owner during the cutover, while the jobs are paused: it takes the state lock.
         exec 9>/var/lock/mia-state.lock
-        flock -n 9 || die "another Mia operation is already running"
+        flock -n 9 || die "another Mia operation (or a backup dump) is running; try again in a minute"
         install -d -m 750 -o root -g 10001 /var/lib/mia/os-import
         ;;
     esac
@@ -597,12 +603,19 @@ case "$cmd" in
       chmod 600 "$safety"
       echo "mia: existing database saved to $safety"
     fi
+    # From here the database is not the one the services last ran on. If anything below stops, the
+    # marker stays: start_services (deploy, settings, https enable, go-live) refuses and the off-host
+    # backup skips, until `mia restore` is run again and succeeds. It is written after the safety dump
+    # on purpose: a restore that stops before this line has changed nothing and leaves no marker.
+    install -m 600 /dev/null "$restore_incomplete"
     compose exec -T postgres psql -U mia -d postgres -v ON_ERROR_STOP=1 \
       -c "DROP DATABASE IF EXISTS mia WITH (FORCE)" -c "CREATE DATABASE mia OWNER mia"
     compose exec -T postgres pg_restore -U mia -d mia --no-owner --no-privileges --exit-on-error < "$file"
     echo "mia: restored $(compose exec -T postgres psql -U mia -d mia -tAc "select count(*) from information_schema.tables where table_schema='public'") tables"
     # Roles and grants come back BEFORE anything can reach the database. Any failure stops here.
     post_restore_reapply
+    # Every step succeeded: the database is whole again, so the services may start (and be backed up).
+    rm -f "$restore_incomplete"
     start_services
     ;;
   backup)
