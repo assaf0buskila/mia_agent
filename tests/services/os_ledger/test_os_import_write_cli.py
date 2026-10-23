@@ -31,8 +31,21 @@ RECORD_TABLES = ("os_clients", "os_works", "os_payments", "os_time", "os_expense
 CLIENT_NAME_COLUMN = 1  # the synthetic clients tab: person_id, name, ...
 
 
+@pytest.fixture(params=["sheets", "postgres"])
+def backend(request, ledger):
+    """The key state the job runs under, on the ledger it writes to (the ``Knobs`` it reads).
+
+    G24 (stage) and G12 (promote) run under ``backend=sheets`` with ``ledger_enabled=true`` and
+    ``epoch=E`` and the freeze on: erratum E29 turns the ledger keys on at T1 and moves the
+    backend only at T6. The ``postgres`` leg is the state after T6; the job must not care.
+    """
+    ledger.knobs.backend = request.param
+    ledger.knobs.freeze = True
+    return request.param
+
+
 @pytest.fixture
-def shadow(ledger):
+def shadow(ledger, backend):
     fresh_workspace(ledger, IMPORT_WS)
     return ledger
 
@@ -44,12 +57,13 @@ def cli():
     return os_import
 
 
-def job_settings(*, owners=OWNER_ID, epoch=1, workspace=IMPORT_WS):
-    """The real ``Settings`` the job reads: one owner, the workspace and the epoch."""
+def job_settings(*, owners=OWNER_ID, epoch=1, workspace=IMPORT_WS, backend="sheets"):
+    """The real ``Settings`` the job reads: one owner, the workspace, the epoch, the ledger keys
+    on and the freeze on (E29). ``backend`` is the leg under test, ``sheets`` by default."""
     return Settings(
         _env_file=None, env=MiaEnv.TEST, telegram_owner_user_ids=owners, kill_switch=False,
         assaf_os_workspace_id=workspace, assaf_os_authority_epoch=epoch,
-        assaf_os_backend="postgres", assaf_os_ledger_enabled=True,
+        assaf_os_backend=backend, assaf_os_ledger_enabled=True, assaf_os_freeze=True,
     )
 
 
@@ -110,7 +124,8 @@ class Broken:
 
 
 def run(cli, env, argv, *, settings=None, ledger=None):
-    deps = cli.Deps(settings=settings or job_settings(), ledger=ledger or PgShaped(env))
+    settings = settings or job_settings(backend=env.knobs.backend)  # the leg under test
+    deps = cli.Deps(settings=settings, ledger=ledger or PgShaped(env))
     return cli.main(argv, deps_factory=lambda: deps)
 
 
@@ -141,6 +156,29 @@ def leaks(text, tmp_path):
 
 
 # ---- stage, then promote, end to end ------------------------------------------------------------
+
+
+def test_the_job_runs_under_the_key_state_of_the_leg_it_is_proven_on(shadow, backend):
+    """Under ``sheets`` this is the T1..T5 state of erratum E29: ledger keys on, backend off."""
+    settings = job_settings(backend=backend)
+    assert settings.assaf_os_backend == backend == shadow.knobs.backend
+    assert settings.assaf_os_ledger_enabled is True and shadow.knobs.enabled is True
+    assert settings.assaf_os_authority_epoch == shadow.knobs.settings_epoch == 1
+    assert settings.assaf_os_freeze is True and shadow.knobs.freeze is True
+    assert settings.kill_switch is False and shadow.knobs.kill_switch is False
+
+
+def test_the_backend_leg_is_real_for_the_ledger_it_writes_to(shadow, backend):
+    """Only an import transaction passes while ``backend=sheets``; the others are refused at the
+    backend, and under ``postgres`` they reach the authority check and meet the shadow core."""
+    from tests.fakes.contexts import make_ctx
+
+    ctx = make_ctx("OS", workspace=IMPORT_WS, owner=int(OWNER_ID))
+    with pytest.raises(api.LedgerError) as caught:
+        with shadow.transaction(ctx, domain="core", kind="proposal"):
+            pass
+    assert caught.value.code == (
+        "backend_not_postgres" if backend == "sheets" else "authority_not_active")
 
 
 def test_stage_then_promote_end_to_end(shadow, cli, tmp_path, capsys):
@@ -308,7 +346,7 @@ def test_the_next_epoch_stages_the_same_workbook_as_a_new_batch(shadow, cli, tmp
     next_epoch(shadow, epoch=1)
     capsys.readouterr()
     assert run(cli, shadow, args(path, "--stage", epoch=2),
-               settings=job_settings(epoch=2)) == 0
+               settings=job_settings(epoch=2, backend=shadow.knobs.backend)) == 0
     out = capsys.readouterr().out
     assert "reason=persisted" in out and "already_staged" not in out
     assert sorted(b["authority_epoch"] for b in batches(shadow)) == [1, 2]
@@ -519,7 +557,7 @@ def test_promoting_a_workbook_that_was_never_staged_writes_nothing(shadow, cli, 
 
 @pytest.mark.parametrize("mode", ["stage", "promote"])
 def test_a_ledger_that_is_not_in_shadow_refuses_authority_not_active(
-    ledger, cli, tmp_path, capsys, mode
+    ledger, backend, cli, tmp_path, capsys, mode
 ):
     fresh_workspace(ledger, IMPORT_WS, core="active")
     path = book(tmp_path)
@@ -589,7 +627,7 @@ def test_the_live_wiring_loads_the_settings_and_builds_the_ledger_from_them(
     import app.core.config as config
 
     seen = []
-    settings = job_settings()
+    settings = job_settings(backend=shadow.knobs.backend)
     ledger = PgShaped(shadow)
     monkeypatch.setattr(config, "get_settings", lambda: seen.append("settings") or settings)
     monkeypatch.setattr(
