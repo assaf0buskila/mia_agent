@@ -1,8 +1,11 @@
 # Assaf OS live evidence — 2026-10-13
 
 > **Historical record (13 October 2026).** Every Worker, version, rollback and commit ID below is
-> evidence as of its date, not current production. The last verified production and rollback IDs
-> are in `docs/CLAUDE_CODE_HANDOFF.md`, section "Last verified production and access". MIA's live
+> evidence as of its date, not a claim about current production. The last verified Worker and MIA
+> IDs are in `docs/CLAUDE_CODE_HANDOFF.md`, section "Last verified production and access". That
+> handoff records the installed Apps Script version as unverified, so Script version 10 (`bda48fa`,
+> bundle digest `660e6c72de1de2f0268df87dae01b4385cbb4b15c256cabac851c134f5801f89`) below remains
+> the latest Script record; its five sources are what master carries since #183. MIA's live
 > commit is whatever `/health` reports as `deployment.commit_sha`. Since this record, MIA #101 has
 > landed on master via #183 (2026-10-18); the owner frontend #67 is still open.
 

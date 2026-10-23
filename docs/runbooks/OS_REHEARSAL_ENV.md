@@ -40,11 +40,12 @@ an issue, chat or commit. The copy contains private business data.
    **Bundle digest rule.**
    - Take `schema.js`, `core.js`, `runtime.js`, `UnifiedSheets.gs`, `UnifiedRuntime.gs`,
      in that order, from `ops/assaf-os/`. `appsscript.json` is excluded.
-   - For each file: convert CRLF to LF, trim trailing whitespace, and end with exactly
-     one newline.
+   - For each file: convert CRLF to LF, strip trailing whitespace at the end of the file
+     (not per line), and end with exactly one newline.
    - Join the five files with a newline, and take the SHA-256 of the UTF-8 bytes.
 
-   This reproduces the recorded Script version 10 digest `660e6c72…5801f89` from
+   This reproduces the recorded Script version 10 digest
+   `660e6c72de1de2f0268df87dae01b4385cbb4b15c256cabac851c134f5801f89` from
    backend `bda48fa`. From the repository root, at the release's commit:
 
    ```powershell
