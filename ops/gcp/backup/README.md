@@ -101,8 +101,13 @@ Rollback: `sudo systemctl disable --now mia-backup-offsite.timer`, remove the tw
   The next slot takes the backup; `--status` goes stale after three missed slots.
 - The run holds that lock **shared** from before the key fetch until the dump is on disk (not during the
   upload), so a restore cannot start between the check and the dump. The flip side, in one line: a
-  `mia` command (or `pg-hba-harden.sh --apply|--rollback`) started during those seconds reports
-  `another Mia operation (or a backup dump) is running; try again in a minute`, and works on retry.
+  `mia` command started during those seconds reports
+  `another Mia operation (or a backup dump) is running; try again in a minute`;
+  `pg-hba-harden.sh --apply|--rollback` reports `reason=hba_operation_busy` and `app-role-demote.sh`
+  `reason=app_role_operation_busy`. Nothing was changed: retry in a minute, do not roll back.
+- These three behaviours (the shared lock, the marker skip, the SIGTERM cleanup) are in the copy the
+  timer runs, `/opt/mia/backup/backup_offsite.py`, only after `install_on_vm.py` is run again from the
+  deployed tag (step 4 of the setup above). A deploy alone does not update it.
 - A slot is also **skipped** (`skipped code=restore_incomplete`, exit 0, no failure recorded) while
   `/etc/mia/restore-incomplete` exists. `mia restore` writes it before it drops the database and removes
   it only after every post-restore step succeeded, so a restore that aborted (`ledger_reapply_failed`
@@ -175,7 +180,10 @@ note:** the deploy that fixes the cause of a `ledger_reapply_failed` (say, an im
 `MIA_BUILD_SHA`) will build, fetch settings and then stop at that refusal, by design: run
 `sudo mia restore <same dump>` again, and the services start at the end of it. A restore that stops
 before `DROP DATABASE` (a missing dump, a failed safety dump) changed nothing and leaves no marker.
-The off-host backup also skips its slots while the marker exists (see "Watching it"). The steps, in
+The off-host backup also skips its slots while the marker exists (see "Watching it"). The marker guards
+`start_services` only: a raw `docker compose ... up` (as in `docs/runbooks/APP_ROLE_DEMOTE.md`), a
+`mia job` after `jobs resume`, `mia os-job` and `mia os-authority` do not check it, so run none of them
+while it exists. The steps, in
 this order:
 
 | # | Step | Skipped, with a logged reason, when |
@@ -261,7 +269,10 @@ unrepaired posture, so the way forward is not to retry with the same image.
    refuse (by design, the database is half restored), so expect that refusal at the end of the deploy:
    the old image is built and `tag.env` points at it, which is all the next step needs. `mia deploy`
    needs `/opt/mia/src/<tag>` and `mia` keeps only the three newest sources, so an older tag has to be
-   put back first (a normal approved upload of that commit).
+   put back first (a normal approved upload of that commit). The deploy runs that tag's own `mia`: a
+   tag older than V2-10b knows no marker and starts the services on the half-restored database, so
+   with such a tag run step 2 at once, and remove a stale `/etc/mia/restore-incomplete` by hand only
+   after step 2 succeeded.
 2. `sudo mia restore <dump>`. The reapply now matches the schema; the services start at the end.
 3. Roll forward to the current image: `sudo mia deploy <current tag>`.
 4. `sudo mia os-ledger migrate --approved-sha <sha>` applies the ledger migrations the dump predates.
@@ -312,8 +323,10 @@ sudo docker compose -p mia -f /opt/mia/compose.yaml --env-file /opt/mia/tag.env 
 
 Then make the application tables the way the first deploy did (`sudo docker compose -p mia -f
 /opt/mia/compose.yaml --env-file /opt/mia/tag.env run --rm --no-deps -T migrate`) and run steps 1 to
-5. The failed restore left the `restore-incomplete` marker: the services stay down until that last
-`mia restore` succeeds, which is what removes it. Never reset a database that holds data you need.
+5. The failed restore left the `restore-incomplete` marker: `start_services` refuses until that last
+`mia restore` succeeds, which is what removes it. Step 1's raw `docker compose ... up` does not check
+the marker and starts the app on the reset, freshly migrated database; that is expected in this order
+(it is empty, not half restored), but run no `mia` job against it before the last restore. Never reset a database that holds data you need.
 The drill proves the order, the failure of the other order and this recovery against the real
 scripts: `test_drill_a_new_vm_*` in `tests/ops/test_restore_reapply.py`.
 
