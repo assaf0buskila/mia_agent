@@ -33,7 +33,7 @@ from urllib.parse import parse_qsl
 from app.prototypes.assaf_os_domain import ENUMS, canonical_input
 from app.prototypes.assaf_os_ledger import PREFIXES
 from app.prototypes.assaf_os_primary import LocalPrimaryError
-from app.services.os_ledger import api
+from app.services.os_ledger import api, contract
 
 DIRECT_SCOPE = "assaf-os:direct"
 READ_SCOPE = "assaf-os:read"
@@ -56,7 +56,6 @@ _RECORD_ID = re.compile(r"[A-Za-z][A-Za-z0-9_-]{2,63}")  # the domain's id rule
 _MAX_REVISION = 2**53 - 1
 _DELETED_KEYS = frozenset({"entity", "after", "limit"})
 _LIMIT = re.compile(r"[1-9][0-9]{0,2}")
-_NO_UNDO = MappingProxyType({"state": "none", "until": None, "undo_request_id": None})
 _LOG = logging.getLogger("mia.os_commit")
 
 
@@ -126,19 +125,14 @@ def _logged(op: str, run: Callable[[], dict[str, Any]]) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------------------------
-# Wire helpers (§10.1 binding + §10.2 receipt_v2, with §22 E12 and E14.3). V2-20 owns the shared
-# serializer; until it lands, the bodies are built here with exactly its rules.
+# Wire bodies. V2-20's ``contract.py`` owns the §10.2 serializer (``receipt_v2``, ``deleted_body``,
+# the §10.1 binding, E12 and E14.3's observed_version); this module gathers what the builder needs
+# inside the transaction and never formats a body itself.
 
 
-def _iso(value: datetime) -> str:
-    if not isinstance(value, datetime) or value.utcoffset() is None:
-        raise _integrity("naive_datetime")
-    return value.astimezone(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
-
-
-def _binding(ctx: api.TrustedOwnerContext, observed_version: int) -> dict[str, Any]:
-    return {"api_version": "assaf-os.v2", "source": "postgresql", "workspace_id": ctx.workspace,
-            "authority_epoch": ctx.authority_epoch, "observed_version": observed_version}
+def _contract_failure(exc: contract.ContractError) -> api.LedgerError:
+    # A fixed reason code only (I7): a value never reaches the log or the envelope.
+    return _integrity("contract_" + re.sub(r"[^a-z0-9_]", "_", exc.reason)[:48])
 
 
 def _receipt_body(tx: api.LedgerTx, ctx: api.TrustedOwnerContext,
@@ -149,7 +143,7 @@ def _receipt_body(tx: api.LedgerTx, ctx: api.TrustedOwnerContext,
     proposal = tx.proposal(receipt.proposal_id)
     if proposal is None:
         raise _integrity("receipt_without_proposal")
-    records: list[dict[str, Any]] = []
+    records: list[tuple[api.Entity, api.RecordDict]] = []
     if receipt.status in {"committed", "target_changed"}:
         seen: set[tuple[str, str]] = set()
         for mutation in proposal.mutations:
@@ -159,35 +153,25 @@ def _receipt_body(tx: api.LedgerTx, ctx: api.TrustedOwnerContext,
             seen.add(key)
             record = tx.get(mutation.entity, mutation.record_id, include_deleted=True)
             if record is not None:
-                records.append({"entity": mutation.entity, "record": dict(record)})
+                records.append((mutation.entity, dict(record)))
     if receipt.status == "committed" and not records:
         raise _integrity("receipt_records_missing")  # E14.3
-    undo: dict[str, Any] | None = None
-    if receipt.kind == "owner_direct":
-        undo = dict(_NO_UNDO)
-        if receipt.status == "committed":
-            if receipt.undo_until is None:
-                raise _integrity("receipt_undo_until_missing")
-            prior = tx.undo_receipt_of(receipt.request_id)
-            state = "undone" if prior else (
-                "expired" if tx.now > receipt.undo_until else "available")
-            undo = {"state": state, "until": _iso(receipt.undo_until),
-                    "undo_request_id": prior.request_id if prior else None}
-    committed = receipt.status == "committed"
-    return _binding(ctx, max(tx.version, receipt.commit_version)) | {
-        "status": receipt.status,
-        "request_id": receipt.request_id,
-        "proposal_id": receipt.proposal_id,
-        "kind": receipt.kind,
-        "actor_source": proposal.source,
-        "commit_version": receipt.commit_version,
-        "committed_at": _iso(receipt.completed_at) if committed else None,
-        "server_now": _iso(tx.now),
-        "records": records,
-        "undo": undo,
-        "undo_of": receipt.undo_of,
-        "reason_codes": list(receipt.reason_codes),
-    }
+    undo: api.UndoView | None = None
+    if receipt.kind == "owner_direct" and receipt.status == "committed":
+        if receipt.undo_until is None:
+            raise _integrity("receipt_undo_until_missing")
+        prior = tx.undo_receipt_of(receipt.request_id)
+        state = "undone" if prior else ("expired" if tx.now > receipt.undo_until else "available")
+        undo = api.UndoView(state, receipt.undo_until, prior.request_id if prior else None)
+    result = api.ReceiptResult(
+        found=True, receipt=receipt, proposal=proposal, records=tuple(records),
+        observed_version=max(tx.version, receipt.commit_version), undo=undo)
+    try:
+        return contract.receipt_v2(
+            result, workspace_id=ctx.workspace, authority_epoch=ctx.authority_epoch,
+            request_id=receipt.request_id, server_now=tx.now)
+    except contract.ContractError as exc:
+        raise _contract_failure(exc) from None
 
 
 def _stored(tx: api.LedgerTx, ctx: api.TrustedOwnerContext,
@@ -698,11 +682,10 @@ def deleted(ledger: api.LedgerReader, ctx: api.TrustedOwnerContext, query: Any, 
     _admit(ctx, settings, scope=READ_SCOPE, write=False, intent=False)
     entity, after, limit = _deleted_query(query)
     page = ledger.deleted(ctx, entity, after=after, limit=limit)
-    return _binding(ctx, page.observed_version) | {
-        "entity": page.entity,
-        "records": [dict(record) for record in page.records],
-        "next_cursor": page.next_cursor,
-    }
+    return contract.deleted_body(
+        workspace_id=ctx.workspace, authority_epoch=ctx.authority_epoch,
+        observed_version=page.observed_version, entity=page.entity, records=page.records,
+        next_cursor=page.next_cursor)
 
 
 __all__ = [
