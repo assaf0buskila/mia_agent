@@ -338,8 +338,9 @@ present throughout; jobs paused and a verified backup before **each** of T1, T3,
   (local, no network). It prints the number of changed cells and their `(sheet, cell)` refs, never the
   values. **It must be zero.** That count is `drift_changed_cells` in the sign-off.
 - **Go G24** staging the import into the production ledger. **Stage**:
-  `sudo mia os-job os-import <arguments V2-30 documents in its --help>`, on the capture that will be
-  signed. It writes staging rows to the production ledger (nothing is promoted until G12), and it runs as
+  `sudo mia os-job os-import /var/lib/mia/os-import/<capture>.xlsx --workspace W --epoch E --stage`
+  (`W` is the `workspace` that `sudo mia os-authority status --approved-sha S` prints), on the capture
+  that will be signed. It writes staging rows to the production ledger (nothing is promoted until G12), and it runs as
   the ledger **runtime** role (no privileged DSN) from the deployed tag's `scripts/`. Unaccepted and
   id-less rows are quarantined, never dropped. Resolve every quarantined row without a bypass.
 - **Verify**: zero unresolved quarantine; the manifest counts, ids, revisions, per-currency totals,
@@ -352,8 +353,10 @@ present throughout; jobs paused and a verified backup before **each** of T1, T3,
 - **Go G12** import promotion of the exact signed manifest.
 - **Do**: show Assaf the manifest summary and its digest. When he says so in chat, the operator writes
   `manifest.json` (section 2) with his sign-off, and the exact digest is passed to promote:
-  `sudo mia os-job os-import <promote arguments V2-30 documents>` with that digest. Promote runs in one
-  transaction at `core=shadow`, writes every record with its Sheets revision, refuses orphans unless
+  `sudo mia os-job os-import /var/lib/mia/os-import/<capture>.xlsx --workspace W --epoch E --promote <digest>`,
+  plus `--cancellations /var/lib/mia/os-import/<cancellations>.json` when the manifest lists any (the
+  digest is the one `uv run --offline python scripts/os_import.py <capture>.xlsx --workspace W --epoch E`
+  printed on the same workbook and cancellations). Promote runs in one transaction at `core=shadow`, writes every record with its Sheets revision, refuses orphans unless
   the manifest lists them under `cancellations`, and is idempotent within an epoch.
   `import_quarantine_unresolved`, `manifest_digest_mismatch`, `import_orphan_rows` and
   `authority_not_active` are its refusals.
