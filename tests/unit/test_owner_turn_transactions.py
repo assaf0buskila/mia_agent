@@ -383,6 +383,22 @@ async def test_a_timeout_error_notice_discards_the_unfinished_turns_partial_work
     assert ids == [], "the unfinished turn's partial write was committed with the hang notice"
 
 
+async def test_a_failed_turn_notice_discards_the_unfinished_turns_partial_work(factory, worker):
+    async def fails(**kwargs):
+        _partial_turn_row(kwargs["store"], "failed")
+        raise RuntimeError("turn failed")
+
+    out = await worker("evt-f4-failed", fails)
+    assert out.sent and out.sent[0].text.startswith("הבדיקה לא עברה כרגע.")
+    with factory() as fresh:
+        assert LeadStore(fresh).get_webhook(
+            provider="telegram", provider_event_id="evt-f4-failed"
+        ).status == "sent"
+    ids = _approval_ids(factory)
+    print(f"OS-RUNTIME F4d failed_turn committed_partial_rows={len(ids)}")
+    assert ids == [], "the unfinished turn's partial write was committed with the failure notice"
+
+
 async def test_a_delivered_reply_keeps_the_turns_work_even_when_it_drained_late(factory, worker):
     async def delivers_late(**kwargs):
         _partial_turn_row(kwargs["store"], "delivered")

@@ -343,6 +343,9 @@ async def process_telegram_owner_update(
                 _mark_claimed(store, claimed, "sent")
                 session.commit()
                 return
+            # As in the timeout branches: nothing uncommitted rides along the notice send, and
+            # the failed turn's partial write is discarded, not committed with the claim.
+            session.rollback()
             sent = await _send_owner_notice(item=merged, port=port, text=FAIL_REPLY)
             _mark_claimed(store, claimed, "sent" if sent else "failed")
             session.commit()
