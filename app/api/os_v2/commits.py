@@ -6,8 +6,9 @@
 ``operation_unavailable``, and any ``Authorization`` header is refused (I4). A write then needs the
 owner's cookie session, the exact Origin and CSRF with ``assaf-os:direct``
 (``owner_mutation_scope``); its trusted context comes only from V2-19's
-``authorize.from_owner_mutation`` and ``require``. Until V2-19 lands (the scope and the
-``authorize`` module), every route fails closed with ``ledger_unavailable`` and writes nothing.
+``authorize.from_owner_mutation`` (``from_owner_read`` for the read) and ``require``. V2-19 is on
+master, so both are real; the module is still resolved at call time and, if the scope or the module
+were ever missing, every route would fail closed with ``ledger_unavailable`` and write nothing.
 
 Bodies are capped by ``OwnerOSBoundary`` (16 KiB for these routes, §10.5). The service decides the
 source (``OS_DIRECT``) and every outcome; this module only admits, delegates and renders.
@@ -37,7 +38,7 @@ from app.core.config import Settings, get_settings
 from app.services.os_ledger import api, owner_direct
 
 ROOT = "/v1/owner/os/unified"
-AUTHORIZE_MODULE = "app.services.os_ledger.authorize"  # V2-19; imported at call time only
+AUTHORIZE_MODULE = "app.services.os_ledger.authorize"  # V2-19; resolved at call time (fail closed)
 _LOG = logging.getLogger("mia.os_v2")
 _HEADERS = {"Cache-Control": "private, no-store"}
 
@@ -60,8 +61,8 @@ def direct_principal(
     settings: Settings = Depends(get_settings),
 ) -> OwnerSessionPrincipal:
     """Cookie session + exact Origin + CSRF with ``assaf-os:direct``, through the one
-    ``owner_mutation_scope`` (V2-19 sets the mutation proof there). Before V2-19 adds the scope to
-    the mutation allow-list, ``owner_mutation_scope`` refuses it and so does this route."""
+    ``owner_mutation_scope`` (V2-19 sets the mutation proof there). Should the scope ever leave the
+    mutation allow-list, ``owner_mutation_scope`` refuses it and so does this route."""
     try:
         dependency = owner_sessions.owner_mutation_scope(owner_direct.DIRECT_SCOPE)
     except ValueError:
