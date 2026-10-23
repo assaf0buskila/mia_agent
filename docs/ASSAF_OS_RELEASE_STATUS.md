@@ -1,16 +1,6 @@
 # Assaf OS release preparation — 2026-10-12
 
-Current deployment and remaining acceptance are recorded in
-`ops/assaf-os/LIVE_STATUS.md` (updated 13 October). MIA lead approval integration
-is deployed at `cb977017c037bb6a7c6738edb821452049e5d3bf`; Script version 7,
-Cloudflare, mapped-owner Google login and the native/OS round trip are live.
-One human Telegram-approved synthetic lead is verified in the shared Sheet and
-OS. Four of the five real legacy learning leads are imported after human approval;
-the fifth is approved but unexecuted and expired. Phone/contact actions and read
-refresh are deployed at frontend 209f516 / Cloudflare 3c5524bd, with actual rendering
-acceptance still pending. The independently reviewed latency fix is prepared for
-Script-first deployment. Complete browser/form and owner/device acceptance remain pending. The preparation snapshot below is historical; its
-disabled-gate and not-yet-deployed statements are not current operational status.
+Deployment evidence and remaining acceptance as of 13 October are recorded in `ops/assaf-os/LIVE_STATUS.md`: Apps Script version 10 (rollback version 9), Cloudflare Worker `c2237976` (rollback `0f52dbef`), and the latest public MIA health there is `5672cc1` (status `ok`; `345d0a7` is the earlier owner-import release). These IDs are historical: the last verified Worker and MIA IDs are in `docs/CLAUDE_CODE_HANDOFF.md`, section "Last verified production and access" (it records the installed Apps Script version as unverified, so Script version 10 at `bda48fa` remains the latest Script record), and MIA's live commit is whatever `/health` reports as `deployment.commit_sha`. Actual native/OS round trip, one human Telegram-approved test, populated OS phone/call/WhatsApp rendering and four real legacy learning rows are verified. The fifth, real browser/form intake and owner/device timing/UX acceptance remain open. The Hebrew closure checklist is `docs/ASSAF_OS_FINISH_PLAN.md`. The preparation snapshot below is historical; its disabled-gate and undeployed statements are not current operational status.
 
 The owner selected Cloudflare for the OS, one existing Google Sheets workbook
 for business data, and Apps Script for the shared record/approval service. Direct

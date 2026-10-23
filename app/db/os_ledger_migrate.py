@@ -10,16 +10,25 @@ from sqlalchemy.engine import Connection, Engine
 
 from app.db.migrate import MigrationSummary
 
-MIGRATIONS = ("20261015_assaf_os_ledger.sql",)
+MIGRATIONS = (
+    "20261015_assaf_os_ledger.sql",
+    # V2-14b schema addendum (V2_PG_CONTRACTS.md section 4), applied in this order.
+    "20261016_assaf_os_ledger_core_v2.sql",
+    "20261016_assaf_os_statements.sql",
+    "20261016_assaf_os_assistant.sql",
+)
 OWNER_ROLE = "assaf_os_owner"
 # V2-15 must provision a separate NOINHERIT login and validate its exact grant map.
 RUNTIME_ROLE = "assaf_os_ledger"
-RUNTIME_DSN_ENV = "MIA_OS_LEDGER_DATABASE_URL"
+RUNTIME_DSN_ENV = "MIA_OWNER_OS_LEDGER_DATABASE_URL"
 TABLES = frozenset({
     "os_workspaces", "os_authority", "os_leads", "os_clients", "os_works", "os_payments",
     "os_time", "os_expenses", "os_tasks", "os_proposals", "os_receipts", "os_events",
     "os_outbox", "os_mirror_state", "os_summary_monthly", "os_summary_cycle",
     "os_import_batches", "os_import_rows",
+    # V2-14b
+    "os_statements", "os_statement_lines", "os_statement_batch_lines", "os_merchant_rules",
+    "os_statement_review_drafts", "os_assistant_credentials", "os_assistant_audit",
 })
 
 

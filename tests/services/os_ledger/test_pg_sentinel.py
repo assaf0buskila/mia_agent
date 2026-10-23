@@ -15,7 +15,7 @@ from pathlib import Path
 
 from tests.services.os_ledger.conftest import PG_URL_ENV, core_module_present, pg_enabled
 
-MIN_PG_CASES = 364
+MIN_PG_CASES = 407  # 403 on master (V2-16 final) + V2-18's one E14(1) case + V2-16b's 3 (E26)
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]

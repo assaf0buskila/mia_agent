@@ -198,10 +198,16 @@ def test_core_authority_state_is_none_without_a_dsn():
     assert api.core_authority_state(Settings(_env_file=None)) is None
 
 
-def test_lazy_entry_points_fail_closed_before_v2_16_lands():
+def test_lazy_entry_points_fail_closed_when_the_implementation_is_missing(monkeypatch):
     class WithDsn:
         owner_os_ledger_database_url = "postgresql://ledger@127.0.0.1:1/x"
 
+    # §22 E13: V2-16 has landed, so simulate a missing implementation module.
+    monkeypatch.setattr(
+        api.importlib,
+        "import_module",
+        lambda *a, **k: (_ for _ in ()).throw(ImportError("x")),
+    )
     with pytest.raises(api.LedgerError) as caught:
         api.core_authority_state(WithDsn())
     assert (caught.value.code, caught.value.reason) == (
@@ -381,8 +387,8 @@ def test_os_workbook_is_subtracted_only_when_frozen_or_on_postgres():
     assert "os-book" in _allowed(assaf_os_backend="sheets", assaf_os_freeze=False)
     assert "os-book" not in _allowed(assaf_os_freeze=True)
     assert "os-book" not in _allowed(assaf_os_backend="postgres")
-    # An invalid backend coerces to sheets, so it never subtracts by itself.
-    assert "os-book" in _allowed(assaf_os_backend="postgresql")
+    # §22 E9: an invalid backend coerces, and a coerced value fails toward subtracting.
+    assert "os-book" not in _allowed(assaf_os_backend="postgresql")
     assert {"extra-1"} <= _allowed(assaf_os_freeze=True, os_mirror_spreadsheet_id="mirror-book")
 
 

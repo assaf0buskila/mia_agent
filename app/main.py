@@ -32,6 +32,7 @@ from app.core.config import MiaEnv, get_settings, os_config_coerced
 from app.core.demo import demo_mode_active
 from app.core.errors import MiaError
 from app.core.logging import configure_logging
+from app.db.app_role_posture import app_role_ready
 from app.db.session import database_ready, get_session_factory, init_db
 from app.db.store import LeadStore
 from app.services.os_ledger.api import LedgerError
@@ -440,6 +441,6 @@ def health_live() -> dict[str, str]:
 
 @app.get("/health/ready", response_model=None)
 def health_ready() -> JSONResponse:
-    if database_ready():
+    if database_ready() and app_role_ready(get_settings().app_role_posture):
         return JSONResponse(content={"status": "ok"})
     return JSONResponse(status_code=503, content={"status": "not_ready"})

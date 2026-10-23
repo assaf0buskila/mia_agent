@@ -3,10 +3,17 @@ import os
 import re
 from collections.abc import Callable
 from enum import StrEnum
-from typing import Any, Literal
+from typing import Any, Literal, Self
 from urllib.parse import urlparse
 
-from pydantic import Field, TypeAdapter, ValidationError, ValidationInfo, field_validator
+from pydantic import (
+    Field,
+    TypeAdapter,
+    ValidationError,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.core.models import model_chain
@@ -154,6 +161,10 @@ class Settings(BaseSettings):
     )
 
     database_url: str = Field(default="sqlite:///:memory:")
+    # V2-14a. A plain str on purpose: no Literal and no validator, so a bad value can never fail
+    # the settings load. app.db.app_role_posture treats anything but exactly "enforce" as
+    # "observe" at use and logs the coercion once.
+    app_role_posture: str = "observe"
     composio_api_key: str = Field(default="")
     composio_user_id: str = Field(default="")
     # Ask Composio for resource ids (GSC site, GA4 property) when the matching env var is
@@ -212,8 +223,14 @@ class Settings(BaseSettings):
     owner_os_session_database_url: str = ""
     owner_os_read_database_url: str = ""
     owner_os_action_database_url: str = ""
+    owner_os_ledger_database_url: str = Field(default="", repr=False)
     owner_os_cursor_secret: str = ""
+    # Declared only so the existing mia-env still validates. Nothing reads it since V2-08.
     owner_os_session_ttl_seconds: int = Field(default=1800, gt=0, le=1800)
+    # V2-08 sliding sessions: a renewal slides the idle window, never past the absolute cap
+    # measured from the chain's first login.
+    owner_os_session_idle_seconds: int = Field(default=43_200, ge=300, le=43_200)
+    owner_os_session_absolute_seconds: int = Field(default=1_209_600, ge=3_600, le=1_209_600)
     owner_os_session_scopes: str = (
         "owner-os:read:contacts,owner-os:read:activities,owner-os:read:reminders"
     )
@@ -242,6 +259,28 @@ class Settings(BaseSettings):
         "none", "minimal", "low", "medium", "high", "xhigh", "max"
     ] = "medium"
     owner_turn_timeout_seconds: float = Field(default=45.0, gt=0.0, le=300.0)
+    # Reserved off the end of the owner turn deadline so a model/tool call that
+    # finishes right up against the deadline still leaves time for the reply to
+    # actually reach Telegram (app/surfaces/owner.py's post-deadline check stops
+    # a send that would otherwise start after `deadline_at`). This is the
+    # `reserve` in every `child_call_timeout` call the owner loop makes.
+    owner_final_reserve_seconds: float = Field(default=5.0, gt=0.0, le=30.0)
+    # Per-attempt cap for ONE model rung inside the owner tool loop. Bounds a
+    # slow/hanging primary so it cannot burn the whole remaining turn budget and
+    # starve every fallback rung behind it (see `LlmModelChain.complete`'s
+    # `attempt_timeout`). Independent of `llm_request_timeout_seconds`, which is
+    # only the client's own fallback default when no explicit timeout is given.
+    owner_model_attempt_timeout_seconds: float = Field(default=20.0, gt=0.0, le=120.0)
+    # Below this many seconds of remaining turn budget, a model call is not worth
+    # starting at all -- there would not be enough time left for even one
+    # plausible attempt plus the final-reserve send. Used as `child_call_timeout`'s
+    # `minimum` for the model chain call in `run_owner_agent`.
+    owner_min_model_seconds: float = Field(default=6.0, gt=0.0, le=60.0)
+    # Same idea as `owner_min_model_seconds`, for one tool dispatch
+    # (`_run_tool_with_timeout`'s `child_call_timeout` call): below this many
+    # seconds left, a tool call is refused rather than started and immediately
+    # cut off.
+    owner_min_tool_seconds: float = Field(default=2.0, gt=0.0, le=60.0)
     telegram_typing_interval_seconds: float = Field(default=4.0, gt=0.5, le=10.0)
     embedding_provider: str = Field(default="openai")
     embedding_model: str = Field(default="")
@@ -290,6 +329,12 @@ class Settings(BaseSettings):
     def _coerce_os_config(cls, value: Any, info: ValidationInfo) -> Any:
         return _os_config_value(info.field_name, value)
 
+    @model_validator(mode="after")
+    def _owner_os_session_windows(self) -> Self:
+        if self.owner_os_session_absolute_seconds < self.owner_os_session_idle_seconds:
+            raise ValueError("owner_os_session_absolute_seconds must be at least the idle window")
+        return self
+
     def cors_origin_list(self) -> list[str]:
         return [item.strip() for item in self.cors_origins.split(",") if item.strip()]
 
@@ -308,10 +353,17 @@ class Settings(BaseSettings):
         }
         configured.add(self.resolved_sheets_spreadsheet_id())
         configured.add(LOCKED_SPREADSHEET_ID)
-        # The OS mirror workbook is never a write target. The OS workbook stops being one once it
-        # is frozen or PostgreSQL holds the authority.
+        # The OS mirror workbook is never a write target (§22 E9). The OS workbook stops being one
+        # once T1 has started: it is frozen, or PostgreSQL holds the authority. Only an exact,
+        # cleanly loaded "sheets" backend with the freeze exactly off keeps it; a coerced or
+        # unexpected value fails toward subtracting, never toward allowing.
         configured.discard(self.os_mirror_spreadsheet_id.strip())
-        if self.assaf_os_freeze or self.assaf_os_backend == "postgres":
+        still_on_sheets = (
+            self.assaf_os_backend == "sheets"
+            and self.assaf_os_freeze is False
+            and not _OS_CONFIG_COERCED & {"assaf_os_backend", "assaf_os_freeze"}
+        )
+        if not still_on_sheets:
             configured.discard(self.assaf_os_workbook_id.strip())
         return frozenset(configured)
 

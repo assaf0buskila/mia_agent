@@ -28,11 +28,15 @@ from app.db.models import (
 )
 from app.domain.approvals import DECISION_APPROVED, DECISION_PENDING, DECISION_REJECTED
 from app.integrations.llm_client import LlmError, parse_json_object
-from app.services.assaf_os import AssafOsError, AssafOsPort, ProposeRequest
+from app.services.assaf_os import AssafOsError, ProposeRequest
+from app.services.os_backend import get_os_backend
+from app.services.os_ledger import api as ledger_api
 from app.services.owner_actions import (
     ACTION_OWNER_EXTERNAL_WRITE,
     RESOURCE_OWNER_PROPOSAL,
     OwnerActionProposal,
+    is_ledger_owner_action,
+    load_ledger_authorize,
     propose_owner_action,
     read_owner_action,
 )
@@ -41,6 +45,10 @@ from app.services.phone_identity import normalize_new_input_phone
 PATHS = ("לימוד", "אוטומציה")
 PREPARE_KIND = "assaf_os.lead.prepare"
 FINAL_KIND = "assaf_os.approve"
+# V2-28: the duplicate pre-check pages through the ledger's leads (section 8 page cap 200). A
+# workspace beyond the bound fails closed rather than guessing "absent".
+_LEDGER_LEAD_PAGE = 200
+_LEDGER_LEAD_MAX_PAGES = 50
 _MODEL_TIMEOUT_SECONDS = 8.0
 _MODEL_MAX_OUTPUT_TOKENS = 240
 _TEXT_LIMIT = 700
@@ -480,8 +488,14 @@ def current_lead_duplicate_guard(
     return {"phone": phone, "email": email, "absent": not _duplicate_in_snapshot(snapshot, probe)}
 
 
-def _existing_source_proposal(store, source: Mapping[str, Any]) -> OwnerActionProposal | None:
-    """Recover the durable CRM-source -> Assaf OS proposal link from immutable envelopes."""
+def _existing_source_proposal(
+    store, source: Mapping[str, Any], *, ledger: bool = False
+) -> OwnerActionProposal | None:
+    """Recover the durable CRM-source -> Assaf OS proposal link from immutable envelopes.
+
+    Only a card of the active authority counts (V2-28): under the ledger a Sheets card can never
+    be decided, and under Sheets a ledger card cannot either.
+    """
     contact_id = str(source.get("contact_id") or "")
     rows = store.session.scalars(
         select(ApprovalRow)
@@ -495,6 +509,8 @@ def _existing_source_proposal(store, source: Mapping[str, Any]) -> OwnerActionPr
     for row in rows:
         envelope = read_owner_action(row)
         if envelope is None or envelope.get("kind") != FINAL_KIND:
+            continue
+        if is_ledger_owner_action(envelope) is not ledger:
             continue
         binding = envelope["target"].get("source_binding")
         if not isinstance(binding, dict) or binding.get("contact_id") != contact_id:
@@ -540,6 +556,225 @@ def _source_proposal_attempt_count(store, source: Mapping[str, Any]) -> int:
     return count
 
 
+def _uses_ledger(settings) -> bool:
+    """V2-17's factory choice: only ``postgres`` puts website leads on the ledger."""
+    return getattr(settings, "assaf_os_backend", "sheets") == "postgres"
+
+
+def _as_os_error(exc: ledger_api.LedgerError) -> AssafOsError:
+    return AssafOsError(exc.code, exc.status)
+
+
+def _ledger_access(settings, principal: Principal) -> tuple[Any, Any]:
+    """The ledger and the MIA (model, non-deciding) context: reads and propose only."""
+    try:
+        ledger = ledger_api.build_ledger(settings)
+        ctx = load_ledger_authorize().from_mia_tool(principal, settings)
+    except ledger_api.LedgerError as exc:
+        raise _as_os_error(exc) from None
+    return ledger, ctx
+
+
+def _ledger_lead_exists(ledger, ctx, lead_input: Mapping[str, str]) -> bool:
+    """The duplicate pre-check as a ledger read: any live lead with the same phone or email."""
+    leads: list[dict[str, Any]] = []
+    after: str | None = None
+    try:
+        for _ in range(_LEDGER_LEAD_MAX_PAGES):
+            page = ledger.page(ctx, "leads", after=after, limit=_LEDGER_LEAD_PAGE)
+            leads.extend(dict(record) for record in page.records)
+            after = page.next_cursor
+            if after is None:
+                return _duplicate_in_snapshot({"records": {"leads": leads}}, lead_input)
+    except ledger_api.LedgerError as exc:
+        raise _as_os_error(exc) from None
+    raise ValueError("ledger_lead_scan_bounded")
+
+
+def _create_final_ledger_proposal(
+    store,
+    *,
+    settings,
+    principal: Principal,
+    source: Mapping[str, Any],
+    template: LeadTemplate,
+    path: str,
+    source_ref: str,
+    corrected_name: str = "",
+    corrected_phone: str = "",
+    corrected_email: str = "",
+) -> OwnerActionProposal:
+    """The website lead as one MIA ledger proposal plus one exact Telegram card (V2-28).
+
+    The request id is ``mia_request_uuid(owner, ws, "website-lead-<hex>")``. The duplicate
+    pre-check is a ledger read. A duplicate, or any definite ledger refusal, is a no-write that
+    releases the preparation claim: it never leaves a ``pending_review`` row. Only an unknown
+    COMMIT outcome stays uncertain. Nothing here can decide or commit a business row.
+    """
+    linked = _existing_source_proposal(store, source, ledger=True)
+    if linked is not None:
+        return linked
+    lead_input = _lead_input(
+        source,
+        template,
+        path=path,
+        corrected_name=corrected_name,
+        corrected_phone=corrected_phone,
+        corrected_email=corrected_email,
+    )
+    ledger, ctx = _ledger_access(settings, principal)
+    if _ledger_lead_exists(ledger, ctx, lead_input):
+        raise ValueError("lead_already_exists")
+    stable_identity = {
+        "owner": principal.actor_id,
+        "workspace": ctx.workspace,
+        "contact_id": str(source.get("contact_id") or ""),
+    }
+    stable_digest = _digest(stable_identity)
+    attempt_count = _source_proposal_attempt_count(store, source)
+    source_id = "website-lead-" + _digest({"stable": stable_digest, "attempt": attempt_count})[:32]
+    request_id = ledger_api.mia_request_uuid(principal.actor_id, ctx.workspace, source_id)
+    operation_key = f"leadprep-contact:{stable_digest}"
+    if attempt_count:
+        claimed = store.reclaim_completed_provider_write(scope="approval", key=operation_key)
+        if not claimed and not store.get_provider_write_status(
+            scope="approval", key=operation_key
+        ):
+            claimed = store.claim_provider_write(scope="approval", key=operation_key)
+    else:
+        claimed = store.claim_provider_write(scope="approval", key=operation_key)
+    if not claimed:
+        linked = _existing_source_proposal(store, source, ledger=True)
+        if linked is not None:
+            return linked
+        raise ValueError("lead_source_pending_review")
+    claim_note = {"contact_id": str(source.get("contact_id") or ""), "request_id": request_id}
+    if not store.annotate_provider_write_claim(
+        scope="approval", key=operation_key, result_json=_json(claim_note)
+    ):
+        store.mark_provider_write_pending_review(scope="approval", key=operation_key)
+        raise ValueError("lead_source_pending_review")
+    provider_attempted = False
+    try:
+        linked = _existing_source_proposal(store, source, ledger=True)
+        if linked is not None:
+            if not store.complete_provider_write(
+                scope="approval",
+                key=operation_key,
+                result_json=_json(
+                    {
+                        **claim_note,
+                        "approval_id": linked.approval_id,
+                        "proposal_id": linked.proposal_id,
+                    }
+                ),
+            ):
+                store.mark_provider_write_pending_review(scope="approval", key=operation_key)
+                raise ValueError("lead_source_pending_review")
+            return linked
+        if _ledger_lead_exists(ledger, ctx, lead_input):
+            raise ValueError("lead_already_exists")
+        provider_attempted = True
+        try:
+            row = ledger.propose(
+                ctx,
+                ledger_api.ProposeInput(
+                    request_id=request_id,
+                    entity="leads",
+                    record_id=None,
+                    expected_revision=0,
+                    input=lead_input,
+                ),
+            )
+        except ledger_api.LedgerError as exc:
+            if exc.write_outcome != "unknown":
+                provider_attempted = False  # a definite refusal: the ledger wrote nothing
+                if exc.code == "lead_already_exists":
+                    raise ValueError("lead_already_exists") from None
+            raise _as_os_error(exc) from None
+        if (
+            row.request_id != request_id
+            or row.kind != "proposal"
+            or row.entity != "leads"
+            or row.status != "pending"
+        ):
+            raise ValueError("lead_proposal_not_pending")
+        from app.domain.owner.proposal_cards import (
+            assaf_os_proposal_is_reviewable,
+            ledger_proposal_body,
+        )
+
+        pending = ledger_proposal_body(row)
+        target = {
+            "proposal": pending,
+            "proposal_digest": _digest(pending),
+            "approval_guard_version": pending["approval_guard_version"],
+            "workspace_id": ctx.workspace,
+            "authority_epoch": ctx.authority_epoch,
+            "mode": settings.assaf_os_mode,
+            "source_binding": _source_binding(source),
+            "duplicate_guard": {
+                "phone": lead_input["phone"],
+                "email": lead_input["email"],
+                "absent": True,
+            },
+            "contact_provenance": {
+                "raw_phone": _fields(source.get("raw_fields")).get("phone", ""),
+                "normalized_phone": lead_input["phone"],
+                "raw_email": _fields(source.get("raw_fields")).get("email", ""),
+                "normalized_email": lead_input["email"],
+                "owner_corrected_name": bool(corrected_name),
+                "owner_corrected_phone": bool(corrected_phone),
+                "owner_corrected_email": bool(corrected_email),
+            },
+        }
+        # The 36-char decision UUIDs travel in the parameters JSON, never in approval_id.
+        prospective = {
+            "kind": FINAL_KIND,
+            "parameters": {
+                "proposal_id": row.proposal_id,
+                "request_id": row.approval_id,
+                "rejection_request_id": row.rejection_id,
+            },
+            "target": target,
+        }
+        if not assaf_os_proposal_is_reviewable(prospective):
+            raise ValueError("proposal_unreviewable")
+        proposal = propose_owner_action(
+            store,
+            principal=principal,
+            source_ref=source_ref,
+            kind=FINAL_KIND,
+            parameters=prospective["parameters"],
+            target=target,
+            now=datetime.now(UTC),
+            ttl_seconds=600,
+        )
+        if not store.complete_provider_write(
+            scope="approval",
+            key=operation_key,
+            result_json=_json(
+                {
+                    "approval_id": proposal.approval_id,
+                    "proposal_id": proposal.proposal_id,
+                    "request_id": request_id,
+                }
+            ),
+        ):
+            raise ValueError("lead_source_pending_review")
+        return proposal
+    except Exception:
+        if provider_attempted:
+            store.mark_provider_write_pending_review(scope="approval", key=operation_key)
+        elif attempt_count:
+            store.complete_provider_write(
+                scope="approval", key=operation_key, result_json=_json(claim_note)
+            )
+        else:
+            store.release_operation(scope="approval", key=operation_key)
+        raise
+
+
 def _create_final_proposal(
     store,
     *,
@@ -553,6 +788,19 @@ def _create_final_proposal(
     corrected_phone: str = "",
     corrected_email: str = "",
 ) -> OwnerActionProposal:
+    if _uses_ledger(settings):
+        return _create_final_ledger_proposal(
+            store,
+            settings=settings,
+            principal=principal,
+            source=source,
+            template=template,
+            path=path,
+            source_ref=source_ref,
+            corrected_name=corrected_name,
+            corrected_phone=corrected_phone,
+            corrected_email=corrected_email,
+        )
     linked = _existing_source_proposal(store, source)
     if linked is not None:
         return linked
@@ -564,7 +812,7 @@ def _create_final_proposal(
         corrected_phone=corrected_phone,
         corrected_email=corrected_email,
     )
-    port = AssafOsPort(settings, principal.actor_id, actor_source="MIA")
+    port = get_os_backend(settings, principal.actor_id, actor="MIA")
     if _duplicate_in_snapshot(port.snapshot(), lead_input):
         raise ValueError("lead_already_exists")
     stable_identity = {
@@ -787,7 +1035,7 @@ def choose_lead_path(
             path=path,
             source_ref=f"{row.resource_id}:path:{path}",
         )
-    except AssafOsError as exc:
+    except (AssafOsError, ledger_api.LedgerError) as exc:
         return LeadChoiceResult(exc.code)
     except (KeyError, TypeError, ValueError, ValidationError, json.JSONDecodeError) as exc:
         return LeadChoiceResult(str(exc) or "invalid_source")
@@ -851,6 +1099,45 @@ def prepare_selected_crm_lead(
     )
 
 
+def _prove_ledger_lead_no_write(
+    settings, principal: Principal, envelope: Mapping[str, Any]
+) -> None:
+    """Ledger proof that an approved lead card never wrote, by reads only (V2-28).
+
+    A receipt under either decision UUID is the answer: committed refuses, any other terminal
+    status proves the no-write. Without a receipt, a proposal past its expiry can never commit
+    (a late approve finishes it ``expired``), so that proves it too. Anything else is unproven.
+    """
+    if not _uses_ledger(settings):
+        raise ValueError("recovery_not_eligible")
+    parameters = envelope["parameters"]
+    proposal = envelope["target"].get("proposal") or {}
+    ledger, ctx = _ledger_access(settings, principal)
+    try:
+        for request_id in (parameters["request_id"], parameters["rejection_request_id"]):
+            found = ledger.receipt(ctx, str(request_id))
+            if found.found:
+                receipt = found.receipt
+                if (
+                    receipt is None
+                    or receipt.proposal_id != parameters["proposal_id"]
+                    or receipt.status == "committed"
+                ):
+                    raise ValueError("remote_no_write_unproven")
+                return
+        created = ledger.creation_request(ctx, str(proposal.get("request_id") or ""))
+    except ledger_api.LedgerError:
+        raise ValueError("remote_no_write_unproven") from None
+    if (
+        not created.found
+        or created.proposal is None
+        or created.proposal.proposal_id != parameters["proposal_id"]
+        or created.decision is not None
+        or created.past_expiry is not True
+    ):
+        raise ValueError("remote_no_write_unproven")
+
+
 def recover_expired_approved_crm_lead(
     store,
     *,
@@ -882,7 +1169,26 @@ def recover_expired_approved_crm_lead(
     current_binding = current_source_binding(store, binding)
     if _json(current_binding) != _json(binding):
         raise ValueError("source_changed")
-    port = AssafOsPort(settings, principal.actor_id, actor_source="MIA")
+    if is_ledger_owner_action(envelope):
+        _prove_ledger_lead_no_write(settings, principal, envelope)
+        row.result = "terminal:remote_expired_no_receipt"
+        store.release_operation(scope="approval", key=f"{row.resource_id}:execute")
+        store.session.flush()
+        return prepare_selected_crm_lead(
+            store,
+            settings=settings,
+            principal=principal,
+            contact_id=str(binding["contact_id"]),
+            conversation_id=str(binding["conversation_id"]),
+            path=path,
+            summary=summary,
+            next_step=next_step,
+        )
+    if _uses_ledger(settings):
+        # An Apps Script card under postgres: the backend is the ledger, which cannot prove an
+        # Apps Script no-write (V2-17 review). Refuse explicitly; no backend is built.
+        raise ValueError("remote_no_write_unproven")
+    port = get_os_backend(settings, principal.actor_id, actor="MIA")
     remote = port.proposal(str(parameters["proposal_id"]))
     receipt = port.receipt(str(parameters["request_id"]))
     if (
