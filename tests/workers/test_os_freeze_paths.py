@@ -861,8 +861,15 @@ def test_a_frozen_active_ledger_still_settles_its_pending_proposals(env, key):
 @dataclass
 class DirectOutcome:
     refused: str | None  # the refusal code, if the route ended in one
+    status: int  # the HTTP status the route answered
     wrote: bool  # any ledger row, receipt, event, outbox row or version change
-    business: bool  # a task row or an outbox row changed: a business change reached the ledger
+    business: bool  # a task row's content or the outbox changed: a business change was written
+
+
+def business_state(world) -> tuple[list[str], int]:
+    """Every task row's full content (an in-place update counts) and the outbox size."""
+    tasks = sorted(json.dumps(row, sort_keys=True, default=str) for row in world.rows("os_tasks"))
+    return tasks, len(world.rows("os_outbox"))
 
 
 def drive_owner_direct(env: Env, freeze: bool, route: str) -> DirectOutcome:
@@ -885,7 +892,7 @@ def drive_owner_direct(env: Env, freeze: bool, route: str) -> DirectOutcome:
             assert owner.client.post(f"{ROUTE}/commits", json=create, headers=headers
                                      ).status_code == 200
         owner.settings = owner.settings.model_copy(update={"assaf_os_freeze": freeze})
-        before = counts(world)
+        before, business_before = counts(world), business_state(world)
         if route == "commit":
             request = ("/commits", create)
         elif route == "undo":
@@ -894,14 +901,14 @@ def drive_owner_direct(env: Env, freeze: bool, route: str) -> DirectOutcome:
         else:
             request = (f"/commits/{uuid.uuid4()}/abandon", {})
         response = owner.client.post(ROUTE + request[0], json=request[1], headers=headers)
-        after = counts(world)
+        after, business_after = counts(world), business_state(world)
     changed = {key for key in after if after[key] != before[key]}
-    business = bool(changed & {"os_tasks", "os_outbox"})
+    business = business_after != business_before
     if response.status_code == 200:
-        return DirectOutcome(None, bool(changed), business)
+        return DirectOutcome(None, 200, bool(changed), business)
     error = response.json()["error"]
     assert error["write_outcome"] == "not_started", error
-    return DirectOutcome(error["code"], bool(changed), business)
+    return DirectOutcome(error["code"], response.status_code, bool(changed), business)
 
 
 COMMITS_FILE = "app/api/os_v2/commits.py"
@@ -925,19 +932,19 @@ def test_every_classified_owner_direct_site_has_a_driver_and_nothing_else_does()
 @pytest.mark.parametrize("site", sorted(OWNER_DIRECT_INTENT_DRIVERS), ids=lambda s: s[2])
 def test_an_owner_direct_intent_is_refused_os_frozen_and_writes_nothing(env, site):
     assert OWNER_DIRECT_INTENT_DRIVERS[site](env, True) == DirectOutcome(
-        "os_frozen", wrote=False, business=False)
+        "os_frozen", 503, wrote=False, business=False)
 
 
 @pytest.mark.parametrize("site", sorted(OWNER_DIRECT_INTENT_DRIVERS), ids=lambda s: s[2])
 def test_the_same_owner_direct_intent_writes_before_the_freeze(env, site):
     assert OWNER_DIRECT_INTENT_DRIVERS[site](env, False) == DirectOutcome(
-        None, wrote=True, business=True)
+        None, 200, wrote=True, business=True)
 
 
 @pytest.mark.parametrize("site", sorted(OWNER_DIRECT_ALLOWED_DRIVERS), ids=lambda s: s[2])
 def test_abandon_is_allowed_under_the_freeze_and_writes_no_business_change(env, site):
     """An abandoned receipt and its event settle a lost request id; nothing else moves."""
     assert OWNER_DIRECT_ALLOWED_DRIVERS[site](env, True) == DirectOutcome(
-        None, wrote=True, business=False)
+        None, 200, wrote=True, business=False)
     assert OWNER_DIRECT_ALLOWED_DRIVERS[site](env, False) == DirectOutcome(
-        None, wrote=True, business=False)
+        None, 200, wrote=True, business=False)

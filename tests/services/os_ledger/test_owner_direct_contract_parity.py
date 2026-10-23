@@ -11,7 +11,7 @@ body the service emits, on the fake and on PostgreSQL.
 from __future__ import annotations
 
 import pytest
-from app.services.os_ledger import contract, owner_direct
+from app.services.os_ledger import api, contract, owner_direct
 
 from tests.fakes.os_ledger_builders import commit_direct, rid, task
 from tests.services.os_ledger.owner_direct_support import (
@@ -21,6 +21,7 @@ from tests.services.os_ledger.owner_direct_support import (
     ledger_case,
     owner_ctx,
     single,
+    state,
 )
 
 
@@ -95,3 +96,42 @@ def test_v2_20_readers_accept_every_body_the_service_emits(env):
         assert contract.read_receipt_v2(body) == body
     page = deleted_page(env)
     assert contract.read_deleted_page(page) == page
+
+
+def failing_receipt(monkeypatch) -> None:
+    def broken(*_args, **_kwargs):
+        raise contract.ContractError("naive_datetime")
+
+    monkeypatch.setattr(contract, "receipt_v2", broken)
+
+
+def refused_contract(call) -> api.LedgerError:
+    with pytest.raises(api.LedgerError) as refused:
+        call()
+    return refused.value
+
+
+def test_a_contract_failure_on_a_fresh_commit_rolls_back_and_reads_not_started(env, monkeypatch):
+    """The body is built inside the transaction, before COMMIT: a failure there writes nothing."""
+    settings, context = KnobSettings(env), owner_ctx()
+    commit_direct(env, context, [task("TAS_t1")])
+    before = state(env)
+    failing_receipt(monkeypatch)
+    error = refused_contract(lambda: owner_direct.commit(
+        env, context, single("complete", record_id="TAS_t1", revision=1), settings=settings))
+    assert (error.code, error.write_outcome) == ("ledger_integrity_failed", "not_started")
+    assert error.reason == "contract_naive_datetime"
+    assert state(env) == before
+
+
+def test_a_contract_failure_on_an_undo_rolls_back_and_reads_not_started(env, monkeypatch):
+    settings, context = KnobSettings(env), owner_ctx()
+    commit_direct(env, context, [task("TAS_t1")])
+    done = owner_direct.commit(
+        env, context, single("complete", record_id="TAS_t1", revision=1), settings=settings)
+    before = state(env)
+    failing_receipt(monkeypatch)
+    error = refused_contract(lambda: owner_direct.undo(
+        env, context, done["request_id"], {"undo_request_id": rid()}, settings=settings))
+    assert (error.code, error.write_outcome) == ("ledger_integrity_failed", "not_started")
+    assert state(env) == before

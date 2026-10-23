@@ -179,10 +179,12 @@ def test_an_authorization_header_is_refused_before_authorize(owner, world, calls
     assert calls == [] and world.version() == 0
 
 
-def test_the_service_still_checks_the_numeric_owner_the_real_context_carries(world, calls):
-    """The real constructor re-checks the allow-list; a session owner outside it never mints."""
+def test_a_session_owner_outside_the_allow_list_is_refused_before_any_context(world, calls):
+    """The session layer refuses an owner outside the allow-list (401) before any constructor runs,
+    so nothing is minted. The constructor's own allow-list re-check is pinned by V2-19's
+    tests/services/os_ledger/test_authorize_constructors.py."""
     with OwnerApp(owner_settings(telegram_owner_user_ids="999")) as other:
         response = other.client.post(ROOT + "/commits", json=create_body(uuid4_str()),
                                      headers=other.login())
     assert response.status_code == 401 and error(response) == "owner_auth_required"
-    assert world.version() == 0
+    assert calls == [] and world.version() == 0
