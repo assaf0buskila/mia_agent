@@ -7,7 +7,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import signal
+import subprocess
 import sys
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -37,6 +41,8 @@ def env(tmp_path):
         "MIA_BACKUP_WORK_DIR": str(tmp_path / "work"),
         # never the machine's real lock: a developer may have a `mia` running
         "MIA_STATE_LOCK": str(tmp_path / "mia-state.lock"),
+        # nor the machine's real restore-incomplete marker (V2-10b)
+        "MIA_RESTORE_INCOMPLETE": str(tmp_path / "restore-incomplete"),
     }
 
 
@@ -373,6 +379,276 @@ def test_a_real_held_state_lock_is_seen_and_released_for_the_next_slot(env, caps
     assert backup_offsite.state_lock_busy(lock) is False  # the check itself leaves no lock behind
     code, _ = run_main(env, FakeVm(), now=NOW + timedelta(minutes=15))
     assert code == 0
+
+
+# --- V2-10b: check-then-act on the state lock, the restore-incomplete marker, SIGTERM -----------
+
+
+class FakeFcntl:
+    """flock's semantics for a machine without fcntl (a Windows dev box).
+
+    Shared holders coexist, an exclusive holder excludes everyone else, a non-blocking request that
+    conflicts raises BlockingIOError. Holders are tracked per descriptor. A descriptor that was
+    closed without an explicit LOCK_UN is forgotten, as the kernel does.
+    """
+
+    LOCK_SH, LOCK_EX, LOCK_NB, LOCK_UN = 1, 2, 4, 8
+
+    def __init__(self):
+        self.holders: dict[tuple[int, int], dict[int, int]] = {}
+
+    def flock(self, target, operation):
+        descriptor = target if isinstance(target, int) else target.fileno()
+        info = os.fstat(descriptor)
+        identity = (info.st_dev, info.st_ino)
+        self._forget_closed()
+        holders = self.holders.setdefault(identity, {})
+        if operation & self.LOCK_UN:
+            holders.pop(descriptor, None)
+            return
+        mode = self.LOCK_EX if operation & self.LOCK_EX else self.LOCK_SH
+        others = [held for other, held in holders.items() if other != descriptor]
+        if (mode == self.LOCK_EX and others) or self.LOCK_EX in others:
+            raise BlockingIOError(11, "Resource temporarily unavailable")
+        holders[descriptor] = mode
+
+    def _forget_closed(self):
+        for identity, holders in self.holders.items():
+            for descriptor in list(holders):
+                try:
+                    info = os.fstat(descriptor)
+                    alive = (info.st_dev, info.st_ino) == identity
+                except OSError:
+                    alive = False
+                if not alive:
+                    del holders[descriptor]
+
+
+@pytest.fixture
+def flock_module(monkeypatch):
+    """The real fcntl on POSIX (CI, the VM); a stand-in with the same semantics elsewhere."""
+    if sys.platform != "win32":
+        import fcntl
+
+        return fcntl
+    fake = FakeFcntl()
+    monkeypatch.setitem(sys.modules, "fcntl", fake)
+    return fake
+
+
+def can_take_exclusive(module, path: Path) -> bool:
+    """What `mia`'s `exec 9>lock; flock -n 9` would get: the exclusive lock, or a refusal."""
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        try:
+            module.flock(descriptor, module.LOCK_EX | module.LOCK_NB)
+        except OSError:
+            return False
+        module.flock(descriptor, module.LOCK_UN)
+        return True
+    finally:
+        os.close(descriptor)
+
+
+def test_the_shared_state_lock_is_held_while_the_key_is_fetched_and_the_dump_is_taken(
+    env, flock_module
+):
+    """V2-10 review nit 6: a `mia restore` must not start between the early look and the dump."""
+    lock = Path(env["MIA_STATE_LOCK"])
+    lock.write_text("", encoding="utf-8")
+    vm = FakeVm()
+    exclusive_granted: dict[str, list[bool]] = {"key": [], "dump": [], "upload": []}
+
+    def handler(call):
+        if "secrets versions access" in call.text:
+            exclusive_granted["key"].append(can_take_exclusive(flock_module, lock))
+        elif "pg_dump" in call.argv:
+            exclusive_granted["dump"].append(can_take_exclusive(flock_module, lock))
+        elif "storage cp" in call.text:
+            exclusive_granted["upload"].append(can_take_exclusive(flock_module, lock))
+        return vm.handler(call)
+
+    code = backup_offsite.main([], runner=FakeRunner(handler), environ=env, now=NOW)
+    assert code == 0 and state(env)["last_object"] == DUMP
+    # while the key is fetched and pg_dump runs, a mia command (flock -n 9) is refused ...
+    assert exclusive_granted["key"] == [False] and exclusive_granted["dump"] == [False]
+    # ... and once the dump is on disk the lock is released: the upload may take minutes
+    assert exclusive_granted["upload"] and all(exclusive_granted["upload"])
+    assert can_take_exclusive(flock_module, lock)  # nothing is left held after the run
+
+
+def test_a_restore_that_wins_the_lock_after_the_early_look_still_stops_the_slot(
+    env, flock_module, monkeypatch, capsys
+):
+    lock = Path(env["MIA_STATE_LOCK"])
+    lock.write_text("", encoding="utf-8")
+    monkeypatch.setattr(backup_offsite, "state_lock_busy", lambda path: False)  # looked free ...
+    restore = os.open(lock, os.O_RDONLY)  # ... then `mia restore` took it (exec 9>; flock -n 9)
+    flock_module.flock(restore, flock_module.LOCK_EX | flock_module.LOCK_NB)
+    try:
+        code, runner = run_main(env, FakeVm())
+    finally:
+        flock_module.flock(restore, flock_module.LOCK_UN)
+        os.close(restore)
+    assert code == 0 and runner.calls == []  # no key fetch, no dump
+    assert "skipped code=state_lock_busy" in capsys.readouterr().err
+    assert not (work_dir(env) / "state.json").exists() and leftovers(env) == []
+    code, _ = run_main(env, FakeVm(), now=NOW + timedelta(minutes=15))
+    assert code == 0 and state(env)["last_object"].endswith(".dump.enc")
+
+
+def test_the_backup_creates_a_missing_lock_file_so_a_later_mia_command_contends_on_it(
+    env, flock_module
+):
+    """/var/lock is a tmpfs: after a reboot the file is gone until a `mia` command makes it."""
+    lock = Path(env["MIA_STATE_LOCK"])
+    assert not lock.exists()
+    code, _ = run_main(env, FakeVm())
+    assert code == 0 and lock.exists()
+
+
+def test_a_restore_incomplete_marker_skips_the_slot_until_a_restore_succeeds(env, capsys):
+    marker = Path(env["MIA_RESTORE_INCOMPLETE"])
+    marker.write_text("", encoding="utf-8")
+    code, runner = run_main(env, FakeVm())
+    assert code == 0 and runner.calls == []  # nothing fetched, nothing dumped, nothing uploaded
+    assert "skipped code=restore_incomplete" in capsys.readouterr().err
+    assert not (work_dir(env) / "state.json").exists()  # a skip is not a failure
+    assert leftovers(env) == []
+    marker.unlink()  # `mia restore` finished
+    code, _ = run_main(env, FakeVm(), now=NOW + timedelta(minutes=15))
+    assert code == 0 and state(env)["last_object"].endswith(".dump.enc")
+
+
+def test_the_marker_is_read_only_after_the_shared_lock_is_held(env, flock_module, monkeypatch):
+    """The restore writes the marker under its exclusive lock, so reading it under ours is safe."""
+    lock = Path(env["MIA_STATE_LOCK"])
+    lock.write_text("", encoding="utf-8")
+    real, seen = backup_offsite.restore_marker_present, []
+
+    def spy(path):
+        seen.append(can_take_exclusive(flock_module, lock))
+        return real(path)
+
+    monkeypatch.setattr(backup_offsite, "restore_marker_present", spy)
+    code, _ = run_main(env, FakeVm())
+    assert code == 0 and seen == [False]
+
+
+def test_only_a_definite_absence_lets_a_dump_through_the_marker_check(tmp_path):
+    assert backup_offsite.restore_marker_present(tmp_path / "nothing-here") is False
+    present = tmp_path / "restore-incomplete"
+    present.write_text("", encoding="utf-8")
+    assert backup_offsite.restore_marker_present(present) is True
+    assert backup_offsite.restore_marker_present(present / "below-a-file") is False  # ENOTDIR
+
+
+def test_the_marker_path_is_the_one_mia_writes_and_defaults_to_etc_mia():
+    script = (ROOT / "ops/gcp/vm/mia").read_text(encoding="utf-8")
+    assert "/etc/mia/restore-incomplete" in script
+    assert backup_offsite.RESTORE_INCOMPLETE == Path("/etc/mia/restore-incomplete")
+    assert backup_offsite.Config(bucket="b").restore_incomplete == backup_offsite.RESTORE_INCOMPLETE
+    config = backup_offsite.Config.from_env(
+        {"MIA_BACKUP_BUCKET": BUCKET, "MIA_RESTORE_INCOMPLETE": "/elsewhere/marker"}
+    )
+    assert config.restore_incomplete == Path("/elsewhere/marker")
+
+
+def test_the_sigterm_handler_raises_system_exit_so_the_finally_blocks_run(monkeypatch):
+    registered = {}
+
+    def register(number, handler):
+        registered.setdefault(number, handler)
+
+    monkeypatch.setattr(backup_offsite.signal, "signal", register)
+    backup_offsite.install_sigterm_handler()
+    with pytest.raises(SystemExit) as stop:
+        registered[signal.SIGTERM](signal.SIGTERM, None)
+    assert stop.value.code == 128 + signal.SIGTERM
+
+
+def test_importing_the_module_installs_no_handler_only_the_entry_point_does():
+    source = Path(backup_offsite.__file__).read_text(encoding="utf-8")
+    assert source.count("signal.signal(") == 1  # inside install_sigterm_handler, nowhere else
+    assert re.search(r"def install_sigterm_handler\(\).*?signal\.signal\(", source, re.DOTALL)
+    entry = source.split('if __name__ == "__main__":', 1)[1]
+    assert entry.index("install_sigterm_handler()") < entry.index("main()")
+    check = (
+        "import signal, sys; sys.path.insert(0, sys.argv[1]); import backup_offsite; "
+        "sys.exit(0 if signal.getsignal(signal.SIGTERM) == signal.SIG_DFL else 1)"
+    )
+    done = subprocess.run(
+        [sys.executable, "-I", "-c", check, str(Path(backup_offsite.__file__).parent)],
+        capture_output=True, text=True, check=False, timeout=60,
+    )
+    assert done.returncode == 0, done.stderr
+
+
+SIGTERM_DRIVER = """
+import sys, time
+from datetime import UTC, datetime
+from pathlib import Path
+
+root, backup_dir, work, lock, marker, ready = sys.argv[1:7]
+sys.path[:0] = [root, backup_dir]
+import backup_offsite
+from tests.ops import fakes
+
+vm = fakes.FakeVm()
+
+
+def handler(call):
+    result = vm.handler(call)
+    if "pg_dump" in call.argv:  # the plaintext dump is on disk and the key file is beside it
+        Path(ready).write_text("x")
+        time.sleep(120)
+    return result
+
+
+environ = {
+    "MIA_BACKUP_BUCKET": fakes.BUCKET,
+    "MIA_BACKUP_WORK_DIR": work,
+    "MIA_STATE_LOCK": lock,
+    "MIA_RESTORE_INCOMPLETE": marker,
+}
+backup_offsite.install_sigterm_handler()
+sys.exit(backup_offsite.main(
+    [], runner=fakes.FakeRunner(handler), environ=environ,
+    now=datetime(2026, 10, 15, 12, 5, 3, tzinfo=UTC),
+))
+"""
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX-only: Windows cannot deliver SIGTERM to a Python handler; the VM runs Linux",
+)
+def test_a_sigterm_mid_run_removes_the_plaintext_dump_and_the_key_file(tmp_path):
+    """V2-10 review nit 7: systemd's TimeoutStartSec sends SIGTERM; the finally must still run."""
+    driver, ready = tmp_path / "driver.py", tmp_path / "ready"
+    work = tmp_path / "work"
+    driver.write_text(SIGTERM_DRIVER, encoding="utf-8", newline="\n")
+    process = subprocess.Popen(
+        [sys.executable, str(driver), str(ROOT), str(Path(backup_offsite.__file__).parent),
+         str(work), str(tmp_path / "state.lock"), str(tmp_path / "restore-incomplete"), str(ready)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    try:
+        for _ in range(300):
+            if ready.exists() or process.poll() is not None:
+                break
+            time.sleep(0.1)
+        assert ready.exists(), process.communicate(timeout=10)
+        [run] = list((work / "runs").iterdir())
+        assert (run / "key").exists() and (run / "dump.bin").exists()  # what must not stay behind
+        process.send_signal(signal.SIGTERM)
+        _, stderr = process.communicate(timeout=30)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+    assert process.returncode == 128 + signal.SIGTERM, stderr
+    assert list((work / "runs").iterdir()) == []
 
 
 @pytest.mark.parametrize("bucket", ["", "UPPER", "a", "has space", "gs://bucket", "bucket/sub"])

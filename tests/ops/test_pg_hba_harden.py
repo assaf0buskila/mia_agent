@@ -163,6 +163,37 @@ def test_the_script_checks_the_roles_the_contract_names_before_it_changes_anythi
     assert "SCRAM-SHA-256" in SCRIPT and "rolcanlogin" in SCRIPT
 
 
+E28_FLOOR = (
+    ("runtime.env", "MIA_DATABASE_URL"),
+    ("runtime.env", "MIA_OWNER_OS_LEDGER_DATABASE_URL"),
+    ("os-ledger-migrate.env", "MIA_OS_LEDGER_MIGRATION_DATABASE_URL"),
+    ("settings.env", "MIA_OWNER_OS_SESSION_DATABASE_URL"),
+)
+E28_ADDED = (
+    ("settings.env", "MIA_OWNER_OS_READ_DATABASE_URL"),
+    ("settings.env", "MIA_OWNER_OS_ACTION_DATABASE_URL"),
+    ("os-retention.env", "MIA_OS_LEDGER_RETENTION_DATABASE_URL"),
+)
+
+
+def test_the_preflight_covers_every_dsn_the_app_and_the_jobs_read_e28():
+    """E28 (V2-10b): the named keys are listed, and every `*DATABASE_URL` key is scanned too."""
+    match = re.search(r"^dsn_sources=\(\n(.*?)\n\)", SCRIPT, re.MULTILINE | re.DOTALL)
+    assert match, "pg-hba-harden.sh has no dsn_sources"
+    sources = [tuple(line.strip().strip('"').split(" ")) for line in match.group(1).splitlines()]
+    for entry in (*E28_FLOOR, *E28_ADDED):
+        assert entry in sources, entry
+    # the regex scan: every DATABASE_URL key of the four VM-owned or mia-env files
+    assert "grep -oE '^[A-Z0-9_]*DATABASE_URL='" in SCRIPT
+    files = re.search(r"^dsn_scan_files=\(([^)]*)\)", SCRIPT, re.MULTILINE)
+    assert files and files.group(1).split() == [
+        "runtime.env", "settings.env", "os-ledger-migrate.env", "os-retention.env",
+    ]
+    # the header cites the erratum, not "a deviation from E21"
+    header = SCRIPT.split("set +x", 1)[0]
+    assert "E28" in header and "Deviation from the literal text of E21" not in header
+
+
 def test_nothing_secret_is_ever_an_argument_or_printed():
     code = "\n".join(line for line in SCRIPT.splitlines() if not line.lstrip().startswith("#"))
     assert code.startswith("set +x") or "\nset +x\n" in code
@@ -599,6 +630,43 @@ def test_a_dsn_form_the_script_cannot_verify_is_refused_before_any_change(cluste
     assert values["dsn_unverified"] == "none" and values["logins_verified"] == "2"
 
 
+@pytest.mark.parametrize(
+    ("lines", "unverified"),
+    [
+        # Compose's dotenv is last-wins: the script must not log in with the first line only.
+        (
+            "MIA_OWNER_OS_READ_DATABASE_URL={good}\nMIA_OWNER_OS_READ_DATABASE_URL={bad}\n",
+            "MIA_OWNER_OS_READ_DATABASE_URL",
+        ),
+        ("MIA_FOO_DATABASE_URL=\nMIA_FOO_DATABASE_URL={bad}\n", "MIA_FOO_DATABASE_URL"),
+        # Settings is case-insensitive and dotenv takes `export KEY=`: forms the scan cannot see.
+        ("mia_owner_os_read_database_url={bad}\n", "settings.env:noncanonical_key"),
+        ("export MIA_BAR_DATABASE_URL={bad}\n", "settings.env:noncanonical_key"),
+        ("MIA_BAZ_DATABASE_URL ={bad}\n", "settings.env:noncanonical_key"),
+    ],
+)
+def test_a_duplicate_or_noncanonical_dsn_key_is_refused_before_any_change(
+    cluster, lines, unverified
+):
+    """V2-10b review r1 finding 1: the preflight must read the line the app and Compose read.
+
+    A repeated key (last-wins elsewhere), a lowercase key, `export KEY=` or `KEY =` is a DSN the
+    script cannot be sure it checked, so it stops the change the way an unverifiable form does.
+    """
+    app, port = cluster.app_password, cluster.port
+    good = f"postgresql://mia_app:{app}@127.0.0.1:{port}/mia"
+    bad = f"postgresql://mia_app:wrong-{app}@127.0.0.1:{port}/mia"
+    cluster.write_env("settings.env", lines.format(good=good, bad=bad))
+    before = cluster.hba_text()
+    done, values = cluster.run("--apply")
+    assert done.returncode == 2, done.stdout + done.stderr
+    assert "reason=hba_dsn_unverified" in done.stdout
+    assert unverified in values["dsn_unverified"].split(",")
+    assert cluster.hba_text() == before and cluster.backups() == []
+    assert cluster.tcp("mia", "not-the-password")  # nothing was reloaded: trust is still open
+    assert app not in done.stdout + done.stderr
+
+
 def test_a_dsn_with_no_password_is_refused_before_any_change(cluster):
     cluster.write_env(
         "runtime.env", f"MIA_DATABASE_URL=postgresql://mia@127.0.0.1:{cluster.port}/mia\n"
@@ -608,6 +676,127 @@ def test_a_dsn_with_no_password_is_refused_before_any_change(cluster):
     assert done.returncode == 2 and "reason=hba_dsn_without_password" in done.stdout
     assert values["dsn_without_password"] == "MIA_DATABASE_URL"
     assert cluster.hba_text() == before and cluster.backups() == []
+
+
+# --- E28 (V2-10b): every DSN the app or the jobs read is checked, not only the first four --------
+
+ANY_DSN_KEY = [
+    pytest.param("settings.env", "MIA_OWNER_OS_READ_DATABASE_URL", id="read"),
+    pytest.param("settings.env", "MIA_OWNER_OS_ACTION_DATABASE_URL", id="action"),
+    pytest.param("os-retention.env", "MIA_OS_LEDGER_RETENTION_DATABASE_URL", id="retention"),
+    # found only by the `*DATABASE_URL` scan: no list names these keys
+    pytest.param("settings.env", "MIA_FOO_DATABASE_URL", id="scan-settings"),
+    pytest.param("runtime.env", "MIA_BAR_DATABASE_URL", id="scan-runtime"),
+    pytest.param("os-ledger-migrate.env", "MIA_BAZ_DATABASE_URL", id="scan-migrate"),
+    pytest.param("os-retention.env", "MIA_QUX_DATABASE_URL", id="scan-retention"),
+]
+
+
+def append_env(cluster: Cluster, name: str, text: str) -> None:
+    path = cluster.etc / name
+    before = path.read_text(encoding="utf-8") if path.exists() else ""
+    cluster.write_env(name, before + text)
+
+
+@pytest.mark.parametrize(("file", "key"), ANY_DSN_KEY)
+def test_a_wrong_password_in_any_dsn_key_rolls_back_and_never_locks_the_app_out(cluster, file, key):
+    """V2-10 review finding 1: a DSN the preflight never read could fail after the reload."""
+    wrong = "wrong" + uuid.uuid4().hex
+    append_env(cluster, file,
+               f"{key}=postgresql+psycopg://mia_app:{wrong}@127.0.0.1:{cluster.port}/mia\n")
+    before = cluster.hba_text()
+    done, values = cluster.run("--apply")
+    assert done.returncode == 1, done.stdout + done.stderr
+    assert "reason=hba_login_failed_rolled_back" in done.stdout
+    assert values["key"] == key  # the KEY NAME, so the operator knows which line to fix
+    # no trust line is left half-applied: the original file is back and loaded
+    assert cluster.hba_text() == before
+    assert cluster.tcp("mia", "anything-at-all")
+    # and the app's own DSN still works, as it did before the attempt
+    assert cluster.tcp("mia", cluster.password)
+    secrets = done.stdout + done.stderr + cluster.arglog.read_text(encoding="utf-8")
+    assert wrong not in secrets and cluster.password not in secrets
+
+
+@pytest.mark.parametrize(("file", "key"), ANY_DSN_KEY)
+def test_a_right_password_in_any_dsn_key_is_logged_in_with_after_the_change(cluster, file, key):
+    append_env(cluster, file,
+               f"{key}=postgresql://mia_app:{cluster.app_password}@127.0.0.1:{cluster.port}/mia\n")
+    done, values = cluster.run("--apply")
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert values["hardened"] == "true" and values["logins_verified"] == "2"
+    assert cluster.tcp("mia_app", cluster.app_password)
+    assert not cluster.tcp("mia_app", "wrong")
+
+
+def test_check_lists_the_key_names_it_will_log_in_with_and_never_a_value(cluster):
+    append_env(cluster, "settings.env",
+               "MIA_OWNER_OS_ACTION_DATABASE_URL=postgresql://mia_app:"
+               f"{cluster.app_password}@127.0.0.1:{cluster.port}/mia\n")
+    done, values = cluster.run("--check")
+    assert done.returncode == 1  # not hardened yet
+    assert values["apply_ready"] == "true"
+    assert values["dsn_keys_checked"].split(",") == [
+        "MIA_DATABASE_URL", "MIA_OWNER_OS_ACTION_DATABASE_URL",
+    ]
+    assert cluster.app_password not in done.stdout + done.stderr
+
+
+def test_check_prints_the_key_names_of_every_dsn_apply_would_refuse_and_apply_refuses_them(cluster):
+    """E28: --check names the keys apply would refuse, ahead of the window; never a value."""
+    secret = "pw" + uuid.uuid4().hex
+    port = cluster.port
+    append_env(cluster, "settings.env",
+               f"MIA_OWNER_OS_READ_DATABASE_URL=postgresql://mia_app:{secret}@db.example:{port}/mia\n"
+               f"MIA_FOO_DATABASE_URL=postgresql://mia_app@127.0.0.1:{port}/mia\n")
+    append_env(cluster, "os-retention.env",
+               f"MIA_OS_LEDGER_RETENTION_DATABASE_URL=postgresql://assaf_os_retention@127.0.0.1:{port}/mia\n")
+    before = cluster.hba_text()
+    done, values = cluster.run("--check")
+    assert values["dsn_unverified"] == "MIA_OWNER_OS_READ_DATABASE_URL"
+    assert set(values["dsn_without_password"].split(",")) == {
+        "MIA_FOO_DATABASE_URL", "MIA_OS_LEDGER_RETENTION_DATABASE_URL",
+    }
+    assert values["apply_ready"] == "false"
+    assert secret not in done.stdout + done.stderr
+
+    done, values = cluster.run("--apply")
+    assert done.returncode == 2, done.stdout + done.stderr
+    assert "reason=hba_dsn_without_password" in done.stdout
+    assert cluster.hba_text() == before and cluster.backups() == []
+    assert secret not in done.stdout + done.stderr
+
+
+def test_a_role_found_only_through_the_scan_must_have_a_scram_password_too(cluster):
+    cluster.psql("SET password_encryption = 'md5'; CREATE ROLE extra_reader LOGIN PASSWORD 'old'")
+    append_env(cluster, "settings.env",
+               f"MIA_FOO_DATABASE_URL=postgresql://extra_reader:old@127.0.0.1:{cluster.port}/mia\n")
+    before = cluster.hba_text()
+    done, values = cluster.run("--apply")
+    assert done.returncode == 2 and "reason=hba_role_without_scram" in done.stdout
+    assert "extra_reader" in values["roles_without_scram"].split(",")
+    assert cluster.hba_text() == before and cluster.backups() == []
+
+
+def test_an_empty_value_or_an_absent_key_is_skipped_not_refused(cluster):
+    append_env(cluster, "settings.env",
+               "MIA_OWNER_OS_READ_DATABASE_URL=\n"
+               "MIA_OWNER_OS_ACTION_DATABASE_URL=''\n"
+               'MIA_FOO_DATABASE_URL=""\n'
+               "MIA_OWNER_OS_ORIGIN=https://example.test\n")
+    done, values = cluster.run("--apply")  # MIA_OWNER_OS_SESSION_DATABASE_URL is absent altogether
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert values["logins_verified"] == "1"  # only runtime.env's MIA_DATABASE_URL
+    assert values["dsn_unverified"] == "none" and values["hardened"] == "true"
+
+
+def test_a_key_found_by_the_list_and_by_the_scan_is_logged_in_with_once(cluster):
+    key = "MIA_OWNER_OS_READ_DATABASE_URL"
+    append_env(cluster, "settings.env",
+               f"{key}=postgresql://mia_app:{cluster.app_password}@127.0.0.1:{cluster.port}/mia\n")
+    done, values = cluster.run("--apply")
+    assert done.returncode == 0 and values["logins_verified"] == "2"
+    assert values["dsn_keys_checked"].split(",").count(key) == 1
 
 
 def test_a_dsn_whose_password_is_wrong_rolls_the_change_back_and_never_leaves_the_app_out(cluster):

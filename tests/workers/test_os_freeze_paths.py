@@ -221,12 +221,22 @@ def test_the_scanner_tells_a_database_commit_from_a_ledger_commit():
 
 # The ledger-side intents of contract I8 (section 2): commit, undo, batch submit and the assistant
 # submit are new intents the T1 freeze must refuse (503 os_frozen); abandon writes no business
-# change, so the freeze allows it. None exists in app/ at this base: V2-24 (commit, undo, abandon),
-# V2-26 (the statement batch submit) and V2-37 (the assistant submit) land after this chunk, and
-# each must add its call site here, classified, in the same change. Keys are
+# change, so the freeze allows it. V2-24's owner-direct commit, undo and abandon are classified
+# here; V2-26 (the statement batch submit) and V2-37 (the assistant submit) land later, and each
+# must add its call site here, classified, in the same change. Keys are
 # (file, enclosing function, method) like the sites above; values say why.
-LEDGER_INTENT_SITES: dict[tuple[str, str, str], str] = {}
-LEDGER_ALLOWED_SITES: dict[tuple[str, str, str], str] = {}
+LEDGER_INTENT_SITES: dict[tuple[str, str, str], str] = {
+    # V2-24 (app/api/os_v2/commits.py): the three routes each hold their call in a local ``run``.
+    # ``owner_direct._admit(..., intent=True)`` refuses ``os_frozen`` first; driven at the end of
+    # this file (``drive_owner_direct``).
+    ("app/api/os_v2/commits.py", "run", "commit"): "POST /commits (V2-24 one-tap commit)",
+    ("app/api/os_v2/commits.py", "run", "undo"): "POST /commits/{id}/undo (compensating undo)",
+}
+LEDGER_ALLOWED_SITES: dict[tuple[str, str, str], str] = {
+    # abandon settles a lost request id: an abandoned receipt and one event, no business change and
+    # no outbox row, so the T1 drain lets it through.
+    ("app/api/os_v2/commits.py", "run", "abandon"): "POST /commits/{id}/abandon (V2-24)",
+}
 LEDGER_INTENT_VERBS = frozenset({"undo", "submit", "abandon"})
 
 
@@ -843,3 +853,98 @@ def test_a_ledger_decision_writes_nothing_unless_the_ledger_holds_the_authority(
 def test_a_frozen_active_ledger_still_settles_its_pending_proposals(env, key):
     """The control: the same decision does write when only the freeze is on (I8 drain)."""
     assert PG_DECISION_DRIVERS[key](env, "drain") == LedgerOutcome(None, wrote=True)
+
+
+# ------------------------------------- the owner-direct sites (V2-24): commit, undo and abandon
+
+
+@dataclass
+class DirectOutcome:
+    refused: str | None  # the refusal code, if the route ended in one
+    status: int  # the HTTP status the route answered
+    wrote: bool  # any ledger row, receipt, event, outbox row or version change
+    business: bool  # a task row's content or the outbox changed: a business change was written
+
+
+def business_state(world) -> tuple[list[str], int]:
+    """Every task row's full content (an in-place update counts) and the outbox size."""
+    tasks = sorted(json.dumps(row, sort_keys=True, default=str) for row in world.rows("os_tasks"))
+    return tasks, len(world.rows("os_outbox"))
+
+
+def drive_owner_direct(env: Env, freeze: bool, route: str) -> DirectOutcome:
+    """One real ``POST /commits``, ``/commits/{id}/undo`` or ``/commits/{id}/abandon`` through
+    ``app.main`` with V2-19's real ``authorize`` over the FakeLedger, no Script behind it. The
+    original of an undo is committed BEFORE the freeze, like a pending card in the drain."""
+    import uuid
+
+    from tests.api.os_v2.v2_19_support import OwnerApp, ledger_world, owner_settings
+
+    env.monkeypatch.setattr(port, "_post", no_script)
+    world = ledger_world()
+    env.monkeypatch.setattr(ledger_api, "build_ledger", lambda _settings: world.fake)
+    create = {"request_id": str(uuid.uuid4()), "op": "create", "entity": "tasks",
+              "record_id": None, "expected_revision": 0,
+              "patch": {"title": "Freeze drive", "status": "לביצוע"}}
+    with OwnerApp(owner_settings(assaf_os_freeze=False)) as owner:
+        headers = owner.login()
+        if route == "undo":
+            assert owner.client.post(f"{ROUTE}/commits", json=create, headers=headers
+                                     ).status_code == 200
+        owner.settings = owner.settings.model_copy(update={"assaf_os_freeze": freeze})
+        before, business_before = counts(world), business_state(world)
+        if route == "commit":
+            request = ("/commits", create)
+        elif route == "undo":
+            request = (f"/commits/{create['request_id']}/undo",
+                       {"undo_request_id": str(uuid.uuid4())})
+        else:
+            request = (f"/commits/{uuid.uuid4()}/abandon", {})
+        response = owner.client.post(ROUTE + request[0], json=request[1], headers=headers)
+        after, business_after = counts(world), business_state(world)
+    changed = {key for key in after if after[key] != before[key]}
+    business = business_after != business_before
+    if response.status_code == 200:
+        return DirectOutcome(None, 200, bool(changed), business)
+    error = response.json()["error"]
+    assert error["write_outcome"] == "not_started", error
+    return DirectOutcome(error["code"], response.status_code, bool(changed), business)
+
+
+COMMITS_FILE = "app/api/os_v2/commits.py"
+OWNER_DIRECT_INTENT_DRIVERS: dict[tuple[str, str, str], Callable[[Env, bool], DirectOutcome]] = {
+    (COMMITS_FILE, "run", "commit"): lambda env, freeze: drive_owner_direct(env, freeze, "commit"),
+    (COMMITS_FILE, "run", "undo"): lambda env, freeze: drive_owner_direct(env, freeze, "undo"),
+}
+OWNER_DIRECT_ALLOWED_DRIVERS: dict[tuple[str, str, str], Callable[[Env, bool], DirectOutcome]] = {
+    (COMMITS_FILE, "run", "abandon"): lambda env, freeze: drive_owner_direct(
+        env, freeze, "abandon"),
+}
+
+
+def test_every_classified_owner_direct_site_has_a_driver_and_nothing_else_does():
+    intents = {site for site in LEDGER_INTENT_SITES if site[0] == COMMITS_FILE}
+    allowed = {site for site in LEDGER_ALLOWED_SITES if site[0] == COMMITS_FILE}
+    assert set(OWNER_DIRECT_INTENT_DRIVERS) == intents
+    assert set(OWNER_DIRECT_ALLOWED_DRIVERS) == allowed
+
+
+@pytest.mark.parametrize("site", sorted(OWNER_DIRECT_INTENT_DRIVERS), ids=lambda s: s[2])
+def test_an_owner_direct_intent_is_refused_os_frozen_and_writes_nothing(env, site):
+    assert OWNER_DIRECT_INTENT_DRIVERS[site](env, True) == DirectOutcome(
+        "os_frozen", 503, wrote=False, business=False)
+
+
+@pytest.mark.parametrize("site", sorted(OWNER_DIRECT_INTENT_DRIVERS), ids=lambda s: s[2])
+def test_the_same_owner_direct_intent_writes_before_the_freeze(env, site):
+    assert OWNER_DIRECT_INTENT_DRIVERS[site](env, False) == DirectOutcome(
+        None, 200, wrote=True, business=True)
+
+
+@pytest.mark.parametrize("site", sorted(OWNER_DIRECT_ALLOWED_DRIVERS), ids=lambda s: s[2])
+def test_abandon_is_allowed_under_the_freeze_and_writes_no_business_change(env, site):
+    """An abandoned receipt and its event settle a lost request id; nothing else moves."""
+    assert OWNER_DIRECT_ALLOWED_DRIVERS[site](env, True) == DirectOutcome(
+        None, 200, wrote=True, business=False)
+    assert OWNER_DIRECT_ALLOWED_DRIVERS[site](env, False) == DirectOutcome(
+        None, 200, wrote=True, business=False)

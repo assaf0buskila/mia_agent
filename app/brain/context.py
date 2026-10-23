@@ -12,9 +12,16 @@ callers treat as "no extra knowledge", not as an error.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, datetime
 
-from app.brain.embeddings import EmbeddingError, EmbeddingPort
+from app.brain.embeddings import (
+    EMBEDDING_TIMEOUT_SECONDS,
+    MIN_QUERY_EMBEDDING_SECONDS,
+    BoundedEmbeddingPort,
+    EmbeddingError,
+    EmbeddingPort,
+)
 from app.brain.retrieval import (
     MemoryScoreWeights,
     deduplicate,
@@ -30,6 +37,7 @@ from app.brain.schemas import (
 )
 from app.brain.store import BrainStore
 from app.brain.vectors import rank_by_similarity
+from app.core.deadlines import child_call_timeout
 
 # Categories that make up the always-on profile. Small, curated, never retrieval-ranked:
 # these are the facts that should be in front of the model on every single turn.
@@ -52,12 +60,28 @@ PROFILE_BUDGET_SHARE = 0.4
 _CANDIDATE_POOL = 50
 
 
-def _embed_query(port: EmbeddingPort, query: str) -> list[float]:
+def _embed_query(
+    port: EmbeddingPort, query: str, *, deadline_at: float | None = None,
+    reserve_seconds: float = 0.0,
+) -> list[float]:
     """Embed the query, or return an empty vector so retrieval degrades to keyword-only."""
     if not port.enabled() or not query.strip():
         return []
     try:
-        vectors = port.embed([query])
+        if deadline_at is None:
+            vectors = port.embed([query])
+        else:
+            timeout = child_call_timeout(
+                deadline_at=deadline_at,
+                configured=EMBEDDING_TIMEOUT_SECONDS,
+                reserve=reserve_seconds,
+                minimum=MIN_QUERY_EMBEDDING_SECONDS,
+            )
+            # Never turn a refused child call into an unbounded default timeout.
+            # Legacy ports without a bounded API remain usable outside a timed turn.
+            if timeout is None or not isinstance(port, BoundedEmbeddingPort):
+                return []
+            vectors = port.embed_with_timeout([query], timeout=timeout)
     except EmbeddingError:
         return []
     return vectors[0] if vectors else []
@@ -111,7 +135,10 @@ def retrieve_memories(
     subject: str = "owner",
     exclude_ids: set[str] | None = None,
     now: datetime | None = None,
+    query_embedding: Callable[[], list[float]] | None = None,
 ) -> list[RetrievedItem]:
+    if limit <= 0:
+        return []
     skip = exclude_ids or set()
     records = [
         record
@@ -120,12 +147,19 @@ def retrieve_memories(
     ]
     if not records:
         return []
-    query_vector = _embed_query(embedding_port, query)
+    vector_rows = store.memory_vectors(subject=subject, kinds=kinds)
+    if query_embedding is None:
+        query_vector = _embed_query(embedding_port, query)
+    else:
+        eligible_ids = {record.memory_id for record in records}
+        query_vector = (
+            query_embedding() if any(mid in eligible_ids for mid, _ in vector_rows) else []
+        )
     similarity = {
         memory_id: score
         for memory_id, score in _similarity_map(
             query_vector,
-            store.memory_vectors(subject=subject, kinds=kinds),
+            vector_rows,
             limit=_CANDIDATE_POOL,
         ).items()
         if memory_id not in skip
@@ -160,13 +194,23 @@ def retrieve_knowledge(
     embedding_port: EmbeddingPort,
     limit: int = DEFAULT_KNOWLEDGE_LIMIT,
     min_similarity: float = 0.0,
+    query_embedding: Callable[[], list[float]] | None = None,
 ) -> list[RetrievedItem]:
+    if limit <= 0:
+        return []
     chunks = store.list_knowledge_chunks()
     if not chunks:
         return []
-    query_vector = _embed_query(embedding_port, query)
+    vector_rows = store.knowledge_vectors()
+    if query_embedding is None:
+        query_vector = _embed_query(embedding_port, query)
+    else:
+        eligible_ids = {chunk.chunk_id for chunk in chunks}
+        query_vector = (
+            query_embedding() if any(cid in eligible_ids for cid, _ in vector_rows) else []
+        )
     similarity = _similarity_map(
-        query_vector, store.knowledge_vectors(), limit=_CANDIDATE_POOL
+        query_vector, vector_rows, limit=_CANDIDATE_POOL
     )
     candidates = [
         {
@@ -201,6 +245,8 @@ def assemble_owner_context(
     include_gaps: bool = True,
     touch: bool = True,
     now: datetime | None = None,
+    deadline_at: float | None = None,
+    embedding_reserve_seconds: float = 0.0,
 ) -> BrainContext:
     """Assemble the most relevant context for one owner request, within a char budget.
 
@@ -208,6 +254,18 @@ def assemble_owner_context(
     recency component meaningful — the decay is defined over last access, not creation.
     """
     score_weights = weights or MemoryScoreWeights()
+    # Lazy and private to this invocation: no call for empty/keyword-only retrieval,
+    # and [] caches provider failure just as a populated vector caches success.
+    cached_vector: list[float] | None = None
+
+    def query_embedding() -> list[float]:
+        nonlocal cached_vector
+        if cached_vector is None:
+            cached_vector = _embed_query(
+                embedding_port, query, deadline_at=deadline_at,
+                reserve_seconds=embedding_reserve_seconds,
+            )
+        return cached_vector
     # The profile is always-on, but it must never consume the whole budget or a small
     # `max_chars` would leave no room for anything retrieved for this actual question.
     profile, profile_ids = build_profile_block(
@@ -223,12 +281,14 @@ def assemble_owner_context(
         query=query,
         embedding_port=embedding_port,
         weights=score_weights,
-        limit=memory_limit,
+        limit=memory_limit if memory_budget > 0 else 0,
         exclude_ids=profile_ids,
         now=now,
+        query_embedding=query_embedding,
     )
     knowledge = retrieve_knowledge(
-        store, query=query, embedding_port=embedding_port, limit=knowledge_limit
+        store, query=query, embedding_port=embedding_port,
+        limit=knowledge_limit if knowledge_budget > 0 else 0, query_embedding=query_embedding,
     )
     memories, memory_used = fit_to_budget(memories, max_chars=memory_budget)
     knowledge, knowledge_used = fit_to_budget(knowledge, max_chars=knowledge_budget)
