@@ -221,9 +221,9 @@ def test_the_scanner_tells_a_database_commit_from_a_ledger_commit():
 
 # The ledger-side intents of contract I8 (section 2): commit, undo, batch submit and the assistant
 # submit are new intents the T1 freeze must refuse (503 os_frozen); abandon writes no business
-# change, so the freeze allows it. None exists in app/ at this base: V2-24 (commit, undo, abandon),
-# V2-26 (the statement batch submit) and V2-37 (the assistant submit) land after this chunk, and
-# each must add its call site here, classified, in the same change. Keys are
+# change, so the freeze allows it. V2-24's owner-direct commit, undo and abandon are classified
+# here; V2-26 (the statement batch submit) and V2-37 (the assistant submit) land later, and each
+# must add its call site here, classified, in the same change. Keys are
 # (file, enclosing function, method) like the sites above; values say why.
 LEDGER_INTENT_SITES: dict[tuple[str, str, str], str] = {
     # V2-24 (app/api/os_v2/commits.py): the three routes each hold their call in a local ``run``.
