@@ -276,6 +276,16 @@ def test_the_t1_and_t2_rollbacks_say_a_retry_redoes_t2_and_the_old_drain_is_set_
     assert "`drain_stale`" in RUNBOOK.split("## 7. Reason codes", 1)[1]
 
 
+def test_the_text_says_an_unknown_probe_does_not_void_the_captures():
+    # V2-31b finding 3: the CLI carries fence_probe_at through `unknown`; the runbook must say so
+    # at the two places an operator meets it (T3's probe and T6's preflight).
+    t3 = re.sub(r"\s+", " ", section_of("### T3"))
+    assert "`sheets: unknown`" in t3 and "does not void the captures" in t3
+    t6 = re.sub(r"\s+", " ", section_of("### T6"))
+    assert "`sheets: unknown`" in t6 and "does not void the T4 captures" in t6
+    assert "an `unknown` probe does not" in RUNBOOK.split("## 7. Reason codes", 1)[1]
+
+
 def test_the_archive_name_is_the_contracts_en_dash_literal():
     assert "`ARCHIVE – edits ignored`" in RUNBOOK and "–" in RUNBOOK
     stripped = RUNBOOK.replace("`ARCHIVE - read only`", "")

@@ -1000,20 +1000,78 @@ def test_the_drain_must_be_taken_within_the_named_bound_of_the_fence_probe(
         assert run.code == 1 and hard(run) == {"sheets_pending_proposals": "drain_stale"}
 
 
-def test_an_unknown_probe_ends_the_unbroken_run_but_is_not_a_sighting_of_the_live_sheet(
-    any_world,
-):
+def test_an_unknown_probe_is_no_sighting_of_the_live_sheet_and_no_end_of_the_run(any_world):
+    # V2-31b finding 3: an `unknown` probe (a timeout, a transport error) carries no more
+    # information than no probe at all, and a gap between two `unavailable` probes is already
+    # treated as continuous. It must not restart the clock and void the captures.
+    world = started(any_world)
+    assert drain_at(world, -10).code == 0
+    assert fence_at(world, -9.5).code == 0
+    first = stamp(at(hours=-9.5))
+    world.probes.fence = ("unknown", "transport")
+    world.clock[0] = at(hours=-9)
+    assert world.run("preflight").code == 1  # `unknown` is still not a pass of sheets_not_fenced
+    record = world.get(cli.PREFLIGHT)
+    assert record["sheets"] == "unknown" and record["last_probe_at"] == stamp(at(hours=-9))
+    assert record["fence_probe_at"] == first, "carried through, not restarted"
+    assert "fence_broken_at" not in record, "a transport error does not void the drain"
+    assert fence_at(world, -8.5).code == 0
+    assert world.get(cli.PREFLIGHT)["fence_probe_at"] == first
+    assert world.run("preflight").code == 0  # idempotent
+
+
+def test_an_unknown_probe_between_two_fenced_probes_keeps_the_captures_valid(any_world):
+    world = started(any_world)
+    assert drain_at(world, -10).code == 0
+    assert fence_at(world, -9.5).code == 0  # T3
+    sign_capture(world, -9.2, -8)  # T4/T5: captured after the fence, signed later
+    world.probes.fence = ("unknown", "transport")
+    world.clock[0] = at(hours=-1)  # T6 preflight: the signed schema probe times out once
+    assert world.run("preflight").code == 1
+    assert fence_at(world, -0.5).code == 0  # and passes on the next attempt
+    assert world.get(cli.PREFLIGHT)["fence_probe_at"] == stamp(at(hours=-9.5))
+    run = activate_now(world)
+    assert run.code == 0, run.err
+    assert [c["status"] for c in run.out["checks"]] == ["pass"] * len(cli.PRECONDITIONS)
+    assert world.state().states["core"] == "active"
+
+
+def test_activate_after_an_unknown_preflight_uses_the_carried_fence_time(any_world):
+    # The last record on disk is the `unknown` one; activate probes the Script itself.
+    world = started(any_world)
+    assert drain_at(world, -10).code == 0
+    assert fence_at(world, -9.5).code == 0
+    sign_capture(world, -9.2, -8)
+    world.probes.fence = ("unknown", "transport")
+    world.clock[0] = at(hours=-1)
+    world.run("preflight")
+    assert world.get(cli.PREFLIGHT)["sheets"] == "unknown"
+    assert activate_now(world).code == 0
+
+
+def test_an_unknown_probe_with_no_fence_before_it_has_nothing_to_carry(any_world):
+    world = started(any_world)
+    world.probes.fence = ("unknown", "transport")
+    world.clock[0] = at(hours=-9)
+    world.run("preflight")
+    assert "fence_probe_at" not in world.get(cli.PREFLIGHT)
+    assert fence_at(world, -8).code == 1  # no drain yet; the clock starts here
+    assert world.get(cli.PREFLIGHT)["fence_probe_at"] == stamp(at(hours=-8))
+
+
+def test_the_live_sheet_after_a_fence_and_an_unknown_probe_is_still_a_break(any_world):
     world = started(any_world)
     assert drain_at(world, -10).code == 0
     assert fence_at(world, -9.5).code == 0
     world.probes.fence = ("unknown", "transport")
     world.clock[0] = at(hours=-9)
-    assert world.run("preflight").code == 1
+    world.run("preflight")
+    live = script_live_again(world, -8.5)  # the T3 rollback: the Script is LIVE
+    assert live.code == 1
     record = world.get(cli.PREFLIGHT)
-    assert record["sheets"] == "unknown" and "fence_probe_at" not in record
-    assert "fence_broken_at" not in record, "a transport error does not void the drain"
-    assert fence_at(world, -8.5).code == 0
-    assert world.get(cli.PREFLIGHT)["fence_probe_at"] == stamp(at(hours=-8.5))
+    assert "fence_probe_at" not in record
+    assert record["fence_broken_at"] == stamp(at(hours=-8.5)), "the unknown probe hides no break"
+    assert hard(live)["sheets_pending_proposals"] == "drain_before_fence_break"
 
 
 def test_a_refused_drain_does_not_touch_the_fence_record(ready):

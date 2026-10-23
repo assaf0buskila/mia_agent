@@ -628,11 +628,12 @@ def verify_signoff(
 
 
 def _fence_time(doc: Mapping[str, Any] | None, epoch: int, sha: str) -> datetime | None:
-    """The earliest continuous time the fence was observed, for this epoch and release."""
+    """The earliest continuous time the fence was observed, for this epoch and release. A record of
+    an ``unknown`` probe carries it through (see ``_fence_record``); a ``live`` one never does."""
     if (
         doc is None
         or doc.get("kind") != "preflight"
-        or doc.get("sheets") != "unavailable"
+        or doc.get("sheets") not in ("unavailable", "unknown")
         or doc.get("epoch") != epoch
         or doc.get("release_sha") != sha
     ):
@@ -660,10 +661,13 @@ def _fence_record(
     """The fence evidence (``preflight.json``) after one observation of the Script.
 
     ``fence_probe_at`` is the earliest probe of an unbroken run of ``unavailable``: it is carried
-    through further ``unavailable`` probes and dropped by any other observation. Seeing the Script
-    live right after a fence had been established is the break: ``fence_broken_at`` records it, is
-    kept by every later observation of this epoch and release, and is never moved earlier. An
-    ``unknown`` probe ends the run but proves nothing about the Script, so it is no break.
+    through further ``unavailable`` probes and through ``unknown`` ones, and dropped by a ``live``
+    one. Seeing the Script live right after a fence had been established is the break:
+    ``fence_broken_at`` records it, is kept by every later observation of this epoch and release,
+    and is never moved earlier. An ``unknown`` probe (a timeout, a transport error) proves nothing
+    about the Script: it is neither a break nor a restart of the clock, so it carries no more
+    information than no probe, and an unprobed gap between two ``unavailable`` probes is already
+    treated as continuous. It would otherwise void the captures taken after the first fence.
     """
     carried = _fence_time(previous, epoch, sha)
     broken = _fence_broken(previous, epoch, sha)
@@ -675,6 +679,8 @@ def _fence_record(
         # A later capture is only provably after the fence if no probe in between saw the Script
         # live.
         document["fence_probe_at"] = _iso(carried if carried is not None else now)
+    elif state == "unknown" and carried is not None:
+        document["fence_probe_at"] = _iso(carried)
     elif state == "live" and carried is not None:
         broken = now
     if broken is not None:

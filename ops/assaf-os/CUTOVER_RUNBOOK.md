@@ -318,7 +318,10 @@ present throughout; jobs paused and a verified backup before **each** of T1, T3,
      of `unavailable` for this epoch and SHA. A probe that sees the Script live restarts the clock, and
      when a fence had already been recorded it also records `fence_broken_at`, the first time the Script
      was seen live again, which voids any `drain.json` taken before it. The T2 drain is such a probe: it
-     sees the Script live, so it records that break itself.
+     sees the Script live, so it records that break itself. A probe that cannot tell (`sheets: unknown`:
+     the 20 second budget ran out, a transport error, an unexpected reply) is neither a sighting nor a
+     pass: it exits 1 (`sheets_not_fenced`), carries `fence_probe_at` forward unchanged and records no
+     break, so it **does not void the captures**. Run `preflight` again.
   3. Put **warning-only protection on every tab** of the archive workbook, hidden tabs included
      (unhide, protect with "Show a warning when editing this range", hide again), and rename the
      workbook to exactly `ARCHIVE – edits ignored` (the dash is an en dash, U+2013). Warning protection
@@ -378,7 +381,9 @@ present throughout; jobs paused and a verified backup before **each** of T1, T3,
 - **Preflight**: put the fresh `backup.json`, `restore-drill.json`, `fe-v2.json` and `journal.json` in the
   evidence directory (section 2) and run `sudo mia os-authority preflight --approved-sha S`. It must
   print `ready_to_activate: true` with all 15 checks `pass`. A check whose operator evidence is not there
-  yet shows `pending` here and **still refuses `activate`**.
+  yet shows `pending` here and **still refuses `activate`**. If this preflight prints `sheets: unknown`
+  (a timeout or a transport error on the probe), run it again: an `unknown` probe carries the recorded
+  `fence_probe_at` forward and does not void the T4 captures, the staging (G24) or the sign-off.
 - **Go G13** authority activation at epoch `E`.
 - **Command**: `sudo mia os-authority activate --approved-sha S`. It re-evaluates **every**
   precondition (section 7) and moves `core` from `shadow` to `active` only if all pass. It **never**
@@ -482,7 +487,7 @@ refuses on any `fail` and on any `pending`.
 | `release_sha_mismatch` | The image SHA equals the approved SHA (checked before anything runs) | Wrong `--approved-sha`, or a stale image: deploy `S` |
 | `sheets_not_fenced` | The signed read-only Script probe returns `unavailable` | Set `ASSAF_OS_MODE=FENCED` (T3); `unknown` is not a pass |
 | `freeze_off` | `settings.assaf_os_freeze` is true | The freeze must still be on at `activate` (T1) |
-| `capture_before_fence` | The signed capture time is later than the unbroken `fence_probe_at` | A capture before the fence: take new ones (T4) |
+| `capture_before_fence` | The signed capture time is later than the unbroken `fence_probe_at` (a probe that saw the Script live restarts it; an `unknown` probe does not) | A capture before the fence: take new ones (T4) |
 | `main_role_unsafe` | The main DSN passes the V2-14a posture check | Step 2 not enforced |
 | `ledger_role_unsafe` | The V2-15 grant-map validator passes | Step 4 not done, or a posture drifted |
 | `sheets_pending_proposals` | `drain.json`: zero pending, taken before the fence and after any lifted fence (`fence_broken_at`), at most 2 hours before `fence_probe_at`, same epoch and SHA | Settle and redo T1 and T2, then T3's probe (`no_drain_evidence`, `drain_after_fence`, `drain_before_fence_break`, `drain_stale`) |
