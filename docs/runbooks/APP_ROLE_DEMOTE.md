@@ -93,7 +93,8 @@ their redaction before provisioning; they are outside this helper's logging cont
    ```bash
    H=/opt/mia/src/<approved-tag>/ops/gcp/vm/pg-hba-harden.sh
    sudo bash "$H" --check      # exit 1 until applied: expect hardened=false, apply_ready=true,
-                               # dsn_unverified=none (anything else: fix that DSN first, see below)
+                               # dsn_unverified=none (anything else: fix that DSN first, see below);
+                               # dsn_keys_checked= lists every DSN key it will log in with afterwards
    sudo bash "$H" --apply      # expect applied=true hardened=true
    curl --fail --silent --show-error http://127.0.0.1:8000/health/ready
    sudo bash "$H" --check      # expect hardened=true (exit 0)
@@ -151,8 +152,11 @@ superuser. Confirm first, read-only: `sudo docker exec mia-postgres-1 sh -c 'gre
 What `--apply` does, in this order, and nothing else (it never deploys, restarts or fetches settings):
 
 1. Refuses unless every role a live DSN uses has a SCRAM verifier. The fixed list is `mia`, `mia_app` (when
-   present), `assaf_os_session`, `assaf_os_ledger` and `assaf_os_retention`; the users found in the
-   VM-owned DSN files (`runtime.env`, `os-ledger-migrate.env`, `settings.env`) are added. A role that does not
+   present), `assaf_os_session`, `assaf_os_ledger` and `assaf_os_retention`; the users of every
+   `*DATABASE_URL` key in the DSN files (`runtime.env`, `settings.env`, `os-ledger-migrate.env`,
+   `os-retention.env`; V2-10b, E28) are added, including `MIA_OWNER_OS_READ_DATABASE_URL` and
+   `MIA_OWNER_OS_ACTION_DATABASE_URL`. Run `--check` well before the window: a surprise key there blocks
+   `--apply` until it is fixed. A role that does not
    exist yet, or cannot log in (the NOLOGIN `assaf_os_owner`), is not a DSN role. `mia` must exist.
    A live DSN with no password is refused too (`hba_dsn_without_password`), and so is one in a form the
    script cannot parse (`hba_dsn_unverified`: another host, `localhost`, a query string), because its login
@@ -194,12 +198,12 @@ for a few seconds during that deploy, and do that deploy before step 1a, as FORK
 | Reason code | Meaning and what to do |
 |---|---|
 | `hba_root_required` | not run as root (exit 1). |
-| `hba_operation_busy` | another `mia` operation holds `/var/lock/mia-state.lock` (exit 1). Wait, then retry. |
+| `hba_operation_busy` | another `mia` operation, or an off-host backup dump (V2-10b), holds `/var/lock/mia-state.lock` (exit 1). Nothing was changed: retry in a minute; this is not a reason to roll back. |
 | `hba_database_unreachable` | `docker compose exec postgres psql` failed (exit 2). Is the postgres container up? |
 | `hba_file_unusable`, `hba_rules_unreadable`, `hba_roles_unreadable` | the server did not answer the catalog query as expected (exit 2). Nothing was changed. |
 | `hba_role_without_scram` | a login role a DSN uses has no SCRAM verifier, or `mia` is missing (exit 2). The role names are printed on `roles_without_scram=`. Set the password again (`ALTER ROLE ... PASSWORD`) under `password_encryption = 'scram-sha-256'` and update the DSN, then retry. |
 | `hba_dsn_without_password` | a live DSN names a role with no password (exit 2); it would be locked out. |
-| `hba_dsn_unverified` | a live DSN is in a form the script cannot parse, so its login could not be checked after the change (exit 2). `dsn_unverified=` names the setting. Rewrite it in the canonical loopback form, then retry. `--check` shows `apply_ready=false` for it. |
+| `hba_dsn_unverified` | a live DSN is in a form the script cannot parse, so its login could not be checked after the change (exit 2). `dsn_unverified=` names the setting. Rewrite it in the canonical loopback form, then retry. A key named twice in one file is listed too (Compose reads the last line), and `<file>:noncanonical_key` means a DSN key in that file is lowercase, `export`-prefixed or has a space before `=`: keep exactly one `KEY=value` line per key. `--check` shows `apply_ready=false` for it. |
 | `hba_rules_invalid_before_change` | the current `pg_hba.conf` already has a syntax error (exit 2). Fix it first. |
 | `hba_rewrite_failed` | the copy or rewrite failed (exit 1). The file is restored if it had been touched. |
 | `hba_rewrite_invalid_restored` | the rewritten file still had a TCP `trust` rule (for example in an `include`d file) or did not parse (exit 1). The backup was put back. |

@@ -1,0 +1,38 @@
+{
+  "actor_source": "OS_DIRECT",
+  "api_version": "assaf-os.v2",
+  "authority_epoch": 1,
+  "commit_version": 3,
+  "committed_at": "2026-10-16T12:00:00.000Z",
+  "kind": "owner_direct",
+  "observed_version": 3,
+  "proposal_id": "PRO_00000000000040008000000000001005",
+  "reason_codes": [],
+  "records": [
+    {
+      "entity": "payments",
+      "record": {
+        "actual_amount_ils": 1000,
+        "currency": "ILS",
+        "date": "2026-10-01",
+        "kind": "בוטל",
+        "path": "לימוד",
+        "payment_id": "PAY_p1",
+        "person_id": "PER_c1",
+        "revision": 2,
+        "work_id": "WOR_w1"
+      }
+    }
+  ],
+  "request_id": "00000000-0000-4000-8000-000000007106",
+  "server_now": "2026-10-16T12:00:00.000Z",
+  "source": "postgresql",
+  "status": "committed",
+  "undo": {
+    "state": "available",
+    "undo_request_id": null,
+    "until": "2026-10-16T12:00:30.000Z"
+  },
+  "undo_of": null,
+  "workspace_id": "test"
+}

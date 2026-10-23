@@ -1,0 +1,33 @@
+{
+  "actor_source": "OS_DIRECT",
+  "api_version": "assaf-os.v2",
+  "authority_epoch": 1,
+  "commit_version": 2,
+  "committed_at": "2026-10-16T12:00:00.000Z",
+  "kind": "owner_direct",
+  "observed_version": 2,
+  "proposal_id": "PRO_00000000000040008000000000001003",
+  "reason_codes": [],
+  "records": [
+    {
+      "entity": "tasks",
+      "record": {
+        "revision": 2,
+        "status": "לביצוע",
+        "task_id": "TAS_t2",
+        "title": "לחזור ללקוח"
+      }
+    }
+  ],
+  "request_id": "00000000-0000-4000-8000-000000007105",
+  "server_now": "2026-10-16T12:00:00.000Z",
+  "source": "postgresql",
+  "status": "committed",
+  "undo": {
+    "state": "available",
+    "undo_request_id": null,
+    "until": "2026-10-16T12:00:30.000Z"
+  },
+  "undo_of": null,
+  "workspace_id": "test"
+}
