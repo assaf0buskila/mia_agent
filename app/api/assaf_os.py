@@ -16,6 +16,12 @@ from app.services.os_backend import OsBackend, get_os_backend, parse_snapshot_qu
 router = APIRouter(prefix="/v1/owner/os/unified", tags=["owner-os-unified"])
 _ID = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{2,63}$")
 _REQUEST = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$")
+# No handler below reads the owner-session ``db``. Each scope hands the session's pooled connection
+# back once authentication has fully passed, instead of holding an idle-in-transaction connection
+# across the 15-30 s Apps Script call.
+_read_scope = owner_scope("assaf-os:read", release_session_db=True)
+_propose_scope = owner_mutation_scope("assaf-os:propose", release_session_db=True)
+_decide_scope = owner_mutation_scope("assaf-os:approve", release_session_db=True)
 
 
 def _port(settings: Settings, owner: OwnerSessionPrincipal) -> OsBackend:
@@ -35,7 +41,7 @@ async def _run(call):
 
 @router.get("/schema")
 async def schema(
-    owner: OwnerSessionPrincipal = Depends(owner_scope("assaf-os:read")),
+    owner: OwnerSessionPrincipal = Depends(_read_scope),
     settings: Settings = Depends(get_settings),
 ):
     port = _port(settings, owner)
@@ -46,7 +52,7 @@ async def schema(
 async def snapshot(
     request: Request,
     background: BackgroundTasks,
-    owner: OwnerSessionPrincipal = Depends(owner_scope("assaf-os:read")),
+    owner: OwnerSessionPrincipal = Depends(_read_scope),
     settings: Settings = Depends(get_settings),
 ):
     port = _port(settings, owner)
@@ -67,7 +73,7 @@ async def snapshot(
 @router.post("/proposals")
 async def propose(
     body: ProposeRequest,
-    owner: OwnerSessionPrincipal = Depends(owner_mutation_scope("assaf-os:propose")),
+    owner: OwnerSessionPrincipal = Depends(_propose_scope),
     settings: Settings = Depends(get_settings),
 ):
     if settings.kill_switch:
@@ -79,7 +85,7 @@ async def propose(
 @router.get("/proposals/{proposal_id}")
 async def proposal(
     proposal_id: str,
-    owner: OwnerSessionPrincipal = Depends(owner_scope("assaf-os:read")),
+    owner: OwnerSessionPrincipal = Depends(_read_scope),
     settings: Settings = Depends(get_settings),
 ):
     if not _ID.fullmatch(proposal_id):
@@ -92,7 +98,7 @@ async def proposal(
 async def approve(
     body: DecisionRequest,
     proposal_id: str,
-    owner: OwnerSessionPrincipal = Depends(owner_mutation_scope("assaf-os:approve")),
+    owner: OwnerSessionPrincipal = Depends(_decide_scope),
     settings: Settings = Depends(get_settings),
 ):
     if not _ID.fullmatch(proposal_id):
@@ -107,7 +113,7 @@ async def approve(
 async def reject(
     body: DecisionRequest,
     proposal_id: str,
-    owner: OwnerSessionPrincipal = Depends(owner_mutation_scope("assaf-os:approve")),
+    owner: OwnerSessionPrincipal = Depends(_decide_scope),
     settings: Settings = Depends(get_settings),
 ):
     if not _ID.fullmatch(proposal_id):
@@ -121,7 +127,7 @@ async def reject(
 @router.get("/receipts/{request_id}")
 async def receipt(
     request_id: str,
-    owner: OwnerSessionPrincipal = Depends(owner_scope("assaf-os:read")),
+    owner: OwnerSessionPrincipal = Depends(_read_scope),
     settings: Settings = Depends(get_settings),
 ):
     if not _REQUEST.fullmatch(request_id):
@@ -132,7 +138,7 @@ async def receipt(
 
 @router.get("/cached")
 async def cached_snapshot(
-    owner: OwnerSessionPrincipal = Depends(owner_scope("assaf-os:read")),
+    owner: OwnerSessionPrincipal = Depends(_read_scope),
     settings: Settings = Depends(get_settings),
 ):
     # V2-42: the last validated snapshot, served without the Apps Script. The port is constructed

@@ -1,8 +1,8 @@
 """V2-02: phase timing on the owner OS and owner auth routes.
 
-The backend emits a Server-Timing header with the fixed names auth, db, script, ledger and verify
-(integer milliseconds, no other parameter) only for authenticated requests, and never on a 401 or
-403 envelope. Duration log lines carry stage names, outcomes, reason codes and integer
+The backend emits a Server-Timing header with the fixed names auth, db, script, ledger, verify and
+total (integer milliseconds, no other parameter) only for authenticated requests, and never on a
+401 or 403 envelope. Duration log lines carry stage names, outcomes, reason codes and integer
 milliseconds only.
 """
 
@@ -35,13 +35,16 @@ sessions = auth.sessions
 
 SENTINEL = "ZZ-SENTINEL-9f3c71"
 ORIGIN = {"Origin": auth.ORIGIN}
-METRICS = ("auth", "db", "script", "ledger", "verify")
+METRICS = ("auth", "db", "script", "ledger", "verify", "total")
 OS_STAGES = ("os_auth", "os_read", "os_commit", "os_verify", "os_mirror")
-_PART = re.compile(r"(auth|db|script|ledger|verify);dur=(\d+)")
+_PART = re.compile(r"(auth|db|script|ledger|verify|total);dur=(\d+)")
+_SUMMARY_LINE = re.compile(
+    r"owner_os_request op=[a-z_]+ status=\d{3} total_ms=\d+ rid=[0-9a-f]{32}"
+)
 _LOG_LINE = re.compile(
     r"owner_stage stage=(os_auth|os_read|os_commit|os_verify|os_mirror) "
     r"metric=(auth|db|script|ledger|verify|none) outcome=(ok|error|cancelled) "
-    r"latency_ms=\d+ reason=(none|[a-z][a-z0-9_]{1,47})"
+    r"latency_ms=\d+ reason=(none|[a-z][a-z0-9_]{1,47}) rid=([0-9a-f]{32}|none)"
 )
 
 
@@ -133,6 +136,12 @@ def _propose_body() -> dict:
         "expected_revision": 0,
         "input": {"title": SENTINEL, "status": "לביצוע"},
     }
+
+
+def _stage_lines(lines: list[str]) -> list[str]:
+    """The owner_stage lines; every other line on the logger must be a request summary."""
+    assert all(_LOG_LINE.fullmatch(line) or _SUMMARY_LINE.fullmatch(line) for line in lines), lines
+    return [line for line in lines if _LOG_LINE.fullmatch(line)]
 
 
 def _owner_lines(caplog) -> list[str]:
@@ -260,8 +269,9 @@ def test_snapshot_success_carries_allow_listed_server_timing(sessions, monkeypat
     assert timing["script"] >= 40, "the Apps Script round trip is the dominant phase"
     assert response.headers["cache-control"] == "private, no-store"
     lines = _owner_lines(caplog)
-    assert lines and all(_LOG_LINE.fullmatch(line) for line in lines), lines
-    stages = {_LOG_LINE.fullmatch(line).group(1) for line in lines}
+    stage_lines = _stage_lines(lines)
+    assert stage_lines, lines
+    stages = {_LOG_LINE.fullmatch(line).group(1) for line in stage_lines}
     assert {"os_auth", "os_read", "os_verify"} <= stages and "os_commit" not in stages
 
 
@@ -282,7 +292,7 @@ def test_writes_log_the_commit_stage(sessions, monkeypatch, caplog) -> None:
             )
     assert proposed.status_code == 200 and approved.status_code == 200
     assert _timing(proposed)["script"] >= 15 and _timing(approved)["script"] >= 15
-    stages = {_LOG_LINE.fullmatch(line).group(1) for line in _owner_lines(caplog)}
+    stages = {_LOG_LINE.fullmatch(line).group(1) for line in _stage_lines(_owner_lines(caplog))}
     assert {"os_commit", "os_verify"} <= stages
 
 
@@ -605,4 +615,4 @@ def test_sentinel_never_reaches_logs_or_headers(sessions, monkeypatch, caplog) -
         assert SENTINEL not in json.dumps(dict(response.headers))
     assert SENTINEL not in caplog.text
     lines = _owner_lines(caplog)
-    assert lines and all(_LOG_LINE.fullmatch(line) for line in lines), lines
+    assert lines and _stage_lines(lines), lines

@@ -651,7 +651,29 @@ def require_owner_session(
     return principal
 
 
-def owner_scope(scope: str) -> Callable[..., OwnerSessionPrincipal]:
+def _release_owner_session(db: Session) -> None:
+    """Hand the owner-session connection back to the pool once authentication is over.
+
+    Only reads remain (the first-use UPDATE is already committed), so the rollback discards
+    nothing. A failing rollback is logged by reason code and the session is closed regardless;
+    ``get_owner_session_db`` closes it again in its own ``finally``, which is harmless.
+    """
+    try:
+        db.rollback()
+    except SQLAlchemyError:
+        _logger.warning("owner_auth reason=session_release_failed")
+    db.close()
+
+
+def owner_scope(
+    scope: str, *, release_session_db: bool = False
+) -> Callable[..., OwnerSessionPrincipal]:
+    """``release_session_db`` is for a route whose handler never reads the owner-session ``db``.
+
+    Such a route (the Assaf OS Apps Script relay) would otherwise hold an idle-in-transaction
+    connection for the whole 15-30 s Script call. The release happens only after the session,
+    its scopes and the Origin have all passed.
+    """
     if scope not in KNOWN_SCOPES:
         raise ValueError("unknown owner scope")
 
@@ -660,7 +682,10 @@ def owner_scope(scope: str) -> Callable[..., OwnerSessionPrincipal]:
         db: Session = Depends(get_owner_session_db),
         settings: Settings = Depends(get_settings),
     ) -> OwnerSessionPrincipal:
-        return require_owner_session(request, scope, db=db, settings=settings)
+        principal = require_owner_session(request, scope, db=db, settings=settings)
+        if release_session_db:
+            _release_owner_session(db)
+        return principal
 
     return dependency
 
@@ -669,6 +694,7 @@ def owner_mutation_scope(
     scope: str,
     *,
     require_fresh_login: bool = False,
+    release_session_db: bool = False,
 ) -> Callable[..., OwnerSessionPrincipal]:
     if scope not in ACTION_SCOPES | BUSINESS_WRITE_SCOPES | ASSAF_OS_WRITE_SCOPES:
         raise ValueError("mutation scope must be a fixed action scope")
@@ -706,7 +732,10 @@ def owner_mutation_scope(
             ):
                 raise _error(401, "owner_auth_required")
         # Origin, session and CSRF (and the fresh login when required) have all passed.
-        return _attach_mutation_proof(principal)
+        principal = _attach_mutation_proof(principal)
+        if release_session_db:
+            _release_owner_session(db)
+        return principal
 
     return dependency
 

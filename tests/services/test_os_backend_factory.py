@@ -10,6 +10,7 @@ from __future__ import annotations
 import ast
 import json
 import logging
+import re
 import sys
 import types
 from pathlib import Path
@@ -952,9 +953,15 @@ def test_the_v1_snapshot_body_is_byte_identical_through_the_factory(setup, monke
     assert through_factory.status_code == ignored.status_code == 200
     assert through_factory.content == ignored.content == golden
     assert through_factory.json() == fixed
-    assert {k: v for k, v in through_factory.headers.items() if k != "server-timing"} == {
-        k: v for k, v in ignored.headers.items() if k != "server-timing"
+    # server-timing (a per-request measurement) and x-request-id (a per-request random id) differ
+    # by design; every other header is identical, and the id is present and well formed on both.
+    per_request = {"server-timing", "x-request-id"}
+    assert {k: v for k, v in through_factory.headers.items() if k not in per_request} == {
+        k: v for k, v in ignored.headers.items() if k not in per_request
     }
+    for response in (through_factory, ignored):
+        assert re.fullmatch(r"[0-9a-f]{32}", response.headers["x-request-id"])
+    assert through_factory.headers["x-request-id"] != ignored.headers["x-request-id"]
     assert calls == ["snapshot"] * 3
     assert refreshed == [OWNER, OWNER], "the instant-open cache is still fed under sheets"
 

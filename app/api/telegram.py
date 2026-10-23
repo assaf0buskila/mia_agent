@@ -55,6 +55,13 @@ from app.workers.telegram_owner import process_telegram_owner_update
 
 router = APIRouter(prefix="/v1/telegram", tags=["telegram"])
 _log = logging.getLogger("mia.telegram")
+_LOG_CODE = re.compile(r"[a-z][a-z0-9_]{1,47}")
+
+
+def _log_code(value: object) -> str:
+    """A status or code for a log line, or ``error`` when it is anything but a fixed snake_case."""
+    return value if isinstance(value, str) and _LOG_CODE.fullmatch(value) else "error"
+
 
 # This is deliberately fixed text: a transcription provider failure must be visible to
 # the owner, but no provider response, audio bytes, transcript, or configuration detail
@@ -189,8 +196,25 @@ async def _execute_assaf_os_owner_decision(
             reject_assaf_os_owner_action,
         )
 
+        started = perf_counter()
         session = get_session_factory()()
         ledger_card = False
+        logged = False
+
+        def finish(outcome):
+            # The whole worker-thread execution of an Assaf OS card decision, in ms: a decision,
+            # which card family, a fixed outcome code. Never an id, a body or a text.
+            nonlocal logged
+            logged = True
+            _log.info(
+                "owner_callback op=assaf_os_execute decision=%s card=%s outcome=%s ms=%d",
+                decision if decision in {"approve", "reject"} else "error",
+                "ledger" if ledger_card else "sheets",
+                _log_code(getattr(outcome, "status", None)),
+                elapsed_ms(started),
+            )
+            return outcome
+
         try:
             thread_store = LeadStore(session)
             principal = Principal.owner(source="telegram", actor_id=actor_id)
@@ -213,11 +237,11 @@ async def _execute_assaf_os_owner_decision(
                     decision=decision,
                 )
                 session.commit()
-                return outcome
+                return finish(outcome)
             if thread_store.get_provider_write_status(
                 scope="approval", key=operation_key
             ) in {"provider_claimed", "pending_review"}:
-                return OwnerActionExecution("unknown")
+                return finish(OwnerActionExecution("unknown"))
             if decision == "approve":
                 outcome = execute_approved_owner_action_with_adapters(
                     thread_store,
@@ -233,7 +257,7 @@ async def _execute_assaf_os_owner_decision(
                     proposal_id=proposal_id,
                 )
             session.commit()
-            return outcome
+            return finish(outcome)
         except Exception:
             session.rollback()
             if ledger_card:
@@ -242,7 +266,7 @@ async def _execute_assaf_os_owner_decision(
                 _log.info(
                     "owner_callback op=ledger_decision outcome=unknown reason=worker_failed"
                 )
-                return OwnerActionExecution("unknown")
+                return finish(OwnerActionExecution("unknown"))
             # A preflight transport failure happens before execute_owner_action can
             # create its effect claim. Make that uncertainty sticky as well: the
             # already-approved callback must not become a blind provider retry.
@@ -252,11 +276,60 @@ async def _execute_assaf_os_owner_decision(
                     scope="approval", key=operation_key
                 )
             session.commit()
-            return OwnerActionExecution("unknown")
+            return finish(OwnerActionExecution("unknown"))
         finally:
+            if not logged:
+                _log.info(
+                    "owner_callback op=assaf_os_execute decision=%s card=%s outcome=error ms=%d",
+                    decision if decision in {"approve", "reject"} else "error",
+                    "ledger" if ledger_card else "sheets",
+                    elapsed_ms(started),
+                )
             session.close()
 
     return await run_in_threadpool(execute)
+
+
+async def _choose_lead_path_off_loop(
+    *, settings, actor_id: str, preparation_token: str, path: str
+):
+    """Run the blocking lead-path choice with a thread-owned DB session, committed on return.
+
+    ``choose_lead_path`` makes up to three blocking Apps Script calls (a ledger call under
+    postgres) and flushes an UPDATE of the preparation ApprovalRow. Inline in the callback
+    handler that blocked the event loop and held the row lock across the Telegram send and edit.
+    The transaction ends here, before the caller does any Telegram I/O; an exception rolls
+    back and propagates exactly as it did when the call was inline.
+    """
+
+    def choose():
+        from app.db.session import get_session_factory
+        from app.domain.owner.proposal_cards import render_owner_approval_card
+        from app.services.assaf_os_leads import choose_lead_path
+
+        session = get_session_factory()()
+        try:
+            store = LeadStore(session)
+            choice = choose_lead_path(
+                store,
+                settings=settings,
+                principal=Principal.owner(source="telegram", actor_id=actor_id),
+                approval_id=preparation_token,
+                path=path,
+            )
+            card = None
+            if choice.status == "prepared":
+                final_row = store.get_approval_by_approval_id(choice.approval_id)
+                card = render_owner_approval_card(final_row)
+            session.commit()
+            return choice, card
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    return await run_in_threadpool(choose)
 
 
 async def _handle_callback(
@@ -277,6 +350,8 @@ async def _handle_callback(
     Callbacks can be replayed against a message whose buttons are already gone, so the
     decision path must stay idempotent; `decide_approval` is keyed on the approval id.
     """
+    handler_started = perf_counter()
+    final_status = "none"
     if not is_valid_telegram_owner_context(callback, owner_ids):
         _log.info(
             "telegram_owner_context accepted=false kind=callback "
@@ -300,15 +375,13 @@ async def _handle_callback(
         if db is None:
             raise RuntimeError("recognized lead path callback requires a database session")
         from app.domain.owner.callbacks import approval_token
-        from app.domain.owner.proposal_cards import render_owner_approval_card
-        from app.services.assaf_os_leads import choose_lead_path
 
-        store = LeadStore(db)
-        choice = choose_lead_path(
-            store,
+        # The request session is not used on this branch: the choice runs on a thread-owned
+        # session that is committed before any Telegram call below, so no transaction is open.
+        choice, card = await _choose_lead_path_off_loop(
             settings=settings,
-            principal=Principal.owner(source="telegram", actor_id=callback["from"]),
-            approval_id=preparation_token,
+            actor_id=callback["from"],
+            preparation_token=preparation_token,
             path=selected_path,
         )
         reply_text = {
@@ -330,8 +403,6 @@ async def _handle_callback(
             "already_handled": "בקשת ההכנה כבר טופלה ולא ביצעתי אותה שוב.",
         }.get(choice.status, "לא הצלחתי להכין הצעת ליד. לא נכתבה רשומה.")
         if choice.status == "prepared":
-            final_row = store.get_approval_by_approval_id(choice.approval_id)
-            card = render_owner_approval_card(final_row)
             try:
                 await port.send(
                     OutboundMessage(
@@ -536,6 +607,7 @@ async def _handle_callback(
                 proposal_id=resolved.owner_action_resource_id_to_execute,
                 crm_pre_synced=crm_pre_synced,
             )
+        final_status = _log_code(outcome.status)
         reply_text = outcome.text or {
             "target_changed": "היעד השתנה. צריך להכין בקשת אישור חדשה.",
             "already_handled": "הפעולה כבר טופלה או ממתינה לבדיקה. לא ביצעתי שוב.",
@@ -565,6 +637,7 @@ async def _handle_callback(
                     principal=Principal.owner(source="telegram", actor_id=callback["from"]),
                     proposal_id=rejected_row.resource_id,
                 )
+            final_status = _log_code(rejected.status)
             reply_text = rejected.text or {
                 "already_handled": "הדחייה כבר טופלה.",
                 "unknown": "תוצאת הדחייה אינה ודאית וממתינה לבדיקה. לא שלחתי שוב.",
@@ -617,6 +690,16 @@ async def _handle_callback(
                     "callback_fallback_send_failed",
                     type(exc).__name__,
                 )
+    if deferred_assaf_os_ack:
+        # Tap to final edit, from this handler's entry: the share of click-to-visible the server
+        # can see on a Telegram decision. `edited` is whether the edit itself landed.
+        _log.info(
+            "owner_callback op=assaf_os_visible decision=%s outcome=%s edited=%s ms=%d",
+            decision if decision in {"approve", "reject"} else "error",
+            final_status,
+            "true" if sent else "false",
+            elapsed_ms(handler_started),
+        )
     return {"processed": 1, "decision": decision, "sent": sent}
 
 

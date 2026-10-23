@@ -17,6 +17,7 @@ from app.core.demo import demo_mode_active
 from app.core.errors import MiaError
 from app.core.logging import log_comm, log_owner_agent
 from app.core.owner_timing import owner_stage
+from app.db.session import end_transaction
 from app.db.store import LeadStore
 from app.domain.ai_runs import (
     OWNER_REPLY_ACTION,
@@ -58,6 +59,18 @@ class OwnerLoopResult:
     reply: str
     sent: bool
     crm_wrote: bool
+
+
+def _end_turn_transaction(store: LeadStore) -> None:
+    """Commit what the turn has written so far; see ``end_transaction``.
+
+    The turn used to run as one transaction opened by the incoming-event INSERT, so the approval
+    card was sent before its row was committed and a write lock was held across every model call,
+    Script call and Telegram send.
+    """
+    session = getattr(store, "session", None)
+    if session is not None:
+        end_transaction(session)
 
 
 def _owner_reply(text: str) -> str:
@@ -169,6 +182,9 @@ async def run_owner_loop(
         else:
             reply = "הכלי זמין רק לבעלים מאומתים."
     elif not reply:
+        # The incoming canonical event (and anything the reminder branch wrote) is committed
+        # before the agent runs: no write transaction is held across the model and tool calls.
+        _end_turn_transaction(store)
         reply, crm_wrote = await asyncio.to_thread(
             lambda: _talk_with_optional_agent(
                 text=owner_text,
@@ -205,6 +221,9 @@ async def run_owner_loop(
                 _turn_approval_card_messages(store, item=item, approval_ids=turn_approval_ids)
             )
 
+    # Every card's ApprovalRow is committed before its card reaches Telegram, and no write
+    # transaction stays open across the sends.
+    _end_turn_transaction(store)
     sent = False
     # True the moment any chunk of anything (prose/digest or a card) is actually
     # handed to Telegram -- unlike `sent`, which stays scoped to message index 0
@@ -338,6 +357,9 @@ async def run_owner_loop(
                 "owner outbound event save failed after delivery error=%s",
                 type(exc).__name__,
             )
+    # The webhook status and the outgoing event are durable before the worker awaits its typing
+    # task (a Telegram call) with nothing uncommitted.
+    _end_turn_transaction(store)
     del crm_wrote
     return OwnerTurnResult(processed=True, sent=sent, last_reply=reply)
 
