@@ -447,7 +447,12 @@ Allowed **only** while `non_import_receipts` is 0 at the current epoch. After th
 
 - **Go G19** the rollback itself.
 - **Command**: `sudo mia os-authority rollback --approved-sha S`. It sets `core` to `fenced` (the ledger
-  then refuses every write) and prints the steps. It is idempotent.
+  then refuses every write) and prints the steps. It is idempotent. It counts the non-import receipts
+  before the fence **and again after it**: the first phone actions (G16, G17) happen exactly while a
+  rollback is still allowed, and a commit can land between the check and the fence. If the second count
+  is nonzero it refuses `rollback_after_first_write`, leaves `core` **fenced** and prints **no steps**
+  (no revert, no "the Sheet is as captured"). That is the section 6 state: the ledger owns a business
+  write, so do not return to Sheets; follow section 6.
 - **Then, in this order**, as the command prints:
   1. `sudo mia os-authority freeze-plan --phase revert --approved-sha S` prints
      `MIA_ASSAF_OS_BACKEND=sheets`, `MIA_ASSAF_OS_LEDGER_ENABLED=false`,
@@ -509,7 +514,7 @@ Other refusals of the CLI:
 | `final_accept_flag_required` | `preflight --drain` needs `--final-accept` |
 | `drain_requires_live_sheet` | The drain snapshot needs a live Sheet; run it before T3 |
 | `switch_not_applied` | `freeze-plan --phase mirror` or `open` before the switch is in the settings |
-| `rollback_after_first_write`, `rearm_after_first_write` | A non-import receipt exists at this epoch |
+| `rollback_after_first_write`, `rearm_after_first_write` | A non-import receipt exists at this epoch. `rollback` also counts again after it fences `core`: if a commit slipped in between, `core` stays fenced and nothing is printed (section 5, then section 6) |
 | `authority_changed:<reason>` | Another owner or epoch, or a transition the state machine does not allow |
 | `ledger_unavailable:<reason>` | The pepper does not match its pin, or the ledger cannot be read |
 | `evidence_unwritable` | The evidence directory cannot be written |

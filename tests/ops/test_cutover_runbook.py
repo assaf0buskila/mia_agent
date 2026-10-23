@@ -286,6 +286,15 @@ def test_the_text_says_an_unknown_probe_does_not_void_the_captures():
     assert "an `unknown` probe does not" in RUNBOOK.split("## 7. Reason codes", 1)[1]
 
 
+def test_the_text_says_a_rollback_counts_again_after_the_fence_and_prints_no_steps_then():
+    # V2-31b finding 4: the race between the receipt count and the fence.
+    section = re.sub(r"\s+", " ", section_of("## 5. "))
+    assert "before the fence **and again after it**" in section
+    assert "leaves `core` **fenced** and prints **no steps**" in section
+    assert "follow section 6" in section
+    assert "slipped in between" in RUNBOOK.split("## 7. Reason codes", 1)[1]
+
+
 def test_the_archive_name_is_the_contracts_en_dash_literal():
     assert "`ARCHIVE – edits ignored`" in RUNBOOK and "–" in RUNBOOK
     stripped = RUNBOOK.replace("`ARCHIVE - read only`", "")

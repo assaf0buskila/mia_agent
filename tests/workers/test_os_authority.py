@@ -636,6 +636,58 @@ def test_rollback_after_the_first_business_write_is_refused_and_changes_nothing(
     assert ready.run("fence").code == 0  # roll forward: fence is still available
 
 
+class RacingAdmin:
+    """The authority admin, with a business commit landing just before each transition.
+
+    The receipt count and the ``active -> fenced`` transition are separate transactions, and the
+    ledger does not check receipts on that edge: the commit lands in the window between them.
+    """
+
+    def __init__(self, env, race):
+        self._env, self._race = env, race
+
+    def __getattr__(self, name):
+        return getattr(self._env, name)
+
+    def transition(self, *args, **kwargs):
+        self._race()
+        return self._env.transition(*args, **kwargs)
+
+
+def test_a_commit_between_the_receipt_count_and_the_fence_refuses_the_rollback(any_ready):
+    # V2-31b finding 4: the phone actions of G16/G17 happen exactly while a rollback is allowed.
+    ready = any_ready
+    commit_import(ready.env, ctx(), [task("TAS_i1")], "e" * 64)
+    assert ready.run("activate").code == 0
+    landed = []
+    ready.deps.admin = RacingAdmin(
+        ready.env, lambda: landed.append(commit_direct(ready.env, ctx(), [task("TAS_race")])))
+    run = ready.run("rollback")
+    assert len(landed) == 1, "the commit landed after the count and before the fence"
+    assert run.code == 1 and codes(run) == ["rollback_after_first_write"]
+    # Nothing a rollback prints: no 'Sheet is exactly as captured', no revert-to-Sheets steps.
+    assert run.out == {"command": "rollback", "ok": False}
+    assert "exactly as captured" not in json.dumps(run.out) + run.err + str(run.out)
+    assert "next_steps" not in run.out and "MIA_ASSAF_OS" not in run.err
+    # Core stays fenced: the ledger refuses every further write, which is the section 6 state.
+    assert ready.state().states["core"] == "fenced" and ready.state().epoch == 1
+    with pytest.raises(api.LedgerError, match="^authority_not_active$"):
+        commit_direct(ready.env, ctx(), [task("TAS_after")])
+    ready.deps.admin = ready.env
+    again = ready.run("rollback")  # a repeat is refused by the first count already
+    assert again.code == 1 and codes(again) == ["rollback_after_first_write"]
+    assert ready.run("fence").code == 0 and ready.state().states["core"] == "fenced"
+
+
+def test_a_rollback_with_no_commit_in_the_window_still_prints_the_steps(any_ready):
+    ready = any_ready
+    assert ready.run("activate").code == 0
+    ready.deps.admin = RacingAdmin(ready.env, lambda: None)
+    run = ready.run("rollback")
+    assert run.code == 0 and run.out["outcome"] == "fenced"
+    assert "exactly as captured" in " ".join(run.out["next_steps"])
+
+
 def test_rollback_refuses_a_restoring_ledger(any_ready):
     ready = any_ready
     for step in ("fenced", "restoring"):

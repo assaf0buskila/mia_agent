@@ -1206,7 +1206,15 @@ def rollback_steps(epoch: int) -> list[str]:
 
 
 def cmd_rollback(ctx: Context) -> Result:
-    """Allowed only before the first non-import receipt at the current epoch."""
+    """Allowed only before the first non-import receipt at the current epoch.
+
+    The receipt count and the ``active -> fenced`` transition are separate transactions and the
+    ledger does not check receipts on that edge, so a commit (the phone actions of G16/G17 happen
+    exactly while a rollback is allowed) can land between them. The count is therefore repeated
+    AFTER the fence: once ``core`` is fenced nothing more can commit, so the second count is final.
+    A write that got in refuses the rollback and prints nothing about Sheets: ``core`` stays
+    fenced, which is the section 6 path (the ledger now owns a business write).
+    """
     deps = ctx.deps
     snapshot = _state(ctx)
     core = snapshot.states["core"]
@@ -1222,6 +1230,8 @@ def cmd_rollback(ctx: Context) -> Result:
             )
     except api.LedgerError as error:
         raise _ledger_refusal(error) from None
+    if deps.probes.non_import_receipts(deps.workspace, snapshot.epoch):
+        raise Refusal("rollback_after_first_write")
     return Result(True, {"command": "rollback", "ok": True, "outcome": "fenced",
                          "next_steps": rollback_steps(snapshot.epoch),
                          **_snapshot_document(snapshot)})
