@@ -13,13 +13,18 @@ written with so a model change is a detectable backfill rather than silent corru
 
 from __future__ import annotations
 
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 import httpx
 
 from app.brain.vectors import l2_normalize
 from app.core.config import Settings
 from app.core.errors import MiaError
+from app.integrations.deadline_http import (
+    embedding_http_deadline,
+    enable_http_deadlines,
+    supports_http_deadlines,
+)
 
 _OPENAI_EMBEDDINGS_URL = "https://api.openai.com/v1/embeddings"
 _GEMINI_EMBEDDINGS_URL = "https://generativelanguage.googleapis.com/v1beta/openai/embeddings"
@@ -28,7 +33,8 @@ _GEMINI_EMBEDDINGS_URL = "https://generativelanguage.googleapis.com/v1beta/opena
 # 300000 tokens summed across a single request.
 MAX_BATCH_ITEMS = 128
 MAX_INPUT_CHARS = 8000
-_TIMEOUT = 30.0
+EMBEDDING_TIMEOUT_SECONDS = 30.0
+MIN_QUERY_EMBEDDING_SECONDS = 0.1
 
 
 class EmbeddingError(MiaError):
@@ -46,6 +52,15 @@ class EmbeddingPort(Protocol):
     def enabled(self) -> bool: ...
 
     def embed(self, texts: list[str]) -> list[list[float]]: ...
+
+
+@runtime_checkable
+class BoundedEmbeddingPort(Protocol):
+    """Optional capability; legacy ports keep their original `embed(texts)` API."""
+
+    def embed_with_timeout(
+        self, texts: list[str], *, timeout: float
+    ) -> list[list[float]]: ...
 
 
 def _clip(text: str) -> str:
@@ -157,15 +172,26 @@ class OpenAIEmbeddingPort:
         return bool(self._api_key and self._model)
 
     def embed(self, texts: list[str]) -> list[list[float]]:
+        return self._embed(texts, timeout=None)
+
+    def embed_with_timeout(self, texts: list[str], *, timeout: float) -> list[list[float]]:
+        if timeout <= 0:
+            raise EmbeddingError("embedding deadline exceeded")
+        if self._client is not None and not supports_http_deadlines(self._client):
+            raise EmbeddingError("embedding client has no total deadline support")
+        with embedding_http_deadline(timeout):
+            return self._embed(texts, timeout=timeout)
+
+    def _embed(self, texts: list[str], *, timeout: float | None) -> list[list[float]]:
         if not texts or not self.enabled():
             return []
         vectors: list[list[float]] = []
         for start in range(0, len(texts), MAX_BATCH_ITEMS):
             batch = [_clip(text) for text in texts[start : start + MAX_BATCH_ITEMS]]
-            vectors.extend(self._embed_batch(batch))
+            vectors.extend(self._embed_batch(batch, timeout=timeout))
         return vectors
 
-    def _embed_batch(self, batch: list[str]) -> list[list[float]]:
+    def _embed_batch(self, batch: list[str], *, timeout: float | None = None) -> list[list[float]]:
         payload: dict[str, object] = {
             "model": self._model,
             "input": batch,
@@ -174,9 +200,15 @@ class OpenAIEmbeddingPort:
         headers = {"Authorization": f"Bearer {self._api_key}"}
         try:
             if self._client is not None:
-                response = self._client.post(self._url, json=payload, headers=headers)
+                # Preserve the injected client's default for existing unbounded callers.
+                options = {} if timeout is None else {"timeout": timeout}
+                response = self._client.post(
+                    self._url, json=payload, headers=headers, **options
+                )
             else:
-                with httpx.Client(timeout=_TIMEOUT) as client:
+                with httpx.Client(timeout=timeout or EMBEDDING_TIMEOUT_SECONDS) as client:
+                    if timeout is not None:
+                        enable_http_deadlines(client)
                     response = client.post(self._url, json=payload, headers=headers)
         except httpx.HTTPError as exc:
             raise EmbeddingError("embedding request failed") from exc
@@ -209,7 +241,9 @@ class OpenAIEmbeddingPort:
         return ordered
 
 
-def build_embedding_port(settings: Settings) -> EmbeddingPort:
+def build_embedding_port(
+    settings: Settings, *, client: httpx.Client | None = None
+) -> EmbeddingPort:
     """Explicit provider selection. Never fails over between model families."""
     model = settings.embedding_model.strip()
     dim = settings.embedding_dim
@@ -221,9 +255,9 @@ def build_embedding_port(settings: Settings) -> EmbeddingPort:
         if not key:
             return DisabledEmbeddingPort()
         return OpenAIEmbeddingPort(
-            api_key=key, model=model, dim=dim, url=_GEMINI_EMBEDDINGS_URL
+            api_key=key, model=model, dim=dim, url=_GEMINI_EMBEDDINGS_URL, client=client
         )
     key = settings.openai_api_key.strip()
     if not key:
         return DisabledEmbeddingPort()
-    return OpenAIEmbeddingPort(api_key=key, model=model, dim=dim)
+    return OpenAIEmbeddingPort(api_key=key, model=model, dim=dim, client=client)

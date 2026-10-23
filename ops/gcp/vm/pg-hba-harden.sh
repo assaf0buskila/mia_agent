@@ -155,6 +155,12 @@ scan_dsns() {
   for file in "${dsn_scan_files[@]}"; do
     path="$etc_dir/$file"
     [ -r "$path" ] || continue
+    # The app reads keys case-insensitively and Compose takes `export KEY=` and `KEY =`: a DSN
+    # line in any form but `KEY=` at column 0 is one this scan cannot check, so it stops the change.
+    if [ "$(grep -ciE '^[[:space:]]*(export[[:space:]]+)?[a-z0-9_]*database_url[[:space:]]*=' "$path" || true)" \
+      != "$(grep -cE '^[A-Z0-9_]*DATABASE_URL=' "$path" || true)" ]; then
+      dsn_unverified+=("$file:noncanonical_key")
+    fi
     found="$(grep -oE '^[A-Z0-9_]*DATABASE_URL=' "$path" || true)"
     while IFS= read -r key; do
       if [ -n "$key" ]; then add_dsn_target "$file ${key%=}"; fi
@@ -165,6 +171,11 @@ scan_dsns() {
     key="${entry#* }"
     path="$etc_dir/$file"
     [ -r "$path" ] || continue
+    # Compose's dotenv is last-wins: a repeated key may not be the line checked here.
+    if [ "$(grep -cE "^${key}=" "$path" || true)" -gt 1 ]; then
+      dsn_unverified+=("$key")
+      continue
+    fi
     line="$(grep -E "^${key}=" "$path" | head -n 1 || true)"
     [ -n "$line" ] || continue
     value="${line#*=}"

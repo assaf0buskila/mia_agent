@@ -1,0 +1,44 @@
+{
+  "actor_source": "OS_DIRECT",
+  "api_version": "assaf-os.v2",
+  "authority_epoch": 1,
+  "commit_version": 2,
+  "committed_at": null,
+  "kind": "owner_direct",
+  "observed_version": 2,
+  "proposal_id": "PRO_00000000000040008000000000001003",
+  "reason_codes": [],
+  "records": [
+    {
+      "entity": "tasks",
+      "record": {
+        "due_date": "2026-10-01",
+        "revision": 1,
+        "status": "בוצע",
+        "task_id": "TAS_t3",
+        "title": "לשלוח חשבונית"
+      }
+    },
+    {
+      "entity": "tasks",
+      "record": {
+        "due_date": "2026-10-20",
+        "revision": 1,
+        "status": "לביצוע",
+        "task_id": "TAS_t1",
+        "title": "להכין הצעת מחיר"
+      }
+    }
+  ],
+  "request_id": "00000000-0000-4000-8000-00000000710d",
+  "server_now": "2026-10-16T12:00:00.000Z",
+  "source": "postgresql",
+  "status": "target_changed",
+  "undo": {
+    "state": "none",
+    "undo_request_id": null,
+    "until": null
+  },
+  "undo_of": null,
+  "workspace_id": "test"
+}

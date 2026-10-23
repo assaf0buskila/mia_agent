@@ -52,7 +52,7 @@ async def test_failed_note_agent_tells_assaf_the_failure_class(monkeypatch) -> N
     error) without a model id or a secret."""
     monkeypatch.setattr("app.domain.owner.brain.build_agent_client", _failing_chain)
     monkeypatch.setattr(
-        "app.domain.owner.brain.build_embedding_port", lambda _s: FakeEmbeddingPort()
+        "app.domain.owner.brain.build_embedding_port", lambda _s, **kwargs: FakeEmbeddingPort()
     )
     settings = get_settings()
     settings.openai_api_key = "k"
@@ -108,7 +108,7 @@ async def test_capability_question_is_answered_even_when_the_model_is_broken(
     """
     monkeypatch.setattr("app.domain.owner.brain.build_agent_client", _failing_chain)
     monkeypatch.setattr(
-        "app.domain.owner.brain.build_embedding_port", lambda _s: FakeEmbeddingPort()
+        "app.domain.owner.brain.build_embedding_port", lambda _s, **kwargs: FakeEmbeddingPort()
     )
     settings = get_settings()
     settings.openai_api_key = "k"

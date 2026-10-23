@@ -198,12 +198,12 @@ for a few seconds during that deploy, and do that deploy before step 1a, as FORK
 | Reason code | Meaning and what to do |
 |---|---|
 | `hba_root_required` | not run as root (exit 1). |
-| `hba_operation_busy` | another `mia` operation holds `/var/lock/mia-state.lock` (exit 1). Wait, then retry. |
+| `hba_operation_busy` | another `mia` operation, or an off-host backup dump (V2-10b), holds `/var/lock/mia-state.lock` (exit 1). Nothing was changed: retry in a minute; this is not a reason to roll back. |
 | `hba_database_unreachable` | `docker compose exec postgres psql` failed (exit 2). Is the postgres container up? |
 | `hba_file_unusable`, `hba_rules_unreadable`, `hba_roles_unreadable` | the server did not answer the catalog query as expected (exit 2). Nothing was changed. |
 | `hba_role_without_scram` | a login role a DSN uses has no SCRAM verifier, or `mia` is missing (exit 2). The role names are printed on `roles_without_scram=`. Set the password again (`ALTER ROLE ... PASSWORD`) under `password_encryption = 'scram-sha-256'` and update the DSN, then retry. |
 | `hba_dsn_without_password` | a live DSN names a role with no password (exit 2); it would be locked out. |
-| `hba_dsn_unverified` | a live DSN is in a form the script cannot parse, so its login could not be checked after the change (exit 2). `dsn_unverified=` names the setting. Rewrite it in the canonical loopback form, then retry. `--check` shows `apply_ready=false` for it. |
+| `hba_dsn_unverified` | a live DSN is in a form the script cannot parse, so its login could not be checked after the change (exit 2). `dsn_unverified=` names the setting. Rewrite it in the canonical loopback form, then retry. A key named twice in one file is listed too (Compose reads the last line), and `<file>:noncanonical_key` means a DSN key in that file is lowercase, `export`-prefixed or has a space before `=`: keep exactly one `KEY=value` line per key. `--check` shows `apply_ready=false` for it. |
 | `hba_rules_invalid_before_change` | the current `pg_hba.conf` already has a syntax error (exit 2). Fix it first. |
 | `hba_rewrite_failed` | the copy or rewrite failed (exit 1). The file is restored if it had been touched. |
 | `hba_rewrite_invalid_restored` | the rewritten file still had a TCP `trust` rule (for example in an `include`d file) or did not parse (exit 1). The backup was put back. |
