@@ -9,17 +9,15 @@ statement and finishes ``committed``. Reject, expiry, a revoked key and a restor
 way without the expense ops. A statement write never happens outside the ledger transaction that
 carries its ledger effects, and nothing here logs a line, a merchant or an amount (I7, I11).
 
-Authorization is ONE seam, ``LedgerStatementService._authorize``: it calls V2-19's
-``authorize.require(ctx, op)`` (§9), resolved at call time, and fails closed
-(``ledger_unavailable``) while that module is absent. Routes mint the context with V2-19's
-``authorize.from_owner_*`` constructors; this service never mints one.
+Authorization is ONE call, ``LedgerStatementService._authorize``: V2-19's
+``authorize.require(ctx, op)`` (§9). It refuses any context ``authorize`` did not mint. Routes mint
+the context with V2-19's ``authorize.from_owner_*`` constructors; this service never mints one.
 """
 
 from __future__ import annotations
 
 import base64
 import hmac
-import importlib
 import logging
 import re
 from collections.abc import Callable, Mapping, Sequence
@@ -42,7 +40,7 @@ from app.domain.statements import (
     summarize_cycle,
 )
 from app.domain.statements.vocabulary import MIN_PEPPER_BYTES
-from app.services.os_ledger import api
+from app.services.os_ledger import api, authorize
 from app.services.os_ledger import statement_plan as sp
 from app.services.os_ledger.statement_tables import (
     BatchLineRow,
@@ -61,7 +59,6 @@ BATCH_TTL = timedelta(days=7)
 CYCLE_LIST_MAX = 36
 PAGE_MAX = 100
 DRAFT_OVERRIDES_MAX = 100
-AUTHORIZE_MODULE = "app.services.os_ledger.authorize"  # V2-19; imported at call time only
 FINGERPRINT_MESSAGE = b"assaf-os-statement-pepper-fingerprint.v1"
 
 _LOG = logging.getLogger("mia.os_statements")
@@ -121,13 +118,11 @@ class LedgerStatementService:
 
     def __init__(self, ledger: Any, settings: Any, *,
                  pin_reader: Callable[[Any], str | None] | None = None,
-                 revoke_watermark: Callable[[str], datetime | None] | None = None,
-                 require: Callable[[api.TrustedOwnerContext, str], None] | None = None) -> None:
+                 revoke_watermark: Callable[[str], datetime | None] | None = None) -> None:
         self._ledger = ledger
         self._settings = settings
         self._pin_reader = pin_reader or _pg_pin_reader
         self._revoke_watermark = revoke_watermark or db_revoke_watermark
-        self._require = require
 
     # ---- admission -------------------------------------------------------------------------
 
@@ -143,14 +138,8 @@ class LedgerStatementService:
             raise api.LedgerError("owner_auth_required", reason="owner_not_allowed")
 
     def _authorize(self, ctx: api.TrustedOwnerContext, op: str) -> None:
-        """The one seam to V2-19: ``require(ctx, op)``, the §9 channel x operation matrix."""
-        require = self._require
-        if require is None:
-            try:
-                require = importlib.import_module(AUTHORIZE_MODULE).require
-            except (ImportError, AttributeError):
-                raise _refuse(op, "authorize_missing") from None
-        require(ctx, op)
+        """V2-19's ``require(ctx, op)``: the §9 channel x operation matrix, on a minted context."""
+        authorize.require(ctx, op)
 
     def _admit(self, ctx: api.TrustedOwnerContext, op: str, *, owner_only: bool = False) -> None:
         self._available()

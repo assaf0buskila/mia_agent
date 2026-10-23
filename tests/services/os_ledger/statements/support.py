@@ -20,12 +20,15 @@ import os
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from contextlib import contextmanager
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 from uuid import UUID
 
+from app.api import owner_sessions
+from app.api.owner_sessions import OwnerSessionPrincipal
 from app.core.config import MiaEnv, Settings
-from app.services.os_ledger import api
+from app.services.os_ledger import api, authorize
 from app.services.os_ledger.statement_tables import CredentialRow, tables_for
 from app.services.os_ledger.statements import LedgerStatementService, pepper_fingerprint
 
@@ -46,50 +49,30 @@ CLAUDE = "ASSISTANT_CLAUDE"
 GPT = "ASSISTANT_GPT"
 HEX64 = re.compile(r"[0-9a-f]{64}")
 
-# ---- the §9 matrix (V2-19) --------------------------------------------------------------------
-# V2-19's ``authorize.require`` is not on this base. The service reaches it through ONE seam
-# (``LedgerStatementService(require=...)``, default: the real module, resolved at call time). Until
-# V2-19 merges, these tests inject this table, which copies the §9 cells the statement service
-# uses; once ``authorize`` is importable they use the real function, unchanged.
-_DENY = "channel_operation_denied"
-_COLUMN = {"OS": 0, "MIA": 1, "TELEGRAM_APPROVAL": 2, "ASSISTANT_CLAUDE": 3, "ASSISTANT_GPT": 3,
-           "WORKER": 4}
-_MATRIX: dict[str, tuple[tuple[Any, ...], ...]] = {
-    "read": (("scope", "assaf-os:read", False), ("allow",), ("deny",), ("deny",),
-             ("job", {"verifier", "mirror"})),
-    "read_rules": (("scope", "assaf-os:read", False), ("deny",), ("deny",),
-                   ("scope", "merchant_rules:read", False), ("deny",)),
-    "read_own_batches": (("scope", "assaf-os:read", False), ("deny",), ("deny",),
-                         ("scope", "own_proposals:read", False), ("deny",)),
-    "propose_statement_batch": (("scope", "assaf-os:propose", True), ("deny",), ("deny",),
-                                ("scope", "statement:propose", False), ("deny",)),
-    "decide_statement_batch": (("scope", "assaf-os:approve", True), ("deny",), ("deny",),
-                               ("deny",), ("deny",)),
-    "draft_statement_batch": (("scope", "assaf-os:approve", True), ("deny",), ("deny",),
-                              ("deny",), ("deny",)),
-    "expire_batches": (("deny",), ("deny",), ("deny",), ("deny",), ("job", {"retention"})),
+# ---- trusted contexts (V2-19) -----------------------------------------------------------------
+# ``authorize.require`` refuses any context ``authorize`` did not mint (review r1), so the service
+# runs on contexts from V2-19's own constructors: ``World.owner``, ``reader``, ``worker`` and
+# ``assistant()``. ``World.ctx`` covers the shapes a constructor cannot produce (a wrong scope set,
+# another epoch, a channel with no constructor to reach) by registering a ``make_ctx`` context, as
+# ``tests/services/os_ledger/test_channel_matrix.py`` does. Its defaults are the well-formed shape
+# of each channel, so a refusal comes from the §9 cell and never from a malformed context.
+_CHANNEL_SHAPE: dict[str, tuple[frozenset[str], str | None]] = {
+    "OS": (OWNER_SCOPES, None),
+    "MIA": (frozenset(), None),
+    "TELEGRAM_APPROVAL": (frozenset(), None),
+    "ASSISTANT_CLAUDE": (ASSISTANT_SCOPES, CRED),
+    "ASSISTANT_GPT": (ASSISTANT_SCOPES, CRED),
+    "WORKER": (frozenset({"retention"}), None),
 }
 
 
-def matrix_require(ctx: api.TrustedOwnerContext, op: str) -> None:
-    cell = _MATRIX[op][_COLUMN[ctx.channel]]
-    if cell[0] == "deny":
-        raise api.LedgerError(_DENY)
-    if cell[0] == "scope":
-        if cell[1] not in ctx.scopes:
-            raise api.LedgerError("scope_denied")
-        if cell[2] and ctx.browser_mutation_verified is not True:
-            raise api.LedgerError("browser_mutation_verification_required")
-    elif cell[0] == "job" and not ctx.scopes & cell[1]:
-        raise api.LedgerError("scope_denied")
-
-
-def default_require():
-    try:
-        from app.services.os_ledger.authorize import require
-    except ImportError:
-        return matrix_require
-    return require
+def session_principal(scopes: Iterable[str] = OWNER_SCOPES, *, proven: bool,
+                      ) -> OwnerSessionPrincipal:
+    """An owner session as a route gets it (``proven``: the Origin and CSRF checks passed)."""
+    principal = OwnerSessionPrincipal(
+        owner_id=OWNER_ID, scopes=frozenset(scopes), session_hash="h" * 64,
+        expires_at=datetime.now(UTC) + timedelta(hours=1))
+    return owner_sessions._attach_mutation_proof(principal) if proven else principal
 
 
 def uuid_v4(number: int) -> str:
@@ -139,12 +122,9 @@ class World:
             self._start_pg(request, pin, statements)
         self.service = LedgerStatementService(
             self.ledger, self.config, pin_reader=self._pin_reader,
-            revoke_watermark=lambda owner_id: self.watermark["value"], require=default_require())
-        self.owner = make_ctx("OS", owner=OWNER, workspace=WORKSPACE, scopes=OWNER_SCOPES,
-                              browser_mutation_verified=True)
-        self.reader = make_ctx("OS", owner=OWNER, workspace=WORKSPACE, scopes=OWNER_SCOPES,
-                               browser_mutation_verified=False)
-        self.worker = for_worker("retention", owner=OWNER, workspace=WORKSPACE)
+            revoke_watermark=lambda owner_id: self.watermark["value"])
+        self.owner = authorize.from_owner_mutation(session_principal(proven=True), self.config)
+        self.reader = authorize.from_owner_read(session_principal(proven=False), self.config)
 
     # ---- the two ledgers ------------------------------------------------------------------
 
@@ -207,16 +187,25 @@ class World:
 
     # ---- contexts -------------------------------------------------------------------------
 
+    @property
+    def worker(self) -> api.TrustedOwnerContext:
+        """The retention job's context, minted on each use (a worker context lives 120 s)."""
+        return authorize.for_worker("retention", self.config)
+
     def assistant(self, kind: str = "claude", credential: str = CRED):
-        channel = {"claude": "ASSISTANT_CLAUDE", "gpt": "ASSISTANT_GPT"}[kind]
-        return make_ctx(channel, owner=OWNER, workspace=WORKSPACE, scopes=ASSISTANT_SCOPES,
-                        browser_mutation_verified=False, credential_id=credential)
+        held = SimpleNamespace(
+            credential_id=credential, kind=kind, owner_id=OWNER_ID, workspace_id=WORKSPACE,
+            epoch=self.config.assaf_os_authority_epoch, scopes=ASSISTANT_SCOPES, revoked_at=None,
+            expires_at=datetime.now(UTC) + timedelta(days=1))
+        return authorize.from_assistant(held, self.config)
 
     def ctx(self, channel: str, **over: Any):
-        fields: dict[str, Any] = dict(owner=OWNER, workspace=WORKSPACE, scopes=OWNER_SCOPES,
-                                      browser_mutation_verified=True)
+        scopes, credential = _CHANNEL_SHAPE[channel]
+        fields: dict[str, Any] = dict(
+            owner=OWNER, workspace=WORKSPACE, scopes=scopes, credential_id=credential,
+            browser_mutation_verified=channel == "OS")
         fields.update(over)
-        return make_ctx(channel, **fields)
+        return authorize._register(make_ctx(channel, **fields))
 
     # ---- the clock and the authority -------------------------------------------------------
 

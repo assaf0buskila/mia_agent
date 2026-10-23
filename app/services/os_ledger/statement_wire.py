@@ -1,8 +1,9 @@
 """Wire rendering for the statement bodies (V2-26; V2_PG_CONTRACTS.md §10.1, §10.2, §12.4, §22 E12).
 
-Private to V2-26: V2-20's ``contract.py`` serializer is not on this base, so the three bodies the
-statement routes share (the §10.1 binding, ``batch_created`` and ``receipt_v2``) are rendered here,
-exactly as §10 and E12 spell them. Every owner-facing v2 body carries the binding (E12 a);
+Private to V2-26: the three bodies the statement routes share (the §10.1 binding,
+``batch_created`` and ``receipt_v2``) are rendered here, exactly as §10 and E12 spell them. V2-20's
+``contract.py`` has its own ``binding`` and ``receipt_v2`` (other signatures); they are not shared
+yet. Every owner-facing v2 body carries the binding (E12 a);
 ``observed_version`` is REQUIRED on ``receipt_v2``, ``batch_created`` and ``draft_saved`` (E12 b).
 Nothing here reads a clock or a database: callers pass the values in.
 """

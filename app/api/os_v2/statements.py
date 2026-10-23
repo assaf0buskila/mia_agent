@@ -11,7 +11,7 @@ Every route is gated first: unless ``assaf_os_statements_enabled`` is on and ``a
 (``owner_mutation_scope``); its trusted context comes only from V2-19's ``authorize`` constructors
 (``from_owner_mutation`` / ``from_owner_read``), resolved at call time. The service then enforces
 the §9 matrix itself (``authorize.require``), so this module only admits, delegates and renders.
-Until V2-19 lands, every route fails closed with ``ledger_unavailable`` and writes nothing.
+If that module cannot be imported, every route fails closed with ``ledger_unavailable``.
 
 Bodies are capped by ``OwnerOSBoundary`` (128 KiB for the paste, 16 KiB for the rest, §10.5).
 """

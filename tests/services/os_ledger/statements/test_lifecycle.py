@@ -3,16 +3,14 @@
 from __future__ import annotations
 
 import pytest
-from app.services.os_ledger import api
+from app.services.os_ledger import api, authorize
 from app.services.os_ledger.statements import pepper_fingerprint
 
-from tests.fakes.contexts import for_worker, make_ctx
 from tests.services.os_ledger.statements.support import (
     CLAUDE,
     CRED,
     CRED_B,
     GPT,
-    OWNER,
     batch,
     three_lines,
 )
@@ -87,7 +85,7 @@ def test_a_batch_without_lines_finishes_as_restored_without_detail(world):
 def test_a_batch_from_an_older_epoch_expires_with_epoch_changed(world):
     submitted = world.paste(batch(three_lines()))
     world.bump_epoch()
-    ctx = for_worker("retention", owner=OWNER, workspace="test", epoch=2)
+    ctx = authorize.for_worker("retention", world.config)  # minted at the bumped epoch, 2
     assert world.service.expire_due(ctx) == 1
     receipt = world.rows("os_receipts")[0]
     assert (receipt["status"], receipt["reason_codes"], receipt["epoch"]) == (
@@ -105,7 +103,7 @@ def test_expire_due_only_accepts_the_retention_worker(world):
     world.paste(batch(three_lines()))
     world.advance(WEEK + 1)
     for ctx in (world.owner, world.reader, world.ctx("MIA"),
-                make_ctx("WORKER", owner=OWNER, workspace="test", scopes=frozenset({"mirror"}))):
+                authorize.for_worker("mirror", world.config)):
         with pytest.raises(api.LedgerError) as caught:
             world.service.expire_due(ctx)
         assert caught.value.code in {"channel_operation_denied", "scope_denied"}

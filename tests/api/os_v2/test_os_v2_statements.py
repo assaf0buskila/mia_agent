@@ -1,23 +1,23 @@
 """V2-26 routes (§12.3, §12.4, §9, §10.5): the statement review, draft, approve and cycle views.
 
 The real owner-session machinery runs (cookie, exact Origin, CSRF), over the sqlite session store
-of ``tests.unit.test_owner_sessions``. V2-19's ``app.services.os_ledger.authorize`` is not on this
-base and is stood in through ``sys.modules`` (the constructors and ``require``, the §9 matrix for
-the statement operations). Without it every route fails closed with ``ledger_unavailable``.
+of ``tests.unit.test_owner_sessions``. V2-19's real ``app.services.os_ledger.authorize`` runs: its
+constructors mint the contexts and ``require`` enforces the §9 matrix. ``AuthorizeSpy`` only wraps
+those functions to record which ones a route reached. If the module cannot be imported, every route
+fails closed with ``ledger_unavailable``.
 """
 
 from __future__ import annotations
 
 import json
 import sys
-import types
 from datetime import UTC, datetime
 
 import pytest
 from app.api.os_v2 import statements
 from app.api.os_v2.errors import ledger_error_handler
 from app.api.owner_os_boundary import OwnerOSBoundary, owner_http_error, owner_validation_error
-from app.services.os_ledger import api
+from app.services.os_ledger import api, authorize
 from app.services.os_ledger.statement_tables import tables_for
 from app.services.os_ledger.statements import LedgerStatementService, pepper_fingerprint
 from fastapi.exceptions import RequestValidationError
@@ -33,7 +33,6 @@ from tests.services.os_ledger.statements.support import (
     batch,
     encode,
     line,
-    matrix_require,
     three_lines,
 )
 from tests.unit import test_owner_sessions as auth
@@ -44,33 +43,28 @@ AUTHORIZE_MODULE = "app.services.os_ledger.authorize"
 SCOPES = ",assaf-os:read,assaf-os:propose,assaf-os:approve"
 
 
-class FakeAuthorize(types.ModuleType):
-    """Stand-in for V2-19's ``authorize``: §9's OS constructors and ``require``."""
+class AuthorizeSpy:
+    """Records the V2-19 calls a route makes, around the REAL ``authorize``; replaces nothing."""
 
-    def __init__(self) -> None:
-        super().__init__(AUTHORIZE_MODULE)
+    def __init__(self, monkeypatch) -> None:
         self.calls: list[tuple[str, str]] = []
+        for name in ("from_owner_mutation", "from_owner_read"):
+            monkeypatch.setattr(authorize, name, self._constructor(name, getattr(authorize, name)))
+        monkeypatch.setattr(authorize, "require", self._require(authorize.require))
 
-    @staticmethod
-    def _ctx(principal, settings, *, verified: bool):
-        owner = str(principal.owner_id)
-        if owner not in settings.telegram_owner_user_id_set():
-            raise api.LedgerError("owner_auth_required")
-        return make_ctx("OS", owner=int(owner), workspace=settings.assaf_os_workspace_id,
-                        epoch=settings.assaf_os_authority_epoch, scopes=principal.scopes,
-                        browser_mutation_verified=verified)
+    def _constructor(self, name, real):
+        def spy(principal, settings):
+            self.calls.append((name, ""))
+            return real(principal, settings)
 
-    def from_owner_mutation(self, principal, settings):
-        self.calls.append(("from_owner_mutation", ""))
-        return self._ctx(principal, settings, verified=True)
+        return spy
 
-    def from_owner_read(self, principal, settings):
-        self.calls.append(("from_owner_read", ""))
-        return self._ctx(principal, settings, verified=False)
+    def _require(self, real):
+        def spy(ctx, op):
+            self.calls.append(("require", op))
+            return real(ctx, op)
 
-    def require(self, ctx, op):
-        self.calls.append(("require", op))
-        matrix_require(ctx, op)
+        return spy
 
 
 def settings():
@@ -87,7 +81,7 @@ def settings():
 
 
 class Backend:
-    def __init__(self, config) -> None:
+    def __init__(self, config, monkeypatch) -> None:
         self.config = config
         self.ledger = FakeLedger(
             clock=lambda: NOW, uuid4=Counter(0x5000),
@@ -101,17 +95,16 @@ class Backend:
             self.ledger.transition(auth.WORKSPACE, domain, "active", expected_epoch=1,
                                    actor_owner_id=auth.OWNER_ID)
         self.ledger.pin_statement_pepper(auth.WORKSPACE, pepper_fingerprint(PEPPER))
-        self.authorize = FakeAuthorize()
+        self.authorize = AuthorizeSpy(monkeypatch)
         self.service = LedgerStatementService(
-            self.ledger, config, pin_reader=lambda tx: tx.data["statement_pepper_fp"],
-            require=self.authorize.require)
+            self.ledger, config, pin_reader=lambda tx: tx.data["statement_pepper_fp"])
 
     def rows(self, table):
         return self.ledger.rows(table)
 
     def tables(self):
         worker = make_ctx("WORKER", owner=int(auth.OWNER_ID), workspace=auth.WORKSPACE,
-                          scopes=frozenset({"retention"}))
+                          scopes=frozenset({"retention"}))  # straight to the ledger, no require
         with self.ledger.transaction(worker, domain="statements", kind="statement_batch",
                                      purpose="expire") as tx:
             return tables_for(tx).dump()
@@ -130,9 +123,8 @@ def app_for(factory, config):
 @pytest.fixture
 def world(sessions, monkeypatch):
     config = settings()
-    state = Backend(config)
+    state = Backend(config, monkeypatch)
     monkeypatch.setattr(statements, "service_for", lambda _settings: state.service)
-    monkeypatch.setitem(sys.modules, AUTHORIZE_MODULE, state.authorize)
     with TestClient(app_for(sessions, config), base_url=auth.ORIGIN) as browser:
         login = auth._login(browser)
         state.browser = browser
