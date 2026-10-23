@@ -287,6 +287,40 @@ def test_the_t1_and_t2_rollbacks_say_a_retry_redoes_t2_and_the_old_drain_is_set_
     assert "`drain_stale`" in RUNBOOK.split("## 7. Reason codes", 1)[1]
 
 
+def test_the_ledger_keys_come_at_t1_and_the_switch_flips_only_the_backend_in_the_text():
+    # Contract section 22 E29: the import of T4/T5 needs the ledger keys before the switch.
+    assert cli.plan_lines("drain", "E") == [
+        "MIA_ASSAF_OS_FREEZE=true", "MIA_ASSAF_OS_LEDGER_ENABLED=true",
+        "MIA_ASSAF_OS_AUTHORITY_EPOCH=E",
+    ]
+    assert cli.plan_lines("switch", "E") == ["MIA_ASSAF_OS_BACKEND=postgres"]
+    t1 = re.sub(r"\s+", " ", section_of("### T1"))
+    command, rollback = t1.split("**Rollback**", 1)
+    for key in cli.plan_lines("drain", "E"):
+        assert f"`{key}`" in command, key
+    assert "with the backend still `sheets`" in command and "E29" in command
+    assert "`authorize.for_worker` refuses `epoch_unset`" in command
+    assert "`backend_not_postgres`" in command and "test_os_e29_sheets_with_ledger_keys" in command
+    # The T1/T2 rollback returns the ledger keys with the existing revert phase, and the freeze.
+    assert "--phase revert" in rollback and "MIA_ASSAF_OS_FREEZE=false" in rollback
+    for key in cli.plan_lines("revert", 0):
+        assert f"`{key}`" in rollback, key
+    # T4 and T5 name the precondition, T6's switch prints only the backend.
+    for step in ("### T4", "### T5"):
+        flat = re.sub(r"\s+", " ", section_of(step))
+        assert "T1 keys" in flat and "**Precondition**" in flat, step
+    t6 = re.sub(r"\s+", " ", section_of("### T6"))
+    switch = t6.split("- **Switch**", 1)[1].split("- **Verify**", 1)[0]
+    assert "`MIA_ASSAF_OS_BACKEND=postgres` and nothing else" in switch
+    assert "set at T1 and are not repeated" in switch and "`drain_keys_not_applied`" in switch
+    assert "`MIA_ASSAF_OS_LEDGER_ENABLED=true`, `MIA_ASSAF_OS_AUTHORITY_EPOCH=E`." not in switch
+    rule = RUNBOOK.split("5. **Keys that matter**", 1)[1].split("6. **", 1)[0]
+    keys_rule = re.sub(r"\s+", " ", rule)
+    assert "T1 sets `FREEZE`, `LEDGER_ENABLED` and `AUTHORITY_EPOCH`" in keys_rule
+    assert "T6 sets `BACKEND` only" in keys_rule
+    assert re.search(r"^\| `drain_keys_not_applied` \|", RUNBOOK, re.M)
+
+
 def test_the_text_names_the_import_not_promoted_refusal_where_the_operator_meets_it():
     # V2-31b finding 8: one refusal beyond the contract's 15, so it is NOT in the 15-row table.
     assert cli.PROMOTE_GATE == "import_not_promoted" and cli.PROMOTE_GATE not in cli.PRECONDITIONS

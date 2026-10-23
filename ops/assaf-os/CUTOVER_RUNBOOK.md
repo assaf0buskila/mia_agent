@@ -45,7 +45,10 @@ fill) and [APP_ROLE_DEMOTE.md](../../docs/runbooks/APP_ROLE_DEMOTE.md) (step 2 i
 5. **Keys that matter**: `MIA_ASSAF_OS_FREEZE`, `MIA_ASSAF_OS_BACKEND`, `MIA_ASSAF_OS_LEDGER_ENABLED`,
    `MIA_ASSAF_OS_AUTHORITY_EPOCH` and `MIA_ASSAF_OS_MIRROR_ENABLED` change only in the step that names
    them, through `freeze-plan`, then `ops/gcp/push-settings.ps1 -PatchSecret -Set @{ KEY = "value" }`,
-   then `sudo mia settings`. All start off (`sheets`, `false`, `0`, `false`, `false`).
+   then `sudo mia settings`. All start off (`sheets`, `false`, `0`, `false`, `false`). **When**
+   (contract section 22 E29): T1 sets `FREEZE`, `LEDGER_ENABLED` and `AUTHORITY_EPOCH` (the import of
+   T4 and T5 needs the last two), T6 sets `BACKEND` only, T7 sets `MIRROR_ENABLED`, and the `open`
+   phase clears `FREEZE`.
 6. **Never print a credential.** Do not `cat`, source, paste or trace `/etc/mia/*.env`. Check a file
    with `sudo stat -c '%a %U %n'` (mode 600, owner root).
 
@@ -261,7 +264,18 @@ present throughout; jobs paused and a verified backup before **each** of T1, T3,
 
 - **Go G10** drain/freeze and final reconcile in the approved window.
 - **Command**: `sudo mia os-authority freeze-plan --phase drain --approved-sha S` prints
-  `MIA_ASSAF_OS_FREEZE=true`. Set it with `push-settings.ps1`, then `sudo mia settings`.
+  `MIA_ASSAF_OS_FREEZE=true`, `MIA_ASSAF_OS_LEDGER_ENABLED=true` and `MIA_ASSAF_OS_AUTHORITY_EPOCH=E`,
+  with the backend still `sheets`. Set them with `push-settings.ps1`, then `sudo mia settings`. It
+  names `E` from the ledger, so `init` (step 5) has run, and it refuses (`authority_state_invalid`) once
+  `core` is no longer `shadow`.
+  **Why the ledger keys come now, not at T6** (contract section 22 E29): the import (G24 stage at T4,
+  G12 promote at T5) runs as the ledger worker, before the switch, and needs both:
+  `authorize.for_worker` refuses `epoch_unset` and the ledger core refuses `ledger_disabled` without
+  them. With `MIA_ASSAF_OS_BACKEND` still `sheets` nothing else changes: the backend factory returns the
+  Sheets backend (only its postgres path reads the keys), the OS and Mia are served from the Sheet, and
+  the ledger core admits only `import` while `core` is `shadow` (a proposal, an owner commit or a
+  decision is refused `backend_not_postgres`). Proved by
+  `tests/workers/test_os_e29_sheets_with_ledger_keys.py`.
   **Each freeze starts a new drain**: the command also renames an existing `drain.json` (the drain of
   an earlier freeze, for example an aborted window) to `drain-superseded-<UTC>.json` and refuses
   (`evidence_unwritable`) if it cannot. Run it once, at the start of T1: running it again after T2
@@ -277,9 +291,14 @@ present throughout; jobs paused and a verified backup before **each** of T1, T3,
   `assaf_os_leads._create_final_proposal` (V2-28's file) records every refusal after its claim as an
   uncertain write, so the same lead then answers `lead_source_pending_review` after the freeze lifts and
   needs an owner repair. Leads wait until `open`.
-- **Verify**: `sudo mia os-authority status --approved-sha S` shows `settings.freeze: true`;
-  a new proposal on the phone is refused; `/health` SHA is `S`.
-- **Rollback**: `MIA_ASSAF_OS_FREEZE=false`, `sudo mia settings`. The ledger and the Sheet are
+- **Verify**: `sudo mia os-authority status --approved-sha S` shows `settings.freeze: true`,
+  `settings.ledger_enabled: true`, `settings.epoch_matches: true` and `settings.backend: sheets`;
+  a new proposal on the phone is refused; the OS still loads from the Sheet; `/health` SHA is `S`.
+- **Rollback** (the same for an aborted T2): the keys go back with the way back to Sheets, which
+  `core=shadow` allows. `sudo mia os-authority freeze-plan --phase revert --approved-sha S` prints
+  `MIA_ASSAF_OS_BACKEND=sheets`, `MIA_ASSAF_OS_LEDGER_ENABLED=false`, `MIA_ASSAF_OS_AUTHORITY_EPOCH=0`
+  and `MIA_ASSAF_OS_MIRROR_ENABLED=false`. Set them together with `MIA_ASSAF_OS_FREEZE=false`, then
+  `sudo mia settings`. The ledger and the Sheet are
   unchanged, but **the drain is void**: once the freeze is lifted the owner can make OS-screen
   proposals again (they have no Telegram card, so no other check sees them). **A retry redoes T1 and
   T2**: its `freeze-plan --phase drain` sets the old `drain.json` aside, and a drain taken more than
@@ -344,7 +363,9 @@ present throughout; jobs paused and a verified backup before **each** of T1, T3,
 
 ### T4: captures and import staging
 
-- **Precondition**: the fence is on and `fence_probe_at` is recorded.
+- **Precondition**: the fence is on and `fence_probe_at` is recorded. The T1 keys are applied
+  (`sudo mia os-authority status --approved-sha S`: `settings.ledger_enabled: true`,
+  `settings.epoch_matches: true`, `settings.backend: sheets`); the import is refused without them.
 - **Capture #1 and #2**: download the archive workbook as `.xlsx` (hidden journals included), twice,
   a few minutes apart, both **after** `fence_probe_at`. Record UTC, size and sha256 of each. Copy them
   into `/var/lib/mia/os-import` as `root:10001`, mode 640 (the import job mounts it read-only).
@@ -364,6 +385,7 @@ present throughout; jobs paused and a verified backup before **each** of T1, T3,
 ### T5: sign the manifest, promote the import
 
 - **Go G12** import promotion of the exact signed manifest.
+- **Precondition**: the T1 keys are still applied (as for T4) and `core` is `shadow` at epoch `E`.
 - **Do**: show Assaf the manifest summary and its digest. When he says so in chat, the operator writes
   `manifest.json` (section 2) with his sign-off, and the exact digest is passed to promote:
   `sudo mia os-job os-import <promote arguments V2-30 documents>` with that digest. Promote runs in one
@@ -399,8 +421,10 @@ present throughout; jobs paused and a verified backup before **each** of T1, T3,
   every Sheets write is refused `authority_moved` (409) and the Script is already fenced.
 - **Go G14** the backend switch to postgres.
 - **Switch**: `sudo mia os-authority freeze-plan --phase switch --approved-sha S` prints exactly
-  `MIA_ASSAF_OS_BACKEND=postgres`, `MIA_ASSAF_OS_LEDGER_ENABLED=true`, `MIA_ASSAF_OS_AUTHORITY_EPOCH=E`.
-  **The freeze stays on.** Set the keys, then `sudo mia settings` (T6 is `mia settings` and then `/health`;
+  `MIA_ASSAF_OS_BACKEND=postgres` and nothing else: `MIA_ASSAF_OS_LEDGER_ENABLED=true` and
+  `MIA_ASSAF_OS_AUTHORITY_EPOCH=E` were set at T1 and are not repeated (contract section 22 E29). It
+  refuses `drain_keys_not_applied` if they are not in the settings the job reads.
+  **The freeze stays on.** Set the key, then `sudo mia settings` (T6 is `mia settings` and then `/health`;
   there is no task to replace on the VM).
 - **Verify**: `/health` shows `deployment.commit_sha == S`; `/health/ready` is 200;
   `sudo mia os-authority status --approved-sha S` shows `settings.backend: postgres`,
@@ -535,10 +559,11 @@ Other refusals of the CLI:
 | Code | Meaning |
 |---|---|
 | `import_not_promoted` | `activate` (and `preflight`, as a `gates` entry, `pending` until T5) found no committed import receipt at this epoch that binds the digest of the signed `manifest.json`: promote was skipped, ran for another manifest, or ran at an earlier epoch. Run T5 at this epoch with the signed digest |
-| `workspace_missing` | `init` has not run (step 5) |
-| `authority_state_invalid` | The command does not apply to the current `core` state (for example `freeze-plan --phase revert` before `rollback` has fenced it) |
+| `workspace_missing` | `init` has not run (step 5); `freeze-plan` needs the workspace for the epoch it prints (E29) |
+| `authority_state_invalid` | The command does not apply to the current `core` state (for example `freeze-plan --phase revert` before `rollback` has fenced it, or `--phase drain` once `core` is no longer `shadow`) |
 | `final_accept_flag_required` | `preflight --drain` needs `--final-accept` |
 | `drain_requires_live_sheet` | The drain snapshot needs a live Sheet; run it before T3 |
+| `drain_keys_not_applied` | `freeze-plan --phase switch` while `MIA_ASSAF_OS_LEDGER_ENABLED=true` and `MIA_ASSAF_OS_AUTHORITY_EPOCH=E` (set at T1) are not in the settings the job reads |
 | `switch_not_applied` | `freeze-plan --phase mirror` or `open` before the switch is in the settings |
 | `rollback_after_first_write`, `rearm_after_first_write` | A non-import receipt exists at this epoch. `rollback` also counts again after it fences `core`: if a commit slipped in between, `core` stays fenced and nothing is printed (section 5, then section 6) |
 | `authority_changed:<reason>` | Another owner or epoch, or a transition the state machine does not allow |

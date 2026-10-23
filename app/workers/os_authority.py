@@ -1302,15 +1302,21 @@ def cmd_rollback(ctx: Context) -> Result:
 
 
 def plan_lines(phase: str, epoch: int) -> list[str]:
-    """The ``mia-env`` keys one phase flips. Each phase is its own owner go (section 16)."""
-    if phase == "drain":  # T1: the freeze starts
-        return ["MIA_ASSAF_OS_FREEZE=true"]
-    if phase == "switch":  # T6: the backend moves; the freeze STAYS on
+    """The ``mia-env`` keys one phase flips. Each phase is its own owner go (section 16).
+
+    Contract §22 E29: the ledger keys come at T1, not at T6. The import (T4 stage, T5 promote) runs
+    as the ledger worker before the switch and needs ``MIA_ASSAF_OS_LEDGER_ENABLED=true`` and
+    ``MIA_ASSAF_OS_AUTHORITY_EPOCH=E``. With the backend still ``sheets`` the factory returns
+    Sheets and the ledger core admits only ``kind=import`` while ``core=shadow``. The switch then
+    flips the backend and nothing else."""
+    if phase == "drain":  # T1: the freeze starts, and the ledger keys the import needs
         return [
-            "MIA_ASSAF_OS_BACKEND=postgres",
+            "MIA_ASSAF_OS_FREEZE=true",
             "MIA_ASSAF_OS_LEDGER_ENABLED=true",
             f"MIA_ASSAF_OS_AUTHORITY_EPOCH={epoch}",
         ]
+    if phase == "switch":  # T6: the backend moves, only; the freeze STAYS on
+        return ["MIA_ASSAF_OS_BACKEND=postgres"]
     if phase == "mirror":  # T7: the Sheets mirror starts (its workbook id and key are set already)
         return ["MIA_ASSAF_OS_MIRROR_ENABLED=true"]
     if phase == "open":  # the first non-import write is admitted
@@ -1329,8 +1335,17 @@ PLAN_NOTES = {
         "settle every pending item",
         "each freeze starts a new drain: an earlier drain.json is set aside (renamed "
         "drain-superseded-<UTC>.json), so run T2 (preflight --drain) after this freeze",
+        "the ledger keys are set now, before any import: the T4 stage and the T5 promote run as "
+        "the ledger worker and need them; the backend stays sheets, so the OS and Mia are still "
+        "served from the Sheet (until the 'switch' phase), and the ledger admits only imports",
+        "then check: sudo mia os-authority status (settings.freeze true, settings.ledger_enabled "
+        "true, settings.epoch_matches true, settings.backend sheets)",
+        "if the window is aborted, undo them with: freeze-plan --phase revert, and "
+        "MIA_ASSAF_OS_FREEZE=false",
     ],
     "switch": [
+        "this flips the backend only: MIA_ASSAF_OS_LEDGER_ENABLED and MIA_ASSAF_OS_AUTHORITY_EPOCH "
+        "were set at the 'drain' phase and are not repeated",
         "MIA_ASSAF_OS_FREEZE stays true: no write is admitted until the 'open' phase",
         "then check /health deployment.commit_sha and: sudo mia os-authority status "
         "(settings.epoch_matches must be true)",
@@ -1357,16 +1372,21 @@ def cmd_freeze_plan(ctx: Context, *, phase: str) -> Result:
     touches Secret Manager or the ledger. A phase that follows another refuses to print until the
     settings the job reads show that the earlier one was applied. The one thing it changes is the
     evidence of an earlier freeze: ``--phase drain`` starts a freeze, so it sets an existing
-    ``drain.json`` aside (each freeze starts a new drain) and refuses if it cannot."""
+    ``drain.json`` aside (each freeze starts a new drain) and refuses if it cannot.
+
+    Every phase reads the ledger for the epoch (E29: the drain plan names it, since the ledger keys
+    are set at T1). The drain phase needs ``core=shadow``: a freeze only starts a cutover that has
+    not been activated, and a refusal voids nothing."""
     if phase not in PHASES:
         raise Refusal("phase_invalid")
     settings = ctx.deps.settings
-    epoch = 0
+    snapshot = _state(ctx)
+    epoch = snapshot.epoch
     if phase == "drain":
+        if snapshot.states["core"] != "shadow":
+            raise Refusal("authority_state_invalid")
         ctx.deps.evidence.set_aside(DRAIN, ctx.now)
     else:
-        snapshot = _state(ctx)
-        epoch = snapshot.epoch
         if phase in ("switch", "mirror", "open") and snapshot.states["core"] != "active":
             raise Refusal("authority_state_invalid")
         if phase == "revert" and snapshot.states["core"] not in ("fenced", "shadow"):
@@ -1377,6 +1397,13 @@ def cmd_freeze_plan(ctx: Context, *, phase: str) -> Result:
             raise Refusal("authority_state_invalid")
         if phase in ("switch", "mirror") and settings.assaf_os_freeze is not True:
             raise Refusal("freeze_off")
+        if phase == "switch" and not (
+            settings.assaf_os_ledger_enabled is True
+            and settings.assaf_os_authority_epoch == epoch
+        ):
+            # E29: the switch flips the backend only. Without the T1 keys the postgres factory
+            # would answer ledger_disabled / epoch_zero for every OS call.
+            raise Refusal("drain_keys_not_applied")
         if phase in ("mirror", "open") and not (
             settings.assaf_os_backend == "postgres"
             and settings.assaf_os_ledger_enabled is True

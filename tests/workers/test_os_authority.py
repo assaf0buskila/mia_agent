@@ -1115,6 +1115,7 @@ def test_freeze_plan_drain_sets_the_old_drain_aside_so_each_freeze_starts_a_new_
 
 
 def test_freeze_plan_drain_works_before_any_evidence_directory_exists(world):
+    assert world.run("init").code == 0  # the plan names the epoch (E29), so the workspace exists
     plan = world.run("freeze-plan")
     assert plan.code == 0 and not world.dir.exists()
 
@@ -1353,11 +1354,21 @@ def keys_of(run) -> list[str]:
     return [line for line in run.out.splitlines() if not line.startswith("#")]
 
 
-def apply_switch(world, epoch=1):
-    """What `mia settings` does after the operator sets the switch keys in mia-env."""
-    world.settings.assaf_os_backend = "postgres"
+def apply_drain(world, epoch=1):
+    """What `mia settings` does after the operator sets the T1 keys (E29): the freeze and the
+    ledger keys, with the backend still `sheets`."""
+    world.settings.assaf_os_freeze = True
     world.settings.assaf_os_ledger_enabled = True
     world.settings.assaf_os_authority_epoch = epoch
+
+
+def apply_switch(world, epoch=1):
+    """The settings after T6: the T1 keys, and the backend switched to postgres."""
+    apply_drain(world, epoch)
+    world.settings.assaf_os_backend = "postgres"
+
+
+DRAIN_KEYS = ["MIA_ASSAF_OS_FREEZE=true", "MIA_ASSAF_OS_LEDGER_ENABLED=true"]
 
 
 def test_freeze_plan_prints_the_exact_keys_and_changes_nothing(ready):
@@ -1365,6 +1376,8 @@ def test_freeze_plan_prints_the_exact_keys_and_changes_nothing(ready):
     drain = ready.run("freeze-plan")
     assert drain.code == 0 and "MIA_ASSAF_OS_FREEZE=true\n" in drain.out
     assert "sudo mia settings" in drain.out
+    # E29: the ledger keys are set at T1, with the backend still sheets (the import needs them).
+    assert keys_of(drain) == [*DRAIN_KEYS, "MIA_ASSAF_OS_AUTHORITY_EPOCH=1"]
     # `--phase drain` starts a freeze, so it sets the earlier freeze's drain.json aside (V2-31b,
     # tested on its own). This test is about the ledger and the plans, and runs on to `activate`.
     (ready.dir / cli.DRAIN).write_bytes(kept_drain)
@@ -1372,12 +1385,11 @@ def test_freeze_plan_prints_the_exact_keys_and_changes_nothing(ready):
     early = ready.run("freeze-plan", "--phase", "switch")
     assert early.code == 1 and codes(early) == ["authority_state_invalid"]
     assert ready.run("activate").code == 0
+    apply_drain(ready)  # T1's keys, applied long before T6
     switch = ready.run("freeze-plan", "--phase", "switch")
-    # The freeze STAYS on through the switch and the mirror: no write is admitted until `open`.
-    assert keys_of(switch) == [
-        "MIA_ASSAF_OS_BACKEND=postgres", "MIA_ASSAF_OS_LEDGER_ENABLED=true",
-        "MIA_ASSAF_OS_AUTHORITY_EPOCH=1",
-    ]
+    # E29: the switch flips ONLY the backend, and the freeze STAYS on through the switch and the
+    # mirror: no write is admitted until `open`.
+    assert keys_of(switch) == ["MIA_ASSAF_OS_BACKEND=postgres"]
     assert "MIA_ASSAF_OS_FREEZE stays true" in switch.out
     apply_switch(ready)
     mirror = ready.run("freeze-plan", "--phase", "mirror")
@@ -1458,13 +1470,80 @@ def test_mirror_open_and_switch_need_an_active_core(ready):
 
 
 def test_freeze_plan_after_a_re_arm_names_the_new_epoch(ready):
+    # E29: the epoch is printed by the drain plan (T1), where the retry starts, not by the switch.
     ready.run("activate")
     ready.run("rollback")
     ready.run("init", "--rearm")
     assert ready.run("freeze-plan", "--phase", "revert").code == 0
+    drain = ready.run("freeze-plan")
+    assert keys_of(drain) == [*DRAIN_KEYS, "MIA_ASSAF_OS_AUTHORITY_EPOCH=2"]
     ready.env.transition(WORKSPACE, "core", "active", expected_epoch=2, actor_owner_id=OWNER_ID)
+    apply_drain(ready, epoch=2)
     switch = ready.run("freeze-plan", "--phase", "switch")
-    assert "MIA_ASSAF_OS_AUTHORITY_EPOCH=2" in switch.out
+    assert keys_of(switch) == ["MIA_ASSAF_OS_BACKEND=postgres"]
+
+
+# ----------------------------------------------- the ledger keys come at T1 (contract §22 E29)
+#
+# The import (G24 stage at T4, G12 promote at T5) runs before T6 as the ledger worker. It needs
+# MIA_ASSAF_OS_LEDGER_ENABLED=true and MIA_ASSAF_OS_AUTHORITY_EPOCH=E (authorize.for_worker refuses
+# epoch_unset, the ledger core refuses ledger_disabled). Under backend=sheets the factory still
+# returns Sheets and the core admits only kind=import at core=shadow
+# (tests/workers/test_os_e29_sheets_with_ledger_keys.py), so T1 is the first place they are safe.
+
+
+def test_the_drain_plan_prints_the_freeze_and_the_ledger_keys_with_the_backend_still_sheets(
+    any_world,
+):
+    world = started(any_world)
+    plan = world.run("freeze-plan")
+    assert plan.code == 0
+    assert keys_of(plan) == [*DRAIN_KEYS, "MIA_ASSAF_OS_AUTHORITY_EPOCH=1"]
+    assert not [key for key in keys_of(plan) if "BACKEND" in key], "the backend stays sheets"
+    assert "the backend stays sheets" in plan.out and "T4 stage" in plan.out
+    assert cli.plan_lines("drain", 7) == [*DRAIN_KEYS, "MIA_ASSAF_OS_AUTHORITY_EPOCH=7"]
+    assert cli.plan_lines("switch", 7) == ["MIA_ASSAF_OS_BACKEND=postgres"]
+
+
+def test_the_drain_plan_needs_the_workspace_and_a_shadow_core_and_voids_nothing_when_refused(
+    world,
+):
+    world.put(cli.DRAIN, {"v": 1})
+    run = world.run("freeze-plan")  # no `init` yet: there is no epoch to print
+    assert run.code == 1 and codes(run) == ["workspace_missing"]
+    assert (world.dir / cli.DRAIN).exists() and not superseded(world)
+    assert world.run("init").code == 0
+    good_evidence(world)
+    assert world.run("activate").code == 0
+    run = world.run("freeze-plan")  # core is active: a drain plan is not a thing any more
+    assert run.code == 1 and codes(run) == ["authority_state_invalid"]
+    assert "MIA_ASSAF_OS" not in json.dumps(run.out), "no key is printed on a refusal"
+    assert (world.dir / cli.DRAIN).exists() and not superseded(world)
+
+
+def test_the_switch_plan_refuses_until_the_t1_keys_are_applied(ready):
+    assert ready.run("activate").code == 0
+    for ledger, epoch in ((False, 0), (True, 0), (False, 1), (True, 2)):
+        ready.settings.assaf_os_ledger_enabled, ready.settings.assaf_os_authority_epoch = (
+            ledger, epoch)
+        run = ready.run("freeze-plan", "--phase", "switch")
+        assert run.code == 1 and codes(run) == ["drain_keys_not_applied"], (ledger, epoch)
+        assert "MIA_ASSAF_OS" not in json.dumps(run.out), "no key is printed on a refusal"
+    apply_drain(ready)
+    assert ready.run("freeze-plan", "--phase", "switch").code == 0
+
+
+def test_an_aborted_window_returns_the_ledger_keys_with_the_revert_plan(ready):
+    # T1 or T2 aborted: core is still `shadow`, and the T1 keys are set. The revert plan (core
+    # shadow is allowed: it owns no data) prints the ledger keys back; the freeze is lifted after.
+    apply_drain(ready)
+    run = ready.run("freeze-plan", "--phase", "revert")
+    assert run.code == 0
+    assert keys_of(run) == [
+        "MIA_ASSAF_OS_BACKEND=sheets", "MIA_ASSAF_OS_LEDGER_ENABLED=false",
+        "MIA_ASSAF_OS_AUTHORITY_EPOCH=0", "MIA_ASSAF_OS_MIRROR_ENABLED=false",
+    ]
+    assert ready.state().states["core"] == "shadow" and ready.state().epoch == 1
 
 
 # --------------------------------------------------------------------------- status and hygiene
