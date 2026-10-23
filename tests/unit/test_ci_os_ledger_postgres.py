@@ -251,6 +251,7 @@ def test_container_waits_for_the_ledger_job() -> None:
         "owner-os-postgres",
         JOB,
         "os-ledger-migration-postgres",
+        "os-cutover-postgres",
     }
     assert len(needs) == len(set(needs))
 
