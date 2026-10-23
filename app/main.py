@@ -35,6 +35,7 @@ from app.core.logging import configure_logging
 from app.db.app_role_posture import app_role_ready
 from app.db.session import database_ready, get_session_factory, init_db
 from app.db.store import LeadStore
+from app.integrations.owner_http import close_owner_http_client
 from app.services.os_ledger.api import LedgerError
 from app.surfaces.site_v2 import SITE_PROMPT_VERSION
 from app.workers import os_mirror
@@ -286,14 +287,17 @@ async def lifespan(_app: FastAPI):
     try:
         yield
     finally:
-        for active_runtime in (runtime, reminder_runtime):
-            if active_runtime is None:
-                continue
-            import asyncio
+        try:
+            for active_runtime in (runtime, reminder_runtime):
+                if active_runtime is None:
+                    continue
+                import asyncio
 
-            stop_event, thread = active_runtime
-            stop_event.set()
-            await asyncio.to_thread(thread.join, 15)
+                stop_event, thread = active_runtime
+                stop_event.set()
+                await asyncio.to_thread(thread.join, 15)
+        finally:
+            close_owner_http_client()
 
 
 app = FastAPI(

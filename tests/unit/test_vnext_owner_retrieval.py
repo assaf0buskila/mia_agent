@@ -9,7 +9,7 @@ them counted.
 
 The v2 cleanup deleted the graph, so that *particular* double path cannot come back. What
 these tests still defend is the cost contract itself: one owner turn, one memory pass, one
-knowledge pass, two query embeddings — regardless of how many model steps the agent loop
+knowledge pass, one shared query embedding — regardless of how many model steps the agent loop
 takes. They assert **exactly** one, never `>= 1`.
 """
 
@@ -270,8 +270,8 @@ def test_one_owner_turn_retrieves_exactly_once(monkeypatch) -> None:
     # The whole point. Exactly one, not "at least one", across two model steps.
     assert counts["memory"] == 1
     assert counts["knowledge"] == 1
-    # One query embedding per retrieval kind — four before the original fix.
-    assert port.calls == 2
+    # The two retrieval kinds share the same query embedding within this turn.
+    assert port.calls == 1
 
 
 def test_the_answer_is_grounded_in_what_was_retrieved(monkeypatch) -> None:

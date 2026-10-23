@@ -11,6 +11,8 @@ import logging
 from datetime import UTC, datetime
 from typing import NamedTuple
 
+import httpx
+
 from app.brain.context import (
     assemble_owner_context,
 )
@@ -45,6 +47,7 @@ from app.integrations.llm_client import (
     LlmClient,
     LlmModelChain,
 )
+from app.integrations.owner_http import get_owner_http_client
 from app.integrations.research import ResearchPort, build_research_port
 from app.integrations.search_console import SearchConsolePort, build_search_console_port
 from app.integrations.seo_audit import SeoAuditPort, build_seo_audit_port
@@ -136,7 +139,9 @@ class OwnerBrainResult(NamedTuple):
     approval_ids: tuple[str, ...] = ()
 
 
-def build_agent_client(settings: Settings) -> LlmModelChain:
+def build_agent_client(
+    settings: Settings, *, http_client: httpx.Client | None = None
+) -> LlmModelChain:
     """Every configured model, in order.
 
     `MIA_OWNER_AGENT_FALLBACK_MODEL` was documented but previously ignored — only
@@ -150,6 +155,7 @@ def build_agent_client(settings: Settings) -> LlmModelChain:
         settings.owner_agent_model,
         settings.owner_agent_fallback_model,
     )
+    transport = http_client if http_client is not None else get_owner_http_client()
     clients = [
         LlmClient(
             api_key=settings.openai_api_key,
@@ -157,6 +163,7 @@ def build_agent_client(settings: Settings) -> LlmModelChain:
             url=OPENAI_RESPONSES_URL,
             timeout=settings.llm_request_timeout_seconds,
             reasoning_effort=settings.owner_agent_reasoning_effort,
+            client=transport,
         )
         for name in chain
     ]
@@ -165,13 +172,15 @@ def build_agent_client(settings: Settings) -> LlmModelChain:
             settings,
             settings.owner_agent_gemini_model,
             reasoning_effort=settings.owner_agent_reasoning_effort,
+            http_client=transport,
         )
     )
     return LlmModelChain(clients)
 
 
 def _gemini_clients(
-    settings: Settings, model: str, *, reasoning_effort: str = ""
+    settings: Settings, model: str, *, reasoning_effort: str = "",
+    http_client: httpx.Client | None = None,
 ) -> list[LlmClient]:
     """Gemini OpenAI-compat as the cross-provider last resort.
 
@@ -190,6 +199,7 @@ def _gemini_clients(
             url=GEMINI_CHAT_URL,
             timeout=settings.llm_request_timeout_seconds,
             reasoning_effort=reasoning_effort,
+            client=http_client,
         )
     ]
 
@@ -264,7 +274,7 @@ def answer_owner(
     if not agent_client.enabled():
         return OwnerBrainResult(fallback_text, False, (), fallback_reason="no_model_configured")
 
-    port = embedding_port or build_embedding_port(settings)
+    port = embedding_port or build_embedding_port(settings, client=get_owner_http_client())
     moment = now or datetime.now(UTC)
     if requests_no_history(owner_text):
         history = ()
@@ -279,6 +289,10 @@ def answer_owner(
                 max_chars=settings.memory_max_context_chars,
                 weights=_weights(settings),
                 now=moment,
+                deadline_at=deadline_at,
+                embedding_reserve_seconds=(
+                    settings.owner_final_reserve_seconds + settings.owner_min_model_seconds
+                ),
             )
     house = bind_owner_house_ports(settings)
     ctx = ToolContext(
