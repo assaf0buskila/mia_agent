@@ -115,8 +115,8 @@ class FakeProbes:
 
 
 def import_receipt_exists(env, epoch: int, manifest_digest: str) -> bool:
-    """What ``promote`` leaves behind (V2-30, E1-rev): a committed import receipt at this epoch whose
-    request id is ``import_request_uuid(epoch, digest)`` and whose proposal carries the digest."""
+    """What ``promote`` leaves behind (V2-30, E1-rev): a committed import receipt at this epoch
+    whose request id is ``import_request_uuid(epoch, digest)`` and whose proposal has the digest."""
     proposals = {row["proposal_id"]: row for row in env.rows("os_proposals")}
     return any(
         row["kind"] == "import" and row["status"] == "committed" and row["epoch"] == epoch
@@ -198,7 +198,7 @@ MANIFEST_DIGEST = signed_manifest(NOW, NOW)["manifest_digest"]
 
 
 def promote_import(world: World, digest: str | None = None) -> None:
-    """T5: the import receipt ``promote`` writes at the current epoch, bound to the signed digest."""
+    """T5: the import receipt ``promote`` writes at the current epoch, bound to the signed one."""
     digest = digest or MANIFEST_DIGEST
     epoch = world.state().epoch
     if not import_receipt_exists(world.env, epoch, digest):

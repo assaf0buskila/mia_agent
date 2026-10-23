@@ -372,7 +372,9 @@ present throughout; jobs paused and a verified backup before **each** of T1, T3,
   `import_quarantine_unresolved`, `manifest_digest_mismatch`, `import_orphan_rows` and
   `authority_not_active` are its refusals.
 - **Verify**: `sudo mia os-authority status --approved-sha S`: `states.core: shadow`, epoch `E`,
-  `non_import_receipts: 0`.
+  `non_import_receipts: 0`. Promote leaves one committed `import` receipt at epoch `E`, and its
+  proposal carries the signed digest: `preflight` and `activate` look for exactly that, so a skipped
+  promote cannot activate (`import_not_promoted`, T6).
 - **Rollback**: before activation nothing serves from the ledger. If the import is wrong, T6 does not
   happen; fix the capture and re-stage (a new batch), or section 5.
 
@@ -380,13 +382,18 @@ present throughout; jobs paused and a verified backup before **each** of T1, T3,
 
 - **Preflight**: put the fresh `backup.json`, `restore-drill.json`, `fe-v2.json` and `journal.json` in the
   evidence directory (section 2) and run `sudo mia os-authority preflight --approved-sha S`. It must
-  print `ready_to_activate: true` with all 15 checks `pass`. A check whose operator evidence is not there
-  yet shows `pending` here and **still refuses `activate`**. If this preflight prints `sheets: unknown`
+  print `ready_to_activate: true` with all 15 checks `pass` and the one entry of `gates`
+  (`import_not_promoted`) `pass`. A check whose operator evidence is not there
+  yet shows `pending` here and **still refuses `activate`**; the gate shows `pending` (detail
+  `no_import_receipt`) until T5's promote has run at this epoch. If this preflight prints `sheets: unknown`
   (a timeout or a transport error on the probe), run it again: an `unknown` probe carries the recorded
   `fence_probe_at` forward and does not void the T4 captures, the staging (G24) or the sign-off.
 - **Go G13** authority activation at epoch `E`.
 - **Command**: `sudo mia os-authority activate --approved-sha S`. It re-evaluates **every**
-  precondition (section 7) and moves `core` from `shadow` to `active` only if all pass. It **never**
+  precondition (section 7) and moves `core` from `shadow` to `active` only if all pass **and** the
+  signed manifest digest was promoted at this epoch (`import_not_promoted`, beyond the contract's 15:
+  an import receipt at epoch `E` that binds the digest in `manifest.json`; with no signed manifest
+  it says nothing, `manifest_not_signed` does). It **never**
   bumps the epoch. Run again once active it answers `already_active` without checking.
 - **Verify**: `outcome: activated`; `states.core: active`; `activation.json` exists. From this moment
   every Sheets write is refused `authority_moved` (409) and the Script is already fenced.
@@ -527,6 +534,7 @@ Other refusals of the CLI:
 
 | Code | Meaning |
 |---|---|
+| `import_not_promoted` | `activate` (and `preflight`, as a `gates` entry, `pending` until T5) found no committed import receipt at this epoch that binds the digest of the signed `manifest.json`: promote was skipped, ran for another manifest, or ran at an earlier epoch. Run T5 at this epoch with the signed digest |
 | `workspace_missing` | `init` has not run (step 5) |
 | `authority_state_invalid` | The command does not apply to the current `core` state (for example `freeze-plan --phase revert` before `rollback` has fenced it) |
 | `final_accept_flag_required` | `preflight --drain` needs `--final-accept` |

@@ -287,6 +287,18 @@ def test_the_t1_and_t2_rollbacks_say_a_retry_redoes_t2_and_the_old_drain_is_set_
     assert "`drain_stale`" in RUNBOOK.split("## 7. Reason codes", 1)[1]
 
 
+def test_the_text_names_the_import_not_promoted_refusal_where_the_operator_meets_it():
+    # V2-31b finding 8: one refusal beyond the contract's 15, so it is NOT in the 15-row table.
+    assert cli.PROMOTE_GATE == "import_not_promoted" and cli.PROMOTE_GATE not in cli.PRECONDITIONS
+    codes_table = RUNBOOK.split("## 7. Reason codes", 1)[1]
+    assert cli.PROMOTE_GATE not in codes_table.split("Other refusals of the CLI", 1)[0]
+    assert re.search(rf"^\| `{cli.PROMOTE_GATE}` \|", codes_table, re.M)
+    for step in ("### T5", "### T6"):
+        assert f"`{cli.PROMOTE_GATE}`" in re.sub(r"\s+", " ", section_of(step)), step
+    t6 = re.sub(r"\s+", " ", section_of("### T6"))
+    assert "`no_import_receipt`" in t6 and "binds the digest in `manifest.json`" in t6
+
+
 def t7_create_step() -> str:
     t7 = section_of("### T7")
     start = t7.index("- **Create the eight tabs**")

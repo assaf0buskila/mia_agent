@@ -68,6 +68,8 @@ PRECONDITIONS = (
     "fe_v2_reader_not_live",
     "journal_capacity",
 )
+# One more refusal of ``activate`` and ``preflight``, beyond the contract's 15 (see run_gates).
+PROMOTE_GATE = "import_not_promoted"
 
 BACKUP_MAX_AGE = timedelta(hours=1)
 # T3 follows T2 immediately: a drain taken more than this long before the fence probe was taken
@@ -282,6 +284,9 @@ class Probes(Protocol):
         """``empty``, ``verified`` or ``unverified``."""
 
     def non_import_receipts(self, workspace: str, epoch: int) -> int: ...
+
+    def import_promoted(self, workspace: str, epoch: int, manifest_digest: str) -> bool:
+        """True when a committed import receipt at this epoch binds this manifest digest."""
 
 
 def fence_state(
@@ -522,6 +527,29 @@ class LiveProbes:
                 "SELECT count(*) FROM assaf_os.os_receipts WHERE workspace_id = :workspace "
                 "AND epoch = :epoch AND kind <> 'import'"
             ), {"workspace": workspace, "epoch": epoch}).scalar_one())
+
+    def import_promoted(self, workspace: str, epoch: int, manifest_digest: str) -> bool:
+        """What ``promote`` (V2-30, E1-rev) leaves behind: one committed ``import`` receipt at this
+        epoch whose request id is ``import_request_uuid(epoch, digest)``, and its proposal, which
+        carries the digest (``dependency_digest``) and the request digest of
+        ``{"import": digest, "epoch": epoch}``. No schema of its own: it reads those two rows."""
+        from sqlalchemy import text
+
+        with self._engine("privileged").connect() as connection:
+            found = connection.execute(text(
+                "SELECT count(*) FROM assaf_os.os_receipts r "
+                "JOIN assaf_os.os_proposals p "
+                "ON p.workspace_id = r.workspace_id AND p.proposal_id = r.proposal_id "
+                "WHERE r.workspace_id = :workspace AND r.epoch = :epoch AND r.kind = 'import' "
+                "AND r.status = 'committed' AND r.request_id = CAST(:request_id AS uuid) "
+                "AND p.kind = 'import' AND p.epoch = :epoch AND p.status = 'committed' "
+                "AND p.dependency_digest = :digest AND p.request_digest = :request_digest"
+            ), {
+                "workspace": workspace, "epoch": epoch, "digest": manifest_digest,
+                "request_id": api.import_request_uuid(epoch, manifest_digest),
+                "request_digest": api.digest({"import": manifest_digest, "epoch": epoch}),
+            }).scalar_one()
+        return int(found) > 0
 
 
 # ---------------------------------------------------------------------------------------------
@@ -931,6 +959,36 @@ def run_checks(ctx: Context, snapshot: api.AuthoritySnapshot) -> list[Check]:
     return results
 
 
+def _check_promoted(ctx: Context, snapshot: api.AuthoritySnapshot) -> Check | None:
+    """An import receipt at THIS epoch binds the signed manifest digest (V2-31b, finding 8).
+
+    ``promote`` writes it in the same transaction as the records, so it is the proof that the
+    signed import is in the ledger; without it activation would pass on an empty ledger and only
+    the phone check at T6 would catch it. None when there is no signed manifest to bind: that is
+    ``manifest_not_signed``'s refusal, and this check adds nothing to it. Not yet promoted is
+    ``pending`` (T5 comes after the T3 preflight), and ``activate`` refuses on it."""
+    document, _ = ctx.manifest()
+    if document is None:
+        return None
+    signed, _ = verify_signoff(document, ctx.deps.owner_id, ctx.now)
+    if signed is None:
+        return None
+    if ctx.deps.probes.import_promoted(ctx.deps.workspace, snapshot.epoch, signed.digest):
+        return _pass(PROMOTE_GATE)
+    return _not_yet(PROMOTE_GATE, "no_import_receipt")
+
+
+def run_gates(ctx: Context, snapshot: api.AuthoritySnapshot) -> list[Check]:
+    """The checks of ``activate`` and ``preflight`` beyond the contract's 15 preconditions."""
+    try:
+        gate = _check_promoted(ctx, snapshot)
+    except EvidenceError:
+        gate = _fail(PROMOTE_GATE, "evidence_unreadable")
+    except Exception:  # never print a driver message
+        gate = _fail(PROMOTE_GATE, "probe_error")
+    return [] if gate is None else [gate]
+
+
 def _blocking(checks: Sequence[Check], *, allow_pending: bool) -> list[str]:
     return [c.code for c in checks if c.status == "fail" or (
         c.status == "pending" and not allow_pending)]
@@ -1079,11 +1137,13 @@ def cmd_preflight(ctx: Context, *, drain: bool, final_accept: bool) -> Result:
     checks = run_checks(ctx, snapshot)
     document["checks"] = [check.as_dict() for check in checks]
     deps.evidence.write(PREFLIGHT, document)
-    failed = _blocking(checks, allow_pending=True)
-    pending = [c.code for c in checks if c.status == "pending"]
+    gates = run_gates(ctx, snapshot)  # reported, not written: the evidence file keeps its shape
+    failed = _blocking([*checks, *gates], allow_pending=True)
+    pending = [c.code for c in [*checks, *gates] if c.status == "pending"]
     result = {
         "command": "preflight", "ok": not failed, "ready_to_activate": not failed and not pending,
-        "checks": document["checks"], "sheets": state, **_snapshot_document(snapshot),
+        "checks": document["checks"], "gates": [gate.as_dict() for gate in gates],
+        "sheets": state, **_snapshot_document(snapshot),
     }
     return Result(not failed, result, failed)
 
@@ -1128,7 +1188,8 @@ def _drain(ctx: Context, snapshot: api.AuthoritySnapshot, *, final_accept: bool)
 
 
 def cmd_activate(ctx: Context) -> Result:
-    """``shadow -> active``, only when every precondition holds. Never bumps the epoch."""
+    """``shadow -> active``, only when every precondition holds and the signed import is promoted at
+    this epoch (``import_not_promoted``, beyond the contract's 15). Never bumps the epoch."""
     deps = ctx.deps
     snapshot = _state(ctx)
     core = snapshot.states["core"]
@@ -1143,10 +1204,12 @@ def cmd_activate(ctx: Context) -> Result:
     except EvidenceError:
         ctx.fence_doc = None
     checks = run_checks(ctx, snapshot)
-    blocking = _blocking(checks, allow_pending=False)
+    gates = run_gates(ctx, snapshot)
+    blocking = _blocking([*checks, *gates], allow_pending=False)
     if blocking:
         return Result(False, {"command": "activate", "ok": False, "outcome": "refused",
                               "checks": [check.as_dict() for check in checks],
+                              "gates": [gate.as_dict() for gate in gates],
                               **_snapshot_document(snapshot)}, blocking)
     try:
         after = deps.admin.transition(
@@ -1156,7 +1219,8 @@ def cmd_activate(ctx: Context) -> Result:
     except api.LedgerError as error:
         raise _ledger_refusal(error) from None
     document = {"command": "activate", "ok": True, "outcome": "activated",
-                "checks": [check.as_dict() for check in checks], **_snapshot_document(after)}
+                "checks": [check.as_dict() for check in checks],
+                "gates": [gate.as_dict() for gate in gates], **_snapshot_document(after)}
     try:
         deps.evidence.write(ACTIVATION, {
             "v": 1, "kind": "activation", "activated_at": _iso(deps.now()), "epoch": after.epoch,
