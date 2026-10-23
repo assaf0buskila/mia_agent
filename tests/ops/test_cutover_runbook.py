@@ -260,6 +260,22 @@ def test_every_sudo_mia_command_is_a_command_of_the_vm_script():
             "restore"} <= used
 
 
+def test_the_t1_and_t2_rollbacks_say_a_retry_redoes_t2_and_the_old_drain_is_set_aside():
+    # V2-31b finding 2: the rollback only unfreezes, so the next freeze must not inherit its drain.
+    flat = re.sub(r"\s+", " ", section_of("### T1"))
+    assert "Each freeze starts a new drain" in flat and "drain-superseded-<UTC>.json" in flat
+    rollback = flat.split("**Rollback**", 1)[1]
+    assert "A retry redoes T1 and T2" in rollback and "sets the old `drain.json` aside" in rollback
+    assert "`drain_stale`" in rollback
+    t2 = re.sub(r"\s+", " ", section_of("### T2")).split("**Rollback**", 1)[1]
+    assert "A retry redoes T2" in t2 and "sets it aside" in t2
+    # The numbers and names the text states are the CLI's own.
+    assert cli.DRAIN_MAX_AGE == timedelta(hours=2)
+    assert "more than 2 hours before `fence_probe_at`" in flat
+    assert re.search(r"^\| `drain\.json` \|.*drain-superseded-.*\(`drain_stale`\)", RUNBOOK, re.M)
+    assert "`drain_stale`" in RUNBOOK.split("## 7. Reason codes", 1)[1]
+
+
 def test_the_archive_name_is_the_contracts_en_dash_literal():
     assert "`ARCHIVE – edits ignored`" in RUNBOOK and "–" in RUNBOOK
     stripped = RUNBOOK.replace("`ARCHIVE - read only`", "")

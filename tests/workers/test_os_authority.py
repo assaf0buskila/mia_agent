@@ -779,6 +779,11 @@ def failing(run: Run) -> dict[str, str]:
     return {c["code"]: c["detail"] for c in run.out["checks"] if c["status"] != "pass"}
 
 
+def hard(run: Run) -> dict[str, str]:
+    """Only the checks that FAIL (a preflight before the operator evidence also shows `pending`)."""
+    return {c["code"]: c["detail"] for c in run.out["checks"] if c["status"] == "fail"}
+
+
 def test_a_retry_that_redoes_the_drain_does_not_carry_the_aborted_fence_time(any_world):
     world = started(any_world)
     assert drain_at(world, -10).code == 0
@@ -886,20 +891,129 @@ def test_a_live_preflight_before_any_fence_does_not_void_the_drain(any_world):
     assert activate_now(world).code == 0, "the freeze held since the drain: it need not be redone"
 
 
+# ------------------------------------------------ a drain belongs to one freeze (V2-31b finding 2)
+#
+# The T1/T2 rollback only unfreezes. Nothing in the ledger changes, and no fence was ever recorded,
+# so `fence_broken_at` is absent. Proposals made from the OS screen over the next days have no
+# Telegram card, so no other check sees them. The old drain must not satisfy the retry.
+
+
+def superseded(world: World) -> list[str]:
+    return sorted(path.name for path in world.dir.glob("drain-superseded-*.json"))
+
+
+def test_freeze_plan_drain_sets_the_old_drain_aside_so_each_freeze_starts_a_new_one(any_world):
+    world = started(any_world)
+    assert drain_at(world, -10).code == 0
+    old = (world.dir / cli.DRAIN).read_bytes()
+    world.clock[0] = at(hours=-9)
+    plan = world.run("freeze-plan")
+    assert plan.code == 0 and "MIA_ASSAF_OS_FREEZE=true\n" in plan.out
+    assert "drain.json" in plan.out, "the plan tells the operator the drain is void"
+    assert not (world.dir / cli.DRAIN).exists()
+    kept = superseded(world)
+    assert len(kept) == 1 and (world.dir / kept[0]).read_bytes() == old, "set aside, not deleted"
+    assert kept[0] == "drain-superseded-" + cli.EvidenceStore.aside_stamp(at(hours=-9)) + ".json"
+    again = world.run("freeze-plan")  # nothing left to set aside
+    assert again.code == 0 and superseded(world) == kept
+    # Only the drain phase starts a freeze: the other phases leave a drain alone.
+    world.put(cli.DRAIN, {"v": 1})
+    assert world.run("freeze-plan", "--phase", "revert").code == 0
+    assert (world.dir / cli.DRAIN).exists() and superseded(world) == kept
+
+
+def test_freeze_plan_drain_works_before_any_evidence_directory_exists(world):
+    plan = world.run("freeze-plan")
+    assert plan.code == 0 and not world.dir.exists()
+
+
+def test_freeze_plan_drain_refuses_when_the_old_drain_cannot_be_set_aside(world, monkeypatch):
+    world.run("init")
+    world.put(cli.DRAIN, {"v": 1})
+
+    def refuse(*args, **kwargs):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(cli.os, "replace", refuse)
+    run = world.run("freeze-plan")
+    assert run.code == 1 and codes(run) == ["evidence_unwritable"]
+    assert (world.dir / cli.DRAIN).exists(), "a freeze must not start over a drain it cannot void"
+
+
+def test_an_aborted_window_cannot_lend_its_drain_to_the_next_freeze(any_world):
+    """The reviewer's scenario: drain, abort, unfreeze, new OS proposals, re-freeze, then T3."""
+    world = started(any_world)
+    assert drain_at(world, -100).code == 0  # window 1: T1, T2 at epoch 1, then aborted before T3
+    # Days later: the owner made OS-screen proposals (no card, no drain), then T1 of window 2.
+    world.clock[0] = at(hours=-3)
+    assert world.run("freeze-plan").code == 0
+    # The operator goes straight to T3 without a T2: the Script is fenced and probed.
+    run = fence_at(world, -2)
+    assert run.code == 1 and codes(run) == ["sheets_pending_proposals"]
+    assert hard(run) == {"sheets_pending_proposals": "no_drain_evidence"}
+    sign_capture(world, -1.5, -1)
+    refused = activate_now(world)
+    assert refused.code == 1 and codes(refused) == ["sheets_pending_proposals"]
+    assert failing(refused) == {"sheets_pending_proposals": "no_drain_evidence"}
+    assert world.state().states["core"] == "shadow"
+    assert not (world.dir / cli.ACTIVATION).exists()
+
+
+def test_an_old_drain_is_stale_even_when_nobody_ran_freeze_plan(any_world):
+    """The same scenario, with the freeze keys set by hand: the age bound refuses it."""
+    world = started(any_world)
+    assert drain_at(world, -100).code == 0
+    run = fence_at(world, -2)  # no fence was ever recorded before, so there is no fence_broken_at
+    assert "fence_broken_at" not in world.get(cli.PREFLIGHT)
+    assert run.code == 1 and codes(run) == ["sheets_pending_proposals"]
+    assert hard(run) == {"sheets_pending_proposals": "drain_stale"}
+    sign_capture(world, -1.5, -1)
+    refused = activate_now(world)
+    assert refused.code == 1 and codes(refused) == ["sheets_pending_proposals"]
+    assert failing(refused) == {"sheets_pending_proposals": "drain_stale"}
+    assert world.state().states["core"] == "shadow"
+    # The retry the runbook prescribes: T1 (the old drain is set aside), a new T2, then T3, with
+    # new captures (the evidence of the refused attempt goes, as in the T3 retry above).
+    world.drop(cli.MANIFEST)
+    for name in (cli.BACKUP, cli.DRILL, cli.FRONTEND, cli.JOURNAL):
+        world.drop(name)
+    assert world.run("freeze-plan").code == 0
+    assert drain_at(world, -1.2).code == 0
+    assert fence_at(world, -1).code == 0
+    sign_capture(world, -0.9, -0.8)
+    assert activate_now(world).code == 0
+
+
+@pytest.mark.parametrize("extra_seconds,fresh", [(0, True), (1, False)])
+def test_the_drain_must_be_taken_within_the_named_bound_of_the_fence_probe(
+    any_world, extra_seconds, fresh
+):
+    assert cli.DRAIN_MAX_AGE <= timedelta(hours=6), "T3 follows T2 immediately: a small bound"
+    world = started(any_world)
+    assert drain_at(world, -20).code == 0
+    world.probes.fence = ("unavailable", "")
+    world.clock[0] = at(hours=-20) + cli.DRAIN_MAX_AGE + timedelta(seconds=extra_seconds)
+    run = world.run("preflight")
+    if fresh:
+        assert run.code == 0
+    else:
+        assert run.code == 1 and hard(run) == {"sheets_pending_proposals": "drain_stale"}
+
+
 def test_an_unknown_probe_ends_the_unbroken_run_but_is_not_a_sighting_of_the_live_sheet(
     any_world,
 ):
     world = started(any_world)
     assert drain_at(world, -10).code == 0
-    assert fence_at(world, -9).code == 0
+    assert fence_at(world, -9.5).code == 0
     world.probes.fence = ("unknown", "transport")
-    world.clock[0] = at(hours=-8)
+    world.clock[0] = at(hours=-9)
     assert world.run("preflight").code == 1
     record = world.get(cli.PREFLIGHT)
     assert record["sheets"] == "unknown" and "fence_probe_at" not in record
     assert "fence_broken_at" not in record, "a transport error does not void the drain"
-    assert fence_at(world, -7).code == 0
-    assert world.get(cli.PREFLIGHT)["fence_probe_at"] == stamp(at(hours=-7))
+    assert fence_at(world, -8.5).code == 0
+    assert world.get(cli.PREFLIGHT)["fence_probe_at"] == stamp(at(hours=-8.5))
 
 
 def test_a_refused_drain_does_not_touch_the_fence_record(ready):
@@ -996,9 +1110,13 @@ def apply_switch(world, epoch=1):
 
 
 def test_freeze_plan_prints_the_exact_keys_and_changes_nothing(ready):
+    kept_drain = (ready.dir / cli.DRAIN).read_bytes()
     drain = ready.run("freeze-plan")
     assert drain.code == 0 and "MIA_ASSAF_OS_FREEZE=true\n" in drain.out
     assert "sudo mia settings" in drain.out
+    # `--phase drain` starts a freeze, so it sets the earlier freeze's drain.json aside (V2-31b,
+    # tested on its own). This test is about the ledger and the plans, and runs on to `activate`.
+    (ready.dir / cli.DRAIN).write_bytes(kept_drain)
     before = ready.state()
     early = ready.run("freeze-plan", "--phase", "switch")
     assert early.code == 1 and codes(early) == ["authority_state_invalid"]

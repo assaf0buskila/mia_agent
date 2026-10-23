@@ -13,7 +13,9 @@ outcome=<ok|refused> reason=<code>``.
 Evidence lives in one VM-owned directory (``MIA_OS_AUTHORITY_DIR``, default
 ``/var/lib/mia/os-authority``). This job writes ``drain.json`` (``preflight --drain``),
 ``preflight.json`` (``preflight``, and ``preflight --drain`` once it has seen the Script live: that
-sighting ends the run of fenced probes) and ``activation.json`` (``activate``). The operator places
+sighting ends the run of fenced probes) and ``activation.json`` (``activate``). ``freeze-plan
+--phase drain`` starts a freeze and so sets an earlier ``drain.json`` aside: a drain belongs to
+one freeze. The operator places
 ``backup.json``, ``restore-drill.json``, ``fe-v2.json``, ``journal.json`` and ``manifest.json``
 there (formats: ops/assaf-os/CUTOVER_RUNBOOK.md). The activation preconditions are the fixed table
 in ``PRECONDITIONS``; ``activate`` re-evaluates every one of them and moves ``core`` from
@@ -68,6 +70,9 @@ PRECONDITIONS = (
 )
 
 BACKUP_MAX_AGE = timedelta(hours=1)
+# T3 follows T2 immediately: a drain taken more than this long before the fence probe was taken
+# under a freeze that may have lapsed in between (an aborted window, then OS-screen proposals).
+DRAIN_MAX_AGE = timedelta(hours=2)
 DRILL_MAX_AGE = timedelta(days=7)
 JOURNAL_MAX_AGE = timedelta(days=7)
 CLOCK_SKEW = timedelta(seconds=60)
@@ -235,6 +240,23 @@ class EvidenceStore:
                     os.unlink(temporary)
         except OSError:
             raise Refusal("evidence_unwritable") from None
+
+    @staticmethod
+    def aside_stamp(moment: datetime) -> str:
+        return moment.astimezone(UTC).strftime("%Y%m%dT%H%M%SZ")
+
+    def set_aside(self, name: str, moment: datetime) -> bool:
+        """Rename an evidence file out of the way, ``<stem>-superseded-<UTC stamp><suffix>``; it is
+        never deleted. False when there was none."""
+        path = self.directory / name
+        try:
+            if not (path.is_symlink() or path.exists()):
+                return False
+            os.replace(path, path.with_name(
+                f"{path.stem}-superseded-{self.aside_stamp(moment)}{path.suffix}"))
+        except OSError:
+            raise Refusal("evidence_unwritable") from None
+        return True
 
 
 # ---------------------------------------------------------------------------------------------
@@ -764,6 +786,10 @@ def _check_pending(ctx: Context, snapshot: api.AuthoritySnapshot) -> Check:
         return Check(code, "pending", "fence_not_recorded")
     if not recorded < fenced_at:
         return _fail(code, "drain_after_fence")
+    if fenced_at - recorded > DRAIN_MAX_AGE:
+        # No fence had to be broken for this: an aborted window only unfreezes. Proposals made
+        # over the days in between have no Telegram card, so no other check would see them.
+        return _fail(code, "drain_stale")
     return _pass(code)
 
 
@@ -1221,6 +1247,8 @@ PLAN_NOTES = {
     "drain": [
         "the freeze refuses every new proposal; approve and reject still pass, so the drain can "
         "settle every pending item",
+        "each freeze starts a new drain: an earlier drain.json is set aside (renamed "
+        "drain-superseded-<UTC>.json), so run T2 (preflight --drain) after this freeze",
     ],
     "switch": [
         "MIA_ASSAF_OS_FREEZE stays true: no write is admitted until the 'open' phase",
@@ -1245,14 +1273,18 @@ PLAN_NOTES = {
 
 
 def cmd_freeze_plan(ctx: Context, *, phase: str) -> Result:
-    """The exact ``mia-env`` keys to flip for a phase, then ``mia settings``. Prints; changes
-    nothing, and never touches Secret Manager. A phase that follows another refuses to print
-    until the settings the job reads show that the earlier one was applied."""
+    """The exact ``mia-env`` keys to flip for a phase, then ``mia settings``. Prints, and never
+    touches Secret Manager or the ledger. A phase that follows another refuses to print until the
+    settings the job reads show that the earlier one was applied. The one thing it changes is the
+    evidence of an earlier freeze: ``--phase drain`` starts a freeze, so it sets an existing
+    ``drain.json`` aside (each freeze starts a new drain) and refuses if it cannot."""
     if phase not in PHASES:
         raise Refusal("phase_invalid")
     settings = ctx.deps.settings
     epoch = 0
-    if phase != "drain":
+    if phase == "drain":
+        ctx.deps.evidence.set_aside(DRAIN, ctx.now)
+    else:
         snapshot = _state(ctx)
         epoch = snapshot.epoch
         if phase in ("switch", "mirror", "open") and snapshot.states["core"] != "active":

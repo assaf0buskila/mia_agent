@@ -187,7 +187,7 @@ time proves nothing and fails.
 
 | File | Written by | Used by | Notes |
 |---|---|---|---|
-| `drain.json` | `preflight --drain --final-accept` | `sheets_pending_proposals` | Epoch, SHA and freeze bound |
+| `drain.json` | `preflight --drain --final-accept` | `sheets_pending_proposals` | Epoch, SHA and freeze bound. One drain belongs to one freeze: `freeze-plan --phase drain` renames an existing one to `drain-superseded-<UTC>.json` (kept, never deleted), and a drain taken more than 2 hours before `fence_probe_at` is refused (`drain_stale`) |
 | `preflight.json` | `preflight`, and the drain once it sees the Script live | `capture_before_fence`, `sheets_pending_proposals` | Holds `fence_probe_at` and, after a lifted fence, `fence_broken_at` |
 | `activation.json` | `activate` | the record | The ledger state, not this file, is the authority |
 | `backup.json` | operator | `backup_too_old` | V2-10 `backup_offsite.py --status` output |
@@ -262,6 +262,10 @@ present throughout; jobs paused and a verified backup before **each** of T1, T3,
 - **Go G10** drain/freeze and final reconcile in the approved window.
 - **Command**: `sudo mia os-authority freeze-plan --phase drain --approved-sha S` prints
   `MIA_ASSAF_OS_FREEZE=true`. Set it with `push-settings.ps1`, then `sudo mia settings`.
+  **Each freeze starts a new drain**: the command also renames an existing `drain.json` (the drain of
+  an earlier freeze, for example an aborted window) to `drain-superseded-<UTC>.json` and refuses
+  (`evidence_unwritable`) if it cannot. Run it once, at the start of T1: running it again after T2
+  voids that T2 and T2 must be redone.
 - **What the freeze does**: it refuses every **new** intent on both backends with 503 `os_frozen` (a
   proposal from the OS screen or from Mia, a lead card). Approve and reject stay allowed, so every
   pending item can settle. The OS workbook leaves Mia's Sheets allow-list. Proved path by path in
@@ -275,7 +279,12 @@ present throughout; jobs paused and a verified backup before **each** of T1, T3,
   needs an owner repair. Leads wait until `open`.
 - **Verify**: `sudo mia os-authority status --approved-sha S` shows `settings.freeze: true`;
   a new proposal on the phone is refused; `/health` SHA is `S`.
-- **Rollback**: `MIA_ASSAF_OS_FREEZE=false`, `sudo mia settings`. Nothing else changed.
+- **Rollback**: `MIA_ASSAF_OS_FREEZE=false`, `sudo mia settings`. The ledger and the Sheet are
+  unchanged, but **the drain is void**: once the freeze is lifted the owner can make OS-screen
+  proposals again (they have no Telegram card, so no other check sees them). **A retry redoes T1 and
+  T2**: its `freeze-plan --phase drain` sets the old `drain.json` aside, and a drain taken more than
+  2 hours before `fence_probe_at` is refused anyway (`sheets_pending_proposals`, detail
+  `drain_stale`). Never reuse a drain of an earlier freeze.
 
 ### T2: final reconcile
 
@@ -287,7 +296,9 @@ present throughout; jobs paused and a verified backup before **each** of T1, T3,
 - **Verify**: exit 0, and `drain.json` records `sheets_pending: 0`, `sheets_unknown_receipts: 0`,
   `cards_open: 0`, `freeze: true`. A nonzero count refuses with the matching code; settle it and run it
   again (another snapshot is allowed).
-- **Rollback**: none needed; unfreeze as in T1 if you stop here.
+- **Rollback**: none needed; unfreeze as in T1 if you stop here. **A retry redoes T2**: `drain.json`
+  belongs to the freeze it was taken under, and the retry's `freeze-plan --phase drain` (T1) sets it
+  aside. Go on to T3 promptly after a good T2 (see `drain_stale` in section 7).
 
 ### T3: fence the Sheet
 
@@ -474,7 +485,7 @@ refuses on any `fail` and on any `pending`.
 | `capture_before_fence` | The signed capture time is later than the unbroken `fence_probe_at` | A capture before the fence: take new ones (T4) |
 | `main_role_unsafe` | The main DSN passes the V2-14a posture check | Step 2 not enforced |
 | `ledger_role_unsafe` | The V2-15 grant-map validator passes | Step 4 not done, or a posture drifted |
-| `sheets_pending_proposals` | `drain.json`: zero pending, taken before the fence and after any lifted fence (`fence_broken_at`), same epoch and SHA | Settle and redo T2, then T3's probe (`drain_after_fence`, `drain_before_fence_break`) |
+| `sheets_pending_proposals` | `drain.json`: zero pending, taken before the fence and after any lifted fence (`fence_broken_at`), at most 2 hours before `fence_probe_at`, same epoch and SHA | Settle and redo T1 and T2, then T3's probe (`no_drain_evidence`, `drain_after_fence`, `drain_before_fence_break`, `drain_stale`) |
 | `sheets_unknown_receipts` | Zero Sheets receipts unknown | Resolve by receipt, never replay |
 | `approval_cards_open` | Every `assaf_os.approve` card is terminal | Settle or let it expire |
 | `backup_too_old` | `backup.json` shows a dump under 1 h old | Re-run `--status` after a fresh backup |
