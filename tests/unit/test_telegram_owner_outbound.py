@@ -137,7 +137,9 @@ async def test_proposal_turn_keyboard_ignores_an_unrelated_newer_approval(
             channel=Channel.TELEGRAM,
             items=[
                 {
-                    "id": "evt.exact.turn.keyboard." + tool_name,
+                    # Unique per variant: the owner turn now commits its webhook claim, and the
+                    # in-memory database is shared, so a reused id would be a duplicate delivery.
+                    "id": f"evt.exact.turn.keyboard.{tool_name}.{has_turn_approval}",
                     "from": _OWNER_ID,
                     "text": "prepare a linkedin post for approval",
                 }

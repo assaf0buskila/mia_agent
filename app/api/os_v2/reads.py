@@ -30,6 +30,7 @@ from starlette.concurrency import run_in_threadpool
 
 from app.api.owner_sessions import OwnerSessionPrincipal, owner_scope
 from app.core.config import Settings, get_settings
+from app.core.owner_timing import owner_phase
 from app.prototypes.assaf_os_domain import SCHEMA
 from app.services.os_ledger import api, authorize
 
@@ -239,9 +240,15 @@ def _context(principal: OwnerSessionPrincipal, settings: Settings) -> api.Truste
 
 async def _respond(op: str, run: Callable[[], dict[str, Any]]) -> JSONResponse:
     started = time.perf_counter()
+
+    def timed() -> dict[str, Any]:
+        # Server-Timing "ledger": the ledger read, timed where it runs (silent outside a request).
+        with owner_phase("ledger", "os_read"):
+            return run()
+
     try:
         # The ledger is synchronous (a DB read transaction): never on the event loop.
-        body = await run_in_threadpool(run)
+        body = await run_in_threadpool(timed)
     except api.LedgerError as exc:
         _LOG.info("os_v2_read op=%s outcome=%s ms=%d", op, exc.code,
                   int((time.perf_counter() - started) * 1000))

@@ -106,3 +106,22 @@ def test_another_account_another_cycle_and_a_reimport_do_not_collide(world):
     reimport = paste(world, 4, "2026-10-15", lines=three_lines())
     for pid in (other_account.proposal_id, next_cycle.proposal_id, reimport.proposal_id):
         assert world.review(pid)["blocking"] == []
+
+
+@pytest.mark.parametrize("variant", ["SYNTHETIC BUSINESS CARD", "synthetic business card",
+                                     "Synthetic Business Card "])
+def test_a_spelling_variant_of_the_account_label_is_the_same_account(world, variant):
+    """The domain identifies an account by its folded label, so E31 must too."""
+    first = paste(world, 1, "2026-10-15")
+    world.approve(first.proposal_id)
+    second = paste(world, 2, "2026-10-17", label=variant)
+    assert second.statement_id != first.statement_id
+    assert world.draft(second.proposal_id)["blocking"] == BLOCKED
+    review = world.review(second.proposal_id)
+    assert review["blocking"] == BLOCKED
+    before, expenses = world.everything(), world.expenses()
+    with refused("cycle_has_statement"):
+        world.service.approve(world.owner, second.proposal_id, review["approval_request_id"],
+                              review["review_digest"])
+    assert world.everything() == before and world.expenses() == expenses
+    assert len(expenses) == 2  # booked once, not twice

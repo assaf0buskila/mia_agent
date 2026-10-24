@@ -32,6 +32,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal, Protocol, cast
 
+from app.core.owner_timing import owner_phase
 from app.services.os_ledger import api, contract
 
 _LOG = logging.getLogger("mia.os_backend_pg")
@@ -259,8 +260,12 @@ class PostgresOsBackend:
                 op, outcome, reason, int((time.monotonic() - started) * 1000),
             )
 
+        # Server-Timing "ledger": the whole ledger call, a write under the commit stage. Silent
+        # outside an owner HTTP request (Telegram and Mia call the backend too).
+        stage = "os_commit" if op in {"propose", "decide"} else "os_read"
         try:
-            yield dispatch
+            with owner_phase("ledger", stage):
+                yield dispatch
         except api.LedgerError as exc:
             log("refused", exc.reason or exc.code)
             raise

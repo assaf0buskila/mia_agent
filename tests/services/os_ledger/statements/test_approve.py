@@ -109,6 +109,38 @@ def test_a_hand_entry_change_after_the_review_makes_it_stale(world):
                               review["approval_request_id"], review["review_digest"])
 
 
+@pytest.mark.parametrize("changes", [
+    {"vendor": "Demo Shop Branch"}, {"date": "2026-09-21"},
+])
+def test_matching_candidate_edit_after_review_is_stale_without_writes(world, changes):
+    world.hand_expense("EXP_h1", vendor="Demo Shop", amount=10000, day="2026-09-20")
+    submitted = world.paste(batch([line("DEMO SHOP", 10000)]))
+    review = world.review(submitted.proposal_id)
+    assert review["merges"][0]["expense_id"] == "EXP_h1"
+    world.edit_expense("EXP_h1", **changes)
+    # The expense still auto-links; only its matching state changed.
+    assert world.review(submitted.proposal_id)["merges"] == review["merges"]
+    before = (world.version(), world.everything())
+    with refused("review_stale"):
+        world.service.approve(world.owner, submitted.proposal_id,
+                              review["approval_request_id"], review["review_digest"])
+    assert (world.version(), world.everything()) == before
+
+
+def test_non_candidate_edit_does_not_stale_the_review(world):
+    world.hand_expense("EXP_h1", vendor="Demo Shop", amount=10000, day="2026-09-20")
+    world.hand_expense("EXP_other", vendor="Other Shop", amount=10000, day="2026-09-20")
+    submitted = world.paste(batch([line("DEMO SHOP", 10000)]))
+    review = world.review(submitted.proposal_id)
+    world.edit_expense("EXP_other", vendor="Other Shop Branch", date="2026-09-21")
+    assert world.review(submitted.proposal_id)["review_digest"] == review["review_digest"]
+    result = world.service.approve(world.owner, submitted.proposal_id,
+                                   review["approval_request_id"], review["review_digest"])
+    assert result.receipt.status == "committed"
+    (linked,) = stored(world, submitted.statement_id).values()
+    assert linked.matched_expense_id == "EXP_h1" and linked.expense_id is None
+
+
 def test_unassigned_lines_block_the_approval(world):
     submitted = world.paste(batch([line("MYSTERY", 100, tag=None), line("SHOP", 200)]))
     review = world.review(submitted.proposal_id)

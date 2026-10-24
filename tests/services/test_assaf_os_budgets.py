@@ -34,7 +34,7 @@ GOOGLE = "https://script.googleusercontent.com/macros/echo?user_content_key=synt
 LOG_LINE = re.compile(
     r"owner_stage stage=(os_auth|os_read|os_commit|os_verify|os_mirror) "
     r"metric=(auth|db|script|ledger|verify|none) outcome=(ok|error|cancelled) "
-    r"latency_ms=\d+ reason=(none|[a-z][a-z0-9_]{1,47})"
+    r"latency_ms=\d+ reason=(none|[a-z][a-z0-9_]{1,47}) rid=([0-9a-f]{32}|none)"
 )
 BUDGETS = {
     "schema": 15.0,
@@ -498,7 +498,7 @@ def test_a_timeout_logs_timeout_operation_as_the_only_detail(name, monkeypatch, 
     script = [line for line in lines if "metric=script" in line]
     assert len(script) == 1
     assert f"stage={STAGE[name]} metric=script outcome=error" in script[0]
-    assert script[0].endswith(f"reason=timeout_{name}"), script[0]
+    assert script[0].endswith(f"reason=timeout_{name} rid=none"), script[0]
     for private in (config.assaf_os_hmac_secret, config.assaf_os_script_url, assaf.PROPOSAL):
         assert private not in " ".join(lines)
 
@@ -511,7 +511,7 @@ def test_a_cold_pre_read_timeout_is_attributed_to_the_proposal_read(monkeypatch,
             _decide(_adapter(config), "approve")
     assert hung.value.code == "source_unavailable"
     (line,) = [line for line in _lines(caplog) if "metric=script" in line]
-    assert "stage=os_read" in line and line.endswith("reason=timeout_proposal")
+    assert "stage=os_read" in line and line.endswith("reason=timeout_proposal rid=none")
 
 
 @pytest.mark.parametrize(
@@ -529,7 +529,7 @@ def test_socket_and_connect_timeouts_are_both_recognized(failure, monkeypatch, c
             _adapter(config).snapshot()
     assert timed_out.value.code == "source_unavailable"
     (line,) = [line for line in _lines(caplog) if "metric=script" in line]
-    assert line.endswith("reason=timeout_snapshot")
+    assert line.endswith("reason=timeout_snapshot rid=none")
 
 
 @pytest.mark.parametrize(
@@ -551,7 +551,7 @@ def test_other_transport_failures_keep_the_old_reason_and_are_not_timeouts(
             _adapter(config).snapshot()
     assert down.value.code == "source_unavailable"
     (line,) = [line for line in _lines(caplog) if "metric=script" in line]
-    assert line.endswith("reason=source_unavailable")
+    assert line.endswith("reason=source_unavailable rid=none")
     _script(monkeypatch, [(0.0, failure)])
     with pytest.raises(port.AssafOsError) as unknown:
         _propose(_adapter(config))
