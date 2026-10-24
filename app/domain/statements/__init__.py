@@ -11,8 +11,10 @@ from __future__ import annotations
 from .batch import BatchLine, StatementBatch, parse_statement_batch
 from .diff import (
     ACTIONS,
+    BLOCK_CYCLE_HAS_STATEMENT,
     BLOCK_MERGE_CHOICE,
     BLOCK_UNASSIGNED,
+    LINKED_EXPENSE_CHANGED,
     DiffEntry,
     ExpenseOp,
     ReviewChoices,
@@ -73,12 +75,14 @@ from .vocabulary import (
 
 __all__ = (
     "ACTIONS",
+    "BLOCK_CYCLE_HAS_STATEMENT",
     "BLOCK_MERGE_CHOICE",
     "BLOCK_UNASSIGNED",
     "CURRENCIES",
     "DEFAULT_CATEGORY",
     "DEFAULT_PATH",
     "DEFAULT_PLATFORM",
+    "LINKED_EXPENSE_CHANGED",
     "LOW_CONFIDENCE",
     "MAX_BATCH_BYTES",
     "MAX_ISSUES",

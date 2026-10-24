@@ -1,0 +1,48 @@
+{
+  "account_label": "Synthetic Business Card",
+  "api_version": "assaf-os.v2",
+  "authority_epoch": 1,
+  "by_category": [
+    {
+      "amount_minor": 8000,
+      "category": "AI"
+    },
+    {
+      "amount_minor": 600,
+      "category": "Food"
+    }
+  ],
+  "charge_date": "2026-10-15",
+  "cycle": "2026-10",
+  "cycle_from": "2026-09-20",
+  "cycle_to": "2026-09-20",
+  "observed_version": 2,
+  "previous": {
+    "business_total_minor": 7800,
+    "statement_id": "STM_8c4f59f306b2946e7d878d7b98ad2269"
+  },
+  "source": "postgresql",
+  "statement_id": "STM_f0fad4c24d6ff12cdbd18f98ec37dc64",
+  "subscriptions": [
+    {
+      "amount_minor": 8000,
+      "badges": [
+        "changed"
+      ],
+      "label": "CLAUDE SUB",
+      "line_count": 1,
+      "original_amount_minor": null,
+      "original_currency": null,
+      "previous_amount_minor": 7500
+    }
+  ],
+  "totals": {
+    "business_charge_minor": 8600,
+    "business_credit_minor": 0,
+    "business_line_count": 2,
+    "business_total_minor": 8600,
+    "personal_count": 1,
+    "unassigned_count": 0
+  },
+  "workspace_id": "test"
+}

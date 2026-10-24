@@ -1,0 +1,369 @@
+{
+  "api_version": "assaf-os.v2",
+  "authority_epoch": 1,
+  "cycles": [
+    {
+      "account_label": "Synthetic Business Card",
+      "business_line_count": null,
+      "business_total_minor": null,
+      "charge_date": "2026-10-15",
+      "cycle": "2026-10",
+      "pending_proposal_id": "PRO_00000000000040008000000000002007",
+      "statement_id": null,
+      "status": "pending"
+    },
+    {
+      "account_label": "Synthetic Business Card",
+      "business_line_count": 2,
+      "business_total_minor": 7800,
+      "charge_date": "2026-09-15",
+      "cycle": "2026-09",
+      "pending_proposal_id": null,
+      "statement_id": "STM_8c4f59f306b2946e7d878d7b98ad2269",
+      "status": "imported"
+    },
+    {
+      "account_label": "Synthetic Business Card",
+      "business_line_count": null,
+      "business_total_minor": null,
+      "charge_date": null,
+      "cycle": "2026-08",
+      "pending_proposal_id": null,
+      "statement_id": null,
+      "status": "not_imported"
+    },
+    {
+      "account_label": "Synthetic Business Card",
+      "business_line_count": null,
+      "business_total_minor": null,
+      "charge_date": null,
+      "cycle": "2026-07",
+      "pending_proposal_id": null,
+      "statement_id": null,
+      "status": "not_imported"
+    },
+    {
+      "account_label": "Synthetic Business Card",
+      "business_line_count": null,
+      "business_total_minor": null,
+      "charge_date": null,
+      "cycle": "2026-06",
+      "pending_proposal_id": null,
+      "statement_id": null,
+      "status": "not_imported"
+    },
+    {
+      "account_label": "Synthetic Business Card",
+      "business_line_count": null,
+      "business_total_minor": null,
+      "charge_date": null,
+      "cycle": "2026-05",
+      "pending_proposal_id": null,
+      "statement_id": null,
+      "status": "not_imported"
+    },
+    {
+      "account_label": "Synthetic Business Card",
+      "business_line_count": null,
+      "business_total_minor": null,
+      "charge_date": null,
+      "cycle": "2026-04",
+      "pending_proposal_id": null,
+      "statement_id": null,
+      "status": "not_imported"
+    },
+    {
+      "account_label": "Synthetic Business Card",
+      "business_line_count": null,
+      "business_total_minor": null,
+      "charge_date": null,
+      "cycle": "2026-03",
+      "pending_proposal_id": null,
+      "statement_id": null,
+      "status": "not_imported"
+    },
+    {
+      "account_label": "Synthetic Business Card",
+      "business_line_count": null,
+      "business_total_minor": null,
+      "charge_date": null,
+      "cycle": "2026-02",
+      "pending_proposal_id": null,
+      "statement_id": null,
+      "status": "not_imported"
+    },
+    {
+      "account_label": "Synthetic Business Card",
+      "business_line_count": null,
+      "business_total_minor": null,
+      "charge_date": null,
+      "cycle": "2026-01",
+      "pending_proposal_id": null,
+      "statement_id": null,
+      "status": "not_imported"
+    },
+    {
+      "account_label": "Synthetic Business Card",
+      "business_line_count": null,
+      "business_total_minor": null,
+      "charge_date": null,
+      "cycle": "2025-12",
+      "pending_proposal_id": null,
+      "statement_id": null,
+      "status": "not_imported"
+    },
+    {
+      "account_label": "Synthetic Business Card",
+      "business_line_count": null,
+      "business_total_minor": null,
+      "charge_date": null,
+      "cycle": "2025-11",
+      "pending_proposal_id": null,
+      "statement_id": null,
+      "status": "not_imported"
+    },
+    {
+      "account_label": "Synthetic Business Card",
+      "business_line_count": null,
+      "business_total_minor": null,
+      "charge_date": null,
+      "cycle": "2025-10",
+      "pending_proposal_id": null,
+      "statement_id": null,
+      "status": "not_imported"
+    },
+    {
+      "account_label": "Synthetic Business Card",
+      "business_line_count": null,
+      "business_total_minor": null,
+      "charge_date": null,
+      "cycle": "2025-09",
+      "pending_proposal_id": null,
+      "statement_id": null,
+      "status": "not_imported"
+    },
+    {
+      "account_label": "Synthetic Business Card",
+      "business_line_count": null,
+      "business_total_minor": null,
+      "charge_date": null,
+      "cycle": "2025-08",
+      "pending_proposal_id": null,
+      "statement_id": null,
+      "status": "not_imported"
+    },
+    {
+      "account_label": "Synthetic Business Card",
+      "business_line_count": null,
+      "business_total_minor": null,
+      "charge_date": null,
+      "cycle": "2025-07",
+      "pending_proposal_id": null,
+      "statement_id": null,
+      "status": "not_imported"
+    },
+    {
+      "account_label": "Synthetic Business Card",
+      "business_line_count": null,
+      "business_total_minor": null,
+      "charge_date": null,
+      "cycle": "2025-06",
+      "pending_proposal_id": null,
+      "statement_id": null,
+      "status": "not_imported"
+    },
+    {
+      "account_label": "Synthetic Business Card",
+      "business_line_count": null,
+      "business_total_minor": null,
+      "charge_date": null,
+      "cycle": "2025-05",
+      "pending_proposal_id": null,
+      "statement_id": null,
+      "status": "not_imported"
+    },
+    {
+      "account_label": "Synthetic Business Card",
+      "business_line_count": null,
+      "business_total_minor": null,
+      "charge_date": null,
+      "cycle": "2025-04",
+      "pending_proposal_id": null,
+      "statement_id": null,
+      "status": "not_imported"
+    },
+    {
+      "account_label": "Synthetic Business Card",
+      "business_line_count": null,
+      "business_total_minor": null,
+      "charge_date": null,
+      "cycle": "2025-03",
+      "pending_proposal_id": null,
+      "statement_id": null,
+      "status": "not_imported"
+    },
+    {
+      "account_label": "Synthetic Business Card",
+      "business_line_count": null,
+      "business_total_minor": null,
+      "charge_date": null,
+      "cycle": "2025-02",
+      "pending_proposal_id": null,
+      "statement_id": null,
+      "status": "not_imported"
+    },
+    {
+      "account_label": "Synthetic Business Card",
+      "business_line_count": null,
+      "business_total_minor": null,
+      "charge_date": null,
+      "cycle": "2025-01",
+      "pending_proposal_id": null,
+      "statement_id": null,
+      "status": "not_imported"
+    },
+    {
+      "account_label": "Synthetic Business Card",
+      "business_line_count": null,
+      "business_total_minor": null,
+      "charge_date": null,
+      "cycle": "2024-12",
+      "pending_proposal_id": null,
+      "statement_id": null,
+      "status": "not_imported"
+    },
+    {
+      "account_label": "Synthetic Business Card",
+      "business_line_count": null,
+      "business_total_minor": null,
+      "charge_date": null,
+      "cycle": "2024-11",
+      "pending_proposal_id": null,
+      "statement_id": null,
+      "status": "not_imported"
+    },
+    {
+      "account_label": "Synthetic Business Card",
+      "business_line_count": null,
+      "business_total_minor": null,
+      "charge_date": null,
+      "cycle": "2024-10",
+      "pending_proposal_id": null,
+      "statement_id": null,
+      "status": "not_imported"
+    },
+    {
+      "account_label": "Synthetic Business Card",
+      "business_line_count": null,
+      "business_total_minor": null,
+      "charge_date": null,
+      "cycle": "2024-09",
+      "pending_proposal_id": null,
+      "statement_id": null,
+      "status": "not_imported"
+    },
+    {
+      "account_label": "Synthetic Business Card",
+      "business_line_count": null,
+      "business_total_minor": null,
+      "charge_date": null,
+      "cycle": "2024-08",
+      "pending_proposal_id": null,
+      "statement_id": null,
+      "status": "not_imported"
+    },
+    {
+      "account_label": "Synthetic Business Card",
+      "business_line_count": null,
+      "business_total_minor": null,
+      "charge_date": null,
+      "cycle": "2024-07",
+      "pending_proposal_id": null,
+      "statement_id": null,
+      "status": "not_imported"
+    },
+    {
+      "account_label": "Synthetic Business Card",
+      "business_line_count": null,
+      "business_total_minor": null,
+      "charge_date": null,
+      "cycle": "2024-06",
+      "pending_proposal_id": null,
+      "statement_id": null,
+      "status": "not_imported"
+    },
+    {
+      "account_label": "Synthetic Business Card",
+      "business_line_count": null,
+      "business_total_minor": null,
+      "charge_date": null,
+      "cycle": "2024-05",
+      "pending_proposal_id": null,
+      "statement_id": null,
+      "status": "not_imported"
+    },
+    {
+      "account_label": "Synthetic Business Card",
+      "business_line_count": null,
+      "business_total_minor": null,
+      "charge_date": null,
+      "cycle": "2024-04",
+      "pending_proposal_id": null,
+      "statement_id": null,
+      "status": "not_imported"
+    },
+    {
+      "account_label": "Synthetic Business Card",
+      "business_line_count": null,
+      "business_total_minor": null,
+      "charge_date": null,
+      "cycle": "2024-03",
+      "pending_proposal_id": null,
+      "statement_id": null,
+      "status": "not_imported"
+    },
+    {
+      "account_label": "Synthetic Business Card",
+      "business_line_count": null,
+      "business_total_minor": null,
+      "charge_date": null,
+      "cycle": "2024-02",
+      "pending_proposal_id": null,
+      "statement_id": null,
+      "status": "not_imported"
+    },
+    {
+      "account_label": "Synthetic Business Card",
+      "business_line_count": null,
+      "business_total_minor": null,
+      "charge_date": null,
+      "cycle": "2024-01",
+      "pending_proposal_id": null,
+      "statement_id": null,
+      "status": "not_imported"
+    },
+    {
+      "account_label": "Synthetic Business Card",
+      "business_line_count": null,
+      "business_total_minor": null,
+      "charge_date": null,
+      "cycle": "2023-12",
+      "pending_proposal_id": null,
+      "statement_id": null,
+      "status": "not_imported"
+    },
+    {
+      "account_label": "Synthetic Business Card",
+      "business_line_count": null,
+      "business_total_minor": null,
+      "charge_date": null,
+      "cycle": "2023-11",
+      "pending_proposal_id": null,
+      "statement_id": null,
+      "status": "not_imported"
+    }
+  ],
+  "observed_version": 1,
+  "source": "postgresql",
+  "workspace_id": "test"
+}
