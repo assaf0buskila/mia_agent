@@ -3152,6 +3152,16 @@ So the production cutover would stall at T7 with the OS frozen. Both review pass
 - An authority-read error pauses `os_frozen`.
 - The kill switch still pauses first.
 
+### E35a (2026-10-24): the snapshot freeze gate and version-bound mirror status
+
+Under the freeze, the consistent-snapshot gate also requires core `active` (the precheck and
+the snapshot must both see `active`); with the freeze off, `_PUBLISHING` (shadow, active) is unchanged. The
+`os-authority status` mirror probe reports `verified` only for the current version (stale verification after a
+rollback or rearm is not shown as verified).
+Pre-activation `mirror_not_verified` accepts an empty mirror or a clean last projection (synced, no error,
+and `verified_version` equal to `projected_version`) even when behind the ledger, while T7 and section 4 step 1
+use `status`, which requires verification at the current ledger version.
+
 ### E36 (2026-10-24): G09 is replaced by fixes, tests and a careful live run (Assaf's ruling)
 
 **The ruling.** Assaf asked why a rehearsal machine is needed, was given the reasons and the options, and chose
