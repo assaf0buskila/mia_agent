@@ -307,6 +307,23 @@ def test_a_pending_batch_past_its_expiry_reads_as_expired(world):
         world.service.save_draft(world.owner, "PRO_" + "1" * 32, 0, [], {})
 
 
+def test_a_pending_batch_past_its_deadline_reviews_without_a_live_plan(world):
+    """V2-26b (review r4 MINOR): past expires_at, before the worker runs, the review reads expired
+    and must not offer the live plan, totals or a digest the owner could act on."""
+    submitted = world.paste(batch(three_lines()))
+    live = world.review(submitted.proposal_id)
+    assert live["status"] == "pending" and live["totals"]["business_line_count"] > 0
+    world.advance(7 * 24 * 3600 + 5)
+    review = world.review(submitted.proposal_id)
+    assert review["status"] == "expired" and review["line_count"] == 3
+    assert review["review_digest"] != live["review_digest"]
+    assert review["merges"] == [] and review["blocking"] == []
+    assert review["counts"] == {"add": 0, "keep": 0, "update": 0, "void": 0,
+                                "owner_edited_kept": 0, "kept_earlier_choice": 0}
+    assert review["totals"]["business_line_count"] == 0
+    assert [p["status"] for p in world.rows("os_proposals")] == ["pending"]  # reads never write
+
+
 def test_a_draft_after_expiry_is_refused_and_writes_nothing(world):
     submitted = world.paste(batch(three_lines()))
     key = world.lines(submitted.proposal_id)[0]["line_key"]

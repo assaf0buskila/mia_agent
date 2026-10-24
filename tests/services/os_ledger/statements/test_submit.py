@@ -110,6 +110,20 @@ def test_equal_submit_replay_preserves_conflict_and_superseded_fields(world, con
     assert world.everything() == before
 
 
+def test_equal_submit_replay_of_a_restored_batch_returns_the_original_snapshot(world):
+    """V2-26b (review r4 NIT): a pending batch with no detail left (a restore) still answers an
+    equal replay with its stored response (I1), although its review reads expired."""
+    raw = encode(batch(three_lines()))
+    first = world.paste(raw)
+    original = encode(batch_created(world.owner, first))
+    world.drop_batch_lines()
+    assert world.review(first.proposal_id)["status"] == "expired"
+    before = (world.version(), world.everything())
+    replay = world.paste(raw)
+    assert replay == first and encode(batch_created(world.owner, replay)) == original
+    assert (world.version(), world.everything()) == before
+
+
 def test_equal_submit_replay_without_a_stored_snapshot_refuses_without_writes(world):
     from dataclasses import replace
 
@@ -121,7 +135,9 @@ def test_equal_submit_replay_without_a_stored_snapshot_refuses_without_writes(wo
         tables = tables_for(tx)
         tables.put_draft(replace(tables.draft(submitted.proposal_id), submitted=None))
     before = (world.version(), world.everything())
-    with refused("review_stale"):
+    # V2-26b (review r4 NIT): a registry row without its snapshot is an integrity fault, not a
+    # stale review the owner could fix by reading again.
+    with refused("ledger_integrity_failed"):
         world.paste(raw)
     assert (world.version(), world.everything()) == before
 
