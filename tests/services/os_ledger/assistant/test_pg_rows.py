@@ -17,6 +17,21 @@ from sqlalchemy.exc import DBAPIError
 from tests.services.os_ledger.assistant.support import IP_A
 
 
+def test_issue_request_runtime_updates_only_status_columns(pg_aw):
+    aw = pg_aw
+    aw.request()
+    for column in ("label", "session_binding", "epoch", "collect_deadline"):
+        with pytest.raises(LedgerError) as caught:
+            with aw.store._inner._begin() as conn:
+                value = "DEFAULT" if column == "collect_deadline" else column
+                conn.execute(
+                    text(f"UPDATE assaf_os.os_assistant_issue_requests SET {column} = {value}")
+                )
+        assert caught.value.reason == "db_error_42501"
+    with aw.store._inner._begin() as conn:
+        conn.execute(text("UPDATE assaf_os.os_assistant_issue_requests SET status = 'rejected'"))
+
+
 def privilege(aw, sql: str) -> bool:
     with aw.w._admin_engine.connect() as conn:
         return bool(conn.execute(text(sql)).scalar())

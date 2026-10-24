@@ -23,6 +23,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from app.services import assistant_keys as ac
+from app.services.assistant_issue import AssistantIssueService, IssueTables
 from app.services.os_ledger.statement_tables import tables_for
 
 from tests.services.os_ledger.statements.support import World
@@ -83,7 +84,11 @@ class MemoryAssistantStore:
     def invalid_lookup(self, *, ip_hmac: str, credential_id: str | None, reason: str,
                        now: datetime) -> str | None:
         since = now - timedelta(seconds=ac.FAIL_WINDOW_SECONDS)
-        with self._lock:
+        with self._gate("ip:" + ip_hmac), self._gate("invalid-lookups"), self._lock:
+            if sum(1 for r in self.rows if r["client_ip_hmac"] == ip_hmac
+                   and r["occurred_at"] >= now - timedelta(seconds=ac.IP_WINDOW_SECONDS)
+                   ) >= ac.IP_LIMIT:
+                raise ac._limited("ip_limit")
             failures = [r for r in self.rows if r["operation"] == "bearer"
                         and r["occurred_at"] >= since]
             if sum(1 for r in failures if r["client_ip_hmac"] == ip_hmac) >= ac.FAIL_LIMIT:
@@ -199,7 +204,10 @@ class AWorld:
         self.clock = Clock()
         self.counter = Counter()
         self.statements = self.w.service
-        self.service = ac.AssistantCredentialService(self.w.ledger, self.w.config, self.statements)
+        self.service = AssistantIssueService(
+            self.w.ledger, self.w.config, self.statements,
+            revoke_watermark=lambda owner: self.w.watermark["value"])
+        self._issue_cards = {}
         self.store = SpyStore(MemoryAssistantStore(self.w) if backend == "fake"
                               else ac.PgAssistantStore(self.w.config))
         self.gateway = self.make_gateway()
@@ -219,8 +227,80 @@ class AWorld:
 
     def issue(self, *, label: str = "Claude desktop", kind: str = "claude",
               days: int | None = None, ctx=None) -> dict[str, Any]:
-        return self.service.issue(ctx or self.w.owner, label=label, kind=kind,
-                                  expires_in_days=days)
+        request = self.request(label=label, kind=kind, days=days, ctx=ctx)
+        self.decide_issue(request)
+        return self.collect(request, ctx=ctx)
+
+    def request(self, *, label="Claude desktop", kind="claude", days=None, ctx=None,
+                session="a" * 64):
+        from app.capabilities.types import Principal
+        from app.db.models import ApprovalRow
+        from app.db.store import LeadStore
+        from app.services.owner_actions import propose_owner_action
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import Session
+
+        ctx = ctx or self.w.owner
+        result = self.service.issue(ctx, session_hash=session, label=label, kind=kind,
+                                    expires_in_days=days)
+        envelope = self.service.proposal(ctx, result["issue_request_id"], session_hash=session)
+        engine = create_engine("sqlite:///:memory:")
+        ApprovalRow.__table__.create(engine)
+        db = Session(engine, expire_on_commit=False)
+        store = LeadStore(db)
+        action = propose_owner_action(
+            store, principal=Principal.owner(source="telegram", actor_id="123"),
+            source_ref=result["issue_request_id"], kind=envelope["kind"],
+            parameters=envelope["parameters"], target=envelope["target"], ttl_seconds=600)
+        db.commit()
+        row = store.get_approval_by_approval_id(action.approval_id)
+        self._issue_cards[result["issue_request_id"]] = (db, store, row)
+        return result
+
+    def decide_issue(self, request, *, decision="approve"):
+        from app.capabilities.types import Principal
+        from app.services.owner_actions import decide_owner_action
+
+        db, store, row = self._issue_cards[request["issue_request_id"]]
+        decide_owner_action(store, principal=Principal.owner(source="telegram", actor_id="123"),
+                            approval_id=row.approval_id,
+                            decision="approved" if decision == "approve" else "rejected")
+        db.commit()
+        self.service.decide_issue(row, decision=decision)
+        return row
+
+    def collect(self, request, *, session="a" * 64, ctx=None):
+        return self.service.collect(ctx or self.w.owner, request["issue_request_id"],
+                                    session_hash=session)
+
+    def issue_status(self, request, *, session="a" * 64):
+        return self.service.status(self.w.reader, request["issue_request_id"], session_hash=session)
+
+    def issue_rows(self):
+        if self.kind == "fake":
+            with self.w.scratch_tx() as tx:
+                return [
+                    vars(row) for row in tx.scratch.get("assistant_issue_requests", {}).values()
+                ]
+        from sqlalchemy import text
+
+        with self.w._admin_engine.connect() as conn:
+            return [dict(row) for row in conn.execute(text(
+                "SELECT * FROM assaf_os.os_assistant_issue_requests")).mappings()]
+
+    def tamper_issue(self, request, **values):
+        if self.kind == "fake":
+            with self.w.scratch_tx() as tx:
+                tables = IssueTables(tx)
+                row = tables.get(request["issue_request_id"])
+                tables.memory()[row.issue_request_id] = replace(row, **values)
+            return
+        from sqlalchemy import text
+        assert set(values) == {"label"}
+        with self.w._admin_engine.begin() as conn:
+            conn.execute(text("UPDATE assaf_os.os_assistant_issue_requests SET label = :label "
+                              "WHERE issue_request_id = :id"),
+                         {**values, "id": request["issue_request_id"]})
 
     def listing(self, ctx=None) -> dict[str, Any]:
         return self.service.list(ctx or self.w.reader)

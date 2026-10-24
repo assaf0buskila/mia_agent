@@ -3,9 +3,11 @@
 Under ``/v1/owner/os/unified`` (the module name is erratum E34's; the URL is unchanged):
 
 * ``GET  /assistant-credentials``: the list, no secret;
-* ``POST /assistant-credentials`` with ``{label, kind, expires_in_days?}``: issues a key. It needs a
-  step-up token for THIS session in ``X-Step-Up`` (403 ``step_up_required`` otherwise) and
-  returns the list item plus the secret, once;
+* ``POST /assistant-credentials`` with ``{label, kind, expires_in_days?}``: commits a pending
+  E37 request and immutable Telegram card, then sends the card and returns 202;
+* ``GET /assistant-credentials/issue-requests/{id}``: status for the requesting session;
+* ``POST .../issue-requests/{id}/collect``: after Telegram approval, that same verified OS
+  session collects the list item and one-time key within ten minutes;
 * ``POST /assistant-credentials/{id}/revoke`` and ``POST /assistant-credentials/revoke-all``: return
   the list. Revoking a key rejects that key's pending batches in the same ledger transaction.
 
@@ -23,7 +25,6 @@ from __future__ import annotations
 
 import json
 import logging
-import time
 from collections.abc import Callable
 from typing import Annotated, Any
 
@@ -33,29 +34,35 @@ from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
 from app.api import owner_sessions
+from app.api.deps import get_db, get_telegram_port
 from app.api.owner_sessions import (
     CSRF_HEADER,
     OwnerSessionPrincipal,
     get_owner_session_db,
     owner_scope,
 )
+from app.capabilities.types import Principal
 from app.core.config import Settings, get_settings
-from app.services import assistant_keys as keys
-from app.services import assistant_step_up as step_up
+from app.db.store import LeadStore
+from app.domain.owner.callbacks import approval_token
+from app.domain.owner.proposal_cards import render_owner_approval_card
+from app.integrations.base import MessagePort, OutboundMessage
+from app.integrations.telegram_format import approval_keyboard
+from app.services.assistant_issue import AssistantIssueService
 from app.services.os_ledger import api, authorize
+from app.services.owner_actions import propose_owner_action
 
 ROOT = "/v1/owner/os/unified"
 APPROVE_SCOPE = "assaf-os:approve"
-STEP_UP_HEADER = "X-Step-Up"
 HEADERS = {"Cache-Control": "private, no-store"}
 _LOG = logging.getLogger("mia.os_v2")
 
 router = APIRouter()
 
 
-def service_for(settings: Settings) -> keys.AssistantCredentialService:
+def service_for(settings: Settings) -> AssistantIssueService:
     """The owner's key service on the PostgreSQL ledger. Tests replace this one function."""
-    return keys.AssistantCredentialService(api.build_ledger(settings), settings)
+    return AssistantIssueService(api.build_ledger(settings), settings)
 
 
 def gate(settings: Settings) -> None:
@@ -132,28 +139,75 @@ async def list_keys(
     return await respond(run)
 
 
-@router.post(ROOT + "/assistant-credentials")
+@router.post(ROOT + "/assistant-credentials", status_code=202)
 async def issue_key(
     request: Request,
-    x_step_up: Annotated[str | None, Header(alias=STEP_UP_HEADER)] = None,
+    principal: OwnerSessionPrincipal = Depends(approve_mutation),
+    settings: Settings = Depends(get_settings),
+    db: Session = Depends(get_db),
+    port: MessagePort = Depends(get_telegram_port),
+) -> JSONResponse:
+    raw = await request.body()
+
+    def run():
+        gate(settings)
+        ctx = authorize.from_owner_mutation(principal, settings)
+        authorize.require(ctx, "manage_credentials")
+        body = parse_object(raw, {"label", "kind"}, frozenset({"expires_in_days"}))
+        service = service_for(settings)
+        pending = service.issue(
+            ctx, session_hash=principal.session_hash, label=body["label"], kind=body["kind"],
+            expires_in_days=body.get("expires_in_days"))
+        envelope = service.proposal(ctx, pending["issue_request_id"],
+                                    session_hash=principal.session_hash)
+        store = LeadStore(db)
+        action = propose_owner_action(
+            store, principal=Principal.owner(source="telegram", actor_id=principal.owner_id),
+            source_ref=pending["issue_request_id"], kind="assistant_key.issue",
+            parameters=envelope["parameters"], target=envelope["target"], ttl_seconds=600)
+        db.commit()  # the ledger request and the card both commit before any Telegram call
+        card = render_owner_approval_card(store.get_approval_by_approval_id(action.approval_id))
+        db.commit()  # rendering's read transaction is closed before the network call, too
+        return pending, action.approval_id, card
+
+    pending, approval_id, card = await run_in_threadpool(run)
+    try:
+        await port.send(OutboundMessage(
+            conversation_id=principal.owner_id, text=card, channel="telegram",
+            idempotency_key=f"assistant-issue:{approval_id}", parse_mode="HTML",
+            reply_markup=approval_keyboard(approval_token(approval_id))))
+    except Exception:
+        _LOG.warning("os_v2 op=assistant_issue outcome=pending reason=card_send_failed")
+    return JSONResponse(pending, status_code=202, headers=HEADERS)
+
+
+@router.get(ROOT + "/assistant-credentials/issue-requests/{issue_request_id}")
+async def issue_status(
+    issue_request_id: str,
+    principal: OwnerSessionPrincipal = Depends(owner_scope("assaf-os:read")),
+    settings: Settings = Depends(get_settings),
+) -> JSONResponse:
+    def run():
+        gate(settings)
+        return service_for(settings).status(authorize.from_owner_read(principal, settings),
+                                             issue_request_id, session_hash=principal.session_hash)
+    return await respond(run)
+
+
+@router.post(ROOT + "/assistant-credentials/issue-requests/{issue_request_id}/collect")
+async def collect_key(
+    issue_request_id: str,
+    request: Request,
     principal: OwnerSessionPrincipal = Depends(approve_mutation),
     settings: Settings = Depends(get_settings),
 ) -> JSONResponse:
     raw = await request.body()
 
-    def run() -> dict[str, Any]:
+    def run():
         gate(settings)
-        ctx = authorize.from_owner_mutation(principal, settings)
-        authorize.require(ctx, "manage_credentials")
-        if not x_step_up:
-            raise api.LedgerError("step_up_required", reason="step_up_missing")
-        step_up.verify(x_step_up, session_hash=principal.session_hash, now=int(time.time()),
-                       settings=settings)
-        body = parse_object(raw, {"label", "kind"}, frozenset({"expires_in_days"}))
-        return service_for(settings).issue(
-            ctx, label=body["label"], kind=body["kind"],
-            expires_in_days=body.get("expires_in_days"))
-
+        empty_object(raw)
+        return service_for(settings).collect(authorize.from_owner_mutation(principal, settings),
+                                              issue_request_id, session_hash=principal.session_hash)
     return await respond(run)
 
 

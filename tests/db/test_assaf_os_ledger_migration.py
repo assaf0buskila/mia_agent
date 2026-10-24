@@ -31,7 +31,7 @@ def test_ledger_is_an_explicit_allowlisted_migration():
 
     assert ledger.MIGRATIONS == (
         MIGRATION, "20261016_assaf_os_ledger_core_v2.sql", "20261016_assaf_os_statements.sql",
-        "20261016_assaf_os_assistant.sql",
+        "20261016_assaf_os_assistant.sql", "20261024_assaf_os_issue_requests.sql",
     )
     assert MIGRATION in POSTGRES_ONLY
     assert (ROOT / "migrations_assaf_os" / MIGRATION).is_file()
@@ -109,7 +109,7 @@ def test_explicit_migration_is_repeatable_and_readiness_is_separate(migrated, le
     assert result.applied == []
     assert result.already == [
         MIGRATION, "20261016_assaf_os_ledger_core_v2.sql", "20261016_assaf_os_statements.sql",
-        "20261016_assaf_os_assistant.sql",
+        "20261016_assaf_os_assistant.sql", "20261024_assaf_os_issue_requests.sql",
     ]
     assert ledger_schema_ready(ledger_db)
     assert TABLES <= set(migrated.scalars(text(
@@ -376,7 +376,7 @@ def test_migration_fails_atomically_and_does_not_skip_duplicate_errors(ledger_db
     monkeypatch.setattr(ledger, "migration_scripts", lambda: scripts)
     assert ledger.apply_ledger_migrations(ledger_db).applied == [
         MIGRATION, "20261016_assaf_os_ledger_core_v2.sql", "20261016_assaf_os_statements.sql",
-        "20261016_assaf_os_assistant.sql",
+        "20261016_assaf_os_assistant.sql", "20261024_assaf_os_issue_requests.sql",
     ]
 
 
@@ -444,7 +444,7 @@ def test_main_dsn_demote_gate_and_privilege_drift(ledger_db, monkeypatch, capsys
         os_ledger.main(["migrate", "--approved-sha", "a" * 40])
         assert json.loads(capsys.readouterr().out)["already"] == [
             MIGRATION, "20261016_assaf_os_ledger_core_v2.sql", "20261016_assaf_os_statements.sql",
-            "20261016_assaf_os_assistant.sql",
+            "20261016_assaf_os_assistant.sql", "20261024_assaf_os_issue_requests.sql",
         ]
         with ledger_db.begin() as conn:
             conn.execute(text(f"GRANT USAGE ON SCHEMA assaf_os TO {role}"))
@@ -632,6 +632,7 @@ def test_owner_admin_only_grant_to_migration_session_is_allowed(ledger_db):
         assert apply_ledger_migrations(ledger_db).already == [
             MIGRATION, "20261016_assaf_os_ledger_core_v2.sql",
             "20261016_assaf_os_statements.sql", "20261016_assaf_os_assistant.sql",
+            "20261024_assaf_os_issue_requests.sql",
         ]
     finally:
         with ledger_db.begin() as conn:

@@ -9,7 +9,7 @@ chunk's own pin.
 The rules they prove:
 
 * the owner's key bodies carry the §10.1 binding and NO ``observed_version`` (E12 a, b);
-* the step-up body is exactly ``{step_up_token, expires_at}`` (A4);
+* request and approval status bodies expose only the bound id, status and deadline (E37);
 * the bearer bodies are ``assaf-os-assistant.v1`` and carry no decision id, no request id, no review
   digest and no binding;
 * the secret appears in the issue body and nowhere else, and no body carries a hash.
@@ -67,7 +67,7 @@ def golden(name: str) -> bytes:
 def test_the_golden_tree_is_exactly_the_shapes(shapes):
     assert GOLDEN_NAMES == sorted(shapes)
     assert sorted(p.name for p in GOLDEN_DIR.iterdir()) == [f"{n}.json" for n in GOLDEN_NAMES]
-    assert set(GOLDEN_NAMES) == OWNER_SHAPES | BEARER_SHAPES | {"step_up_issued"}
+    assert set(GOLDEN_NAMES) == OWNER_SHAPES | BEARER_SHAPES | {"issue_requested", "issue_approved"}
 
 
 @pytest.mark.parametrize("name", GOLDEN_NAMES)
@@ -110,11 +110,14 @@ def test_the_list_shows_a_used_key_an_unused_key_and_a_revoked_key():
     assert {i["kind"] for i in items} == {"claude", "gpt"}
 
 
-def test_the_step_up_body_is_exactly_the_token_and_its_expiry():
-    body = json.loads(golden("step_up_issued"))
-    assert set(body) == {"step_up_token", "expires_at"}  # A4: no binding, no version
-    assert re.fullmatch(r"su1\.[0-9]+\.[0-9]+\.[0-9a-f]{64}", body["step_up_token"])
-    assert ISO.fullmatch(body["expires_at"])
+@pytest.mark.parametrize(
+    "name,status", [("issue_requested", "pending_approval"), ("issue_approved", "approved")]
+)
+def test_issue_request_shapes_are_bound_and_contain_no_key(name, status):
+    body = json.loads(golden(name))
+    assert body.keys() == BINDING.keys() | {"issue_request_id", "status", "expires_at"}
+    assert {k: body[k] for k in BINDING} == BINDING
+    assert body["status"] == status and ISO.fullmatch(body["expires_at"])
 
 
 @pytest.mark.parametrize("name", sorted(BEARER_SHAPES))

@@ -4,8 +4,9 @@ An assistant (Claude or GPT) holds a static bearer key. It can only SUBMIT a sta
 lands as a pending V2-26 proposal that the owner alone can approve; nothing here can commit, decide
 or reach the approve path. Two halves:
 
-* ``AssistantCredentialService``: the owner's side. Issue, list, revoke, revoke-all. Each is ONE
-  ledger transaction (``kind="statement_batch"``: the kind both a credential-only write and V2-26's
+* ``AssistantCredentialService``: the owner's list, revoke and revoke-all. E37's request/approve/
+  collect flow lives in ``assistant_issue``. Each ledger write is ONE transaction
+  (``kind="statement_batch"``: the kind both a key-only write and V2-26's
   ``revoke_pending_for_credential`` are admitted under, §5.3, D5), so revoking a key and rejecting
   its pending batches happen together or not at all.
 * ``AssistantGateway``: the bearer side. ``authenticate`` runs §17.2's order: the feature switch,
@@ -20,10 +21,12 @@ refused by the per-IP count or by the invalid-lookup budget writes no row (the a
 pattern: a blocked caller cannot grow the table, and its window slides); each such refusal logs a
 reason-code line. Nothing here logs a secret, a hash, an address or a statement.
 
-The advisory-lock pattern follows ``OwnerSessionStore.record_auth_attempt``: take the bucket lock,
+The advisory-lock pattern follows ``OwnerSessionStore.record_auth_attempt``: take the IP lock,
 COUNT the window, INSERT the row, all in one short transaction. A valid key's call holds its key
 lock from the quota COUNT to the audit INSERT, so 30 requests an hour and 5 batches a day are exact
-under concurrency; its lock and statement timeouts are 3 s.
+under concurrency; its lock and statement timeouts are 3 s. Lock order is always IP, then the
+invalid-lookup budget when needed, then key. A process-wide three-slot bearer guard waits at most
+two seconds before refusing; owner requests do not acquire it.
 """
 
 from __future__ import annotations
@@ -34,6 +37,7 @@ import ipaddress
 import logging
 import re
 import secrets
+import threading
 import unicodedata
 import uuid
 from collections.abc import Callable, Sequence
@@ -77,6 +81,11 @@ _LOCK_TIMEOUT = "3s"
 _CREDENTIAL_ID = re.compile(r"AC_[0-9a-f]{32}")
 _FORBIDDEN_LABEL_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp"})
 _LOG = logging.getLogger("mia.os_assistant")
+# A bearer holds an accounting connection plus its work's ledger connection. The shared
+# ledger pool is 5 + 5: at most three bearers leaves capacity for owner reads and key lists.
+# This process-wide guard is bearer-only; acquisition fails before slot admission or work.
+_bearer_slots = threading.BoundedSemaphore(3)
+_BEARER_WAIT_SECONDS = 2
 
 
 # ---------------------------------------------------------------------------------------------
@@ -337,26 +346,6 @@ class AssistantCredentialService:
         with self._tx(ctx) as tx:
             return self._listing(ctx, credential_tables(tx))
 
-    def issue(self, ctx: api.TrustedOwnerContext, *, label: Any, kind: Any,
-              expires_in_days: Any = None) -> dict[str, Any]:
-        """A new key. The caller has already checked the step-up token (the route does)."""
-        self._admit(ctx, "manage_credentials")
-        clean = _label(label)
-        if kind not in KINDS or type(kind) is not str:
-            raise _invalid("invalid_kind")
-        days = DEFAULT_DAYS if expires_in_days is None else expires_in_days
-        if type(days) is not int or not 1 <= days <= MAX_DAYS:
-            raise _invalid("invalid_expiry")
-        secret = self._new_secret()
-        with self._tx(ctx) as tx:
-            row = StoredCredential(
-                self._new_id(), str(ctx.numeric_owner), ctx.authority_epoch, clean, kind,
-                tx.now, tx.now + timedelta(days=days), None, workspace_id=ctx.workspace,
-                scopes=SCOPES_TEXT, secret_hash=secret_hash(secret))
-            credential_tables(tx).insert(row)
-        _LOG.info("os_assistant op=issue outcome=ok reason=issued")
-        return {**binding(ctx), **_item(row), "secret": secret}
-
     def _revoke_in(self, tx: Any, tables: CredentialTables, credential_id: str) -> None:
         """The key and its pending batches, on the caller's open transaction (D5)."""
         tables.revoke(credential_id, tx.now)
@@ -511,9 +500,16 @@ class PgAssistantStore:
 
     def invalid_lookup(self, *, ip_hmac: str, credential_id: str | None, reason: str,
                        now: datetime) -> str | None:
-        """Count, then record, under one lock. ``"ip"`` or ``"global"`` when over: no row."""
+        """Every audit writer locks IP first and recounts; then invalid-lookups, then key.
+
+        Invalid-budget refusals return ``"ip"`` / ``"global"`` without a row.
+        """
         since = now - timedelta(seconds=FAIL_WINDOW_SECONDS)
         with self._begin() as conn:
+            self._lock(conn, f"ip:{ip_hmac}")
+            if self._count(conn, "client_ip_hmac = :ip AND occurred_at >= :since", ip=ip_hmac,
+                           since=now - timedelta(seconds=IP_WINDOW_SECONDS)) >= IP_LIMIT:
+                raise _limited("ip_limit")
             self._lock(conn, "invalid-lookups")
             if self._count(conn, "operation = 'bearer' AND client_ip_hmac = :ip AND "
                            "occurred_at >= :since", ip=ip_hmac, since=since) >= FAIL_LIMIT:
@@ -664,6 +660,15 @@ class AssistantGateway:
         gets. The cost is a rare missing audit row; a retry stays safe because a batch's request
         id is idempotent.
         """
+        if not _bearer_slots.acquire(timeout=_BEARER_WAIT_SECONDS):
+            _LOG.warning("os_assistant op=admit outcome=refused reason=bearer_busy")
+            raise api.LedgerError("ledger_unavailable", reason="bearer_busy")
+        try:
+            return self._run(caller, operation, work)
+        finally:
+            _bearer_slots.release()
+
+    def _run(self, caller: Caller, operation: str, work: Callable[[Facts], Any]) -> Any:
         facts = Facts()
         outcome: list[tuple[bool, Any]] = []  # set once, when the work has returned or raised
         try:

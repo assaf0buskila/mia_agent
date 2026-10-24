@@ -3185,3 +3185,41 @@ therefore **NOT_INCLUDED**. No throwaway VM, workbook copy or TEST Script is cre
 - The ARCHIVE name is the contract literal `ARCHIVE – edits ignored`.
 - T6 reads the epoch from `status` and from the v2 binding.
 - Write smoke happens only after T7 and G16, as in section 4.
+
+### E37 (2026-10-24): the assistant-key step-up is Telegram approval, not a fresh Google login (§17.1; Assaf picked "c")
+
+**Why §17.1's Google step-up cannot work.**
+- Google returns `auth_time` only for a published, **verified** OAuth app with "Session age claims" enabled. Google's
+  page also says "Google does not support Google Account reauth requests". So a 600 s `auth_time` check fails whenever
+  Assaf's Google session is older than 10 minutes.
+- The OS page's CSP also blocks GIS, and the OS client has no delivery path for the Google client id.
+
+**The rule (replaces §17.1's step-up paragraph).** Issuing an assistant key is an exact, immutable, expiring owner
+proposal (`kind="assistant_key.issue"`). The numeric Telegram owner approves it through the existing approval-card path.
+
+**The flow:**
+1. `POST /assistant-credentials` returns 202 with `issue_request_id`.
+2. After the DB commit, the card is sent. It's approvable for 10 min.
+3. Approval only CAS-marks the request `approved`. It sends no secret.
+4. `POST …/issue-requests/{id}/collect`, by the **same OS session** (cookie, Origin and CSRF; `session_binding` =
+   HMAC(pepper, session_hash), never the raw hash) within 10 min of approval, mints the credential. In **one ledger
+   transaction** it stores only the hash, flips the request to `collected`, and returns the plaintext exactly once.
+
+**The two factors.** Neither the OS session alone nor Telegram alone can issue a key. Another session gets 404.
+
+**Refusals:**
+- revoke-all and an epoch bump refuse a pending or approved collect;
+- the kill switch refuses request, approve and collect;
+- no secret, decision id or session hash goes into logs or the audit.
+
+**Storage (coordinator ruling on the design fork).** A new ledger table, `assaf_os.os_assistant_issue_requests` (status
+CHECKs; the runtime role gets SELECT, INSERT and UPDATE on status columns only), with a migration and `role_policy`
+grants. The rejected alternative was the ApprovalRow plus a claim: it crosses two DBs and needs claim-then-mint recovery.
+
+**What's retired.** `POST /v1/owner/auth/step-up`, `assistant_step_up.py` and
+`owner_google_login.verify_step_up_id_token`, each deleted with its tests. V2-21d (the FE re-auth hook) is not needed.
+
+**Where it ships.** Folded into V2-37 (#204) before its merge, so master never carries the dead Google step-up.
+V2-39 becomes request → "approve on Telegram" (poll every 3 s, at most 10 min) → collect once.
+
+Design note: T2\v2-37b-telegram-step-up-design.md.

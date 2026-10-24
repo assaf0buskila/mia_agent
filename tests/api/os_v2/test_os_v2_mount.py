@@ -46,12 +46,17 @@ STATEMENT_SEGMENTS = {"statements", "statement-batches", "merchant-rules"}
 # §17.1 (V2-37; module renamed by erratum E34): the owner's key routes and the step-up route, and
 # §17.2 the three bearer routes. A route outside these sets is refused below.
 KEY_ROUTES = {
+    ("GET", "/v1/owner/os/unified/assistant-credentials/issue-requests/{issue_request_id}"),
+    (
+        "POST",
+        "/v1/owner/os/unified/assistant-credentials/issue-requests/{issue_request_id}/collect",
+    ),
     ("GET", "/v1/owner/os/unified/assistant-credentials"),
     ("POST", "/v1/owner/os/unified/assistant-credentials"),
     ("POST", "/v1/owner/os/unified/assistant-credentials/{credential_id}/revoke"),
     ("POST", "/v1/owner/os/unified/assistant-credentials/revoke-all"),
 }
-STEP_UP_ROUTES = {("POST", "/v1/owner/auth/step-up")}
+STEP_UP_ROUTES = set()
 ASSISTANT_ROUTES = {
     ("GET", "/v1/assistant/os/context"),
     ("POST", "/v1/assistant/os/statement-batches"),

@@ -184,9 +184,81 @@ def test_the_per_address_limit_is_exact_across_two_keys_of_the_same_address(aw):
 
 def test_two_different_addresses_never_block_each_other(aw):
     one, two = aw.issue(label="one"), aw.issue(label="two", kind="gpt")
+    callers = [aw.authenticate(key["secret"], ip=ip)
+               for key, ip in zip((one, two), (IP_A, IP_B), strict=True)]
+    entered_a, entered_b = threading.Event(), threading.Event()
+    outcomes = []
+
+    def work_a(facts):
+        entered_a.set()
+        assert entered_b.wait(1), "B must enter while A is inside work"
+        return "a"
+
+    def work_b(facts):
+        assert entered_a.is_set()
+        entered_b.set()
+        return "b"
+
+    def attempt(caller, work):
+        try:
+            outcomes.append(aw.gateway.run(caller, "context", work))
+        except Exception as error:
+            outcomes.append(error)
+
+    a = threading.Thread(target=attempt, args=(callers[0], work_a))
+    b = threading.Thread(target=attempt, args=(callers[1], work_b))
+    a.start()
+    assert entered_a.wait(2)
+    b.start()
+    a.join(5)
+    b.join(5)
+    assert not a.is_alive() and not b.is_alive()
+    assert sorted(str(value) for value in outcomes) == ["a", "b"]
+
+
+def test_valid_and_invalid_writers_share_the_address_lock_and_recount(aw, monkeypatch):
+    issued = aw.issue()
+    caller = aw.authenticate(issued["secret"])
     aw.seed_audit(59, ip_hmac=aw.ip_hmac(IP_A), operation="context", ok=True, reason="ok")
-    aw.seed_audit(59, ip_hmac=aw.ip_hmac(IP_B), operation="context", ok=True, reason="ok")
-    assert two_callers(aw, [one["secret"], two["secret"]], [IP_A, IP_B]) == ["ok", "ok"]
+    entered, release, invalid_started = (threading.Event() for _ in range(3))
+    outcomes = []
+    original = aw.store._inner.invalid_lookup
+
+    def ready_to_write(**kwargs):
+        invalid_started.set()  # the cheap count and lookup have both finished at 59
+        return original(**kwargs)
+
+    monkeypatch.setattr(aw.store._inner, "invalid_lookup", ready_to_write)
+
+    def work(facts):
+        entered.set()
+        assert release.wait(2)
+        return "ok"
+
+    def valid():
+        try:
+            outcomes.append(aw.gateway.run(caller, "context", work))
+        except LedgerError as error:
+            outcomes.append(error.reason)
+
+    def invalid():
+        try:
+            aw.authenticate("aosp_" + "z" * 43)
+        except LedgerError as error:
+            outcomes.append(error.reason)
+
+    a, b = threading.Thread(target=valid), threading.Thread(target=invalid)
+    a.start()
+    assert entered.wait(2)
+    b.start()
+    assert invalid_started.wait(2)
+    time.sleep(0.1)  # allow the invalid writer to reach its lock while valid work is held
+    release.set()
+    a.join(5)
+    b.join(5)
+    assert not a.is_alive() and not b.is_alive()
+    assert sorted(outcomes) == ["ip_limit", "ok"]
+    assert len(aw.audit()) == 60
 
 
 def test_a_call_refused_by_the_address_recount_writes_no_row_and_does_not_run_the_work(aw):
