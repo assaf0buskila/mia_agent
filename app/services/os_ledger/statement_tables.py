@@ -15,7 +15,9 @@ The review drafts table doubles as the **batch registry**. ``LedgerTx`` has no w
 of the workspace. So every batch gets one draft row at submit (``draft_revision`` 0), whose
 ``choices`` object also holds a reserved ``index`` entry ``{statement_id, credential_id, source,
 open}``. It survives a restore (only ``os_statement_batch_lines`` data is excluded from a dump), so
-a restored batch with no lines is still found and finished.
+a restored batch with no lines is still found and finished. ``expire_due`` also finds a batch by
+its live detail (``proposals_with_detail``), so a batch without a registry row cannot keep personal
+lines past its window.
 """
 
 from __future__ import annotations
@@ -154,6 +156,7 @@ class StatementTables(Protocol):
     def batch_lines(self, proposal_id: str) -> list[BatchLineRow]: ...
     def live_batch_line_count(self, proposal_id: str) -> int: ...
     def batch_line_count(self, proposal_id: str) -> int: ...
+    def proposals_with_detail(self) -> list[str]: ...
     def insert_batch_lines(self, rows: Sequence[BatchLineRow]) -> None: ...
     def purge_batch_lines(self, proposal_id: str) -> int: ...
     def rules(self) -> list[RuleRow]: ...
@@ -266,6 +269,10 @@ class MemoryTables:
 
     def batch_line_count(self, proposal_id: str) -> int:
         return sum(1 for (pid, _) in self._t("batch_lines") if pid == proposal_id)
+
+    def proposals_with_detail(self) -> list[str]:
+        return sorted({pid for (pid, _), r in self._t("batch_lines").items()
+                       if r.detail is not None})
 
     def insert_batch_lines(self, rows: Sequence[BatchLineRow]) -> None:
         table = self._t("batch_lines")
@@ -486,6 +493,11 @@ class PgTables:
         return int(self._run(
             "SELECT count(*) FROM assaf_os.os_statement_batch_lines WHERE workspace_id = :ws "
             "AND proposal_id = :id", id=proposal_id).scalar_one())
+
+    def proposals_with_detail(self) -> list[str]:
+        return [r.proposal_id for r in self._run(
+            "SELECT DISTINCT proposal_id FROM assaf_os.os_statement_batch_lines "
+            "WHERE workspace_id = :ws AND detail IS NOT NULL ORDER BY proposal_id").all()]
 
     def insert_batch_lines(self, rows: Sequence[BatchLineRow]) -> None:
         if not rows:

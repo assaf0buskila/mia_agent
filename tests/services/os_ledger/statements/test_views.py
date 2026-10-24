@@ -214,6 +214,30 @@ def test_the_assistant_context_has_business_rules_the_recent_statements_and_the_
         "separators": [",", ":"], "max_bytes": 131072, "max_lines": 300}
 
 
+def test_the_assistant_context_calls_a_statement_with_no_live_batch_not_imported(world):
+    """imported | pending | not_imported (§12.4): "pending" is only a batch still awaiting him."""
+    world.credential()
+    rejected = world.paste(batch(three_lines(), number=1, charge_date="2026-08-15"))
+    world.reject(rejected.proposal_id)
+    world.paste(batch(three_lines(), number=2, charge_date="2026-09-15"))
+    approved = world.paste(batch(three_lines(), number=3, charge_date="2026-10-15"))
+    world.approve(approved.proposal_id)
+    world.paste(batch(three_lines(), number=4, charge_date="2026-11-15"))
+
+    def states():
+        body = world.service.context_for_assistant(world.assistant())
+        return {s["charge_date"]: s["status"] for s in body["statements"]}
+
+    live = {"2026-08-15": "not_imported", "2026-09-15": "pending", "2026-10-15": "imported",
+            "2026-11-15": "pending"}
+    assert states() == live
+    world.advance(7 * 24 * 3600 + 1)  # both waiting batches are now overdue, expiry has not run
+    overdue = {**live, "2026-09-15": "not_imported", "2026-11-15": "not_imported"}
+    assert states() == overdue
+    world.service.expire_due(world.worker)
+    assert states() == overdue
+
+
 def test_the_assistant_context_needs_the_assistant_read_scope(world):
     with refused("scope_denied"):
         world.service.context_for_assistant(

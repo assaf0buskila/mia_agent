@@ -21,6 +21,8 @@ from datetime import date, timedelta
 from typing import Any
 
 from app.domain.statements import (
+    BLOCK_MERGE_CHOICE,
+    LINKED_EXPENSE_CHANGED,
     PAYMENT_STATUS_CANCELLED,
     BatchLine,
     Classification,
@@ -177,8 +179,9 @@ def plan_rules(confirmations: Sequence[RuleConfirmation], rows: Sequence[RuleRow
 
     A personal rule is keyed only by its HMAC (id and match key) and stores no merchant text. The
     business rules go through the domain's ``learn_rules`` and keep its id. A merchant that changes
-    tag keeps one live rule: a personal row gains the key in place (same id), and a business row is
-    retired (key and HMAC scrubbed) before the personal row takes the HMAC slot.
+    tag keeps one live rule: a personal row gains the key in place (same id). A business row that
+    began as that personal row still has its id, so it goes back to personal in place too; any other
+    business row is retired (key and HMAC scrubbed) before the personal row takes the HMAC slot.
     """
     by_hmac = {(r.match, r.merchant_key_hmac): r for r in rows}
     writes: list[tuple[RuleRow, str]] = []
@@ -188,6 +191,13 @@ def plan_rules(confirmations: Sequence[RuleConfirmation], rows: Sequence[RuleRow
         row = by_hmac.get(("exact", h))
         if c.tag == "personal":
             if row is not None and row.tag == "personal":
+                continue
+            if row is not None and row.rule_id == personal_rule_id(h):
+                # Retiring this row and inserting the personal one would insert the same id.
+                writes.append((replace(
+                    row, tag="personal", merchant_key=None, category=None, path=None,
+                    platform=None, is_subscription=None, label=None, aliases=(), active=True,
+                    revision=row.revision + 1, source_proposal_id=proposal_id), "update"))
                 continue
             if row is not None:
                 writes.append((replace(
@@ -593,11 +603,11 @@ def merges_body(diff: StatementDiff) -> list[dict[str, Any]]:
     entries = {e.line_key: e for e in diff.entries}
     found: dict[str, dict[str, Any]] = {}
     for key, entry in entries.items():
-        if "merge_choice_required" in entry.flags:
-            changed = "linked_expense_changed" in entry.flags
+        if BLOCK_MERGE_CHOICE in entry.flags:
+            changed = LINKED_EXPENSE_CHANGED in entry.flags
             found[key] = {"line_key": key,
                           "expense_id": entry.candidate_expense_ids[0] if changed else None,
-                          "state": "linked_expense_changed" if changed else "choose",
+                          "state": LINKED_EXPENSE_CHANGED if changed else "choose",
                           "candidate_expense_ids": list(entry.candidate_expense_ids)}
     for op in diff.ops:
         if op.op in {"link", "unlink"}:

@@ -202,7 +202,12 @@ class TestOnPostgres:
 
         first = os_retention.run(settings, service=world.service,
                                  context=lambda s: world.worker, retention_engine=retention)
-        assert first == {"expired": 0, "purge": 3, "backstop": 1, "audit": 1, "errors": []}
+        # PRO_OLD has no registry row, yet the runtime path finds it by its detail and expires it:
+        # its line is purged (not left to the backstop) and the retention role then deletes it.
+        assert first == {"expired": 1, "purge": 4, "backstop": 0, "audit": 1, "errors": []}
+        assert self.count(world, "os_proposals", "proposal_id = 'PRO_OLD' AND status = 'expired'"
+                          ) == 1
+        assert self.count(world, "os_receipts", "status = 'expired'") == 1
         assert self.count(world, "os_statement_batch_lines", "detail IS NOT NULL") == 3
         assert self.count(world, "os_assistant_audit") == 1  # the 2-day-old row stays
         assert self.count(world, "os_statements") == 2 and self.count(world, "os_proposals") == 3
@@ -212,7 +217,24 @@ class TestOnPostgres:
                                   context=lambda s: world.worker, retention_engine=retention)
         assert second == {"expired": 1, "purge": 3, "backstop": 0, "audit": 0, "errors": []}
         assert self.count(world, "os_statement_batch_lines") == 0
-        assert self.count(world, "os_receipts", "status = 'expired'") == 1
+        assert self.count(world, "os_receipts", "status = 'expired'") == 2
+
+    def test_the_backstop_deletes_old_detail_when_the_runtime_path_is_down(self, pg):
+        """I11: whatever the runtime path does, detail never outlives expires_at + 1 day."""
+        from app.services.os_ledger import api
+        world, retention = pg
+        self.seed_old_batch_and_audit(world)
+
+        def down(_settings):
+            raise api.LedgerError("ledger_unavailable", reason="runtime_down")
+
+        summary = os_retention.run(world.config, service=world.service, context=down,
+                                   retention_engine=retention)
+        assert summary == {"expired": 0, "purge": 0, "backstop": 1, "audit": 1,
+                           "errors": ["expire_due:runtime_down"]}
+        assert self.count(world, "os_statement_batch_lines") == 0
+        assert self.count(world, "os_proposals", "proposal_id = 'PRO_OLD' AND status = 'pending'"
+                          ) == 1
 
     def test_the_retention_role_can_do_nothing_else(self, pg):
         from sqlalchemy import text

@@ -288,6 +288,20 @@ class World:
                               "WHERE workspace_id = :ws AND credential_id = :id"),
                          {"now": self.now(), "ws": WORKSPACE, "id": credential_id})
 
+    def drop_drafts(self) -> None:
+        """Every review-draft (batch registry) row gone, as if the batches were seeded by hand."""
+        if self.kind == "fake":
+            with self.scratch_tx() as tx:
+                tx.scratch["statement_tables"]["drafts"].clear()
+            return
+        from sqlalchemy import text
+        with self._admin_engine.begin() as conn:
+            conn.execute(text("DELETE FROM assaf_os.os_statement_review_drafts"))
+
+    def current_reader(self) -> api.TrustedOwnerContext:
+        """An OS read context minted now, so it carries the settings epoch of this moment."""
+        return authorize.from_owner_read(session_principal(proven=False), self.config)
+
     def drop_batch_lines(self) -> None:
         """A restore: FORK-BACKUP excludes the batch-line data."""
         if self.kind == "fake":

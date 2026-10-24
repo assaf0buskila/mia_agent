@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import re
 from datetime import timedelta
+from types import SimpleNamespace
 
 import pytest
 from app.domain.statements import normalize_merchant
 from app.services.os_ledger import api
+from app.services.os_ledger import statement_plan as sp
 
 from tests.services.os_ledger.statements.support import (
     CLAUDE,
@@ -349,6 +351,42 @@ def test_a_decided_batch_reviews_without_detail_and_refuses_a_draft(world):
     assert world.lines(submitted.proposal_id) == []
     with refused("already_decided"):
         world.service.save_draft(world.owner, submitted.proposal_id, 0, [], {})
+
+
+def test_a_pending_batch_of_an_older_epoch_reads_as_expired(world):
+    """It can never be decided (a decision finishes it expired), so the review must not show a
+    pending batch with a digest the owner could act on."""
+    submitted = world.paste(batch(three_lines()))
+    assert world.review(submitted.proposal_id)["status"] == "pending"
+    world.bump_epoch()
+    review = world.service.review(world.current_reader(), submitted.proposal_id)
+    assert review["status"] == "expired" and review["authority_epoch"] == 2
+    assert review["conflict_with"] == []
+
+
+def test_a_lines_cursor_does_not_survive_an_epoch_change(world):
+    submitted = world.paste(batch(three_lines()))
+    page = world.service.lines(world.reader, submitted.proposal_id, after=None, limit=1)
+    assert isinstance(page["next_cursor"], str)
+    world.bump_epoch()
+    with refused("invalid_cursor"):
+        world.service.lines(world.current_reader(), submitted.proposal_id,
+                            after=page["next_cursor"], limit=1)
+
+
+def test_the_merge_states_come_from_the_domain_constants(monkeypatch):
+    monkeypatch.setattr(sp, "BLOCK_MERGE_CHOICE", "x_choice")
+    monkeypatch.setattr(sp, "LINKED_EXPENSE_CHANGED", "x_changed")
+    choose = SimpleNamespace(line_key="k1", flags=("x_choice",), candidate_expense_ids=("EXP_1",))
+    changed = SimpleNamespace(line_key="k2", flags=("x_choice", "x_changed"),
+                              candidate_expense_ids=("EXP_2", "EXP_3"))
+    other = SimpleNamespace(line_key="k3", flags=("something_else",), candidate_expense_ids=())
+    diff = SimpleNamespace(entries=(choose, changed, other), ops=())
+    assert sp.merges_body(diff) == [
+        {"line_key": "k1", "expense_id": None, "state": "choose",
+         "candidate_expense_ids": ["EXP_1"]},
+        {"line_key": "k2", "expense_id": "EXP_2", "state": "x_changed",
+         "candidate_expense_ids": ["EXP_2", "EXP_3"]}]
 
 
 def test_a_restored_batch_without_detail_reads_as_expired_and_refuses_a_draft(world):

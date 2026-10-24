@@ -8,6 +8,7 @@ from datetime import timedelta
 import pytest
 from app.domain.statements import LINKED_EXPENSE_CHANGED
 from app.services.os_ledger import api
+from app.services.os_ledger.statement_tables import RuleRow
 
 from tests.services.os_ledger.statements.support import (
     CLAUDE,
@@ -388,6 +389,58 @@ def test_a_rule_confirmation_without_a_tag_is_refused_at_approve_and_draft(world
     with pytest.raises(api.LedgerError) as caught:
         world.draft(submitted.proposal_id, [{"line_key": key, "make_rule": True}])
     assert caught.value.details == {"reason": "rule_without_tag"}
+
+
+CHARGE_DATES = {1: "2026-10-15", 2: "2026-11-15", 3: "2026-12-15", 4: "2027-01-15",
+                5: "2027-02-15"}
+
+
+def confirm_rule(world, number, tag, **extra):
+    """A batch with one PERSONAL CAFE line, where the owner picks ``tag`` and ticks "always"."""
+    submitted = world.paste(batch([line("PERSONAL CAFE", 900 + number, tag=None)], number=number,
+                                  charge_date=CHARGE_DATES[number]))
+    key = world.lines(submitted.proposal_id)[0]["line_key"]
+    world.draft(submitted.proposal_id, [{"line_key": key, "tag": tag, "make_rule": True, **extra}])
+    return submitted.proposal_id, world.approve(submitted.proposal_id).receipt
+
+
+def only_rule(world):
+    (rule,) = world.tables()["rules"].values()
+    return rule
+
+
+def test_a_merchant_rule_goes_personal_business_personal_and_back(world):
+    """One live rule per merchant. The business row keeps the personal id, so going back to
+    personal must update it in place: retiring it and inserting the same id is a PK collision."""
+    _, receipt = confirm_rule(world, 1, "personal")
+    rule = only_rule(world)
+    assert receipt.status == "committed"
+    assert (rule.tag, rule.merchant_key, rule.revision, rule.active) == ("personal", None, 1, True)
+    rule_id, key_hmac = rule.rule_id, rule.merchant_key_hmac
+
+    confirm_rule(world, 2, "business", category="Food")
+    rule = only_rule(world)
+    assert (rule.rule_id, rule.tag, rule.category, rule.revision, rule.active) == (
+        rule_id, "business", "Food", 2, True)
+
+    third, receipt = confirm_rule(world, 3, "personal")
+    assert receipt.status == "committed"
+    assert only_rule(world) == RuleRow(
+        rule_id=rule_id, tag="personal", match="exact", merchant_key=None,
+        merchant_key_hmac=key_hmac, category=None, path=None, platform=None,
+        is_subscription=None, label=None, aliases=(), active=True, revision=3,
+        source_proposal_id=third)
+    nxt = world.paste(batch([line("PERSONAL CAFE", 777, tag=None)], number=4,
+                            charge_date=CHARGE_DATES[4]))
+    item = world.lines(nxt.proposal_id)[0]
+    assert (item["tag"], item["rule_id"]) == ("personal", rule_id)
+    world.approve(nxt.proposal_id)
+
+    _, receipt = confirm_rule(world, 5, "business", category="Food")
+    rule = only_rule(world)
+    assert receipt.status == "committed"
+    assert (rule.rule_id, rule.tag, rule.category, rule.revision, rule.active) == (
+        rule_id, "business", "Food", 4, True)
 
 
 # ---- re-import: replace semantics through the ledger ---------------------------------------------

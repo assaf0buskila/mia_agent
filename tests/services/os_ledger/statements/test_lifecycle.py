@@ -53,6 +53,26 @@ def test_expire_due_finishes_overdue_batches_and_purges_their_detail(world):
     assert world.service.expire_due(world.worker) == 0  # a second run finds nothing
 
 
+def test_a_pending_batch_with_no_registry_row_still_expires_and_purges(world):
+    """The registry is an index, not the authority: a batch that holds detail is found by it."""
+    old = world.paste(batch(three_lines(), number=1))
+    fresh = world.paste(batch(three_lines(), number=2, charge_date="2026-11-15"))
+    world.drop_drafts()
+    world.advance(WEEK + 1)
+    assert world.service.expire_due(world.worker) == 2
+    assert statuses(world) == {old.proposal_id: "expired", fresh.proposal_id: "expired"}
+    assert purged(world, old.proposal_id) and purged(world, fresh.proposal_id)
+    assert sorted(r["status"] for r in world.rows("os_receipts")) == ["expired", "expired"]
+    assert world.service.expire_due(world.worker) == 0
+
+
+def test_a_current_batch_with_no_registry_row_is_left_alone(world):
+    submitted = world.paste(batch(three_lines()))
+    world.drop_drafts()
+    assert world.service.expire_due(world.worker) == 0
+    assert statuses(world) == {submitted.proposal_id: "pending"}
+
+
 @pytest.mark.parametrize("knob,value", [
     ("kill_switch", True), ("assaf_os_backend", "sheets"), ("assaf_os_ledger_enabled", False),
     ("assaf_os_freeze", True), ("assaf_os_statements_enabled", False)])

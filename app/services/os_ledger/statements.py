@@ -344,8 +344,11 @@ class LedgerStatementService:
             if statement is None:
                 raise api.LedgerError("batch_not_found", reason="statement_missing")
             live = tables.live_batch_line_count(proposal.proposal_id) > 0
+            # A pending batch of an older epoch can never be decided (a decision finishes it
+            # expired), so the review must not offer it: no plan, no digest to act on.
+            older = proposal.status == "pending" and proposal.epoch != ctx.authority_epoch
             status = proposal.status
-            if status == "pending" and (tx.now >= proposal.expires_at or not live):
+            if status == "pending" and (older or tx.now >= proposal.expires_at or not live):
                 status = "expired"
             draft = tables.draft(proposal.proposal_id) or DraftRow(
                 proposal.proposal_id, 0, statement_id=proposal.record_id,
@@ -364,10 +367,11 @@ class LedgerStatementService:
                 "rejection_request_id": proposal.rejection_id,
                 "conflict_with": [p.proposal_id for p, _ in self._pending_others(
                     tx, tables, proposal.record_id, exclude=proposal.proposal_id,
-                    epoch=ctx.authority_epoch, heal=False)] if proposal.status == "pending" else [],
+                    epoch=ctx.authority_epoch, heal=False)]
+                if proposal.status == "pending" and not older else [],
                 "draft_revision": draft.draft_revision,
             }
-            if proposal.status == "pending" and live:
+            if proposal.status == "pending" and live and not older:
                 self._check_pin(tx, self._pepper("review"), "review")
                 plan = self._plan(tx, tables, proposal, statement, draft, op="review")
                 body.update(
@@ -390,7 +394,8 @@ class LedgerStatementService:
         if type(limit) is not int or not 1 <= limit <= PAGE_MAX:
             raise api.LedgerError("invalid_query", reason="limit")
         pepper = self._pepper("lines")
-        offset = self._decode_cursor(after, ctx.workspace, proposal_id, pepper)
+        offset = self._decode_cursor(after, ctx.workspace, ctx.authority_epoch, proposal_id,
+                                     pepper)
         with self._tx(ctx) as tx:
             tables = tables_for(tx)
             proposal = self._batch(tx, proposal_id)
@@ -412,22 +417,24 @@ class LedgerStatementService:
                 window = batch[offset:offset + limit]
                 page = [sp.line_view(plan, line) for line in window]
                 if offset + limit < len(batch):
-                    next_cursor = self._encode_cursor(ctx.workspace, proposal_id, offset + limit,
-                                                      pepper)
+                    next_cursor = self._encode_cursor(ctx.workspace, ctx.authority_epoch,
+                                                      proposal_id, offset + limit, pepper)
             elif offset:
                 raise api.LedgerError("invalid_cursor", reason="cursor_range")
             return {**binding(ctx, tx.version), "lines": page, "next_cursor": next_cursor}
 
     @staticmethod
-    def _cursor_mac(workspace: str, proposal_id: str, offset: int, pepper: bytes) -> str:
-        message = f"lines-cursor\x1f{workspace}\x1f{proposal_id}\x1f{offset}".encode()
+    def _cursor_mac(workspace: str, epoch: int, proposal_id: str, offset: int,
+                    pepper: bytes) -> str:
+        message = f"lines-cursor\x1f{workspace}\x1f{epoch}\x1f{proposal_id}\x1f{offset}".encode()
         return hmac.new(pepper, message, "sha256").hexdigest()
 
-    def _encode_cursor(self, workspace: str, proposal_id: str, offset: int, pepper: bytes) -> str:
+    def _encode_cursor(self, workspace: str, epoch: int, proposal_id: str, offset: int,
+                       pepper: bytes) -> str:
         payload = base64.urlsafe_b64encode(str(offset).encode()).decode().rstrip("=")
-        return f"c1.{self._cursor_mac(workspace, proposal_id, offset, pepper)}.{payload}"
+        return f"c1.{self._cursor_mac(workspace, epoch, proposal_id, offset, pepper)}.{payload}"
 
-    def _decode_cursor(self, token: str | None, workspace: str, proposal_id: str,
+    def _decode_cursor(self, token: str | None, workspace: str, epoch: int, proposal_id: str,
                        pepper: bytes) -> int:
         """An offset into the batch's fixed order. The cursor holds no statement text."""
         if token is None:
@@ -443,7 +450,7 @@ class LedgerStatementService:
         except (ValueError, UnicodeError):
             raise bad from None
         if offset < 0 or not hmac.compare_digest(
-                parts[1], self._cursor_mac(workspace, str(proposal_id), offset, pepper)):
+                parts[1], self._cursor_mac(workspace, epoch, str(proposal_id), offset, pepper)):
             raise bad
         return offset
 
@@ -721,11 +728,19 @@ class LedgerStatementService:
         with self._tx(ctx_worker, purpose="expire") as tx:
             tables = tables_for(tx)
             self._check_pin(tx, pepper, op)
-            for draft in tables.open_drafts():
-                proposal = tx.proposal(draft.proposal_id)
+            # The registry is an index, not the authority: a pending batch that still holds detail
+            # is found by that detail too, so no personal line outlives its window (I11) because
+            # a registry row is missing. (LedgerTx cannot list proposals, and tx.connection is
+            # barred from os_proposals.)
+            found = {d.proposal_id for d in tables.open_drafts()} | set(
+                tables.proposals_with_detail())
+            for proposal_id in sorted(found):
+                proposal = tx.proposal(proposal_id)
                 if proposal is None or proposal.kind != "statement_batch" or (
                         proposal.status != "pending"):
-                    tables.put_draft(replace(draft, open=False))
+                    draft = tables.draft(proposal_id)
+                    if draft is not None and draft.open:
+                        tables.put_draft(replace(draft, open=False))
                     continue
                 if proposal.epoch != ctx_worker.authority_epoch:
                     reasons: tuple[str, ...] = ("epoch_changed",)
@@ -875,16 +890,25 @@ class LedgerStatementService:
             for s in recent:
                 if s.approved_proposal_id is not None:
                     status, count = "imported", s.line_count
-                else:
-                    status = "pending"
-                    count = (tables.batch_line_count(s.current_proposal_id)
-                             if s.current_proposal_id else s.line_count)
+                elif self._awaits_owner(tx, s):
+                    status, count = "pending", tables.batch_line_count(s.current_proposal_id)
+                else:  # every batch of it was rejected, expired or superseded away
+                    status, count = "not_imported", s.line_count
                 statements.append({"account_label": s.account_label,
                                    "charge_date": s.charge_date.isoformat(), "status": status,
                                    "line_count": count})
             return {"rules": rules, "statements": statements, "format": {
                 "schema": "statement-batch.v1", "encoding": "utf-8", "ensure_ascii": False,
                 "separators": [",", ":"], "max_bytes": MAX_BATCH_BYTES, "max_lines": MAX_LINES}}
+
+    @staticmethod
+    def _awaits_owner(tx: Any, statement: StatementRow) -> bool:
+        """The statement's current batch is still pending and inside its window."""
+        if statement.current_proposal_id is None:
+            return False
+        proposal = tx.proposal(statement.current_proposal_id)
+        return proposal is not None and proposal.status == "pending" and (
+            proposal.expires_at > tx.now)
 
     def status_for_credential(self, ctx: api.TrustedOwnerContext,
                               proposal_id: str) -> dict[str, Any]:
