@@ -14,8 +14,8 @@ from app.api.assistant.os import router as assistant_os_router
 from app.api.business_ledger import router as business_ledger_router
 from app.api.form_intake import router as form_intake_router
 from app.api.os_v2.commits import router as os_v2_commits_router
-from app.api.os_v2.owner_keys import router as os_v2_credentials_router
 from app.api.os_v2.errors import ledger_error_handler
+from app.api.os_v2.owner_keys import router as os_v2_credentials_router
 from app.api.os_v2.reads import router as os_v2_reads_router
 from app.api.os_v2.statements import router as os_v2_statements_router
 from app.api.owner_os import router as owner_os_router
