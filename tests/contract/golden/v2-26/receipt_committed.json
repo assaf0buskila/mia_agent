@@ -1,0 +1,37 @@
+{
+  "actor_source": "ASSISTANT_PASTE",
+  "api_version": "assaf-os.v2",
+  "authority_epoch": 1,
+  "commit_version": 1,
+  "committed_at": "2026-10-16T12:00:00.000Z",
+  "kind": "statement_batch",
+  "observed_version": 1,
+  "proposal_id": "PRO_00000000000040008000000000002003",
+  "reason_codes": [],
+  "records": [
+    {
+      "entity": "expenses",
+      "record": {
+        "amount_ils": 10000,
+        "category": "כלי AI",
+        "currency": "ILS",
+        "date": "2026-10-15",
+        "expense_id": "EXP_1b96c3b67aea8130a02e95af2ffcc40c",
+        "path": "משותף",
+        "payment_status": "שולם",
+        "platform": "אחר",
+        "revision": 1,
+        "source_key": "stmt:STM_f0fad4c24d6ff12cdbd18f98ec37dc64:3cead85e4a42ad23b109f517ce1339ad9ab4d745258fa99afe1a63e324a4fc7b",
+        "source_type": "תשלום בפועל",
+        "vendor": "DEMO SHOP"
+      }
+    }
+  ],
+  "request_id": "00000000-0000-4000-8000-000000002001",
+  "server_now": "2026-10-16T12:00:00.000Z",
+  "source": "postgresql",
+  "status": "committed",
+  "undo": null,
+  "undo_of": null,
+  "workspace_id": "test"
+}

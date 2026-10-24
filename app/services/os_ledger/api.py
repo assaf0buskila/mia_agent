@@ -117,6 +117,7 @@ ERROR_CODES: Mapping[str, ErrorSpec] = MappingProxyType({
     "review_stale": _spec(409),
     "unassigned_lines": _spec(409),
     "merge_choice_required": _spec(409),
+    "cycle_has_statement": _spec(409),  # §22 E31
     "draft_conflict": _spec(409),
     "batch_conflict": _spec(409, False, "conflicting_proposal_id"),
     "lead_already_exists": _spec(409),

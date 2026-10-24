@@ -35,7 +35,7 @@ def owner_settings(**changes) -> Settings:
         telegram_owner_user_ids=OWNER_ID, telegram_bot_token="telegram-test-token",
         assaf_os_enabled=True, assaf_os_backend="postgres", assaf_os_workspace_id=WORKSPACE,
         assaf_os_authority_epoch=1, assaf_os_ledger_enabled=True,
-        assaf_os_owner_direct_enabled=True, kill_switch=False,
+        assaf_os_owner_direct_enabled=True, assaf_os_statements_enabled=True, kill_switch=False,
     )
     return Settings(**(values | changes))
 

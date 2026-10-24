@@ -1,0 +1,19 @@
+{
+  "api_version": "assaf-os.v2",
+  "authority_epoch": 1,
+  "conflict": false,
+  "observed_version": 0,
+  "proposal_id": "PRO_00000000000040008000000000002003",
+  "source": "postgresql",
+  "statement_id": "STM_f0fad4c24d6ff12cdbd18f98ec37dc64",
+  "status": "pending",
+  "summary": {
+    "business_count": 2,
+    "disagreement_count": 0,
+    "line_count": 3,
+    "personal_count": 1,
+    "unassigned_count": 0
+  },
+  "superseded_proposal_id": null,
+  "workspace_id": "test"
+}
