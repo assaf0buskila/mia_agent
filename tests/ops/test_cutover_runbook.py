@@ -224,6 +224,62 @@ def section_of(heading: str) -> str:
     raise AssertionError(heading)
 
 
+@pytest.mark.parametrize("condition,pins", [
+    ("merged fixes", ("WP1/E35", "#199", "WP2", "#197", "merged PR SHAs",
+                      "date_1904", "sheet `state`", "sheet set and order")),
+    ("CI", ("tests/workers/test_os_cutover_sequence.py", "os-cutover-postgres",
+            "headSha == S", "conclusion == success", "T6→T7", "mirror verified")),
+    ("PC restore drill", ("ops/gcp/backup/restore_drill.py", "restore-drill.json",
+                          "started_utc", "passed: true", "rto_met: true",
+                          "fewer than 7 days before activation", "restore_drill_too_old",
+                          "RTO ≤ 2 h", "RPO ≤ 15 min")),
+    ("live window", ("Assaf's quiet window", "explicit statement in chat", "UTC", "`S`",
+                     "section 5's rollback ready before the first non-import receipt",
+                     "Every G10-G17 gate keeps its explicit go")),
+])
+def test_step_6_pins_each_e36_condition_and_its_evidence(condition, pins):
+    step = re.sub(r"\s+", " ", section_of("### Step 6"))
+    assert "**Go G09**" in step and "section 22 E36" in step
+    assert "NOT_INCLUDED" in step and "V2-35/V2-35a" in step
+    for pin in pins:
+        assert pin in step, (condition, pin)
+
+
+def test_step_6_records_machine_checkable_pr_and_ci_evidence():
+    step = re.sub(r"\s+", " ", section_of("### Step 6"))
+    for number in (199, 197):
+        assert f"gh pr view {number} --json number,state,mergedAt,mergeCommit" in step
+    assert "state == MERGED" in step and "40-hex `mergeCommit.oid`" in step
+    for sha in ("WP1-MERGE-SHA", "WP2-MERGE-SHA"):
+        assert f"git merge-base --is-ancestor <{sha}> S" in step
+    assert "gh run view <RUN-ID> --json headSha,conclusion,jobs" in step
+    assert "run ID/URL" in step and "job" in step and "conclusion == success" in step
+
+
+@pytest.mark.parametrize("location", ["production order", "wave 6", "G09 table"])
+def test_all_g09_summaries_keep_the_four_e36_conditions(location):
+    if location == "production order":
+        text = re.search(r"^\| 6 \|.*$", RUNBOOK, re.M).group()
+    elif location == "wave 6":
+        text = section_of("## 3. Wave 6")
+    else:
+        text = re.search(r"^\| G09 \|.*$", RUNBOOK, re.M).group()
+    text = re.sub(r"\s+", " ", text)
+    for pin in ("E36", "WP1/E35", "#199", "WP2", "#197", "merged PR SHAs",
+                "os-cutover-postgres", "`S`", "PC", "restore-drill.json", "< 7 days",
+                "Assaf's quiet window", "section 5", "before the first non-import receipt"):
+        assert pin in text, (location, pin)
+    assert "rehearsal passed" not in text and "on a copy" not in text
+
+
+@pytest.mark.parametrize("name", ["OS_REHEARSAL_PLAN.md", "OS_REHEARSAL_ENV.md"])
+def test_copy_rehearsal_documents_are_kept_as_e36_reference_only(name):
+    text = (ROOT / "docs/runbooks" / name).read_text(encoding="utf-8")
+    assert text.splitlines()[2] == (
+        "Status: NOT_INCLUDED by contract §22 E36 (2026-10-24, Assaf); kept for reference"
+    )
+
+
 def bullet_with(section: str, command: str) -> str:
     """The top-level bullet of a section (its indented lines included) that runs a command."""
     for bullet in re.split(r"^(?=- )", section, flags=re.M):

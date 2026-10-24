@@ -1,5 +1,7 @@
 # V2-35: isolated cutover rehearsal plan
 
+Status: NOT_INCLUDED by contract §22 E36 (2026-10-24, Assaf); kept for reference
+
 Status: checklist written before execution; **NOT_RUN**. This does not constitute
 a passed rehearsal or approval for production. Follow frozen `V2_PG_CONTRACTS.md`
 v1 §§0, 16, 18, 19 and the pasted V2-35 issue. Save a private evidence directory

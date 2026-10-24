@@ -4,11 +4,12 @@ Status: **NOT_RUN**. Written and tested on fakes and a disposable PostgreSQL onl
 been run against production, and this document authorizes none of them.
 Source of truth: `V2_PG_CONTRACTS.md` section 16 (the CLI, the table of preconditions, the Script fence),
 section 19 (the production order, FORK-PROD-ORDER), section 5.4 (the authority state machine), and the
-errata E8 (retention credential) and E21 (close loopback `trust`). Where the code and this text differ,
+errata E8 (retention credential), E21 (close loopback `trust`), E35 and E36 (G09 replacement).
+Where the code and this text differ,
 the code is right: fix this text.
 
-The companion documents are [OS_REHEARSAL_PLAN.md](../../docs/runbooks/OS_REHEARSAL_PLAN.md) (the same
-steps on a copy first), [OS_PHONE_ACCEPTANCE.md](../../docs/runbooks/OS_PHONE_ACCEPTANCE.md) (the phone
+The companion documents are [OS_REHEARSAL_PLAN.md](../../docs/runbooks/OS_REHEARSAL_PLAN.md) (reference
+only; the copy rehearsal is NOT_INCLUDED by E36), [OS_PHONE_ACCEPTANCE.md](../../docs/runbooks/OS_PHONE_ACCEPTANCE.md) (the phone
 run and the go list), [OS_CUTOVER_GO_NO_GO.md](../../docs/runbooks/OS_CUTOVER_GO_NO_GO.md) (the record you
 fill) and [APP_ROLE_DEMOTE.md](../../docs/runbooks/APP_ROLE_DEMOTE.md) (step 2 in full).
 
@@ -62,7 +63,7 @@ fill) and [APP_ROLE_DEMOTE.md](../../docs/runbooks/APP_ROLE_DEMOTE.md) (step 2 i
 | 3 | `mia os-ledger migrate` (V2-14 + V2-14b) | G06 | Additive; restore the pre-step dump |
 | 4 | Provision the ledger roles, then the validator | G07 | Re-run (idempotent); see the staged-DSN rule |
 | 5 | `mia os-authority init` | G08 | Idempotent; nothing to undo before an import |
-| 6 | Rehearsal (V2-35a, V2-35) on a copy | G09 | The copy is thrown away |
+| 6 | E36: merged PR SHAs for WP1/E35 (#199) and WP2 (#197); green CI `os-cutover-postgres` on `S`; PC `restore-drill.json` < 7 days before activation; Assaf's quiet window with section 5 rollback ready before the first non-import receipt | G09 | Stop before wave 6 if any condition fails |
 | 7 | Wave 6: T1 to T7, the first write, phone acceptance | G10 to G24 | Section 5 |
 
 Every production step above pauses the jobs and takes a verified backup first (section 0). Steps 1 to
@@ -225,17 +226,39 @@ Every production step above pauses the jobs and takes a verified backup first (s
 - **Rollback**: none needed. A second owner or a different pepper is refused
   (`authority_changed:workspace_conflict`, `ledger_unavailable:statement_pepper_mismatch`).
 
-### Step 6: rehearsal
+### Step 6: E36 readiness before wave 6
 
-- **Go G09** the rehearsal run, on a copy, with a different Script, workbook and mirror. Follow
-  `docs/runbooks/OS_REHEARSAL_PLAN.md`; it executes this runbook's T1 to T7, the broken-precondition abort
-  (exactly one of the 15 codes below, nonzero, no state change), the rollback before the first write,
-  and a real `mia restore`. A relevant release change invalidates it. Production does not start until
-  it passes.
-- **Precondition**: steps 1 to 5 done on the copy's own pins; production untouched.
-- **Verify**: every row of the rehearsal plan's table is `REHEARSAL_VERIFIED`, with the abort, the
-  rollback and the forward run recorded in `OS_CUTOVER_GO_NO_GO.md`.
-- **Rollback**: the copy is thrown away and its data disposition recorded; production is unchanged.
+- **Go G09** acceptance of the four conditions below, by Assaf's explicit statement in chat for `S`.
+  Contract section 22 E36 (2026-10-24, Assaf) replaces the isolated-copy rehearsal: V2-35/V2-35a are
+  **NOT_INCLUDED**. `OS_REHEARSAL_PLAN.md` and `OS_REHEARSAL_ENV.md` are kept for reference; no
+  throwaway VM, workbook copy or TEST Script is required.
+- **Precondition**: steps 1 to 5 done; all four conditions have evidence for this release:
+  1. **Fixes merged**: WP1/E35 (#199) permits mirror publishing under the freeze only while core
+     authority is `active`; WP2 (#197) makes the drift checker compare `date_1904`, sheet `state`
+     and the sheet set and order. Record the merged PR SHAs with
+     `gh pr view 199 --json number,state,mergedAt,mergeCommit` and
+     `gh pr view 197 --json number,state,mergedAt,mergeCommit`: each must show `state == MERGED`,
+     a merge timestamp and a 40-hex `mergeCommit.oid`. Both fixes must be in `S`: require exit 0 from
+     `git merge-base --is-ancestor <WP1-MERGE-SHA> S` and
+     `git merge-base --is-ancestor <WP2-MERGE-SHA> S`.
+  2. **CI green at the release SHA**: record the run ID/URL and the JSON from
+     `gh run view <RUN-ID> --json headSha,conclusion,jobs`. Require `headSha == S`,
+     `conclusion == success`, and job `os-cutover-postgres` with `conclusion == success`.
+     It must run `tests/workers/test_os_cutover_sequence.py` (via #199), proving T6→T7 under the
+     freeze with mirror verified (WP2's drift tests prove the workbook-level drift check). A local test run or another SHA does not meet this.
+  3. **PC restore drill**: run `ops/gcp/backup/restore_drill.py` on Assaf's PC, never the VM, fewer
+     than 7 days before activation. Keep its `--report` output as `restore-drill.json` (section 2):
+     `started_utc` proves the age, with `passed: true` and `rto_met: true`. Recheck the age at
+     activation; `restore_drill_too_old` still blocks it. Record Assaf's limits, RTO ≤ 2 h and
+     RPO ≤ 15 min, with the drill evidence and for any post-cutover restore.
+  4. **Live window and rollback**: record Assaf's quiet window as his explicit statement in chat,
+     naming `S` and the UTC window, with section 5's rollback ready before the first non-import receipt.
+     Every G10-G17 gate keeps its explicit go; the window statement and G09 do not approve those steps.
+- **Verify**: record all four evidence items and Assaf's G09 statement in `OS_CUTOVER_GO_NO_GO.md`.
+  Missing, stale or mismatched evidence stops wave 6. A release SHA or window change requires fresh
+  matching evidence and an explicit G09 statement.
+- **Rollback**: do not start wave 6 if any condition fails. Once the live run starts, section 5 applies
+  only before the first non-import receipt; after that boundary follow section 6.
 
 ## 2. The evidence directory
 
@@ -315,8 +338,11 @@ V2-30 prints for the staged batch.
 
 ## 3. Wave 6: T1 to T7
 
-Preconditions for the whole of wave 6: steps 1 to 6 done; the rehearsal passed at this release; Assaf is
-present throughout; jobs paused and a verified backup before **each** of T1, T3, T5 and T6.
+Preconditions for the whole of wave 6: steps 1 to 6 done; E36/G09 has the merged PR SHAs for WP1/E35
+(#199) and WP2 (#197), green CI `os-cutover-postgres` on `S`, a PC `restore-drill.json` < 7 days before
+activation, and Assaf's quiet window with section 5 rollback ready before the first non-import receipt
+(step 6's four evidence items). Every G10-G17 gate keeps its explicit go. Assaf is present throughout;
+jobs paused and a verified backup before **each** of T1, T3, T5 and T6.
 
 ### T1: drain (freeze)
 
@@ -660,7 +686,7 @@ Each needs its own explicit statement in chat, for that step only.
 | G06 | V2-14/V2-14b schema migration |
 | G07 | V2-15 role grants and provisioning, and the validator |
 | G08 | Authority initialization and the workspace and pepper pin |
-| G09 | The rehearsal |
+| G09 | E36: merged PR SHAs for WP1/E35 (#199) and WP2 (#197); green CI `os-cutover-postgres` on `S`; PC `restore-drill.json` < 7 days before activation; Assaf's quiet window with section 5 rollback ready before the first non-import receipt (step 6 evidence) |
 | G10 | Drain/freeze and final reconcile in the approved window |
 | G11 | The Script Properties fence, archive naming and tab warnings |
 | G12 | Import promotion of the exact signed manifest |

@@ -1,5 +1,7 @@
 # V2-35a: owner-run TEST environment
 
+Status: NOT_INCLUDED by contract §22 E36 (2026-10-24, Assaf); kept for reference
+
 אסף, החזרה מתבצעת בעותק זמני של הגיליון ובמסד נתונים מקומי. צור לעותק
 פריסת Apps Script חדשה, הגדר TEST ומפתח חתימה חדש שנשאר אצלך בלבד.
 בדוק שהמזהים שונים מאלה של סביבת הייצור. בסיום סגור את הפריסה, מחק את
