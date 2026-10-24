@@ -119,7 +119,12 @@ _STATE_COLUMNS = (
 
 
 class PgOutbox:
-    """The §14 outbox on the ledger runtime DSN. Every method is one short transaction."""
+    """The §14 outbox on the ledger runtime DSN. Every method is one short transaction.
+
+    PostgreSQL owns all timestamps, including retry deadlines. The protocol's ``now`` and
+    ``next_attempt_at`` arguments remain for clock-injected stores; PgOutbox ignores them.
+    ``now()`` is stable within each short transaction, so comparisons and stamps agree.
+    """
 
     def __init__(self, engine: Any, workspace_id: str, *, schema: str = "assaf_os") -> None:
         if not _SCHEMA_RE.fullmatch(schema):
@@ -140,14 +145,14 @@ class PgOutbox:
         # subquery (§14). RETURNING adds ``attempts`` so a retried row is read back first.
         statement = self._text(
             "UPDATE {s}.os_outbox SET status='leased', lease_owner=:owner, "
-            "leased_at=CAST(:now AS timestamptz), lease_generation=lease_generation+1, "
-            "attempts=attempts+1, updated_at=CAST(:now AS timestamptz) "
+            "leased_at=now(), lease_generation=lease_generation+1, "
+            "attempts=attempts+1, updated_at=now() "
             "WHERE (workspace_id, event_id) IN ("
             " SELECT workspace_id, event_id FROM {s}.os_outbox"
             " WHERE workspace_id=:ws AND ("
-            "   (status IN ('pending','unknown') AND next_attempt_at <= CAST(:now AS timestamptz))"
+            "   (status IN ('pending','unknown') AND next_attempt_at <= now())"
             "   OR (status = 'leased'"
-            "       AND leased_at < CAST(:now AS timestamptz) - CAST(:ttl AS interval)))"
+            "       AND leased_at < now() - CAST(:ttl AS interval)))"
             " ORDER BY commit_version"
             " FOR UPDATE SKIP LOCKED LIMIT :n) "
             "RETURNING workspace_id, event_id, commit_version, body, lease_generation, attempts"
@@ -155,7 +160,7 @@ class PgOutbox:
         with self._engine.begin() as conn:
             rows = conn.execute(
                 statement,
-                {"owner": lease_owner, "now": now, "ws": self._workspace_id,
+                {"owner": lease_owner, "ws": self._workspace_id,
                  "ttl": lease_ttl, "n": int(limit)},
             ).mappings().all()
         events = [
@@ -182,17 +187,20 @@ class PgOutbox:
         """Compare-and-set on ``lease_generation``; clears the lease as V2-14's CHECKs require."""
         if status not in FINISH_STATUSES:
             raise OutboxError("outbox_status_invalid")
+        # Same bounded backoff as the worker, anchored to the database clock instead of
+        # the caller's absolute deadline. Terminal outcomes need no retry delay.
+        retry_delay = backoff(event.attempts) if status in {"pending", "unknown"} else timedelta(0)
         statement = self._text(
             "UPDATE {s}.os_outbox SET status=:status, lease_owner=NULL, leased_at=NULL, "
             "last_error_code=CAST(:code AS varchar), "
-            "next_attempt_at=CAST(:next AS timestamptz), updated_at=GREATEST(now(), updated_at) "
+            "next_attempt_at=now() + CAST(:retry AS interval), updated_at=now() "
             "WHERE workspace_id=:ws AND event_id=CAST(:event AS uuid) "
             "AND lease_generation=:generation AND status='leased'"
         )
         with self._engine.begin() as conn:
             result = conn.execute(
                 statement,
-                {"status": status, "code": _code(error_code), "next": next_attempt_at,
+                {"status": status, "code": _code(error_code), "retry": retry_delay,
                  "ws": event.workspace_id, "event": event.event_id,
                  "generation": int(generation)},
             )
@@ -241,12 +249,12 @@ class PgOutbox:
                 self._text(
                     "UPDATE {s}.os_mirror_state SET "
                     "projected_version=GREATEST(projected_version, CAST(:v AS bigint)), "
-                    "last_attempt_at=CAST(:now AS timestamptz), "
+                    "last_attempt_at=now(), "
                     "status=CASE WHEN status IN ('synced','pending','delayed') THEN 'pending' "
-                    "ELSE status END, updated_at=CAST(:now AS timestamptz) "
+                    "ELSE status END, updated_at=now() "
                     "WHERE workspace_id=:ws"
                 ),
-                {"v": int(version), "now": now, "ws": self._workspace_id},
+                {"v": int(version), "ws": self._workspace_id},
             )
 
     def record_result(
@@ -271,12 +279,12 @@ class PgOutbox:
             f"scan_coverage=CASE WHEN {fresh} AND CAST(:has_cov AS boolean) "
             "THEN CAST(:cov AS jsonb) ELSE scan_coverage END, "
             f"last_verified_at=CASE WHEN CAST(:verified AS boolean) AND {fresh} "
-            "THEN CAST(:now AS timestamptz) ELSE last_verified_at END, "
+            "THEN now() ELSE last_verified_at END, "
             "verified_version=CASE WHEN CAST(:verified AS boolean) "
             "THEN GREATEST(verified_version, CAST(:v AS bigint)) ELSE verified_version END, "
             "projected_version=CASE WHEN CAST(:verified AS boolean) "
             "THEN GREATEST(projected_version, CAST(:v AS bigint)) ELSE projected_version END, "
-            "updated_at=CAST(:now AS timestamptz) "
+            "updated_at=now() "
             "WHERE workspace_id=:ws"
         )
         with self._engine.begin() as conn:
@@ -289,7 +297,6 @@ class PgOutbox:
                     "cov": json.dumps(dict(coverage or {}), ensure_ascii=False),
                     "verified": bool(verified),
                     "v": int(version),
-                    "now": now,
                     "ws": self._workspace_id,
                 },
             )

@@ -4,7 +4,8 @@ Default-off. ``start_if_enabled`` starts one daemon thread per process, and only
 ``assaf_os_mirror_enabled`` is set and the target is the configured mirror (never the OS workbook
 or a CRM workbook). Each tick (``run_once``):
 
-1. pauses on the kill switch, the freeze, a disabled mirror or a changed target, before any call;
+1. pauses on the kill switch, the freeze unless core authority is active, a disabled mirror or
+   a changed target, before any outbox, reader or Sheets call;
 2. claims outbox rows under a lease (one short transaction);
 3. loads one consistent snapshot through the reader (each read its own short transaction);
 4. projects every tab (headers are the schema labels; the summary tab from
@@ -31,6 +32,7 @@ import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from functools import cache
 from typing import Any, NamedTuple
 
 from sqlalchemy.exc import SQLAlchemyError
@@ -84,17 +86,24 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
-def pause_reason(settings: Any, binding: str | None = None) -> str | None:
-    """Why the mirror must not publish now, or None. Checked before any call (I8, I14)."""
-    if getattr(settings, "assaf_os_mirror_enabled", False) is not True:
-        return "disabled"
+def pause_reason(
+    settings: Any, binding: str | None = None, *,
+    authority_reader: Callable[[Any], api.AuthorityState | None] | None = None,
+) -> str | None:
+    """Why to pause, before outbox, reader or Sheets calls; frozen reads fail closed (E35)."""
     if getattr(settings, "kill_switch", True):
         return "kill_switch"
-    if getattr(settings, "assaf_os_freeze", True):
-        return "os_frozen"
+    if getattr(settings, "assaf_os_mirror_enabled", False) is not True:
+        return "disabled"
     target = str(getattr(settings, "os_mirror_spreadsheet_id", "") or "")
     if binding is not None and binding != destination_binding(target):
         return "mirror_target_changed"
+    if getattr(settings, "assaf_os_freeze", True):
+        try:
+            if (authority_reader or api.core_authority_state)(settings) != "active":
+                return "os_frozen"
+        except Exception:  # fail closed; never log authority values or exception payloads (I7)
+            return "os_frozen"
     return None
 
 
@@ -238,8 +247,9 @@ def _publish(
 def _tick(
     deps: MirrorDeps, settings: Any, *, now: datetime, lease_owner: str, anti_entropy: bool,
     claim_limit: int,
+    authority_reader: Callable[[Any], api.AuthorityState | None] | None,
 ) -> TickResult:
-    pause = pause_reason(settings, deps.destination_binding)
+    pause = pause_reason(settings, deps.destination_binding, authority_reader=authority_reader)
     if pause is not None:
         return TickResult("paused", pause)
     try:
@@ -260,7 +270,8 @@ def _tick(
         _finish_all(deps, events, "pending", "reader_unavailable", now)
         return TickResult("deferred", "reader_unavailable", len(events))
     core = snapshot.states.get("core")
-    if core not in _PUBLISHING:
+    publishing = {"active"} if getattr(settings, "assaf_os_freeze", True) else _PUBLISHING
+    if core not in publishing:
         _finish_all(deps, events, "pending", "authority_not_publishing", now)
         if core == "fenced":
             deps.outbox.record_result(
@@ -289,13 +300,14 @@ def run_once(
     lease_owner: str,
     anti_entropy: bool,
     claim_limit: int = CLAIM_LIMIT,
+    authority_reader: Callable[[Any], api.AuthorityState | None] | None = None,
 ) -> TickResult:
     """One publisher tick. Never raises a transport or store error; returns its outcome."""
     started = time.monotonic()
     try:
         result = _tick(
             deps, settings, now=now, lease_owner=lease_owner, anti_entropy=anti_entropy,
-            claim_limit=claim_limit,
+            claim_limit=claim_limit, authority_reader=authority_reader,
         )
     except _STORE_ERRORS:
         result = TickResult("deferred", "outbox_unavailable")
@@ -361,9 +373,11 @@ class MirrorPublisher:
         clock: Callable[[], datetime] | None = None,
         lease_owner: str | None = None,
         tick_seconds: float = TICK_SECONDS,
+        authority_reader: Callable[[Any], api.AuthorityState | None] | None = None,
     ) -> None:
         self._settings_provider = settings_provider
         self._deps_factory = deps_factory
+        self._authority_reader = authority_reader
         self._clock = clock or _utcnow
         self.lease_owner = lease_owner or f"mirror-{os.getpid()}-{uuid.uuid4().hex[:12]}"
         self._tick_seconds = tick_seconds
@@ -379,8 +393,17 @@ class MirrorPublisher:
     def tick(self) -> TickResult:
         settings = self._settings_provider()
         now = self._clock()
-        pause = pause_reason(settings)
+        # Both pause checks share one fresh, lazy read per tick, outside transport calls.
+        authority_state = cache(
+            lambda: (self._authority_reader or api.core_authority_state)(settings)
+        )
+        pause = pause_reason(
+            settings, self._deps.destination_binding if self._deps is not None else None,
+            authority_reader=lambda _: authority_state(),
+        )
         if pause is not None:
+            if pause == "mirror_target_changed":
+                self._deps = None
             if pause != self._last_pause:
                 _LOG.info("os_mirror op=tick outcome=paused reason=%s", pause)
                 self._last_pause = pause
@@ -406,7 +429,7 @@ class MirrorPublisher:
             or (self._recover_at is not None and now >= self._recover_at)
         )
         result = run_once(self._deps, settings, now=now, lease_owner=self.lease_owner,
-                          anti_entropy=due)
+                          anti_entropy=due, authority_reader=lambda _: authority_state())
         if result.reason == "mirror_target_changed":
             self._deps = None  # rebuilt on the next tick; the pinned binding then refuses
         if due and result.outcome not in {"paused", "deferred", "refused"}:

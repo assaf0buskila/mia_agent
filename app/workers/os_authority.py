@@ -301,8 +301,9 @@ class Probes(Protocol):
 
     def unknown_receipts(self) -> int: ...
 
-    def mirror(self, workspace: str) -> str:
-        """``empty``, ``verified`` or ``unverified``."""
+    def mirror(self, workspace: str, version: int | None) -> str:
+        """``empty``, ``verified`` or ``unverified``; None checks only the last projection's
+        cleanliness for pre-activation, an int also requires verification at that version."""
 
     def non_import_receipts(self, workspace: str, epoch: int) -> int: ...
 
@@ -526,7 +527,7 @@ class LiveProbes:
         with Session(self._engine("main")) as session:
             return unknown_assaf_os_receipts(session)
 
-    def mirror(self, workspace: str) -> str:
+    def mirror(self, workspace: str, version: int | None) -> str:
         from sqlalchemy import text
 
         with self._engine("privileged").connect() as connection:
@@ -536,7 +537,10 @@ class LiveProbes:
             ), {"workspace": workspace}).first()
         if row is None:
             return "empty"
-        if row[0] == "synced" and row[1] == row[2] and row[3] is None:
+        if (
+            row[0] == "synced" and row[1] == row[2] and row[3] is None
+            and (version is None or row[2] >= version)
+        ):
             return "verified"
         return "unverified"
 
@@ -886,7 +890,9 @@ def _check_drill(ctx: Context, snapshot: api.AuthoritySnapshot) -> Check:
 
 
 def _check_mirror(ctx: Context, snapshot: api.AuthoritySnapshot) -> Check:
-    state = ctx.deps.probes.mirror(ctx.deps.workspace)
+    # Pre-activation may lag: the freeze prevents catching up until core becomes active.
+    # Only a clean last projection (or an empty mirror) is sufficient here; T7 uses status.
+    state = ctx.deps.probes.mirror(ctx.deps.workspace, None)
     return _pass("mirror_not_verified") if state in {"empty", "verified"} else _fail(
         "mirror_not_verified"
     )
@@ -1141,7 +1147,8 @@ def cmd_status(ctx: Context) -> Result:
         # this epoch (the point of no simple rollback), and whether the mirror is verified.
         "non_import_receipts": observed(
             lambda: deps.probes.non_import_receipts(deps.workspace, snapshot.epoch)),
-        "mirror": observed(lambda: deps.probes.mirror(deps.workspace)) or "unknown",
+        "mirror": observed(
+            lambda: deps.probes.mirror(deps.workspace, snapshot.version)) or "unknown",
         "evidence": evidence,
     }
     return Result(True, document)

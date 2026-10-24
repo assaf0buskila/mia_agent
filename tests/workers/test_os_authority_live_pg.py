@@ -55,7 +55,7 @@ if pg_enabled():
         env.ensure_workspace(WORKSPACE, OWNER_ID, 1)
         probes, engine = live_probes(url), create_engine(url)
         try:
-            assert probes.mirror(WORKSPACE) == "empty"
+            assert probes.mirror(WORKSPACE, 3) == "empty"
             cases = [
                 ({"status": "synced", "projected": 3, "verified": 3, "error": None}, "verified"),
                 ({"status": "synced", "projected": 3, "verified": 2, "error": None}, "unverified"),
@@ -71,8 +71,11 @@ if pg_enabled():
             for values, expected in cases:
                 with engine.begin() as connection:
                     mirror_row(connection, **values)
-                assert probes.mirror(WORKSPACE) == expected, values
-            assert probes.mirror("another-workspace") == "empty"
+                version = values["projected"]
+                assert probes.mirror(WORKSPACE, version) == expected, values
+                assert probes.mirror(WORKSPACE, None) == expected, values
+                assert probes.mirror(WORKSPACE, version + 1) == "unverified", values
+            assert probes.mirror("another-workspace", 3) == "empty"
         finally:
             probes.close()
             engine.dispose()
@@ -173,7 +176,7 @@ if pg_enabled():
         env = build_pg_env(url)
         env.ensure_workspace(WORKSPACE, OWNER_ID, 1)
         probes = live_probes(url)
-        probes.mirror(WORKSPACE)
+        probes.mirror(WORKSPACE, 0)
         assert list(probes._engines) == ["privileged"]
         probes.close()
         assert probes._engines == {}
