@@ -151,6 +151,51 @@ def test_first_delivery_writes_the_full_projection_and_verifies(world: World) ->
     assert world.sheets.values(mp.ENTITY_TABS["clients"])[0] == list(mp.headers("clients"))
 
 
+@pytest.mark.parametrize("equal", [True, False])
+def test_empty_progress_rewrites_retried_events_and_clears_old_extents(world: World, equal):
+    ids = world.seed()
+    assert world.tick().outcome == "verified"
+    writes, reads = len(world.sheets.writes), world.sheets.reads
+    world.outbox.state.update(
+        status="pending", projected_version=0, verified_version=0,
+        last_attempt_at=None, last_verified_at=None, last_error_code=None, scan_coverage={},
+    )
+    for event_id in ids:
+        world.outbox.row(event_id).update(status="unknown", next_attempt_at=world.clock())
+    if not equal:
+        world.sheets.grid[mp.ENTITY_TABS["tasks"]][(50, 30)] = "stale-tail"
+    assert world.tick().outcome == "verified"
+    assert len(world.sheets.writes) == writes + 1, "empty progress must be re-proven by a write"
+    assert world.sheets.reads == reads + 2, "extent scan, then readback after the full rewrite"
+    assert "stale-tail" not in world.sheets.all_cells()
+    assert world.state().verified_version == world.reader.version
+
+
+@pytest.mark.parametrize("failure", ["extent_scan", "write_not_sent"])
+def test_empty_progress_still_requires_a_rewrite_after_a_prewrite_failure(world: World, failure):
+    ids = world.seed()
+    assert world.tick().outcome == "verified"
+    writes = len(world.sheets.writes)
+    world.outbox.state.update(
+        status="pending", projected_version=0, verified_version=0,
+        last_attempt_at=None, last_verified_at=None, last_error_code=None, scan_coverage={},
+    )
+    for event_id in ids:
+        world.outbox.row(event_id).update(status="unknown", next_attempt_at=world.clock())
+    if failure == "extent_scan":
+        world.sheets.fail_next_read = True
+    else:
+        world.sheets.fail_next_write = "not_sent"
+    assert world.tick().outcome == "delayed"
+    assert world.state().verified_version == 0
+    attempted_writes = len(world.sheets.writes)
+    assert attempted_writes == writes + (failure == "write_not_sent")
+    world.clock.advance(60)
+    assert world.tick().outcome == "verified"
+    assert len(world.sheets.writes) == attempted_writes + 1
+    assert world.state().last_verified_at == world.clock()
+
+
 # ---------------------------------------------------------------------------------------------
 # §20 gate: a lost ack converges on readback.
 
@@ -414,7 +459,7 @@ def test_freeze_with_active_authority_publishes_and_verifies(world: World, monke
     assert result == os_mirror.TickResult("verified", "readback_equal", len(ids))
     assert calls == [1]
     assert world.statuses(ids) == ["sent"] * len(ids)
-    assert len(world.sheets.writes) == 1 and world.sheets.reads == 1
+    assert len(world.sheets.writes) == 1 and world.sheets.reads == 2
     state = world.state()
     assert state.status == "synced"
     assert state.verified_version == world.reader.version == state.projected_version
@@ -451,7 +496,7 @@ def test_active_precheck_with_shadow_snapshot_requires_active_under_freeze(
     else:
         assert result == os_mirror.TickResult("verified", "readback_equal", len(ids))
         assert world.statuses(ids) == ["sent"] * len(ids)
-        assert len(world.sheets.writes) == world.sheets.reads == 1
+        assert len(world.sheets.writes) == 1 and world.sheets.reads == 2
 
 
 @pytest.mark.parametrize("authority", ["shadow", "fenced", "restoring", None, "missing",
@@ -797,7 +842,8 @@ def test_not_sent_error_defers_with_backoff_and_reports_delayed(world: World) ->
 
 def test_readback_failure_after_a_write_is_unknown(world: World) -> None:
     ids = world.seed()
-    world.sheets.fail_next_read = True
+    # The empty-progress extent scan precedes the write; fail the read AFTER it lands.
+    world.sheets.before_apply = lambda: setattr(world.sheets, "fail_next_read", True)
     result = world.tick()
     assert (result.outcome, result.reason) == ("unknown", "readback_failed")
     assert world.statuses(ids) == ["unknown"] * len(ids)

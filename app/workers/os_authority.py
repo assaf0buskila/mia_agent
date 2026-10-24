@@ -1,6 +1,6 @@
 """``mia os-authority``: the authority fence and cutover CLI (V2_PG_CONTRACTS.md section 16, V2-31).
 
-    mia os-authority init|preflight|freeze-plan|activate|fence|rollback|status --approved-sha <sha>
+    mia os-authority <command> --approved-sha <sha>
 
 It runs on the privileged migration DSN (the ``AuthorityAdmin`` of section 5.4), behind the same
 exact-SHA go as ``mia os-ledger``. It never touches Secret Manager, a Script Property, a workbook or
@@ -48,7 +48,8 @@ from app.services.os_ledger import api
 
 _LOG = logging.getLogger("mia.os_authority")
 
-COMMANDS = ("init", "preflight", "freeze-plan", "activate", "fence", "rollback", "status")
+COMMANDS = ("init", "preflight", "freeze-plan", "activate", "fence", "rollback", "status",
+            "mirror-reset")
 
 # Section 16: every activation precondition, in table order. Each is a refusal reason code.
 PRECONDITIONS = (
@@ -519,11 +520,18 @@ class LiveProbes:
 
         with self._engine("privileged").connect() as connection:
             row = connection.execute(text(
-                "SELECT status, projected_version, verified_version, last_error_code "
+                "SELECT status, projected_version, verified_version, last_error_code, "
+                "last_attempt_at, last_verified_at "
                 "FROM assaf_os.os_mirror_state WHERE workspace_id = :workspace"
             ), {"workspace": workspace}).first()
         if row is None:
             return "empty"
+        if version is None:
+            # Reset/never-attempted progress is empty, while retaining the destination pin.
+            if tuple(row) == ("pending", 0, 0, None, None, None):
+                return "empty"
+            if row[0] == "fenced" and row[1] == row[2] and row[3] == "authority_fenced":
+                return "verified"  # clean for activation only; status/T7 still require synced
         if (
             row[0] == "synced" and row[1] == row[2] and row[3] is None
             and (version is None or row[2] >= version)
@@ -875,7 +883,8 @@ def _check_drill(ctx: Context, snapshot: api.AuthoritySnapshot) -> Check:
 
 def _check_mirror(ctx: Context, snapshot: api.AuthoritySnapshot) -> Check:
     # Pre-activation may lag: the freeze prevents catching up until core becomes active.
-    # Only a clean last projection (or an empty mirror) is sufficient here; T7 uses status.
+    # Only a clean last projection (including rollback-fenced clean) or empty progress suffices;
+    # T7 uses status, which still requires synced verification at the current version.
     state = ctx.deps.probes.mirror(ctx.deps.workspace, None)
     return _pass("mirror_not_verified") if state in {"empty", "verified"} else _fail(
         "mirror_not_verified"
@@ -1269,6 +1278,37 @@ def cmd_fence(ctx: Context) -> Result:
                          **_snapshot_document(snapshot)})
 
 
+def cmd_mirror_reset(ctx: Context, *, expected_epoch: int | None) -> Result:
+    """Clear progress before activation, preserving the pin and auditing under the state lock."""
+    from app.services.os_ledger.outbox import destination_binding
+
+    if expected_epoch is None or expected_epoch < 1:
+        raise Refusal("expected_epoch_required")
+    deps = ctx.deps
+    if deps.settings.assaf_os_freeze is not True:
+        raise Refusal("freeze_off")
+    target = getattr(deps.settings, "os_mirror_spreadsheet_id", "")
+    if not isinstance(target, str) or not target.strip():
+        raise Refusal("mirror_destination_missing")
+    audit_name = f"mirror-reset-{uuid4().hex}.json"
+
+    def audit() -> None:
+        # Written inside the locked transaction before the UPDATE. An unwritable audit refuses
+        # the reset. This records authorization, not a commit that might still fail afterwards.
+        deps.evidence.write(audit_name, {
+            "v": 1, "kind": "mirror_reset", "outcome": "authorized",
+            "recorded_at": _iso(ctx.now), "release_sha": ctx.approved_sha,
+            "epoch": expected_epoch, "workspace": deps.workspace, "owner_id": deps.owner_id,
+        })
+
+    changed = deps.admin.reset_mirror(
+        deps.workspace, expected_epoch=expected_epoch, actor_owner_id=deps.owner_id,
+        destination_binding=destination_binding(target), audit=audit,
+    )
+    return Result(True, {"command": "mirror-reset", "ok": True,
+                         "outcome": "reset" if changed else "already_empty", "audit": audit_name})
+
+
 def rollback_steps(epoch: int) -> list[str]:
     return [
         "Core is fenced: the ledger refuses every write. The Sheet is exactly as captured.",
@@ -1472,6 +1512,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="preflight --drain: allow the one disclosed mutating snapshot (T2 final accept)",
     )
     parser.add_argument("--rearm", action="store_true", help="init: fenced to shadow, epoch + 1")
+    parser.add_argument("--expected-epoch", type=int, help="mirror-reset: exact current epoch")
     parser.add_argument("--phase", choices=PHASES, default="drain", help="freeze-plan phase")
     return parser
 
@@ -1529,6 +1570,8 @@ def _dispatch(ctx: Context, args: argparse.Namespace) -> Result:
         return cmd_activate(ctx)
     if command == "fence":
         return cmd_fence(ctx)
+    if command == "mirror-reset":
+        return cmd_mirror_reset(ctx, expected_epoch=args.expected_epoch)
     return cmd_rollback(ctx)
 
 

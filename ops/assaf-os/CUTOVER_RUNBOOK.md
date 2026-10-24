@@ -63,7 +63,7 @@ fill) and [APP_ROLE_DEMOTE.md](../../docs/runbooks/APP_ROLE_DEMOTE.md) (step 2 i
 | 4 | Provision the ledger roles, then the validator | G07 | Re-run (idempotent); see the staged-DSN rule |
 | 5 | `mia os-authority init` | G08 | Idempotent; nothing to undo before an import |
 | 6 | Rehearsal (V2-35a, V2-35) on a copy | G09 | The copy is thrown away |
-| 7 | Wave 6: T1 to T7, the first write, phone acceptance | G10 to G24 | Section 5 |
+| 7 | Wave 6: T1 to T7, the first write, phone acceptance | G10 to G25 | Section 5 |
 
 Every production step above pauses the jobs and takes a verified backup first (section 0). Steps 1 to
 5 touch no business data: the OS stays on Sheets until T6.
@@ -590,6 +590,11 @@ Allowed **only** while `non_import_receipts` is 0 at the current epoch. After th
   that came before it had one. Then repeat T1 to T7 from a fresh drain, a fresh fence and new captures:
   the import request id and batch key include the epoch, so the same workbook imports again at the new
   epoch. There is no `fenced` to `active`.
+  Before activation on the retry, use the E35a mirror rule in section 7: empty or a clean last
+  projection that may lag, including a fenced-clean row. If uncertain progress blocks preflight,
+  use `sudo mia os-authority mirror-reset --approved-sha S --expected-epoch E` with the retry's
+  current epoch after T1 has applied the freeze. Then repeat preflight, activate and T7; the reset
+  never substitutes for T7 verification.
 
 ## 6. After the first non-import receipt
 
@@ -603,6 +608,10 @@ number.
   words in `OS_CUTOVER_GO_NO_GO.md`; until then it is not one.
 - **Afterwards**: recovery is a restore (`fenced` to `restoring`, then `active` with an epoch bump) under
   its own go (G21) and plan, not an automated command of this tool.
+  If that approved recovery plan needs a mirror retry before activation, section 7's `mirror-reset`
+  remedy can clear uncertain mirror progress while frozen and core is not active. It clears no
+  receipts and grants no return to Sheets or authority transition. T7 and section 4 still require
+  verification at the current version after activation.
 
 ## 7. Reason codes
 
@@ -622,10 +631,30 @@ refuses on any `fail` and on any `pending`.
 | `approval_cards_open` | Every `assaf_os.approve` card is terminal | Settle or let it expire |
 | `backup_too_old` | `backup.json` shows a dump under 1 h old | Re-run `--status` after a fresh backup |
 | `restore_drill_too_old` | `restore-drill.json`: passed, within 7 days | Re-run the drill |
-| `mirror_not_verified` | The mirror is empty or verified | Wait for a verified mirror, or fix the conflict |
+| `mirror_not_verified` | E35a: empty or a clean last projection that may lag; a fenced-clean row counts | Before activation only, use the guarded `mirror-reset` remedy below for uncertain progress, then preflight and T7 |
 | `manifest_not_signed` | `manifest.json` verifies every binding of section 2 | Re-sign the exact digest |
 | `fe_v2_reader_not_live` | `fe-v2.json` carries the Cloudflare version and bundle hash | Record the live reader |
 | `journal_capacity` | `journal.json`: fresh, exactly the five tabs and `max_rows` 2000, each tab at most 90 percent of the cap | Fix the file (`tabs`, `max_rows`), or archive rows (`at_cap`) |
+
+**E35a mirror retry remedy (before activation only).** A clean projection is `synced` with no error
+and `projected_version == verified_version`; it may lag the ledger before activation. A fenced-clean
+row has `status=fenced`, equal versions and `last_error_code=authority_fenced`: only rollback fenced
+the last clean projection. T7 and section 4 still require `mirror: verified` at the current version.
+An uncertain `conflict`, `unknown`, `pending`, or fenced row with unequal versions or another error
+does not pass. Never-attempted empty progress (pending, zero versions, null attempt/verification/error)
+counts as empty for preflight only.
+
+**Go G25** mirror progress reset, before activation only. With its own explicit owner go for production, run
+`sudo mia os-authority mirror-reset --approved-sha S --expected-epoch E`, using the current epoch.
+It requires the exact SHA and epoch, freeze ON and core authority NOT `active`. It takes the workspace
+state lock, checks the pinned destination against settings, and clears only that workspace's
+`os_mirror_state` progress to empty. It preserves the destination pin, never touches the workbook,
+and changes no receipts, outbox rows, ledger version or authority. It is idempotent. An authorization
+audit (`mirror-reset-<id>.json`) is written under the lock in `/var/lib/mia/os-authority` before the
+reset; failure to write it aborts the reset. The audit records authorization; the command's successful
+JSON result confirms commit. Repeat preflight and activation. At T7 the first projection is a
+full rewrite plus readback, scanning the old extents first to clear trailing cells; even an equal
+pre-write scan cannot replace the write and readback proof.
 
 Other refusals of the CLI:
 
@@ -645,6 +674,14 @@ Other refusals of the CLI:
 | `evidence_unwritable` | The evidence directory cannot be written |
 | `dsn_missing`, `owner_ambiguous`, `workspace_invalid` | The job environment is incomplete |
 | `internal_error` | An unexpected failure; its text is never printed |
+| `expected_epoch_required` | `mirror-reset` requires a positive `--expected-epoch` |
+| `mirror_destination_missing` | `mirror-reset` needs a configured destination |
+
+For `mirror-reset`, `freeze_off` means apply T1 before retrying;
+`authority_changed:core_active` refuses a reset while core is active, and
+`authority_changed:epoch_mismatch` means the owner or epoch no longer matches. Re-read status and
+obtain the go for the current target; never use the reset to bypass activation or a restore plan.
+`authority_changed:mirror_destination_changed` refuses to replace the existing destination pin.
 
 ## 8. Owner gates, in one list
 
@@ -676,3 +713,4 @@ Each needs its own explicit statement in chat, for that step only.
 | G22 | `fence`: stopping all ledger writes after the first non-import receipt (not pre-approved) |
 | G23 | `init --rearm`: `fenced` to `shadow` with one epoch bump, to try again after a rollback |
 | G24 | Staging the import into the production ledger (`os-job os-import`), before the promote of G12 |
+| G25 | `mirror-reset` before activation: clear uncertain mirror progress under the freeze, preserving its destination pin |

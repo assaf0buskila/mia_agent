@@ -195,6 +195,10 @@ def _publish(
         return TickResult("deferred", exc.code, len(events))
     version = projection.observed_version
     in_conflict = state.status == "conflict"
+    must_rewrite = (
+        state.status in {"pending", "delayed", "fenced"}
+        and state.verified_version == 0 and state.last_verified_at is None
+    )
     # A synced mirror at this exact version, with nothing to deliver: read only, never write.
     drift_check = (
         anti_entropy and not events and state.status == "synced"
@@ -207,7 +211,7 @@ def _publish(
         state.status == "unknown" or any(event.attempts > 1 for event in events)
     )
     coverage: Mapping[str, Any] = state.scan_coverage
-    if drift_check or read_first:
+    if drift_check or read_first or must_rewrite:
         try:
             before = deps.transport.batch_get(mp.read_ranges())
         except MirrorTransportError as exc:
@@ -215,7 +219,7 @@ def _publish(
                 # Nothing was written and nothing was learned: the mirror stays synced.
                 return TickResult("delayed", exc.code, 0)
             return _transport_failed(deps, events, state, version, now, exc.code, sent=False)
-        if mp.readback_equal(projection, before):
+        if not must_rewrite and mp.readback_equal(projection, before):
             return _verified(deps, events, version, now, before)
         if drift_check:
             deps.outbox.record_result(
@@ -223,6 +227,9 @@ def _publish(
                 coverage=mp.coverage_of(before),
             )
             return TickResult("conflict", "drift", 0)
+        # Empty/reset progress has no trusted extents. Scan first to clear old trailing cells,
+        # then rewrite even if equal. Keep this requirement through known pre-write failures:
+        # delayed/pending without any verification cannot take the read-only retry shortcut.
         coverage = mp.coverage_of(before)
 
     deps.outbox.record_attempt(version, now)
