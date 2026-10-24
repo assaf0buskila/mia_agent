@@ -9,11 +9,11 @@ from __future__ import annotations
 
 import logging
 import re
-from uuid import uuid4
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
+from app.core.owner_timing import request_id_or_new
 from app.services.os_ledger.api import LedgerError
 
 _LOG = logging.getLogger("mia.os_v2")
@@ -43,7 +43,9 @@ def ledger_error_response(exc: LedgerError, *, write: bool) -> JSONResponse:
         error["details"] = dict(exc.details)
     return JSONResponse(
         status_code=exc.status,
-        content={"api_version": "owner-os.v1", "request_id": uuid4().hex, "error": error},
+        # The request's own id (also the x-request-id header the boundary sets), so a phone-side
+        # error joins the server logs; a fresh random id when rendered outside a request.
+        content={"api_version": "owner-os.v1", "request_id": request_id_or_new(), "error": error},
         headers=_HEADERS,
     )
 

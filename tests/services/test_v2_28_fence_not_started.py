@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import UTC, datetime
 
 import pytest
@@ -197,8 +198,19 @@ def test_a_fenced_telegram_approve_is_not_started_and_releases_its_claim(
     )
     assert second.status == "not_started"
     assert calls == [("TELEGRAM_APPROVAL", "approve")] * 2
-    lines = [r.getMessage() for r in caplog.records if "not_started" in r.getMessage()]
+    # The fence's own refusal lines carry the reason; the OS-RUNTIME timing line of the same
+    # decision (`op=sheets_decide`) carries the fixed outcome and the duration instead.
+    timing_prefix = "owner_actions op=sheets_decide "
+    messages = [r.getMessage() for r in caplog.records]
+    lines = [m for m in messages if "not_started" in m and not m.startswith(timing_prefix)]
     assert lines and all("reason=authority_moved" in line for line in lines)
+    timing = [m for m in messages if m.startswith(timing_prefix)]
+    assert len(timing) == 2 and all(
+        re.fullmatch(
+            r"owner_actions op=sheets_decide operation=approve outcome=not_started ms=\d+", m
+        )
+        for m in timing
+    ), timing
     assert not any(pending()["proposal_id"] in r.getMessage() for r in caplog.records)
 
 

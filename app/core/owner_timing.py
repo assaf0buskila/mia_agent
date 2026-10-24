@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import logging
 import re
+import uuid
 from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from contextvars import ContextVar
@@ -62,8 +63,10 @@ _TIMEOUT_STAGES = frozenset(
     {"model_primary", "model_fallback", "tool", "tool_abandoned", "final_model"}
 )
 # The only Server-Timing names the backend may emit, in emission order.
-# "ledger" is reserved for the PostgreSQL authority and has no emitter yet.
-SERVER_TIMING_METRICS = ("auth", "db", "script", "ledger", "verify")
+# "ledger" is the PostgreSQL authority (PostgresOsBackend and the v2 reads). "total" is the whole
+# server-side request wall time and is last: only the OwnerOSBoundary sets it, never a stage.
+SERVER_TIMING_METRICS = ("auth", "db", "script", "ledger", "verify", "total")
+_PHASE_METRICS = tuple(name for name in SERVER_TIMING_METRICS if name != "total")
 # Timings must never let a client tell unknown, expired or revoked credentials apart.
 _NO_TIMING_STATUSES = frozenset({401, 403})
 _MAX_MS = 2_147_483_647
@@ -71,6 +74,36 @@ _SAFE = re.compile(r"[^a-zA-Z0-9_.:-]")
 _REASON = re.compile(r"[a-z][a-z0-9_]{1,47}")
 _KNOWN_MODEL_PREFIXES = ("gpt-", "o1", "o3", "o4", "gemini-", "claude-", "text-")
 _SOURCE_HASH: ContextVar[str] = ContextVar("mia_owner_source_hash", default="")
+# The random id of the private request in flight (uuid4 hex, set by OwnerOSBoundary). It joins the
+# server log lines to the response header and the phone; it identifies nothing else.
+_REQUEST_ID: ContextVar[str] = ContextVar("mia_owner_request_id", default="")
+_OPS = frozenset(
+    {
+        "snapshot", "schema", "cached", "propose", "proposal", "approve", "reject", "receipt",
+        "pending", "proposal_request", "commit", "undo", "abandon", "deleted", "auth", "other",
+    }
+)
+
+
+def current_request_id() -> str:
+    """The id of the private request in flight, or ``"none"`` outside one."""
+    return _REQUEST_ID.get() or "none"
+
+
+def request_id_or_new() -> str:
+    """The id in flight, else a fresh random one (an envelope rendered outside any request)."""
+    rid = _REQUEST_ID.get()
+    return rid if rid else uuid.uuid4().hex
+
+
+@contextmanager
+def request_id_scope(rid: str) -> Iterator[str]:
+    """Hold ``rid`` as the current request id for the whole of one private request."""
+    token = _REQUEST_ID.set(rid)
+    try:
+        yield rid
+    finally:
+        _REQUEST_ID.reset(token)
 
 
 class RequestTiming:
@@ -167,7 +200,7 @@ def owner_stage(
     """
     if stage not in _ALLOWED_STAGES:
         raise ValueError("unknown_owner_stage")
-    if metric and (stage not in _OS_STAGES or metric not in SERVER_TIMING_METRICS):
+    if metric and (stage not in _OS_STAGES or metric not in _PHASE_METRICS):
         raise ValueError("unknown_server_timing_metric")
     started = monotonic()
     outcome = "ok"
@@ -188,12 +221,13 @@ def owner_stage(
         elapsed = min(_MAX_MS, max(0, int((monotonic() - started) * 1000)))
         if stage in _OS_STAGES:
             _LOG.info(
-                "owner_stage stage=%s metric=%s outcome=%s latency_ms=%d reason=%s",
+                "owner_stage stage=%s metric=%s outcome=%s latency_ms=%d reason=%s rid=%s",
                 stage,
                 metric or "none",
                 outcome,
                 elapsed,
                 reason,
+                _safe(current_request_id(), 40),
             )
         else:
             _LOG.info(
@@ -243,13 +277,29 @@ def log_timeout_stage(stage: str, *, source_ref: str = "") -> None:
     _LOG.info("owner_stage_timeout timeout_stage=%s source_ref_hash=%s", name, source_hash)
 
 
+def log_owner_os_request(*, op: str, status: int, total_ms: int, rid: str) -> None:
+    """The one summary line of a private owner request: a fixed op, a status, integer ms, the id.
+
+    ``op`` comes from the boundary's fixed (method, path) table, never the raw path; anything
+    outside it logs as ``other``.
+    """
+    _LOG.info(
+        "owner_os_request op=%s status=%d total_ms=%d rid=%s",
+        op if op in _OPS else "other",
+        int(status),
+        min(_MAX_MS, max(0, int(total_ms))),
+        _safe(rid, 40),
+    )
+
+
 def owner_phase(metric: str, stage: str) -> AbstractContextManager[None]:
     """owner_stage plus a Server-Timing metric, and silent outside an owner OS request.
 
     The shared ports also serve Telegram and the owner tools; those callers have no active
-    request, so they neither log OS stages nor accumulate a metric.
+    request, so they neither log OS stages nor accumulate a metric. ``total`` is refused: only the
+    boundary sets it, once, for the whole request.
     """
-    if metric not in SERVER_TIMING_METRICS or stage not in _OS_STAGES:
+    if metric not in _PHASE_METRICS or stage not in _OS_STAGES:
         raise ValueError("unknown_server_timing_phase")
     if _REQUEST.get() is None:
         return nullcontext()

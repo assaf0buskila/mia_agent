@@ -556,3 +556,154 @@ def test_frozen_frontend_bff_to_postgres(os_pg):
         server.should_exit = True
         thread.join(timeout=10)
         listener.close()
+
+
+# ---- OS-RUNTIME F3: the owner-session database is released before the Apps Script call ----------
+
+UNIFIED = OS_API + "/unified"
+
+
+def _enable_assaf_os(settings) -> None:
+    """The shared Assaf OS on the fixture's settings; call it BEFORE login (scopes are baked in)."""
+    settings.assaf_os_enabled = True
+    settings.assaf_os_script_url = "https://script.google.com/macros/s/" + "x" * 24 + "/exec"
+    settings.assaf_os_workbook_id = "workbook_12345678901234567890"
+    settings.assaf_os_workspace_id = settings.owner_os_workspace_id
+    settings.assaf_os_hmac_secret = "assaf-os-test-secret-at-least-32-bytes"
+    settings.assaf_os_mode = "TEST"
+    settings.owner_os_session_scopes += ",assaf-os:read,assaf-os:propose,assaf-os:approve"
+
+
+@pytest.fixture
+def os_script(os_pg, monkeypatch):
+    """A signed fake Apps Script that reports what the owner-session database holds DURING a call.
+
+    ``seen`` gets ``(operation, idle_in_transaction_backends, checked_out_connections)`` for every
+    Script call. The count comes from a separate connection (its own pid excluded) over the whole
+    ``owner_os_test`` database; the pool figure is the owner-session engine's own.
+    """
+    from app.api.owner_sessions import _session_factory
+    from app.services import assaf_os as port
+    from sqlalchemy.pool import NullPool
+
+    from tests.unit import test_assaf_os as assaf
+
+    client, settings, engine, urls = os_pg
+    _enable_assaf_os(settings)
+    port._clear_assaf_os_decision_binding_cache()
+    port._clear_assaf_os_schema_cache()
+    watcher = create_engine(os.environ["MIA_OWNER_OS_TEST_POSTGRES_URL"], poolclass=NullPool)
+    seen: list[tuple[str, int, int]] = []
+
+    def held() -> tuple[int, int]:
+        with watcher.connect() as c:
+            idle = c.scalar(text(
+                "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() "
+                "AND pid <> pg_backend_pid() AND state LIKE 'idle in transaction%'"
+            ))
+        return idle, _session_factory(urls["auth"])[0].pool.checkedout()
+
+    def respond(_url, raw, _budget):
+        request = json.loads(json.loads(raw)["payload"])
+        operation = request["operation"]
+        seen.append((operation, *held()))
+        if operation == "schema":
+            result = assaf._schema(settings)
+        elif operation == "snapshot":
+            result = assaf._snapshot(settings)
+        elif operation in {"propose", "proposal"}:
+            result = assaf._pending(settings, "OS")
+        else:
+            result = assaf._decision_result(settings, request)
+        return assaf.signed(raw, result, settings)
+
+    monkeypatch.setattr(port, "_post", respond)
+    yield client, settings, engine, urls, seen, held
+    port._clear_assaf_os_decision_binding_cache()
+    port._clear_assaf_os_schema_cache()
+    watcher.dispose()
+
+
+def _unified_call(client, op: str, csrf: str, settings):
+    from tests.unit import test_assaf_os as assaf
+
+    pending = assaf._pending(settings, "OS")
+    headers = {"X-CSRF-Token": csrf}
+    if op == "schema":
+        return client.get(UNIFIED + "/schema")
+    if op == "snapshot":
+        return client.get(UNIFIED)
+    if op == "propose":
+        body = {key: pending[key] for key in (
+            "request_id", "entity", "record_id", "expected_revision", "input")}
+        return client.post(UNIFIED + "/proposals", json=body, headers=headers)
+    return client.post(
+        f"{UNIFIED}/proposals/{assaf.PROPOSAL}/approve",
+        json={"request_id": pending["approval_request_id"]}, headers=headers,
+    )
+
+
+@pytest.mark.parametrize("op", ["schema", "snapshot", "propose", "approve"])
+def test_the_owner_session_db_is_released_before_every_script_call(os_script, op):
+    client, settings, _engine, _urls, seen, held = os_script
+    csrf = login(client)
+    response = _unified_call(client, op, csrf, settings)
+    assert response.status_code == 200, response.text
+    assert seen, "the Script was never called"
+    for call, idle, checked_out in seen:
+        print(f"OS-RUNTIME F3 op={op} script_call={call} idle_in_transaction={idle} "
+              f"pool_checked_out={checked_out}")
+        assert idle == 0, f"{idle} backend(s) idle in transaction during the {call} call"
+        assert checked_out == 0, f"{checked_out} pooled connection(s) held during the {call} call"
+    assert held() == (0, 0)
+
+
+def test_the_cached_snapshot_route_also_releases_its_session(os_script, monkeypatch):
+    from app.api import assaf_os as assaf_os_routes
+
+    client, settings, _engine, _urls, seen, held = os_script
+    login(client)
+    during: list[tuple[int, int]] = []
+
+    def cache_read(_settings, _owner_id):
+        during.append(held())
+        return {"state": "empty"}
+
+    monkeypatch.setattr(assaf_os_routes, "read_cached_snapshot", cache_read)
+    response = client.get(UNIFIED + "/cached")
+    assert response.status_code == 200, response.text
+    print(f"OS-RUNTIME F3 op=cached idle_in_transaction/pool_checked_out={during}")
+    assert during == [(0, 0)] and seen == []
+
+
+def test_release_keeps_every_auth_refusal_and_never_reaches_the_script(os_script):
+    client, settings, engine, urls, seen, held = os_script
+    csrf = login(client)
+    proposal = {"request_id": str(uuid4()), "entity": "tasks", "record_id": None,
+                "expected_revision": 0, "input": {"title": "x", "status": "לביצוע"}}
+    wrong_origin = client.get(UNIFIED, headers={"Origin": "https://attacker.invalid"})
+    assert wrong_origin.status_code == 403
+    assert wrong_origin.json()["error"]["code"] == "origin_denied"
+    bad_csrf = client.post(UNIFIED + "/proposals", json=proposal,
+                           headers={"X-CSRF-Token": "w" * 64})
+    assert bad_csrf.status_code == 403 and bad_csrf.json()["error"]["code"] == "csrf_denied"
+    no_csrf = client.post(UNIFIED + "/proposals", json=proposal)
+    assert no_csrf.status_code == 403 and no_csrf.json()["error"]["code"] == "csrf_denied"
+    with engine.begin() as c:
+        c.execute(text("UPDATE owner_os_sessions SET revoked_at = now()"))
+    revoked = client.get(UNIFIED)
+    assert revoked.status_code == 401 and revoked.json()["error"]["code"] == "owner_auth_required"
+    revoked_write = client.post(
+        UNIFIED + "/proposals", json=proposal, headers={"X-CSRF-Token": csrf}
+    )
+    assert revoked_write.status_code == 401
+    with engine.begin() as c:
+        c.execute(text("DELETE FROM owner_os_sessions"))
+        c.execute(text("DELETE FROM owner_os_revocations"))
+    login(client)
+    with engine.begin() as c:
+        c.execute(text("UPDATE owner_os_sessions SET expires_at = now() - interval '1 minute'"))
+    expired = client.get(UNIFIED)
+    assert expired.status_code == 401 and expired.json()["error"]["code"] == "owner_auth_required"
+    assert seen == [], "a refused request reached the Apps Script"
+    assert held() == (0, 0)
