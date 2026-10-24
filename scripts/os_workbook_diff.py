@@ -15,10 +15,22 @@ from app.services.os_ledger.xlsx import Workbook, XlsxError, read_xlsx
 
 
 def changed_cells(left: Workbook, right: Workbook) -> list[tuple[str, str]]:
-    """Compare value, type, date flag and formula, without returning any values."""
+    """Compare cells and workbook structure, returning only coordinates and synthetic refs."""
     before = {(sheet.name, ref): cell for sheet in left.sheets for ref, cell in sheet.cells.items()}
     after = {(sheet.name, ref): cell for sheet in right.sheets for ref, cell in sheet.cells.items()}
-    return sorted(ref for ref in before.keys() | after.keys() if before.get(ref) != after.get(ref))
+    changed = {ref for ref in before.keys() | after.keys() if before.get(ref) != after.get(ref)}
+    left_sheets = {sheet.name: sheet for sheet in left.sheets}
+    right_sheets = {sheet.name: sheet for sheet in right.sheets}
+    common = left_sheets.keys() & right_sheets.keys()
+    if left.date_1904 != right.date_1904:
+        changed.add(("<workbook>", "date1904"))
+    changed.update((name, "<sheet>") for name in left_sheets.keys() ^ right_sheets.keys())
+    changed.update((name, "<state>") for name in common
+                   if left_sheets[name].state != right_sheets[name].state)
+    if ([sheet.name for sheet in left.sheets if sheet.name in common]
+            != [sheet.name for sheet in right.sheets if sheet.name in common]):
+        changed.add(("<workbook>", "sheet_order"))
+    return sorted(changed)
 
 
 class _Parser(argparse.ArgumentParser):
