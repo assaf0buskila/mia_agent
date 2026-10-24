@@ -605,9 +605,6 @@ class AssistantGateway:
             return "key_revoked", None
         if found.expires_at <= now:
             return "key_expired", None
-        if (found.workspace_id != settings.assaf_os_workspace_id
-                or found.epoch != settings.assaf_os_authority_epoch):
-            return "key_epoch", None
         if found.owner_id not in settings.telegram_owner_user_id_set():
             return "key_owner", None
         if settings.kill_switch:
@@ -616,6 +613,7 @@ class AssistantGateway:
         if mark is not None and found.created_at <= mark:
             return "key_revoked_all", None
         try:
+            # The workspace, the epoch (I12) and the fixed scopes are checked here, by V2-19.
             return None, authorize.from_assistant(found, settings)
         except api.LedgerError as exc:
             if exc.code != "assistant_auth_required":

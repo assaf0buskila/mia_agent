@@ -160,7 +160,8 @@ def revoked_all(aw, issued):
 
 
 INVALID = [
-    ("key_revoked", revoke_it), ("key_expired", expire_it), ("key_epoch", other_epoch),
+    ("key_revoked", revoke_it), ("key_expired", expire_it),
+    ("credential_binding_changed", other_epoch),
     ("kill_switch", kill_switch), ("key_owner", owner_removed), ("key_revoked_all", revoked_all),
 ]
 

@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import time
 
 import jwt
@@ -41,6 +42,9 @@ class Jwks:
 @pytest.fixture(autouse=True)
 def jwks(monkeypatch):
     monkeypatch.setattr(google, "_JWKS", Jwks())
+    # A token lives five minutes, and a full-suite run outlasts that between collection and this
+    # test: NOW is the real time at the start of each test, never at import.
+    monkeypatch.setattr(sys.modules[__name__], "NOW", int(time.time()))
 
 
 def settings(**over) -> Settings:
@@ -53,9 +57,10 @@ def settings(**over) -> Settings:
     return Settings(**values)
 
 
-def token(*, auth_time=NOW - 5, nonce=NONCE, drop=(), **over) -> str:
+def token(*, auth_time=None, nonce=NONCE, drop=(), **over) -> str:
     claims = {"iss": "https://accounts.google.com", "sub": SUBJECT, "aud": CLIENT,
-              "iat": NOW - 5, "exp": NOW + 300, "nonce": nonce, "auth_time": auth_time}
+              "iat": NOW - 5, "exp": NOW + 300, "nonce": nonce,
+              "auth_time": NOW - 5 if auth_time is None else auth_time}
     claims.update(over)
     for name in drop:
         claims.pop(name, None)

@@ -94,3 +94,11 @@ def test_the_caddyfile_is_unchanged_and_has_no_rate_limit_directive():
     text = raw.decode("utf-8")
     assert "rate_limit" not in text and "/v1/assistant" not in text
     assert "reverse_proxy 127.0.0.1:8000" in text
+
+
+def test_the_default_revoke_all_watermark_is_the_one_v2_26_reads():
+    from app.services import assistant_keys
+    from app.services.os_ledger import statements
+
+    gateway = assistant_keys.AssistantGateway(object(), store=object(), statements=object())
+    assert gateway._watermark is statements.db_revoke_watermark  # D4: no second implementation
