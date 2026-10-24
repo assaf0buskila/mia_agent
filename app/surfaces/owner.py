@@ -201,6 +201,10 @@ async def run_owner_loop(
                 approval_ids_out=turn_approval_ids,
             )
         )
+        # What the agent recorded (its ai_run, a last-step proposal row) is committed as soon
+        # as it returns, so the deadline return below and the worker's drain-timeout rollback
+        # never discard completed work.
+        _end_turn_transaction(store)
 
     # The worker sends the one timeout notice after it has drained this coroutine.
     # Do not send a late model answer and race that notice.

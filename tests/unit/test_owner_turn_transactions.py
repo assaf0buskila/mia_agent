@@ -14,12 +14,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 from app.api.owner import OwnerTurnResult
-from app.db.models import ApprovalRow, CanonicalEventRow
+from app.db.models import AiRunRow, ApprovalRow, CanonicalEventRow
 from app.db.store import LeadStore
 from app.domain.owner import brain
 from app.integrations.base import RecordingMessagePort
@@ -27,6 +28,7 @@ from app.integrations.llm_client import LlmError, LlmResponse, ToolCall
 from app.integrations.transcribe import FakeTranscriptionPort
 from app.services import assaf_os as port
 from app.services.os_ledger import api as ledger_api
+from app.surfaces import owner as owner_surface
 from app.surfaces.owner import run_owner_loop
 from app.workers import telegram_owner
 from sqlalchemy import select
@@ -409,3 +411,62 @@ async def test_a_delivered_reply_keeps_the_turns_work_even_when_it_drained_late(
     out = await worker("evt-f4-delivered", delivers_late)
     assert out.sent == [], "no timeout notice after a delivered answer"
     assert _approval_ids(factory) == ["apr_delivered"]
+
+
+class _LateModel:
+    """Answers once, after the turn deadline has already passed (review r1 MAJOR-1)."""
+
+    last_model = "scripted-test-model"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def enabled(self) -> bool:
+        return True
+
+    def complete(self, **_kwargs) -> LlmResponse:
+        self.calls += 1
+        time.sleep(0.6)
+        return LlmResponse("late answer", (), "stop", "", 7, 5,
+                           {"role": "assistant", "content": "late answer"})
+
+
+async def test_a_drained_timeout_keeps_the_turns_ai_run(factory, monkeypatch):
+    """The agent's work, its ai_run included, is committed as soon as the agent returns, so the
+    deadline return and the worker's drain-timeout rollback discard nothing it recorded."""
+    settings = leads._settings(
+        owner_agent_model="scripted-test-model",
+        openai_api_key="test-only-not-a-credential",
+        memory_write_enabled=False,
+        owner_turn_timeout_seconds=0.3,
+        owner_min_model_seconds=0.01,
+        owner_final_reserve_seconds=0.01,
+    )
+    model = _LateModel()
+    persisted: list[str] = []
+    real_persist = owner_surface.persist_ai_run
+
+    def spy(store, **kwargs):
+        persisted.append(kwargs["next_action"])
+        return real_persist(store, **kwargs)
+
+    monkeypatch.setattr(owner_surface, "persist_ai_run", spy)
+    monkeypatch.setattr(brain, "build_agent_client", lambda *_args, **_kwargs: model)
+    monkeypatch.setattr(ledger_api, "core_authority_state", lambda _settings: "shadow")
+    monkeypatch.setattr(telegram_owner, "get_settings", lambda: settings)
+    monkeypatch.setattr(telegram_owner, "COALESCE_WAIT_S", 0)
+    monkeypatch.setattr(telegram_owner, "get_session_factory", lambda: factory)
+    _claim(factory, "evt-f4-late")
+    out = RecordingMessagePort()
+    await telegram_owner.process_telegram_owner_update(
+        item={"id": "evt-f4-late", "from": leads.OWNER, "chat_id": leads.OWNER,
+              "chat_type": "private", "text": "what is new?"},
+        envelope_kind="text", voice_file_id=None, port=out,
+        transcribe_port=FakeTranscriptionPort("unused"),
+    )
+    with factory() as fresh:
+        runs = fresh.scalars(select(AiRunRow)).all()
+    print(f"OS-RUNTIME F4e model_calls={model.calls} persist_calls={persisted} "
+          f"committed_ai_runs={len(runs)}")
+    assert model.calls == 1 and persisted, "the turn recorded its ai_run"
+    assert len(runs) == 1, "the drained timeout rolled back the turn's ai_run row"
