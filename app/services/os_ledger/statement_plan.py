@@ -21,6 +21,7 @@ from datetime import date, timedelta
 from typing import Any
 
 from app.domain.statements import (
+    BLOCK_CYCLE_HAS_STATEMENT,
     BLOCK_MERGE_CHOICE,
     LINKED_EXPENSE_CHANGED,
     PAYMENT_STATUS_CANCELLED,
@@ -271,6 +272,31 @@ def view_rows(rows: Iterable[LineRow]) -> list[StoredLine]:
         revision=row.revision) for row in rows]
 
 
+def awaits_owner(tx: Any, tables: StatementTables, statement: StatementRow) -> bool:
+    """The statement's current batch can still be decided: pending, inside its window, of this
+    authority epoch, and still holding its detail."""
+    proposal_id = statement.current_proposal_id
+    proposal = None if proposal_id is None else tx.proposal(proposal_id)
+    return (proposal is not None and proposal.kind == "statement_batch"
+            and proposal.status == "pending" and proposal.expires_at > tx.now
+            and proposal.epoch == tx.ctx.authority_epoch
+            and tables.live_batch_line_count(proposal.proposal_id) > 0)
+
+
+def cycle_held_by_another(tx: Any, tables: StatementTables, statement: StatementRow) -> bool:
+    """§22 E31: another statement of this account already holds the cycle.
+
+    The ledger keys a statement by (account, charge date), but a cycle has one statement. Another
+    statement holds it when it is imported, or when a batch of it is still waiting for the owner.
+    A statement whose batches were all rejected, superseded or expired holds nothing.
+    """
+    return any(
+        other.statement_id != statement.statement_id
+        and other.account_label == statement.account_label and other.cycle == statement.cycle
+        and (other.approved_proposal_id is not None or awaits_owner(tx, tables, other))
+        for other in tables.statements())
+
+
 def load_stored(tx: Any, tables: StatementTables, statement_id: str) -> list[StoredLine]:
     """The statement's committed rows as domain ``StoredLine`` objects.
 
@@ -435,6 +461,8 @@ def compute(tx: Any, tables: StatementTables, *, statement: StatementRow,
             raise
         merge = {}
         diff = diff_statement(stored, resolved, choices=ReviewChoices(edited, {}), **common)
+    if cycle_held_by_another(tx, tables, statement):  # after the domain's codes, in the digest
+        diff = replace(diff, blocking=(*diff.blocking, BLOCK_CYCLE_HAS_STATEMENT))
 
     confirmations = confirmations_from_review(resolved)
     rule_writes = plan_rules(confirmations, rule_rows, pepper, proposal_id)

@@ -147,7 +147,7 @@ def test_request_uuids_are_deterministic_uuid5_in_one_namespace():
 
 
 def test_error_table_is_complete_and_exact():
-    assert len(api.ERROR_CODES) == 50
+    assert len(api.ERROR_CODES) == 51  # 50 + cycle_has_statement (§22 E31)
     unknown = api.LedgerError("unknown")
     assert (unknown.status, unknown.write_outcome, unknown.retryable) == (503, "unknown", False)
     for code, spec in api.ERROR_CODES.items():
@@ -635,6 +635,7 @@ SECTION_5_2 = {
     "review_stale": (409, False, ()),
     "unassigned_lines": (409, False, ()),
     "merge_choice_required": (409, False, ()),
+    "cycle_has_statement": (409, False, ()),  # §22 E31
     "draft_conflict": (409, False, ()),
     "batch_conflict": (409, False, ("conflicting_proposal_id",)),
     "lead_already_exists": (409, False, ()),

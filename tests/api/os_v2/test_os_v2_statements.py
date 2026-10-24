@@ -373,3 +373,21 @@ def test_a_statement_text_never_reaches_an_error_envelope(world):
     response = post(world, "/statement-batches", raw=encode(
         batch([line("PERSONAL CAFE", 421731, tag="personal")], number=1)))
     assert "PERSONAL CAFE" not in response.text and "421731" not in response.text
+
+
+def test_a_second_statement_in_the_cycle_is_blocked_and_its_approve_is_a_409(world):
+    """§22 E31: one statement per account per cycle. The review says why; approve refuses."""
+    shop = [line("DEMO SHOP", 10000), line("OTHER SHOP", 2500)]
+    first = paste(world, shop, number=1, charge_date="2026-10-15")
+    review = read(world, f"/statement-batches/{first['proposal_id']}")
+    approved = post(world, f"/statement-batches/{first['proposal_id']}/approve", {
+        "request_id": review["approval_request_id"], "review_digest": review["review_digest"]})
+    assert approved.status_code == 200, approved.text
+    second = paste(world, shop, number=2, charge_date="2026-10-16")
+    review = read(world, f"/statement-batches/{second['proposal_id']}")
+    assert review["blocking"] == ["cycle_has_statement"]
+    expenses = world.rows("os_expenses")
+    response = post(world, f"/statement-batches/{second['proposal_id']}/approve", {
+        "request_id": review["approval_request_id"], "review_digest": review["review_digest"]})
+    assert_error(response, 409, "cycle_has_statement")
+    assert world.rows("os_expenses") == expenses and len(expenses) == 2

@@ -138,3 +138,9 @@ def test_each_golden_follows_the_v2_wire_rules(name):
 def test_no_golden_carries_personal_statement_text(name):
     text = golden(name).decode("utf-8")
     assert not [secret for secret in PERSONAL_TEXT if secret in text]
+
+
+def test_the_cycle_blocked_golden_carries_the_e31_code():
+    body = json.loads(golden("batch_review_cycle_blocked"))
+    assert body["blocking"] == ["cycle_has_statement"] and body["status"] == "pending"
+    assert body["merges"] == [] and body["totals"]["unassigned_count"] == 0

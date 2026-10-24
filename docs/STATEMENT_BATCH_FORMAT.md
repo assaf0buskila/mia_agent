@@ -85,7 +85,7 @@ HMAC of the merchant key and holds no merchant text; its id is derived with the 
 | | |
 |---|---|
 | 404 | `operation_unavailable` (the feature is off), `batch_not_found` (also another key's batch) |
-| 409 | `idempotency_mismatch`, `already_decided`, `decision_request_mismatch`, `review_stale`, `unassigned_lines`, `merge_choice_required`, `draft_conflict` |
+| 409 | `idempotency_mismatch`, `already_decided`, `decision_request_mismatch`, `review_stale`, `unassigned_lines`, `merge_choice_required`, `cycle_has_statement`, `draft_conflict` |
 | 422 | `invalid_statement_batch`, `validation_error` (`details.reason`), `invalid_request_id`, `invalid_cursor` |
 | 400 | `invalid_query` |
 | 503 | `ledger_unavailable` (also a missing or changed pepper), `os_frozen` |

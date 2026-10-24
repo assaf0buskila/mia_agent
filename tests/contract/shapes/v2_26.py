@@ -117,6 +117,14 @@ def batch_review_ready() -> dict:
     return world.review(submitted.proposal_id)
 
 
+def batch_review_cycle_blocked() -> dict:
+    """§22 E31: the cycle already has a statement, so approve is disabled and the review says so."""
+    world = World("fake")
+    shop = [line("DEMO SHOP", 10000), line("COFFEE", 300, suggested_category="Food")]
+    world.approve(world.paste(batch(shop, number=1, charge_date="2026-10-15")).proposal_id)
+    return world.review(world.paste(batch(shop, number=2, charge_date="2026-10-16")).proposal_id)
+
+
 def batch_review_rejected() -> dict:
     world = World("fake")
     submitted = world.paste(batch(three_lines()))
@@ -181,6 +189,7 @@ SHAPES: dict[str, Callable[[], dict]] = {
     "batch_created_conflict": batch_created_conflict,
     "batch_review_blocking": batch_review_blocking,
     "batch_review_ready": batch_review_ready,
+    "batch_review_cycle_blocked": batch_review_cycle_blocked,
     "batch_review_rejected": batch_review_rejected,
     "batch_lines_page": batch_lines_page,
     "draft_saved": draft_saved,

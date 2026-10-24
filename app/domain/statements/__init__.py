@@ -11,6 +11,7 @@ from __future__ import annotations
 from .batch import BatchLine, StatementBatch, parse_statement_batch
 from .diff import (
     ACTIONS,
+    BLOCK_CYCLE_HAS_STATEMENT,
     BLOCK_MERGE_CHOICE,
     BLOCK_UNASSIGNED,
     LINKED_EXPENSE_CHANGED,
@@ -74,6 +75,7 @@ from .vocabulary import (
 
 __all__ = (
     "ACTIONS",
+    "BLOCK_CYCLE_HAS_STATEMENT",
     "BLOCK_MERGE_CHOICE",
     "BLOCK_UNASSIGNED",
     "CURRENCIES",

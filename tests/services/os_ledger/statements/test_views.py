@@ -183,6 +183,28 @@ def test_the_rules_view_lists_active_rules_with_personal_keys_hidden(world):
     assert "personal cafe" not in json.dumps(body).lower()
 
 
+def test_two_statements_in_one_cycle_are_two_rows_and_the_cap_still_holds(world):
+    """§22 E31: the list never hides a statement. Newest charge date first inside a cycle."""
+    first = world.paste(batch(three_lines(), number=1, charge_date="2026-10-15"))
+    second = world.paste(batch(three_lines(), number=2, charge_date="2026-10-16"))
+    cycles = world.service.cycles(world.reader)["cycles"]
+    assert len(cycles) == 36
+    assert [(c["cycle"], c["charge_date"], c["pending_proposal_id"]) for c in cycles[:3]] == [
+        ("2026-10", "2026-10-16", second.proposal_id),
+        ("2026-10", "2026-10-15", first.proposal_id),
+        ("2026-09", None, None)]
+    assert all(set(c) == {"cycle", "account_label", "charge_date", "statement_id", "status",
+                          "business_total_minor", "business_line_count", "pending_proposal_id"}
+               for c in cycles)
+    world.reject(first.proposal_id)
+    world.approve(second.proposal_id)
+    cycles = world.service.cycles(world.reader)["cycles"]
+    october = [c for c in cycles if c["cycle"] == "2026-10"]
+    assert [(c["charge_date"], c["statement_id"] is not None, c["status"]) for c in october] == [
+        ("2026-10-16", True, "imported"), ("2026-10-15", False, "pending")]
+    assert october[0]["statement_id"] == second.statement_id and len(cycles) == 36
+
+
 # ---- the assistant-facing reads -----------------------------------------------------------------
 
 

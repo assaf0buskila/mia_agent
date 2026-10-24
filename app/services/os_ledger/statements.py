@@ -766,7 +766,12 @@ class LedgerStatementService:
             statements = tables.statements()
             if not statements:
                 return {**binding(ctx, tx.version), "cycles": []}
-            by_key = {(s.account_label, s.cycle): s for s in statements}
+            # §22 E31: a cycle may hold more than one statement (two charge dates), and the list
+            # never hides one: a row each, newest charge date first, a placeholder if none.
+            by_key: dict[tuple[str, str], list[StatementRow]] = {}
+            for s in sorted(statements, key=lambda s: (s.charge_date, s.statement_id),
+                            reverse=True):
+                by_key.setdefault((s.account_label, s.cycle), []).append(s)
             labels = sorted({s.account_label for s in statements})
             imported = [s for s in statements if s.approved_proposal_id is not None]
             rows = tables.lines_of([s.statement_id for s in imported])
@@ -777,17 +782,18 @@ class LedgerStatementService:
             entries: list[dict[str, Any]] = []
             while len(entries) < CYCLE_LIST_MAX:
                 for label in labels:
-                    if len(entries) >= CYCLE_LIST_MAX:
-                        break
-                    entries.append(self._cycle_entry(
-                        tx, label, cycle, by_key.get((label, cycle)), rows, committed[label],
-                        today))
+                    for statement in by_key.get((label, cycle)) or [None]:
+                        if len(entries) >= CYCLE_LIST_MAX:
+                            break
+                        entries.append(self._cycle_entry(
+                            tx, tables, label, cycle, statement, rows, committed[label], today))
                 cycle = _previous_cycle(cycle)
             return {**binding(ctx, tx.version), "cycles": entries}
 
     @staticmethod
-    def _cycle_entry(tx: Any, label: str, cycle: str, statement: StatementRow | None,
-                     rows: Mapping[str, Any], committed: set[str], today: date) -> dict[str, Any]:
+    def _cycle_entry(tx: Any, tables: StatementTables, label: str, cycle: str,
+                     statement: StatementRow | None, rows: Mapping[str, Any],
+                     committed: set[str], today: date) -> dict[str, Any]:
         entry: dict[str, Any] = {
             "cycle": cycle, "account_label": label, "charge_date": None, "statement_id": None,
             "status": "", "business_total_minor": None, "business_line_count": None,
@@ -795,11 +801,8 @@ class LedgerStatementService:
         pending = None
         if statement is not None:
             entry["charge_date"] = statement.charge_date.isoformat()
-            if statement.current_proposal_id is not None:
-                proposal = tx.proposal(statement.current_proposal_id)
-                if proposal is not None and proposal.status == "pending" and (
-                        proposal.expires_at > tx.now):
-                    pending = proposal.proposal_id
+            if sp.awaits_owner(tx, tables, statement):
+                pending = statement.current_proposal_id
         entry["pending_proposal_id"] = pending
         if statement is not None and statement.approved_proposal_id is not None:
             totals = summarize_cycle(sp.view_rows(rows[statement.statement_id]))
@@ -809,7 +812,9 @@ class LedgerStatementService:
         elif pending is not None:
             entry["status"] = "pending"
         else:
-            status = cycle_status(cycle, committed_cycles=committed, today=today)
+            # A statement that is not imported is not made so by another statement of its cycle.
+            status = cycle_status(cycle, today=today,
+                                  committed_cycles=committed if statement is None else set())
             entry["status"] = "pending" if status == "awaiting" else status
         return entry
 
@@ -890,7 +895,7 @@ class LedgerStatementService:
             for s in recent:
                 if s.approved_proposal_id is not None:
                     status, count = "imported", s.line_count
-                elif self._awaits_owner(tx, s):
+                elif sp.awaits_owner(tx, tables, s):
                     status, count = "pending", tables.batch_line_count(s.current_proposal_id)
                 else:  # every batch of it was rejected, expired or superseded away
                     status, count = "not_imported", s.line_count
@@ -900,15 +905,6 @@ class LedgerStatementService:
             return {"rules": rules, "statements": statements, "format": {
                 "schema": "statement-batch.v1", "encoding": "utf-8", "ensure_ascii": False,
                 "separators": [",", ":"], "max_bytes": MAX_BATCH_BYTES, "max_lines": MAX_LINES}}
-
-    @staticmethod
-    def _awaits_owner(tx: Any, statement: StatementRow) -> bool:
-        """The statement's current batch is still pending and inside its window."""
-        if statement.current_proposal_id is None:
-            return False
-        proposal = tx.proposal(statement.current_proposal_id)
-        return proposal is not None and proposal.status == "pending" and (
-            proposal.expires_at > tx.now)
 
     def status_for_credential(self, ctx: api.TrustedOwnerContext,
                               proposal_id: str) -> dict[str, Any]:
