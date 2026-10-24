@@ -3223,3 +3223,13 @@ grants. The rejected alternative was the ApprovalRow plus a claim: it crosses tw
 V2-39 becomes request → "approve on Telegram" (poll every 3 s, at most 10 min) → collect once.
 
 Design note: T2\v2-37b-telegram-step-up-design.md.
+
+**§5.2 error-table addendum (E37).** These codes join `api.ERROR_CODES`, and the scaffold pin moves with them:
+
+| Code | HTTP | Meaning |
+|---|---|---|
+| `credential_unknown` | 404 | Unknown issue request or credential, including a request made by another session. |
+| `issue_not_approved` | 409 | Collect before approval. |
+| `issue_rejected` | 409 | The owner rejected it on Telegram. |
+| `issue_collected` | 409 | Already collected once. |
+| `issue_expired` | 410 | The approval deadline or the collection window passed. |
