@@ -36,6 +36,11 @@ _OPS = (
     ("GET", re.compile(_UNIFIED + r"/receipts/[^/]+"), "receipt"),
     ("GET", re.compile(_UNIFIED + r"/pending"), "pending"),
     ("GET", re.compile(_UNIFIED + r"/proposal-requests/[^/]+"), "proposal_request"),
+    # V2-24 owner-direct commits.
+    ("POST", re.compile(_UNIFIED + r"/commits"), "commit"),
+    ("POST", re.compile(_UNIFIED + r"/commits/[^/]+/undo"), "undo"),
+    ("POST", re.compile(_UNIFIED + r"/commits/[^/]+/abandon"), "abandon"),
+    ("GET", re.compile(_UNIFIED + r"/deleted"), "deleted"),
 )
 _AUTH_PREFIX = "/v1/owner/auth"
 _LOG = logging.getLogger("mia.owner_write")

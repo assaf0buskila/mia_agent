@@ -80,7 +80,7 @@ _REQUEST_ID: ContextVar[str] = ContextVar("mia_owner_request_id", default="")
 _OPS = frozenset(
     {
         "snapshot", "schema", "cached", "propose", "proposal", "approve", "reject", "receipt",
-        "pending", "proposal_request", "auth", "other",
+        "pending", "proposal_request", "commit", "undo", "abandon", "deleted", "auth", "other",
     }
 )
 
