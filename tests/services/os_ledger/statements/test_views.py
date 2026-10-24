@@ -201,8 +201,50 @@ def test_two_statements_in_one_cycle_are_two_rows_and_the_cap_still_holds(world)
     cycles = world.service.cycles(world.reader)["cycles"]
     october = [c for c in cycles if c["cycle"] == "2026-10"]
     assert [(c["charge_date"], c["statement_id"] is not None, c["status"]) for c in october] == [
-        ("2026-10-16", True, "imported"), ("2026-10-15", False, "pending")]
+        ("2026-10-16", True, "imported"), ("2026-10-15", False, "not_imported")]
     assert october[0]["statement_id"] == second.statement_id and len(cycles) == 36
+
+
+def test_a_statement_row_with_no_awaiting_batch_is_not_imported_before_the_20th_too(world):
+    """The clock reads Oct 16, so a cycle with NO statement is still "pending" (the owner has until
+    the 20th); a statement whose batches were rejected or lapsed is not waiting on anyone."""
+    rejected = world.paste(batch(three_lines(), number=1, charge_date="2026-10-15"))
+    world.reject(rejected.proposal_id)
+    entry = world.service.cycles(world.reader)["cycles"][0]
+    assert (entry["cycle"], entry["charge_date"], entry["status"], entry["pending_proposal_id"],
+            entry["statement_id"]) == ("2026-10", "2026-10-15", "not_imported", None, None)
+    lapsed = world.paste(batch(three_lines(), number=2, charge_date="2026-10-16"))
+    entry = world.service.cycles(world.reader)["cycles"][0]
+    assert (entry["status"], entry["pending_proposal_id"]) == ("pending", lapsed.proposal_id)
+    world.advance(7 * 24 * 3600 + 1)  # past its window; the clock is now past the 20th as well
+    row = next(c for c in world.service.cycles(world.reader)["cycles"]
+               if c["charge_date"] == "2026-10-16")
+    assert (row["status"], row["pending_proposal_id"]) == ("not_imported", None)
+
+
+def test_spellings_of_one_account_label_are_one_account_in_the_list(world):
+    """The domain identifies an account by its folded label, so the list must too (§22 E31)."""
+    first = world.paste(batch(three_lines(), number=1, charge_date="2026-09-15"))
+    world.approve(first.proposal_id)
+    second = world.paste(batch(three_lines(), number=2, charge_date="2026-10-15",
+                               label="SYNTHETIC BUSINESS CARD"))
+    cycles = world.service.cycles(world.reader)["cycles"]
+    assert len(cycles) == 36
+    assert {c["account_label"] for c in cycles} == {"SYNTHETIC BUSINESS CARD"}  # newest spelling
+    assert [(c["cycle"], c["status"], c["pending_proposal_id"]) for c in cycles[:3]] == [
+        ("2026-10", "pending", second.proposal_id), ("2026-09", "imported", None),
+        ("2026-08", "not_imported", None)]
+    assert [c["cycle"] for c in cycles[:4]] == ["2026-10", "2026-09", "2026-08", "2026-07"]
+
+
+def test_the_previous_statement_is_found_across_spellings_of_the_account(world):
+    first = world.paste(batch(three_lines(), number=1, charge_date="2026-09-15"))
+    world.approve(first.proposal_id)
+    second = world.paste(batch(three_lines(), number=2, charge_date="2026-10-15",
+                               label="SYNTHETIC BUSINESS CARD"))
+    world.approve(second.proposal_id)
+    view = world.service.statement_view(world.reader, second.statement_id)
+    assert view["previous"]["statement_id"] == first.statement_id
 
 
 # ---- the assistant-facing reads -----------------------------------------------------------------

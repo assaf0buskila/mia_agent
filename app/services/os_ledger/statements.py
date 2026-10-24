@@ -767,26 +767,33 @@ class LedgerStatementService:
             if not statements:
                 return {**binding(ctx, tx.version), "cycles": []}
             # §22 E31: a cycle may hold more than one statement (two charge dates), and the list
-            # never hides one: a row each, newest charge date first, a placeholder if none.
+            # never hides one: a row each, newest charge date first, a placeholder if none. An
+            # account is its folded label (sp.account_key), shown under its newest spelling.
+            newest_first = sorted(statements, key=lambda s: (s.charge_date, s.statement_id),
+                                  reverse=True)
             by_key: dict[tuple[str, str], list[StatementRow]] = {}
-            for s in sorted(statements, key=lambda s: (s.charge_date, s.statement_id),
-                            reverse=True):
-                by_key.setdefault((s.account_label, s.cycle), []).append(s)
-            labels = sorted({s.account_label for s in statements})
+            label_of: dict[str, str] = {}
+            for s in newest_first:
+                account = sp.account_key(s.account_label)
+                by_key.setdefault((account, s.cycle), []).append(s)
+                label_of.setdefault(account, s.account_label)
+            accounts = sorted(label_of)
             imported = [s for s in statements if s.approved_proposal_id is not None]
             rows = tables.lines_of([s.statement_id for s in imported])
-            committed = {label: {s.cycle for s in imported if s.account_label == label}
-                         for label in labels}
+            committed = {account: {s.cycle for s in imported
+                                   if sp.account_key(s.account_label) == account}
+                         for account in accounts}
             today = tx.now.date()
             cycle = max([cycle_of(today), *(s.cycle for s in statements)])
             entries: list[dict[str, Any]] = []
             while len(entries) < CYCLE_LIST_MAX:
-                for label in labels:
-                    for statement in by_key.get((label, cycle)) or [None]:
+                for account in accounts:
+                    for statement in by_key.get((account, cycle)) or [None]:
                         if len(entries) >= CYCLE_LIST_MAX:
                             break
                         entries.append(self._cycle_entry(
-                            tx, tables, label, cycle, statement, rows, committed[label], today))
+                            tx, tables, label_of[account], cycle, statement, rows,
+                            committed[account], today))
                 cycle = _previous_cycle(cycle)
             return {**binding(ctx, tx.version), "cycles": entries}
 
@@ -811,10 +818,10 @@ class LedgerStatementService:
                          business_line_count=totals.business_line_count if totals else None)
         elif pending is not None:
             entry["status"] = "pending"
+        elif statement is not None:
+            entry["status"] = "not_imported"  # its batches were rejected, lapsed or superseded
         else:
-            # A statement that is not imported is not made so by another statement of its cycle.
-            status = cycle_status(cycle, today=today,
-                                  committed_cycles=committed if statement is None else set())
+            status = cycle_status(cycle, committed_cycles=committed, today=today)
             entry["status"] = "pending" if status == "awaiting" else status
         return entry
 
@@ -828,7 +835,8 @@ class LedgerStatementService:
             if statement is None or statement.approved_proposal_id is None:
                 raise api.LedgerError("batch_not_found", reason="statement_unknown")
             earlier = [s for s in tables.statements()
-                       if s.account_label == statement.account_label
+                       if sp.account_key(s.account_label) == sp.account_key(
+                           statement.account_label)
                        and s.approved_proposal_id is not None
                        and (s.charge_date, s.statement_id) < (statement.charge_date,
                                                               statement.statement_id)]

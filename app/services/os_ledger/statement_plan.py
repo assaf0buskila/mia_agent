@@ -46,6 +46,7 @@ from app.domain.statements import (
     statement_source_key,
     summarize_cycle,
 )
+from app.domain.statements.text import identity_text
 from app.services.os_ledger import api
 from app.services.os_ledger.statement_tables import (
     LineRow,
@@ -283,6 +284,12 @@ def awaits_owner(tx: Any, tables: StatementTables, statement: StatementRow) -> b
             and tables.live_batch_line_count(proposal.proposal_id) > 0)
 
 
+def account_key(label: str) -> str:
+    """One account, however its label is spelled: the key the domain mints a statement id from
+    (NFKC, cleaned, casefolded), so "Card" and "CARD" are the same account."""
+    return identity_text(label)
+
+
 def cycle_held_by_another(tx: Any, tables: StatementTables, statement: StatementRow) -> bool:
     """§22 E31: another statement of this account already holds the cycle.
 
@@ -290,9 +297,10 @@ def cycle_held_by_another(tx: Any, tables: StatementTables, statement: Statement
     statement holds it when it is imported, or when a batch of it is still waiting for the owner.
     A statement whose batches were all rejected, superseded or expired holds nothing.
     """
+    account = account_key(statement.account_label)
     return any(
         other.statement_id != statement.statement_id
-        and other.account_label == statement.account_label and other.cycle == statement.cycle
+        and account_key(other.account_label) == account and other.cycle == statement.cycle
         and (other.approved_proposal_id is not None or awaits_owner(tx, tables, other))
         for other in tables.statements())
 
