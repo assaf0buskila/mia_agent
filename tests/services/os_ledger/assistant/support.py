@@ -17,6 +17,7 @@ from __future__ import annotations
 import threading
 from collections import Counter
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -56,6 +57,8 @@ class MemoryAssistantStore:
         self.rows: list[dict[str, Any]] = []
         self._lock = threading.Lock()
         self._keys: dict[str, threading.Lock] = {}
+        # Injected accounting faults (a database error as the PG store would raise it).
+        self.fault: str | None = None  # "admit" (before the work), "record" or "commit" (after)
 
     def _credentials(self, tx: Any) -> dict[str, Any]:
         return tx.scratch.setdefault("statement_tables", {}).setdefault("credentials", {})
@@ -92,12 +95,24 @@ class MemoryAssistantStore:
                 ok=False, client_ip_hmac=ip_hmac))
         return None
 
-    def call(self, credential, *, ip_hmac: str, operation: str, now: Callable[[], datetime],
-             work: Callable[[ac.Facts], Any]) -> Any:
+    def _gate(self, name: str) -> threading.Lock:
         with self._lock:
-            gate = self._keys.setdefault(credential.credential_id, threading.Lock())
-        with gate:
+            return self._keys.setdefault(name, threading.Lock())
+
+    @contextmanager
+    def slot(self, credential, *, ip_hmac: str, operation: str, now: Callable[[], datetime]):
+        """The accounting of one call, as ``PgAssistantStore.slot`` does it: the address lock,
+        then the key lock; the address and the key counted again; the row and the usage applied
+        when the block ends normally (so an error in the body, or an injected fault, applies
+        nothing)."""
+        with self._gate("ip:" + ip_hmac), self._gate("key:" + credential.credential_id):
+            if self.fault == "admit":
+                raise ac.api.LedgerError("ledger_unavailable", reason="db_error_55p03")
             moment = now()
+            since = moment - timedelta(seconds=ac.IP_WINDOW_SECONDS)
+            if sum(1 for r in self.rows
+                   if r["client_ip_hmac"] == ip_hmac and r["occurred_at"] >= since) >= ac.IP_LIMIT:
+                raise ac.api.LedgerError("rate_limited", reason="ip_limit")
             mine = [r for r in self.rows if r["credential_id"] == credential.credential_id]
             counted = [r for r in mine if r["reason"] not in ac.LIMIT_REASONS]
             hour = sum(1 for r in counted
@@ -109,35 +124,50 @@ class MemoryAssistantStore:
                 refusal = "key_hour_limit"
             elif operation == "submit" and day >= ac.BATCH_LIMIT:
                 refusal = "key_day_limit"
-            facts, failure = ac.Facts(), None
-            result = None
+            admitted = MemorySlot(self, credential.credential_id, ip_hmac, operation, moment)
             if refusal is None:
-                try:
-                    result = work(facts)
-                except Exception as exc:  # recorded, then re-raised after the row is written
-                    failure = exc
+                yield admitted
+                admitted.commit()
             else:
-                failure = ac.api.LedgerError("rate_limited", reason=refusal)
-            reason = "ok" if failure is None else ac.reason_of(failure)
-            self.rows.append(self._row(
-                credential_id=credential.credential_id, occurred_at=moment, operation=operation,
-                reason=reason, ok=failure is None, line_count=facts.line_count,
-                bytes=facts.bytes, proposal_id=facts.proposal_id, client_ip_hmac=ip_hmac))
-            with self._world.scratch_tx() as tx:
-                table = self._credentials(tx)
-                held = table.get(credential.credential_id)
-                if held is not None:
-                    table[credential.credential_id] = replace(
-                        held, last_used_at=moment, use_count=getattr(held, "use_count", 0) + 1)
-            if failure is not None:
-                raise failure
-            return result
+                admitted.record(ac.Facts(), ac.api.LedgerError("rate_limited", reason=refusal))
+                admitted.commit()
+                raise ac.api.LedgerError("rate_limited", reason=refusal)
+
+
+class MemorySlot:
+    def __init__(self, store: MemoryAssistantStore, credential_id: str, ip_hmac: str,
+                 operation: str, moment: datetime) -> None:
+        self._store, self._credential_id, self._ip_hmac = store, credential_id, ip_hmac
+        self._operation, self._moment = operation, moment
+        self._pending: dict[str, Any] | None = None
+
+    def record(self, facts: ac.Facts, failure: BaseException | None) -> None:
+        if self._store.fault == "record":
+            raise ac.api.LedgerError("ledger_unavailable", reason="db_error_55p03")
+        self._pending = self._store._row(
+            credential_id=self._credential_id, occurred_at=self._moment,
+            operation=self._operation, reason="ok" if failure is None else ac.reason_of(failure),
+            ok=failure is None, line_count=facts.line_count, bytes=facts.bytes,
+            proposal_id=facts.proposal_id, client_ip_hmac=self._ip_hmac)
+
+    def commit(self) -> None:
+        if self._store.fault == "commit":
+            raise ac.api.LedgerError("ledger_unavailable", reason="db_error_08006")
+        if self._pending is None:
+            return
+        self._store.rows.append(self._pending)
+        with self._store._world.scratch_tx() as tx:
+            table = self._store._credentials(tx)
+            held = table.get(self._credential_id)
+            if held is not None:
+                table[self._credential_id] = replace(
+                    held, last_used_at=self._moment, use_count=getattr(held, "use_count", 0) + 1)
 
 
 class SpyStore:
     """Counts the store methods a gateway reaches (``calls``); everything else passes through."""
 
-    METHODS = frozenset({"ip_calls", "find", "invalid_lookup", "call"})
+    METHODS = frozenset({"ip_calls", "find", "invalid_lookup", "slot"})
 
     def __init__(self, inner: Any) -> None:
         self._inner = inner
@@ -215,6 +245,39 @@ class AWorld:
         from tests.services.os_ledger.statements.support import CLAUDE, GPT
         ctx = self.w.assistant(kind, issued["credential_id"])
         return self.w.paste(batch_body, ctx=ctx, source=CLAUDE if kind == "claude" else GPT)
+
+    @contextmanager
+    def accounting_fault(self, when: str, credential_id: str):
+        """Make the call's accounting transaction fail ``when``: ``"admit"`` (before the work) or
+        ``"record"`` (after it). On PostgreSQL it is a real database failure: another connection
+        holds the key's advisory lock (so admission times out) or a ``FOR NO KEY UPDATE`` row lock
+        on the key (so the usage UPDATE after the work times out; the submit's foreign-key
+        ``FOR KEY SHARE`` is compatible with it, so the work itself still runs)."""
+        assert when in {"admit", "record", "commit"}
+        if self.kind == "fake":
+            self.store._inner.fault = when
+            try:
+                yield
+            finally:
+                self.store._inner.fault = None
+            return
+        assert when != "commit", "a COMMIT failure cannot be provoked on a live PostgreSQL"
+        from sqlalchemy import text
+        conn = self.w._admin_engine.connect()
+        trans = conn.begin()
+        try:
+            if when == "admit":
+                conn.execute(text("SELECT pg_advisory_xact_lock(hashtext(:k))"), {
+                    "k": f"assaf-os-assistant:{self.config.assaf_os_workspace_id}"
+                         f":key:{credential_id}"})
+            else:
+                conn.execute(text(
+                    "SELECT 1 FROM assaf_os.os_assistant_credentials WHERE credential_id = :id "
+                    "FOR NO KEY UPDATE"), {"id": credential_id})
+            yield
+        finally:
+            trans.rollback()
+            conn.close()
 
     # ---- observers ------------------------------------------------------------------------
 
