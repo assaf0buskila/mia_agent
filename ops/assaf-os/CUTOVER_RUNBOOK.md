@@ -122,19 +122,20 @@ Every production step above pauses the jobs and takes a verified backup first (s
     `postgresql://` scheme is accepted (the job normalizes it to `postgresql+psycopg://`).
   - Keep `app-role.rollback.env`: it is still the step 2 rollback.
   - Run this once, under the shared state lock, as root. It refuses if the file already exists or
-    the source is not the one expected line, and prints only a reason code:
+    the source is not the one expected line, and prints only a reason code. Exit status 75 with no
+    output means the state lock is busy (another Mia operation is running): wait, then rerun.
 
     ```bash
-    sudo flock -n /var/lock/mia-state.lock sh -euc '
+    sudo flock -n -E 75 /var/lock/mia-state.lock sh -euc '
       src=/etc/mia/app-role.rollback.env; dst=/etc/mia/os-ledger-migrate.env
       [ ! -e "$dst" ] || { echo os_ledger_env_exists >&2; exit 1; }
-      [ "$(wc -l < "$src")" = 1 ] && grep -q "^MIA_DATABASE_URL=postgresql://mia:" "$src" \
+      [ "$(grep -c "" "$src")" = 1 ] && grep -q "^MIA_DATABASE_URL=postgresql://mia:" "$src" \
         || { echo rollback_env_unexpected >&2; exit 1; }
       umask 077
       tmp=$(mktemp /etc/mia/.os-ledger-migrate.XXXXXX); trap "rm -f $tmp" EXIT
       sed -n "s/^MIA_DATABASE_URL=/MIA_OS_LEDGER_MIGRATION_DATABASE_URL=/p" "$src" > "$tmp"
-      [ "$(wc -l < "$tmp")" = 1 ] || { echo os_ledger_env_invalid >&2; exit 1; }
-      chown root:root "$tmp"; chmod 600 "$tmp"; mv -f "$tmp" "$dst"
+      [ "$(grep -c "" "$tmp")" = 1 ] || { echo os_ledger_env_invalid >&2; exit 1; }
+      chown root:root "$tmp"; chmod 600 "$tmp"; sync "$tmp"; mv -f "$tmp" "$dst"
       echo os_ledger_env_written'
     ```
 
@@ -148,13 +149,23 @@ Every production step above pauses the jobs and takes a verified backup first (s
       sudo sh -euc 'a=$(sed -n "s/^MIA_DATABASE_URL=//p" /etc/mia/app-role.rollback.env)
         b=$(sed -n "s/^MIA_OS_LEDGER_MIGRATION_DATABASE_URL=//p" /etc/mia/os-ledger-migrate.env)
         m=$(sed -n "s/^MIA_DATABASE_URL=//p" /etc/mia/runtime.env)
-        [ -n "$b" ] && [ "$a" = "$b" ] && [ "$b" != "$m" ] && echo os_ledger_env_ok || echo os_ledger_env_mismatch'
+        [ -n "$b" ] && [ "$a" = "$b" ] && [ "$b" != "$m" ] && echo os_ledger_env_ok \
+          || { echo os_ledger_env_mismatch; exit 1; }'
       ```
 
-    - `sudo bash /opt/mia/src/<S-tag>/ops/gcp/vm/pg-hba-harden.sh --check` names no refused key.
-      It scram-checks this file's DSN too (E28) and prints key names only, never a value.
-  - The same file serves `mia os-authority`, `mia os-provision` and `mia os-job`, which all
-    require it with exactly this one key. Leave it in place after the cutover.
+    - `sudo bash /opt/mia/src/<S-tag>/ops/gcp/vm/pg-hba-harden.sh --check` prints, without any
+      value:
+      - `MIA_OS_LEDGER_MIGRATION_DATABASE_URL` in `dsn_keys_checked=`;
+      - `dsn_unverified=none`, `dsn_without_password=none` and `roles_without_scram=none`;
+      - exit 0 on the step 1a hardened cluster.
+      It confirms that the DSN's role (`mia`) has a SCRAM verifier, but it does not log in. The
+      equality check above proves the copy is identical, not that it authenticates. The first real
+      login is `mia os-ledger migrate` itself, which on a bad password fails closed with a SQLSTATE
+      (such as 28P01) and prints no value.
+  - The file is read by `mia os-ledger` (this step), `mia os-authority`, `mia os-provision` and
+    `mia restore` (its ledger reapply refuses `ledger_reapply_unavailable` without the file). Each
+    requires exactly this one key. `mia os-job` does not read it. **Leave the file in place after the
+    cutover: deleting it breaks `mia restore`.**
   - It holds a superuser credential: root-only, mode 600, never in `mia-env`, never copied off
     the VM.
 - **Command**: `sudo mia os-ledger migrate --approved-sha S`.
