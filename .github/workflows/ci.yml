@@ -308,7 +308,7 @@ jobs:
       - name: Cutover tooling on PostgreSQL 16
         run: |
           rc=0
-          uv run pytest tests/workers/test_os_authority.py tests/workers/test_os_authority_probes.py tests/workers/test_os_authority_live_pg.py tests/workers/test_os_freeze_paths.py tests/workers/test_os_e29_sheets_with_ledger_keys.py tests/ops/test_os_jobs.py tests/ops/test_provision_retention.py tests/ops/test_cutover_runbook.py tests/services/test_os_backend_factory.py -rs --basetemp=.cache/os-cutover-ci > .cache/os-cutover-ci.log 2>&1 || rc=$?
+          uv run pytest tests/workers/test_os_authority.py tests/workers/test_os_authority_probes.py tests/workers/test_os_authority_live_pg.py tests/workers/test_os_cutover_sequence.py tests/workers/test_os_freeze_paths.py tests/workers/test_os_e29_sheets_with_ledger_keys.py tests/ops/test_os_jobs.py tests/ops/test_provision_retention.py tests/ops/test_cutover_runbook.py tests/services/test_os_backend_factory.py -rs --basetemp=.cache/os-cutover-ci > .cache/os-cutover-ci.log 2>&1 || rc=$?
           cat .cache/os-cutover-ci.log
           exit $rc
       # A PostgreSQL case exists only when the URL reaches it, and a POSIX case only on POSIX: a
