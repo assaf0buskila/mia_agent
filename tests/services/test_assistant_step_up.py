@@ -79,7 +79,7 @@ def test_the_token_own_nonce_is_used_when_no_nonce_is_given():
 @pytest.mark.parametrize("age,ok", [(0, True), (599, True), (600, True), (601, False),
                                     (3600, False)])
 def test_an_auth_time_older_than_600_seconds_is_refused(age, ok):
-    # iat stays fresh (a silent SSO token is fresh too); only auth_time says when he really signed in
+    # iat stays fresh (a silent SSO token is too); only auth_time says when he really signed in
     supplied = token(auth_time=NOW - age)
     if ok:
         assert google.verify_step_up_id_token(supplied, settings=settings(), now=NOW,
@@ -195,7 +195,8 @@ def test_a_token_minted_under_another_secret_is_refused():
 @pytest.mark.parametrize("secret", ["", "short", "s" * 31])
 def test_a_missing_or_short_secret_is_ledger_unavailable_for_mint_and_verify(secret):
     unset = settings(os_step_up_secret=secret)
-    for call in (lambda: mint(settings=unset), lambda: check("su1.1.2." + "0" * 64, settings=unset)):
+    token = "su1.1.2." + "0" * 64
+    for call in (lambda: mint(settings=unset), lambda: check(token, settings=unset)):
         with pytest.raises(api.LedgerError) as caught:
             call()
         assert caught.value.code == "ledger_unavailable"

@@ -56,7 +56,6 @@ class MemoryAssistantStore:
         self.rows: list[dict[str, Any]] = []
         self._lock = threading.Lock()
         self._keys: dict[str, threading.Lock] = {}
-        self.calls: Counter[str] = Counter()  # how often each store method was reached
 
     def _credentials(self, tx: Any) -> dict[str, Any]:
         return tx.scratch.setdefault("statement_tables", {}).setdefault("credentials", {})
@@ -67,13 +66,11 @@ class MemoryAssistantStore:
         return row
 
     def ip_calls(self, ip_hmac: str, since: datetime) -> int:
-        self.calls["ip_calls"] += 1
         with self._lock:
             return sum(1 for r in self.rows
                        if r["client_ip_hmac"] == ip_hmac and r["occurred_at"] >= since)
 
     def find(self, secret_hash: str):
-        self.calls["find"] += 1
         with self._world.scratch_tx() as tx:
             for row in self._credentials(tx).values():
                 if getattr(row, "secret_hash", "") == secret_hash:
@@ -82,7 +79,6 @@ class MemoryAssistantStore:
 
     def invalid_lookup(self, *, ip_hmac: str, credential_id: str | None, reason: str,
                        now: datetime) -> str | None:
-        self.calls["invalid_lookup"] += 1
         since = now - timedelta(seconds=ac.FAIL_WINDOW_SECONDS)
         with self._lock:
             failures = [r for r in self.rows if r["operation"] == "bearer"
@@ -98,7 +94,6 @@ class MemoryAssistantStore:
 
     def call(self, credential, *, ip_hmac: str, operation: str, now: Callable[[], datetime],
              work: Callable[[ac.Facts], Any]) -> Any:
-        self.calls["call"] += 1
         with self._lock:
             gate = self._keys.setdefault(credential.credential_id, threading.Lock())
         with gate:
@@ -139,6 +134,27 @@ class MemoryAssistantStore:
             return result
 
 
+class SpyStore:
+    """Counts the store methods a gateway reaches (``calls``); everything else passes through."""
+
+    METHODS = frozenset({"ip_calls", "find", "invalid_lookup", "call"})
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+        self.calls: Counter[str] = Counter()
+
+    def __getattr__(self, name: str) -> Any:
+        target = getattr(self._inner, name)
+        if name not in self.METHODS:
+            return target
+
+        def counted(*args: Any, **kwargs: Any) -> Any:
+            self.calls[name] += 1
+            return target(*args, **kwargs)
+
+        return counted
+
+
 class AWorld:
     """``AWorld("fake")`` or ``AWorld("pg", request=request)``; one object per test."""
 
@@ -154,8 +170,8 @@ class AWorld:
         self.counter = Counter()
         self.statements = self.w.service
         self.service = ac.AssistantCredentialService(self.w.ledger, self.w.config, self.statements)
-        self.store = (MemoryAssistantStore(self.w) if backend == "fake"
-                      else ac.PgAssistantStore(self.w.config))
+        self.store = SpyStore(MemoryAssistantStore(self.w) if backend == "fake"
+                              else ac.PgAssistantStore(self.w.config))
         self.gateway = self.make_gateway()
 
     def make_gateway(self, **over: Any) -> ac.AssistantGateway:
@@ -186,6 +202,9 @@ class AWorld:
         return self.service.revoke_all(ctx or self.w.owner)
 
     # ---- bearer side ----------------------------------------------------------------------
+
+    def ip_hmac(self, ip: str) -> str:
+        return ac.client_ip_hmac(self.w.config, ip)
 
     def authenticate(self, secret: str | None, *, ip: str = IP_A, cookie: bool = False):
         header = () if secret is None else (f"Bearer {secret}",)

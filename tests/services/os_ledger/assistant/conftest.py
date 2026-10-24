@@ -14,6 +14,8 @@ from tests.services.os_ledger.assistant.support import AWorld
 from tests.services.os_ledger.statements.support import pg_url
 
 CASES = ["fake", *(["pg"] if pg_url() else [])]
+# test_pg_rows.py is PostgreSQL only: collected when the URL is set, absent (not skipped) otherwise.
+collect_ignore = [] if pg_url() else ["test_pg_rows.py"]
 
 
 @pytest.fixture(params=CASES)
@@ -29,6 +31,11 @@ def new_aw(request):
         return AWorld(request.param, request=request, **settings)
 
     return make
+
+
+@pytest.fixture
+def pg_aw(request) -> AWorld:
+    return AWorld("pg", request=request)
 
 
 @pytest.fixture

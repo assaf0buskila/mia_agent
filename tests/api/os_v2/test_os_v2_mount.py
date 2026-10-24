@@ -11,7 +11,9 @@ router, which carries exactly its four routes.
 """
 
 import pytest
-from app.api.os_v2 import commits, reads, statements
+from app.api import owner_step_up
+from app.api.assistant import os as assistant_os
+from app.api.os_v2 import commits, owner_keys, reads, statements
 from app.core.config import MiaEnv, Settings, get_settings
 from app.main import app
 from fastapi.testclient import TestClient
@@ -41,6 +43,20 @@ STATEMENT_ROUTES = {
     ("GET", "/v1/owner/os/unified/merchant-rules"),
 }
 STATEMENT_SEGMENTS = {"statements", "statement-batches", "merchant-rules"}
+# §17.1 (V2-37; module renamed by erratum E34): the owner's key routes and the step-up route, and
+# §17.2 the three bearer routes. A route outside these sets is refused below.
+KEY_ROUTES = {
+    ("GET", "/v1/owner/os/unified/assistant-credentials"),
+    ("POST", "/v1/owner/os/unified/assistant-credentials"),
+    ("POST", "/v1/owner/os/unified/assistant-credentials/{credential_id}/revoke"),
+    ("POST", "/v1/owner/os/unified/assistant-credentials/revoke-all"),
+}
+STEP_UP_ROUTES = {("POST", "/v1/owner/auth/step-up")}
+ASSISTANT_ROUTES = {
+    ("GET", "/v1/assistant/os/context"),
+    ("POST", "/v1/assistant/os/statement-batches"),
+    ("GET", "/v1/assistant/os/statement-batches/{proposal_id}"),
+}
 # Segments that only v2 chunks may mount. V2-24 owns commits and deleted; the others stay unmounted.
 V2_ONLY_SEGMENTS = {
     "commits",
@@ -80,13 +96,22 @@ def test_v2_routers_mount_with_zero_routes(v2_routers):
             assert {(m, r.path) for r in router.routes for m in r.methods} == READS_ROUTES
         elif router is statements.router:
             assert {(m, r.path) for r in router.routes for m in r.methods} == STATEMENT_ROUTES
+        elif router is owner_keys.router:
+            assert {(m, r.path) for r in router.routes for m in r.methods} == KEY_ROUTES
+        elif router is owner_step_up.router:
+            assert {(m, r.path) for r in router.routes for m in r.methods} == STEP_UP_ROUTES
+        elif router is assistant_os.router:
+            assert {(m, r.path) for r in router.routes for m in r.methods} == ASSISTANT_ROUTES
         else:
-            assert router.routes == []
+            assert router.routes == []  # the MCP router stays empty until V2-38
     mounted = _mounted()
     paths = {path for _, path in mounted}
     assert READS_ROUTES <= mounted
-    assert not any(p.startswith(("/v1/assistant", "/v1/owner/auth/step-up")) for p in paths)
-    assert {(m, p) for m, p in mounted if _segment(p) in V2_ONLY_SEGMENTS} == COMMITS_ROUTES
+    assert {(m, p) for m, p in mounted if p.startswith("/v1/assistant")} == ASSISTANT_ROUTES
+    assert not any(p.startswith("/v1/assistant/mcp") for p in paths)
+    assert {(m, p) for m, p in mounted if p.startswith("/v1/owner/auth/step-up")} == STEP_UP_ROUTES
+    assert {(m, p) for m, p in mounted if _segment(p) in V2_ONLY_SEGMENTS} == (
+        COMMITS_ROUTES | KEY_ROUTES)
     assert {(m, p) for m, p in mounted if _segment(p) in STATEMENT_SEGMENTS} == STATEMENT_ROUTES
     assert {(m, p) for m, p in mounted if _segment(p) == "receipts"} == V1_RECEIPTS
 

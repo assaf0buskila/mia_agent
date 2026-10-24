@@ -1,4 +1,4 @@
-"""Assistant keys: issue, list, revoke, bearer authentication, limits and audit (V2_PG_CONTRACTS.md §17).
+"""Assistant keys: issue, list, revoke, bearer authentication, limits, audit (V2_PG_CONTRACTS §17).
 
 An assistant (Claude or GPT) holds a static bearer key. It can only SUBMIT a statement batch, which
 lands as a pending V2-26 proposal that the owner alone can approve; nothing here can commit, decide
@@ -547,6 +547,12 @@ def _limited(reason: str) -> api.LedgerError:
     return api.LedgerError("rate_limited", reason=reason)
 
 
+def check_enabled(settings: Any) -> None:
+    """Step 0: a disabled feature is the uniform 401 with no database and no ledger touched."""
+    if settings.assaf_os_assistant_enabled is not True:
+        raise _uniform("assistant_off")
+
+
 class AssistantGateway:
     """§17.2's bearer enforcement order, then the per-key limits and the audit row."""
 
@@ -569,8 +575,7 @@ class AssistantGateway:
         spent; a valid key is never blocked by either budget.
         """
         settings = self._settings
-        if settings.assaf_os_assistant_enabled is not True:
-            raise _uniform("assistant_off")
+        check_enabled(settings)
         if cookie:
             raise _uniform("cookie_present")
         if len(authorization) != 1 or BEARER.fullmatch(authorization[0]) is None:

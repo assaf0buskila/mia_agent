@@ -21,9 +21,11 @@ import hmac
 import logging
 import re
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 from app.services.os_ledger import api
+from app.services.os_ledger.statement_wire import iso
 
 STEP_UP_TTL_SECONDS = 600
 MIN_SECRET_BYTES = 32
@@ -60,6 +62,17 @@ def _mac(secret: bytes, session_hash: str, auth_time: int, exp: int) -> str:
 def _refuse(reason: str) -> api.LedgerError:
     _LOG.info("os_step_up op=verify outcome=step_up_required reason=%s", reason)
     return api.LedgerError("step_up_required", reason=reason)
+
+
+def body(minted: StepUpToken) -> dict[str, str]:
+    """The route's answer, exactly §17.1: ``{step_up_token, expires_at}``, no binding (A4)."""
+    return {"step_up_token": minted.token,
+            "expires_at": iso(datetime.fromtimestamp(minted.expires_at, tz=UTC)) or ""}
+
+
+def ensure_configured(settings: Any) -> None:
+    """``ledger_unavailable`` unless ``os_step_up_secret`` is set (checked before Google)."""
+    _key(settings)
 
 
 def mint(*, session_hash: str, auth_time: int, now: int, settings: Any) -> StepUpToken:
