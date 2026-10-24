@@ -12,7 +12,7 @@ import inspect
 import json
 import re
 from contextlib import contextmanager
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
@@ -153,6 +153,10 @@ class TestOnPostgres:
         from sqlalchemy.engine import make_url
 
         world = World("pg", request=request)
+        # The retention SQL compares with the database's real now(), while the world runs on the
+        # frozen NOW. Move the world up to the real clock, or a batch the test submits as live is
+        # already past now() - 1 day once NOW is a week old, and the backstop deletes it.
+        world.advance(max(0.0, (datetime.now(UTC) - NOW).total_seconds()))
         parsed = make_url(pg_url())
         engine = create_engine(parsed.set(username="assaf_os_retention", password=None))
         yield world, engine
