@@ -94,7 +94,7 @@ class FakeProbes:
         self._use("unknown")
         return self.unknown
 
-    def mirror(self, workspace):
+    def mirror(self, workspace, version):
         self._use("mirror")
         return self.mirror_state
 
@@ -1588,6 +1588,21 @@ def test_an_aborted_window_returns_the_ledger_keys_with_the_revert_plan(ready):
 
 
 # --------------------------------------------------------------------------- status and hygiene
+
+
+def test_preflight_checks_mirror_cleanliness_and_status_checks_current_version(ready, monkeypatch):
+    calls = []
+
+    def mirror(workspace, version):
+        calls.append((workspace, version))
+        return "verified"
+
+    monkeypatch.setattr(ready.probes, "mirror", mirror)
+    assert ready.run("preflight").code == 0
+    assert calls == [(WORKSPACE, None)]
+    calls.clear()
+    assert ready.run("status").out["mirror"] == "verified"
+    assert calls == [(WORKSPACE, ready.state().version)]
 
 
 def test_status_shows_the_boundary_and_the_mirror_the_cutover_decisions_turn_on(ready):
