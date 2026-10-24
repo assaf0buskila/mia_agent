@@ -46,6 +46,7 @@ from typing import Any, NamedTuple
 from app.brain.context import BrainContext, render_context_block
 from app.core.deadlines import child_call_timeout
 from app.core.owner_timing import log_timeout_stage, owner_stage
+from app.db.session import end_transaction
 
 # Each of these is a tool handler's own real "no data" text, imported (not
 # copied) so the empty-result markers below can never drift out of sync with
@@ -569,6 +570,18 @@ def build_messages(
     return messages
 
 
+def _release_turn_transaction(ctx: Any) -> None:
+    """End the turn's database transaction before a model call; see ``end_transaction``.
+
+    Tolerates a ``ctx`` with no store or no session. The loop calls it only between steps: with
+    ``parallel_tool_calls`` off, and every tool thread drained before the step returns, the
+    session is idle here and cannot be in use by a tool thread.
+    """
+    session = getattr(getattr(ctx, "store", None), "session", None)
+    if session is not None:
+        end_transaction(session)
+
+
 def run_owner_agent(
     *,
     client: LlmClient,
@@ -793,6 +806,11 @@ def run_owner_agent(
             # `owner_stage stage=model_primary latency_ms` data from production.
             call_kwargs["attempt_timeout"] = ctx.settings.owner_model_attempt_timeout_seconds
 
+        # Nothing is held open across the model call: the canonical event, any proposal row a
+        # tool just created and every read transaction are committed here. Tools never run while
+        # this does (parallel_tool_calls is off and a tool thread is always drained), so the
+        # session is idle.
+        _release_turn_transaction(ctx)
         try:
             with owner_stage(
                 stage_name, source_ref=ctx.source_ref, model=getattr(client, "model", "")

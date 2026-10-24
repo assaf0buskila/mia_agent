@@ -44,6 +44,24 @@ def get_session_factory() -> sessionmaker[Session]:
     return _SessionLocal
 
 
+def end_transaction(session: Session) -> None:
+    """Commit and so end the session's open transaction; do nothing when none is open.
+
+    The owner turn calls this at fixed points (before the agent, before each model call, before
+    the outbound sends, at the end) so it never holds an uncommitted write across an LLM call, an
+    Apps Script call or a Telegram send. ``is True`` is deliberate: a MagicMock session answers a
+    truthy mock, which must not be committed. A database error rolls the session back and is
+    re-raised, so the caller's existing failure handling is unchanged.
+    """
+    if session.in_transaction() is not True:
+        return
+    try:
+        session.commit()
+    except SQLAlchemyError:
+        session.rollback()
+        raise
+
+
 def init_db() -> None:
     from app.db import models as _models  # noqa: F401
     from app.db import reminders as _reminders  # noqa: F401

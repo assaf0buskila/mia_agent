@@ -12,6 +12,7 @@ import hashlib
 import importlib
 import json
 import logging
+import re
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -91,6 +92,14 @@ class OwnerActionNotStarted(RuntimeError):
 _FENCE_REFUSALS = frozenset({"authority_moved", "ledger_unavailable"})
 
 
+_TIMING_CODE = re.compile(r"[a-z][a-z0-9_]{1,47}")
+
+
+def _timing_code(value: object) -> str:
+    """A receipt status or an error code for a log line, or ``error`` when it is anything else."""
+    return value if isinstance(value, str) and _TIMING_CODE.fullmatch(value) else "error"
+
+
 def _decide_sheets_card(make_port, operation: str, proposal_id: str, request_id: str):
     """One Telegram decision on an Apps Script card.
 
@@ -104,15 +113,31 @@ def _decide_sheets_card(make_port, operation: str, proposal_id: str, request_id:
 
     outer = current_write_dispatch()
     context = WriteDispatch(operation).activate() if outer is None else nullcontext(outer)
+    started = time.monotonic()
+    outcome = "error"
     with context as dispatch:
         try:
-            return make_port().decide(
+            result = make_port().decide(
                 operation, proposal_id, DecisionRequest(request_id=request_id)
             )
+            status = result.get("status") if isinstance(result, Mapping) else None
+            outcome = _timing_code(status)
+            return result
         except AssafOsError as exc:
             if exc.code in _FENCE_REFUSALS and dispatch.not_started:
+                outcome = "not_started"
                 raise OwnerActionNotStarted(exc.code) from None
+            outcome = _timing_code(exc.code)
             raise
+        finally:
+            # Telegram Sheets-card decisions have no request context, so this is their only
+            # timing: an operation, a fixed outcome code and a duration. Never an id or a body.
+            _LOG.info(
+                "owner_actions op=sheets_decide operation=%s outcome=%s ms=%d",
+                operation if operation in {"approve", "reject"} else "error",
+                outcome,
+                int((time.monotonic() - started) * 1000),
+            )
 
 
 def typed_composio_binding(settings, toolkit: str, *, port: object | None = None) -> dict[str, Any]:

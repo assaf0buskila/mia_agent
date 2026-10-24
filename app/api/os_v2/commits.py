@@ -35,6 +35,7 @@ from app.api.owner_sessions import (
     owner_scope,
 )
 from app.core.config import Settings, get_settings
+from app.core.owner_timing import owner_phase
 from app.services.os_ledger import api, owner_direct
 
 ROOT = "/v1/owner/os/unified"
@@ -124,9 +125,14 @@ async def _body(request: Request) -> Any:
                               reason="invalid_json") from None
 
 
-async def _respond(run: Callable[[], dict[str, Any]]) -> JSONResponse:
+async def _respond(run: Callable[[], dict[str, Any]], *, stage: str) -> JSONResponse:
+    def timed() -> dict[str, Any]:
+        # Server-Timing "ledger": the ledger call, timed where it runs (silent outside a request).
+        with owner_phase("ledger", stage):
+            return run()
+
     # The ledger is synchronous (a DB transaction), so it never runs on the event loop.
-    return JSONResponse(await run_in_threadpool(run), status_code=200, headers=_HEADERS)
+    return JSONResponse(await run_in_threadpool(timed), status_code=200, headers=_HEADERS)
 
 
 @router.post(ROOT + "/commits", dependencies=[Depends(route_guard)])
@@ -141,7 +147,7 @@ async def commit(
         ctx = _context(principal, settings, "commit_direct")
         return owner_direct.commit(api.build_ledger(settings), ctx, body, settings=settings)
 
-    return await _respond(run)
+    return await _respond(run, stage="os_commit")
 
 
 @router.post(ROOT + "/commits/{request_id}/undo", dependencies=[Depends(route_guard)])
@@ -158,7 +164,7 @@ async def undo(
         return owner_direct.undo(api.build_ledger(settings), ctx, request_id, body,
                                  settings=settings)
 
-    return await _respond(run)
+    return await _respond(run, stage="os_commit")
 
 
 @router.post(ROOT + "/commits/{request_id}/abandon", dependencies=[Depends(route_guard)])
@@ -175,7 +181,7 @@ async def abandon(
         return owner_direct.abandon(api.build_ledger(settings), ctx, request_id, body,
                                     settings=settings)
 
-    return await _respond(run)
+    return await _respond(run, stage="os_commit")
 
 
 @router.get(ROOT + "/deleted", dependencies=[Depends(route_guard)])
@@ -190,4 +196,4 @@ async def deleted(
         ctx = _context(principal, settings, "read", read=True)
         return owner_direct.deleted(api.build_ledger(settings), ctx, query, settings=settings)
 
-    return await _respond(run)
+    return await _respond(run, stage="os_read")
