@@ -243,6 +243,10 @@ def run_arm(tmp_path, name, argv, **host_options):
     (["status", "--approved-sha", SHA], "os-authority status --approved-sha " + SHA),
     (["activate", "--approved-sha", SHA], "os-authority activate --approved-sha " + SHA),
     (["fence", "--approved-sha", SHA], "os-authority fence --approved-sha " + SHA),
+    (["restore-begin", "--expected-epoch", "1", "--approved-sha", SHA],
+     "os-authority restore-begin --expected-epoch 1 --approved-sha " + SHA),
+    (["restore-finish", "--expected-epoch", "1", "--approved-sha", SHA],
+     "os-authority restore-finish --expected-epoch 1 --approved-sha " + SHA),
     (["rollback", "--approved-sha", SHA], "os-authority rollback --approved-sha " + SHA),
     (["init", "--rearm", "--approved-sha", SHA],
      "os-authority init --rearm --approved-sha " + SHA),
@@ -315,6 +319,45 @@ def test_os_authority_takes_the_state_lock_like_the_other_owner_gated_commands()
     lock_arm = SCRIPT.split("\ncase \"$cmd\" in\n", 1)[1].split("\nesac\n", 1)[0]
     for name in ("deploy", "restore", "os-ledger", "os-authority", "os-provision"):
         assert re.search(rf"[|\s]{name}[|)]", lock_arm), name
+
+
+@pytest.mark.parametrize("marker_present", [False, True])
+def test_restore_finish_checks_the_host_marker_and_overrides_inherited_assertion(
+    tmp_path, marker_present,
+):
+    host(tmp_path)
+    marker = tmp_path / "restore-incomplete"
+    if marker_present:
+        marker.touch()
+    program = (
+        stubs(tmp_path)
+        + 'compose() { echo "complete=$MIA_OS_RESTORE_COMPLETE compose $*"; }\n'
+        + 'MIA_OS_RESTORE_COMPLETE=true\n'
+        + f'MIA_RESTORE_INCOMPLETE="{marker.as_posix()}"\n'
+        + f'set -- restore-finish --expected-epoch 1 --approved-sha {SHA}\n'
+        + redirected(arm("os-authority"), tmp_path)
+    )
+    result = _run_step(program, tmp_path)
+    if marker_present:
+        assert result.returncode == 1 and "restore_incomplete" in result.stderr
+        assert "compose" not in result.stdout
+    else:
+        assert result.returncode == 0 and "complete=true compose" in result.stdout
+    assert COMPOSE["os-authority"]["environment"]["MIA_OS_RESTORE_COMPLETE"] == (
+        "${MIA_OS_RESTORE_COMPLETE:-false}")
+
+
+def test_restore_begin_never_forwards_an_inherited_completion_assertion(tmp_path):
+    host(tmp_path)
+    program = (
+        stubs(tmp_path)
+        + 'compose() { echo "complete=$MIA_OS_RESTORE_COMPLETE compose $*"; }\n'
+        + 'MIA_OS_RESTORE_COMPLETE=true\n'
+        + f'set -- restore-begin --expected-epoch 1 --approved-sha {SHA}\n'
+        + redirected(arm("os-authority"), tmp_path)
+    )
+    result = _run_step(program, tmp_path)
+    assert result.returncode == 0 and "complete=false compose" in result.stdout
 
 
 # --------------------------------------------------------------------------- mia os-provision
