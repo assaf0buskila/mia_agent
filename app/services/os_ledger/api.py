@@ -662,11 +662,11 @@ def _implementation(module: str, name: str) -> Callable[..., Any]:
 
 
 def core_authority_state(settings: Any) -> AuthorityState | None:
-    """Context-free read of os_authority(core) on the runtime DSN, for V2-17's Sheets fence ONLY.
+    """Context-free read of os_authority(core) for the Sheets fence and mirror freeze gate.
 
     None when no ledger DSN is configured, or when no os_workspaces row exists (the Sheets call
-    proceeds). A DB error, or a missing V2-16 implementation while the DSN is set, is
-    ``ledger_unavailable``.
+    proceeds; the frozen mirror pauses). A DB error, or a missing V2-16 implementation while the
+    DSN is set, is ``ledger_unavailable``.
     """
     if not getattr(settings, "owner_os_ledger_database_url", ""):
         return None
