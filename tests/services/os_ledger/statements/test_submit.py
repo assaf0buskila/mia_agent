@@ -7,6 +7,7 @@ from datetime import timedelta
 
 import pytest
 from app.services.os_ledger import api
+from app.services.os_ledger.statement_wire import batch_created
 
 from tests.fakes.os_ledger_env import NOW
 from tests.services.os_ledger.statements.support import (
@@ -67,6 +68,62 @@ def test_a_replay_returns_the_stored_batch_and_writes_nothing(world):
     assert second.summary == first.summary
     assert world.everything() == before
     assert len(world.rows("os_proposals")) == 1
+
+
+def test_equal_submit_replay_preserves_original_response_after_rule_change(world):
+    raw = encode(batch([line("MYSTERY", 100, tag=None)]))
+    first = world.paste(raw)
+    original = encode(batch_created(world.owner, first))
+    assert first.summary["unassigned_count"] == 1
+    first_key = world.lines(first.proposal_id)[0]["line_key"]
+    world.draft(first.proposal_id, [{"line_key": first_key, "category": "Tools"}])
+    other = world.paste(batch([line("MYSTERY", 100, tag=None)], number=2,
+                              charge_date="2026-11-15"))
+    key = world.lines(other.proposal_id)[0]["line_key"]
+    world.draft(other.proposal_id, [{"line_key": key, "tag": "business", "make_rule": True}])
+    assert world.approve(other.proposal_id).receipt.status == "committed"
+    assert world.lines(first.proposal_id)[0]["tag"] == "business"  # the rule now applies
+    before = (world.version(), world.everything())
+    replay = world.paste(raw)
+    assert encode(batch_created(world.owner, replay)) == original
+    assert replay == first
+    assert (world.version(), world.everything()) == before
+
+
+@pytest.mark.parametrize("conflict", [False, True])
+def test_equal_submit_replay_preserves_conflict_and_superseded_fields(world, conflict):
+    older = world.paste(batch(three_lines()))
+    if conflict:
+        world.draft(older.proposal_id)
+    raw = encode(batch(three_lines(), number=2))
+    first = world.paste(raw)
+    assert first.conflict is conflict
+    assert first.superseded_proposal_id == (None if conflict else older.proposal_id)
+    original = encode(batch_created(world.owner, first))
+    if conflict:
+        world.reject(older.proposal_id)  # the original conflict is now gone
+    else:
+        world.hand_expense("EXP_other", vendor="Other Shop", amount=100, day="2026-09-20")
+    assert world.version() > first.observed_version
+    before = world.everything()
+    assert encode(batch_created(world.owner, world.paste(raw))) == original
+    assert world.everything() == before
+
+
+def test_equal_submit_replay_without_a_stored_snapshot_refuses_without_writes(world):
+    from dataclasses import replace
+
+    from app.services.os_ledger.statement_tables import tables_for
+
+    raw = encode(batch(three_lines()))
+    submitted = world.paste(raw)
+    with world.scratch_tx() as tx:
+        tables = tables_for(tx)
+        tables.put_draft(replace(tables.draft(submitted.proposal_id), submitted=None))
+    before = (world.version(), world.everything())
+    with refused("review_stale"):
+        world.paste(raw)
+    assert (world.version(), world.everything()) == before
 
 
 def test_the_same_batch_id_with_other_content_is_an_idempotency_mismatch(world):

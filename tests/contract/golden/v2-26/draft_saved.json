@@ -6,7 +6,7 @@
   ],
   "draft_revision": 1,
   "observed_version": 2,
-  "review_digest": "b089eab244f5cd08e3d067490ba0a9ae280e2bfdba60c4b69c045d9aec497841",
+  "review_digest": "1585218a79bd59ffbc5dd49eae49138ff3978abba2614fbe32a87ab63a91949f",
   "source": "postgresql",
   "workspace_id": "test"
 }

@@ -14,7 +14,9 @@ The review drafts table doubles as the **batch registry**. ``LedgerTx`` has no w
 ``revoke_pending_for_credential`` must find every pending batch of a statement, of a credential, or
 of the workspace. So every batch gets one draft row at submit (``draft_revision`` 0), whose
 ``choices`` object also holds a reserved ``index`` entry ``{statement_id, credential_id, source,
-open}``. It survives a restore (only ``os_statement_batch_lines`` data is excluded from a dump), so
+open, submitted}``. ``submitted`` is the original BatchSubmitted response snapshot; it is never
+recomputed on replay or changed by a draft save. It survives a restore (only
+``os_statement_batch_lines`` data is excluded from a dump), so
 a restored batch with no lines is still found and finished. ``expire_due`` also finds a batch by
 its live detail (``proposals_with_detail``), so a batch without a registry row cannot keep personal
 lines past its window.
@@ -127,6 +129,7 @@ class DraftRow:
     credential_id: str | None = None
     source: str = ""
     open: bool = True
+    submitted: dict[str, Any] | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True)
@@ -565,7 +568,8 @@ class PgTables:
         index = choices.pop(INDEX_KEY, {})
         return DraftRow(row.proposal_id, int(row.draft_revision), dict(row.overrides or {}),
                         choices, index.get("statement_id", ""), index.get("credential_id"),
-                        index.get("source", ""), bool(index.get("open", False)))
+                        index.get("source", ""), bool(index.get("open", False)),
+                        index.get("submitted"))
 
     def draft(self, proposal_id: str) -> DraftRow | None:
         row = self._run(
@@ -577,7 +581,7 @@ class PgTables:
     def put_draft(self, row: DraftRow) -> None:
         choices = dict(row.choices)
         choices[INDEX_KEY] = {"statement_id": row.statement_id, "credential_id": row.credential_id,
-                              "source": row.source, "open": row.open}
+                              "source": row.source, "open": row.open, "submitted": row.submitted}
         self._run(
             "INSERT INTO assaf_os.os_statement_review_drafts (workspace_id, proposal_id, "
             "draft_revision, overrides, choices, created_at, updated_at) VALUES (:ws, :id, :rev, "

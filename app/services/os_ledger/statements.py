@@ -22,7 +22,7 @@ import logging
 import re
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import AbstractContextManager
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
@@ -259,7 +259,7 @@ class LedgerStatementService:
             self._check_pin(tx, pepper, op)
             existing = tx.proposal_by_request(request_id)
             if existing is not None:
-                return self._replayed(ctx, tx, tables, existing, digest, pepper)
+                return self._replayed(ctx, tx, tables, existing, digest)
             statement = tables.statement(batch.statement_id)
             header = statement or StatementRow(
                 batch.statement_id, batch.account_label, batch.charge_date, batch.cycle,
@@ -296,20 +296,21 @@ class LedgerStatementService:
             tables.insert_batch_lines([
                 BatchLineRow(row.proposal_id, line.line_key, line.occurrence_index,
                              sp.detail_of(line)) for line in batch.lines])
+            summary = sp.summary_of(plan)
+            submitted = BatchSubmitted(row.proposal_id, batch.statement_id, "pending", conflict,
+                                        superseded, summary, tx.version + finishes)
             tables.put_draft(DraftRow(row.proposal_id, 0, {}, {}, batch.statement_id,
-                                      ctx.credential_id, source, True))
+                                      ctx.credential_id, source, True, asdict(submitted)))
             if statement is None:
                 tables.insert_statement(replace(header, current_proposal_id=row.proposal_id))
             else:
                 tables.update_statement(replace(statement, current_proposal_id=row.proposal_id))
-            summary = sp.summary_of(plan)
             _log(op, "ok", "pending", lines=summary["line_count"], superseded=int(
                 superseded is not None), conflict=int(conflict))
-            return BatchSubmitted(row.proposal_id, batch.statement_id, "pending", conflict,
-                                  superseded, summary, tx.version + finishes)
+            return submitted
 
     def _replayed(self, ctx: api.TrustedOwnerContext, tx: Any, tables: StatementTables,
-                  existing: api.ProposalRow, digest: str, pepper: bytes) -> BatchSubmitted:
+                  existing: api.ProposalRow, digest: str) -> BatchSubmitted:
         """The same request id: the stored batch for an equal digest, a mismatch otherwise."""
         if existing.kind != "statement_batch" or existing.request_digest != digest:
             raise api.LedgerError("idempotency_mismatch", reason="request_digest_differs")
@@ -317,21 +318,13 @@ class LedgerStatementService:
             raise api.LedgerError("authority_changed", reason="replay_epoch")
         if existing.status != "pending" or existing.expires_at <= tx.now:
             raise api.LedgerError("already_decided", reason="replay_terminal")
-        statement = tables.statement(existing.record_id)
-        lines = sp.batch_lines_from(tables.batch_lines(existing.proposal_id), existing.record_id)
-        if statement is None or not lines:
-            raise api.LedgerError("review_stale", reason="replay_without_detail")
-        try:
-            plan = sp.compute(tx, tables, statement=statement, batch=lines,
-                              rule_rows=tables.rules(), pepper=pepper,
-                              proposal_id=existing.proposal_id, overrides={}, choices={})
-        except StatementValidationError as exc:
-            raise sp.domain_error(exc) from None
-        others = self._pending_others(tx, tables, existing.record_id, exclude=existing.proposal_id,
-                                      epoch=ctx.authority_epoch, heal=False)
-        _log("submit", "ok", "replayed", lines=len(lines))
-        return BatchSubmitted(existing.proposal_id, existing.record_id, "pending", bool(others),
-                              None, sp.summary_of(plan), tx.version)
+        draft = tables.draft(existing.proposal_id)
+        if draft is None or draft.submitted is None:
+            # A legacy registry has no exact response to return. Never invent one from live state.
+            raise api.LedgerError("review_stale", reason="replay_without_snapshot")
+        snapshot = draft.submitted
+        _log("submit", "ok", "replayed", lines=snapshot["summary"]["line_count"])
+        return BatchSubmitted(**{**snapshot, "summary": dict(snapshot["summary"])})
 
     # ---- reads -----------------------------------------------------------------------------
 
@@ -401,8 +394,9 @@ class LedgerStatementService:
             proposal = self._batch(tx, proposal_id)
             page: list[dict[str, Any]] = []
             next_cursor = None
-            if proposal.status == "pending" and tables.live_batch_line_count(
-                    proposal.proposal_id) > 0:
+            if (proposal.status == "pending" and proposal.epoch == ctx.authority_epoch
+                    and tx.now < proposal.expires_at
+                    and tables.live_batch_line_count(proposal.proposal_id) > 0):
                 statement = tables.statement(proposal.record_id)
                 if statement is None:
                     raise api.LedgerError("batch_not_found", reason="statement_missing")

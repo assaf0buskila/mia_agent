@@ -364,6 +364,22 @@ def test_a_pending_batch_of_an_older_epoch_reads_as_expired(world):
     assert review["conflict_with"] == []
 
 
+@pytest.mark.parametrize("expired_by", ["epoch", "deadline", "past_deadline"])
+def test_expired_batch_lines_without_cursor_return_no_detail(world, expired_by):
+    submitted = world.paste(batch(three_lines()))
+    assert world.lines(submitted.proposal_id)
+    if expired_by == "epoch":
+        world.bump_epoch()
+    else:
+        world.advance(7 * 24 * 3600 + int(expired_by == "past_deadline"))
+    ctx = world.current_reader()
+    assert world.service.review(ctx, submitted.proposal_id)["status"] == "expired"
+    before = (world.version(), world.everything())
+    page = world.service.lines(ctx, submitted.proposal_id, after=None, limit=100)
+    assert page["lines"] == [] and page["next_cursor"] is None
+    assert (world.version(), world.everything()) == before  # reads never purge or decide
+
+
 def test_a_lines_cursor_does_not_survive_an_epoch_change(world):
     submitted = world.paste(batch(three_lines()))
     page = world.service.lines(world.reader, submitted.proposal_id, after=None, limit=1)

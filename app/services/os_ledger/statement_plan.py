@@ -489,7 +489,15 @@ def compute(tx: Any, tables: StatementTables, *, statement: StatementRow,
 def outcome_digest(plan: Plan) -> str:
     """Digest of every effect the approval would have and every value the review shows."""
     diff = plan.diff
-    return api.digest({
+    # Loading the date window also finds unrelated hand entries. Bind only actual matching
+    # candidates and existing links, so an unrelated edit does not invalidate this review.
+    candidate_ids = {eid for entry in diff.entries for eid in entry.candidate_expense_ids}
+    candidate_ids.update(row.matched_expense_id for row in plan.stored
+                         if row.matched_expense_id is not None)
+    candidates = [[c.expense_id, c.source_key, c.date.isoformat(), c.vendor,
+                   c.amount_minor, c.currency, c.payment_status, c.linked_line_key]
+                  for c in plan.candidates if c.expense_id in candidate_ids]
+    state = {
         "entries": [[e.line_key, e.action, e.reason, list(e.flags), e.from_tag, e.to_tag,
                      e.held_back, list(e.kept_fields), list(e.candidate_expense_ids)]
                     for e in diff.entries],
@@ -499,7 +507,10 @@ def outcome_digest(plan: Plan) -> str:
                       r.rule_id, list(r.flags)] for r in plan.resolved],
         "blocking": list(diff.blocking),
         "rules": [[w.rule_id, w.tag, w.revision, how] for w, how in plan.rule_writes],
-    })
+    }
+    if candidates:  # Preserve the digest format of reviews with no manual dependencies.
+        state["candidates"] = candidates
+    return api.digest(state)
 
 
 def review_digest(proposal: Any, draft_revision: int, plan: Plan) -> str:
