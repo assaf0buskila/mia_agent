@@ -23,6 +23,7 @@ from __future__ import annotations
 import ast
 import json
 import logging
+import types
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -764,6 +765,13 @@ def owner_cards(store) -> int:
     return store.session.query(ApprovalRow).count()
 
 
+def world_counts(world) -> dict:
+    """``counts()`` of the V2-20 world for the V2-28 FakeLedger: the same tables, the version and
+    ``pending_seq``, so a write to any of them is seen (a receipt count alone misses the rest)."""
+    return counts(types.SimpleNamespace(
+        rows=world.ledger.rows, version=lambda: world.ledger.version(v228.WORKSPACE)))
+
+
 def drive_pg_lead(env: Env, freeze: bool) -> LedgerOutcome:
     world, store = v228_world(env, v228.pg_settings(assaf_os_freeze=freeze))
     try:
@@ -781,8 +789,12 @@ def drive_pg_lead(env: Env, freeze: bool) -> LedgerOutcome:
         else:
             refused = None
         after = (len(world.ledger.rows("os_proposals")), owner_cards(store))
+        claims = v228.provider_claims(store)
         # A definite refusal releases the preparation claim: no pending_review is left behind.
-        assert all(status != "pending_review" for _, status in v228.provider_claims(store))
+        assert all(status != "pending_review" for _, status in claims)
+        if freeze:
+            # A frozen preparation leaves no claim row at all, released or otherwise.
+            assert claims == [], claims
         return LedgerOutcome(refused, after != before)
     finally:
         store.session.close()
@@ -806,7 +818,7 @@ def drive_pg_telegram(env: Env, state: str, operation: str) -> LedgerOutcome:
             world.ledger.transition(v228.WORKSPACE, "core", "fenced", expected_epoch=1,
                                     actor_owner_id=v228.OWNER)
         world.settings = world.settings.model_copy(update=changes)
-        receipts = len(world.receipts())
+        before = world_counts(world)
         if operation == "approve":
             result = execute_approved_owner_action_with_adapters(
                 store, settings=world.settings, principal=actor, proposal_id=card.proposal_id)
@@ -815,7 +827,8 @@ def drive_pg_telegram(env: Env, state: str, operation: str) -> LedgerOutcome:
             result = reject_assaf_os_owner_action(
                 store, settings=world.settings, principal=actor, proposal_id=card.proposal_id)
             settled = {"executed", "rejected"}
-        wrote = len(world.receipts()) != receipts
+        # Every ledger table the V2-20 world compares and the version, not only the receipts.
+        wrote = world_counts(world) != before
         return LedgerOutcome(None if result.status in settled else result.status, wrote)
     finally:
         store.session.close()

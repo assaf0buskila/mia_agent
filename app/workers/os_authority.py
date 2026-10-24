@@ -13,7 +13,9 @@ outcome=<ok|refused> reason=<code>``.
 Evidence lives in one VM-owned directory (``MIA_OS_AUTHORITY_DIR``, default
 ``/var/lib/mia/os-authority``). This job writes ``drain.json`` (``preflight --drain``),
 ``preflight.json`` (``preflight``, and ``preflight --drain`` once it has seen the Script live: that
-sighting ends the run of fenced probes) and ``activation.json`` (``activate``). The operator places
+sighting ends the run of fenced probes) and ``activation.json`` (``activate``). ``freeze-plan
+--phase drain`` starts a freeze and ``--phase revert`` ends one (the exit from every aborted
+window), and each sets ``drain.json`` aside: a drain belongs to one freeze. The operator places
 ``backup.json``, ``restore-drill.json``, ``fe-v2.json``, ``journal.json`` and ``manifest.json``
 there (formats: ops/assaf-os/CUTOVER_RUNBOOK.md). The activation preconditions are the fixed table
 in ``PRECONDITIONS``; ``activate`` re-evaluates every one of them and moves ``core`` from
@@ -66,8 +68,13 @@ PRECONDITIONS = (
     "fe_v2_reader_not_live",
     "journal_capacity",
 )
+# One more refusal of ``activate`` and ``preflight``, beyond the contract's 15 (see run_gates).
+PROMOTE_GATE = "import_not_promoted"
 
 BACKUP_MAX_AGE = timedelta(hours=1)
+# T3 follows T2 immediately: a drain taken more than this long before the fence probe was taken
+# under a freeze that may have lapsed in between (an aborted window, then OS-screen proposals).
+DRAIN_MAX_AGE = timedelta(hours=2)
 DRILL_MAX_AGE = timedelta(days=7)
 JOURNAL_MAX_AGE = timedelta(days=7)
 CLOCK_SKEW = timedelta(seconds=60)
@@ -137,11 +144,13 @@ PHASES = ("drain", "switch", "mirror", "open", "revert")
 
 
 class Refusal(Exception):
-    """A fixed refusal: the codes are printed, nothing else is."""
+    """A fixed refusal: the codes are printed, nothing else is. ``document`` adds fixed keys to the
+    JSON document (a state name, never a value read from outside)."""
 
-    def __init__(self, *codes: str) -> None:
+    def __init__(self, *codes: str, document: Mapping[str, str] | None = None) -> None:
         super().__init__(",".join(codes))
         self.codes = list(codes)
+        self.document = dict(document or {})
 
 
 class EvidenceError(Exception):
@@ -236,6 +245,29 @@ class EvidenceStore:
         except OSError:
             raise Refusal("evidence_unwritable") from None
 
+    @staticmethod
+    def aside_stamp(moment: datetime) -> str:
+        return moment.astimezone(UTC).strftime("%Y%m%dT%H%M%SZ")
+
+    def set_aside(self, name: str, moment: datetime) -> bool:
+        """Rename an evidence file out of the way, ``<stem>-superseded-<UTC stamp><suffix>``; it is
+        never deleted. False when there was none."""
+        path = self.directory / name
+        try:
+            if not (path.is_symlink() or path.exists()):
+                return False
+            target = path.with_name(
+                f"{path.stem}-superseded-{self.aside_stamp(moment)}{path.suffix}")
+            for attempt in range(2, 1000):  # two set-asides in one second never overwrite
+                if not target.exists():
+                    break
+                target = path.with_name(
+                    f"{path.stem}-superseded-{self.aside_stamp(moment)}-{attempt}{path.suffix}")
+            os.replace(path, target)
+        except OSError:
+            raise Refusal("evidence_unwritable") from None
+        return True
+
 
 # ---------------------------------------------------------------------------------------------
 # Probes: everything that reads the outside world. Tests supply a fake; production uses LiveProbes.
@@ -260,6 +292,9 @@ class Probes(Protocol):
         """``empty``, ``verified`` or ``unverified``."""
 
     def non_import_receipts(self, workspace: str, epoch: int) -> int: ...
+
+    def import_promoted(self, workspace: str, epoch: int, manifest_digest: str) -> bool:
+        """True when a committed import receipt at this epoch binds this manifest digest."""
 
 
 def fence_state(
@@ -501,6 +536,29 @@ class LiveProbes:
                 "AND epoch = :epoch AND kind <> 'import'"
             ), {"workspace": workspace, "epoch": epoch}).scalar_one())
 
+    def import_promoted(self, workspace: str, epoch: int, manifest_digest: str) -> bool:
+        """What ``promote`` (V2-30, E1-rev) leaves behind: one committed ``import`` receipt at this
+        epoch whose request id is ``import_request_uuid(epoch, digest)``, and its proposal, which
+        carries the digest (``dependency_digest``) and the request digest of
+        ``{"import": digest, "epoch": epoch}``. No schema of its own: it reads those two rows."""
+        from sqlalchemy import text
+
+        with self._engine("privileged").connect() as connection:
+            found = connection.execute(text(
+                "SELECT count(*) FROM assaf_os.os_receipts r "
+                "JOIN assaf_os.os_proposals p "
+                "ON p.workspace_id = r.workspace_id AND p.proposal_id = r.proposal_id "
+                "WHERE r.workspace_id = :workspace AND r.epoch = :epoch AND r.kind = 'import' "
+                "AND r.status = 'committed' AND r.request_id = CAST(:request_id AS uuid) "
+                "AND p.kind = 'import' AND p.epoch = :epoch AND p.status = 'committed' "
+                "AND p.dependency_digest = :digest AND p.request_digest = :request_digest"
+            ), {
+                "workspace": workspace, "epoch": epoch, "digest": manifest_digest,
+                "request_id": api.import_request_uuid(epoch, manifest_digest),
+                "request_digest": api.digest({"import": manifest_digest, "epoch": epoch}),
+            }).scalar_one()
+        return int(found) > 0
+
 
 # ---------------------------------------------------------------------------------------------
 # Context and the precondition checks
@@ -606,11 +664,12 @@ def verify_signoff(
 
 
 def _fence_time(doc: Mapping[str, Any] | None, epoch: int, sha: str) -> datetime | None:
-    """The earliest continuous time the fence was observed, for this epoch and release."""
+    """The earliest continuous time the fence was observed, for this epoch and release. A record of
+    an ``unknown`` probe carries it through (see ``_fence_record``); a ``live`` one never does."""
     if (
         doc is None
         or doc.get("kind") != "preflight"
-        or doc.get("sheets") != "unavailable"
+        or doc.get("sheets") not in ("unavailable", "unknown")
         or doc.get("epoch") != epoch
         or doc.get("release_sha") != sha
     ):
@@ -638,10 +697,13 @@ def _fence_record(
     """The fence evidence (``preflight.json``) after one observation of the Script.
 
     ``fence_probe_at`` is the earliest probe of an unbroken run of ``unavailable``: it is carried
-    through further ``unavailable`` probes and dropped by any other observation. Seeing the Script
-    live right after a fence had been established is the break: ``fence_broken_at`` records it, is
-    kept by every later observation of this epoch and release, and is never moved earlier. An
-    ``unknown`` probe ends the run but proves nothing about the Script, so it is no break.
+    through further ``unavailable`` probes and through ``unknown`` ones, and dropped by a ``live``
+    one. Seeing the Script live right after a fence had been established is the break:
+    ``fence_broken_at`` records it, is kept by every later observation of this epoch and release,
+    and is never moved earlier. An ``unknown`` probe (a timeout, a transport error) proves nothing
+    about the Script: it is neither a break nor a restart of the clock, so it carries no more
+    information than no probe, and an unprobed gap between two ``unavailable`` probes is already
+    treated as continuous. It would otherwise void the captures taken after the first fence.
     """
     carried = _fence_time(previous, epoch, sha)
     broken = _fence_broken(previous, epoch, sha)
@@ -653,6 +715,8 @@ def _fence_record(
         # A later capture is only provably after the fence if no probe in between saw the Script
         # live.
         document["fence_probe_at"] = _iso(carried if carried is not None else now)
+    elif state == "unknown" and carried is not None:
+        document["fence_probe_at"] = _iso(carried)
     elif state == "live" and carried is not None:
         broken = now
     if broken is not None:
@@ -764,6 +828,10 @@ def _check_pending(ctx: Context, snapshot: api.AuthoritySnapshot) -> Check:
         return Check(code, "pending", "fence_not_recorded")
     if not recorded < fenced_at:
         return _fail(code, "drain_after_fence")
+    if fenced_at - recorded > DRAIN_MAX_AGE:
+        # No fence had to be broken for this: an aborted window only unfreezes. Proposals made
+        # over the days in between have no Telegram card, so no other check would see them.
+        return _fail(code, "drain_stale")
     return _pass(code)
 
 
@@ -897,6 +965,36 @@ def run_checks(ctx: Context, snapshot: api.AuthoritySnapshot) -> list[Check]:
         except Exception:  # never print a driver or transport message
             results.append(_fail(code, "probe_error"))
     return results
+
+
+def _check_promoted(ctx: Context, snapshot: api.AuthoritySnapshot) -> Check | None:
+    """An import receipt at THIS epoch binds the signed manifest digest (V2-31b, finding 8).
+
+    ``promote`` writes it in the same transaction as the records, so it is the proof that the
+    signed import is in the ledger; without it activation would pass on an empty ledger and only
+    the phone check at T6 would catch it. None when there is no signed manifest to bind: that is
+    ``manifest_not_signed``'s refusal, and this check adds nothing to it. Not yet promoted is
+    ``pending`` (T5 comes after the T3 preflight), and ``activate`` refuses on it."""
+    document, _ = ctx.manifest()
+    if document is None:
+        return None
+    signed, _ = verify_signoff(document, ctx.deps.owner_id, ctx.now)
+    if signed is None:
+        return None
+    if ctx.deps.probes.import_promoted(ctx.deps.workspace, snapshot.epoch, signed.digest):
+        return _pass(PROMOTE_GATE)
+    return _not_yet(PROMOTE_GATE, "no_import_receipt")
+
+
+def run_gates(ctx: Context, snapshot: api.AuthoritySnapshot) -> list[Check]:
+    """The checks of ``activate`` and ``preflight`` beyond the contract's 15 preconditions."""
+    try:
+        gate = _check_promoted(ctx, snapshot)
+    except EvidenceError:
+        gate = _fail(PROMOTE_GATE, "evidence_unreadable")
+    except Exception:  # never print a driver message
+        gate = _fail(PROMOTE_GATE, "probe_error")
+    return [] if gate is None else [gate]
 
 
 def _blocking(checks: Sequence[Check], *, allow_pending: bool) -> list[str]:
@@ -1047,11 +1145,13 @@ def cmd_preflight(ctx: Context, *, drain: bool, final_accept: bool) -> Result:
     checks = run_checks(ctx, snapshot)
     document["checks"] = [check.as_dict() for check in checks]
     deps.evidence.write(PREFLIGHT, document)
-    failed = _blocking(checks, allow_pending=True)
-    pending = [c.code for c in checks if c.status == "pending"]
+    gates = run_gates(ctx, snapshot)  # reported, not written: the evidence file keeps its shape
+    failed = _blocking([*checks, *gates], allow_pending=True)
+    pending = [c.code for c in [*checks, *gates] if c.status == "pending"]
     result = {
         "command": "preflight", "ok": not failed, "ready_to_activate": not failed and not pending,
-        "checks": document["checks"], "sheets": state, **_snapshot_document(snapshot),
+        "checks": document["checks"], "gates": [gate.as_dict() for gate in gates],
+        "sheets": state, **_snapshot_document(snapshot),
     }
     return Result(not failed, result, failed)
 
@@ -1096,7 +1196,8 @@ def _drain(ctx: Context, snapshot: api.AuthoritySnapshot, *, final_accept: bool)
 
 
 def cmd_activate(ctx: Context) -> Result:
-    """``shadow -> active``, only when every precondition holds. Never bumps the epoch."""
+    """``shadow -> active``, only when every precondition holds and the signed import is promoted at
+    this epoch (``import_not_promoted``, beyond the contract's 15). Never bumps the epoch."""
     deps = ctx.deps
     snapshot = _state(ctx)
     core = snapshot.states["core"]
@@ -1111,10 +1212,12 @@ def cmd_activate(ctx: Context) -> Result:
     except EvidenceError:
         ctx.fence_doc = None
     checks = run_checks(ctx, snapshot)
-    blocking = _blocking(checks, allow_pending=False)
+    gates = run_gates(ctx, snapshot)
+    blocking = _blocking([*checks, *gates], allow_pending=False)
     if blocking:
         return Result(False, {"command": "activate", "ok": False, "outcome": "refused",
                               "checks": [check.as_dict() for check in checks],
+                              "gates": [gate.as_dict() for gate in gates],
                               **_snapshot_document(snapshot)}, blocking)
     try:
         after = deps.admin.transition(
@@ -1124,7 +1227,8 @@ def cmd_activate(ctx: Context) -> Result:
     except api.LedgerError as error:
         raise _ledger_refusal(error) from None
     document = {"command": "activate", "ok": True, "outcome": "activated",
-                "checks": [check.as_dict() for check in checks], **_snapshot_document(after)}
+                "checks": [check.as_dict() for check in checks],
+                "gates": [gate.as_dict() for gate in gates], **_snapshot_document(after)}
     try:
         deps.evidence.write(ACTIVATION, {
             "v": 1, "kind": "activation", "activated_at": _iso(deps.now()), "epoch": after.epoch,
@@ -1173,15 +1277,37 @@ def rollback_steps(epoch: int) -> list[str]:
     ]
 
 
+def _rollback_refused(core: str) -> Refusal:
+    """``rollback_after_first_write``, and when ``core`` is fenced by now, also ``core_left_fenced``
+    with ``core: fenced`` in the document (the ledger refuses every write; follow section 6)."""
+    if core == "fenced":
+        return Refusal(
+            "rollback_after_first_write", "core_left_fenced", document={"core": "fenced"})
+    return Refusal("rollback_after_first_write")
+
+
 def cmd_rollback(ctx: Context) -> Result:
-    """Allowed only before the first non-import receipt at the current epoch."""
+    """Allowed only before the first non-import receipt at the current epoch.
+
+    The receipt count and the ``active -> fenced`` transition are separate transactions and the
+    ledger does not check receipts on that edge, so a commit (the phone actions of G16/G17 happen
+    exactly while a rollback is allowed) can land between them. The count is therefore repeated
+    AFTER the fence: once ``core`` is fenced nothing more can commit, so the second count is final.
+    A write that got in refuses the rollback and prints nothing about Sheets: ``core`` stays
+    fenced, which is the section 6 path (the ledger now owns a business write).
+
+    The two refusals must not read the same: before the fence the ledger is still LIVE; after it
+    every OS write is refused ``authority_not_active``. The second one (and a repeat that finds
+    ``core`` already fenced) adds the reason ``core_left_fenced`` and ``core: fenced`` to the
+    document.
+    """
     deps = ctx.deps
     snapshot = _state(ctx)
     core = snapshot.states["core"]
     if core == "restoring":
         raise Refusal("authority_state_invalid")
     if deps.probes.non_import_receipts(deps.workspace, snapshot.epoch):
-        raise Refusal("rollback_after_first_write")
+        raise _rollback_refused(core)
     try:
         if core != "fenced":
             snapshot = deps.admin.transition(
@@ -1190,21 +1316,29 @@ def cmd_rollback(ctx: Context) -> Result:
             )
     except api.LedgerError as error:
         raise _ledger_refusal(error) from None
+    if deps.probes.non_import_receipts(deps.workspace, snapshot.epoch):
+        raise _rollback_refused("fenced")
     return Result(True, {"command": "rollback", "ok": True, "outcome": "fenced",
                          "next_steps": rollback_steps(snapshot.epoch),
                          **_snapshot_document(snapshot)})
 
 
 def plan_lines(phase: str, epoch: int) -> list[str]:
-    """The ``mia-env`` keys one phase flips. Each phase is its own owner go (section 16)."""
-    if phase == "drain":  # T1: the freeze starts
-        return ["MIA_ASSAF_OS_FREEZE=true"]
-    if phase == "switch":  # T6: the backend moves; the freeze STAYS on
+    """The ``mia-env`` keys one phase flips. Each phase is its own owner go (section 16).
+
+    Contract §22 E29: the ledger keys come at T1, not at T6. The import (T4 stage, T5 promote) runs
+    as the ledger worker before the switch and needs ``MIA_ASSAF_OS_LEDGER_ENABLED=true`` and
+    ``MIA_ASSAF_OS_AUTHORITY_EPOCH=E``. With the backend still ``sheets`` the factory returns
+    Sheets and the ledger core admits only ``kind=import`` while ``core=shadow``. The switch then
+    flips the backend and nothing else."""
+    if phase == "drain":  # T1: the freeze starts, and the ledger keys the import needs
         return [
-            "MIA_ASSAF_OS_BACKEND=postgres",
+            "MIA_ASSAF_OS_FREEZE=true",
             "MIA_ASSAF_OS_LEDGER_ENABLED=true",
             f"MIA_ASSAF_OS_AUTHORITY_EPOCH={epoch}",
         ]
+    if phase == "switch":  # T6: the backend moves, only; the freeze STAYS on
+        return ["MIA_ASSAF_OS_BACKEND=postgres"]
     if phase == "mirror":  # T7: the Sheets mirror starts (its workbook id and key are set already)
         return ["MIA_ASSAF_OS_MIRROR_ENABLED=true"]
     if phase == "open":  # the first non-import write is admitted
@@ -1221,8 +1355,19 @@ PLAN_NOTES = {
     "drain": [
         "the freeze refuses every new proposal; approve and reject still pass, so the drain can "
         "settle every pending item",
+        "each freeze starts a new drain: an earlier drain.json is set aside (renamed "
+        "drain-superseded-<UTC>.json), so run T2 (preflight --drain) after this freeze",
+        "the ledger keys are set now, before any import: the T4 stage and the T5 promote run as "
+        "the ledger worker and need them; the backend stays sheets, so the OS and Mia are still "
+        "served from the Sheet (until the 'switch' phase), and the ledger admits only imports",
+        "then check: sudo mia os-authority status (settings.freeze true, settings.ledger_enabled "
+        "true, settings.epoch_matches true, settings.backend sheets)",
+        "if the window is aborted, undo them with: freeze-plan --phase revert, and "
+        "MIA_ASSAF_OS_FREEZE=false",
     ],
     "switch": [
+        "this flips the backend only: MIA_ASSAF_OS_LEDGER_ENABLED and MIA_ASSAF_OS_AUTHORITY_EPOCH "
+        "were set at the 'drain' phase and are not repeated",
         "MIA_ASSAF_OS_FREEZE stays true: no write is admitted until the 'open' phase",
         "then check /health deployment.commit_sha and: sudo mia os-authority status "
         "(settings.epoch_matches must be true)",
@@ -1240,21 +1385,33 @@ PLAN_NOTES = {
     "revert": [
         "the freeze is untouched: set MIA_ASSAF_OS_FREEZE=false only after the Script is LIVE "
         "again",
+        "the drain of this freeze is void once it is lifted: an existing drain.json is set aside "
+        "(renamed drain-superseded-<UTC>.json), so a retry redoes T2",
     ],
 }
 
 
 def cmd_freeze_plan(ctx: Context, *, phase: str) -> Result:
-    """The exact ``mia-env`` keys to flip for a phase, then ``mia settings``. Prints; changes
-    nothing, and never touches Secret Manager. A phase that follows another refuses to print
-    until the settings the job reads show that the earlier one was applied."""
+    """The exact ``mia-env`` keys to flip for a phase, then ``mia settings``. Prints, and never
+    touches Secret Manager or the ledger. A phase that follows another refuses to print until the
+    settings the job reads show that the earlier one was applied. The one thing it changes is the
+    evidence of a freeze: ``--phase drain`` starts a freeze and ``--phase revert`` ends one, so
+    each sets an existing ``drain.json`` aside (a drain belongs to one freeze) and refuses if it
+    cannot.
+
+    Every phase reads the ledger for the epoch (E29: the drain plan names it, since the ledger keys
+    are set at T1). The drain phase needs ``core=shadow``: a freeze only starts a cutover that has
+    not been activated, and a refusal voids nothing."""
     if phase not in PHASES:
         raise Refusal("phase_invalid")
     settings = ctx.deps.settings
-    epoch = 0
-    if phase != "drain":
-        snapshot = _state(ctx)
-        epoch = snapshot.epoch
+    snapshot = _state(ctx)
+    epoch = snapshot.epoch
+    if phase == "drain":
+        if snapshot.states["core"] != "shadow":
+            raise Refusal("authority_state_invalid")
+        ctx.deps.evidence.set_aside(DRAIN, ctx.now)
+    else:
         if phase in ("switch", "mirror", "open") and snapshot.states["core"] != "active":
             raise Refusal("authority_state_invalid")
         if phase == "revert" and snapshot.states["core"] not in ("fenced", "shadow"):
@@ -1263,8 +1420,21 @@ def cmd_freeze_plan(ctx: Context, *, phase: str) -> Result:
             # is being restored is nobody's way back; a shadow ledger (never activated, or re-armed)
             # owns no data, so the settings may return to Sheets.
             raise Refusal("authority_state_invalid")
+        if phase == "revert":
+            # The exit from every aborted window ends the freeze, so it voids the drain of that
+            # freeze too: once the freeze is lifted the owner can make OS-screen proposals that no
+            # card and no check shows. Without this the 2 h age bound is the only thing between an
+            # old drain and the next fence (V2-31b review 2).
+            ctx.deps.evidence.set_aside(DRAIN, ctx.now)
         if phase in ("switch", "mirror") and settings.assaf_os_freeze is not True:
             raise Refusal("freeze_off")
+        if phase == "switch" and not (
+            settings.assaf_os_ledger_enabled is True
+            and settings.assaf_os_authority_epoch == epoch
+        ):
+            # E29: the switch flips the backend only. Without the T1 keys the postgres factory
+            # would answer ledger_disabled / epoch_zero for every OS call.
+            raise Refusal("drain_keys_not_applied")
         if phase in ("mirror", "open") and not (
             settings.assaf_os_backend == "postgres"
             and settings.assaf_os_ledger_enabled is True
@@ -1391,7 +1561,8 @@ def run(
         deps = (deps_factory or live_deps)(env)
         return finish(_dispatch(Context(deps, args.approved_sha), args))
     except Refusal as refusal:
-        return finish(Result(False, {"command": args.command, "ok": False}, refusal.codes))
+        return finish(Result(
+            False, {"command": args.command, "ok": False, **refusal.document}, refusal.codes))
     except api.LedgerError as error:
         return finish(Result(False, {"command": args.command, "ok": False},
                              _ledger_refusal(error).codes))
