@@ -62,6 +62,7 @@ class FakeProbes:
         self.mirror_state = "empty"
         self.broken: set[str] = set()
         self.snapshots = 0
+        self.promote_calls: list[tuple[str, int, str]] = []
         self.closed = False
 
     def _use(self, name):
@@ -104,8 +105,25 @@ class FakeProbes:
             if row["kind"] != "import" and row["epoch"] == epoch
         )
 
+    def import_promoted(self, workspace, epoch, manifest_digest):
+        self._use("promoted")
+        self.promote_calls.append((workspace, epoch, manifest_digest))
+        return import_receipt_exists(self.env, epoch, manifest_digest)
+
     def close(self):
         self.closed = True
+
+
+def import_receipt_exists(env, epoch: int, manifest_digest: str) -> bool:
+    """What ``promote`` leaves behind (V2-30, E1-rev): a committed import receipt at this epoch
+    whose request id is ``import_request_uuid(epoch, digest)`` and whose proposal has the digest."""
+    proposals = {row["proposal_id"]: row for row in env.rows("os_proposals")}
+    return any(
+        row["kind"] == "import" and row["status"] == "committed" and row["epoch"] == epoch
+        and str(row["request_id"]) == api.import_request_uuid(epoch, manifest_digest)
+        and proposals.get(row["proposal_id"], {}).get("dependency_digest") == manifest_digest
+        for row in env.rows("os_receipts")
+    )
 
 
 CASES = ["fake", *(["pg"] if pg_enabled() else [])]
@@ -175,6 +193,19 @@ def signed_manifest(captured: datetime, signed: datetime, **over: Any) -> dict:
     return document
 
 
+# Every signed manifest of this module carries the same object, so the same digest.
+MANIFEST_DIGEST = signed_manifest(NOW, NOW)["manifest_digest"]
+
+
+def promote_import(world: World, digest: str | None = None) -> None:
+    """T5: the import receipt ``promote`` writes at the current epoch, bound to the signed one."""
+    digest = digest or MANIFEST_DIGEST
+    epoch = world.state().epoch
+    if not import_receipt_exists(world.env, epoch, digest):
+        commit_import(world.env, ctx(epoch=epoch), [task(f"TAS_p{epoch}_{digest[:6]}")], digest,
+                      epoch=epoch)
+
+
 # The five journal tabs of the archive workbook (UnifiedRuntime.gs ASSAF_OS_META), spelled out here
 # on purpose: test_os_authority_probes.py pins the CLI's own list to the Script's source, and these
 # literals are what an operator is told to measure.
@@ -217,7 +248,10 @@ def operator_evidence(world: World) -> None:
     world.put(cli.JOURNAL, journal_document())
 
 
-def good_evidence(world: World) -> None:
+def good_evidence(world: World, *, promoted: bool = True) -> None:
+    """Every file a ready cutover has, and (unless ``promoted`` is False) T5's import receipt."""
+    if promoted:
+        promote_import(world)
     operator_evidence(world)
     world.put(cli.DRAIN, {
         "v": 1, "kind": "drain", "recorded_at": stamp(at(hours=-3)), "epoch": 1,
@@ -500,6 +534,110 @@ def test_the_journal_measure_still_needs_every_tab_to_be_a_count(ready):
         assert codes(run) == ["journal_capacity"] and journal_detail(run) == "invalid", bad
 
 
+# ----------------------------------------- the import must be promoted (V2-31b finding 8)
+#
+# `promote` (V2-30, E1-rev) writes a committed import receipt whose request id is
+# import_request_uuid(epoch, manifest_digest), and a proposal that carries the digest. Without it,
+# activation would pass on an empty ledger and only the phone check at T6 would catch it. This is
+# one more check of `activate` and `preflight`; it is not one of the contract's 15 preconditions.
+
+
+def unpromoted(world: World) -> World:
+    """A cutover that is ready in every way but one: T5's promote was skipped."""
+    assert world.run("init").code == 0
+    good_evidence(world, promoted=False)
+    return world
+
+
+def gates(run: Run) -> dict[str, str]:
+    return {g["code"]: g["status"] + ":" + g.get("detail", "") for g in run.out["gates"]}
+
+
+def test_activate_after_a_skipped_promote_is_refused(any_world):
+    world = unpromoted(any_world)
+    before = world.state()
+    run = world.run("activate")
+    assert run.code == 1 and codes(run) == ["import_not_promoted"]
+    assert gates(run) == {"import_not_promoted": "pending:no_import_receipt"}
+    assert [c["status"] for c in run.out["checks"]] == ["pass"] * len(cli.PRECONDITIONS)
+    assert world.state() == before and before.states["core"] == "shadow"
+    assert not (world.dir / cli.ACTIVATION).exists()
+    # The same cutover with T5 done activates, and the probe was asked about the SIGNED digest at
+    # THIS epoch.
+    promote_import(world)
+    ok = world.run("activate")
+    assert ok.code == 0 and gates(ok) == {"import_not_promoted": "pass:"}
+    assert world.probes.promote_calls == [(WORKSPACE, 1, MANIFEST_DIGEST)] * 2
+    assert world.state().states["core"] == "active"
+
+
+def test_a_promote_of_another_manifest_does_not_count(any_world):
+    world = unpromoted(any_world)
+    commit_import(world.env, ctx(), [task("TAS_other")], "e" * 64)  # an import, not the signed one
+    run = world.run("activate")
+    assert run.code == 1 and codes(run) == ["import_not_promoted"]
+    assert world.state().states["core"] == "shadow"
+
+
+def test_a_promote_at_an_earlier_epoch_does_not_count(any_world):
+    world = any_world
+    assert world.run("init").code == 0
+    good_evidence(world)  # promoted at epoch 1
+    assert world.run("activate").code == 0
+    assert world.run("rollback").code == 0
+    assert world.run("init", "--rearm").code == 0
+    world.env.knobs.settings_epoch = 2
+    good_evidence(world, promoted=False)
+    for name in (cli.DRAIN, cli.PREFLIGHT):
+        world.put(name, {**world.get(name), "epoch": 2})
+    assert world.state().epoch == 2
+    run = world.run("activate")  # the epoch-1 receipt binds the same digest, at the old epoch
+    assert run.code == 1 and codes(run) == ["import_not_promoted"]
+    assert world.probes.promote_calls[-1] == (WORKSPACE, 2, MANIFEST_DIGEST)
+    promote_import(world)
+    assert world.run("activate").code == 0
+    assert (world.state().epoch, world.state().states["core"]) == (2, "active")
+
+
+def test_the_promote_check_needs_a_signed_manifest_and_adds_nothing_without_one(world):
+    assert world.run("init").code == 0
+    good_evidence(world, promoted=False)
+    world.drop(cli.MANIFEST)
+    run = world.run("preflight")
+    assert run.code == 0 and run.out["gates"] == []
+    assert codes(world.run("activate")) == ["capture_before_fence", "manifest_not_signed"]
+    # An unsigned manifest is the manifest check's refusal, not a promote question.
+    world.put(cli.MANIFEST, signed_manifest(at(minutes=-90), at(minutes=-30),
+                                            signoff_manifest_digest="0" * 64))
+    assert codes(world.run("activate")) == ["manifest_not_signed"]
+    assert world.probes.promote_calls == []
+
+
+def test_a_probe_error_on_the_promote_check_fails_it_closed_and_leaks_nothing(ready, caplog):
+    ready.probes.broken = {"promoted"}
+    with caplog.at_level(logging.DEBUG):
+        run = ready.run("activate")
+    assert run.code == 1 and codes(run) == ["import_not_promoted"]
+    assert gates(run) == {"import_not_promoted": "fail:probe_error"}
+    assert "driver-text" not in json.dumps(run.out) + run.err + caplog.text
+    assert SECRET not in json.dumps(run.out) + run.err + caplog.text
+    assert ready.state().states["core"] == "shadow"
+
+
+def test_preflight_shows_the_promote_check_and_is_not_ready_without_it(any_world):
+    world = unpromoted(any_world)
+    run = world.run("preflight")
+    assert run.code == 0, "an operator step that is not there yet is pending, not a failure"
+    assert run.out["ready_to_activate"] is False
+    assert gates(run) == {"import_not_promoted": "pending:no_import_receipt"}
+    assert len(run.out["checks"]) == len(cli.PRECONDITIONS), "the contract's 15 stay the 15"
+    assert "gates" not in world.get(cli.PREFLIGHT), "the fence evidence file is unchanged"
+    promote_import(world)
+    run = world.run("preflight")
+    assert run.code == 0 and run.out["ready_to_activate"] is True
+    assert gates(run) == {"import_not_promoted": "pass:"}
+
+
 # --------------------------------------------------------------------------- init
 
 
@@ -633,7 +771,66 @@ def test_rollback_after_the_first_business_write_is_refused_and_changes_nothing(
     run = ready.run("rollback")
     assert run.code == 1 and codes(run) == ["rollback_after_first_write"]
     assert ready.state().states["core"] == "active"
+    # V2-31b review: this refusal (count 1) leaves the ledger LIVE, and says nothing else. The
+    # post-fence refusal of the race below must never read the same.
+    assert run.out == {"command": "rollback", "ok": False}
+    assert "core_left_fenced" not in run.err
     assert ready.run("fence").code == 0  # roll forward: fence is still available
+
+
+class RacingAdmin:
+    """The authority admin, with a business commit landing just before each transition.
+
+    The receipt count and the ``active -> fenced`` transition are separate transactions, and the
+    ledger does not check receipts on that edge: the commit lands in the window between them.
+    """
+
+    def __init__(self, env, race):
+        self._env, self._race = env, race
+
+    def __getattr__(self, name):
+        return getattr(self._env, name)
+
+    def transition(self, *args, **kwargs):
+        self._race()
+        return self._env.transition(*args, **kwargs)
+
+
+def test_a_commit_between_the_receipt_count_and_the_fence_refuses_the_rollback(any_ready):
+    # V2-31b finding 4: the phone actions of G16/G17 happen exactly while a rollback is allowed.
+    ready = any_ready
+    commit_import(ready.env, ctx(), [task("TAS_i1")], "e" * 64)
+    assert ready.run("activate").code == 0
+    landed = []
+    ready.deps.admin = RacingAdmin(
+        ready.env, lambda: landed.append(commit_direct(ready.env, ctx(), [task("TAS_race")])))
+    run = ready.run("rollback")
+    assert len(landed) == 1, "the commit landed after the count and before the fence"
+    # V2-31b review: the refusal says that core was LEFT FENCED (a second reason, and the state in
+    # the document), so it cannot be read as the count-1 refusal where the ledger is still live.
+    assert run.code == 1 and codes(run) == ["rollback_after_first_write", "core_left_fenced"]
+    # Nothing a rollback prints: no 'Sheet is exactly as captured', no revert-to-Sheets steps.
+    assert run.out == {"command": "rollback", "ok": False, "core": "fenced"}
+    assert "exactly as captured" not in json.dumps(run.out) + run.err + str(run.out)
+    assert "next_steps" not in run.out and "MIA_ASSAF_OS" not in run.err
+    # Core stays fenced: the ledger refuses every further write, which is the section 6 state.
+    assert ready.state().states["core"] == "fenced" and ready.state().epoch == 1
+    with pytest.raises(api.LedgerError, match="^authority_not_active$"):
+        commit_direct(ready.env, ctx(), [task("TAS_after")])
+    ready.deps.admin = ready.env
+    again = ready.run("rollback")  # a repeat is refused by the first count, with core fenced
+    assert again.code == 1 and codes(again) == ["rollback_after_first_write", "core_left_fenced"]
+    assert again.out == {"command": "rollback", "ok": False, "core": "fenced"}
+    assert ready.run("fence").code == 0 and ready.state().states["core"] == "fenced"
+
+
+def test_a_rollback_with_no_commit_in_the_window_still_prints_the_steps(any_ready):
+    ready = any_ready
+    assert ready.run("activate").code == 0
+    ready.deps.admin = RacingAdmin(ready.env, lambda: None)
+    run = ready.run("rollback")
+    assert run.code == 0 and run.out["outcome"] == "fenced"
+    assert "exactly as captured" in " ".join(run.out["next_steps"])
 
 
 def test_rollback_refuses_a_restoring_ledger(any_ready):
@@ -759,7 +956,9 @@ def script_live_again(world: World, hours: float) -> Run:
 
 
 def sign_capture(world: World, captured: float, signed: float) -> None:
+    """T5: Assaf signs the manifest, and the import is promoted at the current epoch."""
     world.put(cli.MANIFEST, signed_manifest(at(hours=captured), at(hours=signed)))
+    promote_import(world)
 
 
 def activate_now(world: World) -> Run:
@@ -777,6 +976,11 @@ def started(world: World) -> World:
 
 def failing(run: Run) -> dict[str, str]:
     return {c["code"]: c["detail"] for c in run.out["checks"] if c["status"] != "pass"}
+
+
+def hard(run: Run) -> dict[str, str]:
+    """Only the checks that FAIL (a preflight before the operator evidence also shows `pending`)."""
+    return {c["code"]: c["detail"] for c in run.out["checks"] if c["status"] == "fail"}
 
 
 def test_a_retry_that_redoes_the_drain_does_not_carry_the_aborted_fence_time(any_world):
@@ -886,20 +1090,222 @@ def test_a_live_preflight_before_any_fence_does_not_void_the_drain(any_world):
     assert activate_now(world).code == 0, "the freeze held since the drain: it need not be redone"
 
 
-def test_an_unknown_probe_ends_the_unbroken_run_but_is_not_a_sighting_of_the_live_sheet(
-    any_world,
-):
+# ------------------------------------------------ a drain belongs to one freeze (V2-31b finding 2)
+#
+# The T1/T2 rollback only unfreezes. Nothing in the ledger changes, and no fence was ever recorded,
+# so `fence_broken_at` is absent. Proposals made from the OS screen over the next days have no
+# Telegram card, so no other check sees them. The old drain must not satisfy the retry.
+
+
+def superseded(world: World) -> list[str]:
+    return sorted(path.name for path in world.dir.glob("drain-superseded-*.json"))
+
+
+def test_freeze_plan_drain_sets_the_old_drain_aside_so_each_freeze_starts_a_new_one(any_world):
     world = started(any_world)
     assert drain_at(world, -10).code == 0
-    assert fence_at(world, -9).code == 0
+    old = (world.dir / cli.DRAIN).read_bytes()
+    world.clock[0] = at(hours=-9)
+    plan = world.run("freeze-plan")
+    assert plan.code == 0 and "MIA_ASSAF_OS_FREEZE=true\n" in plan.out
+    assert "drain.json" in plan.out, "the plan tells the operator the drain is void"
+    assert not (world.dir / cli.DRAIN).exists()
+    kept = superseded(world)
+    assert len(kept) == 1 and (world.dir / kept[0]).read_bytes() == old, "set aside, not deleted"
+    assert kept[0] == "drain-superseded-" + cli.EvidenceStore.aside_stamp(at(hours=-9)) + ".json"
+    again = world.run("freeze-plan")  # nothing left to set aside
+    assert again.code == 0 and superseded(world) == kept
+    # A phase that starts or ends a freeze voids its drain (V2-31b review 2: the drain phase, and
+    # the revert phase, the documented exit from every aborted window). A refused plan voids none.
+    world.put(cli.DRAIN, {"v": 1})
+    assert codes(world.run("freeze-plan", "--phase", "switch")) == ["authority_state_invalid"]
+    assert (world.dir / cli.DRAIN).exists() and superseded(world) == kept
+    assert world.run("freeze-plan", "--phase", "revert").code == 0
+    assert not (world.dir / cli.DRAIN).exists()
+    after_revert = superseded(world)
+    assert len(after_revert) == 2 and set(kept) < set(after_revert), "none overwritten"
+    assert json.loads((world.dir / sorted(set(after_revert) - set(kept))[0]).read_text()) == {
+        "v": 1}
+
+
+def test_an_aborted_window_closed_by_the_revert_plan_cannot_lend_its_drain(any_world):
+    """V2-31b review 2: drain 10:00, revert 10:10, an OS proposal 10:20, the keys set by hand at
+    10:30 WITHOUT the drain phase, fence 10:40. The 2 h bound would pass (40 minutes), so the revert
+    plan itself must have voided the drain."""
+    world = started(any_world)
+    base = at(hours=-3)  # 10:00
+
+    def clock(minutes: int) -> None:
+        world.clock[0] = base + timedelta(minutes=minutes)
+
+    assert drain_at(world, -3).code == 0  # 10:00 T1/T2, then the window is aborted
+    clock(10)
+    revert = world.run("freeze-plan", "--phase", "revert")  # 10:10 the documented exit
+    assert revert.code == 0 and not (world.dir / cli.DRAIN).exists()
+    # 10:20: an OS-screen proposal (no card). 10:30: the keys are set by hand, with no drain phase.
+    clock(40)
+    run = fence_at(world, -3 + 40 / 60)  # 10:40: the Script is fenced and probed
+    assert run.code == 1 and codes(run) == ["sheets_pending_proposals"]
+    assert hard(run) == {"sheets_pending_proposals": "no_drain_evidence"}
+    sign_capture(world, -2, -1.9)
+    refused = activate_now(world)
+    assert refused.code == 1 and codes(refused) == ["sheets_pending_proposals"]
+    assert failing(refused) == {"sheets_pending_proposals": "no_drain_evidence"}
+    assert world.state().states["core"] == "shadow"
+    assert not (world.dir / cli.ACTIVATION).exists()
+
+
+def test_freeze_plan_drain_works_before_any_evidence_directory_exists(world):
+    assert world.run("init").code == 0  # the plan names the epoch (E29), so the workspace exists
+    plan = world.run("freeze-plan")
+    assert plan.code == 0 and not world.dir.exists()
+
+
+def test_freeze_plan_drain_refuses_when_the_old_drain_cannot_be_set_aside(world, monkeypatch):
+    world.run("init")
+    world.put(cli.DRAIN, {"v": 1})
+
+    def refuse(*args, **kwargs):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(cli.os, "replace", refuse)
+    run = world.run("freeze-plan")
+    assert run.code == 1 and codes(run) == ["evidence_unwritable"]
+    assert (world.dir / cli.DRAIN).exists(), "a freeze must not start over a drain it cannot void"
+
+
+def test_an_aborted_window_cannot_lend_its_drain_to_the_next_freeze(any_world):
+    """The reviewer's scenario: drain, abort, unfreeze, new OS proposals, re-freeze, then T3."""
+    world = started(any_world)
+    assert drain_at(world, -100).code == 0  # window 1: T1, T2 at epoch 1, then aborted before T3
+    # Days later: the owner made OS-screen proposals (no card, no drain), then T1 of window 2.
+    world.clock[0] = at(hours=-3)
+    assert world.run("freeze-plan").code == 0
+    # The operator goes straight to T3 without a T2: the Script is fenced and probed.
+    run = fence_at(world, -2)
+    assert run.code == 1 and codes(run) == ["sheets_pending_proposals"]
+    assert hard(run) == {"sheets_pending_proposals": "no_drain_evidence"}
+    sign_capture(world, -1.5, -1)
+    refused = activate_now(world)
+    assert refused.code == 1 and codes(refused) == ["sheets_pending_proposals"]
+    assert failing(refused) == {"sheets_pending_proposals": "no_drain_evidence"}
+    assert world.state().states["core"] == "shadow"
+    assert not (world.dir / cli.ACTIVATION).exists()
+
+
+def test_an_old_drain_is_stale_even_when_nobody_ran_freeze_plan(any_world):
+    """The same scenario, with the freeze keys set by hand: the age bound refuses it."""
+    world = started(any_world)
+    assert drain_at(world, -100).code == 0
+    run = fence_at(world, -2)  # no fence was ever recorded before, so there is no fence_broken_at
+    assert "fence_broken_at" not in world.get(cli.PREFLIGHT)
+    assert run.code == 1 and codes(run) == ["sheets_pending_proposals"]
+    assert hard(run) == {"sheets_pending_proposals": "drain_stale"}
+    sign_capture(world, -1.5, -1)
+    refused = activate_now(world)
+    assert refused.code == 1 and codes(refused) == ["sheets_pending_proposals"]
+    assert failing(refused) == {"sheets_pending_proposals": "drain_stale"}
+    assert world.state().states["core"] == "shadow"
+    # The retry the runbook prescribes: T1 (the old drain is set aside), a new T2, then T3, with
+    # new captures (the evidence of the refused attempt goes, as in the T3 retry above).
+    world.drop(cli.MANIFEST)
+    for name in (cli.BACKUP, cli.DRILL, cli.FRONTEND, cli.JOURNAL):
+        world.drop(name)
+    assert world.run("freeze-plan").code == 0
+    assert drain_at(world, -1.2).code == 0
+    assert fence_at(world, -1).code == 0
+    sign_capture(world, -0.9, -0.8)
+    assert activate_now(world).code == 0
+
+
+@pytest.mark.parametrize("extra_seconds,fresh", [(0, True), (1, False)])
+def test_the_drain_must_be_taken_within_the_named_bound_of_the_fence_probe(
+    any_world, extra_seconds, fresh
+):
+    assert cli.DRAIN_MAX_AGE <= timedelta(hours=6), "T3 follows T2 immediately: a small bound"
+    world = started(any_world)
+    assert drain_at(world, -20).code == 0
+    world.probes.fence = ("unavailable", "")
+    world.clock[0] = at(hours=-20) + cli.DRAIN_MAX_AGE + timedelta(seconds=extra_seconds)
+    run = world.run("preflight")
+    if fresh:
+        assert run.code == 0
+    else:
+        assert run.code == 1 and hard(run) == {"sheets_pending_proposals": "drain_stale"}
+
+
+def test_an_unknown_probe_is_no_sighting_of_the_live_sheet_and_no_end_of_the_run(any_world):
+    # V2-31b finding 3: an `unknown` probe (a timeout, a transport error) carries no more
+    # information than no probe at all, and a gap between two `unavailable` probes is already
+    # treated as continuous. It must not restart the clock and void the captures.
+    world = started(any_world)
+    assert drain_at(world, -10).code == 0
+    assert fence_at(world, -9.5).code == 0
+    first = stamp(at(hours=-9.5))
     world.probes.fence = ("unknown", "transport")
-    world.clock[0] = at(hours=-8)
-    assert world.run("preflight").code == 1
+    world.clock[0] = at(hours=-9)
+    assert world.run("preflight").code == 1  # `unknown` is still not a pass of sheets_not_fenced
     record = world.get(cli.PREFLIGHT)
-    assert record["sheets"] == "unknown" and "fence_probe_at" not in record
+    assert record["sheets"] == "unknown" and record["last_probe_at"] == stamp(at(hours=-9))
+    assert record["fence_probe_at"] == first, "carried through, not restarted"
     assert "fence_broken_at" not in record, "a transport error does not void the drain"
-    assert fence_at(world, -7).code == 0
-    assert world.get(cli.PREFLIGHT)["fence_probe_at"] == stamp(at(hours=-7))
+    assert fence_at(world, -8.5).code == 0
+    assert world.get(cli.PREFLIGHT)["fence_probe_at"] == first
+    assert world.run("preflight").code == 0  # idempotent
+
+
+def test_an_unknown_probe_between_two_fenced_probes_keeps_the_captures_valid(any_world):
+    world = started(any_world)
+    assert drain_at(world, -10).code == 0
+    assert fence_at(world, -9.5).code == 0  # T3
+    sign_capture(world, -9.2, -8)  # T4/T5: captured after the fence, signed later
+    world.probes.fence = ("unknown", "transport")
+    world.clock[0] = at(hours=-1)  # T6 preflight: the signed schema probe times out once
+    assert world.run("preflight").code == 1
+    assert fence_at(world, -0.5).code == 0  # and passes on the next attempt
+    assert world.get(cli.PREFLIGHT)["fence_probe_at"] == stamp(at(hours=-9.5))
+    run = activate_now(world)
+    assert run.code == 0, run.err
+    assert [c["status"] for c in run.out["checks"]] == ["pass"] * len(cli.PRECONDITIONS)
+    assert world.state().states["core"] == "active"
+
+
+def test_activate_after_an_unknown_preflight_uses_the_carried_fence_time(any_world):
+    # The last record on disk is the `unknown` one; activate probes the Script itself.
+    world = started(any_world)
+    assert drain_at(world, -10).code == 0
+    assert fence_at(world, -9.5).code == 0
+    sign_capture(world, -9.2, -8)
+    world.probes.fence = ("unknown", "transport")
+    world.clock[0] = at(hours=-1)
+    world.run("preflight")
+    assert world.get(cli.PREFLIGHT)["sheets"] == "unknown"
+    assert activate_now(world).code == 0
+
+
+def test_an_unknown_probe_with_no_fence_before_it_has_nothing_to_carry(any_world):
+    world = started(any_world)
+    world.probes.fence = ("unknown", "transport")
+    world.clock[0] = at(hours=-9)
+    world.run("preflight")
+    assert "fence_probe_at" not in world.get(cli.PREFLIGHT)
+    assert fence_at(world, -8).code == 1  # no drain yet; the clock starts here
+    assert world.get(cli.PREFLIGHT)["fence_probe_at"] == stamp(at(hours=-8))
+
+
+def test_the_live_sheet_after_a_fence_and_an_unknown_probe_is_still_a_break(any_world):
+    world = started(any_world)
+    assert drain_at(world, -10).code == 0
+    assert fence_at(world, -9.5).code == 0
+    world.probes.fence = ("unknown", "transport")
+    world.clock[0] = at(hours=-9)
+    world.run("preflight")
+    live = script_live_again(world, -8.5)  # the T3 rollback: the Script is LIVE
+    assert live.code == 1
+    record = world.get(cli.PREFLIGHT)
+    assert "fence_probe_at" not in record
+    assert record["fence_broken_at"] == stamp(at(hours=-8.5)), "the unknown probe hides no break"
+    assert hard(live)["sheets_pending_proposals"] == "drain_before_fence_break"
 
 
 def test_a_refused_drain_does_not_touch_the_fence_record(ready):
@@ -929,6 +1335,7 @@ def test_the_whole_cutover_in_order_with_cli_written_evidence(any_world):
     world.clock[0] = at(hours=-5)
     assert world.run("preflight").code == 0
     world.put(cli.MANIFEST, signed_manifest(at(hours=-4), at(hours=-3)))
+    promote_import(world)
     world.put(cli.BACKUP, {"last_success_utc": stamp(at(minutes=-5))})
     world.put(cli.DRILL, {"started_utc": stamp(at(days=-1)), "passed": True})
     world.put(cli.FRONTEND, {"v": 1, "cloudflare_version": "ce8332db-4a1e",
@@ -988,27 +1395,42 @@ def keys_of(run) -> list[str]:
     return [line for line in run.out.splitlines() if not line.startswith("#")]
 
 
-def apply_switch(world, epoch=1):
-    """What `mia settings` does after the operator sets the switch keys in mia-env."""
-    world.settings.assaf_os_backend = "postgres"
+def apply_drain(world, epoch=1):
+    """What `mia settings` does after the operator sets the T1 keys (E29): the freeze and the
+    ledger keys, with the backend still `sheets`."""
+    world.settings.assaf_os_freeze = True
     world.settings.assaf_os_ledger_enabled = True
     world.settings.assaf_os_authority_epoch = epoch
 
 
+def apply_switch(world, epoch=1):
+    """The settings after T6: the T1 keys, and the backend switched to postgres."""
+    apply_drain(world, epoch)
+    world.settings.assaf_os_backend = "postgres"
+
+
+DRAIN_KEYS = ["MIA_ASSAF_OS_FREEZE=true", "MIA_ASSAF_OS_LEDGER_ENABLED=true"]
+
+
 def test_freeze_plan_prints_the_exact_keys_and_changes_nothing(ready):
+    kept_drain = (ready.dir / cli.DRAIN).read_bytes()
     drain = ready.run("freeze-plan")
     assert drain.code == 0 and "MIA_ASSAF_OS_FREEZE=true\n" in drain.out
     assert "sudo mia settings" in drain.out
+    # E29: the ledger keys are set at T1, with the backend still sheets (the import needs them).
+    assert keys_of(drain) == [*DRAIN_KEYS, "MIA_ASSAF_OS_AUTHORITY_EPOCH=1"]
+    # `--phase drain` starts a freeze, so it sets the earlier freeze's drain.json aside (V2-31b,
+    # tested on its own). This test is about the ledger and the plans, and runs on to `activate`.
+    (ready.dir / cli.DRAIN).write_bytes(kept_drain)
     before = ready.state()
     early = ready.run("freeze-plan", "--phase", "switch")
     assert early.code == 1 and codes(early) == ["authority_state_invalid"]
     assert ready.run("activate").code == 0
+    apply_drain(ready)  # T1's keys, applied long before T6
     switch = ready.run("freeze-plan", "--phase", "switch")
-    # The freeze STAYS on through the switch and the mirror: no write is admitted until `open`.
-    assert keys_of(switch) == [
-        "MIA_ASSAF_OS_BACKEND=postgres", "MIA_ASSAF_OS_LEDGER_ENABLED=true",
-        "MIA_ASSAF_OS_AUTHORITY_EPOCH=1",
-    ]
+    # E29: the switch flips ONLY the backend, and the freeze STAYS on through the switch and the
+    # mirror: no write is admitted until `open`.
+    assert keys_of(switch) == ["MIA_ASSAF_OS_BACKEND=postgres"]
     assert "MIA_ASSAF_OS_FREEZE stays true" in switch.out
     apply_switch(ready)
     mirror = ready.run("freeze-plan", "--phase", "mirror")
@@ -1089,13 +1511,80 @@ def test_mirror_open_and_switch_need_an_active_core(ready):
 
 
 def test_freeze_plan_after_a_re_arm_names_the_new_epoch(ready):
+    # E29: the epoch is printed by the drain plan (T1), where the retry starts, not by the switch.
     ready.run("activate")
     ready.run("rollback")
     ready.run("init", "--rearm")
     assert ready.run("freeze-plan", "--phase", "revert").code == 0
+    drain = ready.run("freeze-plan")
+    assert keys_of(drain) == [*DRAIN_KEYS, "MIA_ASSAF_OS_AUTHORITY_EPOCH=2"]
     ready.env.transition(WORKSPACE, "core", "active", expected_epoch=2, actor_owner_id=OWNER_ID)
+    apply_drain(ready, epoch=2)
     switch = ready.run("freeze-plan", "--phase", "switch")
-    assert "MIA_ASSAF_OS_AUTHORITY_EPOCH=2" in switch.out
+    assert keys_of(switch) == ["MIA_ASSAF_OS_BACKEND=postgres"]
+
+
+# ----------------------------------------------- the ledger keys come at T1 (contract §22 E29)
+#
+# The import (G24 stage at T4, G12 promote at T5) runs before T6 as the ledger worker. It needs
+# MIA_ASSAF_OS_LEDGER_ENABLED=true and MIA_ASSAF_OS_AUTHORITY_EPOCH=E (authorize.for_worker refuses
+# epoch_unset, the ledger core refuses ledger_disabled). Under backend=sheets the factory still
+# returns Sheets and the core admits only kind=import at core=shadow
+# (tests/workers/test_os_e29_sheets_with_ledger_keys.py), so T1 is the first place they are safe.
+
+
+def test_the_drain_plan_prints_the_freeze_and_the_ledger_keys_with_the_backend_still_sheets(
+    any_world,
+):
+    world = started(any_world)
+    plan = world.run("freeze-plan")
+    assert plan.code == 0
+    assert keys_of(plan) == [*DRAIN_KEYS, "MIA_ASSAF_OS_AUTHORITY_EPOCH=1"]
+    assert not [key for key in keys_of(plan) if "BACKEND" in key], "the backend stays sheets"
+    assert "the backend stays sheets" in plan.out and "T4 stage" in plan.out
+    assert cli.plan_lines("drain", 7) == [*DRAIN_KEYS, "MIA_ASSAF_OS_AUTHORITY_EPOCH=7"]
+    assert cli.plan_lines("switch", 7) == ["MIA_ASSAF_OS_BACKEND=postgres"]
+
+
+def test_the_drain_plan_needs_the_workspace_and_a_shadow_core_and_voids_nothing_when_refused(
+    world,
+):
+    world.put(cli.DRAIN, {"v": 1})
+    run = world.run("freeze-plan")  # no `init` yet: there is no epoch to print
+    assert run.code == 1 and codes(run) == ["workspace_missing"]
+    assert (world.dir / cli.DRAIN).exists() and not superseded(world)
+    assert world.run("init").code == 0
+    good_evidence(world)
+    assert world.run("activate").code == 0
+    run = world.run("freeze-plan")  # core is active: a drain plan is not a thing any more
+    assert run.code == 1 and codes(run) == ["authority_state_invalid"]
+    assert "MIA_ASSAF_OS" not in json.dumps(run.out), "no key is printed on a refusal"
+    assert (world.dir / cli.DRAIN).exists() and not superseded(world)
+
+
+def test_the_switch_plan_refuses_until_the_t1_keys_are_applied(ready):
+    assert ready.run("activate").code == 0
+    for ledger, epoch in ((False, 0), (True, 0), (False, 1), (True, 2)):
+        ready.settings.assaf_os_ledger_enabled, ready.settings.assaf_os_authority_epoch = (
+            ledger, epoch)
+        run = ready.run("freeze-plan", "--phase", "switch")
+        assert run.code == 1 and codes(run) == ["drain_keys_not_applied"], (ledger, epoch)
+        assert "MIA_ASSAF_OS" not in json.dumps(run.out), "no key is printed on a refusal"
+    apply_drain(ready)
+    assert ready.run("freeze-plan", "--phase", "switch").code == 0
+
+
+def test_an_aborted_window_returns_the_ledger_keys_with_the_revert_plan(ready):
+    # T1 or T2 aborted: core is still `shadow`, and the T1 keys are set. The revert plan (core
+    # shadow is allowed: it owns no data) prints the ledger keys back; the freeze is lifted after.
+    apply_drain(ready)
+    run = ready.run("freeze-plan", "--phase", "revert")
+    assert run.code == 0
+    assert keys_of(run) == [
+        "MIA_ASSAF_OS_BACKEND=sheets", "MIA_ASSAF_OS_LEDGER_ENABLED=false",
+        "MIA_ASSAF_OS_AUTHORITY_EPOCH=0", "MIA_ASSAF_OS_MIRROR_ENABLED=false",
+    ]
+    assert ready.state().states["core"] == "shadow" and ready.state().epoch == 1
 
 
 # --------------------------------------------------------------------------- status and hygiene
