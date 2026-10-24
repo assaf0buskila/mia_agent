@@ -92,6 +92,16 @@ class MemoryAssistantStore:
                 ok=False, client_ip_hmac=ip_hmac))
         return None
 
+    def control(self, credential, *, ip_hmac: str, method: str, now: datetime) -> None:
+        if method not in {"initialize", "ping", "tools_list", "notification", "invalid_request",
+                          "method_not_found", "invalid_params", "body_too_large",
+                          "unsupported_media"}:
+            raise ValueError("invalid_control_method")
+        with self._lock:
+            self.rows.append(self._row(
+                credential_id=credential.credential_id, occurred_at=now,
+                operation="mcp_control", reason=method, ok=True, client_ip_hmac=ip_hmac))
+
     def call(self, credential, *, ip_hmac: str, operation: str, now: Callable[[], datetime],
              work: Callable[[ac.Facts], Any]) -> Any:
         with self._lock:
@@ -99,7 +109,8 @@ class MemoryAssistantStore:
         with gate:
             moment = now()
             mine = [r for r in self.rows if r["credential_id"] == credential.credential_id]
-            counted = [r for r in mine if r["reason"] not in ac.LIMIT_REASONS]
+            counted = [r for r in mine if r["reason"] not in ac.LIMIT_REASONS
+                       and r["operation"] != "mcp_control"]
             hour = sum(1 for r in counted
                        if r["occurred_at"] >= moment - timedelta(seconds=ac.KEY_WINDOW_SECONDS))
             day = sum(1 for r in counted if r["operation"] == "submit" and r["ok"]

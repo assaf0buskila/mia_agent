@@ -246,6 +246,8 @@ LEDGER_INTENT_SITES: dict[tuple[str, str, str], str] = {
     # ASSISTANT_GPT. V2-26's ``submit`` refuses ``os_frozen`` first; driven below.
     ("app/api/assistant/os.py", "run", "submit"): (
         "POST /v1/assistant/os/statement-batches (an assistant key, propose-only)"),
+    ("app/api/assistant/mcp.py", "run", "submit"): (
+        "POST /v1/assistant/mcp tools/call submit_statement_batch (propose-only)"),
 }
 LEDGER_ALLOWED_SITES: dict[tuple[str, str, str], str] = {
     # abandon settles a lost request id: an abandoned receipt and one event, no business change and
@@ -967,9 +969,44 @@ def drive_assistant_submit(env: Env, freeze: bool) -> LedgerOutcome:
     return LedgerOutcome(error["code"], wrote)
 
 
+def drive_mcp_submit(env: Env, freeze: bool) -> LedgerOutcome:
+    """The real MCP tool call through app.main, the bearer gateway and V2-26's submit."""
+    env.monkeypatch.setattr(port, "_post", no_script)
+    aw = AWorld("fake")
+    issued = aw.issue()
+    env.monkeypatch.setattr(assistant_os, "gateway_for", lambda _settings: aw.gateway)
+    main_app.dependency_overrides[get_settings] = lambda: aw.config
+    try:
+        aw.config.assaf_os_freeze = freeze
+
+        def rows() -> tuple:
+            tables = {k: v for k, v in aw.statement_tables().items() if k != "credentials"}
+            return (aw.w.rows("os_proposals"), aw.w.rows("os_receipts"), aw.w.rows("os_events"),
+                    aw.w.rows("os_outbox"), aw.w.rows("os_expenses"), tables)
+
+        before = rows()
+        client = TestClient(main_app, base_url="https://api.assafweb.test",
+                            client=("203.0.113.9", 50000))
+        response = client.post(
+            "/v1/assistant/mcp", headers={"Authorization": f"Bearer {issued['secret']}"},
+            json={"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+                "name": "submit_statement_batch", "arguments": {"batch": batch(three_lines())}}})
+        wrote = rows() != before
+    finally:
+        main_app.dependency_overrides.pop(get_settings, None)
+    assert response.status_code == 200, response.text
+    result = response.json()["result"]
+    if result.get("isError"):
+        assert result["content"] == [{"type": "text", "text": "os_frozen"}], result
+        return LedgerOutcome("os_frozen", wrote)
+    assert result["structuredContent"]["status"] == "pending", result
+    return LedgerOutcome(None, wrote)
+
+
 LEDGER_INTENT_DRIVERS: dict[tuple[str, str, str], Callable[[Env, bool], LedgerOutcome]] = {
     ("app/api/os_v2/statements.py", "run", "submit"): drive_statement_submit,
     ("app/api/assistant/os.py", "run", "submit"): drive_assistant_submit,
+    ("app/api/assistant/mcp.py", "run", "submit"): drive_mcp_submit,
 }
 
 

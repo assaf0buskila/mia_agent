@@ -392,6 +392,8 @@ class AssistantCredentialService:
 
 
 class AssistantStore(Protocol):
+    def control(self, credential: StoredCredential, *, ip_hmac: str, method: str,
+                now: datetime) -> None: ...
     """Context-free access to ``os_assistant_credentials`` and ``os_assistant_audit``.
 
     ``PgAssistantStore`` is the production implementation (the ledger runtime role); the test
@@ -495,6 +497,18 @@ class PgAssistantStore:
                          reason=reason, ok=False, facts=Facts(), ip_hmac=ip_hmac)
         return None
 
+    def control(self, credential: StoredCredential, *, ip_hmac: str, method: str,
+                now: datetime) -> None:
+        """S1/S1b: one IP-counted control row, no key quota, service work or usage update."""
+        if method not in {"initialize", "ping", "tools_list", "notification", "invalid_request",
+                          "method_not_found", "invalid_params", "body_too_large",
+                          "unsupported_media"}:
+            raise ValueError("invalid_control_method")
+        with self._begin() as conn:
+            self._insert(conn, credential_id=credential.credential_id, moment=now,
+                         operation="mcp_control", reason=method, ok=True, facts=Facts(),
+                         ip_hmac=ip_hmac)
+
     def call(self, credential: StoredCredential, *, ip_hmac: str, operation: str,
              now: Callable[[], datetime], work: Callable[[Facts], Any]) -> Any:
         failure: BaseException | None = None
@@ -503,7 +517,7 @@ class PgAssistantStore:
             self._lock(conn, f"key:{credential.credential_id}")
             moment = now()
             counted = ("credential_id = :cid AND reason NOT IN ('key_hour_limit', "
-                       "'key_day_limit') AND ")
+                       "'key_day_limit') AND operation <> 'mcp_control' AND ")
             hour = self._count(conn, counted + "occurred_at >= :since",
                                cid=credential.credential_id,
                                since=moment - timedelta(seconds=KEY_WINDOW_SECONDS))
@@ -619,6 +633,11 @@ class AssistantGateway:
             if exc.code != "assistant_auth_required":
                 raise
             return exc.reason or "key_invalid", None
+
+    def control(self, caller: Caller, method: str) -> None:
+        """Record a transport control call without consuming this key's work quota."""
+        self._store.control(caller.credential, ip_hmac=caller.ip_hmac, method=method,
+                            now=self._clock())
 
     def run(self, caller: Caller, operation: str, work: Callable[[Facts], Any]) -> Any:
         """The per-key limits, ``work`` and the call's one audit row, in the store's transaction."""
