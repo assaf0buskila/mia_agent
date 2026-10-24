@@ -381,7 +381,10 @@ def test_no_transaction_is_open_during_any_transport_call(world: World) -> None:
         ({"os_mirror_spreadsheet_id": "another-sheet"}, "mirror_target_changed"),
     ],
 )
-def test_kill_switch_freeze_and_default_off_pause_the_worker(world: World, overrides, reason):
+def test_kill_switch_freeze_and_default_off_pause_the_worker(
+    world: World, overrides, reason, monkeypatch
+):
+    monkeypatch.setattr(api, "core_authority_state", lambda _settings: "shadow")
     ids = world.seed()
     paused = world.tick(settings=mirror_settings(**overrides), anti_entropy=True)
     assert (paused.outcome, paused.reason) == ("paused", reason)
@@ -390,6 +393,190 @@ def test_kill_switch_freeze_and_default_off_pause_the_worker(world: World, overr
     assert world.statuses(ids) == ["pending"] * len(ids)
     assert {world.outbox.row(i)["attempts"] for i in ids} == {0}
     assert world.tick().outcome == "verified"
+
+
+def test_freeze_with_active_authority_publishes_and_verifies(world: World, monkeypatch) -> None:
+    ids = world.seed()
+    settings = mirror_settings(assaf_os_freeze=True)
+    calls = []
+
+    def authority_reader(loaded):
+        assert loaded is settings
+        assert world.outbox.calls == [] and world.reader.calls == []
+        assert world.sheets.writes == [] and world.sheets.reads == 0
+        with world.counter.tx():
+            calls.append(1)
+            return "active"
+
+    monkeypatch.setattr(api, "core_authority_state", authority_reader)
+    result = world.tick(settings=settings)
+    assert result == os_mirror.TickResult("verified", "readback_equal", len(ids))
+    assert calls == [1]
+    assert world.statuses(ids) == ["sent"] * len(ids)
+    assert len(world.sheets.writes) == 1 and world.sheets.reads == 1
+    state = world.state()
+    assert state.status == "synced"
+    assert state.verified_version == world.reader.version == state.projected_version
+    assert world.counter.open == 0
+
+
+@pytest.mark.parametrize("authority", ["shadow", "fenced", "restoring", None, "missing",
+                                        "ledger_error", "unexpected_error"])
+@pytest.mark.parametrize("publisher_path", [False, True])
+def test_freeze_without_active_authority_pauses_without_calls(
+    world: World, authority, caplog, publisher_path
+) -> None:
+    ids = world.seed()
+    rows = copy.deepcopy(world.outbox.rows)
+    calls = []
+
+    def authority_reader(_settings):
+        calls.append(1)
+        if authority == "ledger_error":
+            raise api.LedgerError("ledger_unavailable", reason="read_failed")
+        if authority == "unexpected_error":
+            raise RuntimeError(MARK)
+        return authority
+
+    built = []
+
+    def deps_factory(_settings):
+        built.append(1)
+        return world.deps
+
+    publisher = os_mirror.MirrorPublisher(
+        settings_provider=lambda: mirror_settings(assaf_os_freeze=True),
+        deps_factory=deps_factory, clock=world.clock, authority_reader=authority_reader,
+    )
+    with caplog.at_level(logging.INFO):
+        result = publisher.tick() if publisher_path else os_mirror.run_once(
+            world.deps, mirror_settings(assaf_os_freeze=True), now=world.clock(),
+            lease_owner="w1", anti_entropy=True, authority_reader=authority_reader,
+        )
+    assert result == os_mirror.TickResult("paused", "os_frozen")
+    assert calls == [1]
+    assert built == []
+    assert world.outbox.calls == [] and world.reader.calls == []
+    assert world.sheets.writes == [] and world.sheets.reads == 0
+    assert world.outbox.rows == rows and world.outbox.state is None
+    assert world.statuses(ids) == ["pending"] * len(ids)
+    assert {world.outbox.row(i)["attempts"] for i in ids} == {0}
+    assert MARK not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("overrides", "reason"),
+    [
+        ({"kill_switch": True}, "kill_switch"),
+        ({"kill_switch": True, "assaf_os_mirror_enabled": False}, "kill_switch"),
+        ({"assaf_os_mirror_enabled": False}, "disabled"),
+        ({"os_mirror_spreadsheet_id": "another-sheet"}, "mirror_target_changed"),
+    ],
+)
+@pytest.mark.parametrize("publisher_path", [False, True])
+def test_static_pauses_skip_the_authority_read_under_freeze(
+    world: World, overrides, reason, publisher_path
+):
+    ids = world.seed()
+    calls = []
+
+    def authority_reader(_settings):
+        calls.append(1)
+        return "active"
+
+    settings = mirror_settings(assaf_os_freeze=True, **overrides)
+    publisher = os_mirror.MirrorPublisher(
+        settings_provider=lambda: settings, deps_factory=lambda _settings: world.deps,
+        clock=world.clock, authority_reader=authority_reader,
+    )
+    publisher._deps = world.deps  # also exercise a target change on an existing publisher
+    result = publisher.tick() if publisher_path else os_mirror.run_once(
+        world.deps, settings, now=world.clock(),
+        lease_owner="w1", anti_entropy=True, authority_reader=authority_reader,
+    )
+    assert result == os_mirror.TickResult("paused", reason)
+    assert calls == []
+    assert world.outbox.calls == [] and world.reader.calls == []
+    assert world.sheets.writes == [] and world.sheets.reads == 0
+    assert world.statuses(ids) == ["pending"] * len(ids)
+    assert {world.outbox.row(i)["attempts"] for i in ids} == {0}
+
+
+@pytest.mark.parametrize("publisher_path", [False, True])
+def test_freeze_off_never_reads_authority(world: World, monkeypatch, publisher_path) -> None:
+    calls = []
+
+    def authority_reader(_settings):
+        calls.append(1)
+        raise AssertionError("freeze-off authority read")
+
+    monkeypatch.setattr(api, "core_authority_state", authority_reader)
+    ids = world.seed()
+    publisher = os_mirror.MirrorPublisher(
+        settings_provider=lambda: mirror_settings(assaf_os_freeze=False),
+        deps_factory=lambda _settings: world.deps, clock=world.clock,
+    )
+    result = publisher.tick() if publisher_path else world.tick()
+    assert result == os_mirror.TickResult("verified", "readback_equal", len(ids))
+    assert calls == []
+
+
+def test_publisher_freeze_reads_authority_once_and_logs_each_pause_transition(
+    world: World, caplog
+) -> None:
+    caplog.set_level(logging.INFO, logger="mia.os_mirror")
+    authority = "active"
+    calls = []
+    built = []
+
+    def authority_reader(_settings):
+        assert world.counter.open == 0
+        with world.counter.tx():
+            calls.append(authority)
+            return authority
+
+    def deps_factory(_settings):
+        assert calls == ["active"]
+        built.append(1)
+        return world.deps
+
+    publisher = os_mirror.MirrorPublisher(
+        settings_provider=lambda: mirror_settings(assaf_os_freeze=True),
+        deps_factory=deps_factory, clock=world.clock, authority_reader=authority_reader,
+    )
+    ids = world.seed()
+    assert publisher.tick() == os_mirror.TickResult("verified", "readback_equal", len(ids))
+    assert calls == ["active"] and built == [1]
+    authority = "restoring"
+    rows = copy.deepcopy(world.outbox.rows)
+    state = copy.deepcopy(world.outbox.state)
+    counts = (len(world.outbox.calls), len(world.reader.calls), len(world.sheets.writes),
+              world.sheets.reads)
+    for _ in range(3):
+        assert publisher.tick() == os_mirror.TickResult("paused", "os_frozen")
+    assert calls == ["active", "restoring", "restoring", "restoring"]
+    assert counts == (len(world.outbox.calls), len(world.reader.calls), len(world.sheets.writes),
+                      world.sheets.reads)
+    assert world.outbox.rows == rows and world.outbox.state == state
+    paused = [r.getMessage() for r in caplog.records if "outcome=paused" in r.getMessage()]
+    assert paused == ["os_mirror op=tick outcome=paused reason=os_frozen"]
+    authority = "active"
+    assert publisher.tick().outcome == "idle"
+    authority = "restoring"
+    assert publisher.tick() == os_mirror.TickResult("paused", "os_frozen")
+    paused = [r.getMessage() for r in caplog.records if "outcome=paused" in r.getMessage()]
+    assert paused == ["os_mirror op=tick outcome=paused reason=os_frozen"] * 2
+
+
+def test_freeze_active_precheck_keeps_the_snapshot_authority_gate(world: World, monkeypatch):
+    ids = world.seed()
+    monkeypatch.setattr(api, "core_authority_state", lambda _settings: "active")
+    world.reader.states["core"] = "fenced"
+    result = world.tick(settings=mirror_settings(assaf_os_freeze=True))
+    assert result == os_mirror.TickResult("paused", "authority_fenced", len(ids))
+    assert world.sheets.writes == [] and world.sheets.reads == 0
+    assert world.statuses(ids) == ["pending"] * len(ids)
+    assert world.state().status == "fenced"
 
 
 def test_publisher_logs_a_pause_once_and_never_calls_out(world: World, caplog) -> None:
