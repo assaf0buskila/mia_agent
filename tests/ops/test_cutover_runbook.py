@@ -282,6 +282,21 @@ def test_restore_procedure_pins_limits_epoch_and_refusals():
     assert "WP1/E35" in section and "A freeze alone is insufficient" in section
 
 
+def test_restore_containment_order_exception_and_reason_table():
+    section = section_of("## 6. ")
+    assert section.index("MIA_KILL_SWITCH=true") < section.index("os-authority fence")
+    assert "first fence impossible / evidence directory lost" in section
+    assert "owner's explicit exception procedure" in section
+    assert "fence_record_minted_after_restore" in section and "null" in section
+    assert "restore-attempt.json" in section and "pre_restore_fence_record_present" in section
+    assert "run status after `mia restore` and compare the epoch" in section
+    table = RUNBOOK.split("Other refusals of the CLI:", 1)[1]
+    for code in ("restore_incomplete", "restore_rpo_exceeded", "restore_evidence_invalid",
+                 "restore_epoch_mismatch", "restore_epoch_required", "restore_epoch_invalid",
+                 "restore_rto_exceeded"):
+        assert re.search(rf"^\| `{code}` \|", table, re.M), code
+
+
 def test_every_sudo_mia_command_is_a_command_of_the_vm_script():
     arms = set(re.findall(r"^  ([a-z|-]+)\)$", SCRIPT, re.M))
     commands = {name for arm_ in arms for name in arm_.split("|")}

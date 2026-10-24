@@ -195,6 +195,17 @@ The off-host backup also skips its slots while the marker exists (see "Watching 
 while it exists. The steps, in
 this order:
 
+Before `DROP DATABASE`, `mia restore` also atomically records `restore-attempt.json` in
+`/var/lib/mia/os-authority` (UID 10001, mode 0600), outside the dump. Its
+`pre_restore_fence_record_present` boolean records whether `ledger-fence.json` existed before
+replacement. A later fence without matching incident evidence is marked
+`fence_record_minted_after_restore=true`; the standard authority restore commands then STOP.
+For a fresh cluster or lost evidence directory, follow the owner's explicit exception procedure
+in `ops/assaf-os/CUTOVER_RUNBOOK.md` section 6. RTO/RPO booleans are meaningless for timestamps
+first minted after restoration. A successful authority restore-finish archives the attempt so
+it cannot mark a later incident. Failure to write this attempt leaves the incomplete marker and
+stops before database replacement (`restore_evidence_invalid`).
+
 | # | Step | Skipped, with a logged reason, when |
 |---|---|---|
 | 1 | `python3 /opt/mia/app-role-demote/app_role_demote.py --reapply` (V2-14a) | `mia_app` does not exist (`app_role_not_demoted`) |
@@ -255,6 +266,7 @@ Reason codes (stderr, a fixed set; nothing else is printed about the cause):
 | Reason code | Meaning and what to do |
 |---|---|
 | `restore_catalog_unreadable` | a catalog query through `docker compose exec postgres` failed. Check the postgres container. |
+| `restore_evidence_invalid` | the durable pre-restore evidence could not be written. Repair the evidence directory and rerun the restore; the database has not yet been replaced and the incomplete marker remains. |
 | `app_role_reapply_unavailable` | `mia_app` exists but `/opt/mia/app-role-demote/app_role_demote.py` or `sql/app-role-demote.sql` is missing. Reinstall them from the approved source (V2-14a runbook). |
 | `app_role_reapply_failed` | the helper failed. It prints its own `reason=app_role_...` line just above. |
 | `ledger_reapply_unavailable` | the restored database has `assaf_os`, but `MIA_TAG` in `/opt/mia/tag.env` is unusable, the deployed `provision_ledger.py` is missing under `/opt/mia/src/<tag>/`, or `/etc/mia/os-ledger-migrate.env` is missing or holds another key. |

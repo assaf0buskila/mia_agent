@@ -8,6 +8,7 @@ nothing touches docker, ``/etc/mia`` or a lock.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -194,6 +195,7 @@ def stubs(tmp_path) -> str:
         'chown() { echo "chown $*"; }\n'
         'flock() { return 0; }\n'
         f'jobs_paused="{(tmp_path / "jobs-paused").as_posix()}"\n'
+        f'restore_incomplete="{(tmp_path / "etc-mia/restore-incomplete").as_posix()}"\n'
         'os_jobs=(os-authority os-import os-verifier os-retention)\n'
         + function("single_key_env") + "\n"
     )
@@ -334,6 +336,7 @@ def test_restore_finish_checks_the_host_marker_and_overrides_inherited_assertion
         + 'compose() { echo "complete=$MIA_OS_RESTORE_COMPLETE compose $*"; }\n'
         + 'MIA_OS_RESTORE_COMPLETE=true\n'
         + f'MIA_RESTORE_INCOMPLETE="{marker.as_posix()}"\n'
+        + f'restore_incomplete="{marker.as_posix()}"\n'
         + f'set -- restore-finish --expected-epoch 1 --approved-sha {SHA}\n'
         + redirected(arm("os-authority"), tmp_path)
     )
@@ -358,6 +361,76 @@ def test_restore_begin_never_forwards_an_inherited_completion_assertion(tmp_path
     )
     result = _run_step(program, tmp_path)
     assert result.returncode == 0 and "complete=false compose" in result.stdout
+
+
+@pytest.mark.parametrize("command", ["init", "status", "fence", "rollback", "activate",
+                                     "preflight", "freeze-plan"])
+def test_expected_epoch_is_refused_outside_restore_commands(tmp_path, command):
+    code, output = run_arm(tmp_path, "os-authority", [
+        command, "--expected-epoch", "1", "--approved-sha", SHA])
+    assert code == 1 and "compose" not in output
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "bad", "1.5"])
+@pytest.mark.parametrize("command", ["restore-begin", "restore-finish"])
+def test_malformed_restore_epoch_has_distinct_reason(tmp_path, value, command):
+    code, output = run_arm(tmp_path, "os-authority", [
+        command, "--expected-epoch", value, "--approved-sha", SHA])
+    assert code == 1 and "restore_epoch_invalid" in output and "compose" not in output
+
+
+def test_restore_finish_uses_the_existing_marker_variable(tmp_path):
+    host(tmp_path)
+    marker = tmp_path / "actual-marker"
+    marker.touch()
+    program = (stubs(tmp_path) + f'restore_incomplete="{marker.as_posix()}"\n'
+               + 'MIA_RESTORE_INCOMPLETE=/unrelated/absent-marker\n'
+               + f'set -- restore-finish --expected-epoch 1 --approved-sha {SHA}\n'
+               + redirected(arm("os-authority"), tmp_path))
+    result = _run_step(program, tmp_path)
+    assert result.returncode == 1 and "restore_incomplete" in result.stderr
+    assert "compose" not in result.stdout
+
+
+def test_fence_wrapper_continues_when_evidence_directory_setup_fails(tmp_path):
+    host(tmp_path)
+    program = (stubs(tmp_path) + 'install() { return 1; }; chown() { return 1; }\n'
+               + f'set -- fence --approved-sha {SHA}\n'
+               + redirected(arm("os-authority"), tmp_path))
+    result = _run_step(program, tmp_path)
+    assert result.returncode == 0 and "compose --profile os-authority" in result.stdout
+
+
+def test_restore_records_pre_restore_fence_presence_before_drop(tmp_path):
+    restore = arm("restore")
+    assert restore.index("record_restore_attempt") < restore.index("DROP DATABASE")
+    # Run only the evidence writer, with all host paths redirected into this fixture.
+    for present in (False, True):
+        directory = tmp_path / "var-lib/os-authority"
+        directory.mkdir(parents=True, exist_ok=True)
+        if present:
+            (directory / "ledger-fence.json").write_text("{}")
+        program = ('set -euo pipefail\nchown() { return 0; }\n'
+                   + function("record_restore_attempt").replace(
+                       "/var/lib/mia", "./var-lib")
+                   + '\nrecord_restore_attempt\n')
+        result = _run_step(program, tmp_path)
+        assert result.returncode == 0, result.stderr
+        record = json.loads((directory / "restore-attempt.json").read_text())
+        assert record == {"v": 1, "pre_restore_fence_record_present": present}
+
+
+def test_authority_usage_keeps_restore_description_with_the_command():
+    usage = function("usage")
+    assert "\n    restore-begin/restore-finish also require" not in usage
+    assert ("activate, fence, rollback, status,\n"
+            "                        restore-begin/restore-finish --expected-epoch <E>") in usage
+
+
+@pytest.mark.parametrize("command", ["restore-begin", "restore-finish"])
+def test_missing_restore_epoch_is_required(tmp_path, command):
+    code, output = run_arm(tmp_path, "os-authority", [command, "--approved-sha", SHA])
+    assert code == 1 and "restore_epoch_required" in output and "compose" not in output
 
 
 # --------------------------------------------------------------------------- mia os-provision
