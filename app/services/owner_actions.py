@@ -832,6 +832,36 @@ def _ledger_recover(
     return found
 
 
+def assistant_issue_service(settings):
+    from app.services.assistant_issue import AssistantIssueService
+
+    return AssistantIssueService(ledger_api.build_ledger(settings), settings)
+
+
+def execute_assistant_issue_decision(store, *, settings, principal, proposal_id, decision):
+    """E37 ledger CAS, never a provider claim. Every failure is safe to retry by re-tapping."""
+    if (
+        not _valid_owner(principal)
+        or principal.actor_id not in settings.telegram_owner_user_id_set()
+    ):
+        return OwnerActionExecution("unauthorized")
+    row = store.get_approval_by_resource(
+        RESOURCE_OWNER_PROPOSAL, proposal_id, ACTION_OWNER_EXTERNAL_WRITE
+    )
+    if row is None or row.actor_id != principal.actor_id:
+        return OwnerActionExecution("unbound")
+    try:
+        # CAS must already be committed. No request-scoped Session crosses into the ledger.
+        store.session.commit()
+        status = assistant_issue_service(settings).decide_issue(row, decision=decision)
+    except ledger_api.LedgerError as exc:
+        _LOG.info("owner_actions op=assistant_issue outcome=refused reason=%s", exc.code)
+        return OwnerActionExecution("not_started")
+    return OwnerActionExecution(status, (
+        "אושר. חזור למסך ה-OS כדי להציג את המפתח פעם אחת."
+        if decision == "approve" else "הבקשה להנפקת מפתח נדחתה."))
+
+
 def execute_approved_owner_action_with_adapters(
     store,
     *,
@@ -887,6 +917,10 @@ def execute_approved_owner_action_with_adapters(
     envelope = read_owner_action(row)
     if envelope is None:
         return OwnerActionExecution("unbound")
+    if envelope["kind"] == "assistant_key.issue":
+        return execute_assistant_issue_decision(
+            store, settings=settings, principal=principal, proposal_id=proposal_id,
+            decision="approve")
     if is_ledger_owner_action(envelope):
         # V2-28: a ledger card is decided on the ledger and recovered by its receipt.
         return execute_ledger_owner_decision(

@@ -256,6 +256,23 @@ LEDGER_ALLOWED_SITES: dict[tuple[str, str, str], str] = {
 }
 LEDGER_INTENT_VERBS = frozenset({"undo", "submit", "abandon"})
 
+# E37 key-management metadata, with no business mutation or Script transport. The request
+# cannot mint; Telegram only changes approval status; collect alone creates the key. These
+# sites are separate from statement submits, whose freeze behavior is driven below.
+ASSISTANT_KEY_SITES = {
+    ("app/api/os_v2/owner_keys.py", "run", "issue"): "OS session requests Telegram approval",
+    ("app/services/owner_actions.py", "execute_assistant_issue_decision", "decide_issue"): (
+        "committed numeric-owner Telegram decision, ledger CAS only"),
+    ("app/api/os_v2/owner_keys.py", "run", "collect"): "same-session one-time collection",
+}
+
+
+def test_every_assistant_issue_site_is_classified_separately_from_business_intents():
+    found = {(relative, function, method) for relative, source in app_sources()
+             for function, method, _ in method_sites(
+                 source, frozenset({"issue", "collect", "decide_issue"}))}
+    assert found == set(ASSISTANT_KEY_SITES)
+
 
 def ledger_intent_sites() -> set[tuple[str, str, str]]:
     found: set[tuple[str, str, str]] = set()

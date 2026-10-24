@@ -114,7 +114,7 @@ _ROWS: dict[str, tuple[tuple[Any, ...], ...]] = {
     "commit_direct": (_scope(DIRECT_SCOPE, mutation=True), _D, _D, _D, _D),
     "undo": (_scope(DIRECT_SCOPE, mutation=True), _D, _D, _D, _D),
     "abandon": (_scope(DIRECT_SCOPE, mutation=True), _D, _D, _D, _D),
-    # Issuing a key also needs the step-up token; V2-37 checks it.
+    # E37 additionally requires a committed Telegram approval before same-session collection.
     "manage_credentials": (_scope(APPROVE_SCOPE, mutation=True), _D, _D, _D, _D),
     "import_promote": (_D, _D, _D, _D, _jobs("import")),
     "authority_admin": (_D, _D, _D, _D, _jobs("authority")),

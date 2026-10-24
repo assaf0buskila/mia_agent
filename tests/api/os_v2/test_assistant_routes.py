@@ -473,3 +473,32 @@ def test_a_forwarded_for_header_does_not_choose_the_bucket_outside_production(en
         **env.headers(issued["secret"]), "X-Forwarded-For": "198.51.100.200"})
     [row] = aw.audit()
     assert row["client_ip_hmac"] == aw.ip_hmac(IP_A)
+
+
+# ---------------------------------------------------------------------------------------------
+# review r1 MAJOR-2: the outcome the caller sees is the outcome of the work
+
+
+def test_a_post_whose_accounting_fails_after_the_submit_is_still_a_200_with_the_batch(env, caplog):
+    caplog.set_level("INFO")
+    issued = env.aw.issue()
+    with env.aw.accounting_fault("record", issued["credential_id"]):
+        response = env.post_batch(issued["secret"])
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert set(body) == BATCH_KEYS and body["status"] == "pending"
+    [proposal] = env.aw.proposals()
+    assert proposal["proposal_id"] == body["proposal_id"] and proposal["status"] == "pending"
+    assert "not_started" not in response.text
+    assert "os_assistant op=audit outcome=failed reason=audit_write_failed" in caplog.text
+    # a retry with the same client batch id is the same batch (the request id is idempotent)
+    again = env.post_batch(issued["secret"])
+    assert again.status_code == 200 and again.json()["proposal_id"] == body["proposal_id"]
+
+
+def test_a_post_whose_accounting_fails_before_the_submit_is_503_not_started_with_no_batch(env):
+    issued = env.aw.issue()
+    with env.aw.accounting_fault("admit", issued["credential_id"]):
+        response = env.post_batch(issued["secret"])
+    error = error_of(response, 503, "ledger_unavailable")
+    assert error["write_outcome"] == "not_started" and env.aw.proposals() == []

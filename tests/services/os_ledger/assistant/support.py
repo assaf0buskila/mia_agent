@@ -17,11 +17,13 @@ from __future__ import annotations
 import threading
 from collections import Counter
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from app.services import assistant_keys as ac
+from app.services.assistant_issue import AssistantIssueService, IssueTables
 from app.services.os_ledger.statement_tables import tables_for
 
 from tests.services.os_ledger.statements.support import World
@@ -56,6 +58,8 @@ class MemoryAssistantStore:
         self.rows: list[dict[str, Any]] = []
         self._lock = threading.Lock()
         self._keys: dict[str, threading.Lock] = {}
+        # Injected accounting faults (a database error as the PG store would raise it).
+        self.fault: str | None = None  # "admit" (before the work), "record" or "commit" (after)
 
     def _credentials(self, tx: Any) -> dict[str, Any]:
         return tx.scratch.setdefault("statement_tables", {}).setdefault("credentials", {})
@@ -80,7 +84,11 @@ class MemoryAssistantStore:
     def invalid_lookup(self, *, ip_hmac: str, credential_id: str | None, reason: str,
                        now: datetime) -> str | None:
         since = now - timedelta(seconds=ac.FAIL_WINDOW_SECONDS)
-        with self._lock:
+        with self._gate("ip:" + ip_hmac), self._gate("invalid-lookups"), self._lock:
+            if sum(1 for r in self.rows if r["client_ip_hmac"] == ip_hmac
+                   and r["occurred_at"] >= now - timedelta(seconds=ac.IP_WINDOW_SECONDS)
+                   ) >= ac.IP_LIMIT:
+                raise ac._limited("ip_limit")
             failures = [r for r in self.rows if r["operation"] == "bearer"
                         and r["occurred_at"] >= since]
             if sum(1 for r in failures if r["client_ip_hmac"] == ip_hmac) >= ac.FAIL_LIMIT:
@@ -97,17 +105,33 @@ class MemoryAssistantStore:
                           "method_not_found", "invalid_params", "body_too_large",
                           "unsupported_media"}:
             raise ValueError("invalid_control_method")
-        with self._lock:
+        with self._gate("ip:" + ip_hmac), self._lock:
+            if sum(1 for r in self.rows if r["client_ip_hmac"] == ip_hmac
+                   and r["occurred_at"] >= now - timedelta(seconds=ac.IP_WINDOW_SECONDS)
+                   ) >= ac.IP_LIMIT:
+                raise ac._limited("ip_limit")
             self.rows.append(self._row(
                 credential_id=credential.credential_id, occurred_at=now,
                 operation="mcp_control", reason=method, ok=True, client_ip_hmac=ip_hmac))
 
-    def call(self, credential, *, ip_hmac: str, operation: str, now: Callable[[], datetime],
-             work: Callable[[ac.Facts], Any]) -> Any:
+    def _gate(self, name: str) -> threading.Lock:
         with self._lock:
-            gate = self._keys.setdefault(credential.credential_id, threading.Lock())
-        with gate:
+            return self._keys.setdefault(name, threading.Lock())
+
+    @contextmanager
+    def slot(self, credential, *, ip_hmac: str, operation: str, now: Callable[[], datetime]):
+        """The accounting of one call, as ``PgAssistantStore.slot`` does it: the address lock,
+        then the key lock; the address and the key counted again; the row and the usage applied
+        when the block ends normally (so an error in the body, or an injected fault, applies
+        nothing)."""
+        with self._gate("ip:" + ip_hmac), self._gate("key:" + credential.credential_id):
+            if self.fault == "admit":
+                raise ac.api.LedgerError("ledger_unavailable", reason="db_error_55p03")
             moment = now()
+            since = moment - timedelta(seconds=ac.IP_WINDOW_SECONDS)
+            if sum(1 for r in self.rows
+                   if r["client_ip_hmac"] == ip_hmac and r["occurred_at"] >= since) >= ac.IP_LIMIT:
+                raise ac.api.LedgerError("rate_limited", reason="ip_limit")
             mine = [r for r in self.rows if r["credential_id"] == credential.credential_id]
             counted = [r for r in mine if r["reason"] not in ac.LIMIT_REASONS
                        and r["operation"] != "mcp_control"]
@@ -120,35 +144,50 @@ class MemoryAssistantStore:
                 refusal = "key_hour_limit"
             elif operation == "submit" and day >= ac.BATCH_LIMIT:
                 refusal = "key_day_limit"
-            facts, failure = ac.Facts(), None
-            result = None
+            admitted = MemorySlot(self, credential.credential_id, ip_hmac, operation, moment)
             if refusal is None:
-                try:
-                    result = work(facts)
-                except Exception as exc:  # recorded, then re-raised after the row is written
-                    failure = exc
+                yield admitted
+                admitted.commit()
             else:
-                failure = ac.api.LedgerError("rate_limited", reason=refusal)
-            reason = "ok" if failure is None else ac.reason_of(failure)
-            self.rows.append(self._row(
-                credential_id=credential.credential_id, occurred_at=moment, operation=operation,
-                reason=reason, ok=failure is None, line_count=facts.line_count,
-                bytes=facts.bytes, proposal_id=facts.proposal_id, client_ip_hmac=ip_hmac))
-            with self._world.scratch_tx() as tx:
-                table = self._credentials(tx)
-                held = table.get(credential.credential_id)
-                if held is not None:
-                    table[credential.credential_id] = replace(
-                        held, last_used_at=moment, use_count=getattr(held, "use_count", 0) + 1)
-            if failure is not None:
-                raise failure
-            return result
+                admitted.record(ac.Facts(), ac.api.LedgerError("rate_limited", reason=refusal))
+                admitted.commit()
+                raise ac.api.LedgerError("rate_limited", reason=refusal)
+
+
+class MemorySlot:
+    def __init__(self, store: MemoryAssistantStore, credential_id: str, ip_hmac: str,
+                 operation: str, moment: datetime) -> None:
+        self._store, self._credential_id, self._ip_hmac = store, credential_id, ip_hmac
+        self._operation, self._moment = operation, moment
+        self._pending: dict[str, Any] | None = None
+
+    def record(self, facts: ac.Facts, failure: BaseException | None) -> None:
+        if self._store.fault == "record":
+            raise ac.api.LedgerError("ledger_unavailable", reason="db_error_55p03")
+        self._pending = self._store._row(
+            credential_id=self._credential_id, occurred_at=self._moment,
+            operation=self._operation, reason="ok" if failure is None else ac.reason_of(failure),
+            ok=failure is None, line_count=facts.line_count, bytes=facts.bytes,
+            proposal_id=facts.proposal_id, client_ip_hmac=self._ip_hmac)
+
+    def commit(self) -> None:
+        if self._store.fault == "commit":
+            raise ac.api.LedgerError("ledger_unavailable", reason="db_error_08006")
+        if self._pending is None:
+            return
+        self._store.rows.append(self._pending)
+        with self._store._world.scratch_tx() as tx:
+            table = self._store._credentials(tx)
+            held = table.get(self._credential_id)
+            if held is not None:
+                table[self._credential_id] = replace(
+                    held, last_used_at=self._moment, use_count=getattr(held, "use_count", 0) + 1)
 
 
 class SpyStore:
     """Counts the store methods a gateway reaches (``calls``); everything else passes through."""
 
-    METHODS = frozenset({"ip_calls", "find", "invalid_lookup", "call"})
+    METHODS = frozenset({"ip_calls", "find", "invalid_lookup", "slot"})
 
     def __init__(self, inner: Any) -> None:
         self._inner = inner
@@ -180,7 +219,10 @@ class AWorld:
         self.clock = Clock()
         self.counter = Counter()
         self.statements = self.w.service
-        self.service = ac.AssistantCredentialService(self.w.ledger, self.w.config, self.statements)
+        self.service = AssistantIssueService(
+            self.w.ledger, self.w.config, self.statements,
+            revoke_watermark=lambda owner: self.w.watermark["value"])
+        self._issue_cards = {}
         self.store = SpyStore(MemoryAssistantStore(self.w) if backend == "fake"
                               else ac.PgAssistantStore(self.w.config))
         self.gateway = self.make_gateway()
@@ -200,8 +242,80 @@ class AWorld:
 
     def issue(self, *, label: str = "Claude desktop", kind: str = "claude",
               days: int | None = None, ctx=None) -> dict[str, Any]:
-        return self.service.issue(ctx or self.w.owner, label=label, kind=kind,
-                                  expires_in_days=days)
+        request = self.request(label=label, kind=kind, days=days, ctx=ctx)
+        self.decide_issue(request)
+        return self.collect(request, ctx=ctx)
+
+    def request(self, *, label="Claude desktop", kind="claude", days=None, ctx=None,
+                session="a" * 64):
+        from app.capabilities.types import Principal
+        from app.db.models import ApprovalRow
+        from app.db.store import LeadStore
+        from app.services.owner_actions import propose_owner_action
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import Session
+
+        ctx = ctx or self.w.owner
+        result = self.service.issue(ctx, session_hash=session, label=label, kind=kind,
+                                    expires_in_days=days)
+        envelope = self.service.proposal(ctx, result["issue_request_id"], session_hash=session)
+        engine = create_engine("sqlite:///:memory:")
+        ApprovalRow.__table__.create(engine)
+        db = Session(engine, expire_on_commit=False)
+        store = LeadStore(db)
+        action = propose_owner_action(
+            store, principal=Principal.owner(source="telegram", actor_id="123"),
+            source_ref=result["issue_request_id"], kind=envelope["kind"],
+            parameters=envelope["parameters"], target=envelope["target"], ttl_seconds=600)
+        db.commit()
+        row = store.get_approval_by_approval_id(action.approval_id)
+        self._issue_cards[result["issue_request_id"]] = (db, store, row)
+        return result
+
+    def decide_issue(self, request, *, decision="approve"):
+        from app.capabilities.types import Principal
+        from app.services.owner_actions import decide_owner_action
+
+        db, store, row = self._issue_cards[request["issue_request_id"]]
+        decide_owner_action(store, principal=Principal.owner(source="telegram", actor_id="123"),
+                            approval_id=row.approval_id,
+                            decision="approved" if decision == "approve" else "rejected")
+        db.commit()
+        self.service.decide_issue(row, decision=decision)
+        return row
+
+    def collect(self, request, *, session="a" * 64, ctx=None):
+        return self.service.collect(ctx or self.w.owner, request["issue_request_id"],
+                                    session_hash=session)
+
+    def issue_status(self, request, *, session="a" * 64):
+        return self.service.status(self.w.reader, request["issue_request_id"], session_hash=session)
+
+    def issue_rows(self):
+        if self.kind == "fake":
+            with self.w.scratch_tx() as tx:
+                return [
+                    vars(row) for row in tx.scratch.get("assistant_issue_requests", {}).values()
+                ]
+        from sqlalchemy import text
+
+        with self.w._admin_engine.connect() as conn:
+            return [dict(row) for row in conn.execute(text(
+                "SELECT * FROM assaf_os.os_assistant_issue_requests")).mappings()]
+
+    def tamper_issue(self, request, **values):
+        if self.kind == "fake":
+            with self.w.scratch_tx() as tx:
+                tables = IssueTables(tx)
+                row = tables.get(request["issue_request_id"])
+                tables.memory()[row.issue_request_id] = replace(row, **values)
+            return
+        from sqlalchemy import text
+        assert set(values) == {"label"}
+        with self.w._admin_engine.begin() as conn:
+            conn.execute(text("UPDATE assaf_os.os_assistant_issue_requests SET label = :label "
+                              "WHERE issue_request_id = :id"),
+                         {**values, "id": request["issue_request_id"]})
 
     def listing(self, ctx=None) -> dict[str, Any]:
         return self.service.list(ctx or self.w.reader)
@@ -226,6 +340,39 @@ class AWorld:
         from tests.services.os_ledger.statements.support import CLAUDE, GPT
         ctx = self.w.assistant(kind, issued["credential_id"])
         return self.w.paste(batch_body, ctx=ctx, source=CLAUDE if kind == "claude" else GPT)
+
+    @contextmanager
+    def accounting_fault(self, when: str, credential_id: str):
+        """Make the call's accounting transaction fail ``when``: ``"admit"`` (before the work) or
+        ``"record"`` (after it). On PostgreSQL it is a real database failure: another connection
+        holds the key's advisory lock (so admission times out) or a ``FOR NO KEY UPDATE`` row lock
+        on the key (so the usage UPDATE after the work times out; the submit's foreign-key
+        ``FOR KEY SHARE`` is compatible with it, so the work itself still runs)."""
+        assert when in {"admit", "record", "commit"}
+        if self.kind == "fake":
+            self.store._inner.fault = when
+            try:
+                yield
+            finally:
+                self.store._inner.fault = None
+            return
+        assert when != "commit", "a COMMIT failure cannot be provoked on a live PostgreSQL"
+        from sqlalchemy import text
+        conn = self.w._admin_engine.connect()
+        trans = conn.begin()
+        try:
+            if when == "admit":
+                conn.execute(text("SELECT pg_advisory_xact_lock(hashtext(:k))"), {
+                    "k": f"assaf-os-assistant:{self.config.assaf_os_workspace_id}"
+                         f":key:{credential_id}"})
+            else:
+                conn.execute(text(
+                    "SELECT 1 FROM assaf_os.os_assistant_credentials WHERE credential_id = :id "
+                    "FOR NO KEY UPDATE"), {"id": credential_id})
+            yield
+        finally:
+            trans.rollback()
+            conn.close()
 
     # ---- observers ------------------------------------------------------------------------
 

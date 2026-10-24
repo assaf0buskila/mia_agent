@@ -1,7 +1,7 @@
-"""V2-37 golden shapes: the owner's key bodies, the step-up body and the three bearer bodies.
+"""V2-37 golden shapes: the owner's request/collect bodies and the bearer bodies.
 
 Each shape builds its own deterministic world (a FakeLedger with a frozen clock, counter-made ids, a
-fixed synthetic pepper, a fixed synthetic step-up secret and counter-made keys) and returns the body
+fixed synthetic peppers and counter-made keys) and returns the body
 the real services and the routes' own body builders produced. V2-20's
 ``scripts/export_os_contract_fixtures.py`` registry loads this module and writes
 ``tests/contract/golden/v2-37/<shape>.json``; until V2-20 merges,
@@ -18,7 +18,7 @@ from typing import Any
 
 from app.api.assistant.os import context_body, status_body, submitted_body
 from app.services import assistant_keys as keys
-from app.services import assistant_step_up as step_up
+from app.services.assistant_issue import AssistantIssueService
 from tests.fakes.os_ledger_env import NOW
 from tests.services.os_ledger.assistant.support import IP_A, ORIGIN, AWorld
 from tests.services.os_ledger.statements.support import (
@@ -35,8 +35,9 @@ def _world() -> AWorld:
     """An assistant world whose keys and ids are counters, and whose clock is the ledger's."""
     aw = AWorld("fake")
     ids, secrets = itertools.count(1), itertools.count(1)
-    aw.service = keys.AssistantCredentialService(
+    aw.service = AssistantIssueService(
         aw.w.ledger, aw.w.config, aw.statements,
+        revoke_watermark=lambda owner: None,
         new_id=lambda: f"AC_{next(ids):032x}",
         new_secret=lambda: "aosp_" + f"S{next(secrets):042d}")
     aw.clock.value = NOW
@@ -95,11 +96,27 @@ def keys_revoked_all() -> dict:
     return aw.revoke_all()
 
 
-def step_up_issued() -> dict:
-    settings = _world().w.config
-    minted = step_up.mint(session_hash="a" * 64, auth_time=1_800_000_000 - 5,
-                          now=1_800_000_000, settings=settings)
-    return step_up.body(minted)
+def issue_requested() -> dict:
+    aw = _world()
+    # Stable synthetic request identity, produced by the real request writer.
+    import unittest.mock
+
+    with unittest.mock.patch(
+        "app.services.assistant_issue.secrets.token_hex", return_value="1" * 32
+    ):
+        return aw.request()
+
+
+def issue_approved() -> dict:
+    aw = _world()
+    import unittest.mock
+
+    with unittest.mock.patch(
+        "app.services.assistant_issue.secrets.token_hex", return_value="1" * 32
+    ):
+        request = aw.request()
+    aw.decide_issue(request)
+    return aw.issue_status(request)
 
 
 # --- the bearer routes ---------------------------------------------------------------------
@@ -149,7 +166,8 @@ SHAPES: dict[str, Callable[[], dict]] = {
     "key_issued": key_issued,
     "key_revoked": key_revoked,
     "keys_revoked_all": keys_revoked_all,
-    "step_up_issued": step_up_issued,
+    "issue_requested": issue_requested,
+    "issue_approved": issue_approved,
     "assistant_context": assistant_context,
     "assistant_batch_submitted": assistant_batch_submitted,
     "assistant_batch_status": assistant_batch_status,

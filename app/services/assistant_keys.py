@@ -4,8 +4,9 @@ An assistant (Claude or GPT) holds a static bearer key. It can only SUBMIT a sta
 lands as a pending V2-26 proposal that the owner alone can approve; nothing here can commit, decide
 or reach the approve path. Two halves:
 
-* ``AssistantCredentialService``: the owner's side. Issue, list, revoke, revoke-all. Each is ONE
-  ledger transaction (``kind="statement_batch"``: the kind both a credential-only write and V2-26's
+* ``AssistantCredentialService``: the owner's list, revoke and revoke-all. E37's request/approve/
+  collect flow lives in ``assistant_issue``. Each ledger write is ONE transaction
+  (``kind="statement_batch"``: the kind both a key-only write and V2-26's
   ``revoke_pending_for_credential`` are admitted under, §5.3, D5), so revoking a key and rejecting
   its pending batches happen together or not at all.
 * ``AssistantGateway``: the bearer side. ``authenticate`` runs §17.2's order: the feature switch,
@@ -20,10 +21,12 @@ refused by the per-IP count or by the invalid-lookup budget writes no row (the a
 pattern: a blocked caller cannot grow the table, and its window slides); each such refusal logs a
 reason-code line. Nothing here logs a secret, a hash, an address or a statement.
 
-The advisory-lock pattern follows ``OwnerSessionStore.record_auth_attempt``: take the bucket lock,
+The advisory-lock pattern follows ``OwnerSessionStore.record_auth_attempt``: take the IP lock,
 COUNT the window, INSERT the row, all in one short transaction. A valid key's call holds its key
 lock from the quota COUNT to the audit INSERT, so 30 requests an hour and 5 batches a day are exact
-under concurrency; its lock and statement timeouts are 3 s.
+under concurrency; its lock and statement timeouts are 3 s. Lock order is always IP, then the
+invalid-lookup budget when needed, then key. A process-wide three-slot bearer guard waits at most
+two seconds before refusing; owner requests do not acquire it.
 """
 
 from __future__ import annotations
@@ -34,10 +37,11 @@ import ipaddress
 import logging
 import re
 import secrets
+import threading
 import unicodedata
 import uuid
 from collections.abc import Callable, Sequence
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
@@ -77,6 +81,11 @@ _LOCK_TIMEOUT = "3s"
 _CREDENTIAL_ID = re.compile(r"AC_[0-9a-f]{32}")
 _FORBIDDEN_LABEL_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp"})
 _LOG = logging.getLogger("mia.os_assistant")
+# A bearer holds an accounting connection plus its work's ledger connection. The shared
+# ledger pool is 5 + 5: at most three bearers leaves capacity for owner reads and key lists.
+# This process-wide guard is bearer-only; acquisition fails before slot admission or work.
+_bearer_slots = threading.BoundedSemaphore(3)
+_BEARER_WAIT_SECONDS = 2
 
 
 # ---------------------------------------------------------------------------------------------
@@ -337,26 +346,6 @@ class AssistantCredentialService:
         with self._tx(ctx) as tx:
             return self._listing(ctx, credential_tables(tx))
 
-    def issue(self, ctx: api.TrustedOwnerContext, *, label: Any, kind: Any,
-              expires_in_days: Any = None) -> dict[str, Any]:
-        """A new key. The caller has already checked the step-up token (the route does)."""
-        self._admit(ctx, "manage_credentials")
-        clean = _label(label)
-        if kind not in KINDS or type(kind) is not str:
-            raise _invalid("invalid_kind")
-        days = DEFAULT_DAYS if expires_in_days is None else expires_in_days
-        if type(days) is not int or not 1 <= days <= MAX_DAYS:
-            raise _invalid("invalid_expiry")
-        secret = self._new_secret()
-        with self._tx(ctx) as tx:
-            row = StoredCredential(
-                self._new_id(), str(ctx.numeric_owner), ctx.authority_epoch, clean, kind,
-                tx.now, tx.now + timedelta(days=days), None, workspace_id=ctx.workspace,
-                scopes=SCOPES_TEXT, secret_hash=secret_hash(secret))
-            credential_tables(tx).insert(row)
-        _LOG.info("os_assistant op=issue outcome=ok reason=issued")
-        return {**binding(ctx), **_item(row), "secret": secret}
-
     def _revoke_in(self, tx: Any, tables: CredentialTables, credential_id: str) -> None:
         """The key and its pending batches, on the caller's open transaction (D5)."""
         tables.revoke(credential_id, tx.now)
@@ -391,21 +380,51 @@ class AssistantCredentialService:
 # The bearer side: the store (limits and audit on os_assistant_audit)
 
 
+class Slot(Protocol):
+    """One admitted call's accounting transaction, open until its ``with`` block ends."""
+
+    def record(self, facts: Facts, failure: BaseException | None) -> None: ...
+
+
 class AssistantStore(Protocol):
-    def control(self, credential: StoredCredential, *, ip_hmac: str, method: str,
-                now: datetime) -> None: ...
     """Context-free access to ``os_assistant_credentials`` and ``os_assistant_audit``.
 
     ``PgAssistantStore`` is the production implementation (the ledger runtime role); the test
     suite runs one set of tests on it and on an in-memory double.
+
+    ``slot`` is the accounting of one call. Entering it takes the address lock and then the key
+    lock, counts again (the address, the key's hour, its batches of the day) and either admits the
+    call or raises ``rate_limited``. While it is open the call runs; ``record`` writes the call's
+    one audit row and the key's usage, and leaving the block commits both. An error on entering
+    means nothing ran; an error from ``record`` or the commit means the work already did.
     """
 
+    def control(self, credential: StoredCredential, *, ip_hmac: str, method: str,
+                now: datetime) -> None: ...
     def ip_calls(self, ip_hmac: str, since: datetime) -> int: ...
     def find(self, secret_hash: str) -> StoredCredential | None: ...
     def invalid_lookup(self, *, ip_hmac: str, credential_id: str | None, reason: str,
                        now: datetime) -> str | None: ...
-    def call(self, credential: StoredCredential, *, ip_hmac: str, operation: str,
-             now: Callable[[], datetime], work: Callable[[Facts], Any]) -> Any: ...
+    def slot(self, credential: StoredCredential, *, ip_hmac: str, operation: str,
+             now: Callable[[], datetime]) -> AbstractContextManager[Slot]: ...
+
+
+class _PgSlot:
+    def __init__(self, store: PgAssistantStore, conn: Any, credential_id: str, ip_hmac: str,
+                 operation: str, moment: datetime) -> None:
+        self._store, self._conn, self._credential_id = store, conn, credential_id
+        self._ip_hmac, self._operation, self._moment = ip_hmac, operation, moment
+
+    def record(self, facts: Facts, failure: BaseException | None) -> None:
+        store = self._store
+        store._insert(self._conn, credential_id=self._credential_id, moment=self._moment,
+                      operation=self._operation,
+                      reason="ok" if failure is None else reason_of(failure),
+                      ok=failure is None, facts=facts, ip_hmac=self._ip_hmac)
+        self._conn.execute(text(
+            "UPDATE assaf_os.os_assistant_credentials SET last_used_at = :at, "
+            "use_count = use_count + 1 WHERE workspace_id = :ws AND credential_id = :cid"),
+            {"ws": store._workspace, "at": self._moment, "cid": self._credential_id})
 
 
 class PgAssistantStore:
@@ -483,9 +502,16 @@ class PgAssistantStore:
 
     def invalid_lookup(self, *, ip_hmac: str, credential_id: str | None, reason: str,
                        now: datetime) -> str | None:
-        """Count, then record, under one lock. ``"ip"`` or ``"global"`` when over: no row."""
+        """Every audit writer locks IP first and recounts; then invalid-lookups, then key.
+
+        Invalid-budget refusals return ``"ip"`` / ``"global"`` without a row.
+        """
         since = now - timedelta(seconds=FAIL_WINDOW_SECONDS)
         with self._begin() as conn:
+            self._lock(conn, f"ip:{ip_hmac}")
+            if self._count(conn, "client_ip_hmac = :ip AND occurred_at >= :since", ip=ip_hmac,
+                           since=now - timedelta(seconds=IP_WINDOW_SECONDS)) >= IP_LIMIT:
+                raise _limited("ip_limit")
             self._lock(conn, "invalid-lookups")
             if self._count(conn, "operation = 'bearer' AND client_ip_hmac = :ip AND "
                            "occurred_at >= :since", ip=ip_hmac, since=since) >= FAIL_LIMIT:
@@ -499,23 +525,39 @@ class PgAssistantStore:
 
     def control(self, credential: StoredCredential, *, ip_hmac: str, method: str,
                 now: datetime) -> None:
-        """S1/S1b: one IP-counted control row, no key quota, service work or usage update."""
+        """S1/S1b under R2a: lock IP, recount, then insert one row without key usage."""
         if method not in {"initialize", "ping", "tools_list", "notification", "invalid_request",
                           "method_not_found", "invalid_params", "body_too_large",
                           "unsupported_media"}:
             raise ValueError("invalid_control_method")
         with self._begin() as conn:
+            self._lock(conn, f"ip:{ip_hmac}")
+            if self._count(conn, "client_ip_hmac = :ip AND occurred_at >= :since", ip=ip_hmac,
+                           since=now - timedelta(seconds=IP_WINDOW_SECONDS)) >= IP_LIMIT:
+                raise _limited("ip_limit")
             self._insert(conn, credential_id=credential.credential_id, moment=now,
                          operation="mcp_control", reason=method, ok=True, facts=Facts(),
                          ip_hmac=ip_hmac)
 
-    def call(self, credential: StoredCredential, *, ip_hmac: str, operation: str,
-             now: Callable[[], datetime], work: Callable[[Facts], Any]) -> Any:
-        failure: BaseException | None = None
-        result: Any = None
+    @contextmanager
+    def slot(self, credential: StoredCredential, *, ip_hmac: str, operation: str,
+             now: Callable[[], datetime]):
+        """The accounting transaction of one call (see ``AssistantStore``).
+
+        The address lock comes first and the key lock second, always in that order, so no two
+        calls can wait on each other. Counting the address again here, under its lock, makes the
+        per-address limit exact for admitted calls: the cheap count before the lookup can be
+        passed by concurrent requests, this one cannot. A call over the address limit writes no
+        row; a call over a key limit writes its refusal row, which the counters leave out.
+        """
+        refusal: str | None = None
         with self._begin() as conn:
+            self._lock(conn, f"ip:{ip_hmac}")
             self._lock(conn, f"key:{credential.credential_id}")
             moment = now()
+            if self._count(conn, "client_ip_hmac = :ip AND occurred_at >= :since", ip=ip_hmac,
+                           since=moment - timedelta(seconds=IP_WINDOW_SECONDS)) >= IP_LIMIT:
+                raise _limited("ip_limit")
             counted = ("credential_id = :cid AND reason NOT IN ('key_hour_limit', "
                        "'key_day_limit') AND operation <> 'mcp_control' AND ")
             hour = self._count(conn, counted + "occurred_at >= :since",
@@ -525,26 +567,17 @@ class PgAssistantStore:
                                "occurred_at >= :since", cid=credential.credential_id,
                                since=moment - timedelta(seconds=BATCH_WINDOW_SECONDS))
                    if operation == "submit" else 0)
-            facts = Facts()
             if hour >= KEY_LIMIT:
-                failure = api.LedgerError("rate_limited", reason="key_hour_limit")
+                refusal = "key_hour_limit"
             elif operation == "submit" and day >= BATCH_LIMIT:
-                failure = api.LedgerError("rate_limited", reason="key_day_limit")
+                refusal = "key_day_limit"
+            admitted = _PgSlot(self, conn, credential.credential_id, ip_hmac, operation, moment)
+            if refusal is None:
+                yield admitted
             else:
-                try:
-                    result = work(facts)
-                except Exception as exc:  # recorded below, re-raised once the row is committed
-                    failure = exc
-            self._insert(conn, credential_id=credential.credential_id, moment=moment,
-                         operation=operation, reason="ok" if failure is None
-                         else reason_of(failure), ok=failure is None, facts=facts, ip_hmac=ip_hmac)
-            conn.execute(text(
-                "UPDATE assaf_os.os_assistant_credentials SET last_used_at = :at, "
-                "use_count = use_count + 1 WHERE workspace_id = :ws AND credential_id = :cid"),
-                {"ws": self._workspace, "at": moment, "cid": credential.credential_id})
-        if failure is not None:
-            raise failure
-        return result
+                admitted.record(Facts(), api.LedgerError("rate_limited", reason=refusal))
+        if refusal is not None:
+            raise api.LedgerError("rate_limited", reason=refusal)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -635,14 +668,54 @@ class AssistantGateway:
             return exc.reason or "key_invalid", None
 
     def control(self, caller: Caller, method: str) -> None:
-        """Record a transport control call without consuming this key's work quota."""
-        self._store.control(caller.credential, ip_hmac=caller.ip_hmac, method=method,
-                            now=self._clock())
+        """Record a control in one short transaction inside the shared bearer pool guard."""
+        if not _bearer_slots.acquire(timeout=_BEARER_WAIT_SECONDS):
+            _LOG.warning("os_assistant op=admit outcome=refused reason=bearer_busy")
+            raise api.LedgerError("ledger_unavailable", reason="bearer_busy")
+        try:
+            self._store.control(caller.credential, ip_hmac=caller.ip_hmac, method=method,
+                                now=self._clock())
+        finally:
+            _bearer_slots.release()
 
     def run(self, caller: Caller, operation: str, work: Callable[[Facts], Any]) -> Any:
-        """The per-key limits, ``work`` and the call's one audit row, in the store's transaction."""
-        return self._store.call(caller.credential, ip_hmac=caller.ip_hmac, operation=operation,
-                                now=self._clock, work=work)
+        """The per-address and per-key limits, ``work``, and the call's one audit row.
+
+        An error before ``work`` runs (a limit, a lock timeout, the database) is a refusal:
+        nothing happened. Once ``work`` has returned or raised, its outcome is the truth, because
+        it may have committed (a submit does, on its own ledger transaction): a failure to write
+        the audit row or the usage, or to commit them, is logged as a reason-code line, and the
+        work's own result (or its own error, with its own ``write_outcome``) is what the caller
+        gets. The cost is a rare missing audit row; a retry stays safe because a batch's request
+        id is idempotent.
+        """
+        if not _bearer_slots.acquire(timeout=_BEARER_WAIT_SECONDS):
+            _LOG.warning("os_assistant op=admit outcome=refused reason=bearer_busy")
+            raise api.LedgerError("ledger_unavailable", reason="bearer_busy")
+        try:
+            return self._run(caller, operation, work)
+        finally:
+            _bearer_slots.release()
+
+    def _run(self, caller: Caller, operation: str, work: Callable[[Facts], Any]) -> Any:
+        facts = Facts()
+        outcome: list[tuple[bool, Any]] = []  # set once, when the work has returned or raised
+        try:
+            with self._store.slot(caller.credential, ip_hmac=caller.ip_hmac,
+                                  operation=operation, now=self._clock) as slot:
+                try:
+                    outcome.append((True, work(facts)))
+                except Exception as exc:  # recorded, then raised once the row is committed
+                    outcome.append((False, exc))
+                slot.record(facts, None if outcome[0][0] else outcome[0][1])
+        except Exception:
+            if not outcome:
+                raise
+            _LOG.warning("os_assistant op=audit outcome=failed reason=audit_write_failed")
+        succeeded, value = outcome[0]
+        if succeeded:
+            return value
+        raise value
 
 
 def build_gateway(settings: Any, statements: Any) -> AssistantGateway:

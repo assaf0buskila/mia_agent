@@ -48,7 +48,6 @@ _LOG = logging.getLogger("mia.owner_write")
 _DEFAULT_BODY_CAP = 16_384
 _BODY_CAPS = (
     (re.compile(r"/v1/owner/os/unified/statement-batches"), 131_072),
-    (re.compile(r"/v1/owner/auth/step-up"), 8_192),
 )
 
 
