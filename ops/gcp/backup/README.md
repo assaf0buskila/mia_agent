@@ -7,6 +7,15 @@ a rehearsal against a real PostgreSQL 16 container). Not `STAGING_VERIFIED`, not
 
 ## What it does
 
+After Assaf OS's first non-import receipt, follow
+[`CUTOVER_RUNBOOK.md` section 6](../../assaf-os/CUTOVER_RUNBOOK.md#6-after-the-first-non-import-receipt)
+for authority recovery around this database restore: containment with the loaded kill switch,
+G22 fence, G21 database restore, another G22 fence of the restored authority, then separately
+approved `restore-begin` and `restore-finish` at the original expected epoch. Retain the original
+fence evidence outside the dump. The authority commands enforce RPO <=15 minutes; final service
+recovery still needs measured RTO <=2 hours and live readback. This is an operator procedure,
+never an automatic consequence of restoring the database.
+
 Every 15 minutes the VM takes one consistent `pg_dump -Fc` of database `mia`, checks that
 `pg_restore --list` can read it, encrypts it on the VM, proves the ciphertext decrypts back to the
 same bytes, deletes the plaintext, and uploads ciphertext plus a manifest to a private bucket. The

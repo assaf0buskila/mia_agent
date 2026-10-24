@@ -601,8 +601,63 @@ number.
   on production, so it is **not pre-approved**: it needs Assaf's explicit statement in chat for that one
   use. If he wants it to be a standing emergency stop, he says so in chat and the operator records his
   words in `OS_CUTOVER_GO_NO_GO.md`; until then it is not one.
-- **Afterwards**: recovery is a restore (`fenced` to `restoring`, then `active` with an epoch bump) under
-  its own go (G21) and plan, not an automated command of this tool.
+- **Go G21**, separate containment/settings go before the database restore: set
+  `MIA_KILL_SWITCH=true` in the approved settings plan, retain `MIA_ASSAF_OS_FREEZE=true`,
+  then `sudo mia settings`. Verify `/health` reports `kill_switch=true` from the running app;
+  pause jobs (`sudo mia jobs pause`). Keep the kill switch on through
+  the restore, the second fence, both authority steps and the new epoch's settings reload.
+  This also stops the app's mirror daemon, which paused jobs do not control: WP1/E35 permits
+  that daemon to publish under freeze on an active core. A freeze alone is insufficient.
+- **Go G21**, a separate restore go: `sudo mia restore <dump>`. Follow
+  `ops/gcp/backup/README.md` to verify/decrypt the selected dump and reapply the restored role
+  posture. Record the incident epoch **E** from status BEFORE restoring; the dump must have that
+  same epoch. The restore starts services again, so the kill switch must also hold in their
+  loaded settings. The original `ledger-fence.json` remains outside the dump; do not replace
+  its `fence_started_at` or completed `fenced_at` timestamps. A failed initial evidence write
+  refuses before fencing. A crash after fencing retains the start; retry uses a conservative
+  later completion time for RPO. For an already-fenced ledger with missing incident evidence,
+  `fence` remains a no-op; `restore-begin` refuses `restore_evidence_invalid`. STOP and recover
+  the original evidence with the coordinator.
+- **Go G22**, a separate post-restore fence go: `sudo mia os-authority fence --approved-sha S`.
+  A dump can restore an `active` authority row. Fence it again before proceeding. This preserves
+  the first fence time at E in `ledger-fence.json`; `statements` is fenced if it was active.
+  Do not permit traffic or jobs between the restore and this fence. If the restored epoch differs
+  from E, STOP before this second fence: use a compatible dump and the coordinator's recovery plan.
+- Record the restored dump's actual consistent-snapshot timestamp (backup manifest
+  `created_at_utc`, NOT the download, decrypt or restore completion time) in
+  `/var/lib/mia/os-authority/restore.json`, owned by UID 10001, mode 0600:
+  `{"v":1,"workspace":"<configured workspace>","epoch":E,"release_sha":"S","dump_created_at":"<UTC ISO-8601>"}`.
+  Replace E and S with the actual integer and approved 40-hex image SHA. This is operator evidence:
+  verify it belongs to the exact dump restored using the backup manifest and hashes. The CLI
+  validates its binding and timestamp; it cannot prove that attestation from database rows.
+- **Go G21**, its own explicit go: `sudo mia os-authority restore-begin --expected-epoch E --approved-sha S`.
+  Requires `core=fenced` and `statements=shadow|fenced`. It pins the incident time in
+  `restore-session.json`, then transitions `core` to `restoring`. Repeating at E is a no-op.
+- **Go G21**, another explicit go: `sudo mia os-authority restore-finish --expected-epoch E --approved-sha S`.
+  Requires `core=restoring`, the host's `/etc/mia/restore-incomplete` marker absent
+  (`restore_incomplete` otherwise), and the same `main_role_unsafe` / `ledger_role_unsafe` posture
+  checks as preflight. It refuses missing/malformed/mismatched or future evidence with
+  `restore_evidence_invalid`, a different epoch with `restore_epoch_mismatch`, and a missing E
+  with `restore_epoch_required`. Wrong states refuse `authority_state_invalid`; wrong image SHA
+  refuses `release_sha_mismatch`. RPO **<= 15 min** is a hard gate (`restore_rpo_exceeded`):
+  missing data beyond E36's limit cannot be approved implicitly by this command. Choose a newer
+  verified dump; an exception needs a separate coordinator/owner decision and procedure.
+  The legal transition atomically sets core active and bumps both domains' epoch to E+1 exactly
+  once. Keep passing the ORIGINAL E on retry: both commands report `already_restored` at E+1.
+  Statements remain fenced or shadow; this procedure does not independently activate them.
+- `sudo mia os-authority status --approved-sha S`. Check `core=active`, epoch E+1. Under its
+  own settings go, set `MIA_ASSAF_OS_AUTHORITY_EPOCH=E+1`, retain `MIA_ASSAF_OS_BACKEND=postgres`,
+  ledger and mirror enabled, then `sudo mia settings`; check status `settings.epoch_matches=true`
+  and the approved health SHA. Under separate go, remove the kill switch, unfreeze and resume
+  jobs as appropriate, after verifying those settings were loaded at E+1.
+  The existing mirror/outbox worker resumes through the normal active-state/epoch gates; do not
+  replay old receipts or change the mirror. Verify mirror readback before accepting recovery.
+- Check E36's **RTO <= 2 h**, measured from the ORIGINAL fence start through completed activation
+  and end-to-end service recovery, and **RPO <= 15 min**, dump snapshot to ORIGINAL fence.
+  `restore-finish` reports only booleans/codes for these timestamps: `rpo_evidence_recorded`,
+  `rpo_within_limit`, `rto_within_limit`; `restore_rto_exceeded` is a warning, because refusing a
+  safe activation would prolong an already late outage. Record the full service recovery time
+  separately: command activation alone does not prove RTO or live mirror/outbox delivery.
 
 ## 7. Reason codes
 
