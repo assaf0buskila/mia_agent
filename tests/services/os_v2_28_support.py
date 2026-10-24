@@ -181,8 +181,8 @@ class LedgerWorld:
         monkeypatch.setattr(api, "build_ledger", lambda settings: self.ledger)
         if authorize:
             monkeypatch.setitem(sys.modules, AUTHORIZE_MODULE, self.authorize)
-        else:
-            monkeypatch.delitem(sys.modules, AUTHORIZE_MODULE, raising=False)
+        # Otherwise keep the real module: re-importing after eviction replaces the package
+        # attribute, which monkeypatch's sys.modules teardown does not restore.
         return self
 
     def ctx(self, channel: str):
