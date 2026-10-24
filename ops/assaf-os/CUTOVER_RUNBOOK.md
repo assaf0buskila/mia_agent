@@ -110,6 +110,53 @@ Every production step above pauses the jobs and takes a verified backup first (s
 - **Go G06** V2-14/V2-14b schema migration.
 - **Precondition**: step 2 is enforced; `/etc/mia/os-ledger-migrate.env` holds exactly
   `MIA_OS_LEDGER_MIGRATION_DATABASE_URL` (the wrapper refuses any other key).
+- **Create the migration env file (once, before the first step 3).**
+  - **The role:** the DSN is the ORIGINAL superuser `mia`, the pinned migration identity of the
+    `mia-vm` target (LEDGER_ROLE.md, "Pinned targets": `127.0.0.1:5432/mia`, `mia`; the main
+    identity is `mia_app`).
+  - **The source:** step 2 already saved exactly that DSN, once, as the single
+    `MIA_DATABASE_URL=` line of `/etc/mia/app-role.rollback.env`. It is a `postgresql://` DSN,
+    and `app_role_demote.py` checks its form: user `mia`, host `127.0.0.1`, port `5432`,
+    database `mia`, a password, no query.
+  - So the file is that line with its key renamed, copied, never printed or sourced. The bare
+    `postgresql://` scheme is accepted (the job normalizes it to `postgresql+psycopg://`).
+  - Keep `app-role.rollback.env`: it is still the step 2 rollback.
+  - Run this once, under the shared state lock, as root. It refuses if the file already exists or
+    the source is not the one expected line, and prints only a reason code:
+
+    ```bash
+    sudo flock -n /var/lock/mia-state.lock sh -euc '
+      src=/etc/mia/app-role.rollback.env; dst=/etc/mia/os-ledger-migrate.env
+      [ ! -e "$dst" ] || { echo os_ledger_env_exists >&2; exit 1; }
+      [ "$(wc -l < "$src")" = 1 ] && grep -q "^MIA_DATABASE_URL=postgresql://mia:" "$src" \
+        || { echo rollback_env_unexpected >&2; exit 1; }
+      umask 077
+      tmp=$(mktemp /etc/mia/.os-ledger-migrate.XXXXXX); trap "rm -f $tmp" EXIT
+      sed -n "s/^MIA_DATABASE_URL=/MIA_OS_LEDGER_MIGRATION_DATABASE_URL=/p" "$src" > "$tmp"
+      [ "$(wc -l < "$tmp")" = 1 ] || { echo os_ledger_env_invalid >&2; exit 1; }
+      chown root:root "$tmp"; chmod 600 "$tmp"; mv -f "$tmp" "$dst"
+      echo os_ledger_env_written'
+    ```
+
+  - **Verify, without printing the value:**
+    - `sudo stat -c '%U:%G %a' /etc/mia/os-ledger-migrate.env` prints `root:root 600`.
+    - `sudo cut -d= -f1 /etc/mia/os-ledger-migrate.env` prints only `MIA_OS_LEDGER_MIGRATION_DATABASE_URL`.
+    - This check prints `os_ledger_env_ok`: the copy equals the rollback DSN, and differs from the
+      demoted main DSN.
+
+      ```bash
+      sudo sh -euc 'a=$(sed -n "s/^MIA_DATABASE_URL=//p" /etc/mia/app-role.rollback.env)
+        b=$(sed -n "s/^MIA_OS_LEDGER_MIGRATION_DATABASE_URL=//p" /etc/mia/os-ledger-migrate.env)
+        m=$(sed -n "s/^MIA_DATABASE_URL=//p" /etc/mia/runtime.env)
+        [ -n "$b" ] && [ "$a" = "$b" ] && [ "$b" != "$m" ] && echo os_ledger_env_ok || echo os_ledger_env_mismatch'
+      ```
+
+    - `sudo bash /opt/mia/src/<S-tag>/ops/gcp/vm/pg-hba-harden.sh --check` names no refused key.
+      It scram-checks this file's DSN too (E28) and prints key names only, never a value.
+  - The same file serves `mia os-authority`, `mia os-provision` and `mia os-job`, which all
+    require it with exactly this one key. Leave it in place after the cutover.
+  - It holds a superuser credential: root-only, mode 600, never in `mia-env`, never copied off
+    the VM.
 - **Command**: `sudo mia os-ledger migrate --approved-sha S`.
 - **Verify**: exit 0; the job creates schema `assaf_os`, owned by `assaf_os_owner`.
 - **Rollback**: the migration is additive and creates no data. To undo it, restore the dump taken

@@ -109,7 +109,10 @@ their redaction before provisioning; they are outside this helper's logging cont
    `mia-job@mia-ingest-knowledge` units to finish. Preserve an already-paused state.
 3. `sudo /opt/mia/app-role-demote/app-role-demote.sh`. This transactionally provisions
    ownership/ACLs and stages `/etc/mia/app-role.staged.env`. The original superuser
-   DSN is saved once to `/etc/mia/app-role.rollback.env`. The active runtime file is
+   DSN is saved once to `/etc/mia/app-role.rollback.env`. Keep that file: besides this
+   runbook's rollback, `ops/assaf-os/CUTOVER_RUNBOOK.md` step 3 derives
+   `/etc/mia/os-ledger-migrate.env` from it (the same `mia` DSN under the key
+   `MIA_OS_LEDGER_MIGRATION_DATABASE_URL`, root-only, mode 600). The active runtime file is
    unchanged. A rerun keeps the password and logical catalog state; unmanaged existing
    `mia_app` without a staged file is refused. A failed SQL transaction retains the
    staged credential for retry, and never switches the app. The helper tests a TCP
