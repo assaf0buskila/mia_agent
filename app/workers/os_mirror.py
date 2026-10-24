@@ -42,7 +42,7 @@ from app.integrations.sheets_mirror import (
     MirrorTransportError,
     target_refusal,
 )
-from app.services.os_ledger import api
+from app.services.os_ledger import api, outbox
 from app.services.os_ledger import mirror_projection as mp
 from app.services.os_ledger.outbox import (
     MirrorState,
@@ -50,7 +50,6 @@ from app.services.os_ledger.outbox import (
     OutboxEvent,
     OutboxStore,
     PgOutbox,
-    backoff,
     destination_binding,
 )
 
@@ -145,7 +144,7 @@ def _event_refusal(event: OutboxEvent, epoch: int) -> str | None:
 
 
 def _finish(deps: MirrorDeps, event: OutboxEvent, status: str, code: str | None, now: datetime):
-    retry_at = now + backoff(event.attempts) if status in {"pending", "unknown"} else now
+    retry_at = now + outbox.retry_delay(status, event.attempts)
     if not deps.outbox.finish(event, event.lease_generation, status, code, retry_at):
         _LOG.info("os_mirror op=finish outcome=lost_lease reason=generation_changed")
 
