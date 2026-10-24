@@ -60,6 +60,9 @@ from .vocabulary import PAYMENT_STATUS_CANCELLED, TAGS
 ACTIONS = ("add", "keep", "update", "void", "owner_edited_kept", "kept_earlier_choice")
 BLOCK_UNASSIGNED = "unassigned_lines"
 BLOCK_MERGE_CHOICE = "merge_choice_required"
+# §22 E31: another statement of the account already holds the cycle. The domain diff sees one
+# statement, so the ledger service adds this code (it reads the other statements).
+BLOCK_CYCLE_HAS_STATEMENT = "cycle_has_statement"
 # Entry flag and reason: the hand entry a line is linked to no longer fits that line.
 LINKED_EXPENSE_CHANGED = "linked_expense_changed"
 

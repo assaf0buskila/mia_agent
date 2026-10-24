@@ -24,7 +24,8 @@ import ast
 import json
 import logging
 import types
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -56,12 +57,14 @@ from fastapi.testclient import TestClient
 from sqlalchemy.orm import sessionmaker
 from starlette.exceptions import HTTPException
 
+from tests.api.os_v2 import test_os_v2_statements as statement_routes
 from tests.contract.shapes import v2_20
 from tests.fakes.os_ledger_builders import counts
 from tests.fakes.os_ledger_env import OWNER_ID as LEDGER_OWNER
 from tests.fakes.os_ledger_env import WORKSPACE as LEDGER_WORKSPACE
 from tests.services import os_v2_28_support as v228
 from tests.services import test_os_backend_pg as backend_pg
+from tests.services.os_ledger.statements.support import batch, encode, three_lines
 from tests.services.os_ledger.test_authorize_constructors import principal as session_principal
 from tests.services.os_ledger.test_authorize_constructors import proven
 from tests.unit import test_assaf_os as assaf
@@ -222,16 +225,20 @@ def test_the_scanner_tells_a_database_commit_from_a_ledger_commit():
 
 # The ledger-side intents of contract I8 (section 2): commit, undo, batch submit and the assistant
 # submit are new intents the T1 freeze must refuse (503 os_frozen); abandon writes no business
-# change, so the freeze allows it. V2-24's owner-direct commit, undo and abandon are classified
-# here; V2-26 (the statement batch submit) and V2-37 (the assistant submit) land later, and each
-# must add its call site here, classified, in the same change. Keys are
-# (file, enclosing function, method) like the sites above; values say why.
+# change, so the freeze allows it. V2-24's owner-direct commit, undo and abandon and V2-26's
+# statement batch submit are classified here; V2-37 (the assistant submit) lands later and must add
+# its call site here, classified, in the same change. Keys are (file, enclosing function, method)
+# like the sites above; values say why. The statement approve, reject and draft save settle a batch
+# that is already pending: the drain needs them, so they are not intents (driven at the end of this
+# file).
 LEDGER_INTENT_SITES: dict[tuple[str, str, str], str] = {
     # V2-24 (app/api/os_v2/commits.py): the three routes each hold their call in a local ``run``.
     # ``owner_direct._admit(..., intent=True)`` refuses ``os_frozen`` first; driven at the end of
     # this file (``drive_owner_direct``).
     ("app/api/os_v2/commits.py", "run", "commit"): "POST /commits (V2-24 one-tap commit)",
     ("app/api/os_v2/commits.py", "run", "undo"): "POST /commits/{id}/undo (compensating undo)",
+    ("app/api/os_v2/statements.py", "run", "submit"): (
+        "POST /statement-batches (the owner's paste, ASSISTANT_PASTE)"),
 }
 LEDGER_ALLOWED_SITES: dict[tuple[str, str, str], str] = {
     # abandon settles a lost request id: an abandoned receipt and one event, no business change and
@@ -866,6 +873,106 @@ def test_a_ledger_decision_writes_nothing_unless_the_ledger_holds_the_authority(
 def test_a_frozen_active_ledger_still_settles_its_pending_proposals(env, key):
     """The control: the same decision does write when only the freeze is on (I8 drain)."""
     assert PG_DECISION_DRIVERS[key](env, "drain") == LedgerOutcome(None, wrote=True)
+
+
+# ------------------------------------------ the statement batch routes (V2-26, I8): drive
+# The paste (POST /statement-batches) is the one new ledger intent the statement routes add: the
+# freeze refuses it before any transaction. Approve, reject and the draft save settle a batch that
+# is already pending, so the drain needs them: they stay allowed (a draft is how the owner clears
+# the blocking lines of a batch he is about to approve). They are not census verbs and not intent
+# sites; the control below pins that they still write under the freeze.
+
+
+@contextmanager
+def statement_world(env: Env) -> Iterator[object]:
+    """V2-26's real routes over a FakeLedger and V2-19's real ``authorize``; no Script behind."""
+    env.monkeypatch.setattr(port, "_post", no_script)
+    config = statement_routes.settings()
+    state = statement_routes.Backend(config, env.monkeypatch)
+    env.monkeypatch.setattr(statement_routes.statements, "service_for", lambda _s: state.service)
+    app = statement_routes.app_for(env.sessions, config)
+    with TestClient(app, base_url=auth.ORIGIN) as browser:
+        login = auth._login(browser)
+        state.browser = browser
+        state.headers = {"Origin": auth.ORIGIN, "X-CSRF-Token": login["csrf_token"],
+                         "Content-Type": "application/json"}
+        yield state
+
+
+def statement_rows(state) -> tuple:
+    """Every ledger row the routes can move, and every statement table, as plain values."""
+    return (state.rows("os_proposals"), state.rows("os_receipts"), state.rows("os_events"),
+            state.rows("os_outbox"), state.rows("os_expenses"), state.tables())
+
+
+def statement_outcome(state, response, before: tuple) -> LedgerOutcome:
+    wrote = statement_rows(state) != before
+    if response.status_code == 200:
+        return LedgerOutcome(None, wrote)
+    error = response.json()["error"]
+    assert error["write_outcome"] == "not_started", error
+    if error["code"] == "os_frozen":
+        assert response.status_code == 503, response.text
+    return LedgerOutcome(error["code"], wrote)
+
+
+def drive_statement_submit(env: Env, freeze: bool) -> LedgerOutcome:
+    with statement_world(env) as state:
+        state.config.assaf_os_freeze = freeze
+        before = statement_rows(state)
+        response = state.browser.post(ROUTE + "/statement-batches", headers=state.headers,
+                                      content=encode(batch(three_lines())))
+        return statement_outcome(state, response, before)
+
+
+LEDGER_INTENT_DRIVERS: dict[tuple[str, str, str], Callable[[Env, bool], LedgerOutcome]] = {
+    ("app/api/os_v2/statements.py", "run", "submit"): drive_statement_submit,
+}
+
+
+def drive_statement_decision(env: Env, operation: str) -> LedgerOutcome:
+    """A batch pasted BEFORE the freeze, then saved, approved or rejected AFTER it."""
+    with statement_world(env) as state:
+        pasted = state.browser.post(ROUTE + "/statement-batches", headers=state.headers,
+                                    content=encode(batch(three_lines())))
+        assert pasted.status_code == 200, pasted.text
+        base = f"{ROUTE}/statement-batches/{pasted.json()['proposal_id']}"
+        review = state.browser.get(base, headers={"Origin": auth.ORIGIN}).json()
+        state.config.assaf_os_freeze = True
+        bodies = {
+            "draft": {"draft_revision": review["draft_revision"], "overrides": [], "choices": {}},
+            "approve": {"request_id": review["approval_request_id"],
+                        "review_digest": review["review_digest"]},
+            "reject": {"request_id": review["rejection_request_id"]},
+        }
+        before = statement_rows(state)
+        response = state.browser.post(f"{base}/{operation}", headers=state.headers,
+                                      content=json.dumps(bodies[operation]))
+        return statement_outcome(state, response, before)
+
+
+def test_every_classified_ledger_intent_site_has_a_driver():
+    # V2-24's owner-direct sites are driven by OWNER_DIRECT_INTENT_DRIVERS below.
+    assert set(LEDGER_INTENT_DRIVERS) | set(OWNER_DIRECT_INTENT_DRIVERS) == set(LEDGER_INTENT_SITES)
+    assert not set(LEDGER_INTENT_DRIVERS) & set(OWNER_DIRECT_INTENT_DRIVERS)
+
+
+@pytest.mark.parametrize("site", sorted(LEDGER_INTENT_DRIVERS), ids=lambda s: f"{s[0]}::{s[1]}")
+def test_a_statement_batch_submit_is_refused_os_frozen_and_writes_nothing(env, site):
+    assert LEDGER_INTENT_DRIVERS[site](env, True) == LedgerOutcome("os_frozen", wrote=False)
+
+
+@pytest.mark.parametrize("site", sorted(LEDGER_INTENT_DRIVERS), ids=lambda s: f"{s[0]}::{s[1]}")
+def test_the_same_statement_batch_submit_writes_before_the_freeze(env, site):
+    assert LEDGER_INTENT_DRIVERS[site](env, False) == LedgerOutcome(None, wrote=True)
+
+
+@pytest.mark.parametrize("operation", ["draft", "approve", "reject"])
+def test_a_statement_draft_or_decision_still_settles_its_pending_batch_under_the_freeze(
+    env, operation
+):
+    """The control: only the paste is an intent. The drain must be able to settle the rest."""
+    assert drive_statement_decision(env, operation) == LedgerOutcome(None, wrote=True)
 
 
 # ------------------------------------- the owner-direct sites (V2-24): commit, undo and abandon

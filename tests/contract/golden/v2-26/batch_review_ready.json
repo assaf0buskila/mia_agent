@@ -1,0 +1,51 @@
+{
+  "account_label": "Synthetic Business Card",
+  "actor_source": "ASSISTANT_CLAUDE",
+  "api_version": "assaf-os.v2",
+  "approval_request_id": "00000000-0000-4000-8000-000000002007",
+  "authority_epoch": 1,
+  "blocking": [],
+  "charge_date": "2026-10-15",
+  "conflict_with": [],
+  "counts": {
+    "add": 3,
+    "keep": 0,
+    "kept_earlier_choice": 0,
+    "owner_edited_kept": 0,
+    "update": 0,
+    "void": 0
+  },
+  "credential_label": "Claude desktop",
+  "cycle": "2026-10",
+  "draft_revision": 1,
+  "expires_at": "2026-10-23T12:00:00.000Z",
+  "line_count": 3,
+  "merges": [
+    {
+      "candidate_expense_ids": [
+        "EXP_coffee_a",
+        "EXP_coffee_b"
+      ],
+      "expense_id": "EXP_coffee_b",
+      "line_key": "76ed3bc31b3039497df06c129983ca873718951e022ea01a2e7bea35d12742cf",
+      "state": "proposed"
+    }
+  ],
+  "observed_version": 2,
+  "proposal_id": "PRO_00000000000040008000000000002009",
+  "rejection_request_id": "00000000-0000-4000-8000-000000002008",
+  "review_digest": "f4cc5daf3ff6dd8b51b9d2a1cf9f522c6e58be947272d8e7a8a4a22db2943d26",
+  "source": "postgresql",
+  "statement_id": "STM_f0fad4c24d6ff12cdbd18f98ec37dc64",
+  "status": "pending",
+  "submitted_at": "2026-10-16T12:00:00.000Z",
+  "totals": {
+    "business_charge_minor": 12250,
+    "business_credit_minor": 0,
+    "business_line_count": 3,
+    "business_total_minor": 12250,
+    "personal_count": 0,
+    "unassigned_count": 0
+  },
+  "workspace_id": "test"
+}

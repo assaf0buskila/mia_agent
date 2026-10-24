@@ -1,0 +1,83 @@
+{
+  "api_version": "assaf-os.v2",
+  "authority_epoch": 1,
+  "lines": [
+    {
+      "action": "add",
+      "amount_minor": 1800,
+      "candidate_expense_ids": [
+        "EXP_coffee_a",
+        "EXP_coffee_b"
+      ],
+      "category": "לא מסווג",
+      "confidence": 0.9,
+      "currency": "ILS",
+      "disagreement": false,
+      "flags": [
+        "merge_choice_required"
+      ],
+      "installment": null,
+      "is_subscription": false,
+      "kind": "charge",
+      "line_key": "76ed3bc31b3039497df06c129983ca873718951e022ea01a2e7bea35d12742cf",
+      "merchant_display": "COFFEE CART",
+      "original_amount_minor": null,
+      "original_currency": null,
+      "path": "משותף",
+      "rule_id": null,
+      "suggested_tag": "business",
+      "tag": "business",
+      "txn_date": "2026-09-20"
+    },
+    {
+      "action": "add",
+      "amount_minor": 10000,
+      "candidate_expense_ids": [],
+      "category": "לא מסווג",
+      "confidence": 0.9,
+      "currency": "ILS",
+      "disagreement": false,
+      "flags": [],
+      "installment": null,
+      "is_subscription": false,
+      "kind": "charge",
+      "line_key": "3cead85e4a42ad23b109f517ce1339ad9ab4d745258fa99afe1a63e324a4fc7b",
+      "merchant_display": "DEMO SHOP",
+      "original_amount_minor": null,
+      "original_currency": null,
+      "path": "משותף",
+      "rule_id": null,
+      "suggested_tag": "business",
+      "tag": "business",
+      "txn_date": "2026-09-20"
+    },
+    {
+      "action": "add",
+      "amount_minor": 450,
+      "candidate_expense_ids": [],
+      "category": "לא מסווג",
+      "confidence": 0.9,
+      "currency": "ILS",
+      "disagreement": false,
+      "flags": [
+        "unassigned"
+      ],
+      "installment": null,
+      "is_subscription": false,
+      "kind": "charge",
+      "line_key": "633663aad18641c1e07ba8a8ec3ee8d62d02b9e2245af3e75f387eb6ea2d888a",
+      "merchant_display": "MYSTERY",
+      "original_amount_minor": null,
+      "original_currency": null,
+      "path": "משותף",
+      "rule_id": null,
+      "suggested_tag": null,
+      "tag": null,
+      "txn_date": "2026-09-20"
+    }
+  ],
+  "next_cursor": null,
+  "observed_version": 2,
+  "source": "postgresql",
+  "workspace_id": "test"
+}
