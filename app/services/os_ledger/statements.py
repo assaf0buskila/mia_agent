@@ -320,8 +320,9 @@ class LedgerStatementService:
             raise api.LedgerError("already_decided", reason="replay_terminal")
         draft = tables.draft(existing.proposal_id)
         if draft is None or draft.submitted is None:
-            # A legacy registry has no exact response to return. Never invent one from live state.
-            raise api.LedgerError("review_stale", reason="replay_without_snapshot")
+            # The registry row is written in the submit transaction with its snapshot, so a row
+            # without one is an integrity fault. Never invent a response from live state.
+            raise api.LedgerError("ledger_integrity_failed", reason="replay_without_snapshot")
         snapshot = draft.submitted
         _log("submit", "ok", "replayed", lines=snapshot["summary"]["line_count"])
         return BatchSubmitted(**{**snapshot, "summary": dict(snapshot["summary"])})
@@ -364,7 +365,9 @@ class LedgerStatementService:
                 if proposal.status == "pending" and not older else [],
                 "draft_revision": draft.draft_revision,
             }
-            if proposal.status == "pending" and live and not older:
+            # Only an actionable batch (pending, this epoch, in its window, with detail) shows its
+            # plan and a digest to act on; past the deadline it reads expired like the others.
+            if status == "pending":
                 self._check_pin(tx, self._pepper("review"), "review")
                 plan = self._plan(tx, tables, proposal, statement, draft, op="review")
                 body.update(
