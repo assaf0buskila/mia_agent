@@ -94,6 +94,32 @@ if pg_enabled():
         finally:
             probes.close()
 
+    def test_the_promote_probe_reads_the_import_receipt_and_proposal_promote_leaves():
+        # V2-31b finding 8: `import_not_promoted` stands on this SQL. `commit_import` is the
+        # service-shaped import `promote` makes (same request id, request digest, digest binding).
+        url = os.environ[PG_URL_ENV]
+        env = build_pg_env(url)
+        env.ensure_workspace(WORKSPACE, OWNER_ID, 1)
+        probes = live_probes(url)
+        digest = "d" * 64
+        try:
+            assert probes.import_promoted(WORKSPACE, 1, digest) is False, "nothing promoted yet"
+            commit_import(env, ctx(), [task("TAS_i1")], "e" * 64)  # another manifest
+            assert probes.import_promoted(WORKSPACE, 1, digest) is False
+            commit_import(env, ctx(), [task("TAS_i2")], digest)
+            assert probes.import_promoted(WORKSPACE, 1, digest) is True
+            assert probes.import_promoted(WORKSPACE, 1, "e" * 64) is True
+            assert probes.import_promoted(WORKSPACE, 1, "f" * 64) is False, "another manifest"
+            assert probes.import_promoted(WORKSPACE, 2, digest) is False, "another epoch"
+            assert probes.import_promoted("another-workspace", 1, digest) is False
+            # A business write is no promote, whatever it is bound to.
+            env.transition(WORKSPACE, "core", "active", expected_epoch=1, actor_owner_id=OWNER_ID)
+            commit_direct(env, ctx(), [task("TAS_w1")])
+            assert probes.import_promoted(WORKSPACE, 1, "9" * 64) is False
+            assert probes.import_promoted(WORKSPACE, 1, digest) is True
+        finally:
+            probes.close()
+
     def role_probes(url: str, *, main: str | None = None) -> cli.LiveProbes:
         """Probes over the fixture's demoted main role and ledger runtime role."""
         parsed = make_url(url)

@@ -9,18 +9,28 @@ and every ``sudo mia`` command is a command of the VM script.
 
 from __future__ import annotations
 
+import contextlib
 import copy
+import io
 import json
 import re
 from datetime import timedelta
 from pathlib import Path
 
 import pytest
-from app.services.os_ledger import api
+from app.services.os_ledger import api, mirror_projection
 from app.workers import os_authority as cli
 
 from tests.fakes.os_ledger_env import OWNER_ID
-from tests.workers.test_os_authority import NOW, SHA, World, at, good_evidence, stamp
+from tests.workers.test_os_authority import (
+    NOW,
+    SHA,
+    World,
+    at,
+    good_evidence,
+    promote_import,
+    stamp,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 RUNBOOK = (ROOT / "ops/assaf-os/CUTOVER_RUNBOOK.md").read_text(encoding="utf-8")
@@ -69,6 +79,7 @@ def documented_world(tmp_path, *, mutate=None) -> World:
         if mutate and mutate[0] == name:
             document = mutate[1](document)
         world.put(name, document)
+    promote_import(world, digest)  # T5: the shown manifest's digest, promoted at this epoch
     return world
 
 
@@ -258,6 +269,171 @@ def test_every_sudo_mia_command_is_a_command_of_the_vm_script():
     assert used and used <= commands, sorted(used - commands)
     assert {"os-authority", "os-provision", "os-job", "os-ledger", "settings", "jobs", "backup",
             "restore"} <= used
+
+
+def test_the_t1_and_t2_rollbacks_say_a_retry_redoes_t2_and_the_old_drain_is_set_aside():
+    # V2-31b finding 2: the rollback only unfreezes, so the next freeze must not inherit its drain.
+    flat = re.sub(r"\s+", " ", section_of("### T1"))
+    assert "Each freeze starts a new drain" in flat and "drain-superseded-<UTC>.json" in flat
+    rollback = flat.split("**Rollback**", 1)[1]
+    assert "A retry redoes T1 and T2" in rollback and "`drain_stale`" in rollback
+    # V2-31b review 2: the exit itself (the revert plan) voids the drain, the drain phase does too,
+    # and the age bound is only the backstop.
+    assert "the `--phase revert` plan above, **sets `drain.json` aside**" in rollback
+    assert "and so does the retry's `freeze-plan --phase drain`" in rollback
+    assert "as a backstop" in rollback
+    step = re.sub(r"\s+", " ", section_of("## 5. "))
+    assert "and sets `drain.json` aside (it ends the freeze that drain belongs to)" in step
+    t2 = re.sub(r"\s+", " ", section_of("### T2")).split("**Rollback**", 1)[1]
+    assert "A retry redoes T2" in t2 and "sets it aside" in t2
+    # The numbers and names the text states are the CLI's own.
+    assert cli.DRAIN_MAX_AGE == timedelta(hours=2)
+    assert "more than 2 hours before `fence_probe_at`" in flat
+    assert re.search(r"^\| `drain\.json` \|.*drain-superseded-.*\(`drain_stale`\)", RUNBOOK, re.M)
+    assert "`drain_stale`" in RUNBOOK.split("## 7. Reason codes", 1)[1]
+
+
+def test_the_ledger_keys_come_at_t1_and_the_switch_flips_only_the_backend_in_the_text():
+    # Contract section 22 E29: the import of T4/T5 needs the ledger keys before the switch.
+    assert cli.plan_lines("drain", "E") == [
+        "MIA_ASSAF_OS_FREEZE=true", "MIA_ASSAF_OS_LEDGER_ENABLED=true",
+        "MIA_ASSAF_OS_AUTHORITY_EPOCH=E",
+    ]
+    assert cli.plan_lines("switch", "E") == ["MIA_ASSAF_OS_BACKEND=postgres"]
+    t1 = re.sub(r"\s+", " ", section_of("### T1"))
+    command, rollback = t1.split("**Rollback**", 1)
+    for key in cli.plan_lines("drain", "E"):
+        assert f"`{key}`" in command, key
+    assert "with the backend still `sheets`" in command and "E29" in command
+    assert "`authorize.for_worker` refuses `epoch_unset`" in command
+    assert "`backend_not_postgres`" in command and "test_os_e29_sheets_with_ledger_keys" in command
+    # The T1/T2 rollback returns the ledger keys with the existing revert phase, and the freeze.
+    assert "--phase revert" in rollback and "MIA_ASSAF_OS_FREEZE=false" in rollback
+    for key in cli.plan_lines("revert", 0):
+        assert f"`{key}`" in rollback, key
+    # T4 and T5 name the precondition, T6's switch prints only the backend.
+    for step in ("### T4", "### T5"):
+        flat = re.sub(r"\s+", " ", section_of(step))
+        assert "T1 keys" in flat and "**Precondition**" in flat, step
+    t6 = re.sub(r"\s+", " ", section_of("### T6"))
+    switch = t6.split("- **Switch**", 1)[1].split("- **Verify**", 1)[0]
+    assert "`MIA_ASSAF_OS_BACKEND=postgres` and nothing else" in switch
+    assert "set at T1 and are not repeated" in switch and "`drain_keys_not_applied`" in switch
+    assert "`MIA_ASSAF_OS_LEDGER_ENABLED=true`, `MIA_ASSAF_OS_AUTHORITY_EPOCH=E`." not in switch
+    rule = RUNBOOK.split("5. **Keys that matter**", 1)[1].split("6. **", 1)[0]
+    keys_rule = re.sub(r"\s+", " ", rule)
+    assert "T1 sets `FREEZE`, `LEDGER_ENABLED` and `AUTHORITY_EPOCH`" in keys_rule
+    assert "T6 sets `BACKEND` only" in keys_rule
+    assert re.search(r"^\| `drain_keys_not_applied` \|", RUNBOOK, re.M)
+
+
+def test_the_text_names_the_import_not_promoted_refusal_where_the_operator_meets_it():
+    # V2-31b finding 8: one refusal beyond the contract's 15, so it is NOT in the 15-row table.
+    assert cli.PROMOTE_GATE == "import_not_promoted" and cli.PROMOTE_GATE not in cli.PRECONDITIONS
+    codes_table = RUNBOOK.split("## 7. Reason codes", 1)[1]
+    assert cli.PROMOTE_GATE not in codes_table.split("Other refusals of the CLI", 1)[0]
+    assert re.search(rf"^\| `{cli.PROMOTE_GATE}` \|", codes_table, re.M)
+    for step in ("### T5", "### T6"):
+        assert f"`{cli.PROMOTE_GATE}`" in re.sub(r"\s+", " ", section_of(step)), step
+    t6 = re.sub(r"\s+", " ", section_of("### T6"))
+    assert "`no_import_receipt`" in t6 and "binds the digest in `manifest.json`" in t6
+
+
+def t7_create_step() -> str:
+    t7 = section_of("### T7")
+    start = t7.index("- **Create the eight tabs**")
+    return t7[start:t7.index("- **Command**", start)]
+
+
+def test_t7_creates_the_eight_mirror_tabs_from_the_mirror_schema_in_code():
+    # V2-31b finding 7 (E11.4): the runbook must say how the tabs are created and where their names
+    # and headers come from, not only that they must exist.
+    step = t7_create_step()
+    flat = re.sub(r"\s+", " ", step)
+    precondition = re.sub(r"\s+", " ", section_of("### T7").split("- **Create the eight tabs**")[0])
+    # The tabs the precondition names are exactly the module's, in its order.
+    named = precondition.split("There is no", 1)[0].split("exact names:", 1)[1]
+    assert tuple(re.findall(r"`([^`]+)`", named)) == mirror_projection.MIRROR_TABS
+    assert "create them with the next bullet" in precondition
+    # The header source it cites exists, by name and by path.
+    for cited in ("MIRROR_TABS", "headers()", "_SUMMARY_FIELDS"):
+        assert cited in flat, cited
+    assert hasattr(mirror_projection, "MIRROR_TABS") and callable(mirror_projection.headers)
+    assert hasattr(mirror_projection, "_SUMMARY_FIELDS")
+    for path in ("app/services/os_ledger/mirror_projection.py",
+                 "app/prototypes/assaf_os_export_schema.json", "ops/assaf-os/schema.js"):
+        assert path in flat and (ROOT / path).is_file(), path
+    assert "no `addSheet` call" in precondition and "Leave them empty" in flat
+
+
+def test_the_t7_print_command_prints_each_tab_with_its_header_row():
+    command = re.search(r'`uv run --offline python -X utf8 -c "(.+?)"`', t7_create_step(), re.S)
+    assert command, "the step shows the command"
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        exec(compile(command.group(1), "<runbook T7>", "exec"), {})  # noqa: S102
+    lines = out.getvalue().splitlines()
+    assert len(lines) == 8
+    expected_headers = {"סיכום": "summary"} | {
+        tab: entity for entity, tab in mirror_projection.ENTITY_TABS.items()}
+    for line, tab in zip(lines, mirror_projection.MIRROR_TABS, strict=True):
+        cells = line.split(" | ")
+        assert cells[0] == tab
+        assert tuple(cells[1:]) == mirror_projection.headers(expected_headers[tab])
+    # The worker really writes row 1 itself (so the tabs can be left empty).
+    first = mirror_projection.write_ranges(
+        mirror_projection.Projection(0, {tab: (mirror_projection.headers(expected_headers[tab]),)
+                                         for tab in mirror_projection.MIRROR_TABS}), None)
+    assert [rows[0] for _, rows in first] == [
+        list(mirror_projection.headers(expected_headers[tab]))
+        for tab in mirror_projection.MIRROR_TABS]
+    assert [anchor for anchor, _ in first] == [
+        mirror_projection.tab_anchor(tab) for tab in mirror_projection.MIRROR_TABS]
+
+
+def test_the_t3_rollback_requires_the_live_sighting_and_the_break_record_and_reruns_on_unknown():
+    # V2-31b review 3: the step whose whole job is to record fence_broken_at must say how to know
+    # that it did, and what to do on an `unknown` probe (which writes no break).
+    rollback = re.sub(r"\s+", " ", section_of("### T3")).split("- **Rollback**", 1)[1]
+    step = rollback.split("The rollback lifts the fence", 1)[0]
+    assert "do not go on until both of these hold" in step
+    assert '(a) its JSON prints `"sheets": "live"`' in step
+    assert "(b) `sudo cat /var/lib/mia/os-authority/preflight.json` shows `fence_broken_at`" in step
+    assert '`"sheets": "unknown"`' in step and "**run it again**" in step
+    # The names it relies on are the CLI's own: the evidence file, the key, and the printed state.
+    assert cli.PREFLIGHT == "preflight.json"
+    fenced = {"v": 1, "kind": "preflight", "epoch": 1, "release_sha": SHA, "sheets": "unavailable",
+              "fence_probe_at": stamp(NOW)}
+    live = cli._fence_record(fenced, 1, SHA, "live", NOW + timedelta(minutes=5))
+    assert live["sheets"] == "live" and live["fence_broken_at"] == stamp(
+        NOW + timedelta(minutes=5))
+    unknown = cli._fence_record(fenced, 1, SHA, "unknown", NOW + timedelta(minutes=6))
+    assert unknown["sheets"] == "unknown" and "fence_broken_at" not in unknown
+
+
+def test_the_text_says_an_unknown_probe_does_not_void_the_captures():
+    # V2-31b finding 3: the CLI carries fence_probe_at through `unknown`; the runbook must say so
+    # at the two places an operator meets it (T3's probe and T6's preflight).
+    t3 = re.sub(r"\s+", " ", section_of("### T3"))
+    assert "`sheets: unknown`" in t3 and "does not void the captures" in t3
+    t6 = re.sub(r"\s+", " ", section_of("### T6"))
+    assert "`sheets: unknown`" in t6 and "does not void the T4 captures" in t6
+    assert "an `unknown` probe does not" in RUNBOOK.split("## 7. Reason codes", 1)[1]
+
+
+def test_the_text_says_a_rollback_counts_again_after_the_fence_and_prints_no_steps_then():
+    # V2-31b finding 4: the race between the receipt count and the fence.
+    section = re.sub(r"\s+", " ", section_of("## 5. "))
+    assert "before the fence **and again after it**" in section
+    assert "leaves `core` **fenced** and prints **no steps**" in section
+    assert "follow section 6" in section
+    assert "slipped in between" in RUNBOOK.split("## 7. Reason codes", 1)[1]
+    # V2-31b review: the post-fence refusal has its own reason, named where the operator reads it.
+    assert "`rollback_after_first_write,core_left_fenced`" in section
+    assert "`\"core\": \"fenced\"`" in section and "Read the second reason" in section
+    codes_table = RUNBOOK.split("## 7. Reason codes", 1)[1]
+    assert re.search(r"^\| `core_left_fenced` \|", codes_table, re.M)
+    assert "it adds `core_left_fenced`" in codes_table
 
 
 def test_the_archive_name_is_the_contracts_en_dash_literal():

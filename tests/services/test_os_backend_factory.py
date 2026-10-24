@@ -1093,7 +1093,7 @@ CALL_SITES = {
     "app/tools/owner/assaf_os.py": 1,
     "app/services/assaf_os_leads.py": 2,
     "app/services/owner_actions.py": 4,
-    # V2-31: the read-only Sheets probe of the cutover CLI (pending proposals count, actor MIA).
+    # V2-31: the T2 drain snapshot (disclosed mutating call), actor MIA.
     "app/workers/os_authority.py": 1,
 }
 
