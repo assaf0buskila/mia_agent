@@ -270,7 +270,8 @@ def _tick(
         _finish_all(deps, events, "pending", "reader_unavailable", now)
         return TickResult("deferred", "reader_unavailable", len(events))
     core = snapshot.states.get("core")
-    if core not in _PUBLISHING:
+    publishing = {"active"} if getattr(settings, "assaf_os_freeze", True) else _PUBLISHING
+    if core not in publishing:
         _finish_all(deps, events, "pending", "authority_not_publishing", now)
         if core == "fenced":
             deps.outbox.record_result(

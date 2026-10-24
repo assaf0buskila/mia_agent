@@ -20,7 +20,7 @@ from app.db.models import ApprovalRow, Base, IdempotencyRow
 from app.services import assaf_os
 from app.services.owner_actions import ACTION_OWNER_EXTERNAL_WRITE, RESOURCE_OWNER_PROPOSAL
 from app.workers import os_authority as cli
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 
 NOW = datetime(2026, 10, 20, 12, 0, tzinfo=UTC)
@@ -289,6 +289,51 @@ def probes(**over):
     }
     values.update(over)
     return cli.LiveProbes(settings(), OWNER, **values)
+
+
+@pytest.mark.parametrize("row,version,expected", [
+    (None, 3, "empty"),
+    (("synced", 3, 3, None), 2, "verified"),
+    (("synced", 3, 3, None), 3, "verified"),
+    (("synced", 3, 3, None), 4, "unverified"),
+    (("synced", 3, 2, None), 2, "unverified"),
+    (("synced", 3, 3, "readback_failed"), 3, "unverified"),
+    (("delayed", 3, 3, None), 3, "unverified"),
+    (("unknown", 3, 3, None), 3, "unverified"),
+    (("conflict", 3, 3, None), 3, "unverified"),
+    (("pending", 0, 0, None), 0, "unverified"),
+    (("synced", 0, 0, None), 0, "verified"),
+    (None, None, "empty"),
+    (("synced", 3, 3, None), None, "verified"),
+    (("synced", 3, 2, None), None, "unverified"),
+    (("synced", 3, 3, "readback_failed"), None, "unverified"),
+    (("unknown", 3, 3, None), None, "unverified"),
+    (("conflict", 3, 3, None), None, "unverified"),
+    (("pending", 3, 3, None), None, "unverified"),
+    (("delayed", 3, 3, None), None, "unverified"),
+    (("fenced", 3, 3, None), None, "unverified"),
+])
+def test_mirror_probe_binds_verification_to_the_requested_version(row, version, expected):
+    engine = create_engine("sqlite://")
+    live = probes()
+    live._engines["privileged"] = engine
+    try:
+        with engine.begin() as connection:
+            connection.execute(text("ATTACH DATABASE ':memory:' AS assaf_os"))
+            connection.execute(text(
+                "CREATE TABLE assaf_os.os_mirror_state (workspace_id TEXT, status TEXT, "
+                "projected_version INTEGER, verified_version INTEGER, last_error_code TEXT)"
+            ))
+            if row is not None:
+                connection.execute(text(
+                    "INSERT INTO assaf_os.os_mirror_state VALUES "
+                    "(:workspace, :status, :projected, :verified, :error)"
+                ), dict(zip(("workspace", "status", "projected", "verified", "error"),
+                            ("ws-1", *row), strict=True)))
+        assert live.mirror("ws-1", version) == expected
+        assert live.mirror("another-workspace", version) == "empty"
+    finally:
+        live.close()
 
 
 def test_a_missing_dsn_is_a_fixed_refusal_not_a_default_database():

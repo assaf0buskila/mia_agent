@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import logging
+from dataclasses import replace
 from datetime import timedelta
 from types import SimpleNamespace
 from typing import Any
@@ -420,6 +421,39 @@ def test_freeze_with_active_authority_publishes_and_verifies(world: World, monke
     assert world.counter.open == 0
 
 
+@pytest.mark.parametrize("freeze", [False, True])
+@pytest.mark.parametrize("publisher_path", [False, True])
+def test_active_precheck_with_shadow_snapshot_requires_active_under_freeze(
+    world: World, freeze, publisher_path,
+) -> None:
+    ids = world.seed()
+    world.reader.states["core"] = "shadow"
+    settings = mirror_settings(assaf_os_freeze=freeze)
+    calls = []
+
+    def authority_reader(_settings):
+        calls.append(1)
+        return "active"
+
+    publisher = os_mirror.MirrorPublisher(
+        settings_provider=lambda: settings, deps_factory=lambda _: world.deps,
+        clock=world.clock, authority_reader=authority_reader,
+    )
+    result = publisher.tick() if publisher_path else os_mirror.run_once(
+        world.deps, settings, now=world.clock(), lease_owner="w1", anti_entropy=True,
+        authority_reader=authority_reader,
+    )
+    assert calls == ([1] if freeze else [])
+    if freeze:
+        assert result == os_mirror.TickResult("paused", "authority_not_publishing", len(ids))
+        assert world.statuses(ids) == ["pending"] * len(ids)
+        assert world.sheets.writes == [] and world.sheets.reads == 0
+    else:
+        assert result == os_mirror.TickResult("verified", "readback_equal", len(ids))
+        assert world.statuses(ids) == ["sent"] * len(ids)
+        assert len(world.sheets.writes) == world.sheets.reads == 1
+
+
 @pytest.mark.parametrize("authority", ["shadow", "fenced", "restoring", None, "missing",
                                         "ledger_error", "unexpected_error"])
 @pytest.mark.parametrize("publisher_path", [False, True])
@@ -485,11 +519,22 @@ def test_static_pauses_skip_the_authority_read_under_freeze(
         return "active"
 
     settings = mirror_settings(assaf_os_freeze=True, **overrides)
+    built = []
+
+    def deps_factory(loaded):
+        built.append(1)
+        return replace(world.deps, destination_binding=destination_binding(
+            loaded.os_mirror_spreadsheet_id,
+        ))
+
     publisher = os_mirror.MirrorPublisher(
-        settings_provider=lambda: settings, deps_factory=lambda _settings: world.deps,
+        settings_provider=lambda: settings, deps_factory=deps_factory,
         clock=world.clock, authority_reader=authority_reader,
     )
     publisher._deps = world.deps  # also exercise a target change on an existing publisher
+    if publisher_path and reason == "mirror_target_changed":
+        world.outbox.load_state(world.deps.destination_binding, world.clock())
+        world.outbox.calls.clear()
     result = publisher.tick() if publisher_path else os_mirror.run_once(
         world.deps, settings, now=world.clock(),
         lease_owner="w1", anti_entropy=True, authority_reader=authority_reader,
@@ -500,6 +545,15 @@ def test_static_pauses_skip_the_authority_read_under_freeze(
     assert world.sheets.writes == [] and world.sheets.reads == 0
     assert world.statuses(ids) == ["pending"] * len(ids)
     assert {world.outbox.row(i)["attempts"] for i in ids} == {0}
+    if publisher_path and reason == "mirror_target_changed":
+        assert publisher._deps is None
+        assert built == []
+        assert publisher.tick() == os_mirror.TickResult("refused", "mirror_destination_changed")
+        assert built == [1] and calls == [1]
+        assert world.outbox.calls == ["load_state"]
+        assert world.reader.calls == []
+        assert world.sheets.writes == [] and world.sheets.reads == 0
+        assert world.statuses(ids) == ["pending"] * len(ids)
 
 
 @pytest.mark.parametrize("publisher_path", [False, True])
