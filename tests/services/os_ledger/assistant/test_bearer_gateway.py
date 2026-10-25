@@ -229,7 +229,7 @@ def test_an_assistant_context_can_never_decide_approve_commit_or_manage_keys(aw)
         lambda: service.lines(caller.ctx, submitted.proposal_id, after=None, limit=10),
         lambda: service.cycles(caller.ctx),
         lambda: service.merchant_rules(caller.ctx),
-        lambda: aw.service.issue(caller.ctx, session_hash="a" * 64, label="x", kind="claude"),
+        lambda: aw.service.issue(caller.ctx, chain_id="a" * 64, label="x", kind="claude"),
         lambda: aw.service.revoke(caller.ctx, issued["credential_id"]),
         lambda: aw.service.revoke_all(caller.ctx),
         lambda: aw.service.list(caller.ctx),

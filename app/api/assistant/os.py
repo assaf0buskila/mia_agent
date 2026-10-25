@@ -24,6 +24,7 @@ address.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Callable
 from typing import Any
@@ -132,6 +133,33 @@ async def _read_body(request: Request) -> tuple[bytes, int, bool]:
     return b"".join(chunks), size, False
 
 
+async def _bearer_threadpool(func, *args, **kwargs):
+    """A cancelled request keeps its slot until its synchronous DB work has stopped."""
+    async def outcome():
+        # Python 3.14's cancelled shield logs an inner exception with its traceback. Keep
+        # failures as ordinary task results so provider/DB exception text never reaches it.
+        try:
+            return True, await run_in_threadpool(func, *args, **kwargs)
+        except BaseException as exc:
+            return False, exc
+
+    worker = asyncio.create_task(outcome())
+    try:
+        succeeded, value = await asyncio.shield(worker)
+    except asyncio.CancelledError:
+        # Native Task.cancel can abandon a threadpool await even when AnyIO cancellation is
+        # shielded. Drain the worker before the enclosing request guard releases its slot.
+        while not worker.done():
+            try:
+                await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                continue
+        raise
+    if succeeded:
+        return value
+    raise value
+
+
 def _json_content_type(request: Request) -> bool:
     return request.headers.get("content-type", "").partition(";")[0].strip().lower() == (
         "application/json")
@@ -145,14 +173,15 @@ async def _serve(
     write = request.method != "GET"
     try:
         keys.check_enabled(settings)  # a disabled feature touches no ledger and no database
-        gateway = gateway_for(settings)
-        caller = await run_in_threadpool(
-            gateway.authenticate, cookie="cookie" in request.headers,
-            authorization=request.headers.getlist("authorization"),
-            ip=client_ip(request, settings=settings))
-        payload = await _read_body(request) if body else (b"", 0, False)
-        result = await run_in_threadpool(
-            gateway.run, caller, operation, make_work(gateway, caller, payload))
+        async with keys.async_bearer_request():
+            gateway = gateway_for(settings)
+            caller = await _bearer_threadpool(
+                gateway.authenticate, cookie="cookie" in request.headers,
+                authorization=request.headers.getlist("authorization"),
+                ip=client_ip(request, settings=settings))
+            payload = await _read_body(request) if body else (b"", 0, False)
+            result = await _bearer_threadpool(
+                gateway.run, caller, operation, make_work(gateway, caller, payload))
     except api.LedgerError as exc:
         return _error(exc, write=write)
     except Exception:  # noqa: BLE001 - the envelope is the contract; the reason is logged only

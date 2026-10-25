@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 
 import pytest
 from app.services import assistant_keys as keys
@@ -12,25 +12,33 @@ from app.services.os_ledger.api import LedgerError
 
 
 def test_fourth_bearer_is_bounded_retryable_and_never_enters_the_store(aw, caplog):
-    callers = [
-        aw.authenticate(aw.issue(label=str(i))["secret"], ip=f"203.0.113.{i}") for i in range(4)
-    ]
+    issued = [aw.issue(label=str(i)) for i in range(4)]
     inside = threading.Barrier(4)
     release = threading.Event()
     errors = []
 
-    def work(facts):
-        inside.wait(5)
-        assert release.wait(6)
-        return {}
+    def work(caller, facts):
+        # Production reads hold a second runtime-pool connection beside the accounting slot.
+        # Use the ledger's actual read transaction: a write transaction would serialize on
+        # the workspace FOR UPDATE and prevent three callers from reaching the barrier.
+        transaction = aw.w.ledger._read(caller.ctx) if aw.kind == "pg" else nullcontext()
+        with transaction as tx:
+            if aw.kind == "pg":
+                assert tx.connection.in_transaction()
+                assert tx.connection.exec_driver_sql("SHOW transaction_read_only").scalar() == "on"
+            inside.wait(5)
+            assert release.wait(6)
+            return {}
 
-    def run(caller):
+    def run(index):
         try:
-            aw.gateway.run(caller, "context", work)
+            with keys.bearer_request():
+                caller = aw.authenticate(issued[index]["secret"], ip=f"203.0.113.{index}")
+                aw.gateway.run(caller, "context", lambda facts: work(caller, facts))
         except Exception as exc:
             errors.append(exc)
 
-    threads = [threading.Thread(target=run, args=(caller,)) for caller in callers[:3]]
+    threads = [threading.Thread(target=run, args=(index,)) for index in range(3)]
     for thread in threads:
         thread.start()
     try:
@@ -38,7 +46,9 @@ def test_fourth_bearer_is_bounded_retryable_and_never_enters_the_store(aw, caplo
         aw.store.calls.clear()
         started = time.monotonic()
         with pytest.raises(LedgerError) as caught:
-            aw.gateway.run(callers[3], "context", lambda facts: {})
+            with keys.bearer_request():
+                caller = aw.authenticate(issued[3]["secret"], ip="203.0.113.3")
+                aw.gateway.run(caller, "context", lambda facts: {})
         assert 1.8 <= time.monotonic() - started < 3
         error = caught.value
         assert (error.code, error.status, error.retryable, error.write_outcome) == (
@@ -98,7 +108,7 @@ def test_guard_is_released_on_every_exit_path(fake_aw, monkeypatch, exit_path):
             raise LedgerError("validation_error")
         return {}
 
-    with fault():
+    with keys.bearer_request(), fault():
         if exit_path in {"work_error", "admit"}:
             with pytest.raises(LedgerError):
                 aw.gateway.run(caller, "context", work)

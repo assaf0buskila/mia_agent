@@ -902,6 +902,7 @@ def migrated_constraints() -> tuple[
                 if re.search(r"_check\d*$", dropped):
                     assert checks[table] > 0, (table, dropped)
                     checks[table] -= 1
+                    named_checks.discard((table, dropped))
                 else:
                     gone = {pin for pin in keys if pin[:2] == (table, dropped)}
                     assert len(gone) == 1, (table, dropped)
@@ -989,7 +990,7 @@ def test_constraint_and_index_pins_are_the_frozen_migration_sql():
         )
         assert match, definition
         pinned.add((match.group(2), match.group(3), bool(match.group(1))))
-    assert pinned == created and len(created) == len(policy().INDEX_PINS) == 13
+    assert pinned == created and len(created) == len(policy().INDEX_PINS) == 15
 
 
 def test_privileged_predefined_roles_are_the_reviewed_set():
@@ -1186,12 +1187,13 @@ def live_indexes(c):
 
 def test_constraint_and_index_pins_are_the_catalog(roles):
     """The migrated database holds exactly the pinned inventory: 44 foreign keys, 27 primary
-    keys, 15 unique constraints, 186 checks, 13 further indexes and 176 enabled RI triggers.
+    keys, 15 unique constraints, 186 checks, 15 further indexes and 176 enabled RI triggers.
 
     V2-14 alone was 26, 19, 12, 112, 10 and 104. V2-14b adds seven tables (15 foreign keys,
     7 primary keys, 3 unique keys, 59 checks), six checks on V2-14 tables, the foreign key
     from os_proposals to the credentials and three indexes, and swaps the import batch
     unique key. E37 adds one table, two foreign keys, one primary key and nine checks.
+    E37a adds two audit indexes and replaces the issue status CHECK.
     The totals below are also derived from the SQL text."""
     pinned = sorted((pin.relation, pin.name, pin.definition) for pin in policy().CONSTRAINT_PINS)
     name_only = {(pin.relation, pin.name) for pin in policy().CONSTRAINT_PINS
@@ -1227,12 +1229,12 @@ def test_constraint_and_index_pins_are_the_catalog(roles):
             "JOIN pg_class r ON r.oid = t.tgrelid "
             "WHERE r.relnamespace = 'assaf_os'::regnamespace AND t.tgisinternal GROUP BY 1"
         )).all() == [("O", 4 * sql_kinds.count("FOREIGN"))] == [("O", 176)]
-        # Every table, plus an index per primary key and unique constraint and the 13 others.
+        # Every table, plus an index per primary key and unique constraint and the 15 others.
         assert c.execute(text(
             "SELECT relpersistence::text, count(*) FROM pg_class "
             "WHERE relnamespace = 'assaf_os'::regnamespace GROUP BY 1"
         )).all() == [("p", len(OWNED_TABLES) + sql_kinds.count("PRIMARY")
-                      + sql_kinds.count("UNIQUE") + len(policy().INDEX_PINS))] == [("p", 82)]
+                      + sql_kinds.count("UNIQUE") + len(policy().INDEX_PINS))] == [("p", 84)]
 
 
 def test_constraint_pins_survive_a_dump_and_restore_roundtrip(roles):
@@ -1971,6 +1973,12 @@ ADDENDUM_INVENTORY_MUTATIONS = [
     "ON assaf_os.os_statement_lines(workspace_id, matched_expense_id)",
     "DROP INDEX assaf_os.os_proposals_workspace_status_kind_created_idx",
     "DROP INDEX assaf_os.os_assistant_audit_credential_occurred_idx",
+    "DROP INDEX assaf_os.os_assistant_audit_workspace_ip_occurred_idx",
+    "DROP INDEX assaf_os.os_assistant_audit_workspace_operation_occurred_idx",
+    "ALTER TABLE assaf_os.os_assistant_issue_requests "
+    "DROP CONSTRAINT os_issue_requests_status_check, "
+    "ADD CONSTRAINT os_issue_requests_status_check CHECK "
+    "(status IN ('pending_approval', 'approved', 'rejected', 'expired', 'collected'))",
     "CREATE INDEX v214b_i ON assaf_os.os_statement_batch_lines(purged_at)",
     # Durability of the statement tables.
     "ALTER TABLE assaf_os.os_statement_lines SET UNLOGGED",
@@ -2371,3 +2379,16 @@ def test_reapply_never_writes_the_env_file_for_a_missing_runtime_role(
     finally:
         settle(admin, url.database)
     validate(roles)
+
+
+def test_assistant_followup_status_and_audit_pins():
+    status = next(pin.definition for pin in policy().CONSTRAINT_PINS
+                  if pin.name == "os_issue_requests_status_check")
+    assert "'cancelled'::text" in status
+    assert {
+        "CREATE INDEX os_assistant_audit_workspace_ip_occurred_idx ON assaf_os.os_assistant_audit "
+        "USING btree (workspace_id, client_ip_hmac, occurred_at)",
+        "CREATE INDEX os_assistant_audit_workspace_operation_occurred_idx "
+        "ON assaf_os.os_assistant_audit "
+        "USING btree (workspace_id, operation, occurred_at)",
+    } <= policy().INDEX_PINS

@@ -30,6 +30,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Header, Request
 from fastapi.responses import JSONResponse
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
@@ -89,6 +90,16 @@ def read_principal(
     return principal
 
 
+def login_chain(db: Session, principal: OwnerSessionPrincipal) -> str:
+    """Bind to the authenticated login across cookie rotation; never fall back to the cookie."""
+    chain = db.execute(text(
+        "SELECT chain_id FROM owner_os_sessions WHERE session_hash = :h"
+    ), {"h": principal.session_hash}).scalar_one_or_none()
+    if type(chain) is not str or not chain:
+        raise api.LedgerError("owner_auth_required", reason="session_chain_missing")
+    return chain
+
+
 def bad_body(reason: str) -> api.LedgerError:
     return api.LedgerError("validation_error", details={"reason": reason}, reason=reason)
 
@@ -145,6 +156,7 @@ async def issue_key(
     principal: OwnerSessionPrincipal = Depends(approve_mutation),
     settings: Settings = Depends(get_settings),
     db: Session = Depends(get_db),
+    session_db: Session = Depends(get_owner_session_db),
     port: MessagePort = Depends(get_telegram_port),
 ) -> JSONResponse:
     raw = await request.body()
@@ -155,11 +167,12 @@ async def issue_key(
         authorize.require(ctx, "manage_credentials")
         body = parse_object(raw, {"label", "kind"}, frozenset({"expires_in_days"}))
         service = service_for(settings)
+        chain = login_chain(session_db, principal)
         pending = service.issue(
-            ctx, session_hash=principal.session_hash, label=body["label"], kind=body["kind"],
+            ctx, chain_id=chain, label=body["label"], kind=body["kind"],
             expires_in_days=body.get("expires_in_days"))
         envelope = service.proposal(ctx, pending["issue_request_id"],
-                                    session_hash=principal.session_hash)
+                                    chain_id=chain)
         store = LeadStore(db)
         action = propose_owner_action(
             store, principal=Principal.owner(source="telegram", actor_id=principal.owner_id),
@@ -186,11 +199,13 @@ async def issue_status(
     issue_request_id: str,
     principal: OwnerSessionPrincipal = Depends(owner_scope("assaf-os:read")),
     settings: Settings = Depends(get_settings),
+    session_db: Session = Depends(get_owner_session_db),
 ) -> JSONResponse:
     def run():
         gate(settings)
         return service_for(settings).status(authorize.from_owner_read(principal, settings),
-                                             issue_request_id, session_hash=principal.session_hash)
+                                             issue_request_id,
+                                             chain_id=login_chain(session_db, principal))
     return await respond(run)
 
 
@@ -200,6 +215,7 @@ async def collect_key(
     request: Request,
     principal: OwnerSessionPrincipal = Depends(approve_mutation),
     settings: Settings = Depends(get_settings),
+    session_db: Session = Depends(get_owner_session_db),
 ) -> JSONResponse:
     raw = await request.body()
 
@@ -207,7 +223,8 @@ async def collect_key(
         gate(settings)
         empty_object(raw)
         return service_for(settings).collect(authorize.from_owner_mutation(principal, settings),
-                                              issue_request_id, session_hash=principal.session_hash)
+                                              issue_request_id,
+                                              chain_id=login_chain(session_db, principal))
     return await respond(run)
 
 

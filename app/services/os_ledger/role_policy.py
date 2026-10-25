@@ -724,7 +724,7 @@ CONSTRAINT_PINS: tuple[ConstraintPin, ...] = (
     ConstraintPin(
         "os_assistant_issue_requests", 'os_issue_requests_status_check',
         "CHECK ((status = ANY (ARRAY['pending_approval'::text, 'approved'::te"
-        "xt, 'rejected'::text, 'expired'::text, 'collected'::text])))"
+        "xt, 'rejected'::text, 'expired'::text, 'collected'::text, 'cancelled'::text])))"
     ),
     ConstraintPin(
         "os_assistant_issue_requests", 'os_issue_requests_workspace_fkey',
@@ -739,6 +739,11 @@ CONSTRAINT_PINS: tuple[ConstraintPin, ...] = (
 # pg_get_indexdef. The expression index is the exactly-once key for expenses (V2-14). The
 # audit and proposals indexes and the partial unique index of statement lines are V2-14b's.
 INDEX_PINS = frozenset({
+    "CREATE INDEX os_assistant_audit_workspace_ip_occurred_idx ON assaf_os.os_assistant_audit "
+    "USING btree (workspace_id, client_ip_hmac, occurred_at)",
+    "CREATE INDEX os_assistant_audit_workspace_operation_occurred_idx "
+    "ON assaf_os.os_assistant_audit "
+    "USING btree (workspace_id, operation, occurred_at)",
     "CREATE INDEX os_assistant_audit_credential_occurred_idx ON assaf_os.os_assistant_audit "
     "USING btree (credential_id, occurred_at)",
     "CREATE INDEX os_clients_workspace_business_date_idx ON assaf_os.os_clients USING btree "

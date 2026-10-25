@@ -3233,3 +3233,25 @@ Design note: T2\v2-37b-telegram-step-up-design.md.
 | `issue_rejected` | 409 | The owner rejected it on Telegram. |
 | `issue_collected` | 409 | Already collected once. |
 | `issue_expired` | 410 | The approval deadline or the collection window passed. |
+
+
+### E37a (2026-10-25): collect binds to the login chain; revoke-all cancels uncollected issues
+
+`session_binding` is HMAC-SHA256(`os_step_up_secret`, `chain_id`). The login chain survives
+session renewal; another login chain cannot collect. Logout and owner-session revoke-all
+still invalidate collection through owner authentication.
+
+Assistant-key revoke-all marks every workspace issue request in `pending_approval` or
+`approved` as `cancelled` in the same ledger transaction. Status returns `cancelled`,
+collection refuses, and its Telegram card shows a permanent cancellation message.
+
+The bearer admission guard covers authentication and operation as one request. Audit
+admission counts use `(workspace_id, client_ip_hmac, occurred_at)` and
+`(workspace_id, operation, occurred_at)` indexes. MCP tool errors preserve only field
+paths and codes in `details.issues`, never submitted values.
+
+**Section 5.2 error-table addendum (E37a):**
+
+| Code | HTTP | Meaning |
+|---|---|---|
+| `issue_cancelled` | 409 | Revoke-all cancelled the uncollected issue request. |

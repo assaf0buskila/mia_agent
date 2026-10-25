@@ -13,10 +13,11 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, Response
-from starlette.concurrency import run_in_threadpool
 
+from app.api.assistant import batch_schema as wire
 from app.api.assistant import os as rest
 from app.core.config import Settings, get_settings
+from app.core.owner_timing import request_id_or_new
 from app.core.public_website import client_ip
 from app.domain.statements import vocabulary as v
 from app.services import assistant_keys as keys
@@ -34,15 +35,15 @@ def _object(properties: dict, required: list[str]) -> dict:
 
 
 # Wire schema only; V2-26 remains the validator, including cross-field semantic checks.
-# Tests derive this independently from STATEMENT_BATCH_FORMAT.md's field table.
-_DATE = {"type": "string", "format": "date", "pattern": r"^\d{4}-\d{2}-\d{2}$"}
+# Tests derive fields and limits independently from STATEMENT_BATCH_FORMAT.md's field table,
+# sharing only wire types/patterns rather than hand-copying them.
 _AMOUNT = {"type": "integer", "minimum": 1}
 _LINE = _object({
-    "txn_date": _DATE,
+    "txn_date": wire.DATE,
     "merchant_display": {"type": "string", "minLength": 1, "maxLength": v.MAX_DISPLAY_CHARS},
     "amount_minor": _AMOUNT, "kind": {"type": "string", "enum": list(v.KINDS)},
     "currency": {"type": "string", "const": v.CURRENCY},
-    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+    "confidence": wire.CONFIDENCE,
     "suggested_tag": {"enum": [*v.TAGS, None]},
     "original_amount_minor": _AMOUNT,
     "original_currency": {"type": "string", "pattern": "^[A-Z]{3}$",
@@ -58,11 +59,9 @@ _LINE["dependentRequired"] = {"original_amount_minor": ["original_currency"],
                               "original_currency": ["original_amount_minor"]}
 BATCH_SCHEMA = _object({
     "schema": {"type": "string", "const": v.SCHEMA_VERSION},
-    "client_batch_id": {"type": "string", "pattern":
-                        "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"},
-    "account_label": {"type": "string", "minLength": 1, "maxLength": v.MAX_ACCOUNT_LABEL_CHARS,
-                      "pattern": r"^(?!.*\d{8}).*$"},
-    "charge_date": _DATE,
+    "client_batch_id": wire.UUID,
+    "account_label": wire.ACCOUNT_LABEL,
+    "charge_date": wire.DATE,
     "lines": {"type": "array", "minItems": 1, "maxItems": v.MAX_LINES, "items": _LINE},
 }, ["schema", "client_batch_id", "account_label", "charge_date", "lines"])
 TOOLS = [
@@ -148,76 +147,88 @@ def _tool_work(gateway, caller, settings, params, size):
 @router.post("/v1/assistant/mcp")
 async def mcp(request: Request, settings: Settings = Depends(get_settings)) -> Response:
     if "origin" in request.headers:
-        return JSONResponse({"error": {"code": "origin_denied"}}, status_code=403,
+        return JSONResponse({"api_version": "owner-os.v1", "request_id": request_id_or_new(),
+                             "error": {"code": "origin_denied", "retryable": False,
+                                       "write_outcome": "not_started"}}, status_code=403,
                             headers=rest._HEADERS)
+    if ("mcp-protocol-version" in request.headers
+            and request.headers["mcp-protocol-version"] not in PROTOCOL_VERSIONS):
+        return rest._error(api.LedgerError("invalid_query", reason="unsupported_protocol_version"),
+                           write=True)
     try:
         keys.check_enabled(settings)
-        gateway = rest.gateway_for(settings)
-        caller = await run_in_threadpool(
-            gateway.authenticate, cookie="cookie" in request.headers,
-            authorization=request.headers.getlist("authorization"),
-            ip=client_ip(request, settings=settings))
-        raw, size, too_big = await rest._read_body(request)
-        if too_big:
-            await run_in_threadpool(gateway.control, caller, "body_too_large")
-            raise api.LedgerError("validation_error", details={"reason": "body_too_large"},
-                                  reason="body_too_large")
-        if not rest._json_content_type(request):
-            await run_in_threadpool(gateway.control, caller, "unsupported_media")
-            raise api.LedgerError("validation_error", details={"reason": "content_type"},
-                                  reason="content_type")
-        try:
-            message = json.loads(raw, object_pairs_hook=_strict_pairs,
-                                 parse_constant=_reject_constant)
-        except (ValueError, RecursionError):
-            await run_in_threadpool(gateway.control, caller, "invalid_request")
-            return _rpc_error(None, -32700, "parse_error")
-        if (not isinstance(message, dict) or message.get("jsonrpc") != "2.0"
-                or not isinstance(message.get("method"), str)
-                or ("id" in message and type(message["id"]) not in (str, int))):
-            await run_in_threadpool(gateway.control, caller, "invalid_request")
-            return _rpc_error(None, -32600, "invalid_request")
-        request_id = message.get("id")
-        # Notifications cannot invoke tools or mutate anything. Auth still ran above.
-        if "id" not in message:
-            await run_in_threadpool(gateway.control, caller, "notification")
-            return Response(status_code=202, headers=rest._HEADERS)
-        method = message["method"]
-        params = message.get("params", {})
-        if method != "tools/call" and not isinstance(params, dict):
-            await run_in_threadpool(gateway.control, caller, "invalid_params")
-            return _rpc_error(request_id, -32602, "invalid_params")
-        if method in _CONTROLS:
-            await run_in_threadpool(gateway.control, caller, _CONTROLS[method])
-            if method == "initialize":
-                requested = params.get("protocolVersion")
-                return _reply(request_id, {
-                    "protocolVersion": requested if requested in PROTOCOL_VERSIONS
-                    else PROTOCOL_VERSIONS[-1],
-                    "capabilities": {"tools": {"listChanged": False}},
-                    "serverInfo": {"name": "assaf-os", "version": SERVER_VERSION}})
-            return _reply(request_id, {"tools": TOOLS} if method == "tools/list" else {})
-        if method != "tools/call":
-            await run_in_threadpool(gateway.control, caller, "method_not_found")
-            return _rpc_error(request_id, -32601, "method_not_found")
-        try:
-            work = _tool_work(gateway, caller, settings, params, size)
-        except _ToolError as exc:
-            await run_in_threadpool(gateway.control, caller, exc.wire_code)
-            return _reply(request_id, {"isError": True,
-                                       "content": [{"type": "text", "text": exc.wire_code}]})
-        try:
-            result = await run_in_threadpool(
-                gateway.run, caller, _OPERATIONS[params["name"]], work)
-        except api.LedgerError as exc:
-            return _reply(request_id, {"isError": True,
-                                       "content": [{"type": "text", "text": exc.code}]})
-        except Exception:  # noqa: BLE001 - no exception text crosses the transport
-            _LOG.warning("os_assistant op=mcp_call outcome=refused reason=unexpected_error")
-            return _reply(request_id, {"isError": True,
-                                       "content": [{"type": "text", "text": "unknown"}]})
-        return _reply(request_id, {"content": [{"type": "text", "text": json.dumps(
-            result, ensure_ascii=False, separators=(",", ":"))}], "structuredContent": result})
+        async with keys.async_bearer_request():
+            gateway = rest.gateway_for(settings)
+            caller = await rest._bearer_threadpool(
+                gateway.authenticate, cookie="cookie" in request.headers,
+                authorization=request.headers.getlist("authorization"),
+                ip=client_ip(request, settings=settings))
+            raw, size, too_big = await rest._read_body(request)
+            if too_big:
+                await rest._bearer_threadpool(gateway.control, caller, "body_too_large")
+                raise api.LedgerError("validation_error", details={"reason": "body_too_large"},
+                                      reason="body_too_large")
+            if not rest._json_content_type(request):
+                await rest._bearer_threadpool(gateway.control, caller, "unsupported_media")
+                raise api.LedgerError("validation_error", details={"reason": "content_type"},
+                                      reason="content_type")
+            try:
+                message = json.loads(raw, object_pairs_hook=_strict_pairs,
+                                     parse_constant=_reject_constant)
+            except (ValueError, RecursionError):
+                await rest._bearer_threadpool(gateway.control, caller, "invalid_request")
+                return _rpc_error(None, -32700, "parse_error")
+            if (not isinstance(message, dict) or message.get("jsonrpc") != "2.0"
+                    or not isinstance(message.get("method"), str)
+                    or ("id" in message and type(message["id"]) not in (str, int))):
+                await rest._bearer_threadpool(gateway.control, caller, "invalid_request")
+                return _rpc_error(None, -32600, "invalid_request")
+            request_id = message.get("id")
+            # Notifications cannot invoke tools or mutate anything. Auth still ran above.
+            if "id" not in message:
+                await rest._bearer_threadpool(gateway.control, caller, "notification")
+                return Response(status_code=202, headers=rest._HEADERS)
+            method = message["method"]
+            params = message.get("params", {})
+            if method != "tools/call" and not isinstance(params, dict):
+                await rest._bearer_threadpool(gateway.control, caller, "invalid_params")
+                return _rpc_error(request_id, -32602, "invalid_params")
+            if method in _CONTROLS:
+                await rest._bearer_threadpool(gateway.control, caller, _CONTROLS[method])
+                if method == "initialize":
+                    requested = params.get("protocolVersion")
+                    return _reply(request_id, {
+                        "protocolVersion": requested if requested in PROTOCOL_VERSIONS
+                        else PROTOCOL_VERSIONS[-1],
+                        "capabilities": {"tools": {"listChanged": False}},
+                        "serverInfo": {"name": "assaf-os", "version": SERVER_VERSION}})
+                return _reply(request_id, {"tools": TOOLS} if method == "tools/list" else {})
+            if method != "tools/call":
+                await rest._bearer_threadpool(gateway.control, caller, "method_not_found")
+                return _rpc_error(request_id, -32601, "method_not_found")
+            try:
+                work = _tool_work(gateway, caller, settings, params, size)
+            except _ToolError as exc:
+                await rest._bearer_threadpool(gateway.control, caller, exc.wire_code)
+                return _reply(request_id, {"isError": True,
+                                           "content": [{"type": "text", "text": exc.wire_code}]})
+            try:
+                result = await rest._bearer_threadpool(
+                    gateway.run, caller, _OPERATIONS[params["name"]], work)
+            except api.LedgerError as exc:
+                error = {"isError": True, "content": [{"type": "text", "text": exc.code}]}
+                if exc.code == "invalid_statement_batch" and "issues" in exc.details:
+                    # The service supplies field paths and codes, never submitted values.
+                    error["structuredContent"] = {"details": {"issues": [
+                        {"field": issue["field"], "code": issue["code"]}
+                        for issue in exc.details["issues"]]}}
+                return _reply(request_id, error)
+            except Exception:  # noqa: BLE001 - no exception text crosses the transport
+                _LOG.warning("os_assistant op=mcp_call outcome=refused reason=unexpected_error")
+                return _reply(request_id, {"isError": True,
+                                           "content": [{"type": "text", "text": "unknown"}]})
+            return _reply(request_id, {"content": [{"type": "text", "text": json.dumps(
+                result, ensure_ascii=False, separators=(",", ":"))}], "structuredContent": result})
     except api.LedgerError as exc:
         return rest._error(exc, write=True)
     except Exception:  # noqa: BLE001 - V2-37's uniform, payload-free outer envelope

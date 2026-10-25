@@ -147,7 +147,7 @@ def test_request_uuids_are_deterministic_uuid5_in_one_namespace():
 
 
 def test_error_table_is_complete_and_exact():
-    assert len(api.ERROR_CODES) == 56  # E31 plus the five E37 issue-flow codes
+    assert len(api.ERROR_CODES) == 57  # E31, E37 issue-flow codes and E37a cancellation
     unknown = api.LedgerError("unknown")
     assert (unknown.status, unknown.write_outcome, unknown.retryable) == (503, "unknown", False)
     for code, spec in api.ERROR_CODES.items():
@@ -618,6 +618,7 @@ SECTION_5_2 = {
     "issue_not_approved": (409, False, ()),
     "issue_rejected": (409, False, ()),
     "issue_collected": (409, False, ()),
+    "issue_cancelled": (409, False, ()),
     "issue_expired": (410, False, ()),
     "invalid_trusted_context": (403, False, ()),
     "operation_unavailable": (404, False, ()),
