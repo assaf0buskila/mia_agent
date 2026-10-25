@@ -15,11 +15,12 @@ usage: sudo mia <command>
   job <name>            run one job now: mia-due-scan | mia-ingest-knowledge
   os-ledger migrate --approved-sha <sha>
                         explicitly apply ledger schema after owner go and V2-14a
-  os-authority <init|preflight|freeze-plan|activate|fence|rollback|status> --approved-sha <sha>
+  os-authority <init|preflight|freeze-plan|activate|fence|rollback|status|restore-begin|restore-finish> --approved-sha <sha>
                         the Assaf OS authority fence and cutover steps (V2-31, owner-gated;
                         ops/assaf-os/CUTOVER_RUNBOOK.md): init [--rearm], preflight [--drain
                         --final-accept], freeze-plan [--phase drain|switch|mirror|open|revert],
-                        activate, fence, rollback, status
+                        activate, fence, rollback, status,
+                        restore-begin/restore-finish --expected-epoch <E>
   os-provision <runtime|retention> --approved-sha <sha>
                         give the ledger its database credentials: the runtime role and its DSN in
                         runtime.env (FORK-PROD-ORDER step 4), or the os-retention password and the
@@ -397,6 +398,22 @@ post_restore_reapply() {
   restore_note "complete"
 }
 
+# Outside the database dump, written under mia-state.lock BEFORE replacing the database.
+# This records a restore even on a fresh VM with no surviving incident evidence. A fence
+# minted afterwards must never be mistaken for the original outage's RTO/RPO clock.
+record_restore_attempt() {
+  local directory=/var/lib/mia/os-authority present=false temporary
+  if [ -e "$directory/ledger-fence.json" ] || [ -L "$directory/ledger-fence.json" ]; then
+    present=true
+  fi
+  mkdir -p "$directory" || return 1
+  temporary="$(mktemp "$directory/.restore-attempt-XXXXXX")" || return 1
+  printf '{"v":1,"pre_restore_fence_record_present":%s}\n' "$present" > "$temporary" || return 1
+  chmod 600 "$temporary" || return 1
+  chown 10001:10001 "$directory" "$temporary" || return 1
+  mv -f "$temporary" "$directory/restore-attempt.json" || return 1
+}
+
 cmd="${1:-}"; shift || true
 case "$cmd" in
   deploy|settings|https|restore|go-live|os-ledger|os-authority|os-provision)
@@ -483,11 +500,12 @@ case "$cmd" in
     # here before Compose starts anything; the job re-checks the SHA against its own image.
     os_authority_command="${1:-}"
     case "$os_authority_command" in
-      init|preflight|freeze-plan|activate|fence|rollback|status) shift ;;
-      *) die "usage: mia os-authority <init|preflight|freeze-plan|activate|fence|rollback|status> --approved-sha <sha>" ;;
+      init|preflight|freeze-plan|activate|fence|rollback|status|restore-begin|restore-finish) shift ;;
+      *) die "usage: mia os-authority <init|preflight|freeze-plan|activate|fence|rollback|status|restore-begin|restore-finish> --approved-sha <sha>" ;;
     esac
     os_authority_sha=""
     os_authority_args=()
+    os_restore_epoch=""
     while [ "$#" -gt 0 ]; do
       case "$1" in
         --approved-sha)
@@ -498,18 +516,43 @@ case "$cmd" in
         --phase)
           [ "$#" -ge 2 ] && [[ "$2" =~ ^(drain|switch|mirror|open|revert)$ ]] || die "--phase is drain, switch, mirror, open or revert"
           os_authority_args+=("$1" "$2"); shift 2 ;;
+        --expected-epoch)
+          case "$os_authority_command" in
+            restore-begin|restore-finish) ;;
+            *) die "os-authority: option refused: --expected-epoch" ;;
+          esac
+          [ "$#" -ge 2 ] || die "restore_epoch_required"
+          [[ "$2" =~ ^[1-9][0-9]*$ ]] || die "restore_epoch_invalid"
+          os_restore_epoch="$2"; os_authority_args+=("$1" "$2"); shift 2 ;;
         *) die "os-authority: option refused: $1" ;;
       esac
     done
     [[ "$os_authority_sha" =~ ^[0-9a-f]{40}$ ]] || die "exact approved SHA required"
+    case "$os_authority_command" in
+      restore-begin|restore-finish) [ -n "$os_restore_epoch" ] || die "restore_epoch_required" ;;
+    esac
+    # Host path, under mia-state.lock. The job has no /etc/mia mount: absence inside its container
+    # would prove nothing. Never forward an inherited assertion; compute it for this invocation.
+    os_restore_complete=false
+    if [ "$os_authority_command" = restore-finish ]; then
+      [ ! -e "$restore_incomplete" ] && [ ! -L "$restore_incomplete" ] || die "restore_incomplete"
+      os_restore_complete=true
+    fi
     [ -f /opt/mia/tag.env ] || die "not deployed yet"
     single_key_env /etc/mia/os-ledger-migrate.env MIA_OS_LEDGER_MIGRATION_DATABASE_URL \
       || die "ledger migration env file required with exactly its one key"
     # The evidence directory belongs to the job's user, so the job can read what the operator placed
     # there (backup, drill, frontend, journal and manifest evidence) and write its own files.
-    install -d -m 700 -o 10001 -g 10001 /var/lib/mia/os-authority
-    chown -R 10001:10001 /var/lib/mia/os-authority
-    compose --profile os-authority run --rm --no-deps -T os-authority \
+    case "$os_authority_command" in
+      fence|rollback)
+        # Containment must reach the ledger even when incident bookkeeping is unavailable.
+        install -d -m 700 -o 10001 -g 10001 /var/lib/mia/os-authority || true
+        chown -R 10001:10001 /var/lib/mia/os-authority || true ;;
+      *)
+        install -d -m 700 -o 10001 -g 10001 /var/lib/mia/os-authority
+        chown -R 10001:10001 /var/lib/mia/os-authority ;;
+    esac
+    MIA_OS_RESTORE_COMPLETE="$os_restore_complete" compose --profile os-authority run --rm --no-deps -T os-authority \
       "$os_authority_command" "${os_authority_args[@]}"
     ;;
   os-provision)
@@ -608,6 +651,7 @@ case "$cmd" in
     # backup skips, until `mia restore` is run again and succeeds. It is written after the safety dump
     # on purpose: a restore that stops before this line has changed nothing and leaves no marker.
     install -m 600 /dev/null "$restore_incomplete"
+    record_restore_attempt || restore_fail restore_evidence_invalid
     compose exec -T postgres psql -U mia -d postgres -v ON_ERROR_STOP=1 \
       -c "DROP DATABASE IF EXISTS mia WITH (FORCE)" -c "CREATE DATABASE mia OWNER mia"
     compose exec -T postgres pg_restore -U mia -d mia --no-owner --no-privileges --exit-on-error < "$file"
