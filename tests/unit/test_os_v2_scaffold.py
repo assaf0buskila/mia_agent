@@ -147,7 +147,7 @@ def test_request_uuids_are_deterministic_uuid5_in_one_namespace():
 
 
 def test_error_table_is_complete_and_exact():
-    assert len(api.ERROR_CODES) == 51  # 50 + cycle_has_statement (§22 E31)
+    assert len(api.ERROR_CODES) == 56  # E31 plus the five E37 issue-flow codes
     unknown = api.LedgerError("unknown")
     assert (unknown.status, unknown.write_outcome, unknown.retryable) == (503, "unknown", False)
     for code, spec in api.ERROR_CODES.items():
@@ -429,7 +429,6 @@ def _json(size):
         ("/v1/owner/os/unified/commits", 16_384),
         ("/v1/owner/os/unified/statement-batches", 131_072),
         ("/v1/owner/os/unified/statement-batches/b1/draft", 16_384),
-        ("/v1/owner/auth/step-up", 8_192),
         ("/v1/owner/auth/session", 16_384),
     ],
 )
@@ -615,6 +614,11 @@ SECTION_5_2 = {
     "owner_approval_required": (403, False, ()),
     "browser_mutation_verification_required": (403, False, ()),
     "step_up_required": (403, False, ()),
+    "credential_unknown": (404, False, ()),
+    "issue_not_approved": (409, False, ()),
+    "issue_rejected": (409, False, ()),
+    "issue_collected": (409, False, ()),
+    "issue_expired": (410, False, ()),
     "invalid_trusted_context": (403, False, ()),
     "operation_unavailable": (404, False, ()),
     "proposal_not_found": (404, False, ()),
