@@ -828,6 +828,43 @@ def test_fenced_authority_pauses_and_reports_fenced(world: World) -> None:
     assert world.tick().outcome == "verified"
 
 
+@pytest.mark.parametrize("status,projected,verified,error,attempted,expected", [
+    ("synced", 3, 3, None, True, "authority_fenced"),
+    ("fenced", 3, 3, "authority_fenced", True, "authority_fenced"),
+    ("pending", 0, 0, None, False, "authority_fenced"),
+    ("synced", 3, 2, None, True, "authority_fenced_unclean"),
+    ("synced", 3, 3, "readback_failed", True, "authority_fenced_unclean"),
+    ("conflict", 3, 3, "drift", True, "authority_fenced_unclean"),
+    ("conflict", 3, 3, "readback_mismatch", True, "authority_fenced_unclean"),
+    ("unknown", 3, 3, "mirror_timeout", True, "authority_fenced_unclean"),
+    ("pending", 3, 3, None, True, "authority_fenced_unclean"),
+    ("delayed", 3, 3, None, True, "authority_fenced_unclean"),
+    ("pending", 0, 0, None, True, "authority_fenced_unclean"),
+    ("pending", 0, 0, "mirror_timeout", False, "authority_fenced_unclean"),
+    ("fenced", 3, 2, "authority_fenced", True, "authority_fenced_unclean"),
+    ("fenced", 3, 3, None, True, "authority_fenced_unclean"),
+    ("fenced", 3, 3, "authority_fenced_unclean", True, "authority_fenced_unclean"),
+])
+def test_fence_preserves_previous_cleanliness(
+    world: World, status, projected, verified, error, attempted, expected,
+):
+    world.outbox.load_state(world.deps.destination_binding, world.clock())
+    world.outbox.state.update(
+        status=status, projected_version=projected, verified_version=verified,
+        last_error_code=error, last_attempt_at=world.clock() if attempted else None,
+        last_verified_at=world.clock() if verified else None,
+    )
+    world.reader.version = max(projected, verified, world.reader.version)
+    world.reader.states["core"] = "fenced"
+    for _ in range(2):
+        result = world.tick(anti_entropy=True)
+        assert result == os_mirror.TickResult("paused", expected, 0)
+        state = world.state()
+        assert state.status == "fenced" and state.last_error_code == expected
+        assert (state.projected_version, state.verified_version) == (projected, verified)
+    assert world.sheets.writes == [] and world.sheets.reads == 0
+
+
 def test_not_sent_error_defers_with_backoff_and_reports_delayed(world: World) -> None:
     ids = world.seed()
     world.sheets.fail_next_write = "not_sent"

@@ -526,6 +526,8 @@ class LiveProbes:
             ), {"workspace": workspace}).first()
         if row is None:
             return "empty"
+        if row[3] == "authority_fenced_unclean":
+            return "unverified"
         if version is None:
             # Reset/never-attempted progress is empty, while retaining the destination pin.
             if tuple(row) == ("pending", 0, 0, None, None, None):

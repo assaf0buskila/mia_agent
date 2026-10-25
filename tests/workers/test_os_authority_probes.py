@@ -317,6 +317,8 @@ def probes(**over):
     (("fenced", 3, 2, "authority_fenced"), None, "unverified"),
     (("fenced", 3, 3, "readback_failed"), None, "unverified"),
     (("fenced", 3, 3, "authority_fenced"), 3, "unverified"),
+    (("fenced", 3, 3, "authority_fenced_unclean"), None, "unverified"),
+    (("fenced", 3, 3, "authority_fenced_unclean"), 3, "unverified"),
 ])
 def test_mirror_probe_binds_verification_to_the_requested_version(row, version, expected):
     engine = create_engine("sqlite://")

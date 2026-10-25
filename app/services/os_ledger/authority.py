@@ -142,7 +142,9 @@ class PgAuthorityAdmin:
         """Privileged CLI only, under a freeze. Never deletes or changes a destination pin.
 
         The workspace lock serializes the epoch/core checks with activation and rearm. The
-        row lock also serializes with publisher progress updates. Audit failure aborts the tx.
+        row lock serializes each publisher progress statement, not a whole tick: an in-flight
+        tick can record_attempt or record_result after this reset commits. That affects only
+        liveness; re-run the guarded reset. Audit failure aborts the tx.
         """
         with self._locked(workspace_id) as (conn, row):
             if row is None:

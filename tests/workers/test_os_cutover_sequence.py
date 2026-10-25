@@ -274,6 +274,43 @@ if pg_enabled():
         assert state["projected_version"] == state["verified_version"] == boundary["version"]
         assert len(sheets.writes) == 2 and sheets.reads == 3
 
+    def test_drift_survives_open_rollback_tick_until_guarded_reset_and_t7(cutover):
+        world, deps, sheets = cutover
+        activate_for_t7(world)
+        publisher = mirror_publisher(world, deps)
+        assert publisher.tick().outcome == "verified"
+        version = world.state().version
+        sheets.grid[mp.ENTITY_TABS["tasks"]][(50, 30)] = "hand-edit"
+        world.clock[0] += timedelta(seconds=900)
+        assert publisher.tick() == os_mirror.TickResult("conflict", "drift", 0)
+        state, = world.env.rows("os_mirror_state")
+        assert (state["status"], state["projected_version"], state["verified_version"],
+                state["last_error_code"]) == ("conflict", version, version, "drift")
+        assert world.run("freeze-plan", "--phase", "open").code == 0
+        world.settings.assaf_os_freeze = world.env.knobs.freeze = False
+        assert world.run("rollback").code == 0
+        world.clock[0] += timedelta(seconds=900)
+        assert publisher.tick().outcome == "paused"
+        revert_and_reimport(world)
+        refused = world.run("preflight")
+        assert refused.code == 1 and codes(refused) == ["mirror_not_verified"]
+        state, = world.env.rows("os_mirror_state")
+        assert state["last_error_code"] == "authority_fenced_unclean"
+        assert "hand-edit" in sheets.all_cells()
+        writes, reads = len(sheets.writes), sheets.reads
+        reset = world.run("mirror-reset", "--expected-epoch", "2")
+        assert reset.code == 0 and reset.out["outcome"] == "reset"
+        assert len(sheets.writes) == writes and sheets.reads == reads
+        assert "hand-edit" in sheets.all_cells(), "reset changes progress only"
+        ready = world.run("preflight")
+        assert ready.code == 0 and ready.out["ready_to_activate"] is True
+        activate_for_t7(world)
+        assert mirror_publisher(world, deps).tick().outcome == "verified"
+        assert len(sheets.writes) == writes + 1 and sheets.reads == reads + 2
+        assert {mp.tab_of(a1) for a1, _ in sheets.writes[-1]} == set(mp.MIRROR_TABS)
+        assert "hand-edit" not in sheets.all_cells()
+        assert world.run("status").out["mirror"] == "verified"
+
     @pytest.mark.parametrize("leftover", ["conflict", "unknown", "pending", "fenced"])
     def test_uncertain_leftover_reset_is_idempotent_and_t7_reproves(cutover, leftover):
         world, deps, sheets = cutover

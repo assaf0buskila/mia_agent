@@ -19,7 +19,7 @@ usage: sudo mia <command>
                         the Assaf OS authority fence and cutover steps (V2-31, owner-gated;
                         ops/assaf-os/CUTOVER_RUNBOOK.md): init [--rearm], preflight [--drain
                         --final-accept], freeze-plan [--phase drain|switch|mirror|open|revert],
-                        activate, fence, rollback, status
+                        activate, fence, rollback, status, mirror-reset --expected-epoch <n>
   os-provision <runtime|retention> --approved-sha <sha>
                         give the ledger its database credentials: the runtime role and its DSN in
                         runtime.env (FORK-PROD-ORDER step 4), or the os-retention password and the

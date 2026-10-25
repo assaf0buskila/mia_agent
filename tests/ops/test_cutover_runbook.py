@@ -230,6 +230,7 @@ GATED_COMMANDS = [
     ("### T6", r"sudo mia os-authority activate", "G13", False),
     ("## 5. ", r"sudo mia os-authority rollback", "G19", False),
     ("## 5. ", r"sudo mia os-authority init --rearm", "G23", True),
+    ("## 5. ", r"sudo mia os-authority mirror-reset", "G25", True),
     ("## 6. ", r"sudo mia os-authority fence", "G22", True),
     ("## 7. Reason codes", r"sudo mia os-authority mirror-reset", "G25", False),
 ]

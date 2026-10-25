@@ -3166,6 +3166,10 @@ use `status`, which requires verification at the current ledger version.
   `projected_version == verified_version`, and `last_error_code=authority_fenced`. It is the last
   clean projection fenced by rollback. T7 and section 4 still require `synced` and verification at
   the current version; the first publication after activation heals the fenced row normally.
+  The publisher writes `authority_fenced` only for a previously clean synced row, an already
+  fenced-clean row, or never-attempted empty progress. Every other prior state is recorded as
+  `authority_fenced_unclean` and fails the cleanliness probe, including drift or an uncertain
+  rewrite at equal projected and verified versions; repeated fenced ticks keep it unclean.
 - Uncertain `conflict`, `unknown`, `pending`, or a fenced row with unequal versions or another error
   remain unclean. Before activation, `os-authority mirror-reset --approved-sha S --expected-epoch E`
   requires the exact release SHA and epoch, freeze ON, and core authority NOT `active`. Under the
@@ -3175,7 +3179,9 @@ use `status`, which requires verification at the current ledger version.
   It is idempotent, never touches the workbook, and writes an authorization audit JSON in the CLI
   evidence directory under the lock before mutation (audit failure aborts the reset). The CLI's
   successful result confirms the commit. T7 then performs a full rewrite plus readback, including
-  a scan for old extents; an equal pre-write scan cannot replace that proof.
+  a scan for old extents. After a send whose acknowledgement was lost (the `unknown` path), an
+  equal subsequent read counts as the readback because `readback_equal` compares full tabs.
+  An equal pre-write scan never counts as that proof.
 
 ### E36 (2026-10-24): G09 is replaced by fixes, tests and a careful live run (Assaf's ruling)
 

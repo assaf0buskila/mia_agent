@@ -592,7 +592,7 @@ Allowed **only** while `non_import_receipts` is 0 at the current epoch. After th
   epoch. There is no `fenced` to `active`.
   Before activation on the retry, use the E35a mirror rule in section 7: empty or a clean last
   projection that may lag, including a fenced-clean row. If uncertain progress blocks preflight,
-  use `sudo mia os-authority mirror-reset --approved-sha S --expected-epoch E` with the retry's
+  **Go G25** use `sudo mia os-authority mirror-reset --approved-sha S --expected-epoch E` with the retry's
   current epoch after T1 has applied the freeze. Then repeat preflight, activate and T7; the reset
   never substitutes for T7 verification.
 

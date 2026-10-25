@@ -76,6 +76,8 @@ if pg_enabled():
                 ({"status": "synced", "projected": 0, "verified": 0, "error": None},
                  "verified", "verified"),
                 ({"status": "fenced", "error": "authority_fenced"}, "unverified", "verified"),
+                ({"status": "fenced", "error": "authority_fenced_unclean"},
+                 "unverified", "unverified"),
                 ({"status": "fenced", "verified": 2, "error": "authority_fenced"},
                  "unverified", "unverified"),
                 ({"status": "fenced", "error": "readback_failed"}, "unverified", "unverified"),
