@@ -1,8 +1,8 @@
 """V2-29 outbox lease and ``os_mirror_state`` rules, on the fake and (when a disposable URL is
 set) on PostgreSQL 16 with the V2-14 table DDL taken verbatim from the merged migration.
 
-A "pg" case is generated only when ``MIA_OS_LEDGER_TEST_POSTGRES_URL`` is set, so the PG-less
-``checks`` job generates none and never skips one.
+Shared "pg" cases are generated only when ``MIA_OS_LEDGER_TEST_POSTGRES_URL`` is set.
+The database-clock regression cases skip without that disposable URL.
 """
 
 from __future__ import annotations
@@ -11,8 +11,10 @@ import json
 import os
 import re
 from collections.abc import Iterator
+from contextlib import nullcontext
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
@@ -88,7 +90,9 @@ class PgHarness:
                 self.text(
                     f"INSERT INTO {self.schema}.os_outbox (workspace_id, event_id, "
                     "commit_version, body, next_attempt_at, created_at, updated_at) "
-                    "VALUES (:ws, :id, :v, CAST(:body AS jsonb), :at, :at, :at)"
+                    "VALUES (:ws, :id, :v, CAST(:body AS jsonb), :at, "
+                    "LEAST(CAST(:at AS timestamptz), now()), "
+                    "LEAST(CAST(:at AS timestamptz), now()))"
                 ),
                 {"ws": WS, "id": event_id, "v": commit_version, "body": json.dumps(body),
                  "at": at},
@@ -102,6 +106,25 @@ class PgHarness:
                 {"id": event_id},
             ).mappings().one()
         return dict(row)
+
+    def now(self) -> datetime:
+        with self.engine.begin() as conn:
+            return conn.scalar(self.text("SELECT now()"))
+
+    def make_due(self, event_id: str) -> None:
+        with self.engine.begin() as conn:
+            conn.execute(
+                self.text(f"UPDATE {self.schema}.os_outbox SET next_attempt_at=now() "
+                          "WHERE event_id=:id"), {"id": event_id},
+            )
+
+    def expire_lease(self, event_id: str) -> None:
+        with self.engine.begin() as conn:
+            conn.execute(
+                self.text(f"UPDATE {self.schema}.os_outbox "
+                          "SET leased_at=now() - CAST(:ttl AS interval) - interval '1 second' "
+                          "WHERE event_id=:id"), {"id": event_id, "ttl": LEASE_TTL},
+            )
 
     def close(self) -> None:
         with self.engine.begin() as conn:
@@ -136,21 +159,156 @@ def harness(request) -> Iterator[Any]:
         built.close()
 
 
+@pytest.fixture
+def pg() -> Iterator[PgHarness]:
+    if not PG_URL:
+        pytest.skip("MIA_OS_LEDGER_TEST_POSTGRES_URL is not set")
+    built = PgHarness()
+    try:
+        yield built
+    finally:
+        built.close()
+
+
+def test_pg_due_row_is_claimable_with_application_clock_behind(pg) -> None:
+    before = pg.now()
+    event_id = pg.add(1, outbox_body(), before)
+    (event,) = pg.outbox().claim(1, "behind", before - timedelta(hours=1))
+    row = pg.row(event_id)
+    assert event.event_id == event_id
+    assert (event.lease_generation, event.attempts) == (1, 1)
+    assert before <= row["leased_at"] == row["updated_at"] <= pg.now()
+    assert row["updated_at"] >= row["created_at"]
+
+
+def test_pg_application_clock_ahead_does_not_bypass_backoff_or_stamp_future(pg) -> None:
+    before = pg.now()
+    due = pg.add(1, outbox_body(), before)
+    future = pg.add(2, outbox_body(), before)
+    with pg.engine.begin() as conn:
+        conn.execute(pg.text(f"UPDATE {pg.schema}.os_outbox "
+                             "SET next_attempt_at=now() + interval '30 minutes' "
+                             "WHERE event_id=:id"), {"id": future})
+    store = pg.outbox()
+    (event,) = store.claim(10, "ahead", before + timedelta(hours=1))
+    assert event.event_id == due
+    assert store.claim(10, "ahead", before + timedelta(hours=1)) == []
+    row = pg.row(due)
+    assert before <= row["leased_at"] == row["updated_at"] <= pg.now()
+    assert pg.row(future)["attempts"] == 0
+
+
+def test_pg_lease_takeover_uses_database_time_and_fences_stale_generation(pg) -> None:
+    before = pg.now()
+    event_id = pg.add(1, outbox_body(), before)
+    store = pg.outbox()
+    (first,) = store.claim(1, "first", before)
+    assert store.claim(1, "ahead", before + timedelta(hours=1)) == []
+    assert pg.row(event_id)["lease_generation"] == 1
+    pg.expire_lease(event_id)
+    (second,) = store.claim(1, "behind", before - timedelta(hours=1))
+    assert (second.lease_generation, second.attempts) == (2, 2)
+    assert not store.finish(first, first.lease_generation, "sent", None, before)
+    assert store.finish(second, second.lease_generation, "sent", None, before)
+    assert not store.finish(second, second.lease_generation, "unknown", "late", before)
+    row = pg.row(event_id)
+    assert row["status"] == "sent"
+    assert row["leased_at"] is None and row["lease_owner"] is None
+    assert row["created_at"] <= row["updated_at"] <= pg.now()
+
+
+def test_pg_lease_is_not_reclaimed_at_exact_database_ttl_boundary(pg) -> None:
+    before = pg.now()
+    event_id = pg.add(1, outbox_body(), before)
+    (first,) = pg.outbox().claim(1, "first", before)
+    # Reuse one transaction only in this test to hold PostgreSQL now() exactly still.
+    # This makes both sides of the strict TTL boundary testable without sleeps.
+    with pg.engine.begin() as conn:
+        scoped_engine = SimpleNamespace(begin=lambda: nullcontext(conn))
+        store = PgOutbox(scoped_engine, WS, schema=pg.schema)
+        conn.execute(pg.text(f"UPDATE {pg.schema}.os_outbox "
+                             "SET leased_at=now() - CAST(:ttl AS interval) WHERE event_id=:id"),
+                     {"id": event_id, "ttl": LEASE_TTL})
+        assert store.claim(1, "ahead", before + timedelta(hours=1)) == []
+        conn.execute(pg.text(f"UPDATE {pg.schema}.os_outbox "
+                             "SET leased_at=leased_at - interval '1 microsecond' "
+                             "WHERE event_id=:id"), {"id": event_id})
+        (second,) = store.claim(1, "behind", before - timedelta(hours=1))
+        assert second.event_id == first.event_id
+        assert (second.lease_generation, second.attempts) == (2, 2)
+
+
+@pytest.mark.parametrize("status", ["pending", "unknown", "sent", "conflict"])
+@pytest.mark.parametrize("attempts", [1, 2, 7, 20])
+@pytest.mark.parametrize("skew_hours", [-1, 1])
+def test_pg_finish_uses_database_clock_for_backoff_and_metadata(pg, status, attempts,
+                                                             skew_hours) -> None:
+    before = pg.now()
+    event_id = pg.add(1, outbox_body(), before)
+    with pg.engine.begin() as conn:
+        conn.execute(pg.text(f"UPDATE {pg.schema}.os_outbox SET attempts=:attempts "
+                             "WHERE event_id=:id"), {"id": event_id, "attempts": attempts - 1})
+    store = pg.outbox()
+    (event,) = store.claim(1, "worker", before)
+    # Simulate metadata left in the future by the old, skewed application clock.
+    with pg.engine.begin() as conn:
+        conn.execute(pg.text(f"UPDATE {pg.schema}.os_outbox "
+                             "SET updated_at=now() + interval '1 hour' WHERE event_id=:id"),
+                     {"id": event_id})
+    retry_delay = backoff(attempts) if status in {"pending", "unknown"} else timedelta(0)
+    app_retry = before + timedelta(hours=skew_hours) + retry_delay
+    assert store.finish(event, event.lease_generation, status, "mirror_timeout", app_retry)
+    row = pg.row(event_id)
+    assert row["status"] == status and row["last_error_code"] == "mirror_timeout"
+    assert row["leased_at"] is None and row["lease_owner"] is None
+    assert before <= row["updated_at"] <= pg.now()
+    assert row["updated_at"] >= row["created_at"]
+    assert row["next_attempt_at"] == row["updated_at"] + retry_delay
+    assert store.claim(1, "ahead", before + timedelta(hours=1)) == []
+
+
+@pytest.mark.parametrize("skew_hours", [-1, 1])
+def test_pg_mirror_state_stamps_use_database_clock(pg, skew_hours) -> None:
+    store = pg.outbox()
+    before = pg.now()
+    app_now = before + timedelta(hours=skew_hours)
+    store.load_state(BINDING, app_now)
+    store.record_attempt(7, app_now)
+    state = store.load_state(BINDING, app_now)
+    assert before <= state.last_attempt_at <= pg.now()
+    store.record_result(status="synced", version=7, verified=True, error_code=None,
+                        now=app_now, coverage={"x": [1, 1]})
+    verified = store.load_state(BINDING, app_now)
+    assert before <= verified.last_verified_at <= pg.now()
+    store.record_result(status="synced", version=5, verified=True, error_code=None,
+                        now=app_now, coverage={"x": [9, 9]})
+    assert store.load_state(BINDING, app_now) == verified
+    with pg.engine.begin() as conn:
+        updated_at = conn.scalar(pg.text(f"SELECT updated_at FROM {pg.schema}.os_mirror_state"))
+    assert before <= updated_at <= pg.now()
+
+
 def test_claim_orders_by_commit_version_honours_limit_and_next_attempt(harness) -> None:
     store = harness.outbox()
-    later = harness.add(3, outbox_body(), T0)
-    first = harness.add(1, outbox_body(), T0)
-    future = harness.add(2, outbox_body(), T0 + timedelta(seconds=30))
-    claimed = store.claim(1, "w1", T0)
+    start = harness.now() if isinstance(harness, PgHarness) else T0
+    later = harness.add(3, outbox_body(), start)
+    first = harness.add(1, outbox_body(), start)
+    future = harness.add(2, outbox_body(), start + timedelta(seconds=30))
+    claimed = store.claim(1, "w1", start)
     assert [e.event_id for e in claimed] == [first]
     assert (claimed[0].lease_generation, claimed[0].attempts) == (1, 1)
     assert claimed[0].body == outbox_body() and claimed[0].commit_version == 1
-    assert [e.event_id for e in store.claim(10, "w1", T0)] == [later]
-    assert store.claim(10, "w1", T0) == []
-    assert [e.event_id for e in store.claim(10, "w1", T0 + timedelta(seconds=30))] == [future]
+    assert [e.event_id for e in store.claim(10, "w1", start)] == [later]
+    assert store.claim(10, "w1", start) == []
+    if isinstance(harness, PgHarness):
+        harness.make_due(future)
+    assert [e.event_id for e in store.claim(10, "w1", start + timedelta(seconds=30))] == [future]
     row = harness.row(first)
     assert (row["status"], row["lease_owner"]) == ("leased", "w1")
-    assert row["leased_at"] == T0
+    if isinstance(harness, PgHarness):
+        assert start <= row["leased_at"] == row["updated_at"] <= harness.now()
+    else:
+        assert row["leased_at"] == T0
 
 
 def test_a_lease_is_reclaimed_only_after_lease_ttl_with_a_new_generation(harness) -> None:
@@ -158,6 +316,8 @@ def test_a_lease_is_reclaimed_only_after_lease_ttl_with_a_new_generation(harness
     event_id = harness.add(1, outbox_body(), T0)
     (first,) = store.claim(5, "crashed", T0)
     assert store.claim(5, "w2", T0 + LEASE_TTL) == []
+    if isinstance(harness, PgHarness):
+        harness.expire_lease(event_id)
     (second,) = store.claim(5, "w2", T0 + LEASE_TTL + timedelta(seconds=1))
     assert (second.lease_generation, second.attempts) == (2, 2)
     assert not store.finish(first, first.lease_generation, "sent", None, T0)
@@ -177,8 +337,13 @@ def test_unknown_rows_are_claimable_and_finish_records_the_retry(harness) -> Non
     assert store.finish(claimed, claimed.lease_generation, "unknown", "mirror_timeout", retry_at)
     row = harness.row(event_id)
     assert (row["status"], row["last_error_code"]) == ("unknown", "mirror_timeout")
-    assert row["next_attempt_at"] == retry_at
+    if isinstance(harness, PgHarness):
+        assert row["next_attempt_at"] == row["updated_at"] + backoff(claimed.attempts)
+    else:
+        assert row["next_attempt_at"] == retry_at
     assert store.claim(5, "w1", retry_at - timedelta(seconds=1)) == []
+    if isinstance(harness, PgHarness):
+        harness.make_due(event_id)
     (again,) = store.claim(5, "w1", retry_at)
     assert again.attempts == 2
     with pytest.raises(OutboxError):
@@ -192,15 +357,21 @@ def test_verified_version_never_moves_backwards_under_out_of_order_results(harne
     store.record_attempt(5, T0)
     store.record_attempt(7, T0)
     later = T0 + timedelta(seconds=10)
+    before = harness.now() if isinstance(harness, PgHarness) else later
     store.record_result(status="synced", version=7, verified=True, error_code=None, now=later,
                         coverage={"x": [1, 1]})
+    verified_at = store.load_state(BINDING, T0).last_verified_at
+    if isinstance(harness, PgHarness):
+        assert before <= verified_at <= harness.now()
+    else:
+        assert verified_at == later
     store.record_result(status="synced", version=5, verified=True, error_code=None,
                         now=later + timedelta(seconds=5), coverage={"x": [9, 9]})
     store.record_result(status="conflict", version=5, verified=False, error_code="drift",
                         now=later + timedelta(seconds=6), coverage=None)
     state = store.load_state(BINDING, T0)
     assert (state.status, state.verified_version, state.projected_version) == ("synced", 7, 7)
-    assert state.last_verified_at == later
+    assert state.last_verified_at == verified_at
     assert state.last_error_code is None
     assert state.scan_coverage == {"x": [1, 1]}
     store.record_result(status="conflict", version=7, verified=False, error_code="drift",
@@ -221,9 +392,14 @@ def test_record_attempt_marks_pending_without_erasing_unknown_or_conflict(harnes
     assert store.load_state(BINDING, T0).status == "pending"
     store.record_result(status="conflict", version=2, verified=False, error_code="drift",
                         now=T0, coverage=None)
+    before = harness.now() if isinstance(harness, PgHarness) else T0
     store.record_attempt(3, T0)
     state = store.load_state(BINDING, T0)
-    assert (state.status, state.projected_version, state.last_attempt_at) == ("conflict", 3, T0)
+    assert (state.status, state.projected_version) == ("conflict", 3)
+    if isinstance(harness, PgHarness):
+        assert before <= state.last_attempt_at <= harness.now()
+    else:
+        assert state.last_attempt_at == T0
 
 
 def test_the_destination_binding_is_pinned(harness) -> None:
@@ -258,9 +434,10 @@ def _pg_no_transaction_or_connection_is_held_during_a_transport_call() -> None:
             destination_binding=destination_binding("mirror-sheet-1"),
         )
         clock = Clock()
+        event_ids = []
         for record, entity in ((CLIENT, "clients"), (TASK, "tasks")):
             version = reader.commit(entity, record)
-            pg.add(version, outbox_body(), clock())
+            event_ids.append(pg.add(version, outbox_body(), clock()))
         sheets.fail_next_write = "lost_ack"
         settings = mirror_settings()
         outcomes = []
@@ -269,6 +446,9 @@ def _pg_no_transaction_or_connection_is_held_during_a_transport_call() -> None:
                 deps, settings, now=clock(), lease_owner="w1", anti_entropy=anti_entropy
             ).outcome)
             clock.advance(60)
+            # Advancing the fake worker clock cannot advance PostgreSQL's retry clock.
+            for event_id in event_ids:
+                pg.make_due(event_id)
         assert outcomes == ["unknown", "verified", "verified"]
         assert len(checks) >= 3 and set(checks) == {(0, 0)}
         state = pg.outbox().load_state(destination_binding("mirror-sheet-1"), clock())
