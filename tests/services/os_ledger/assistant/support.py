@@ -100,6 +100,20 @@ class MemoryAssistantStore:
                 ok=False, client_ip_hmac=ip_hmac))
         return None
 
+    def control(self, credential, *, ip_hmac: str, method: str, now: datetime) -> None:
+        if method not in {"initialize", "ping", "tools_list", "notification", "invalid_request",
+                          "method_not_found", "invalid_params", "body_too_large",
+                          "unsupported_media"}:
+            raise ValueError("invalid_control_method")
+        with self._gate("ip:" + ip_hmac), self._lock:
+            if sum(1 for r in self.rows if r["client_ip_hmac"] == ip_hmac
+                   and r["occurred_at"] >= now - timedelta(seconds=ac.IP_WINDOW_SECONDS)
+                   ) >= ac.IP_LIMIT:
+                raise ac._limited("ip_limit")
+            self.rows.append(self._row(
+                credential_id=credential.credential_id, occurred_at=now,
+                operation="mcp_control", reason=method, ok=True, client_ip_hmac=ip_hmac))
+
     def _gate(self, name: str) -> threading.Lock:
         with self._lock:
             return self._keys.setdefault(name, threading.Lock())
@@ -119,7 +133,8 @@ class MemoryAssistantStore:
                    if r["client_ip_hmac"] == ip_hmac and r["occurred_at"] >= since) >= ac.IP_LIMIT:
                 raise ac.api.LedgerError("rate_limited", reason="ip_limit")
             mine = [r for r in self.rows if r["credential_id"] == credential.credential_id]
-            counted = [r for r in mine if r["reason"] not in ac.LIMIT_REASONS]
+            counted = [r for r in mine if r["reason"] not in ac.LIMIT_REASONS
+                       and r["operation"] != "mcp_control"]
             hour = sum(1 for r in counted
                        if r["occurred_at"] >= moment - timedelta(seconds=ac.KEY_WINDOW_SECONDS))
             day = sum(1 for r in counted if r["operation"] == "submit" and r["ok"]

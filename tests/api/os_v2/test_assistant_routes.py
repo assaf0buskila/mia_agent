@@ -73,11 +73,15 @@ def error_of(response, status: int, code: str) -> dict:
 
 
 def test_exactly_the_three_bearer_routes_and_methods_exist():
-    found = {(m, p) for m, p in mounted() if p.startswith("/v1/assistant")}
+    found = {(m, p) for m, p in mounted() if p.startswith(ROOT + "/")}
     assert found == {
         ("GET", ROOT + "/context"),
         ("POST", ROOT + "/statement-batches"),
         ("GET", ROOT + "/statement-batches/{proposal_id}"),
+    }
+    assert {(m, p) for m, p in mounted()
+            if p.startswith("/v1/assistant") and not p.startswith(ROOT + "/")} == {
+        ("POST", "/v1/assistant/mcp"),
     }
 
 

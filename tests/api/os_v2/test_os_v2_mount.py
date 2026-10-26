@@ -6,12 +6,13 @@ is not postgres. ``app.router.routes`` holds included-router wrappers, so the mo
 read from the app's OpenAPI schema.
 
 E24: V2-19 fills the reads router with exactly its two §9 routes, and V2-26 (§12.3) fills the
-statements router with exactly its nine. Every other v2 router stays empty, except V2-24's commits
-router, which carries exactly its four routes.
+statements router with exactly its nine. V2-38 fills the MCP router with exactly one POST route.
+Every other v2 router stays empty, except V2-24's commits router with exactly its four routes.
 """
 
 import pytest
 from app.api import owner_step_up
+from app.api.assistant import mcp as assistant_mcp
 from app.api.assistant import os as assistant_os
 from app.api.os_v2 import commits, owner_keys, reads, statements
 from app.core.config import MiaEnv, Settings, get_settings
@@ -62,6 +63,7 @@ ASSISTANT_ROUTES = {
     ("POST", "/v1/assistant/os/statement-batches"),
     ("GET", "/v1/assistant/os/statement-batches/{proposal_id}"),
 }
+MCP_ROUTES = {("POST", "/v1/assistant/mcp")}
 # Segments that only v2 chunks may mount. V2-24 owns commits and deleted; the others stay unmounted.
 V2_ONLY_SEGMENTS = {
     "commits",
@@ -107,13 +109,15 @@ def test_v2_routers_mount_with_zero_routes(v2_routers):
             assert {(m, r.path) for r in router.routes for m in r.methods} == STEP_UP_ROUTES
         elif router is assistant_os.router:
             assert {(m, r.path) for r in router.routes for m in r.methods} == ASSISTANT_ROUTES
+        elif router is assistant_mcp.router:
+            assert {(m, r.path) for r in router.routes for m in r.methods} == MCP_ROUTES
         else:
-            assert router.routes == []  # the MCP router stays empty until V2-38
+            assert router.routes == []
     mounted = _mounted()
-    paths = {path for _, path in mounted}
     assert READS_ROUTES <= mounted
-    assert {(m, p) for m, p in mounted if p.startswith("/v1/assistant")} == ASSISTANT_ROUTES
-    assert not any(p.startswith("/v1/assistant/mcp") for p in paths)
+    assert {(m, p) for m, p in mounted if p.startswith("/v1/assistant")} == (
+        ASSISTANT_ROUTES | MCP_ROUTES)
+    assert {(m, p) for m, p in mounted if p.startswith("/v1/assistant/mcp")} == MCP_ROUTES
     assert {(m, p) for m, p in mounted if p.startswith("/v1/owner/auth/step-up")} == STEP_UP_ROUTES
     assert {(m, p) for m, p in mounted if _segment(p) in V2_ONLY_SEGMENTS} == (
         COMMITS_ROUTES | KEY_ROUTES)
