@@ -15,6 +15,7 @@ from tests.workers.test_os_authority import (
     SHA,
     World,
     codes,
+    good_evidence,
     stamp,
 )
 
@@ -410,7 +411,7 @@ def test_post_restore_stale_lower_epoch_record_also_takes_exception_path(recover
 
 def test_completed_restore_consumes_attempt_before_the_next_incident(recovery):
     w = recovery
-    w.put(cli.RESTORE_ATTEMPT, {"v": 1, "pre_restore_fence_record_present": True})
+    w.put(cli.RESTORE_ATTEMPT, attempt_document())
     assert step(w, "restore-begin").code == 0
     assert step(w, "restore-finish").code == 0
     assert not (w.dir / cli.RESTORE_ATTEMPT).exists()
@@ -423,7 +424,7 @@ def test_completed_restore_consumes_attempt_before_the_next_incident(recovery):
 
 def test_retry_repairs_attempt_archive_without_bumping_again(recovery, monkeypatch):
     w = recovery
-    w.put(cli.RESTORE_ATTEMPT, {"v": 1, "pre_restore_fence_record_present": True})
+    w.put(cli.RESTORE_ATTEMPT, attempt_document())
     assert step(w, "restore-begin").code == 0
     with monkeypatch.context() as patch:
         def unwritable(*args):
@@ -436,3 +437,264 @@ def test_retry_repairs_attempt_archive_without_bumping_again(recovery, monkeypat
     again = step(w, "restore-finish")
     assert again.code == 0 and again.out["outcome"] == "already_restored"
     assert w.state().epoch == 2 and not (w.dir / cli.RESTORE_ATTEMPT).exists()
+
+
+def attempt_document(attempt_id="1" * 32):
+    return {"v": 1, "attempt_id": attempt_id, "recorded_at": stamp(NOW),
+            "pre_restore_fence_record_present": True}
+
+
+@pytest.mark.parametrize("already_active", [False, True])
+def test_activate_archives_stale_attempt_before_normal_incident(tmp_path, already_active):
+    w = World(tmp_path)
+    assert w.run("init").code == 0
+    good_evidence(w)
+    if already_active:
+        assert w.run("activate").code == 0
+    old = attempt_document()
+    w.put(cli.RESTORE_ATTEMPT, old)
+    assert w.run("activate").code == 0
+    assert not (w.dir / cli.RESTORE_ATTEMPT).exists()
+    [archived] = w.dir.glob("restore-attempt-superseded-*.json")
+    assert w.get(archived.name) == old
+    w.clock[0] = NOW + timedelta(days=30)
+    assert w.run("fence").out["fence_record_minted_after_restore"] is False
+    assert step(w, "restore-begin").code == 0
+
+
+@pytest.mark.parametrize("already_shadow", [False, True])
+def test_rearm_archives_stale_attempt_without_extra_bump(tmp_path, already_shadow):
+    w = World(tmp_path)
+    assert w.run("init").code == 0
+    assert w.run("fence").code == 0
+    if already_shadow:
+        assert w.run("init", "--rearm").code == 0
+    old = attempt_document()
+    w.put(cli.RESTORE_ATTEMPT, old)
+    assert w.run("init", "--rearm").code == 0
+    assert w.state().epoch == 2 and w.state().states["core"] == "shadow"
+    if already_shadow:
+        # A no-op cannot close a new restore window; the next real activation does.
+        assert w.get(cli.RESTORE_ATTEMPT) == old
+        w.env.knobs.settings_epoch = 2
+        good_evidence(w)
+        for name in (cli.DRAIN, cli.PREFLIGHT):
+            w.put(name, {**w.get(name), "epoch": 2})
+        assert w.run("activate").out["outcome"] == "activated"
+    assert not (w.dir / cli.RESTORE_ATTEMPT).exists()
+    [archived] = w.dir.glob("restore-attempt-superseded-*.json")
+    assert w.get(archived.name) == old
+    assert w.run("fence").out["fence_record_minted_after_restore"] is False
+    assert step(w, "restore-begin", epoch=2).code == 0
+
+
+@pytest.mark.parametrize("activation", ["missing", "older", "wrong_epoch", "invalid_time"])
+def test_already_active_preserves_live_attempt_and_flags_fence(tmp_path, activation):
+    w = World(tmp_path)
+    assert w.run("init").code == 0
+    w.env.transition(WORKSPACE, "core", "active", expected_epoch=1, actor_owner_id=OWNER_ID)
+    old = attempt_document()
+    w.put(cli.RESTORE_ATTEMPT, old)
+    if activation != "missing":
+        w.put(cli.ACTIVATION, {
+            "v": 1, "kind": "activation", "release_sha": SHA,
+            "epoch": 2 if activation == "wrong_epoch" else 1,
+            "activated_at": "invalid" if activation == "invalid_time" else stamp(
+                NOW - timedelta(seconds=1) if activation == "older" else NOW),
+        })
+    w.clock[0] += timedelta(minutes=90)
+    for _ in range(2):
+        assert w.run("activate").out["outcome"] == "already_active"
+        assert w.get(cli.RESTORE_ATTEMPT) == old
+    assert w.run("fence").out["fence_record_minted_after_restore"] is True
+    assert codes(step(w, "restore-begin")) == ["restore_evidence_invalid"]
+
+
+def test_already_active_repairs_missing_activation_without_inventing_time(tmp_path):
+    w = World(tmp_path)
+    assert w.run("init").code == 0
+    w.env.transition(WORKSPACE, "core", "active", expected_epoch=1, actor_owner_id=OWNER_ID)
+    assert w.run("activate").out["outcome"] == "already_active"
+    assert w.get(cli.ACTIVATION) == {
+        "v": 1, "kind": "activation", "epoch": 1, "release_sha": SHA,
+        "activated_at": None,
+    }
+
+
+@pytest.mark.parametrize("command", ["activate", "rearm"])
+def test_archive_failure_reports_committed_outcome_and_warning(tmp_path, monkeypatch, command):
+    w = World(tmp_path)
+    assert w.run("init").code == 0
+    if command == "activate":
+        good_evidence(w)
+        args, outcome, epoch = ("activate",), "activated", 1
+    else:
+        assert w.run("fence").code == 0
+        args, outcome, epoch = ("init", "--rearm"), "rearmed", 2
+    old = attempt_document()
+    w.put(cli.RESTORE_ATTEMPT, old)
+
+    def unwritable(*args):
+        if command == "activate":
+            assert w.get(cli.ACTIVATION)["epoch"] == epoch
+        raise cli.Refusal("evidence_unwritable")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(w.deps.evidence, "set_aside", unwritable)
+        result = w.run(*args)
+    assert result.code == 0 and result.out["outcome"] == outcome
+    assert result.out["evidence_written"] is False
+    assert result.out["warnings"] == ["evidence_unwritable"]
+    assert w.state().epoch == epoch
+    assert w.get(cli.RESTORE_ATTEMPT) == old
+    retry = w.run(*args)
+    assert retry.code == 0 and w.state().epoch == epoch
+    if command == "activate":
+        assert not (w.dir / cli.RESTORE_ATTEMPT).exists()
+        assert w.get(cli.ACTIVATION)["epoch"] == epoch
+    else:
+        assert w.get(cli.RESTORE_ATTEMPT) == old
+
+
+def test_restore_begin_pins_attempt_and_finish_archives_only_its_own(recovery):
+    w = recovery
+    old = attempt_document()
+    w.put(cli.RESTORE_ATTEMPT, old)
+    assert step(w, "restore-begin").code == 0
+    assert w.get(cli.RESTORE_SESSION)["restore_attempt_id"] == old["attempt_id"]
+    assert step(w, "restore-begin").code == 0
+    assert step(w, "restore-finish").code == 0
+    assert not (w.dir / cli.RESTORE_ATTEMPT).exists()
+    [archived] = w.dir.glob("restore-attempt-superseded-*.json")
+    assert w.get(archived.name) == old
+
+
+@pytest.mark.parametrize("first_attempt", [False, True])
+def test_stale_finish_retry_preserves_new_attempt_and_stops_second_incident(
+    recovery, first_attempt,
+):
+    w = recovery
+    if first_attempt:
+        w.put(cli.RESTORE_ATTEMPT, attempt_document())
+    assert step(w, "restore-begin").code == 0
+    assert step(w, "restore-finish").code == 0
+    new = attempt_document("2" * 32)
+    w.put(cli.RESTORE_ATTEMPT, new)
+    w.clock[0] = NOW + timedelta(days=1)
+    stale = step(w, "restore-finish")
+    assert stale.code == 0 and stale.out["outcome"] == "already_restored"
+    assert w.get(cli.RESTORE_ATTEMPT) == new
+    assert w.state().epoch == 2
+    w.clock[0] += timedelta(minutes=90)
+    fence = w.run("fence")
+    assert fence.code == 0 and fence.out["fence_record_minted_after_restore"] is True
+    begin = step(w, "restore-begin", epoch=2)
+    assert codes(begin) == ["restore_evidence_invalid"]
+    assert begin.out["rto_within_limit"] is None and begin.out["rpo_within_limit"] is None
+
+
+def test_legacy_session_retry_cannot_consume_new_attempt(recovery):
+    w = recovery
+    assert step(w, "restore-begin").code == 0
+    session = w.get(cli.RESTORE_SESSION)
+    session.pop("restore_attempt_id", None)  # session made before WP4b
+    w.put(cli.RESTORE_SESSION, session)
+    w.env.transition(WORKSPACE, "core", "active", expected_epoch=1, actor_owner_id=OWNER_ID)
+    new = attempt_document("2" * 32)
+    w.put(cli.RESTORE_ATTEMPT, new)
+    assert step(w, "restore-finish").out["outcome"] == "already_restored"
+    assert w.get(cli.RESTORE_ATTEMPT) == new
+
+
+def test_finish_first_run_does_not_consume_replaced_attempt(recovery):
+    w = recovery
+    w.put(cli.RESTORE_ATTEMPT, attempt_document())
+    assert step(w, "restore-begin").code == 0
+    new = attempt_document("2" * 32)
+    w.put(cli.RESTORE_ATTEMPT, new)
+    assert step(w, "restore-finish").code == 0
+    assert w.get(cli.RESTORE_ATTEMPT) == new
+
+
+def test_second_fence_warns_when_preserving_higher_epoch(recovery):
+    w = recovery
+    original = {**w.get(cli.LEDGER_FENCE), "epoch": 2}
+    w.put(cli.LEDGER_FENCE, original)
+    fence = w.run("fence")
+    assert fence.code == 0 and w.state().states["core"] == "fenced"
+    assert w.get(cli.LEDGER_FENCE) == original
+    assert fence.out["warnings"] == ["restore_epoch_mismatch"]
+    assert fence.out["evidence_written"] is False
+
+
+def test_unreadable_attempt_never_blocks_fence_and_restore_stops(tmp_path):
+    w = World(tmp_path)
+    assert w.run("init").code == 0
+    w.dir.mkdir(parents=True, exist_ok=True)
+    (w.dir / cli.RESTORE_ATTEMPT).write_text("[]")
+    fence = w.run("fence")
+    assert fence.code == 0 and w.state().states["core"] == "fenced"
+    assert fence.out["warnings"] == ["restore_evidence_invalid"]
+    assert codes(step(w, "restore-begin")) == ["restore_evidence_invalid"]
+
+
+@pytest.mark.parametrize("command", ["activate", "rearm"])
+def test_attempt_archive_failure_is_retryable_after_activation_or_rearm(
+    tmp_path, monkeypatch, command,
+):
+    w = World(tmp_path)
+    assert w.run("init").code == 0
+    if command == "activate":
+        good_evidence(w)
+        args = ("activate",)
+        epoch = 1
+    else:
+        assert w.run("fence").code == 0
+        args = ("init", "--rearm")
+        epoch = 2
+    w.put(cli.RESTORE_ATTEMPT, attempt_document())
+    with monkeypatch.context() as patch:
+        def unwritable(*args):
+            raise cli.Refusal("evidence_unwritable")
+        patch.setattr(w.deps.evidence, "set_aside", unwritable)
+        result = w.run(*args)
+        assert result.code == 0 and result.err == ""
+        assert result.out["outcome"] == ("activated" if command == "activate" else "rearmed")
+        assert result.out["evidence_written"] is False
+        assert result.out["warnings"] == ["evidence_unwritable"]
+    assert w.state().epoch == epoch
+    assert (w.dir / cli.RESTORE_ATTEMPT).exists()
+    assert w.run(*args).code == 0
+    if command == "rearm":
+        # No-op rearm retains the failed archive; a real activation closes the window.
+        assert (w.dir / cli.RESTORE_ATTEMPT).exists()
+        w.env.knobs.settings_epoch = epoch
+        good_evidence(w)
+        for name in (cli.DRAIN, cli.PREFLIGHT):
+            w.put(name, {**w.get(name), "epoch": epoch})
+        assert w.run("activate").out["outcome"] == "activated"
+    else:
+        assert w.get(cli.ACTIVATION)["epoch"] == epoch
+    assert w.state().epoch == epoch and not (w.dir / cli.RESTORE_ATTEMPT).exists()
+
+
+@pytest.mark.parametrize("change", [{"attempt_id": None}, {"attempt_id": "invalid"},
+                                     {"recorded_at": "invalid"}])
+def test_restore_begin_refuses_unidentifiable_attempt_before_transition(recovery, change):
+    w = recovery
+    w.put(cli.RESTORE_ATTEMPT, {**attempt_document(), **change})
+    assert codes(step(w, "restore-begin")) == ["restore_evidence_invalid"]
+    assert w.state().states["core"] == "fenced"
+    assert not (w.dir / cli.RESTORE_SESSION).exists()
+
+
+def test_finish_preserves_unreadable_attempt_and_reports_correct_warning(recovery):
+    w = recovery
+    w.put(cli.RESTORE_ATTEMPT, attempt_document())
+    assert step(w, "restore-begin").code == 0
+    (w.dir / cli.RESTORE_ATTEMPT).write_text("[]")
+    done = step(w, "restore-finish")
+    assert done.code == 0 and w.state().epoch == 2
+    assert done.out["evidence_written"] is False
+    assert done.out["warnings"] == ["restore_evidence_invalid"]
+    assert (w.dir / cli.RESTORE_ATTEMPT).read_text() == "[]"

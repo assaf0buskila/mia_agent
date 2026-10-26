@@ -415,12 +415,50 @@ def test_restore_containment_order_exception_and_reason_table():
     assert "owner's explicit exception procedure" in section
     assert "fence_record_minted_after_restore" in section and "null" in section
     assert "restore-attempt.json" in section and "pre_restore_fence_record_present" in section
+    assert "Always restore through `sudo mia restore`" in section
+    assert "otherwise the incident timing signal is lost" in section
     assert "run status after `mia restore` and compare the epoch" in section
     table = RUNBOOK.split("Other refusals of the CLI:", 1)[1]
     for code in ("restore_incomplete", "restore_rpo_exceeded", "restore_evidence_invalid",
                  "restore_epoch_mismatch", "restore_epoch_required", "restore_epoch_invalid",
                  "restore_rto_exceeded"):
         assert re.search(rf"^\| `{code}` \|", table, re.M), code
+
+
+def test_attempt_write_failure_documents_no_marker_and_service_restart():
+    readme = (ROOT / "ops/gcp/backup/README.md").read_text(encoding="utf-8")
+    paragraph = readme.split("Failure to write this attempt", 1)[1].split("\n\n", 1)[0]
+    reason = next(line for line in readme.splitlines()
+                  if line.startswith("| `restore_evidence_invalid` |"))
+    for text in (paragraph, reason):
+        assert "no new incomplete marker" in text
+        assert "database untouched" in text
+        assert "services remain stopped" in text
+        assert "sudo mia settings" in text and "start_services" in text
+
+
+def test_legacy_attempt_documents_manual_set_aside_then_current_restore():
+    section = re.sub(r"\s+", " ", section_of("## 6. "))
+    assert "**Manual attempt set-aside**" in section
+    assert "sudo mv -n /var/lib/mia/os-authority/restore-attempt.json" in section
+    assert "restore-attempt-superseded-$(date -u +%Y%m%dT%H%M%SZ).json" in section
+    assert "under `/var/lock/mia-state.lock`" in section
+    assert "legacy attempt without `attempt_id`" in section
+    assert "redo `sudo mia restore <dump>` with the current wrapper" in section
+    assert "does not authorize clearing a live recovery attempt" in section
+    assert "coordinator must abandon the old attempt" in section
+    assert "confirm no restore or authority operation is running" in section
+    assert "under a fresh explicit restore go" in section
+
+
+def test_aborted_restore_documents_same_manual_set_aside_after_cutover():
+    section = re.sub(r"\s+", " ", section_of("## 6. "))
+    assert "aborted before `DROP DATABASE`" in section
+    assert "after cutover with no later activation" in section
+    assert "use **Manual attempt set-aside**" in section
+    assert "only after independently verifying that no recovery is live" in section
+    assert "already-shadow retry leaves the attempt" in section
+    assert "`activated_at` at or after its `recorded_at`" in section
 
 
 def test_every_sudo_mia_command_is_a_command_of_the_vm_script():
