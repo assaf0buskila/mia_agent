@@ -3193,8 +3193,8 @@ therefore **NOT_INCLUDED**. No throwaway VM, workbook copy or TEST Script is cre
 1. **The blockers it found are fixed and merged:**
    - E35, the mirror deadlock (WP1);
    - the drift checker also compares `date_1904`, sheet `state` and the sheet set and order (WP2).
-2. **An automated cutover-sequence test in CI** proves T6→T7 under the freeze: mirror verified, zero drift. This is WP12, and
-   its exact scope is set at design time.
+2. **An automated cutover-sequence test in CI** proves T6→T7 with mirror verified under the freeze;
+   WP2's drift tests prove the workbook-level drift check. This is WP12, and its exact scope is set at design time.
 3. **A restore drill on Assaf's PC** (`ops/gcp/backup/restore_drill.py`) runs fewer than 7 days before activation, because the
    preflight's `restore_drill_too_old` still applies.
 4. **The live run** happens in a quiet window that Assaf names, with section 5's rollback ready before the first non-import
