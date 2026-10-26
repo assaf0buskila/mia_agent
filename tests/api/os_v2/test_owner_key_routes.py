@@ -1,4 +1,4 @@
-"""E37 owner routes: request, Telegram approval, same-session one-time collection.
+"""E37a owner routes: request, Telegram approval, same login chain one-time collection.
 
 The real app uses its cookie/Origin/CSRF guards, SQLite session/card storage and FakeLedger.
 No provider call is made; Telegram messages are recorded. The final flow uses and revokes the

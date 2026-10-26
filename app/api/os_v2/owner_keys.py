@@ -5,9 +5,9 @@ Under ``/v1/owner/os/unified`` (the module name is erratum E34's; the URL is unc
 * ``GET  /assistant-credentials``: the list, no secret;
 * ``POST /assistant-credentials`` with ``{label, kind, expires_in_days?}``: commits a pending
   E37 request and immutable Telegram card, then sends the card and returns 202;
-* ``GET /assistant-credentials/issue-requests/{id}``: status for the requesting session;
+* ``GET /assistant-credentials/issue-requests/{id}``: status for the requesting login chain;
 * ``POST .../issue-requests/{id}/collect``: after Telegram approval, that same verified OS
-  session collects the list item and one-time key within ten minutes;
+  login chain collects the list item and one-time key within ten minutes;
 * ``POST /assistant-credentials/{id}/revoke`` and ``POST /assistant-credentials/revoke-all``: return
   the list. Revoking a key rejects that key's pending batches in the same ledger transaction.
 

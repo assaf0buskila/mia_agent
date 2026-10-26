@@ -1,4 +1,4 @@
-"""E37: Telegram approves an immutable request; only its OS session can mint once.
+"""E37a: Telegram approves an immutable request; only the same OS login chain can mint once.
 
 The main DB card decision commits before this ledger CAS. There are no provider claims:
 a failed ledger transaction is retried by the next tap. Collection locks the request before

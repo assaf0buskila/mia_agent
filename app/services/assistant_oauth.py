@@ -240,10 +240,10 @@ class AssistantOAuthService(keys.AssistantCredentialService):
             if tx.poisoned is not None:
                 raise tx.poisoned
 
-    def account(self, ip, operation):
+    def account(self, ip, operation, *, reason="oauth_attempt"):
         enabled(self._settings)
         self._store.oauth_attempt(ip_hmac=keys.client_ip_hmac(self._settings, ip),
-                                  operation=operation)
+                                  operation=operation, reason=reason)
 
     def authorize(self, params):
         enabled(self._settings)

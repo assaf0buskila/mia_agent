@@ -160,18 +160,23 @@ async def mcp(request: Request, settings: Settings = Depends(get_settings)) -> R
                            write=True)
     try:
         keys.check_enabled(settings)
+        keys.check_bearer_headers(cookie="cookie" in request.headers,
+                                  authorization=request.headers.getlist("authorization"))
+        json_body = rest._json_content_type(request)
+        raw, size, outcome = await rest._read_outcome(
+            request, rest._read_body, rest.BODY_TIMEOUT_SECONDS)
         async with keys.async_bearer_request():
             gateway = rest.gateway_for(settings)
             caller = await rest._bearer_threadpool(
                 gateway.authenticate, cookie="cookie" in request.headers,
                 authorization=request.headers.getlist("authorization"),
                 ip=client_ip(request, settings=settings), resource=request.url.path)
-            raw, size, too_big = await rest._read_body(request)
-            if too_big:
-                await rest._bearer_threadpool(gateway.control, caller, "body_too_large")
-                raise api.LedgerError("validation_error", details={"reason": "body_too_large"},
-                                      reason="body_too_large")
-            if not rest._json_content_type(request):
+            if outcome != "ok":
+                reason = rest._body_reason(outcome)
+                await rest._bearer_threadpool(gateway.control, caller, reason)
+                raise api.LedgerError("validation_error", details={"reason": reason},
+                                      reason=reason)
+            if not json_body:
                 await rest._bearer_threadpool(gateway.control, caller, "unsupported_media")
                 raise api.LedgerError("validation_error", details={"reason": "content_type"},
                                       reason="content_type")

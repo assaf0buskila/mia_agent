@@ -33,6 +33,7 @@ from urllib.parse import urlsplit
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
+from starlette.requests import ClientDisconnect
 
 from app.api.os_v2.errors import ledger_error_response
 from app.core.config import Settings, get_settings
@@ -48,6 +49,7 @@ from app.services.os_ledger.statements import (
 
 ROOT = "/v1/assistant/os"
 BODY_CAP = 131_072  # 128 KiB, §17.2 / §10.5
+BODY_TIMEOUT_SECONDS = 10
 SOURCES = {"ASSISTANT_CLAUDE": CLAUDE, "ASSISTANT_GPT": GPT}
 SUMMARY_KEYS = ("line_count", "business_count", "personal_count", "unassigned_count")
 _HEADERS = {
@@ -118,19 +120,39 @@ def _error(exc: api.LedgerError, *, write: bool) -> JSONResponse:
 
 
 async def _read_body(request: Request) -> tuple[bytes, int, bool]:
+    return await _stream_body(request, BODY_CAP)
+
+
+async def _stream_body(request: Request, cap: int) -> tuple[bytes, int, bool]:
     """The body, its size and whether it is over the cap. Streamed: it never holds more than the
     cap, and an oversized body is not read to the end."""
     declared = request.headers.get("content-length", "")
-    if declared.isascii() and declared.isdigit() and int(declared) > BODY_CAP:
+    if declared.isascii() and declared.isdigit() and int(declared) > cap:
         return b"", min(int(declared), 2_147_483_647), True
     chunks: list[bytes] = []
     size = 0
     async for chunk in request.stream():
         size += len(chunk)
-        if size > BODY_CAP:
+        if size > cap:
             return b"", size, True
         chunks.append(chunk)
     return b"".join(chunks), size, False
+
+
+async def _read_outcome(request: Request, reader, timeout: float) -> tuple[bytes, int, str]:
+    """Only record the pre-slot read; authentication and accounting decide the refusal later."""
+    try:
+        async with asyncio.timeout(timeout):
+            raw, size, too_big = await reader(request)
+        return raw, size, "too_large" if too_big else "ok"
+    except TimeoutError:
+        return b"", 0, "timeout"
+    except ClientDisconnect:
+        return b"", 0, "disconnect"
+
+
+def _body_reason(outcome: str) -> str:
+    return "body_too_large" if outcome == "too_large" else "body_timeout"
 
 
 async def _bearer_threadpool(func, *args, **kwargs):
@@ -167,19 +189,22 @@ def _json_content_type(request: Request) -> bool:
 
 async def _serve(
     request: Request, settings: Settings, operation: str, *, body: bool,
-    make_work: Callable[[keys.AssistantGateway, keys.Caller, tuple[bytes, int, bool]],
+    make_work: Callable[[keys.AssistantGateway, keys.Caller, tuple[bytes, int, str]],
                         Callable[[keys.Facts], dict[str, Any]]],
 ) -> JSONResponse:
     write = request.method != "GET"
     try:
         keys.check_enabled(settings)  # a disabled feature touches no ledger and no database
+        keys.check_bearer_headers(cookie="cookie" in request.headers,
+                                  authorization=request.headers.getlist("authorization"))
+        payload = (await _read_outcome(request, _read_body, BODY_TIMEOUT_SECONDS)
+                   if body else (b"", 0, "ok"))
         async with keys.async_bearer_request():
             gateway = gateway_for(settings)
             caller = await _bearer_threadpool(
                 gateway.authenticate, cookie="cookie" in request.headers,
                 authorization=request.headers.getlist("authorization"),
                 ip=client_ip(request, settings=settings))
-            payload = await _read_body(request) if body else (b"", 0, False)
             result = await _bearer_threadpool(
                 gateway.run, caller, operation, make_work(gateway, caller, payload))
     except api.LedgerError as exc:
@@ -209,13 +234,14 @@ async def submit_batch(request: Request, settings: Settings = Depends(get_settin
     json_body = _json_content_type(request)
 
     def make_work(gateway, caller, payload):
-        raw, size, too_big = payload
+        raw, size, outcome = payload
 
         def run(facts: keys.Facts) -> dict[str, Any]:
             facts.bytes = size
-            if too_big:
-                raise api.LedgerError("validation_error", details={"reason": "body_too_large"},
-                                      reason="body_too_large")
+            if outcome != "ok":
+                reason = _body_reason(outcome)
+                raise api.LedgerError("validation_error", details={"reason": reason},
+                                      reason=reason)
             if not json_body:
                 raise api.LedgerError("validation_error", details={"reason": "content_type"},
                                       reason="content_type")

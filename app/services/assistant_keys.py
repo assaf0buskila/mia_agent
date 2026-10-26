@@ -89,18 +89,6 @@ _bearer_slots = threading.BoundedSemaphore(3)
 _BEARER_WAIT_SECONDS = 2
 
 
-@contextmanager
-def bearer_request():
-    """Reserve one pool slot for the entire bearer request; never nest this acquisition."""
-    if not _bearer_slots.acquire(timeout=_BEARER_WAIT_SECONDS):
-        _LOG.warning("os_assistant op=admit outcome=refused reason=bearer_busy")
-        raise api.LedgerError("ledger_unavailable", reason="bearer_busy")
-    try:
-        yield
-    finally:
-        _bearer_slots.release()
-
-
 @asynccontextmanager
 async def async_bearer_request():
     """Reserve on the event loop so a cancelled waiter cannot acquire later in a worker.
@@ -569,7 +557,7 @@ class PgAssistantStore:
         """S1/S1b under R2a: lock IP, recount, then insert one row without key usage."""
         if method not in {"initialize", "ping", "tools_list", "notification", "invalid_request",
                           "method_not_found", "invalid_params", "body_too_large",
-                          "unsupported_media"}:
+                          "unsupported_media", "body_timeout"}:
             raise ValueError("invalid_control_method")
         with self._begin() as conn:
             self._lock(conn, f"ip:{ip_hmac}")
@@ -580,10 +568,13 @@ class PgAssistantStore:
                          operation="mcp_control", reason=method, ok=True, facts=Facts(),
                          ip_hmac=ip_hmac)
 
-    def oauth_attempt(self, *, ip_hmac: str, operation: str) -> None:
+    def oauth_attempt(self, *, ip_hmac: str, operation: str,
+                      reason: str = "oauth_attempt") -> None:
         """Public OAuth shares R2a's IP lock/recount with every bearer audit writer."""
         if operation not in {"oauth_authorize", "oauth_token"}:
             raise ValueError("invalid_oauth_operation")
+        if reason not in {"oauth_attempt", "body_timeout"}:
+            raise ValueError("invalid_oauth_reason")
         with self._begin() as conn:
             self._lock(conn, f"ip:{ip_hmac}")
             now = conn.execute(text("SELECT clock_timestamp()")).scalar_one()
@@ -591,7 +582,7 @@ class PgAssistantStore:
                            since=now - timedelta(seconds=IP_WINDOW_SECONDS)) >= IP_LIMIT:
                 raise _limited("ip_limit")
             self._insert(conn, credential_id=None, moment=now, operation=operation,
-                         reason="oauth_attempt", ok=True, facts=Facts(), ip_hmac=ip_hmac)
+                         reason=reason, ok=True, facts=Facts(), ip_hmac=ip_hmac)
 
     @contextmanager
     def slot(self, credential: StoredCredential, *, ip_hmac: str, operation: str,
@@ -654,6 +645,14 @@ def check_enabled(settings: Any) -> None:
         raise _uniform("assistant_off")
 
 
+def check_bearer_headers(*, cookie: bool, authorization: Sequence[str]) -> None:
+    """DB-free checks, shared with the routes before they read any client bytes."""
+    if cookie:
+        raise _uniform("cookie_present")
+    if len(authorization) != 1 or BEARER.fullmatch(authorization[0]) is None:
+        raise _uniform("header_invalid")
+
+
 class AssistantGateway:
     """§17.2's bearer enforcement order, then the per-key limits and the audit row."""
 
@@ -678,10 +677,7 @@ class AssistantGateway:
         """
         settings = self._settings
         check_enabled(settings)
-        if cookie:
-            raise _uniform("cookie_present")
-        if len(authorization) != 1 or BEARER.fullmatch(authorization[0]) is None:
-            raise _uniform("header_invalid")
+        check_bearer_headers(cookie=cookie, authorization=authorization)
         ip_hmac = client_ip_hmac(settings, ip)
         now = self._clock()
         if self._store.ip_calls(ip_hmac, now - timedelta(seconds=IP_WINDOW_SECONDS)) >= IP_LIMIT:

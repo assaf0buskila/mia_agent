@@ -22,6 +22,7 @@ from app.services.os_ledger import api
 
 router = APIRouter()
 BODY_CAP = 4096
+BODY_TIMEOUT_SECONDS = 5
 _HEADERS = {"Cache-Control": "no-store", "Pragma": "no-cache",
             "Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff"}
 _LOG = logging.getLogger("mia.os_assistant")
@@ -64,19 +65,8 @@ def _params(raw: bytes) -> dict[str, str]:
     return result
 
 
-async def _form_body(request: Request) -> bytes:
-    if request.headers.get("content-type", "").partition(";")[0].strip().lower() != (
-            "application/x-www-form-urlencoded"):
-        raise ValueError("content_type")
-    # Streaming is authoritative, including chunked bodies without a Content-Length.
-    chunks = []
-    size = 0
-    async for chunk in request.stream():
-        size += len(chunk)
-        if size > BODY_CAP:
-            raise ValueError("body_too_large")
-        chunks.append(chunk)
-    return b"".join(chunks)
+async def _form_body(request: Request) -> tuple[bytes, int, bool]:
+    return await rest._stream_body(request, BODY_CAP)
 
 
 def _metadata(settings: Settings, *, protected: bool) -> JSONResponse:
@@ -142,13 +132,20 @@ async def authorize(request: Request, settings: Settings = Depends(get_settings)
 async def token(request: Request, settings: Settings = Depends(get_settings)) -> JSONResponse:
     try:
         oauth.enabled(settings)
+        form_body = request.headers.get("content-type", "").partition(";")[0].strip().lower() == (
+            "application/x-www-form-urlencoded")
+        raw, _size, outcome = (await rest._read_outcome(request, _form_body, BODY_TIMEOUT_SECONDS)
+                               if form_body else (b"", 0, "ok"))
         async with keys.async_bearer_request():
             service = service_for(settings)
+            accounting = {"reason": "body_timeout"} if outcome in {"timeout", "disconnect"} else {}
             await rest._bearer_threadpool(service.account, client_ip(request, settings=settings),
-                                         "oauth_token")
+                                         "oauth_token", **accounting)
             if request.scope["path"] != "/oauth/token":
                 return _oauth_error("invalid_request")
-            params = _params(await _form_body(request))
+            if not form_body or outcome != "ok":
+                return _oauth_error("invalid_request")
+            params = _params(raw)
             result = await rest._bearer_threadpool(service.token, params)
             return JSONResponse(result, headers=_HEADERS)
     except ValueError:
