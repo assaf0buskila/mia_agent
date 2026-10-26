@@ -107,6 +107,7 @@ ERROR_CODES: Mapping[str, ErrorSpec] = MappingProxyType({
     "issue_not_approved": _spec(409),
     "issue_rejected": _spec(409),
     "issue_collected": _spec(409),
+    "issue_cancelled": _spec(409),
     "issue_expired": _spec(410),
     "idempotency_mismatch": _spec(409),
     "decision_request_mismatch": _spec(409),

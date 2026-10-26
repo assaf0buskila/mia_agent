@@ -9,6 +9,8 @@ import json
 import re
 from pathlib import Path
 
+from app.api.assistant import batch_schema as wire
+
 ROOT = Path(__file__).resolve().parents[3]
 
 
@@ -48,14 +50,14 @@ def schema_from_format():
         values = re.search(r"`" + name + r"` \(([^)]+)\)", left)[1]
         return [None if v == "null" else v for v in re.findall(r"`([^`]+)`", values)]
 
-    date = {"type": "string", "format": "date", "pattern": r"^\d{4}-\d{2}-\d{2}$"}
+    date = wire.DATE
     amount = {"type": "integer", "minimum": 1}
     properties = {
         "txn_date": date, "merchant_display": {"type": "string", "minLength": 1,
                                                 "maxLength": bound("merchant_display")},
         "amount_minor": amount, "kind": {"type": "string", "enum": choices("kind")},
         "currency": {"type": "string", "const": choices("currency")[0]},
-        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "confidence": wire.CONFIDENCE,
         "suggested_tag": {"enum": choices("suggested_tag")},
         "original_amount_minor": amount,
         "original_currency": {"type": "string", "pattern": "^[A-Z]{3}$", "not": {"const": "ILS"}},
@@ -71,10 +73,8 @@ def schema_from_format():
                                  "original_currency": ["original_amount_minor"]}
     return object_schema({
         "schema": {"type": "string", "const": example["schema"]},
-        "client_batch_id": {"type": "string", "pattern":
-                            "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"},
-        "account_label": {"type": "string", "minLength": 1,
-                          "maxLength": bound("account_label"), "pattern": r"^(?!.*\d{8}).*$"},
+        "client_batch_id": wire.UUID,
+        "account_label": {**wire.ACCOUNT_LABEL, "maxLength": bound("account_label")},
         "charge_date": date,
         "lines": {"type": "array", "minItems": 1, "maxItems": max_lines, "items": line},
     }, list(example))

@@ -58,6 +58,15 @@ in UTC, so the runtime gets only SELECT, INSERT and UPDATE of `status`, `approve
 `collected_at`, `credential_id`. Every new constraint is pinned in `role_policy.py`.
 The migration contains no grants or application-data writes.
 
+## E37a assistant follow-ups
+
+`20261025_assaf_os_assistant_followups.sql` follows E37 in the same allowlist and
+atomic digest journal. It replaces the issue status CHECK by its exact name to admit
+`cancelled`, used by workspace revoke-all for pending and approved uncollected requests.
+It also indexes audit admission counts by `(workspace_id, client_ip_hmac, occurred_at)`
+and `(workspace_id, operation, occurred_at)`. Global invalid-lookup budget counts filter
+by operation. Runtime and retention grants, including audit DELETE, are unchanged.
+
 ## Explicit operator job and production gate
 
 **Do not run in production until V2-14a / issue #151 APP-ROLE-DEMOTE has landed and
