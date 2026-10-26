@@ -582,6 +582,10 @@ class AuthorityAdmin(Protocol):  # privileged DSN, CLI jobs only
         self, workspace_id: str, owner_id: str, epoch: int
     ) -> AuthoritySnapshot: ...
     def state(self, workspace_id: str) -> AuthoritySnapshot: ...
+    def reset_mirror(
+        self, workspace_id: str, *, expected_epoch: int, actor_owner_id: str,
+        destination_binding: str, audit: Callable[[], None],
+    ) -> bool: ...
     def transition(
         self,
         workspace_id: str,

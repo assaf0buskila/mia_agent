@@ -11,9 +11,11 @@ import json
 import os
 import re
 import secrets
+import shutil
 import subprocess
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import cached_property
 from pathlib import Path
 
 DATABASE = "mia"
@@ -332,6 +334,12 @@ class Result:
 class Runner:
     """Runs one external command. It reports failure as a Result instead of raising."""
 
+    @cached_property
+    def _gcloud(self) -> str:
+        # Resolve once for every backup/restore/provision call through this runner.
+        # Keep the literal fallback so a missing SDK follows the existing exit-127 path.
+        return shutil.which("gcloud") or shutil.which("gcloud.cmd") or "gcloud"
+
     def run(
         self,
         argv: list[str],
@@ -345,6 +353,8 @@ class Runner:
         argv = [str(part) for part in argv]
         opened = []
         try:
+            if argv[0] == "gcloud":
+                argv[0] = self._gcloud
             options: dict = {"stderr": subprocess.PIPE, "check": False, "timeout": timeout}
             if env:
                 options["env"] = {**os.environ, **env}

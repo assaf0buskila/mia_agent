@@ -42,7 +42,7 @@ from app.integrations.sheets_mirror import (
     MirrorTransportError,
     target_refusal,
 )
-from app.services.os_ledger import api
+from app.services.os_ledger import api, outbox
 from app.services.os_ledger import mirror_projection as mp
 from app.services.os_ledger.outbox import (
     MirrorState,
@@ -50,7 +50,6 @@ from app.services.os_ledger.outbox import (
     OutboxEvent,
     OutboxStore,
     PgOutbox,
-    backoff,
     destination_binding,
 )
 
@@ -145,7 +144,7 @@ def _event_refusal(event: OutboxEvent, epoch: int) -> str | None:
 
 
 def _finish(deps: MirrorDeps, event: OutboxEvent, status: str, code: str | None, now: datetime):
-    retry_at = now + backoff(event.attempts) if status in {"pending", "unknown"} else now
+    retry_at = now + outbox.retry_delay(status, event.attempts)
     if not deps.outbox.finish(event, event.lease_generation, status, code, retry_at):
         _LOG.info("os_mirror op=finish outcome=lost_lease reason=generation_changed")
 
@@ -195,6 +194,10 @@ def _publish(
         return TickResult("deferred", exc.code, len(events))
     version = projection.observed_version
     in_conflict = state.status == "conflict"
+    must_rewrite = (
+        state.status in {"pending", "delayed", "fenced"}
+        and state.verified_version == 0 and state.last_verified_at is None
+    )
     # A synced mirror at this exact version, with nothing to deliver: read only, never write.
     drift_check = (
         anti_entropy and not events and state.status == "synced"
@@ -207,7 +210,7 @@ def _publish(
         state.status == "unknown" or any(event.attempts > 1 for event in events)
     )
     coverage: Mapping[str, Any] = state.scan_coverage
-    if drift_check or read_first:
+    if drift_check or read_first or must_rewrite:
         try:
             before = deps.transport.batch_get(mp.read_ranges())
         except MirrorTransportError as exc:
@@ -215,7 +218,7 @@ def _publish(
                 # Nothing was written and nothing was learned: the mirror stays synced.
                 return TickResult("delayed", exc.code, 0)
             return _transport_failed(deps, events, state, version, now, exc.code, sent=False)
-        if mp.readback_equal(projection, before):
+        if not must_rewrite and mp.readback_equal(projection, before):
             return _verified(deps, events, version, now, before)
         if drift_check:
             deps.outbox.record_result(
@@ -223,6 +226,9 @@ def _publish(
                 coverage=mp.coverage_of(before),
             )
             return TickResult("conflict", "drift", 0)
+        # Empty/reset progress has no trusted extents. Scan first to clear old trailing cells,
+        # then rewrite even if equal. Keep this requirement through known pre-write failures:
+        # delayed/pending without any verification cannot take the read-only retry shortcut.
         coverage = mp.coverage_of(before)
 
     deps.outbox.record_attempt(version, now)
@@ -274,11 +280,25 @@ def _tick(
     if core not in publishing:
         _finish_all(deps, events, "pending", "authority_not_publishing", now)
         if core == "fenced":
+            clean = (
+                state.projected_version == state.verified_version
+                and (
+                    (state.status == "synced" and state.last_error_code is None)
+                    or (state.status == "fenced" and state.last_error_code == "authority_fenced")
+                    or (
+                        state.status == "pending" and state.projected_version == 0
+                        and state.last_error_code is None and state.last_attempt_at is None
+                        and state.last_verified_at is None
+                    )
+                )
+            )
+            # Equal versions alone cannot distinguish drift or a same-version failed rewrite.
+            code = "authority_fenced" if clean else "authority_fenced_unclean"
             deps.outbox.record_result(
                 status="fenced", version=snapshot.observed_version, verified=False,
-                error_code="authority_fenced", now=now, coverage=None,
+                error_code=code, now=now, coverage=None,
             )
-            return TickResult("paused", "authority_fenced", len(events))
+            return TickResult("paused", code, len(events))
         return TickResult("paused", "authority_not_publishing", len(events))
     deliver = []
     for event in events:

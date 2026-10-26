@@ -787,6 +787,17 @@ def v228_world(env: Env, settings: Settings):
     return world, LeadStore(v228.make_store_factory(env.tmp_path)())
 
 
+def test_real_authorize_install_preserves_module_identity(monkeypatch):
+    import importlib
+
+    from app.services.os_ledger import authorize
+
+    with monkeypatch.context() as patch:
+        v228.LedgerWorld().install(patch, authorize=False)
+        assert importlib.import_module(v228.AUTHORIZE_MODULE) is authorize
+    assert importlib.import_module(v228.AUTHORIZE_MODULE) is authorize
+
+
 def owner_cards(store) -> int:
     return store.session.query(ApprovalRow).count()
 
