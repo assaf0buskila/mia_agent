@@ -49,7 +49,7 @@ def _invalid_authorization() -> PlainTextResponse:
     return PlainTextResponse("Invalid authorization request.", status_code=400, headers=_HEADERS)
 
 
-def _params(raw: bytes) -> dict[str, str]:
+def _params(raw: bytes, known: frozenset[str]) -> dict[str, str]:
     if len(raw) > BODY_CAP:
         raise ValueError("body_too_large")
     value = raw.decode("utf-8", errors="strict")
@@ -62,7 +62,7 @@ def _params(raw: bytes) -> dict[str, str]:
         if name in result:
             raise ValueError("duplicate_parameter")
         result[name] = item
-    return result
+    return {k: v for k, v in result.items() if k in known}
 
 
 async def _form_body(request: Request) -> tuple[bytes, int, bool]:
@@ -113,9 +113,10 @@ async def authorize(request: Request, settings: Settings = Depends(get_settings)
                                          "oauth_authorize")
             if request.scope["path"] != "/oauth/authorize":
                 return _invalid_authorization()
-            params = _params(request.scope.get("query_string", b""))
+            params = _params(request.scope.get("query_string", b""), oauth.AUTHORIZE_PARAMS)
             origin = rest.review_origin(settings)
-            row = await rest._bearer_threadpool(service.authorize, params)
+            row = await rest._bearer_threadpool(
+                service.authorize, params, ip=client_ip(request, settings=settings))
             return RedirectResponse(origin + "/#connect/" + row.oauth_request_id,
                                     status_code=302, headers=_HEADERS)
     except (ValueError, oauth.OAuthError):
@@ -145,7 +146,7 @@ async def token(request: Request, settings: Settings = Depends(get_settings)) ->
                 return _oauth_error("invalid_request")
             if not form_body or outcome != "ok":
                 return _oauth_error("invalid_request")
-            params = _params(raw)
+            params = _params(raw, oauth.TOKEN_PARAMS)
             result = await rest._bearer_threadpool(service.token, params)
             return JSONResponse(result, headers=_HEADERS)
     except ValueError:

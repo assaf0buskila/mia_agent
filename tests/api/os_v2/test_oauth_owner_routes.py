@@ -1,4 +1,4 @@
-"""E38b owner consent uses real cookie/Origin/CSRF and the existing Telegram worker."""
+"""E39 owner consent uses real cookie/Origin/CSRF and the existing Telegram worker."""
 
 import base64
 import hashlib
@@ -19,7 +19,7 @@ def flow(owner_world, monkeypatch):  # noqa: F811 - imported pytest fixture
     world.owner.settings.public_base_url = "https://api.assafweb.test"
     service = assistant_oauth.AssistantOAuthService(
         world.aw.w.ledger, world.owner.settings, revoke_watermark=lambda _: None)
-    service._public_tx = lambda: service._tx(world.aw.w.owner)
+    service._public_tx = lambda **kw: service._tx(world.aw.w.owner)
     monkeypatch.setattr(owner_keys, "oauth_service_for", lambda _: service, raising=False)
     monkeypatch.setattr(owner_actions, "assistant_oauth_service", lambda _: service, raising=False)
     verifier = "Z" * 43
@@ -28,7 +28,7 @@ def flow(owner_world, monkeypatch):  # noqa: F811 - imported pytest fixture
         "redirect_uri": assistant_oauth.REDIRECT_URI,
         "code_challenge": base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest())
         .decode().rstrip("="), "code_challenge_method": "S256", "state": "private-state",
-        "resource": assistant_oauth.resource(world.owner.settings)})
+        "resource": assistant_oauth.resource(world.owner.settings)}, ip="203.0.113.1")
     world.oauth_id = row.oauth_request_id
     world.oauth_service = service
     return world
@@ -39,6 +39,15 @@ def test_owner_get_details_never_returns_state_or_code(flow):
     assert response.status_code == 200, response.text
     assert response.json()["client"] == "ChatGPT"
     assert response.json()["status"] == "pending_owner"
+    assert set(response.json()) == {
+        "api_version", "source", "authority_epoch", "workspace_id", "oauth_request_id",
+        "status", "client", "scope", "expires_in_days", "expires_at", "created_at", "deadline"}
+    from app.services.os_ledger.statement_wire import iso
+
+    with flow.oauth_service._public_tx() as tx:
+        row = assistant_oauth.OAuthTables(tx).get(flow.oauth_id)
+    assert response.json()["created_at"] == iso(row.created_at)
+    assert response.json()["deadline"] == iso(row.deadline)
     assert "private-state" not in response.text and "code_challenge" not in response.text
 
 
@@ -58,7 +67,18 @@ def test_owner_oauth_posts_require_cookie_origin_csrf(flow, route, guard):
     assert response.status_code in {401, 403}, response.text
 
 
-def test_owner_request_commits_then_sends_card_and_two_factors_complete(flow):
+def test_owner_request_commits_then_sends_card_and_two_factors_complete(flow, monkeypatch):
+    from datetime import datetime
+
+    from app.domain.owner import proposal_cards
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return flow.aw.w.now()
+
+    monkeypatch.setattr(proposal_cards, "datetime", Clock)
+    flow.aw.w.advance(125)
     response = flow.call("POST", ROOT + flow.oauth_id + "/request-approval", body={})
     assert response.status_code == 202, response.text
     assert flow.oauth_service.status(flow.aw.w.reader, flow.oauth_id,
@@ -66,6 +86,8 @@ def test_owner_request_commits_then_sends_card_and_two_factors_complete(flow):
     assert len(flow.port.sent) == 1
     text = flow.port.sent[0].text
     assert "ChatGPT" in text and "30" in text and "אישור" in text
+    assert "לפני 2 דקות" in text
+    assert "יש לאשר רק אם התחלת בעצמך לחבר את ChatGPT ממש עכשיו." in text
     assert "private-state" not in text
     response = flow.call("POST", ROOT + flow.oauth_id + "/complete", body={})
     assert response.status_code == 409 and response.json()["error"]["code"] == "oauth_not_approved"
@@ -95,11 +117,15 @@ def test_other_google_login_chain_cannot_read_or_complete_approved_grant(flow):
         assert response.json()["error"]["code"] == "oauth_request_unknown"
 
 
-def test_rejected_and_cancelled_cards_have_terminal_text(flow):
+@pytest.mark.parametrize("decision", ["reject", "cancel"])
+def test_rejected_and_cancelled_cards_have_terminal_text(flow, decision):
     assert flow.call("POST", ROOT + flow.oauth_id + "/request-approval", body={}).status_code == 202
-    flow.aw.revoke_all()
-    outcome = flow.approve({})
-    assert outcome.status == "cancelled" and "בוטלה" in outcome.text
+    if decision == "cancel":
+        flow.aw.revoke_all()
+    outcome = flow.approve({}, decision="reject" if decision == "reject" else "approve")
+    assert outcome.status == ("rejected" if decision == "reject" else "cancelled")
+    assert outcome.text == ("הבקשה לחיבור ChatGPT נדחתה." if decision == "reject" else
+                            "הבקשה לחיבור ChatGPT בוטלה. צריך להכין בקשה חדשה.")
     assert "לנסות שוב" not in outcome.text
 
 

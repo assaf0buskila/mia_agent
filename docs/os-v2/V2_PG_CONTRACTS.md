@@ -3277,7 +3277,7 @@ paths and codes in `details.issues`, never submitted values.
 |---|---|---|
 | `issue_cancelled` | 409 | Revoke-all cancelled the uncollected issue request. |
 
-### E38b (2026-10-26): OAuth 2.1 front for assistant MCP (MCP authorization 2025-06-18)
+### E39 (2026-10-26): OAuth 2.1 front for assistant MCP (MCP authorization 2025-06-18)
 
 The OAuth token is an ordinary hashed V2-37 assistant key, kind `gpt`, label
 `ChatGPT connector`, with the existing propose-only scopes, limits and revocation,
@@ -3294,7 +3294,10 @@ Protected-resource metadata advertises only the canonical MCP resource, issuer,
 authorization_code, S256, public-client authentication `none`, CIMD support and the
 authorization-response issuer parameter; no OIDC scopes. MCP uniform 401 responses
 advertise the path-specific resource metadata and add `error="invalid_token"` when
-an Authorization header was presented. REST 401 envelopes and challenges are unchanged.
+an Authorization header was presented. If the configured issuer cannot build a challenge,
+the original plain `WWW-Authenticate: Bearer` challenge and the same 401 status/body
+are returned, without `resource_metadata` or an `error=` change. REST 401 envelopes
+and challenges are unchanged.
 
 `GET /oauth/authorize` validates the exact pinned client
 `https://chatgpt.com/oauth/client.json` and redirect
@@ -3306,12 +3309,14 @@ Noncanonical suffix paths are counted and rejected with 400 instead of framework
 that would copy the query into a Location header; they are not advertised endpoints.
 
 Owner routes under `/v1/owner/os/unified/oauth-requests/{oauth_request_id}`:
-GET returns consent details/status using the owner cookie session and read scope;
+GET returns consent details/status, `created_at` and `deadline` using the owner cookie
+session and read scope; V2-39b can show the request age before consent;
 POST `/request-approval` requires session, exact Origin, CSRF and
 `manage_credentials`, binds HMAC-SHA256(`os_step_up_secret`, login `chain_id`),
 CAS-moves to `approval_requested`, and sends a committed `assistant_key.oauth_grant`
 Telegram card. The Hebrew card identifies ChatGPT, submission for owner approval
-only, and 30-day validity. The existing off-loop, retry-safe numeric-owner decision
+only, 30-day validity, and the request age in whole minutes. A fixed Hebrew warning
+says to approve only if the owner started connecting ChatGPT themselves just now. The existing off-loop, retry-safe numeric-owner decision
 CAS marks `approved` or `rejected`; permanent refusals have terminal text.
 POST `/complete` requires the same mutation proof and login chain, plus `approved`,
 and in one ledger transaction stores only the hash of a random 256-bit code with
@@ -3335,10 +3340,11 @@ refuses every public OAuth endpoint with 503; owner routes retain uniform v2 err
 **Storage.** `20261026_assaf_os_oauth.sql` adds
 `assaf_os.os_assistant_oauth_requests`: workspace/request/owner identity, pinned
 client and redirect, challenge, scope, resource, state, epoch, status, chain binding,
+immutable `client_ip_hmac` (the same HMAC/bucketing as the audit, never exposed or logged),
 created_at/deadline, approved_at, code_hash/code_expires_at/code_used_at and
 credential_id. Status is pending_owner, approval_requested, approved, code_issued,
 exchanged, rejected, expired or cancelled. CHECKs pin status, client/redirect,
-43-character base64url challenge and state; `(workspace_id,code_hash)` is unique
+43-character base64url challenge, 64-character lowercase hex client IP HMAC and state; `(workspace_id,code_hash)` is unique
 when non-NULL. Runtime gets SELECT/INSERT and UPDATE only of status, chain_binding,
 approved_at, code_hash, code_expires_at, code_used_at and credential_id; no DELETE.
 `os_assistant_credentials.audience` is nullable: NULL preserves static-key behavior;
@@ -3351,7 +3357,10 @@ Epoch and owner revoke-all watermarks apply at approval, complete, exchange and 
 complete can echo it exactly. Its CHECK permits 1..512 printable ASCII characters
 (0x20..0x7e). Never put state, code, verifier or token in logs, audit or error bodies.
 OAuth query redaction also runs on Uvicorn's own access logger, before its handlers,
-including percent-encoded path variants.
+including percent-encoded path variants and suffixes. The scrub is O(n) on every
+input: each whitespace-delimited run is scanned/parsed once, with no overlapping
+regex starts; strings without `?` return immediately from the query scrub.
+Non-OAuth queries and Telegram bot URL redaction retain their existing behavior.
 Absent authorize scope defaults to `assaf-os:assistant`; any other scope is refused.
 Token scope is optional and must equal it if supplied. Build issuer and the canonical
 `/v1/assistant/mcp` resource from `public_base_url`, never a hard-coded production
@@ -3359,13 +3368,28 @@ host. Resource is required at authorize and token, with case-insensitive scheme/
 exact path, no trailing slash, query or fragment. Public authorize/token share the
 existing IP audit window: take `ip:<hmac>` advisory lock before recount/insert, using
 fixed operations `oauth_authorize` and `oauth_token`. Each request acquires P1 once
-for its whole lifetime; saturation is retryable 503. Authorize query and token form
-body are capped at 4096 bytes; duplicate parameters are refused. A workspace may
-have at most five live requests in pending_owner/approval_requested/approved; excess
-authorize requests get a fixed 400 page and no row. Resolve the workspace from the
+for authentication/admission and database work; saturation is retryable 503. Capped
+request bodies are read BEFORE acquiring P1, under a 10-second deadline on bearer
+routes and a 5-second deadline on token. Timeouts/disconnects use the fixed audit
+reason `body_timeout`; they release body handling without retaining a pool slot.
+Authorize query and token form body are capped at 4096 bytes and 32 fields. A
+duplicate of ANY parameter name is refused, including unknown names. Unrecognized
+names are discarded (RFC 6749 sections 3.1/3.2), never stored, logged or echoed;
+known parameter validation is unchanged.
+
+Live unbound `pending_owner` requests are capped at two per client IP: excess gets
+the fixed 400 page and no row. At five live unbound requests per workspace, cancel
+the oldest by `(created_at, oauth_request_id)` (request id breaks timestamp ties),
+audit `evicted_unbound`, and insert
+the new request in the SAME transaction under the workspace row lock. The eviction
+audit also holds the requesting IP lock and recounts before inserting.
+Bound `approval_requested`/`approved`/`code_issued` requests have a separate hard cap
+of five, enforced when an OS session requests approval (409 `oauth_not_approved`
+when full); bound requests are NEVER evicted. Request approval binds immediately.
+Expired requests/codes are removed from the live counts before admission. Resolve the workspace from the
 existing `assaf_os_workspace_id`, and verify its numeric owner and epoch on the ledger.
 
-**Section 5.2 error-table addendum (E38b):**
+**Section 5.2 error-table addendum (E39):**
 
 | Code | HTTP | Meaning |
 |---|---|---|

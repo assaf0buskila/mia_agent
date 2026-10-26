@@ -3,6 +3,7 @@
 import asyncio
 import importlib
 import json
+import re
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -66,7 +67,7 @@ def transport(public_env, monkeypatch):
         if service.error:
             raise service.error
 
-    def authorize(params):
+    def authorize(params, *, ip):
         oauth.oauth.validate_authorize(public_env[0].config, params)
         service.calls.append(("authorize", params))
         return SimpleNamespace(oauth_request_id="OR_" + "a" * 32)
@@ -157,7 +158,6 @@ def test_slash_paths_never_redirect_or_copy_query(transport, endpoint, suffix):
     ("resource", "https://mia.assafweb.com:443/v1/assistant/mcp"),
     ("resource", "https://user@mia.assafweb.com/v1/assistant/mcp"),
     ("resource", "https://mia.assafweb.com/v1/assistant/%6dcp"),
-    ("extra", "unexpected"),
 ])
 def test_invalid_authorize_semantics_never_redirect_or_create(transport, field, value):
     _, client, _, service = transport
@@ -168,6 +168,47 @@ def test_invalid_authorize_semantics_never_redirect_or_create(transport, field, 
     assert response.text == "Invalid authorization request."
     assert "location" not in response.headers
     assert service.calls == [("account", IP_A, "oauth_authorize")]
+
+
+@pytest.mark.parametrize("endpoint", ["authorize", "token"])
+def test_unknown_parameters_are_accepted_and_ignored(transport, endpoint):
+    _, client, _, service = transport
+    params = authorization() if endpoint == "authorize" else exchange()
+    extra = {**params, "extra": "unexpected"}
+    response = (client.get("/oauth/authorize", params=extra) if endpoint == "authorize"
+                else client.post("/oauth/token", data=extra))
+    assert response.status_code == (302 if endpoint == "authorize" else 200)
+    assert service.calls[-1] == (("authorize", params) if endpoint == "authorize"
+                                 else ("token", params))
+    assert "unexpected" not in response.text
+
+
+@pytest.mark.parametrize("endpoint", ["authorize", "token"])
+def test_duplicate_unknown_parameter_and_33_fields_are_still_refused(transport, endpoint):
+    _, client, _, service = transport
+    for raw in ("extra=a&extra=b", "&".join(f"unknown{i}=x" for i in range(33))):
+        response = (client.get("/oauth/authorize?" + raw) if endpoint == "authorize"
+                    else client.post("/oauth/token", content=raw, headers={
+                        "Content-Type": "application/x-www-form-urlencoded"}))
+        assert response.status_code == 400
+    assert all(call[0] == "account" for call in service.calls)
+
+
+@pytest.mark.parametrize("base", ["https://api.assafweb.test/app", "https://api.assafweb.test "])
+@pytest.mark.parametrize("headers", [{}, {"Authorization": "Bearer bad"}])
+def test_odd_issuer_preserves_uniform_mcp_401_without_resource_metadata(public_env, base, headers):
+    aw, client = public_env
+    expected = client.post("/v1/assistant/mcp", headers=headers, json={}).json()
+    aw.config.public_base_url = base
+    response = client.post("/v1/assistant/mcp", headers=headers, json={})
+    assert response.status_code == 401
+    body = response.json()
+    assert re.fullmatch(r"[0-9a-f]{32}", body.pop("request_id"))
+    expected.pop("request_id")
+    assert body == expected
+    # Brief correction: preserve V2-37/V2-38's original plain Bearer challenge.
+    assert response.headers["www-authenticate"] == "Bearer"
+    assert "resource_metadata" not in response.headers["www-authenticate"]
 
 
 @pytest.mark.parametrize("code", ["invalid_request", "invalid_grant", "invalid_client",
@@ -227,9 +268,9 @@ def test_single_guard_covers_account_and_work_and_releases(transport, monkeypatc
     monkeypatch.setattr(keys, "_bearer_slots", slots)
 
     def observe(original):
-        def observed(*args):
+        def observed(*args, **kwargs):
             assert slots.held
-            return original(*args)
+            return original(*args, **kwargs)
         return observed
 
     for name in ("account", endpoint):
@@ -328,10 +369,10 @@ async def test_cancelled_oauth_holds_single_slot_until_db_finishes(transport, mo
     monkeypatch.setattr(keys, "_bearer_slots", slots)
     original = getattr(service, "account" if stage == "account" else endpoint)
 
-    def blocked(*args):
+    def blocked(*args, **kwargs):
         entered.set()
         assert release.wait(3)
-        return original(*args)
+        return original(*args, **kwargs)
 
     monkeypatch.setattr(service, "account" if stage == "account" else endpoint, blocked)
     body = urlencode(exchange()).encode()

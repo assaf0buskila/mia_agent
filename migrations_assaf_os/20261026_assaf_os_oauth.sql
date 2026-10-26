@@ -24,6 +24,7 @@ CREATE TABLE assaf_os.os_assistant_oauth_requests (
     code_expires_at timestamptz,
     code_used_at timestamptz,
     credential_id varchar(35),
+    client_ip_hmac character(64) NOT NULL,
     CONSTRAINT os_oauth_requests_pkey PRIMARY KEY (workspace_id, oauth_request_id),
     CONSTRAINT os_oauth_requests_workspace_fkey FOREIGN KEY (workspace_id)
         REFERENCES assaf_os.os_workspaces(workspace_id),
@@ -31,6 +32,8 @@ CREATE TABLE assaf_os.os_assistant_oauth_requests (
         REFERENCES assaf_os.os_assistant_credentials(workspace_id, credential_id),
     CONSTRAINT os_oauth_requests_id_check CHECK (oauth_request_id ~ '^OR_[0-9a-f]{32}$'),
     CONSTRAINT os_oauth_requests_owner_id_check CHECK (owner_id ~ '^[0-9]+$'),
+    CONSTRAINT os_oauth_requests_client_ip_hmac_check CHECK
+        (client_ip_hmac ~ '^[0-9a-f]{64}$'),
     CONSTRAINT os_oauth_requests_client_check CHECK
         (client_id = 'https://chatgpt.com/oauth/client.json'),
     CONSTRAINT os_oauth_requests_redirect_check CHECK

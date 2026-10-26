@@ -1,4 +1,4 @@
-"""E38b OAuth front: immutable consent, two factors, one atomic code exchange.
+"""E39 OAuth front: immutable consent, two factors, one atomic code exchange.
 
 The public side never manufactures an owner context. It uses the existing guarded ledger
 connection and workspace admission SQL; owner and Telegram paths use V2-19 constructors.
@@ -36,6 +36,10 @@ ACTIVE = frozenset({"pending_owner", "approval_requested", "approved", "code_iss
 _ID = re.compile(r"OR_[0-9a-f]{32}")
 _CHALLENGE = re.compile(r"[A-Za-z0-9_-]{43}")
 _VERIFIER = re.compile(r"[A-Za-z0-9._~-]{43,128}")
+AUTHORIZE_PARAMS = frozenset({"response_type", "client_id", "redirect_uri", "code_challenge",
+                              "code_challenge_method", "state", "resource", "scope"})
+TOKEN_PARAMS = frozenset({"grant_type", "code", "redirect_uri", "client_id", "code_verifier",
+                          "resource", "scope"})
 
 
 class OAuthError(Exception):
@@ -90,9 +94,10 @@ def same_resource(value, settings):
 
 
 def validate_authorize(settings, params):
+    params = {k: v for k, v in params.items() if k in AUTHORIZE_PARAMS}
     required = {"response_type", "client_id", "redirect_uri", "code_challenge",
                 "code_challenge_method", "state", "resource"}
-    if (not required <= params.keys() or set(params) - required - {"scope"}
+    if (not required <= params.keys()
             or any(type(v) is not str for v in params.values())
             or params["response_type"] != "code" or params["client_id"] != CLIENT_ID
             or params["redirect_uri"] != REDIRECT_URI
@@ -120,6 +125,7 @@ class OAuthRequest:
     status: str
     created_at: object
     deadline: object
+    client_ip_hmac: str
     chain_binding: str | None = None
     approved_at: object = None
     code_hash: str | None = None
@@ -171,22 +177,27 @@ class OAuthTables:
         if changed.rowcount != 1:
             raise api.LedgerError("ledger_unavailable", reason="oauth_cas_failed")
 
-    def pending_count(self):
-        statuses = {"pending_owner", "approval_requested", "approved"}
+    def live(self):
+        """The caller holds the workspace lock through expiry, recount and admission."""
         if self.tx.connection is None:
             for row in list(self.memory().values()):
-                if row.status in statuses and row.deadline <= self.tx.now:
+                if row.status in ACTIVE and (
+                        row.code_expires_at if row.status == "code_issued" else row.deadline
+                ) <= self.tx.now:
                     self.update(row, status="expired")
-            return sum(r.status in statuses for r in self.memory().values())
+            return sorted((r for r in self.memory().values() if r.status in ACTIVE),
+                          key=lambda r: (r.created_at, r.oauth_request_id))
         self.tx.connection.execute(text(
             "UPDATE assaf_os.os_assistant_oauth_requests SET status = 'expired' "
             "WHERE workspace_id = :ws AND status IN "
-            "('pending_owner', 'approval_requested', 'approved') AND deadline <= :now"),
+            "('pending_owner', 'approval_requested', 'approved', 'code_issued') AND "
+            "CASE WHEN status = 'code_issued' THEN code_expires_at ELSE deadline END <= :now"),
             {"ws": self.tx.ctx.workspace, "now": self.tx.now})
-        return self.tx.connection.execute(text(
-            "SELECT count(*) FROM assaf_os.os_assistant_oauth_requests WHERE workspace_id = :ws "
-            "AND status IN ('pending_owner', 'approval_requested', 'approved')"),
-            {"ws": self.tx.ctx.workspace}).scalar_one()
+        return [OAuthRequest(**r) for r in self.tx.connection.execute(text(
+            "SELECT * FROM assaf_os.os_assistant_oauth_requests WHERE workspace_id = :ws "
+            "AND status IN ('pending_owner', 'approval_requested', 'approved', 'code_issued') "
+            "ORDER BY created_at, oauth_request_id"),
+            {"ws": self.tx.ctx.workspace}).mappings()]
 
     def cancel_uncollected(self):
         if self.tx.connection is None:
@@ -208,7 +219,7 @@ class AssistantOAuthService(keys.AssistantCredentialService):
         self._store = keys.PgAssistantStore(self._settings)
 
     @contextmanager
-    def _public_tx(self):
+    def _public_tx(self, *, ip_hmac=None):
         """Same workspace lock/epoch/fence as the ledger; no public owner context is minted."""
         settings = self._settings
         enabled(settings)
@@ -221,6 +232,9 @@ class AssistantOAuthService(keys.AssistantCredentialService):
                 or type(epoch) is not int or epoch < 1):
             raise api.LedgerError("ledger_unavailable", reason="oauth_workspace_unavailable")
         with self._store._begin() as conn:
+            # Eviction adds an IP-counted audit row: preserve R2a's IP -> workspace order.
+            if ip_hmac is not None:
+                self._store._lock(conn, f"ip:{ip_hmac}")
             row = conn.execute(ADMISSION_SQL, {"ws": workspace}).one()
             check_identity(row.current_role, row.session_role)
             if row.owner_id is None or row.owner_id not in settings.telegram_owner_user_id_set():
@@ -245,18 +259,34 @@ class AssistantOAuthService(keys.AssistantCredentialService):
         self._store.oauth_attempt(ip_hmac=keys.client_ip_hmac(self._settings, ip),
                                   operation=operation, reason=reason)
 
-    def authorize(self, params):
+    def authorize(self, params, *, ip):
         enabled(self._settings)
         p = validate_authorize(self._settings, params)
+        ip_hmac = keys.client_ip_hmac(self._settings, ip)
         row = None
-        with self._public_tx() as tx:
+        with self._public_tx(ip_hmac=ip_hmac) as tx:
             tables = OAuthTables(tx)
-            if tables.pending_count() < 5:
+            unbound = [r for r in tables.live() if r.status == "pending_owner"]
+            if sum(r.client_ip_hmac == ip_hmac for r in unbound) < 2:
+                if len(unbound) >= 5:
+                    if tx.connection is None:
+                        tx.scratch.setdefault("assistant_oauth_audit", []).append("evicted_unbound")
+                    else:
+                        if self._store._count(
+                                tx.connection, "client_ip_hmac = :ip AND occurred_at >= :since",
+                                ip=ip_hmac, since=tx.now - timedelta(
+                                    seconds=keys.IP_WINDOW_SECONDS)) >= keys.IP_LIMIT:
+                            raise keys._limited("ip_limit")
+                        self._store._insert(
+                            tx.connection, credential_id=None, moment=tx.now,
+                            operation="oauth_authorize", reason="evicted_unbound", ok=True,
+                            facts=keys.Facts(), ip_hmac=ip_hmac)
+                    tables.update(unbound[0], status="cancelled")
                 row = OAuthRequest(
                     tx.ctx.workspace, "OR_" + secrets.token_hex(16), str(tx.ctx.numeric_owner),
                     p["client_id"], p["redirect_uri"], p["code_challenge"], p["scope"],
                     p["resource"], p["state"], tx.ctx.authority_epoch, "pending_owner",
-                    tx.now, tx.now + REQUEST_TTL)
+                    tx.now, tx.now + REQUEST_TTL, client_ip_hmac=ip_hmac)
                 tables.insert(row)
         if row is None:
             raise OAuthError("oauth_pending_limit")
@@ -308,7 +338,8 @@ class AssistantOAuthService(keys.AssistantCredentialService):
     def _body(self, ctx, row, now):
         return {**binding(ctx), "oauth_request_id": row.oauth_request_id,
                 "status": self._status(row, now), "client": "ChatGPT", "scope": SCOPE,
-                "expires_in_days": 30, "expires_at": iso(row.deadline)}
+                "expires_in_days": 30, "expires_at": iso(row.deadline),
+                "created_at": iso(row.created_at), "deadline": iso(row.deadline)}
 
     def status(self, ctx, id, *, chain_id):
         self._owner(ctx, "read")
@@ -322,6 +353,8 @@ class AssistantOAuthService(keys.AssistantCredentialService):
             row = self._same(tx, id, chain_id)
             self._transition(row, tx.now, {"pending_owner", "approval_requested"})
             if row.status == "pending_owner":
+                if sum(r.status != "pending_owner" for r in OAuthTables(tx).live()) >= 5:
+                    raise api.LedgerError("oauth_not_approved", reason="oauth_bound_limit")
                 OAuthTables(tx).update(row, status="approval_requested",
                                        chain_binding=session_binding(self._settings, chain_id))
                 row = OAuthTables(tx).get(id)
@@ -331,7 +364,9 @@ class AssistantOAuthService(keys.AssistantCredentialService):
     def envelope(row):
         return {"kind": "assistant_key.oauth_grant", "parameters": {
             "oauth_request_id": row.oauth_request_id, "client": "ChatGPT", "scope": SCOPE,
-            "expires_in_days": 30}, "target": {
+            "expires_in_days": 30,
+            "created_at": iso(row.created_at)},
+            "target": {
                 "workspace_id": row.workspace_id, "authority_epoch": row.epoch,
                 "chain_binding": row.chain_binding}, "version": 1}
 
@@ -391,8 +426,9 @@ class AssistantOAuthService(keys.AssistantCredentialService):
 
     def token(self, params):
         enabled(self._settings)
+        params = {k: v for k, v in params.items() if k in TOKEN_PARAMS}
         required = {"grant_type", "code", "redirect_uri", "client_id", "code_verifier", "resource"}
-        if (not required <= params.keys() or set(params) - required - {"scope"}
+        if (not required <= params.keys()
                 or any(type(v) is not str for v in params.values())
                 or any(not params[k] for k in required)):
             raise OAuthError("invalid_request")

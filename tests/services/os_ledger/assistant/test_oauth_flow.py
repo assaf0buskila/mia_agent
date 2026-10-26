@@ -1,4 +1,4 @@
-"""E38b: both factors, atomic exchange/replay, audience and cancellation, on both ledgers."""
+"""E39: both factors, atomic exchange/replay, audience and cancellation, on both ledgers."""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ class Flow:
         self.service = oauth.AssistantOAuthService(
             aw.w.ledger, aw.config, revoke_watermark=lambda _: aw.w.watermark["value"])
         if aw.kind == "fake":
-            self.service._public_tx = lambda: self.service._tx(aw.w.owner)
+            self.service._public_tx = lambda **kw: self.service._tx(aw.w.owner)
         self.params = {
             "response_type": "code", "client_id": oauth.CLIENT_ID,
             "redirect_uri": oauth.REDIRECT_URI, "scope": oauth.SCOPE,
@@ -39,8 +39,8 @@ class Flow:
         }
         self.cards = []
 
-    def start(self, **changes):
-        return self.service.authorize({**self.params, **changes}).oauth_request_id
+    def start(self, *, ip=IP_A, **changes):
+        return self.service.authorize({**self.params, **changes}, ip=ip).oauth_request_id
 
     def request(self, id, *, chain=CHAIN):
         return self.service.request_approval(self.aw.w.owner, id, chain_id=chain)
@@ -286,14 +286,21 @@ def test_revoked_login_or_epoch_refuses_code_as_invalid_grant(flow, block):
     assert flow.aw.credential_rows() == []
 
 
-def test_pending_request_bound_is_five_and_scope_default_resource_case(flow):
-    for _ in range(5):
+@pytest.mark.parametrize("stage", ["approval_requested", "approved", "code_issued"])
+def test_bound_request_cap_is_five_and_scope_default_resource_case(flow, stage):
+    for i in range(5):
         p = dict(flow.params)
         p.pop("scope")
         p["resource"] = "HTTPS://API.ASSAFWEB.TEST/v1/assistant/mcp"
-        assert flow.service.authorize(p)
-    with pytest.raises(flow.oauth.OAuthError):
-        flow.start()
+        row = flow.service.authorize(p, ip=f"203.0.113.{i}")
+        flow.request(row.oauth_request_id)
+        if stage != "approval_requested":
+            flow.decide(row.oauth_request_id)
+        if stage == "code_issued":
+            flow.complete(row.oauth_request_id)
+    id = flow.start()
+    refused(lambda: flow.request(id), "oauth_not_approved")
+    assert flow.status(id) == "pending_owner"
 
 
 def test_two_parallel_exchanges_mint_once_and_revoke_on_replay(flow):
@@ -357,8 +364,8 @@ def test_request_expires_at_exactly_ten_minutes(flow, stage):
 
 
 def test_pending_limit_expires_old_status_rows_before_admitting_more(flow):
-    for _ in range(5):
-        flow.start()
+    for i in range(5):
+        flow.start(ip=f"203.0.113.{i}")
     flow.aw.w.advance(600)
     flow.start()
     with flow.service._public_tx() as tx:
@@ -439,3 +446,122 @@ if pg_url():
         assert sorted(outcomes) == ["ok", "rate_limited"]
         assert len(pg_aw.audit()) == 60
         assert len([r for r in pg_aw.audit() if r["operation"].startswith("oauth_")]) == 1
+
+
+def test_unbound_per_ip_cap_is_two_and_hmac_is_private(flow, caplog):
+    ids = [flow.start(), flow.start()]
+    with pytest.raises(flow.oauth.OAuthError, match="oauth_pending_limit"):
+        flow.start()
+    with flow.service._public_tx() as tx:
+        assert len(flow.oauth.OAuthTables(tx).live()) == 2
+        rows = [flow.oauth.OAuthTables(tx).get(id) for id in ids]
+    assert all(row.client_ip_hmac == flow.aw.ip_hmac(IP_A) for row in rows)
+    surfaces = caplog.text + repr([flow.service.status(flow.aw.w.reader, id, chain_id=CHAIN)
+                                  for id in ids])
+    assert flow.aw.ip_hmac(IP_A) not in surfaces and IP_A not in surfaces
+    assert flow.start(ip="203.0.113.99")
+
+
+def eviction_audit(flow):
+    with flow.service._public_tx() as tx:
+        if tx.connection is None:
+            return tx.scratch.get("assistant_oauth_audit", [])
+        from sqlalchemy import text
+
+        return list(tx.connection.execute(text(
+            "SELECT reason FROM assaf_os.os_assistant_audit WHERE reason='evicted_unbound'"
+        )).scalars())
+
+
+@pytest.mark.parametrize("stage", ["approval_requested", "approved", "code_issued"])
+def test_oldest_unbound_is_cancelled_with_atomic_audit_and_bound_never_evicted(flow, stage):
+    bound = flow.start()
+    flow.request(bound)
+    if stage != "approval_requested":
+        flow.decide(bound)
+    if stage == "code_issued":
+        flow.complete(bound)
+    ids = []
+    for i in range(5):
+        ids.append(flow.start(ip=f"203.0.113.{i}"))
+        flow.aw.w.advance(1)
+    newest = flow.start(ip="203.0.113.99")
+    assert flow.status(ids[0]) == "cancelled"
+    assert all(flow.status(id) == "pending_owner" for id in [*ids[1:], newest])
+    assert flow.status(bound) == stage
+    assert eviction_audit(flow) == ["evicted_unbound"]
+
+
+def test_unknown_values_never_reach_storage_audit_or_logs(flow, caplog):
+    marker = "UNRECOGNIZED_PRIVATE_VALUE_214"
+    id = flow.start(extra=marker)
+    flow.request(id)
+    flow.decide(id)
+    assert flow.exchange(flow.complete(id), extra=marker)["access_token"]
+    with flow.service._public_tx() as tx:
+        row = flow.oauth.OAuthTables(tx).get(id)
+    assert marker not in repr(vars(row)) + repr(flow.aw.audit()) + caplog.text
+
+
+def test_eviction_and_its_audit_roll_back_when_new_request_insert_fails(flow, monkeypatch):
+    ids = [flow.start(ip=f"203.0.113.{i}") for i in range(5)]
+
+    def fail(self, row):
+        raise api.LedgerError("ledger_unavailable")
+
+    monkeypatch.setattr(flow.oauth.OAuthTables, "insert", fail)
+    refused(lambda: flow.start(ip="203.0.113.99"), "ledger_unavailable")
+    assert all(flow.status(id) == "pending_owner" for id in ids)
+    assert eviction_audit(flow) == []
+
+
+if pg_url():
+    @pytest.mark.parametrize("case", ["ip", "eviction", "binding"])
+    @pytest.mark.parametrize("stage", ["approval_requested", "approved", "code_issued"])
+    def test_oauth_admission_caps_and_eviction_are_serialized_on_pg(pg_aw, case, stage):
+        from concurrent.futures import ThreadPoolExecutor
+
+        flow = Flow(pg_aw)
+        bound = flow.start()
+        flow.request(bound)
+        if stage != "approval_requested":
+            flow.decide(bound)
+        if stage == "code_issued":
+            flow.complete(bound)
+        if case == "eviction":
+            ids = [flow.start(ip=f"203.0.113.{i}") for i in range(5)]
+            # Initial rows precede the race; only initial rows tie on creation time.
+            flow.aw.w.advance(1)
+        elif case == "binding":
+            for i in range(3):
+                flow.request(flow.start(ip=f"203.0.113.{i}"))
+            ids = [flow.start(ip=f"203.0.113.{i + 10}") for i in range(2)]
+        barrier = threading.Barrier(2)
+
+        def work(i):
+            barrier.wait()
+            try:
+                if case == "binding":
+                    flow.request(ids[i])
+                    return "bound"
+                return flow.start(ip=IP_A if case == "ip" else f"203.0.113.{i + 100}")
+            except (flow.oauth.OAuthError, api.LedgerError) as exc:
+                return exc.code
+
+        if case == "ip":
+            flow.start()
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            outcomes = list(pool.map(work, range(2)))
+        if case == "ip":
+            assert outcomes.count("oauth_pending_limit") == 1
+            assert sum(value.startswith("OR_") for value in outcomes) == 1
+        elif case == "binding":
+            assert sorted(outcomes) == ["bound", "oauth_not_approved"]
+        else:
+            assert all(value.startswith("OR_") for value in outcomes)
+            oldest = sorted(ids)[:2]
+            assert {id for id in ids if flow.status(id) == "cancelled"} == set(oldest)
+            survivors = set(ids) - set(oldest)
+            assert all(flow.status(id) == "pending_owner" for id in [*survivors, *outcomes])
+            assert eviction_audit(flow) == ["evicted_unbound"] * 2
+        assert flow.status(bound) == stage

@@ -147,7 +147,7 @@ def test_request_uuids_are_deterministic_uuid5_in_one_namespace():
 
 
 def test_error_table_is_complete_and_exact():
-    assert len(api.ERROR_CODES) == 63  # E31, E37/E37a and E38b OAuth flow
+    assert len(api.ERROR_CODES) == 63  # E31, E37/E37a and E39 OAuth flow
     unknown = api.LedgerError("unknown")
     assert (unknown.status, unknown.write_outcome, unknown.retryable) == (503, "unknown", False)
     for code, spec in api.ERROR_CODES.items():

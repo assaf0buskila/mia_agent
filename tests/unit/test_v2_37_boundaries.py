@@ -48,7 +48,7 @@ def test_no_assistant_module_calls_a_deciding_or_committing_operation(path):
                   and ast.unparse(node.func.value) == "db" and node.func.attr == "commit"
                   and not node.args and not node.keywords}
     if path == "app/api/os_v2/owner_keys.py":
-        # E38b adds the OAuth card: each card commits, then closes its rendering read.
+        # E39 adds the OAuth card: each card commits, then closes its rendering read.
         assert len(db_commits) == 4
     else:
         assert db_commits == set()

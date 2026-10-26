@@ -240,10 +240,15 @@ async def mcp(request: Request, settings: Settings = Depends(get_settings)) -> R
     except api.LedgerError as exc:
         response = rest._error(exc, write=True)
         if exc.code == "assistant_auth_required":
-            response.headers["WWW-Authenticate"] = (
-                'Bearer resource_metadata="' + oauth.issuer(settings, allow_http=True)
-                + '/.well-known/oauth-protected-resource/v1/assistant/mcp"'
-                + (', error="invalid_token"' if "authorization" in request.headers else ""))
+            try:
+                base = oauth.issuer(settings, allow_http=True)
+            except api.LedgerError:
+                pass
+            else:
+                response.headers["WWW-Authenticate"] = (
+                    'Bearer resource_metadata="' + base
+                    + '/.well-known/oauth-protected-resource/v1/assistant/mcp"'
+                    + (', error="invalid_token"' if "authorization" in request.headers else ""))
         return response
     except Exception:  # noqa: BLE001 - V2-37's uniform, payload-free outer envelope
         _LOG.warning("os_assistant op=mcp outcome=refused reason=unexpected_error")

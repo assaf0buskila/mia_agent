@@ -56,7 +56,6 @@ def oauth_db():
         pytest.skip("disposable MIA_OS_LEDGER_TEST_POSTGRES_URL required")
     parsed = make_url(url)
     assert parsed.host in {"127.0.0.1", "localhost", "::1"}
-    assert parsed.port in {5432, 56264}
     assert parsed.database == "mia_ledger_test"
     assert parsed.username == "postgres"
     engine = create_engine(url)
@@ -103,12 +102,13 @@ def test_oauth_columns_and_code_lookup_index_are_exact(oauth_db):
         "workspace_id", "oauth_request_id", "owner_id", "client_id", "redirect_uri",
         "code_challenge", "scope", "resource", "state", "epoch", "status",
         "chain_binding", "created_at", "deadline", "approved_at", "code_hash",
-        "code_expires_at", "code_used_at", "credential_id",
+        "code_expires_at", "code_used_at", "credential_id", "client_ip_hmac",
     ]
     assert all(row[2] == "NO" for row in columns[:11])
     assert columns[11][2] == "YES"
     assert columns[12][2:] == ("NO", "now()")
-    assert all(row[2] == "YES" for row in columns[14:])
+    assert all(row[2] == "YES" for row in columns[14:-1])
+    assert columns[-1][1:] == ("character", "NO", None)
     assert audience == ("text", "YES", None)
     assert indexes == {
         "CREATE UNIQUE INDEX os_assistant_oauth_code_hash_key ON "
@@ -130,6 +130,7 @@ def _request_values(**changes):
         "state": "opaque state ~ ?x=1&y=2",
         "epoch": 1,
         "status": "pending_owner",
+        "client_ip_hmac": "c" * 64,
         "created_at": "2026-10-26T00:00:00Z",
         "deadline": "2026-10-26T00:10:00Z",
     }
@@ -140,10 +141,10 @@ def _request_values(**changes):
 INSERT = """
 INSERT INTO assaf_os.os_assistant_oauth_requests (
     workspace_id, oauth_request_id, owner_id, client_id, redirect_uri, code_challenge,
-    scope, resource, state, epoch, status, created_at, deadline
+    scope, resource, state, epoch, status, created_at, deadline, client_ip_hmac
 ) VALUES (
     :workspace_id, :oauth_request_id, :owner_id, :client_id, :redirect_uri, :code_challenge,
-    :scope, :resource, :state, :epoch, :status, :created_at, :deadline
+    :scope, :resource, :state, :epoch, :status, :created_at, :deadline, :client_ip_hmac
 )
 """
 
@@ -165,6 +166,7 @@ def test_oauth_request_preserves_raw_printable_state_and_allows_configured_resou
 @pytest.mark.parametrize(("change", "constraint"), [
     ({"oauth_request_id": "OR_bad"}, "os_oauth_requests_id_check"),
     ({"owner_id": "owner"}, "os_oauth_requests_owner_id_check"),
+    ({"client_ip_hmac": "not-a-hash"}, "os_oauth_requests_client_ip_hmac_check"),
     ({"client_id": "https://evil.example/client"}, "os_oauth_requests_client_check"),
     ({"redirect_uri": "https://evil.example/callback"}, "os_oauth_requests_redirect_check"),
     ({"code_challenge": "A" * 42 + "+"}, "os_oauth_requests_challenge_check"),

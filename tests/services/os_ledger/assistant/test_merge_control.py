@@ -148,10 +148,16 @@ def test_control_releases_the_shared_guard_on_every_exit(aw, client, monkeypatch
     slots = CountingSlots()
     monkeypatch.setattr(keys, "_bearer_slots", slots)
     original = aw.gateway.control
+    observations = []
 
     def observed(caller, method):
-        assert slots.acquisitions == 1
-        assert not slots.slots.acquire(blocking=False), "MCP control ran without its guard"
+        acquired = slots.slots.acquire(blocking=False)
+        observations.append((slots.acquisitions, not acquired))
+        if acquired:
+            slots.slots.release()
+        if failure == "ip_limit":
+            # Authenticate passed: make control itself recount the now-full IP window.
+            aw.seed_audit(60, ip_hmac=caller.ip_hmac, operation="context", ok=True, reason="ok")
         return original(caller, "raw payload" if failure == "invalid_method" else method)
 
     monkeypatch.setattr(aw.gateway, "control", observed)
@@ -159,13 +165,12 @@ def test_control_releases_the_shared_guard_on_every_exit(aw, client, monkeypatch
         def broken(*args, **kwargs):
             raise LedgerError("ledger_unavailable")
         monkeypatch.setattr(aw.store._inner, "control", broken)
-    if failure == "ip_limit":
-        aw.seed_audit(60, ip_hmac=aw.ip_hmac(IP_A), operation="context", ok=True, reason="ok")
     response = client.post("/v1/assistant/mcp", headers={
         "Authorization": "Bearer " + issued["secret"]},
         json={"jsonrpc": "2.0", "id": 1, "method": "ping"})
     assert response.status_code == {None: 200, "database": 503, "invalid_method": 503,
                                     "ip_limit": 429}[failure], response.text
+    assert observations == [(1, True)], "MCP control must run inside its single guard"
     assert slots.acquisitions == 1
     assert slots.slots.acquire(blocking=False)
     slots.slots.release()

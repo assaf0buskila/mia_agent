@@ -6,7 +6,6 @@ _BOT_URL = re.compile(
     r"(https://api\.telegram\.org/(?:file/)?bot)[0-9]+:[A-Za-z0-9_-]+",
     re.IGNORECASE,
 )
-_QUERY_URI = re.compile(r"((?:https?://[^\s/?#]+)?/[^\s?]*)\?\S*", re.IGNORECASE)
 
 _REDACT_KEYS = {
     "password",
@@ -26,15 +25,49 @@ _REDACT_KEYS = {
 }
 
 
-def _oauth_query(match: re.Match[str]) -> str:
-    uri = match.group(1)
-    try:
-        path = unquote(urlsplit(uri).path).lower()
-    except ValueError:
-        return match.group(0)
-    if path == "/oauth" or path.startswith("/oauth/"):
-        return uri + "?[redacted]"
-    return match.group(0)
+def _oauth_queries(value: str) -> str:
+    """Visit each whitespace-delimited run once; never retry overlapping URI starts.
+
+    Each run has one slash search, one query search and at most one URL parse/decode.
+    Their total input length is <= len(value), so even malformed runs take O(n).
+    Query punctuation is deliberately consumed through the end of the run, as before.
+    """
+    if "?" not in value:
+        return value
+    pieces = []
+    copied = 0
+    end = 0
+    while end < len(value):
+        if value[end].isspace():
+            end += 1
+            continue
+        start = end
+        while end < len(value) and not value[end].isspace():
+            end += 1
+        token = value[start:end]
+        slash = token.find("/")
+        if slash < 0:
+            continue
+        query = token.find("?", slash)
+        if query < 0:
+            continue
+        uri_start = slash
+        for scheme in ("https:", "http:"):
+            candidate = slash - len(scheme)
+            if candidate >= 0 and token[candidate:slash].lower() == scheme:
+                uri_start = candidate
+                break
+        try:
+            path = unquote(urlsplit(token[uri_start:query]).path).lower()
+        except ValueError:
+            continue
+        if path == "/oauth" or path.startswith("/oauth/"):
+            pieces.extend((value[copied:start + query + 1], "[redacted]"))
+            copied = end
+    if not pieces:
+        return value
+    pieces.append(value[copied:])
+    return "".join(pieces)
 
 
 def redact(value: Any) -> Any:
@@ -50,7 +83,7 @@ def redact(value: Any) -> Any:
     if isinstance(value, list):
         return [redact(item) for item in value]
     if isinstance(value, str):
-        return _QUERY_URI.sub(_oauth_query, _BOT_URL.sub(r"\1[redacted]", value))
+        return _oauth_queries(_BOT_URL.sub(r"\1[redacted]", value))
     # A %-style log arg that isn't a str/dict/list (e.g. the `httpx.URL` object
     # httpx's own request logger passes as an arg, not a pre-formatted string)
     # would otherwise skip every branch above and reach the log untouched --

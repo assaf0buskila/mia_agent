@@ -869,7 +869,8 @@ def execute_assistant_issue_decision(store, *, settings, principal, proposal_id,
         _LOG.info("owner_actions op=assistant_issue outcome=refused reason=%s", exc.code)
         if exc.code in {"issue_cancelled", "oauth_cancelled"}:
             return OwnerActionExecution(
-                "cancelled", "הבקשה להנפקת מפתח בוטלה. צריך להכין בקשה חדשה.")
+                "cancelled", ("הבקשה לחיבור ChatGPT בוטלה. צריך להכין בקשה חדשה." if oauth
+                              else "הבקשה להנפקת מפתח בוטלה. צריך להכין בקשה חדשה."))
         if exc.write_outcome == "unknown":
             return OwnerActionExecution("unknown")
         if exc.retryable and exc.write_outcome == "not_started":
@@ -886,7 +887,8 @@ def execute_assistant_issue_decision(store, *, settings, principal, proposal_id,
     return OwnerActionExecution(status, (
         ("אושר. חזור למסך ה-OS כדי להשלים את החיבור ל-ChatGPT." if oauth
          else "אושר. חזור למסך ה-OS כדי להציג את המפתח פעם אחת.")
-        if decision == "approve" else "הבקשה להנפקת מפתח נדחתה."))
+        if decision == "approve" else ("הבקשה לחיבור ChatGPT נדחתה." if oauth
+                                        else "הבקשה להנפקת מפתח נדחתה.")))
 
 
 def execute_approved_owner_action_with_adapters(

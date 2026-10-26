@@ -1187,7 +1187,7 @@ def live_indexes(c):
 
 def test_constraint_and_index_pins_are_the_catalog(roles):
     """The migrated database holds exactly the pinned inventory: 46 foreign keys, 28 primary
-    keys, 15 unique constraints, 199 checks, 16 further indexes and 184 enabled RI triggers.
+    keys, 15 unique constraints, 200 checks, 16 further indexes and 184 enabled RI triggers.
 
     V2-14 alone was 26, 19, 12, 112, 10 and 104. V2-14b adds seven tables (15 foreign keys,
     7 primary keys, 3 unique keys, 59 checks), six checks on V2-14 tables, the foreign key
@@ -1208,7 +1208,7 @@ def test_constraint_and_index_pins_are_the_catalog(roles):
         assert live_indexes(c) == sorted(policy().INDEX_PINS)
         kinds = [row[2].split(" ", 1)[0] for row in live]
         assert {kind: kinds.count(kind) for kind in set(kinds)} == {
-            "FOREIGN": 46, "PRIMARY": 28, "UNIQUE": 15, "CHECK": 199,
+            "FOREIGN": 46, "PRIMARY": 28, "UNIQUE": 15, "CHECK": 200,
         }
         # The same totals, from the migration SQL (schema_migrations is the runner's table).
         sql_keys, sql_checks, _ = migrated_constraints()
@@ -1626,12 +1626,12 @@ def test_runtime_dml_matches_the_addendum_map(roles):
         c.execute(text(
             "INSERT INTO assaf_os.os_assistant_oauth_requests(workspace_id, oauth_request_id, "
             "owner_id, epoch, client_id, redirect_uri, code_challenge, scope, resource, state, "
-            "status, created_at, deadline) VALUES ('v214b', :id, '123', 1, "
+            "status, created_at, deadline, client_ip_hmac) VALUES ('v214b', :id, '123', 1, "
             "'https://chatgpt.com/oauth/client.json', "
             "'https://chatgpt.com/connector_platform_oauth_redirect', :challenge, "
             "'assaf-os:assistant', 'https://api.test/v1/assistant/mcp', 'test-state', "
-            "'pending_owner', now(), now() + interval '10 minutes')"
-        ), {"id": "OR_" + "a" * 32, "challenge": "c" * 43})
+            "'pending_owner', now(), now() + interval '10 minutes', :ip)"
+        ), {"id": "OR_" + "a" * 32, "challenge": "c" * 43, "ip": "f" * 64})
         c.execute(text(
             "INSERT INTO assaf_os.os_receipts(workspace_id, request_id, proposal_id, epoch, "
             "status, kind, commit_version, completed_at, reason_codes) VALUES ('v214b', :r, "

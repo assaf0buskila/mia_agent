@@ -743,6 +743,8 @@ CONSTRAINT_PINS: tuple[ConstraintPin, ...] = (
                   "CHECK (((oauth_request_id)::text ~ '^OR_[0-9a-f]{32}$'::text))"),
     ConstraintPin("os_assistant_oauth_requests", "os_oauth_requests_owner_id_check",
                   "CHECK (((owner_id)::text ~ '^[0-9]+$'::text))"),
+    ConstraintPin("os_assistant_oauth_requests", "os_oauth_requests_client_ip_hmac_check",
+                  "CHECK ((client_ip_hmac ~ '^[0-9a-f]{64}$'::text))"),
     ConstraintPin("os_assistant_oauth_requests", "os_oauth_requests_client_check",
                   "CHECK ((client_id = 'https://chatgpt.com/oauth/client.json'::text))"),
     ConstraintPin("os_assistant_oauth_requests", "os_oauth_requests_redirect_check",
