@@ -5,12 +5,13 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from app.brain.embeddings import FakeEmbeddingPort
 from app.brain.store import BrainStore
 from app.capabilities.types import Principal
 from app.core.config import get_settings
 from app.db.models import IdempotencyRow
-from app.db.session import get_session_factory, init_db
+from app.db.session import get_session_factory, init_db, make_engine
 from app.db.store import LeadStore
 from app.domain.approvals import (
     ACTION_CALENDAR_CREATE,
@@ -30,6 +31,7 @@ from app.domain.owner.uncertain_writes import (
 from app.services.owner_actions import propose_owner_action
 from app.tools.registries.owner_tools import ToolContext, execute_tool, get_tool, tool_names
 from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 OWNER_ID = "550077"
 
@@ -172,11 +174,26 @@ def test_completed_and_failed_writes_are_excluded() -> None:
         session.close()
 
 
-def test_bounded_to_ten_newest_first() -> None:
-    session = _session()
+@pytest.mark.parametrize(
+    "now",
+    [
+        datetime(2026, 10, 24, 23, 11, tzinfo=UTC),
+        datetime(2027, 3, 26, 0, 11, tzinfo=UTC),
+    ],
+    ids=["fall-back", "spring-forward"],
+)
+def test_bounded_to_ten_newest_first(now: datetime, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Isolate fixed-date rows from other tests and the other transition case.
+    engine = make_engine("sqlite:///:memory:")
+    IdempotencyRow.__table__.create(engine)
+    session = Session(engine)
+    # The display item has no key: expose it as the target for this ordering test.
+    monkeypatch.setattr(
+        "app.domain.owner.uncertain_writes.describe_stuck_write",
+        lambda store, *, scope, key: ("Test write", key),
+    )
     try:
         store = LeadStore(session)
-        now = datetime.now(UTC)
         for i in range(15):
             key = f"op_bound_{i}:execute"
             assert store.claim_provider_write(scope="approval", key=key)
@@ -189,11 +206,13 @@ def test_bounded_to_ten_newest_first() -> None:
             )
         items = list_uncertain_writes(store, now=now, timezone="Asia/Jerusalem")
         assert len(items) == 10
-        # Newest (largest i, smallest age) first.
-        times = [item.when_local for item in items]
-        assert times == sorted(times, reverse=True)
+        # The ten newest keys, in order; local display times can repeat at DST.
+        assert [item.target for item in items] == [
+            f"op_bound_{i}:execute" for i in range(14, 4, -1)
+        ]
     finally:
         session.close()
+        engine.dispose()
 
 
 # ------------------------------------------------------------- target resolution
