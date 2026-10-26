@@ -838,6 +838,12 @@ def assistant_issue_service(settings):
     return AssistantIssueService(ledger_api.build_ledger(settings), settings)
 
 
+def assistant_oauth_service(settings):
+    from app.services.assistant_oauth import AssistantOAuthService
+
+    return AssistantOAuthService(ledger_api.build_ledger(settings), settings)
+
+
 def execute_assistant_issue_decision(store, *, settings, principal, proposal_id, decision):
     """E37 ledger CAS; only transient, definitely not-started refusals invite a retry."""
     if (
@@ -853,26 +859,36 @@ def execute_assistant_issue_decision(store, *, settings, principal, proposal_id,
     try:
         # CAS must already be committed. No request-scoped Session crosses into the ledger.
         store.session.commit()
-        status = assistant_issue_service(settings).decide_issue(row, decision=decision)
+        envelope = read_owner_action(row)
+        oauth = bool(envelope and envelope["kind"] == "assistant_key.oauth_grant")
+        if oauth:
+            status = assistant_oauth_service(settings).decide_grant(row, decision=decision)
+        else:
+            status = assistant_issue_service(settings).decide_issue(row, decision=decision)
     except ledger_api.LedgerError as exc:
         _LOG.info("owner_actions op=assistant_issue outcome=refused reason=%s", exc.code)
-        if exc.code == "issue_cancelled":
+        if exc.code in {"issue_cancelled", "oauth_cancelled"}:
             return OwnerActionExecution(
-                "cancelled", "הבקשה להנפקת מפתח בוטלה. צריך להכין בקשה חדשה.")
+                "cancelled", ("הבקשה לחיבור ChatGPT בוטלה. צריך להכין בקשה חדשה." if oauth
+                              else "הבקשה להנפקת מפתח בוטלה. צריך להכין בקשה חדשה."))
         if exc.write_outcome == "unknown":
             return OwnerActionExecution("unknown")
         if exc.retryable and exc.write_outcome == "not_started":
             return OwnerActionExecution("not_started")
         status = {
             "issue_expired": "expired", "target_changed": "target_changed",
+            "oauth_expired": "expired", "oauth_rejected": "rejected",
+            "oauth_completed": "already_handled",
             "authority_changed": "target_changed", "authority_moved": "target_changed",
             "issue_rejected": "rejected", "issue_collected": "already_handled",
             "kill_switch": "policy_denied",
         }.get(exc.code, "unbound")
         return OwnerActionExecution(status)
     return OwnerActionExecution(status, (
-        "אושר. חזור למסך ה-OS כדי להציג את המפתח פעם אחת."
-        if decision == "approve" else "הבקשה להנפקת מפתח נדחתה."))
+        ("אושר. חזור למסך ה-OS כדי להשלים את החיבור ל-ChatGPT." if oauth
+         else "אושר. חזור למסך ה-OS כדי להציג את המפתח פעם אחת.")
+        if decision == "approve" else ("הבקשה לחיבור ChatGPT נדחתה." if oauth
+                                        else "הבקשה להנפקת מפתח נדחתה.")))
 
 
 def execute_approved_owner_action_with_adapters(
@@ -930,7 +946,7 @@ def execute_approved_owner_action_with_adapters(
     envelope = read_owner_action(row)
     if envelope is None:
         return OwnerActionExecution("unbound")
-    if envelope["kind"] == "assistant_key.issue":
+    if envelope["kind"] in {"assistant_key.issue", "assistant_key.oauth_grant"}:
         return execute_assistant_issue_decision(
             store, settings=settings, principal=principal, proposal_id=proposal_id,
             decision="approve")

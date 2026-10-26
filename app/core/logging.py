@@ -53,6 +53,11 @@ class RedactingFilter(logging.Filter):
 
 
 def configure_logging(level: str = "INFO") -> None:
+    # Uvicorn owns a separate access handler, so root-handler filtering cannot protect
+    # OAuth state carried in a request query. Scrub the record before any access handler.
+    access = logging.getLogger("uvicorn.access")
+    if not any(isinstance(f, RedactingFilter) for f in access.filters):
+        access.addFilter(RedactingFilter())
     handler = logging.StreamHandler()
     handler.addFilter(RedactingFilter())
     logging.basicConfig(

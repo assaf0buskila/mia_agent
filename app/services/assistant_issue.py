@@ -1,4 +1,4 @@
-"""E37: Telegram approves an immutable request; only its OS session can mint once.
+"""E37a: Telegram approves an immutable request; only the same OS login chain can mint once.
 
 The main DB card decision commits before this ledger CAS. There are no provider claims:
 a failed ledger transaction is retried by the next tap. Collection locks the request before
@@ -132,6 +132,9 @@ class AssistantIssueService(keys.AssistantCredentialService):
 
     def _revoke_all_in(self, tx):
         IssueTables(tx).cancel_uncollected()
+        from app.services.assistant_oauth import OAuthTables
+
+        OAuthTables(tx).cancel_uncollected()
 
     def _live(self):
         if self._settings.kill_switch:

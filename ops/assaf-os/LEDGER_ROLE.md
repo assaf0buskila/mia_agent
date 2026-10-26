@@ -55,8 +55,8 @@ and `RETENTION_COLUMN_SELECTS` (literal tuples, each pinned by a test to the mig
 and to the live catalog):
 
 - USAGE on the schema; EXECUTE on `assaf_os.expense_source_key_sha256(text)` only.
-- SELECT on `os_authority` and `os_workspaces`; SELECT and INSERT on the other 23 tables
-  (the 16 V2-14 ones and V2-14b's seven).
+- SELECT on `os_authority` and `os_workspaces`; SELECT and INSERT on every other table in `TABLE_PRIVILEGES`, including E37's
+  `os_assistant_issue_requests` and E39's `os_assistant_oauth_requests`.
   The runtime role never creates a workspace (§18.2, §5.4): the privileged
   `AuthorityAdmin.ensure_workspace` does, once, from `mia os-authority init`, before any
   import.
@@ -84,6 +84,21 @@ and to the live catalog):
   `os_assistant_credentials (revoked_at, last_used_at, use_count)`. `os_assistant_audit`
   and `os_receipts.reason_codes` are INSERT-only. The runtime role still has no DELETE
   anywhere: the purge is the retention role's.
+
+E37 adds runtime SELECT/INSERT on `os_assistant_issue_requests`, with UPDATE only
+on `(status, approved_at, collected_at, credential_id)`. Its owner/workspace/epoch,
+login-chain binding, request data and deadlines are immutable to the runtime.
+
+E39 adds runtime SELECT/INSERT on `os_assistant_oauth_requests`, with UPDATE only
+on `(status, chain_binding, approved_at, code_hash, code_expires_at, code_used_at,
+credential_id)`. In particular `client_ip_hmac` is SELECT/INSERT-only: runtime
+UPDATE is forbidden, as are changes to the client, redirect, challenge, scope,
+resource, state, identity and creation/deadline fields. Neither request table gets
+DELETE or retention grants. `os_assistant_credentials.audience` is nullable and
+SELECT/INSERT-only; the runtime UPDATE tuple stays `(revoked_at, last_used_at,
+use_count)`. NULL means static bearer; OAuth stores the canonical MCP audience.
+These tuples derive from `role_policy.ADDENDUM_COLUMN_UPDATES` and
+`ledger_grant_statements()`.
 
 ## Retention (`RETENTION_DELETE_SQL`)
 

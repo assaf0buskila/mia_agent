@@ -156,7 +156,11 @@ def test_uniform_401_for_every_method(env, method, case):
         aw.config.assaf_os_assistant_enabled = False
     response = rpc(client, key, method, headers=headers)
     assert response.status_code == 401
-    assert response.headers["www-authenticate"] == "Bearer"
+    challenge = ('Bearer resource_metadata="https://api.assafweb.test'
+                 '/.well-known/oauth-protected-resource/v1/assistant/mcp"')
+    if key or "Authorization" in headers:
+        challenge += ', error="invalid_token"'
+    assert response.headers["www-authenticate"] == challenge
     assert "mcp-session-id" not in response.headers
     actual = response.json()
     actual.pop("request_id")
@@ -204,13 +208,16 @@ def test_supported_or_absent_protocol_header_uses_default(env, headers):
 
 def _statement_calls(source):
     tree = ast.parse(source)
+    allowed = {"context_for_assistant", "submit", "status_for_credential"}
     calls = [node.func.attr for node in ast.walk(tree)
              if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-             and isinstance(node.func.value, ast.Attribute)
-             and node.func.value.attr == "statements"]
-    assert set(calls) == {"context_for_assistant", "submit", "status_for_credential"}
+             and node.func.attr in allowed]
+    assert set(calls) == allowed
     assert calls.count("submit") == 1
-    forbidden = {"approve", "reject", "decide", "commit", "save_draft", "draft"}
+    forbidden = {name for name, method in inspect.getmembers(LedgerStatementService,
+                                                            predicate=callable)
+                 if not name.startswith("_")} - allowed
+    forbidden |= {"decide", "commit", "save_draft", "draft"}
     assert not [node for node in ast.walk(tree)
                 if isinstance(node, ast.Attribute) and node.attr in forbidden]
     assert not [node for node in ast.walk(tree)
@@ -224,10 +231,18 @@ def test_mcp_ast_only_allowed_statement_methods_and_single_submit():
 
 @pytest.mark.parametrize("call_site", ["gateway.statements.submit(ctx, raw)",
                                       "gateway.statements.approve(ctx)",
-                                      "gateway.decisions.decide(ctx)"])
+                                      "gateway.decisions.decide(ctx)",
+                                      "s = gateway.statements; s.expire_due(ctx)",
+                                      "s = gateway.statements; s.submit(ctx, raw)"])
 def test_mcp_ast_guard_rejects_extra_submit_and_decision_sites(call_site):
     with pytest.raises(AssertionError):
         _statement_calls(inspect.getsource(mcp) + "\n" + call_site)
+
+
+def test_mcp_ast_guard_forbids_a_new_public_service_method_automatically(monkeypatch):
+    monkeypatch.setattr(LedgerStatementService, "future_method", lambda self: None, raising=False)
+    with pytest.raises(AssertionError):
+        _statement_calls(inspect.getsource(mcp) + "\ns = gateway.statements; s.future_method()")
 
 
 def test_failed_submit_keeps_safe_field_issues_without_any_submitted_values(env):

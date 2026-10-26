@@ -802,7 +802,20 @@ def _card_business(parameters: Mapping[str, Any], target: Mapping[str, Any], kin
     return _card(title, body, charges, schedule, expected, note=note)
 
 
+def _card_oauth_grant(p, t):
+    created = datetime.fromisoformat(p["created_at"].replace("Z", "+00:00"))
+    age = max(0, int((datetime.now(UTC) - created).total_seconds() // 60))
+    return _card(
+        "חיבור עוזר ל-Assaf OS",
+        "לאשר חיבור עבור ChatGPT, בתוקף ל-30 ימים?\n"
+        f"הבקשה נוצרה לפני {age} דקות.",
+        note="החיבור מאפשר להגיש מקבצי דפי חיוב לאישור שלך בלבד. "
+        "להשלמת החיבור צריך לחזור למסך ה-OS שביקש אותו.\n"
+        "יש לאשר רק אם התחלת בעצמך לחבר את ChatGPT ממש עכשיו.")
+
+
 _CARD_RENDERERS = {
+    "assistant_key.oauth_grant": _card_oauth_grant,
     "assistant_key.issue": lambda p, t: _card(
         "הנפקת מפתח לעוזר",
         f"לאשר הנפקת מפתח עבור {esc({'claude': 'Claude', 'gpt': 'GPT'}[p['kind']])}, "

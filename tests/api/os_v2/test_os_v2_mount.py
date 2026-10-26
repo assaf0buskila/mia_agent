@@ -3,7 +3,7 @@
 E19: the flag is the gate. V2-24's four owner-direct routes are mounted on the app. They answer
 404 while ``assaf_os_owner_direct_enabled`` is off (an invalid value coerces to off) or the backend
 is not postgres. ``app.router.routes`` holds included-router wrappers, so the mounted paths are
-read from the app's OpenAPI schema.
+enumerated from the app routes, including hidden routes and lazy include wrappers.
 
 E24: V2-19 fills the reads router with exactly its two §9 routes, and V2-26 (§12.3) fills the
 statements router with exactly its nine. V2-38 fills the MCP router with exactly one POST route.
@@ -47,6 +47,9 @@ STATEMENT_SEGMENTS = {"statements", "statement-batches", "merchant-rules"}
 # §17.1 (V2-37; module renamed by erratum E34): the owner's key routes and the step-up route, and
 # §17.2 the three bearer routes. A route outside these sets is refused below.
 KEY_ROUTES = {
+    ("GET", "/v1/owner/os/unified/oauth-requests/{oauth_request_id}"),
+    ("POST", "/v1/owner/os/unified/oauth-requests/{oauth_request_id}/request-approval"),
+    ("POST", "/v1/owner/os/unified/oauth-requests/{oauth_request_id}/complete"),
     ("GET", "/v1/owner/os/unified/assistant-credentials/issue-requests/{issue_request_id}"),
     (
         "POST",
@@ -64,11 +67,22 @@ ASSISTANT_ROUTES = {
     ("GET", "/v1/assistant/os/statement-batches/{proposal_id}"),
 }
 MCP_ROUTES = {("POST", "/v1/assistant/mcp")}
+OAUTH_ROUTES = {
+    ("GET", "/.well-known/oauth-protected-resource"),
+    ("GET", "/.well-known/oauth-protected-resource/v1/assistant/mcp"),
+    ("GET", "/.well-known/oauth-authorization-server"),
+    ("GET", "/.well-known/openid-configuration"),
+    ("GET", "/oauth/authorize"),
+    ("POST", "/oauth/token"),
+    ("GET", "/oauth/authorize/{suffix:path}"),
+    ("POST", "/oauth/token/{suffix:path}"),
+}
 # Segments that only v2 chunks may mount. V2-24 owns commits and deleted; the others stay unmounted.
 V2_ONLY_SEGMENTS = {
     "commits",
     "deleted",
     "assistant-credentials",
+    "oauth-requests",
 }
 # receipts is shared with v1 (GET by request id); no v2 chunk has added to it yet.
 V1_RECEIPTS = {("GET", "/v1/owner/os/unified/receipts/{request_id}")}
@@ -81,11 +95,18 @@ CALLS = (
 )
 
 
-def _mounted() -> set[tuple[str, str]]:
+def _mounted(routes=None) -> set[tuple[str, str]]:
+    # FastAPI's lazy include wrappers retain hidden routes in effective_route_contexts.
+    leaves = []
+    for route in app.routes if routes is None else routes:
+        if hasattr(route, "effective_route_contexts"):
+            leaves.extend(route.effective_route_contexts())
+        else:
+            leaves.append(route)
     return {
-        (method.upper(), path)
-        for path, operations in app.openapi()["paths"].items()
-        for method in operations
+        (method.upper(), route.path)
+        for route in leaves
+        for method in getattr(route, "methods", ()) or ()
     }
 
 
@@ -110,11 +131,14 @@ def test_v2_routers_mount_with_zero_routes(v2_routers):
         elif router is assistant_os.router:
             assert {(m, r.path) for r in router.routes for m in r.methods} == ASSISTANT_ROUTES
         elif router is assistant_mcp.router:
-            assert {(m, r.path) for r in router.routes for m in r.methods} == MCP_ROUTES
+            # E39 rides this already-mounted router (R1). Included routers are lazy wrappers.
+            assert _mounted(router.routes) == MCP_ROUTES | OAUTH_ROUTES
         else:
             assert router.routes == []
     mounted = _mounted()
     assert READS_ROUTES <= mounted
+    assert {(m, p) for m, p in mounted if p.startswith(("/oauth/", "/.well-known/oauth",
+                                                       "/.well-known/openid"))} == OAUTH_ROUTES
     assert {(m, p) for m, p in mounted if p.startswith("/v1/assistant")} == (
         ASSISTANT_ROUTES | MCP_ROUTES)
     assert {(m, p) for m, p in mounted if p.startswith("/v1/assistant/mcp")} == MCP_ROUTES
@@ -123,6 +147,10 @@ def test_v2_routers_mount_with_zero_routes(v2_routers):
         COMMITS_ROUTES | KEY_ROUTES)
     assert {(m, p) for m, p in mounted if _segment(p) in STATEMENT_SEGMENTS} == STATEMENT_ROUTES
     assert {(m, p) for m, p in mounted if _segment(p) == "receipts"} == V1_RECEIPTS
+
+
+def test_hidden_oauth_routes_are_in_the_mounted_census():
+    assert OAUTH_ROUTES <= _mounted()
 
 
 @pytest.mark.parametrize(

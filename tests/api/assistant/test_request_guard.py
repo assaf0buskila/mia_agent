@@ -96,15 +96,18 @@ def test_one_slot_covers_auth_and_work_and_is_released(env, monkeypatch, method,
 
 
 def request_for(path, key):
+    async def receive():
+        return {"type": "http.request", "body": b"{}", "more_body": False}
+
     return Request({"type": "http", "method": "POST", "path": path,
                     "client": ("203.0.113.10", 50000),
                     "headers": [(b"authorization", ("Bearer " + key).encode()),
-                                (b"content-type", b"application/json")]})
+                                (b"content-type", b"application/json")]}, receive=receive)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("surface", ["rest", "mcp"])
-async def test_cancelled_request_releases_its_acquired_slot(env, monkeypatch, surface):
+async def test_cancelled_upload_never_acquires_a_slot(env, monkeypatch, surface):
     aw, _client = env
     key = aw.issue()["secret"]
     slots = threading.BoundedSemaphore(1)
@@ -121,6 +124,8 @@ async def test_cancelled_request_releases_its_acquired_slot(env, monkeypatch, su
     task = asyncio.create_task(endpoint(request_for(path, key), aw.config))
     try:
         await asyncio.wait_for(entered_body.wait(), timeout=3)
+        assert slots.acquire(blocking=False), "client upload held a DB slot"
+        slots.release()
         task.cancel()
         with pytest.raises(asyncio.CancelledError) as caught:
             await task
@@ -131,6 +136,37 @@ async def test_cancelled_request_releases_its_acquired_slot(env, monkeypatch, su
         if not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.parametrize("surface", ["rest", "mcp"])
+@pytest.mark.parametrize("outcome", ["too_large", "timeout", "disconnect"])
+@pytest.mark.parametrize("invalid", ["unknown", "revoked"])
+async def test_recorded_body_outcome_never_preempts_invalid_bearer(
+        env, monkeypatch, surface, outcome, invalid):
+    aw, _client = env
+    issued = aw.issue()
+    key = keys.generate_secret() if invalid == "unknown" else issued["secret"]
+    if invalid == "revoked":
+        aw.revoke(issued["credential_id"])
+    monkeypatch.setattr(rest, "BODY_TIMEOUT_SECONDS", 0.01)
+
+    async def receive():
+        if outcome == "timeout":
+            await asyncio.Event().wait()
+        if outcome == "disconnect":
+            return {"type": "http.disconnect"}
+        return {"type": "http.request", "body": b"x" * (rest.BODY_CAP + 1),
+                "more_body": True}
+
+    endpoint, path = ((rest.submit_batch, rest.ROOT + "/statement-batches") if surface == "rest"
+                      else (mcp.mcp, "/v1/assistant/mcp"))
+    original = request_for(path, key)
+    response = await endpoint(Request(original.scope, receive=receive), aw.config)
+    assert response.status_code == 401
+    assert json.loads(response.body)["error"]["code"] == "assistant_auth_required"
+    [row] = aw.audit()
+    assert row["operation"] == "bearer"
+    assert row["reason"] == ("key_unknown" if invalid == "unknown" else "key_revoked")
 
 
 @pytest.mark.asyncio

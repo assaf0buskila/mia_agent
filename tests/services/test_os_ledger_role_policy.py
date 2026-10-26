@@ -990,7 +990,7 @@ def test_constraint_and_index_pins_are_the_frozen_migration_sql():
         )
         assert match, definition
         pinned.add((match.group(2), match.group(3), bool(match.group(1))))
-    assert pinned == created and len(created) == len(policy().INDEX_PINS) == 15
+    assert pinned == created and len(created) == len(policy().INDEX_PINS) == 16
 
 
 def test_privileged_predefined_roles_are_the_reviewed_set():
@@ -1186,8 +1186,8 @@ def live_indexes(c):
 
 
 def test_constraint_and_index_pins_are_the_catalog(roles):
-    """The migrated database holds exactly the pinned inventory: 44 foreign keys, 27 primary
-    keys, 15 unique constraints, 186 checks, 15 further indexes and 176 enabled RI triggers.
+    """The migrated database holds exactly the pinned inventory: 46 foreign keys, 28 primary
+    keys, 15 unique constraints, 200 checks, 16 further indexes and 184 enabled RI triggers.
 
     V2-14 alone was 26, 19, 12, 112, 10 and 104. V2-14b adds seven tables (15 foreign keys,
     7 primary keys, 3 unique keys, 59 checks), six checks on V2-14 tables, the foreign key
@@ -1208,7 +1208,7 @@ def test_constraint_and_index_pins_are_the_catalog(roles):
         assert live_indexes(c) == sorted(policy().INDEX_PINS)
         kinds = [row[2].split(" ", 1)[0] for row in live]
         assert {kind: kinds.count(kind) for kind in set(kinds)} == {
-            "FOREIGN": 44, "PRIMARY": 27, "UNIQUE": 15, "CHECK": 186,
+            "FOREIGN": 46, "PRIMARY": 28, "UNIQUE": 15, "CHECK": 200,
         }
         # The same totals, from the migration SQL (schema_migrations is the runner's table).
         sql_keys, sql_checks, _ = migrated_constraints()
@@ -1222,19 +1222,19 @@ def test_constraint_and_index_pins_are_the_catalog(roles):
             "SELECT confupdtype::text, confdeltype::text, confmatchtype::text, condeferrable, "
             "condeferred, convalidated, count(*) FROM pg_constraint "
             "WHERE contype = 'f' AND connamespace = 'assaf_os'::regnamespace GROUP BY 1,2,3,4,5,6"
-        )).all() == [("a", "a", "s", False, False, True, 44)]
+        )).all() == [("a", "a", "s", False, False, True, 46)]
         # Four internal RI triggers per foreign key, all enabled.
         assert c.execute(text(
             "SELECT t.tgenabled::text, count(*) FROM pg_trigger t "
             "JOIN pg_class r ON r.oid = t.tgrelid "
             "WHERE r.relnamespace = 'assaf_os'::regnamespace AND t.tgisinternal GROUP BY 1"
-        )).all() == [("O", 4 * sql_kinds.count("FOREIGN"))] == [("O", 176)]
-        # Every table, plus an index per primary key and unique constraint and the 15 others.
+        )).all() == [("O", 4 * sql_kinds.count("FOREIGN"))] == [("O", 184)]
+        # Every table, plus an index per primary key and unique constraint and the 16 others.
         assert c.execute(text(
             "SELECT relpersistence::text, count(*) FROM pg_class "
             "WHERE relnamespace = 'assaf_os'::regnamespace GROUP BY 1"
         )).all() == [("p", len(OWNED_TABLES) + sql_kinds.count("PRIMARY")
-                      + sql_kinds.count("UNIQUE") + len(policy().INDEX_PINS))] == [("p", 84)]
+                      + sql_kinds.count("UNIQUE") + len(policy().INDEX_PINS))] == [("p", 87)]
 
 
 def test_constraint_pins_survive_a_dump_and_restore_roundtrip(roles):
@@ -1269,7 +1269,7 @@ def test_constraint_pins_survive_a_dump_and_restore_roundtrip(roles):
             "SELECT count(*) FROM pg_trigger t JOIN pg_class r ON r.oid = t.tgrelid "
             "WHERE r.relnamespace = 'assaf_os'::regnamespace AND t.tgisinternal "
             "AND t.tgenabled = 'O'"
-        )) == 176
+        )) == 184
         for definition in indexes:
             name = re.fullmatch(r"CREATE (?:UNIQUE )?INDEX (\w+) .*", definition).group(1)
             c.exec_driver_sql(f"DROP INDEX assaf_os.{name}")
@@ -1393,6 +1393,7 @@ ADDENDUM_TABLES = frozenset({
     "os_statements", "os_statement_lines", "os_statement_batch_lines", "os_merchant_rules",
     "os_statement_review_drafts", "os_assistant_credentials", "os_assistant_audit",
     "os_assistant_issue_requests",
+    "os_assistant_oauth_requests",
 })
 LISTED_UPDATES = {
     "os_workspaces": ("pending_seq",),
@@ -1404,6 +1405,10 @@ LISTED_UPDATES = {
     "os_statement_batch_lines": ("detail", "purged_at"),
     "os_assistant_credentials": ("revoked_at", "last_used_at", "use_count"),
     "os_assistant_issue_requests": ("status", "approved_at", "collected_at", "credential_id"),
+    "os_assistant_oauth_requests": (
+        "status", "chain_binding", "approved_at", "code_hash", "code_expires_at",
+        "code_used_at", "credential_id",
+    ),
 }
 EVERY_COLUMN_EXCEPT = {
     "os_statement_lines": {"workspace_id", "statement_id", "line_key", "created_at"},
@@ -1618,6 +1623,15 @@ def test_runtime_dml_matches_the_addendum_map(roles):
             "approval_deadline) VALUES ('v214b', :id, '123', 1, 'Claude', 'claude', 30, :binding, "
             "'pending_approval', now(), now() + interval '10 minutes')"
         ), {"id": "IR_" + "a" * 32, "binding": "b" * 64})
+        c.execute(text(
+            "INSERT INTO assaf_os.os_assistant_oauth_requests(workspace_id, oauth_request_id, "
+            "owner_id, epoch, client_id, redirect_uri, code_challenge, scope, resource, state, "
+            "status, created_at, deadline, client_ip_hmac) VALUES ('v214b', :id, '123', 1, "
+            "'https://chatgpt.com/oauth/client.json', "
+            "'https://chatgpt.com/connector_platform_oauth_redirect', :challenge, "
+            "'assaf-os:assistant', 'https://api.test/v1/assistant/mcp', 'test-state', "
+            "'pending_owner', now(), now() + interval '10 minutes', :ip)"
+        ), {"id": "OR_" + "a" * 32, "challenge": "c" * 43, "ip": "f" * 64})
         c.execute(text(
             "INSERT INTO assaf_os.os_receipts(workspace_id, request_id, proposal_id, epoch, "
             "status, kind, commit_version, completed_at, reason_codes) VALUES ('v214b', :r, "
@@ -2024,6 +2038,9 @@ def test_addendum_dry_run_prints_retention_login_and_every_addendum_grant(monkey
         "assaf_os.os_assistant_credentials TO assaf_os_ledger;",
         "GRANT UPDATE (status, approved_at, collected_at, credential_id) ON TABLE "
         "assaf_os.os_assistant_issue_requests TO assaf_os_ledger;",
+        "GRANT UPDATE (status, chain_binding, approved_at, code_hash, code_expires_at, "
+        "code_used_at, credential_id) ON TABLE assaf_os.os_assistant_oauth_requests "
+        "TO assaf_os_ledger;",
         "GRANT USAGE ON SCHEMA assaf_os TO assaf_os_retention;",
         "GRANT DELETE, SELECT ON TABLE assaf_os.os_assistant_audit TO assaf_os_retention;",
         "GRANT DELETE, SELECT ON TABLE assaf_os.os_statement_batch_lines TO assaf_os_retention;",

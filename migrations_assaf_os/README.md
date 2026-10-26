@@ -67,6 +67,22 @@ It also indexes audit admission counts by `(workspace_id, client_ip_hmac, occurr
 and `(workspace_id, operation, occurred_at)`. Global invalid-lookup budget counts filter
 by operation. Runtime and retention grants, including audit DELETE, are unchanged.
 
+## V2-38b assistant OAuth requests
+
+`20261026_assaf_os_oauth.sql` follows the E37a migration in the same allowlist and
+atomic digest journal. It adds nullable `audience` to `os_assistant_credentials`
+(`NULL` identifies an existing static key) and creates
+`os_assistant_oauth_requests`. A request retains the exact printable OAuth `state`,
+the pinned ChatGPT client and redirect, PKCE challenge, numeric owner, epoch, approval
+binding, one-time code hash and credential reference. `resource` is nonempty but is
+not host-pinned because the runtime derives its exact URI from `public_base_url`.
+
+The runtime role receives SELECT and INSERT plus UPDATE only on `status`,
+`chain_binding`, `approved_at`, `code_hash`, `code_expires_at`, `code_used_at` and
+`credential_id`. It receives no DELETE. The retention role receives no OAuth-request
+grant. A partial unique `(workspace_id, code_hash)` index supports locked public token
+exchange without making NULL request rows collide.
+
 ## Explicit operator job and production gate
 
 **Do not run in production until V2-14a / issue #151 APP-ROLE-DEMOTE has landed and

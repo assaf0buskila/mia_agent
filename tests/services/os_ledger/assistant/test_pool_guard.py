@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import threading
 import time
 from contextlib import contextmanager, nullcontext
@@ -30,13 +31,21 @@ def test_fourth_bearer_is_bounded_retryable_and_never_enters_the_store(aw, caplo
             assert release.wait(6)
             return {}
 
-    def run(index):
+    async def request(index):
         try:
-            with keys.bearer_request():
+            async with keys.async_bearer_request():
                 caller = aw.authenticate(issued[index]["secret"], ip=f"203.0.113.{index}")
                 aw.gateway.run(caller, "context", lambda facts: work(caller, facts))
         except Exception as exc:
             errors.append(exc)
+
+    def run(index):
+        asyncio.run(request(index))
+
+    async def fourth():
+        async with keys.async_bearer_request():
+            caller = aw.authenticate(issued[3]["secret"], ip="203.0.113.3")
+            aw.gateway.run(caller, "context", lambda facts: {})
 
     threads = [threading.Thread(target=run, args=(index,)) for index in range(3)]
     for thread in threads:
@@ -46,9 +55,7 @@ def test_fourth_bearer_is_bounded_retryable_and_never_enters_the_store(aw, caplo
         aw.store.calls.clear()
         started = time.monotonic()
         with pytest.raises(LedgerError) as caught:
-            with keys.bearer_request():
-                caller = aw.authenticate(issued[3]["secret"], ip="203.0.113.3")
-                aw.gateway.run(caller, "context", lambda facts: {})
+            asyncio.run(fourth())
         assert 1.8 <= time.monotonic() - started < 3
         error = caught.value
         assert (error.code, error.status, error.retryable, error.write_outcome) == (
@@ -89,7 +96,7 @@ def test_fourth_bearer_is_bounded_retryable_and_never_enters_the_store(aw, caplo
 
 
 @pytest.mark.parametrize("exit_path", ["success", "work_error", "admit", "record", "commit"])
-def test_guard_is_released_on_every_exit_path(fake_aw, monkeypatch, exit_path):
+async def test_guard_is_released_on_every_exit_path(fake_aw, monkeypatch, exit_path):
     aw = fake_aw
     caller = aw.authenticate(aw.issue()["secret"])
     semaphore = threading.BoundedSemaphore(1)
@@ -108,11 +115,12 @@ def test_guard_is_released_on_every_exit_path(fake_aw, monkeypatch, exit_path):
             raise LedgerError("validation_error")
         return {}
 
-    with keys.bearer_request(), fault():
-        if exit_path in {"work_error", "admit"}:
-            with pytest.raises(LedgerError):
-                aw.gateway.run(caller, "context", work)
-        else:
-            assert aw.gateway.run(caller, "context", work) == {}
+    async with keys.async_bearer_request():
+        with fault():
+            if exit_path in {"work_error", "admit"}:
+                with pytest.raises(LedgerError):
+                    aw.gateway.run(caller, "context", work)
+            else:
+                assert aw.gateway.run(caller, "context", work) == {}
     assert semaphore.acquire(blocking=False)
     semaphore.release()

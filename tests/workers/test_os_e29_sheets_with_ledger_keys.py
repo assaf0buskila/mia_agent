@@ -417,6 +417,8 @@ SETTING_NAMES = ("assaf_os_ledger_enabled", "assaf_os_authority_epoch")
 # Every file in app/ that names either setting, and why it is safe under backend=sheets. A new file
 # here is a new reader: it must be reviewed against §22 E29 before it is added.
 READERS = {
+    "app/services/assistant_oauth.py": (
+        "E39 public ledger admission: refuses backend=sheets before every connection"),
     "app/core/config.py": "the fields and their coercion",
     "app/services/os_backend.py": "the postgres factory path only (backend == postgres)",
     "app/services/os_ledger/authorize.py": "the epoch of a minted context (gated callers only)",

@@ -103,7 +103,7 @@ class MemoryAssistantStore:
     def control(self, credential, *, ip_hmac: str, method: str, now: datetime) -> None:
         if method not in {"initialize", "ping", "tools_list", "notification", "invalid_request",
                           "method_not_found", "invalid_params", "body_too_large",
-                          "unsupported_media"}:
+                          "unsupported_media", "body_timeout"}:
             raise ValueError("invalid_control_method")
         with self._gate("ip:" + ip_hmac), self._lock:
             if sum(1 for r in self.rows if r["client_ip_hmac"] == ip_hmac
