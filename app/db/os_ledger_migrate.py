@@ -16,6 +16,7 @@ MIGRATIONS = (
     "20261016_assaf_os_ledger_core_v2.sql",
     "20261016_assaf_os_statements.sql",
     "20261016_assaf_os_assistant.sql",
+    "20261024_assaf_os_issue_requests.sql",
 )
 OWNER_ROLE = "assaf_os_owner"
 # V2-15 must provision a separate NOINHERIT login and validate its exact grant map.
@@ -29,6 +30,7 @@ TABLES = frozenset({
     # V2-14b
     "os_statements", "os_statement_lines", "os_statement_batch_lines", "os_merchant_rules",
     "os_statement_review_drafts", "os_assistant_credentials", "os_assistant_audit",
+    "os_assistant_issue_requests",
 })
 
 

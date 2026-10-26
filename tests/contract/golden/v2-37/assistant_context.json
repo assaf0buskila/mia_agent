@@ -1,0 +1,39 @@
+{
+  "api_version": "assaf-os-assistant.v1",
+  "format": {
+    "encoding": "utf-8",
+    "ensure_ascii": false,
+    "max_bytes": 131072,
+    "max_lines": 300,
+    "schema": "statement-batch.v1",
+    "separators": [
+      ",",
+      ":"
+    ]
+  },
+  "rules": [
+    {
+      "category": "Tools",
+      "is_subscription": true,
+      "label": null,
+      "match": "exact",
+      "merchant_key": "demo shop",
+      "path": null,
+      "platform": null
+    }
+  ],
+  "statements": [
+    {
+      "account_label": "Synthetic Business Card",
+      "charge_date": "2026-10-15",
+      "line_count": 3,
+      "status": "imported"
+    },
+    {
+      "account_label": "Second Synthetic Card",
+      "charge_date": "2026-10-15",
+      "line_count": 3,
+      "status": "pending"
+    }
+  ]
+}

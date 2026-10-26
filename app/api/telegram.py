@@ -190,6 +190,7 @@ async def _execute_assaf_os_owner_decision(
             RESOURCE_OWNER_PROPOSAL,
             OwnerActionExecution,
             execute_approved_owner_action_with_adapters,
+            execute_assistant_issue_decision,
             execute_ledger_owner_decision,
             is_ledger_owner_action,
             read_owner_action,
@@ -199,6 +200,7 @@ async def _execute_assaf_os_owner_decision(
         started = perf_counter()
         session = get_session_factory()()
         ledger_card = False
+        issue_card = False
         logged = False
 
         def finish(outcome):
@@ -209,7 +211,7 @@ async def _execute_assaf_os_owner_decision(
             _log.info(
                 "owner_callback op=assaf_os_execute decision=%s card=%s outcome=%s ms=%d",
                 decision if decision in {"approve", "reject"} else "error",
-                "ledger" if ledger_card else "sheets",
+                "assistant_issue" if issue_card else "ledger" if ledger_card else "sheets",
                 _log_code(getattr(outcome, "status", None)),
                 elapsed_ms(started),
             )
@@ -219,13 +221,19 @@ async def _execute_assaf_os_owner_decision(
             thread_store = LeadStore(session)
             principal = Principal.owner(source="telegram", actor_id=actor_id)
             operation_key = f"{proposal_id}:{'execute' if decision == 'approve' else 'reject'}"
-            ledger_card = is_ledger_owner_action(
-                read_owner_action(
+            envelope = read_owner_action(
                     thread_store.get_approval_by_resource(
                         RESOURCE_OWNER_PROPOSAL, proposal_id, ACTION_OWNER_EXTERNAL_WRITE
                     )
-                )
             )
+            issue_card = bool(envelope and envelope.get("kind") == "assistant_key.issue")
+            ledger_card = is_ledger_owner_action(envelope)
+            if issue_card:
+                outcome = execute_assistant_issue_decision(
+                    thread_store, settings=settings, principal=principal,
+                    proposal_id=proposal_id, decision=decision)
+                session.commit()
+                return finish(outcome)
             if ledger_card:
                 # V2-28: a ledger card is answered by its receipt, so a leftover claim is never a
                 # sticky unknown here; the decision UUID stored on the card is the only id used.
@@ -260,6 +268,11 @@ async def _execute_assaf_os_owner_decision(
             return finish(outcome)
         except Exception:
             session.rollback()
+            if issue_card:
+                _log.info(
+                    "owner_callback op=assistant_issue outcome=not_started reason=worker_failed"
+                )
+                return finish(OwnerActionExecution("not_started"))
             if ledger_card:
                 # Recovery for a ledger card is a receipt read on the next callback, by the same
                 # stored decision UUID. No claim is parked, so nothing sticks as unknown.
@@ -366,7 +379,8 @@ async def _handle_callback(
         pending = LeadStore(db).get_approval_by_approval_id(callback_token)
         envelope = read_owner_action(pending)
         deferred_assaf_os_ack = bool(
-            envelope is not None and envelope.get("kind") == "assaf_os.approve"
+            envelope is not None
+            and envelope.get("kind") in {"assaf_os.approve", "assistant_key.issue"}
         )
     if not deferred_assaf_os_ack:
         await _answer_owner_callback(port, callback["callback_query_id"])
@@ -622,7 +636,9 @@ async def _handle_callback(
         from app.services.owner_actions import read_owner_action, reject_assaf_os_owner_action
 
         rejected_envelope = read_owner_action(rejected_row)
-        if rejected_envelope is not None and rejected_envelope.get("kind") == "assaf_os.approve":
+        if rejected_envelope is not None and rejected_envelope.get("kind") in {
+            "assaf_os.approve", "assistant_key.issue"
+        }:
             if deferred_assaf_os_ack:
                 rejected = await _execute_assaf_os_owner_decision(
                     settings=settings,
