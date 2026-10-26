@@ -123,6 +123,7 @@ MANIFEST = "manifest.json"
 
 _SHA = re.compile(r"[0-9a-f]{40}")
 _HEX64 = re.compile(r"[0-9a-f]{64}")
+_ATTEMPT_ID = re.compile(r"[0-9a-f]{32}")
 _WORKSPACE = re.compile(r"[A-Za-z0-9_-]{3,128}")
 _OWNER = re.compile(r"[1-9][0-9]{0,19}")
 _STAMP = re.compile(
@@ -1073,6 +1074,7 @@ def cmd_init(ctx: Context, *, rearm: bool = False) -> Result:
             snapshot = _state(ctx)
             if snapshot.states["core"] == "shadow":
                 # A repeat of a re-arm that already ran (or a ledger that was never fenced).
+                deps.evidence.set_aside(RESTORE_ATTEMPT, deps.now())
                 return Result(True, {"command": "init", "ok": True, "outcome": "already_shadow",
                                      **_snapshot_document(snapshot)})
             if snapshot.states["core"] != "fenced":
@@ -1083,6 +1085,7 @@ def cmd_init(ctx: Context, *, rearm: bool = False) -> Result:
                 deps.workspace, "core", "shadow", expected_epoch=snapshot.epoch,
                 actor_owner_id=deps.owner_id,
             )
+            deps.evidence.set_aside(RESTORE_ATTEMPT, deps.now())
             return Result(True, {"command": "init", "ok": True, "outcome": "rearmed",
                                  **_snapshot_document(after)})
         try:
@@ -1228,6 +1231,7 @@ def cmd_activate(ctx: Context) -> Result:
     snapshot = _state(ctx)
     core = snapshot.states["core"]
     if core == "active":
+        deps.evidence.set_aside(RESTORE_ATTEMPT, deps.now())
         return Result(True, {"command": "activate", "ok": True, "outcome": "already_active",
                              **_snapshot_document(snapshot)})
     if core != "shadow":
@@ -1252,6 +1256,9 @@ def cmd_activate(ctx: Context) -> Result:
         )
     except api.LedgerError as error:
         raise _ledger_refusal(error) from None
+    # Core is now active: a leftover attempt belongs to an earlier, closed restore window.
+    # Archive even on the already-active retry above, so an I/O failure is repairable.
+    deps.evidence.set_aside(RESTORE_ATTEMPT, deps.now())
     document = {"command": "activate", "ok": True, "outcome": "activated",
                 "checks": [check.as_dict() for check in checks],
                 "gates": [gate.as_dict() for gate in gates], **_snapshot_document(after)}
@@ -1304,6 +1311,8 @@ def _fence_ledger(
                 "fence_record_minted_after_restore": minted_after_restore,
             }
             deps.evidence.write(LEDGER_FENCE, record)
+        elif record["epoch"] > snapshot.epoch:
+            warnings.append("restore_epoch_mismatch")
     except EvidenceError:
         record = None
         warnings.append("restore_evidence_invalid")
@@ -1397,6 +1406,25 @@ def _late_fence_refusal(command: str, snapshot: api.AuthoritySnapshot) -> Result
     }, ["restore_evidence_invalid"])
 
 
+def _restore_attempt_id(ctx: Context) -> str | None:
+    """Read a usable identity, or pin absence; unidentified attempts cannot be consumed."""
+    try:
+        attempt = ctx.deps.evidence.read(RESTORE_ATTEMPT)
+    except EvidenceError:
+        raise Refusal("restore_evidence_invalid") from None
+    if attempt is None:
+        return None
+    identity = attempt.get("attempt_id")
+    if not (
+        type(attempt.get("v")) is int and attempt["v"] == 1
+        and type(attempt.get("pre_restore_fence_record_present")) is bool
+        and type(identity) is str and _ATTEMPT_ID.fullmatch(identity)
+        and _time(attempt.get("recorded_at")) is not None
+    ):
+        raise Refusal("restore_evidence_invalid")
+    return identity
+
+
 def _complete_restore_evidence(
     ctx: Context, snapshot: api.AuthoritySnapshot, session: Mapping[str, Any],
     document: dict[str, Any],
@@ -1417,15 +1445,18 @@ def _complete_restore_evidence(
                 "v": 1, "kind": "activation", "activated_at": _iso(activated_at),
                 "epoch": snapshot.epoch, "release_sha": ctx.approved_sha,
             })
-        # A successful recovery consumes the restore signal. Preserve its audit record and
-        # retry this bookkeeping at E+1 if archiving fails after authority has committed.
-        ctx.deps.evidence.set_aside(RESTORE_ATTEMPT, ctx.deps.now())
+        # Consume only this recovery's signal, including on E+1 crash retries. An old/absent
+        # pin must never consume a later restore's attempt. The VM state lock spans read/rename.
+        pinned = session.get("restore_attempt_id")
+        if (type(pinned) is str and _ATTEMPT_ID.fullmatch(pinned)
+                and _restore_attempt_id(ctx) == pinned):
+            ctx.deps.evidence.set_aside(RESTORE_ATTEMPT, ctx.deps.now())
     except EvidenceError:
         document["evidence_written"] = False
         evidence_warnings.append("restore_evidence_invalid")
-    except Refusal:
+    except Refusal as error:
         document["evidence_written"] = False
-        evidence_warnings.append("evidence_unwritable")
+        evidence_warnings.extend(error.codes)
     document["rto_within_limit"] = activated_at - started_at <= RESTORE_RTO
     document["warnings"] = (
         ([] if document["rto_within_limit"] else ["restore_rto_exceeded"]) + evidence_warnings)
@@ -1458,7 +1489,9 @@ def cmd_restore_begin(ctx: Context, *, expected_epoch: int | None) -> Result:
             or not started_at <= fenced_at <= ctx.now):
         raise Refusal("restore_evidence_invalid")
     ctx.deps.evidence.write(RESTORE_SESSION, {
-        key: value for key, value in record.items() if key != "release_sha"})
+        **{key: value for key, value in record.items() if key != "release_sha"},
+        "restore_attempt_id": _restore_attempt_id(ctx),
+    })
     after = ctx.deps.admin.transition(
         ctx.deps.workspace, "core", "restoring", expected_epoch=expected_epoch,
         actor_owner_id=ctx.deps.owner_id,

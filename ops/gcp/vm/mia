@@ -408,7 +408,17 @@ record_restore_attempt() {
   fi
   mkdir -p "$directory" || return 1
   temporary="$(mktemp "$directory/.restore-attempt-XXXXXX")" || return 1
-  printf '{"v":1,"pre_restore_fence_record_present":%s}\n' "$present" > "$temporary" || return 1
+  python3 - "$present" > "$temporary" <<'PY' || return 1
+import json
+import sys
+import uuid
+from datetime import UTC, datetime
+
+json.dump({"v": 1, "attempt_id": uuid.uuid4().hex,
+           "recorded_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+           "pre_restore_fence_record_present": sys.argv[1] == "true"}, sys.stdout)
+sys.stdout.write("\n")
+PY
   chmod 600 "$temporary" || return 1
   chown 10001:10001 "$directory" "$temporary" || return 1
   mv -f "$temporary" "$directory/restore-attempt.json" || return 1
@@ -650,8 +660,8 @@ case "$cmd" in
     # marker stays: start_services (deploy, settings, https enable, go-live) refuses and the off-host
     # backup skips, until `mia restore` is run again and succeeds. It is written after the safety dump
     # on purpose: a restore that stops before this line has changed nothing and leaves no marker.
-    install -m 600 /dev/null "$restore_incomplete"
     record_restore_attempt || restore_fail restore_evidence_invalid
+    install -m 600 /dev/null "$restore_incomplete"
     compose exec -T postgres psql -U mia -d postgres -v ON_ERROR_STOP=1 \
       -c "DROP DATABASE IF EXISTS mia WITH (FORCE)" -c "CREATE DATABASE mia OWNER mia"
     compose exec -T postgres pg_restore -U mia -d mia --no-owner --no-privileges --exit-on-error < "$file"

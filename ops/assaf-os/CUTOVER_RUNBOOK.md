@@ -633,13 +633,19 @@ number.
   loss, restored dump/epoch/SHA and independent posture/authority validation; obtain the owner's
   explicit approval before executing that procedure. Do not fabricate timestamps or clear a flag
   to make the standard commands pass.
+  Always restore through `sudo mia restore`, because direct `pg_restore` or `compose exec` bypasses
+  the wrapper and otherwise the incident timing signal is lost.
   Before replacing the database, `mia restore` writes `restore-attempt.json` outside the dump,
-  with boolean `pre_restore_fence_record_present` (file presence, including unsafe links).
+  with a unique `attempt_id`, UTC `recorded_at`, and boolean
+  `pre_restore_fence_record_present` (file presence, including unsafe links).
   A fence minting a record under an outstanding restore attempt without a matching prior fence sets
   `fence_record_minted_after_restore=true`. This conservative signal also catches evidence lost
   after the restore attempt began, and a stale lower-epoch record from an earlier incident.
-  Successful restore-finish archives the consumed attempt as `restore-attempt-superseded-<UTC>.json`;
-  a retry at E+1 repairs an archive failure, without another bump. An unreadable attempt record blocks evidence creation, never
+  `restore-begin` pins the current attempt id (or its absence) in `restore-session.json`.
+  Successful restore-finish archives only its matching attempt as `restore-attempt-superseded-<UTC>.json`;
+  a retry at E+1 repairs an archive failure, without another bump or consuming a newer attempt.
+  Activation and `init --rearm`, including retries, archive outstanding attempts once core is active
+  or re-armed. An unreadable attempt record blocks evidence creation, never
   containment. `restore-begin` refuses `restore_evidence_invalid`; `restore-finish` also refuses
   and reports `rto_within_limit=null` and `rpo_within_limit=null` for that flagged session.
   The RTO/RPO booleans are meaningless in this case: post-restore timestamps prove neither limit.
@@ -651,7 +657,8 @@ number.
   Do not permit traffic or jobs between the restore and this fence. If the restored epoch differs
   from E, STOP and use a compatible dump and the coordinator's recovery plan. If a second fence
   has already run against E0 < E, it still contains writes and preserves the higher-epoch record;
-  `restore-begin` refuses `restore_epoch_mismatch` rather than replacing the incident time.
+  fence warns `restore_epoch_mismatch` with `evidence_written=false`, and `restore-begin` refuses
+  that code rather than replacing the incident time.
 - Record the restored dump's actual consistent-snapshot timestamp (backup manifest
   `created_at_utc`, NOT the download, decrypt or restore completion time) in
   `/var/lib/mia/os-authority/restore.json`, owned by UID 10001, mode 0600:

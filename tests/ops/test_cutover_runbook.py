@@ -289,6 +289,8 @@ def test_restore_containment_order_exception_and_reason_table():
     assert "owner's explicit exception procedure" in section
     assert "fence_record_minted_after_restore" in section and "null" in section
     assert "restore-attempt.json" in section and "pre_restore_fence_record_present" in section
+    assert "Always restore through `sudo mia restore`" in section
+    assert "otherwise the incident timing signal is lost" in section
     assert "run status after `mia restore` and compare the epoch" in section
     table = RUNBOOK.split("Other refusals of the CLI:", 1)[1]
     for code in ("restore_incomplete", "restore_rpo_exceeded", "restore_evidence_invalid",
