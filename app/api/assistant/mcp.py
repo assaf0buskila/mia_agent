@@ -16,14 +16,17 @@ from fastapi.responses import JSONResponse, Response
 
 from app.api.assistant import batch_schema as wire
 from app.api.assistant import os as rest
+from app.api.assistant.oauth import router as oauth_router
 from app.core.config import Settings, get_settings
 from app.core.owner_timing import request_id_or_new
 from app.core.public_website import client_ip
 from app.domain.statements import vocabulary as v
 from app.services import assistant_keys as keys
+from app.services import assistant_oauth as oauth
 from app.services.os_ledger import api
 
 router = APIRouter()
+router.include_router(oauth_router)
 PROTOCOL_VERSIONS = ("2025-06-18",)
 SERVER_VERSION = "1.0.0"
 _LOG = logging.getLogger("mia.os_assistant")
@@ -162,7 +165,7 @@ async def mcp(request: Request, settings: Settings = Depends(get_settings)) -> R
             caller = await rest._bearer_threadpool(
                 gateway.authenticate, cookie="cookie" in request.headers,
                 authorization=request.headers.getlist("authorization"),
-                ip=client_ip(request, settings=settings))
+                ip=client_ip(request, settings=settings), resource=request.url.path)
             raw, size, too_big = await rest._read_body(request)
             if too_big:
                 await rest._bearer_threadpool(gateway.control, caller, "body_too_large")
@@ -230,7 +233,13 @@ async def mcp(request: Request, settings: Settings = Depends(get_settings)) -> R
             return _reply(request_id, {"content": [{"type": "text", "text": json.dumps(
                 result, ensure_ascii=False, separators=(",", ":"))}], "structuredContent": result})
     except api.LedgerError as exc:
-        return rest._error(exc, write=True)
+        response = rest._error(exc, write=True)
+        if exc.code == "assistant_auth_required":
+            response.headers["WWW-Authenticate"] = (
+                'Bearer resource_metadata="' + oauth.issuer(settings, allow_http=True)
+                + '/.well-known/oauth-protected-resource/v1/assistant/mcp"'
+                + (', error="invalid_token"' if "authorization" in request.headers else ""))
+        return response
     except Exception:  # noqa: BLE001 - V2-37's uniform, payload-free outer envelope
         _LOG.warning("os_assistant op=mcp outcome=refused reason=unexpected_error")
         return rest._error(api.LedgerError("unknown", reason="unexpected_error"), write=True)

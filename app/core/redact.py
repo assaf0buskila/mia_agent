@@ -1,10 +1,12 @@
 import re
 from typing import Any
+from urllib.parse import unquote, urlsplit
 
 _BOT_URL = re.compile(
     r"(https://api\.telegram\.org/(?:file/)?bot)[0-9]+:[A-Za-z0-9_-]+",
     re.IGNORECASE,
 )
+_QUERY_URI = re.compile(r"((?:https?://[^\s/?#]+)?/[^\s?]*)\?\S*", re.IGNORECASE)
 
 _REDACT_KEYS = {
     "password",
@@ -24,6 +26,17 @@ _REDACT_KEYS = {
 }
 
 
+def _oauth_query(match: re.Match[str]) -> str:
+    uri = match.group(1)
+    try:
+        path = unquote(urlsplit(uri).path).lower()
+    except ValueError:
+        return match.group(0)
+    if path == "/oauth" or path.startswith("/oauth/"):
+        return uri + "?[redacted]"
+    return match.group(0)
+
+
 def redact(value: Any) -> Any:
     """Strip secrets and PII from structures before they hit logs or traces."""
     if isinstance(value, dict):
@@ -37,7 +50,7 @@ def redact(value: Any) -> Any:
     if isinstance(value, list):
         return [redact(item) for item in value]
     if isinstance(value, str):
-        return _BOT_URL.sub(r"\1[redacted]", value)
+        return _QUERY_URI.sub(_oauth_query, _BOT_URL.sub(r"\1[redacted]", value))
     # A %-style log arg that isn't a str/dict/list (e.g. the `httpx.URL` object
     # httpx's own request logger passes as an arg, not a pre-formatted string)
     # would otherwise skip every branch above and reach the log untouched --
@@ -49,6 +62,5 @@ def redact(value: Any) -> Any:
         text = str(value)
     except Exception:
         return value
-    if _BOT_URL.search(text):
-        return _BOT_URL.sub(r"\1[redacted]", text)
-    return value
+    cleaned = redact(text)
+    return cleaned if cleaned != text else value

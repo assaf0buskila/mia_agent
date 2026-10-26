@@ -50,6 +50,7 @@ from app.domain.owner.proposal_cards import render_owner_approval_card
 from app.integrations.base import MessagePort, OutboundMessage
 from app.integrations.telegram_format import approval_keyboard
 from app.services.assistant_issue import AssistantIssueService
+from app.services.assistant_oauth import AssistantOAuthService
 from app.services.os_ledger import api, authorize
 from app.services.owner_actions import propose_owner_action
 
@@ -64,6 +65,10 @@ router = APIRouter()
 def service_for(settings: Settings) -> AssistantIssueService:
     """The owner's key service on the PostgreSQL ledger. Tests replace this one function."""
     return AssistantIssueService(api.build_ledger(settings), settings)
+
+
+def oauth_service_for(settings: Settings) -> AssistantOAuthService:
+    return AssistantOAuthService(api.build_ledger(settings), settings)
 
 
 def gate(settings: Settings) -> None:
@@ -260,4 +265,79 @@ async def revoke_key(
         empty_object(raw)
         return service_for(settings).revoke(ctx, credential_id)
 
+    return await respond(run)
+
+
+@router.get(ROOT + "/oauth-requests/{oauth_request_id}")
+async def oauth_status(
+    oauth_request_id: str,
+    principal: OwnerSessionPrincipal = Depends(owner_scope("assaf-os:read")),
+    settings: Settings = Depends(get_settings),
+    session_db: Session = Depends(get_owner_session_db),
+) -> JSONResponse:
+    def run():
+        gate(settings)
+        return oauth_service_for(settings).status(
+            authorize.from_owner_read(principal, settings), oauth_request_id,
+            chain_id=login_chain(session_db, principal))
+    return await respond(run)
+
+
+@router.post(ROOT + "/oauth-requests/{oauth_request_id}/request-approval", status_code=202)
+async def oauth_request_approval(
+    oauth_request_id: str,
+    request: Request,
+    principal: OwnerSessionPrincipal = Depends(approve_mutation),
+    settings: Settings = Depends(get_settings),
+    db: Session = Depends(get_db),
+    session_db: Session = Depends(get_owner_session_db),
+    port: MessagePort = Depends(get_telegram_port),
+) -> JSONResponse:
+    raw = await request.body()
+
+    def run():
+        gate(settings)
+        empty_object(raw)
+        ctx = authorize.from_owner_mutation(principal, settings)
+        chain = login_chain(session_db, principal)
+        service = oauth_service_for(settings)
+        pending = service.request_approval(ctx, oauth_request_id, chain_id=chain)
+        envelope = service.proposal(ctx, oauth_request_id, chain_id=chain)
+        store = LeadStore(db)
+        action = propose_owner_action(
+            store, principal=Principal.owner(source="telegram", actor_id=principal.owner_id),
+            source_ref=oauth_request_id, kind=envelope["kind"],
+            parameters=envelope["parameters"], target=envelope["target"], ttl_seconds=600)
+        db.commit()
+        card = render_owner_approval_card(store.get_approval_by_approval_id(action.approval_id))
+        db.commit()
+        return pending, action.approval_id, card
+
+    pending, approval_id, card = await run_in_threadpool(run)
+    try:
+        await port.send(OutboundMessage(
+            conversation_id=principal.owner_id, text=card, channel="telegram",
+            idempotency_key=f"assistant-oauth:{approval_id}", parse_mode="HTML",
+            reply_markup=approval_keyboard(approval_token(approval_id))))
+    except Exception:
+        _LOG.warning("os_v2 op=oauth_grant outcome=pending reason=card_send_failed")
+    return JSONResponse(pending, status_code=202, headers=HEADERS)
+
+
+@router.post(ROOT + "/oauth-requests/{oauth_request_id}/complete")
+async def oauth_complete(
+    oauth_request_id: str,
+    request: Request,
+    principal: OwnerSessionPrincipal = Depends(approve_mutation),
+    settings: Settings = Depends(get_settings),
+    session_db: Session = Depends(get_owner_session_db),
+) -> JSONResponse:
+    raw = await request.body()
+
+    def run():
+        gate(settings)
+        empty_object(raw)
+        return oauth_service_for(settings).complete(
+            authorize.from_owner_mutation(principal, settings), oauth_request_id,
+            chain_id=login_chain(session_db, principal))
     return await respond(run)

@@ -24,6 +24,7 @@ FILES = (
     "20261016_assaf_os_assistant.sql",
     "20261024_assaf_os_issue_requests.sql",
     "20261025_assaf_os_assistant_followups.sql",
+    "20261026_assaf_os_oauth.sql",
 )
 V2_14_TABLES = frozenset({
     "os_workspaces", "os_authority", "os_leads", "os_clients", "os_works", "os_payments",
@@ -141,6 +142,7 @@ COLUMNS = {
         ("revoked_at", TS, False, None),
         ("last_used_at", TS, False, None),
         ("use_count", "bigint", True, "0"),
+        ("audience", "text", False, None),
     ),
     "os_assistant_audit": (
         ("workspace_id", f"{VC}(128)", True, None),
@@ -302,7 +304,9 @@ def _sql_without_comments(name):
 
 def test_allowlist_is_exact_ordered_and_lf_only():
     assert ledger.MIGRATIONS == (V2_14, *FILES)
-    assert ledger.TABLES == V2_14_TABLES | NEW_TABLES | {"os_assistant_issue_requests"}
+    assert ledger.TABLES == V2_14_TABLES | NEW_TABLES | {
+        "os_assistant_issue_requests", "os_assistant_oauth_requests",
+    }
     assert {p.name for p in (ROOT / "migrations_assaf_os").glob("*.sql")} == set(ledger.MIGRATIONS)
     scripts = ledger.migration_scripts()
     assert [name for name, _, _ in scripts] == list(ledger.MIGRATIONS)
@@ -542,7 +546,9 @@ def test_applies_after_v214_in_order_and_rerun_is_a_noop(addendum_db):
         }
         assert set(c.scalars(text(
             "SELECT tablename FROM pg_tables WHERE schemaname='assaf_os'"
-        ))) == V2_14_TABLES | NEW_TABLES | {"os_assistant_issue_requests"} | {"schema_migrations"}
+        ))) == V2_14_TABLES | NEW_TABLES | {
+            "os_assistant_issue_requests", "os_assistant_oauth_requests", "schema_migrations",
+        }
 
 
 def test_v214_constraint_names_are_read_before_they_are_replaced(addendum_db):
@@ -577,7 +583,9 @@ def test_v214_constraint_names_are_read_before_they_are_replaced(addendum_db):
     assert {
         k
         for k in added
-        if after[k][0].split(".")[1] not in NEW_TABLES | {"os_assistant_issue_requests"}
+        if after[k][0].split(".")[1] not in NEW_TABLES | {
+            "os_assistant_issue_requests", "os_assistant_oauth_requests",
+        }
     } == set().union(*CORE_CONSTRAINTS.values()) - replaced
 
 

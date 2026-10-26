@@ -1,0 +1,12 @@
+{
+  "authorization_servers": [
+    "https://mia.assafweb.com"
+  ],
+  "bearer_methods_supported": [
+    "header"
+  ],
+  "resource": "https://mia.assafweb.com/v1/assistant/mcp",
+  "scopes_supported": [
+    "assaf-os:assistant"
+  ]
+}

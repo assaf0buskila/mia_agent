@@ -132,6 +132,9 @@ class AssistantIssueService(keys.AssistantCredentialService):
 
     def _revoke_all_in(self, tx):
         IssueTables(tx).cancel_uncollected()
+        from app.services.assistant_oauth import OAuthTables
+
+        OAuthTables(tx).cancel_uncollected()
 
     def _live(self):
         if self._settings.kill_switch:

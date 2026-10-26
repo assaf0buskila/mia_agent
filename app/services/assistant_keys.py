@@ -136,6 +136,7 @@ class StoredCredential(CredentialRow):
     secret_hash: str = field(default="", repr=False)
     last_used_at: datetime | None = None
     use_count: int = 0
+    audience: str | None = None
 
 
 @dataclass
@@ -207,7 +208,7 @@ def client_ip_hmac(settings: Any, ip: str) -> str:
 # The credential tables inside a ledger transaction (issue, list, revoke)
 
 _COLUMNS = ("credential_id, owner_id, epoch, label, kind, scopes, secret_hash, created_at, "
-            "expires_at, revoked_at, last_used_at, use_count")
+            "expires_at, revoked_at, last_used_at, use_count, audience")
 
 
 class CredentialTables(Protocol):
@@ -294,11 +295,12 @@ class PgCredentialTables:
     def insert(self, row: StoredCredential) -> None:
         self._run(
             "INSERT INTO assaf_os.os_assistant_credentials (workspace_id, credential_id, owner_id, "
-            "epoch, label, kind, scopes, secret_hash, created_at, expires_at) VALUES (:ws, :id, "
-            ":owner, :epoch, :label, :kind, :scopes, :hash, :created, :expires)",
+            "epoch, label, kind, scopes, secret_hash, created_at, expires_at, audience) "
+            "VALUES (:ws, :id, :owner, :epoch, :label, :kind, :scopes, :hash, :created, :expires, "
+            ":audience)",
             id=row.credential_id, owner=row.owner_id, epoch=row.epoch, label=row.label,
             kind=row.kind, scopes=row.scopes, hash=row.secret_hash, created=row.created_at,
-            expires=row.expires_at)
+            expires=row.expires_at, audience=row.audience)
 
     def revoke(self, credential_id: str, at: datetime) -> bool:
         return self._run(
@@ -313,7 +315,7 @@ def stored_from_row(row: Any, workspace: str) -> StoredCredential:
         row.credential_id, str(row.owner_id), int(row.epoch), row.label, row.kind,
         row.created_at, row.expires_at, row.revoked_at, workspace_id=workspace,
         scopes=row.scopes, secret_hash=row.secret_hash.strip(), last_used_at=row.last_used_at,
-        use_count=int(row.use_count))
+        use_count=int(row.use_count), audience=row.audience)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -578,6 +580,19 @@ class PgAssistantStore:
                          operation="mcp_control", reason=method, ok=True, facts=Facts(),
                          ip_hmac=ip_hmac)
 
+    def oauth_attempt(self, *, ip_hmac: str, operation: str) -> None:
+        """Public OAuth shares R2a's IP lock/recount with every bearer audit writer."""
+        if operation not in {"oauth_authorize", "oauth_token"}:
+            raise ValueError("invalid_oauth_operation")
+        with self._begin() as conn:
+            self._lock(conn, f"ip:{ip_hmac}")
+            now = conn.execute(text("SELECT clock_timestamp()")).scalar_one()
+            if self._count(conn, "client_ip_hmac = :ip AND occurred_at >= :since", ip=ip_hmac,
+                           since=now - timedelta(seconds=IP_WINDOW_SECONDS)) >= IP_LIMIT:
+                raise _limited("ip_limit")
+            self._insert(conn, credential_id=None, moment=now, operation=operation,
+                         reason="oauth_attempt", ok=True, facts=Facts(), ip_hmac=ip_hmac)
+
     @contextmanager
     def slot(self, credential: StoredCredential, *, ip_hmac: str, operation: str,
              now: Callable[[], datetime]):
@@ -651,7 +666,8 @@ class AssistantGateway:
         self._watermark = revoke_watermark or db_revoke_watermark
         self._clock = clock or (lambda: datetime.now(UTC))
 
-    def authenticate(self, *, cookie: bool, authorization: Sequence[str], ip: str) -> Caller:
+    def authenticate(self, *, cookie: bool, authorization: Sequence[str], ip: str,
+                     resource: str | None = None) -> Caller:
         """The caller behind a bearer header, or ``assistant_auth_required`` / ``rate_limited``.
 
         Order: (0) the feature switch, no database touched; (1) a cookie is 401; (2) the header
@@ -672,6 +688,12 @@ class AssistantGateway:
             raise _limited("ip_limit")
         found = self._store.find(secret_hash(authorization[0][len("Bearer "):]))
         reason, ctx = self._validity(found, now)
+        if reason is None and found is not None and found.audience is not None:
+            from app.services.assistant_oauth import resource as canonical_resource
+
+            canonical = canonical_resource(settings)
+            if found.audience != canonical or resource not in {canonical, "/v1/assistant/mcp"}:
+                reason, ctx = "key_audience", None
         if reason is not None or ctx is None or found is None:
             over = self._store.invalid_lookup(
                 ip_hmac=ip_hmac, credential_id=None if found is None else found.credential_id,

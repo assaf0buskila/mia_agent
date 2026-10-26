@@ -17,6 +17,7 @@ from app.api.assistant import os as assistant_os
 from app.api.os_v2 import commits, owner_keys, reads, statements
 from app.core.config import MiaEnv, Settings, get_settings
 from app.main import app
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 COMMITS_ROUTES = {
@@ -47,6 +48,9 @@ STATEMENT_SEGMENTS = {"statements", "statement-batches", "merchant-rules"}
 # §17.1 (V2-37; module renamed by erratum E34): the owner's key routes and the step-up route, and
 # §17.2 the three bearer routes. A route outside these sets is refused below.
 KEY_ROUTES = {
+    ("GET", "/v1/owner/os/unified/oauth-requests/{oauth_request_id}"),
+    ("POST", "/v1/owner/os/unified/oauth-requests/{oauth_request_id}/request-approval"),
+    ("POST", "/v1/owner/os/unified/oauth-requests/{oauth_request_id}/complete"),
     ("GET", "/v1/owner/os/unified/assistant-credentials/issue-requests/{issue_request_id}"),
     (
         "POST",
@@ -64,11 +68,20 @@ ASSISTANT_ROUTES = {
     ("GET", "/v1/assistant/os/statement-batches/{proposal_id}"),
 }
 MCP_ROUTES = {("POST", "/v1/assistant/mcp")}
+OAUTH_ROUTES = {
+    ("GET", "/.well-known/oauth-protected-resource"),
+    ("GET", "/.well-known/oauth-protected-resource/v1/assistant/mcp"),
+    ("GET", "/.well-known/oauth-authorization-server"),
+    ("GET", "/.well-known/openid-configuration"),
+    ("GET", "/oauth/authorize"),
+    ("POST", "/oauth/token"),
+}
 # Segments that only v2 chunks may mount. V2-24 owns commits and deleted; the others stay unmounted.
 V2_ONLY_SEGMENTS = {
     "commits",
     "deleted",
     "assistant-credentials",
+    "oauth-requests",
 }
 # receipts is shared with v1 (GET by request id); no v2 chunk has added to it yet.
 V1_RECEIPTS = {("GET", "/v1/owner/os/unified/receipts/{request_id}")}
@@ -110,7 +123,11 @@ def test_v2_routers_mount_with_zero_routes(v2_routers):
         elif router is assistant_os.router:
             assert {(m, r.path) for r in router.routes for m in r.methods} == ASSISTANT_ROUTES
         elif router is assistant_mcp.router:
-            assert {(m, r.path) for r in router.routes for m in r.methods} == MCP_ROUTES
+            # E38b rides this already-mounted router (R1). Included routers are lazy wrappers.
+            probe = FastAPI()
+            probe.include_router(router)
+            assert {(m.upper(), p) for p, methods in probe.openapi()["paths"].items()
+                    for m in methods} == MCP_ROUTES | OAUTH_ROUTES
         else:
             assert router.routes == []
     mounted = _mounted()

@@ -12,6 +12,7 @@ from tests.services.os_ledger.statements.support import pg_url
 @pytest.fixture
 def env(monkeypatch):
     aw = AWorld("fake")
+    aw.config.public_base_url = "https://api.assafweb.test"
     monkeypatch.setattr(assistant_os, "gateway_for", lambda settings: aw.gateway)
     app.dependency_overrides[get_settings] = lambda: aw.config
     with TestClient(app, base_url="https://api.assafweb.test", client=(IP_A, 50000)) as client:

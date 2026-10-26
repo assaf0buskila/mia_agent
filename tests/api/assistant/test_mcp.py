@@ -156,7 +156,11 @@ def test_uniform_401_for_every_method(env, method, case):
         aw.config.assaf_os_assistant_enabled = False
     response = rpc(client, key, method, headers=headers)
     assert response.status_code == 401
-    assert response.headers["www-authenticate"] == "Bearer"
+    challenge = ('Bearer resource_metadata="https://api.assafweb.test'
+                 '/.well-known/oauth-protected-resource/v1/assistant/mcp"')
+    if key or "Authorization" in headers:
+        challenge += ', error="invalid_token"'
+    assert response.headers["www-authenticate"] == challenge
     assert "mcp-session-id" not in response.headers
     actual = response.json()
     actual.pop("request_id")

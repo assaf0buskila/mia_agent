@@ -803,6 +803,11 @@ def _card_business(parameters: Mapping[str, Any], target: Mapping[str, Any], kin
 
 
 _CARD_RENDERERS = {
+    "assistant_key.oauth_grant": lambda p, t: _card(
+        "חיבור עוזר ל-Assaf OS",
+        "לאשר חיבור עבור ChatGPT, בתוקף ל-30 ימים?",
+        note="החיבור מאפשר להגיש מקבצי דפי חיוב לאישור שלך בלבד. "
+        "להשלמת החיבור צריך לחזור למסך ה-OS שביקש אותו."),
     "assistant_key.issue": lambda p, t: _card(
         "הנפקת מפתח לעוזר",
         f"לאשר הנפקת מפתח עבור {esc({'claude': 'Claude', 'gpt': 'GPT'}[p['kind']])}, "

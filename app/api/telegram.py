@@ -226,7 +226,8 @@ async def _execute_assaf_os_owner_decision(
                         RESOURCE_OWNER_PROPOSAL, proposal_id, ACTION_OWNER_EXTERNAL_WRITE
                     )
             )
-            issue_card = bool(envelope and envelope.get("kind") == "assistant_key.issue")
+            issue_card = bool(envelope and envelope.get("kind") in {
+                "assistant_key.issue", "assistant_key.oauth_grant"})
             ledger_card = is_ledger_owner_action(envelope)
             if issue_card:
                 outcome = execute_assistant_issue_decision(
@@ -380,7 +381,8 @@ async def _handle_callback(
         envelope = read_owner_action(pending)
         deferred_assaf_os_ack = bool(
             envelope is not None
-            and envelope.get("kind") in {"assaf_os.approve", "assistant_key.issue"}
+            and envelope.get("kind") in {
+                "assaf_os.approve", "assistant_key.issue", "assistant_key.oauth_grant"}
         )
     if not deferred_assaf_os_ack:
         await _answer_owner_callback(port, callback["callback_query_id"])
@@ -637,7 +639,7 @@ async def _handle_callback(
 
         rejected_envelope = read_owner_action(rejected_row)
         if rejected_envelope is not None and rejected_envelope.get("kind") in {
-            "assaf_os.approve", "assistant_key.issue"
+            "assaf_os.approve", "assistant_key.issue", "assistant_key.oauth_grant"
         }:
             if deferred_assaf_os_ack:
                 rejected = await _execute_assaf_os_owner_decision(

@@ -731,6 +731,45 @@ CONSTRAINT_PINS: tuple[ConstraintPin, ...] = (
         'FOREIGN KEY (workspace_id) REFERENCES assaf_os.os_workspaces(workspa'
         'ce_id)'
     ),
+    # os_assistant_oauth_requests
+    ConstraintPin("os_assistant_oauth_requests", "os_oauth_requests_pkey",
+                  "PRIMARY KEY (workspace_id, oauth_request_id)"),
+    ConstraintPin("os_assistant_oauth_requests", "os_oauth_requests_workspace_fkey",
+                  "FOREIGN KEY (workspace_id) REFERENCES assaf_os.os_workspaces(workspace_id)"),
+    ConstraintPin("os_assistant_oauth_requests", "os_oauth_requests_credential_fkey",
+                  "FOREIGN KEY (workspace_id, credential_id) REFERENCES "
+                  "assaf_os.os_assistant_credentials(workspace_id, credential_id)"),
+    ConstraintPin("os_assistant_oauth_requests", "os_oauth_requests_id_check",
+                  "CHECK (((oauth_request_id)::text ~ '^OR_[0-9a-f]{32}$'::text))"),
+    ConstraintPin("os_assistant_oauth_requests", "os_oauth_requests_owner_id_check",
+                  "CHECK (((owner_id)::text ~ '^[0-9]+$'::text))"),
+    ConstraintPin("os_assistant_oauth_requests", "os_oauth_requests_client_check",
+                  "CHECK ((client_id = 'https://chatgpt.com/oauth/client.json'::text))"),
+    ConstraintPin("os_assistant_oauth_requests", "os_oauth_requests_redirect_check",
+                  "CHECK ((redirect_uri = "
+                  "'https://chatgpt.com/connector_platform_oauth_redirect'::text))"),
+    ConstraintPin("os_assistant_oauth_requests", "os_oauth_requests_challenge_check",
+                  "CHECK ((code_challenge ~ '^[A-Za-z0-9_-]{43}$'::text))"),
+    ConstraintPin("os_assistant_oauth_requests", "os_oauth_requests_scope_check",
+                  "CHECK ((scope = 'assaf-os:assistant'::text))"),
+    ConstraintPin("os_assistant_oauth_requests", "os_oauth_requests_resource_check",
+                  "CHECK ((resource <> ''::text))"),
+    ConstraintPin("os_assistant_oauth_requests", "os_oauth_requests_state_check",
+                  "CHECK (((state ~ '^[ -~]+$'::text) AND ((length(state) >= 1) "
+                  "AND (length(state) <= 512))))"),
+    ConstraintPin("os_assistant_oauth_requests", "os_oauth_requests_epoch_check",
+                  "CHECK ((epoch > 0))"),
+    ConstraintPin("os_assistant_oauth_requests", "os_oauth_requests_status_check",
+                  "CHECK ((status = ANY (ARRAY['pending_owner'::text, "
+                  "'approval_requested'::text, 'approved'::text, 'code_issued'::text, "
+                  "'exchanged'::text, 'rejected'::text, 'expired'::text, "
+                  "'cancelled'::text])))"),
+    ConstraintPin("os_assistant_oauth_requests", "os_oauth_requests_chain_binding_check",
+                  "CHECK ((chain_binding ~ '^[0-9a-f]{64}$'::text))"),
+    ConstraintPin("os_assistant_oauth_requests", "os_oauth_requests_code_hash_check",
+                  "CHECK ((code_hash ~ '^[0-9a-f]{64}$'::text))"),
+    ConstraintPin("os_assistant_oauth_requests", "os_oauth_requests_deadline_check",
+                  "CHECK ((deadline = (created_at + '00:10:00'::interval)))"),
     # schema_migrations
     ConstraintPin("schema_migrations", "schema_migrations_pkey", "PRIMARY KEY (filename)"),
 )
@@ -739,6 +778,9 @@ CONSTRAINT_PINS: tuple[ConstraintPin, ...] = (
 # pg_get_indexdef. The expression index is the exactly-once key for expenses (V2-14). The
 # audit and proposals indexes and the partial unique index of statement lines are V2-14b's.
 INDEX_PINS = frozenset({
+    "CREATE UNIQUE INDEX os_assistant_oauth_code_hash_key ON "
+    "assaf_os.os_assistant_oauth_requests USING btree (workspace_id, code_hash) "
+    "WHERE (code_hash IS NOT NULL)",
     "CREATE INDEX os_assistant_audit_workspace_ip_occurred_idx ON assaf_os.os_assistant_audit "
     "USING btree (workspace_id, client_ip_hmac, occurred_at)",
     "CREATE INDEX os_assistant_audit_workspace_operation_occurred_idx "
@@ -850,6 +892,10 @@ ADDENDUM_COLUMN_UPDATES: Mapping[str, tuple[str, ...]] = MappingProxyType({
     "os_statement_batch_lines": ("detail", "purged_at"),
     "os_assistant_credentials": ("revoked_at", "last_used_at", "use_count"),
     "os_assistant_issue_requests": ("status", "approved_at", "collected_at", "credential_id"),
+    "os_assistant_oauth_requests": (
+        "status", "chain_binding", "approved_at", "code_hash", "code_expires_at",
+        "code_used_at", "credential_id",
+    ),
 })
 # Retention (LOGIN NOINHERIT): schema USAGE plus exactly these. The os-retention job uses
 # DELETE only for purged batch lines, batch lines whose proposal expired more than a day
