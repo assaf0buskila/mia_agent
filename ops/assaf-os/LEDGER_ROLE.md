@@ -219,7 +219,8 @@ also by name, and compared with a freshly migrated catalog).
 - **PostgreSQL upgrades.** The pinned text is PostgreSQL 16's deparse (the VM and CI both
   run 16). After a major upgrade the validator may refuse the migrated database; that is
   the signal to regenerate the pins from a fresh migration on the new version, as part of
-  the upgrade's rehearsal.
+  the upgrade's rehearsal (reference for a future PostgreSQL major upgrade;
+  the V2-35 copy rehearsal is NOT_INCLUDED by E36).
 
 **Obligation for V2-16 (ledger core): `search_path`.** The validator pins its own session
 to `pg_catalog, pg_temp`, but a database-wide `ALTER DATABASE ... SET search_path` is

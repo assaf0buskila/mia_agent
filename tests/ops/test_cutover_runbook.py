@@ -35,6 +35,7 @@ from tests.workers.test_os_authority import (
 ROOT = Path(__file__).resolve().parents[2]
 RUNBOOK = (ROOT / "ops/assaf-os/CUTOVER_RUNBOOK.md").read_text(encoding="utf-8")
 PHONE = (ROOT / "docs/runbooks/OS_PHONE_ACCEPTANCE.md").read_text(encoding="utf-8")
+GO_NO_GO = (ROOT / "docs/runbooks/OS_CUTOVER_GO_NO_GO.md").read_text(encoding="utf-8")
 SCRIPT = (ROOT / "ops/gcp/vm/mia").read_text(encoding="utf-8")
 SCHEMA_JS = (ROOT / "ops/assaf-os/schema.js").read_text(encoding="utf-8")
 
@@ -247,6 +248,109 @@ def section_of(heading: str) -> str:
     raise AssertionError(heading)
 
 
+@pytest.mark.parametrize("condition,pins", [
+    ("merged fixes", ("WP1/E35", "#199", "WP2", "#197", "merged PR SHAs",
+                      "date_1904", "sheet `state`", "sheet set and order")),
+    ("CI", ("tests/workers/test_os_cutover_sequence.py", "os-cutover-postgres",
+            "headSha == S", "conclusion == success", "T6→T7", "mirror verified")),
+    ("PC restore drill", ("ops/gcp/backup/restore_drill.py", "restore-drill.json",
+                          "started_utc", "passed: true", "rto_met: true",
+                          "fewer than 7 days before activation", "restore_drill_too_old",
+                          "RTO ≤ 2 h", "RPO ≤ 15 min")),
+    ("live window", ("Assaf's quiet window", "explicit statement in chat", "UTC", "`S`",
+                     "section 5's rollback ready before the first non-import receipt",
+                     "Every G10-G17 gate keeps its explicit go")),
+])
+def test_step_6_pins_each_e36_condition_and_its_evidence(condition, pins):
+    step = re.sub(r"\s+", " ", section_of("### Step 6"))
+    assert "**Go G09**" in step and "section 22 E36" in step
+    assert "NOT_INCLUDED" in step and "V2-35/V2-35a" in step
+    for pin in pins:
+        assert pin in step, (condition, pin)
+
+
+def test_step_6_records_machine_checkable_pr_and_ci_evidence():
+    step = re.sub(r"\s+", " ", section_of("### Step 6"))
+    for number in (199, 197):
+        assert f"gh pr view {number} --json number,state,mergedAt,mergeCommit" in step
+    assert "state == MERGED" in step and "40-hex `mergeCommit.oid`" in step
+    for sha in ("WP1-MERGE-SHA", "WP2-MERGE-SHA"):
+        assert f"git merge-base --is-ancestor <{sha}> S" in step
+    assert "gh run view <RUN-ID> --json headSha,conclusion,jobs" in step
+    assert "run ID/URL" in step and "job" in step and "conclusion == success" in step
+
+
+@pytest.mark.parametrize("location", ["production order", "wave 6", "G09 table"])
+def test_all_g09_summaries_keep_the_four_e36_conditions(location):
+    if location == "production order":
+        text = re.search(r"^\| 6 \|.*$", RUNBOOK, re.M).group()
+    elif location == "wave 6":
+        text = section_of("## 3. Wave 6")
+    else:
+        text = re.search(r"^\| G09 \|.*$", RUNBOOK, re.M).group()
+    text = re.sub(r"\s+", " ", text)
+    for pin in ("E36", "WP1/E35", "#199", "WP2", "#197", "merged PR SHAs",
+                "os-cutover-postgres", "`S`", "PC", "restore-drill.json", "< 7 days",
+                "Assaf's quiet window", "section 5", "before the first non-import receipt"):
+        assert pin in text, (location, pin)
+    assert "rehearsal passed" not in text and "on a copy" not in text
+
+
+@pytest.mark.parametrize("name", ["OS_REHEARSAL_PLAN.md", "OS_REHEARSAL_ENV.md"])
+def test_copy_rehearsal_documents_are_kept_as_e36_reference_only(name):
+    text = (ROOT / "docs/runbooks" / name).read_text(encoding="utf-8")
+    assert text.splitlines()[2] == (
+        "Status: NOT_INCLUDED by contract §22 E36 (2026-10-24, Assaf); kept for reference"
+    )
+
+
+def test_phone_acceptance_replaces_copy_rehearsal_with_e36_readiness():
+    text = re.sub(r"\s+", " ", PHONE)
+    assert "NOT_INCLUDED by contract §22 E36 (2026-10-24, Assaf)" in text
+    assert "CUTOVER_RUNBOOK.md step 6" in text and "four E36 conditions" in text
+    assert "init; E36 readiness (step 6); then wave-6 T1-T7" in text
+    assert "passed end to end" not in text and "passed rehearsal" not in text
+
+
+@pytest.mark.parametrize("label", [
+    "TEST copy, production pins, PG16, fresh HMAC / isolated harness",
+    "Full V2-35 rehearsal passed, including broken-precondition abort",
+    "Zero non-import receipt boundary; rehearsal rollback + forward",
+    "TEST deployment archived, copy deleted, data disposition recorded",
+])
+def test_go_no_go_marks_copy_rehearsal_evidence_not_included(label):
+    assert f"| {label} | NOT_INCLUDED (E36) |" in GO_NO_GO
+
+
+@pytest.mark.parametrize("label,pins", [
+    ("E36: fixes merged", ("WP1/E35 (#199)", "WP2 (#197)", "merged PR SHAs",
+                          "ancestors of `S`", "MERGED", "mergeCommit.oid")),
+    ("E36: CI green", ("os-cutover-postgres", "headSha == S", "conclusion == success",
+                      "run ID/URL", "tests/workers/test_os_cutover_sequence.py")),
+    ("E36: PC restore drill", ("Assaf's PC", "restore-drill.json", "< 7 days",
+                               "at activation", "started_utc", "passed: true",
+                               "rto_met: true", "RTO ≤ 2 h", "RPO ≤ 15 min")),
+    ("E36: live window and rollback", ("Assaf's", "explicit statement in chat", "`S`",
+                                      "UTC window", "section 5",
+                                      "before the first non-import receipt", "G10-G17",
+                                      "explicit go")),
+])
+def test_go_no_go_records_each_e36_condition(label, pins):
+    row = next(line for line in GO_NO_GO.splitlines() if line.startswith(f"| {label} |"))
+    assert "| NOT_RUN |" in row
+    for pin in pins:
+        assert pin in row, (label, pin)
+
+
+def test_rehearsal_evidence_state_is_reference_only_and_contract_separates_drift_proof():
+    assert "`REHEARSAL_VERIFIED` is retained for reference only (E36)." in RUNBOOK
+    contract = (ROOT / "docs/os-v2/V2_PG_CONTRACTS.md").read_text(encoding="utf-8")
+    e36 = re.sub(r"\s+", " ", contract.split("### E36", 1)[1].split("### E37", 1)[0])
+    assert "mirror verified under the freeze" in e36
+    assert "WP2's drift tests prove the workbook-level drift check" in e36
+    assert "mirror verified, zero drift" not in e36
+
+
 def bullet_with(section: str, command: str) -> str:
     """The top-level bullet of a section (its indented lines included) that runs a command."""
     for bullet in re.split(r"^(?=- )", section, flags=re.M):
@@ -311,12 +415,50 @@ def test_restore_containment_order_exception_and_reason_table():
     assert "owner's explicit exception procedure" in section
     assert "fence_record_minted_after_restore" in section and "null" in section
     assert "restore-attempt.json" in section and "pre_restore_fence_record_present" in section
+    assert "Always restore through `sudo mia restore`" in section
+    assert "otherwise the incident timing signal is lost" in section
     assert "run status after `mia restore` and compare the epoch" in section
     table = RUNBOOK.split("Other refusals of the CLI:", 1)[1]
     for code in ("restore_incomplete", "restore_rpo_exceeded", "restore_evidence_invalid",
                  "restore_epoch_mismatch", "restore_epoch_required", "restore_epoch_invalid",
                  "restore_rto_exceeded"):
         assert re.search(rf"^\| `{code}` \|", table, re.M), code
+
+
+def test_attempt_write_failure_documents_no_marker_and_service_restart():
+    readme = (ROOT / "ops/gcp/backup/README.md").read_text(encoding="utf-8")
+    paragraph = readme.split("Failure to write this attempt", 1)[1].split("\n\n", 1)[0]
+    reason = next(line for line in readme.splitlines()
+                  if line.startswith("| `restore_evidence_invalid` |"))
+    for text in (paragraph, reason):
+        assert "no new incomplete marker" in text
+        assert "database untouched" in text
+        assert "services remain stopped" in text
+        assert "sudo mia settings" in text and "start_services" in text
+
+
+def test_legacy_attempt_documents_manual_set_aside_then_current_restore():
+    section = re.sub(r"\s+", " ", section_of("## 6. "))
+    assert "**Manual attempt set-aside**" in section
+    assert "sudo mv -n /var/lib/mia/os-authority/restore-attempt.json" in section
+    assert "restore-attempt-superseded-$(date -u +%Y%m%dT%H%M%SZ).json" in section
+    assert "under `/var/lock/mia-state.lock`" in section
+    assert "legacy attempt without `attempt_id`" in section
+    assert "redo `sudo mia restore <dump>` with the current wrapper" in section
+    assert "does not authorize clearing a live recovery attempt" in section
+    assert "coordinator must abandon the old attempt" in section
+    assert "confirm no restore or authority operation is running" in section
+    assert "under a fresh explicit restore go" in section
+
+
+def test_aborted_restore_documents_same_manual_set_aside_after_cutover():
+    section = re.sub(r"\s+", " ", section_of("## 6. "))
+    assert "aborted before `DROP DATABASE`" in section
+    assert "after cutover with no later activation" in section
+    assert "use **Manual attempt set-aside**" in section
+    assert "only after independently verifying that no recovery is live" in section
+    assert "already-shadow retry leaves the attempt" in section
+    assert "`activated_at` at or after its `recorded_at`" in section
 
 
 def test_every_sudo_mia_command_is_a_command_of_the_vm_script():

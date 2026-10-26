@@ -203,8 +203,11 @@ replacement. A later fence without matching incident evidence is marked
 For a fresh cluster or lost evidence directory, follow the owner's explicit exception procedure
 in `ops/assaf-os/CUTOVER_RUNBOOK.md` section 6. RTO/RPO booleans are meaningless for timestamps
 first minted after restoration. A successful authority restore-finish archives the attempt so
-it cannot mark a later incident. Failure to write this attempt leaves the incomplete marker and
-stops before database replacement (`restore_evidence_invalid`).
+it cannot mark a later incident. Failure to write this attempt leaves no new incomplete marker,
+the database untouched, and the services remain stopped (`restore_evidence_invalid`). Repair
+the evidence directory and rerun `sudo mia restore <same dump>`. To abandon this pre-DROP restore,
+use `sudo mia settings` to call `start_services` again, retaining any incident containment;
+an existing incomplete marker from an earlier restore still blocks startup.
 
 | # | Step | Skipped, with a logged reason, when |
 |---|---|---|
@@ -266,7 +269,7 @@ Reason codes (stderr, a fixed set; nothing else is printed about the cause):
 | Reason code | Meaning and what to do |
 |---|---|
 | `restore_catalog_unreadable` | a catalog query through `docker compose exec postgres` failed. Check the postgres container. |
-| `restore_evidence_invalid` | the durable pre-restore evidence could not be written. Repair the evidence directory and rerun the restore; the database has not yet been replaced and the incomplete marker remains. |
+| `restore_evidence_invalid` | the durable pre-restore evidence could not be written: no new incomplete marker, database untouched, services remain stopped. Repair the evidence directory and rerun the restore, or abandon this pre-DROP restore and use `sudo mia settings` (`start_services`) to start services again while retaining incident containment. An earlier incomplete marker still blocks startup. |
 | `app_role_reapply_unavailable` | `mia_app` exists but `/opt/mia/app-role-demote/app_role_demote.py` or `sql/app-role-demote.sql` is missing. Reinstall them from the approved source (V2-14a runbook). |
 | `app_role_reapply_failed` | the helper failed. It prints its own `reason=app_role_...` line just above. |
 | `ledger_reapply_unavailable` | the restored database has `assaf_os`, but `MIA_TAG` in `/opt/mia/tag.env` is unusable, the deployed `provision_ledger.py` is missing under `/opt/mia/src/<tag>/`, or `/etc/mia/os-ledger-migrate.env` is missing or holds another key. |

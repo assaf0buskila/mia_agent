@@ -26,6 +26,7 @@ fails loudly, rather than skipping, when ops/assaf-os/provision_ledger.py is mis
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import re
 import shutil
@@ -612,6 +613,7 @@ RESTORE_MARKER = "/etc/mia/restore-incomplete"
 
 ARM_STUB = r"""
 chown() { [ "$STUB_FAIL" != evidence ]; }
+python3() { "$V210_PYTHON" "$@"; }
 mark() { if [ -e "$MIA_RESTORE_INCOMPLETE" ]; then echo present; else echo absent; fi; }
 log() { printf '%s\n' "$*" >> "$STUB_LOG"; }
 compose() {
@@ -653,6 +655,7 @@ def run_restore_arm(tmp_path: Path, *, fail: str = "", dump: bool = True) -> Sim
     done = _run_bash(script, tmp_path, {
         "STUB_LOG": _posix(log),
         "STUB_FAIL": fail,
+        "V210_PYTHON": _posix(Path(sys.executable)),
         "MIA_RESTORE_INCOMPLETE": _posix(marker),
         "MIA_JOBS_PAUSED": _posix(tmp_path / "jobs-paused"),
         "MIA_HTTPS_MARKER": _posix(tmp_path / "no-https"),
@@ -689,13 +692,14 @@ start_services""",
 
 def test_the_restore_arm_writes_the_marker_before_it_drops_and_removes_it_after_the_repair():
     code = _code(_arm("restore"))
+    attempt = code.index("record_restore_attempt")
     mark = code.index('install -m 600 /dev/null "$restore_incomplete"')
     drop = code.index("DROP DATABASE")
     restore = code.index("pg_restore -U mia -d mia")
     post = code.index("post_restore_reapply")
     clear = code.index('rm -f "$restore_incomplete"')
     start = code.index("start_services")
-    assert mark < drop < restore < post < clear < start
+    assert attempt < mark < drop < restore < post < clear < start
     assert code.count("$restore_incomplete") == 2  # written once, removed once
     assert f'restore_incomplete="${{MIA_RESTORE_INCOMPLETE:-{RESTORE_MARKER}}}"' in SCRIPT
 
@@ -749,6 +753,28 @@ def test_a_restore_refused_before_it_touches_anything_leaves_no_marker(tmp_path)
     assert result.lines == [] and not result.marker
 
 
+def test_attempt_write_failure_aborts_before_marker_and_drop(tmp_path):
+    result = run_restore_arm(tmp_path, fail="evidence")
+    assert result.rc == 1 and "reason=restore_evidence_invalid" in result.err
+    assert result.lines == ["SAFETY_DUMP marker=absent"]
+    assert not result.marker
+
+
+def test_wrapper_writes_unique_dated_attempt_before_marker_and_drop(tmp_path):
+    documents = []
+    for index in range(2):
+        directory = tmp_path / str(index)
+        directory.mkdir()
+        result = run_restore_arm(directory)
+        assert result.rc == 0, result.err
+        documents.append(json.loads((directory / "os-authority/restore-attempt.json").read_text()))
+    for doc in documents:
+        assert re.fullmatch(r"[a-f0-9]{32}", doc["attempt_id"])
+        assert datetime.fromisoformat(doc["recorded_at"].replace("Z", "+00:00")).tzinfo
+        assert doc["pre_restore_fence_record_present"] is False
+    assert documents[0]["attempt_id"] != documents[1]["attempt_id"]
+
+
 def test_start_services_refuses_with_the_reason_while_the_marker_exists(tmp_path):
     result = run_start_services(tmp_path, marker=True)
     assert result.rc == 1
@@ -778,7 +804,10 @@ SHIM = r"""
 chown() { :; }
 export V210_ARGLOG="$STUB_LOG"
 flat() { printf '%s' "$*" | tr '\n' ' ' >> "$V210_ARGLOG"; printf '\n' >> "$V210_ARGLOG"; }
-python3() { "$V210_PYTHON" "$V210_DRIVER" "$@"; }
+python3() {
+  if [ "$1" = - ]; then "$V210_PYTHON" "$@"
+  else "$V210_PYTHON" "$V210_DRIVER" "$@"; fi
+}
 docker() {
   case "$1" in
     inspect) echo healthy; return 0 ;;
