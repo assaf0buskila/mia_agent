@@ -310,8 +310,15 @@ def probes(**over):
     (("unknown", 3, 3, None), None, "unverified"),
     (("conflict", 3, 3, None), None, "unverified"),
     (("pending", 3, 3, None), None, "unverified"),
+    (("pending", 0, 0, None), None, "empty"),
     (("delayed", 3, 3, None), None, "unverified"),
     (("fenced", 3, 3, None), None, "unverified"),
+    (("fenced", 3, 3, "authority_fenced"), None, "verified"),
+    (("fenced", 3, 2, "authority_fenced"), None, "unverified"),
+    (("fenced", 3, 3, "readback_failed"), None, "unverified"),
+    (("fenced", 3, 3, "authority_fenced"), 3, "unverified"),
+    (("fenced", 3, 3, "authority_fenced_unclean"), None, "unverified"),
+    (("fenced", 3, 3, "authority_fenced_unclean"), 3, "unverified"),
 ])
 def test_mirror_probe_binds_verification_to_the_requested_version(row, version, expected):
     engine = create_engine("sqlite://")
@@ -322,12 +329,13 @@ def test_mirror_probe_binds_verification_to_the_requested_version(row, version, 
             connection.execute(text("ATTACH DATABASE ':memory:' AS assaf_os"))
             connection.execute(text(
                 "CREATE TABLE assaf_os.os_mirror_state (workspace_id TEXT, status TEXT, "
-                "projected_version INTEGER, verified_version INTEGER, last_error_code TEXT)"
+                "projected_version INTEGER, verified_version INTEGER, last_error_code TEXT, "
+                "last_attempt_at TEXT, last_verified_at TEXT)"
             ))
             if row is not None:
                 connection.execute(text(
                     "INSERT INTO assaf_os.os_mirror_state VALUES "
-                    "(:workspace, :status, :projected, :verified, :error)"
+                    "(:workspace, :status, :projected, :verified, :error, NULL, NULL)"
                 ), dict(zip(("workspace", "status", "projected", "verified", "error"),
                             ("ws-1", *row), strict=True)))
         assert live.mirror("ws-1", version) == expected

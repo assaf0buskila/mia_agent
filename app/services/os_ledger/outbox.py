@@ -101,6 +101,11 @@ def backoff(attempts: int) -> timedelta:
     return timedelta(seconds=min(_BACKOFF_CAP_S, _BACKOFF_BASE_S * 2**exponent))
 
 
+def retry_delay(status: str, attempts: int) -> timedelta:
+    """Retry pending or unknown outcomes with backoff; terminal outcomes have no delay."""
+    return backoff(attempts) if status in {"pending", "unknown"} else timedelta(0)
+
+
 def _code(error_code: str | None) -> str | None:
     if error_code is None:
         return None
@@ -189,7 +194,7 @@ class PgOutbox:
             raise OutboxError("outbox_status_invalid")
         # Same bounded backoff as the worker, anchored to the database clock instead of
         # the caller's absolute deadline. Terminal outcomes need no retry delay.
-        retry_delay = backoff(event.attempts) if status in {"pending", "unknown"} else timedelta(0)
+        delay = retry_delay(status, event.attempts)
         statement = self._text(
             "UPDATE {s}.os_outbox SET status=:status, lease_owner=NULL, leased_at=NULL, "
             "last_error_code=CAST(:code AS varchar), "
@@ -200,7 +205,7 @@ class PgOutbox:
         with self._engine.begin() as conn:
             result = conn.execute(
                 statement,
-                {"status": status, "code": _code(error_code), "retry": retry_delay,
+                {"status": status, "code": _code(error_code), "retry": delay,
                  "ws": event.workspace_id, "event": event.event_id,
                  "generation": int(generation)},
             )

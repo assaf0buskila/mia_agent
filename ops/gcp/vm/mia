@@ -15,12 +15,13 @@ usage: sudo mia <command>
   job <name>            run one job now: mia-due-scan | mia-ingest-knowledge
   os-ledger migrate --approved-sha <sha>
                         explicitly apply ledger schema after owner go and V2-14a
-  os-authority <init|preflight|freeze-plan|activate|fence|rollback|status|restore-begin|restore-finish> --approved-sha <sha>
+  os-authority <init|preflight|freeze-plan|activate|fence|rollback|status|mirror-reset|restore-begin|restore-finish> --approved-sha <sha>
                         the Assaf OS authority fence and cutover steps (V2-31, owner-gated;
                         ops/assaf-os/CUTOVER_RUNBOOK.md): init [--rearm], preflight [--drain
                         --final-accept], freeze-plan [--phase drain|switch|mirror|open|revert],
                         activate, fence, rollback, status,
-                        restore-begin/restore-finish --expected-epoch <E>
+                        restore-begin/restore-finish --expected-epoch <E>,
+                        mirror-reset --expected-epoch <n>
   os-provision <runtime|retention> --approved-sha <sha>
                         give the ledger its database credentials: the runtime role and its DSN in
                         runtime.env (FORK-PROD-ORDER step 4), or the os-retention password and the
@@ -510,8 +511,8 @@ case "$cmd" in
     # here before Compose starts anything; the job re-checks the SHA against its own image.
     os_authority_command="${1:-}"
     case "$os_authority_command" in
-      init|preflight|freeze-plan|activate|fence|rollback|status|restore-begin|restore-finish) shift ;;
-      *) die "usage: mia os-authority <init|preflight|freeze-plan|activate|fence|rollback|status|restore-begin|restore-finish> --approved-sha <sha>" ;;
+      init|preflight|freeze-plan|activate|fence|rollback|status|mirror-reset|restore-begin|restore-finish) shift ;;
+      *) die "usage: mia os-authority <init|preflight|freeze-plan|activate|fence|rollback|status|mirror-reset|restore-begin|restore-finish> --approved-sha <sha>" ;;
     esac
     os_authority_sha=""
     os_authority_args=()
@@ -528,7 +529,7 @@ case "$cmd" in
           os_authority_args+=("$1" "$2"); shift 2 ;;
         --expected-epoch)
           case "$os_authority_command" in
-            restore-begin|restore-finish) ;;
+            mirror-reset|restore-begin|restore-finish) ;;
             *) die "os-authority: option refused: --expected-epoch" ;;
           esac
           [ "$#" -ge 2 ] || die "restore_epoch_required"
@@ -540,6 +541,7 @@ case "$cmd" in
     [[ "$os_authority_sha" =~ ^[0-9a-f]{40}$ ]] || die "exact approved SHA required"
     case "$os_authority_command" in
       restore-begin|restore-finish) [ -n "$os_restore_epoch" ] || die "restore_epoch_required" ;;
+      mirror-reset) [ -n "$os_restore_epoch" ] || die "expected_epoch_required" ;;
     esac
     # Host path, under mia-state.lock. The job has no /etc/mia mount: absence inside its container
     # would prove nothing. Never forward an inherited assertion; compute it for this invocation.

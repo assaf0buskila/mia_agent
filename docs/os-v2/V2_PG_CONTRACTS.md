@@ -1955,7 +1955,7 @@ the time of its Sheets fence probe in its evidence file, which `activate` reads.
 | `approval_cards_open` | Every assaf_os.approve card is terminal |
 | `backup_too_old` | V2-10 evidence: a dump less than 1 h old |
 | `restore_drill_too_old` | V2-10 evidence: a drill within 7 days |
-| `mirror_not_verified` | The mirror is empty or verified |
+| `mirror_not_verified` | The mirror is empty or a clean last projection, possibly behind the ledger (E35a) |
 | `manifest_not_signed` | The import manifest is signed |
 | `fe_v2_reader_not_live` | Operator evidence file with the Cloudflare version and bundle hash |
 | `journal_capacity` | V2-00 measure file: capacity below the cap |
@@ -3161,6 +3161,27 @@ rollback or rearm is not shown as verified).
 Pre-activation `mirror_not_verified` accepts an empty mirror or a clean last projection (synced, no error,
 and `verified_version` equal to `projected_version`) even when behind the ledger, while T7 and section 4 step 1
 use `status`, which requires verification at the current ledger version.
+
+- A fenced-clean row also counts as clean **only before activation**: `status=fenced`,
+  `projected_version == verified_version`, and `last_error_code=authority_fenced`. It is the last
+  clean projection fenced by rollback. T7 and section 4 still require `synced` and verification at
+  the current version; the first publication after activation heals the fenced row normally.
+  The publisher writes `authority_fenced` only for a previously clean synced row, an already
+  fenced-clean row, or never-attempted empty progress. Every other prior state is recorded as
+  `authority_fenced_unclean` and fails the cleanliness probe, including drift or an uncertain
+  rewrite at equal projected and verified versions; repeated fenced ticks keep it unclean.
+- Uncertain `conflict`, `unknown`, `pending`, or a fenced row with unequal versions or another error
+  remain unclean. Before activation, `os-authority mirror-reset --approved-sha S --expected-epoch E`
+  requires the exact release SHA and epoch, freeze ON, and core authority NOT `active`. Under the
+  workspace state lock it clears only that workspace's pinned mirror progress to empty (pending,
+  zero versions, null attempt/verification/error, empty watermark and coverage), preserving and
+  checking the destination pin. Never-attempted empty progress counts as empty for preflight only.
+  It is idempotent, never touches the workbook, and writes an authorization audit JSON in the CLI
+  evidence directory under the lock before mutation (audit failure aborts the reset). The CLI's
+  successful result confirms the commit. T7 then performs a full rewrite plus readback, including
+  a scan for old extents. After a send whose acknowledgement was lost (the `unknown` path), an
+  equal subsequent read counts as the readback because `readback_equal` compares full tabs.
+  An equal pre-write scan never counts as that proof.
 
 ### E36 (2026-10-24): G09 is replaced by fixes, tests and a careful live run (Assaf's ruling)
 
