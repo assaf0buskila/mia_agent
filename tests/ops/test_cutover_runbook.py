@@ -192,6 +192,44 @@ def test_retry_mirror_cleanliness_and_reset_remedy_are_pinned():
         assert re.search(rf"^\| `{code}` \|", table, re.M), code
 
 
+def test_every_upgrade_reapplies_grants_immediately_after_migration():
+    migrate = "sudo mia os-ledger migrate --approved-sha S"
+    reapply = "sudo mia os-provision reapply --approved-sha S"
+    step = section_of("### Step 3")
+    upgrade = bullet_with(step, r"sudo mia os-provision reapply")
+    assert upgrade.index(migrate) < upgrade.index(reapply)
+    for text in ("existing ledger runtime role", "every upgrade", "adds tables",
+                 "`role_policy` grants", "idempotent", "immediately after", "G07"):
+        assert text in upgrade
+    # Initial cutover still provisions the roles in step 4, after the schema in step 3.
+    assert "sudo mia os-provision runtime --approved-sha S" in section_of("### Step 4")
+    role_doc = (ROOT / "ops/assaf-os/LEDGER_ROLE.md").read_text(encoding="utf-8")
+    section = role_doc.split("**After every upgrade (migrate, then reapply).**", 1)[1]
+    paragraph = section.split("\n\n", 1)[0]
+    assert reapply in paragraph and migrate in paragraph
+    assert paragraph.index(migrate) < paragraph.index(reapply)
+    assert "right after" in paragraph
+    for text in ("every upgrade", "adds tables", "`role_policy` grants", "idempotent"):
+        assert text in paragraph
+
+
+def test_upgrade_rollback_redeploys_previous_tag_before_restoring_pre_upgrade_dump():
+    rollback = bullet_with(section_of("### Step 3"), r"\*\*Rollback\*\*")
+    rollback = re.sub(r"\s+", " ", rollback)
+    redeploy = "deploy.ps1 -Ref <old sha>"
+    restore = "sudo mia restore <pre-upgrade dump>"
+    assert rollback.index(redeploy) < rollback.index(restore)
+    for text in (
+        "previous tag first", "old code's reapply", "old schema",
+        "Writes since the dump are lost", "separately approved recovery",
+        "Never restore a pre-upgrade dump while the new tag is deployed",
+        "old tag alone", "does not restore owner-OS writes",
+        "old exact guard refuses the upgraded catalog",
+        "Before the migrate, a plain redeploy is a clean rollback",
+    ):
+        assert text in rollback, text
+
+
 def test_every_owner_go_of_the_phone_acceptance_list_is_a_go_here():
     section = PHONE.split("## Separate Assaf go for each production step", 1)[1]
     section = section.split("## Subsequent feature releases", 1)[0]

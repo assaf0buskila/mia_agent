@@ -272,6 +272,21 @@ block a reapply.
   untouched): run `--mode provision`. If a DSN is already staged, the role is recreated
   with that password and the file is left as it is.
 
+**After every upgrade (migrate, then reapply).** On every upgrade of an already
+provisioned ledger, run `sudo mia os-ledger migrate --approved-sha S`, then right after
+it run `sudo mia os-provision reapply --approved-sha S`, with owner approval for both steps.
+This covers a migration that adds tables and a release that changes the `role_policy` grants.
+Reapply restores the exact grants and validates them. It is idempotent: run it even when
+neither seems to apply. The deployed code's exact `role_policy.validate_ledger_role` guard
+refuses a mismatched grant map. Owner-OS ledger reads fail closed (503 `ledger_unavailable`)
+from the deploy until the reapply, so run deploy, migrate and reapply back to back.
+Reapply mounts `/etc/mia` read-only because it never writes `runtime.env` or changes an
+existing password.
+
+Reapply's `ALTER ... OWNER` statements take an `ACCESS EXCLUSIVE` lock on each `assaf_os`
+table until commit (`SET LOCAL lock_timeout = '5s'`). Run it in a quiet window with the
+jobs paused, never under load. A lock timeout fails the reapply closed; it can simply be re-run.
+
 **Runtime DSN (`mia-vm`).** When the runtime role is created, the password is 32
 random bytes (hex). Its DSN
 `MIA_OWNER_OS_LEDGER_DATABASE_URL=postgresql://assaf_os_ledger:<password>@127.0.0.1:5432/mia`

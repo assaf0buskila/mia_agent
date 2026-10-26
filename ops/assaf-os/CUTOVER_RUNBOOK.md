@@ -173,10 +173,27 @@ Every production step above pauses the jobs and takes a verified backup first (s
   - It holds a superuser credential: root-only, mode 600, never in `mia-env`, never copied off
     the VM.
 - **Command**: `sudo mia os-ledger migrate --approved-sha S`.
+- **Upgrades with an existing ledger runtime role (Go G07)**: on every upgrade of an already
+  provisioned ledger,
+  run `sudo mia os-ledger migrate --approved-sha S`, then immediately after it run
+  `sudo mia os-provision reapply --approved-sha S` to restore and validate the runtime grants.
+  This covers a migration that adds tables and a release that changes the `role_policy` grants.
+  Reapply is idempotent: run it even when neither seems to apply; it leaves `runtime.env` untouched.
+  The deployed code's exact `role_policy.validate_ledger_role` guard refuses a mismatched grant map.
+  Owner-OS ledger reads fail closed (503 `ledger_unavailable`) from the deploy until the reapply,
+  so run deploy, migrate and reapply back to back. The initial cutover still provisions the roles
+  in step 4 below.
 - **Verify**: exit 0; the job creates schema `assaf_os`, owned by `assaf_os_owner`.
-- **Rollback**: the migration is additive and creates no data. To undo it, restore the dump taken
-  before the step (`sudo mia restore <dump>`, which re-applies every role posture); that is a
-  separately approved recovery operation.
+- **Rollback**: for the initial cutover, the migration is additive and creates no data. To undo it,
+  restore the dump taken before the step (`sudo mia restore <dump>`, which re-applies every role
+  posture); that is a separately approved recovery operation.
+  For an upgrade, redeploy the previous tag first (`deploy.ps1 -Ref <old sha>`), then run
+  `sudo mia restore <pre-upgrade dump>` so the old code's reapply runs against the old schema.
+  Writes since the dump are lost; this is a separately approved recovery.
+  Never restore a pre-upgrade dump while the new tag is deployed: its reapply expects the new
+  tables, fails with `ledger_reapply_failed`, and leaves services down with `restore-incomplete`.
+  Redeploying the old tag alone after the migrate does not restore owner-OS writes, because the
+  old exact guard refuses the upgraded catalog. Before the migrate, a plain redeploy is a clean rollback.
 
 ### Step 4: the ledger roles, then the validator
 
