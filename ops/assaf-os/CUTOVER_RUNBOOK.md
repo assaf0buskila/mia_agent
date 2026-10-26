@@ -830,6 +830,7 @@ Other refusals of the CLI:
 | `dsn_missing`, `owner_ambiguous`, `workspace_invalid` | The job environment is incomplete |
 | `internal_error` | An unexpected failure; its text is never printed |
 | `expected_epoch_required` | `mirror-reset` requires a positive `--expected-epoch` |
+| `expected_epoch_invalid` | `mirror-reset` received a malformed `--expected-epoch`; supply a positive integer |
 | `mirror_destination_missing` | `mirror-reset` needs a configured destination |
 
 For `mirror-reset`, `freeze_off` means apply T1 before retrying;
