@@ -839,7 +839,7 @@ def assistant_issue_service(settings):
 
 
 def execute_assistant_issue_decision(store, *, settings, principal, proposal_id, decision):
-    """E37 ledger CAS, never a provider claim. Every failure is safe to retry by re-tapping."""
+    """E37 ledger CAS; only transient, definitely not-started refusals invite a retry."""
     if (
         not _valid_owner(principal)
         or principal.actor_id not in settings.telegram_owner_user_id_set()
@@ -856,7 +856,20 @@ def execute_assistant_issue_decision(store, *, settings, principal, proposal_id,
         status = assistant_issue_service(settings).decide_issue(row, decision=decision)
     except ledger_api.LedgerError as exc:
         _LOG.info("owner_actions op=assistant_issue outcome=refused reason=%s", exc.code)
-        return OwnerActionExecution("not_started")
+        if exc.code == "issue_cancelled":
+            return OwnerActionExecution(
+                "cancelled", "הבקשה להנפקת מפתח בוטלה. צריך להכין בקשה חדשה.")
+        if exc.write_outcome == "unknown":
+            return OwnerActionExecution("unknown")
+        if exc.retryable and exc.write_outcome == "not_started":
+            return OwnerActionExecution("not_started")
+        status = {
+            "issue_expired": "expired", "target_changed": "target_changed",
+            "authority_changed": "target_changed", "authority_moved": "target_changed",
+            "issue_rejected": "rejected", "issue_collected": "already_handled",
+            "kill_switch": "policy_denied",
+        }.get(exc.code, "unbound")
+        return OwnerActionExecution(status)
     return OwnerActionExecution(status, (
         "אושר. חזור למסך ה-OS כדי להציג את המפתח פעם אחת."
         if decision == "approve" else "הבקשה להנפקת מפתח נדחתה."))

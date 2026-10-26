@@ -256,9 +256,9 @@ class AWorld:
         from sqlalchemy.orm import Session
 
         ctx = ctx or self.w.owner
-        result = self.service.issue(ctx, session_hash=session, label=label, kind=kind,
+        result = self.service.issue(ctx, chain_id=session, label=label, kind=kind,
                                     expires_in_days=days)
-        envelope = self.service.proposal(ctx, result["issue_request_id"], session_hash=session)
+        envelope = self.service.proposal(ctx, result["issue_request_id"], chain_id=session)
         engine = create_engine("sqlite:///:memory:")
         ApprovalRow.__table__.create(engine)
         db = Session(engine, expire_on_commit=False)
@@ -286,10 +286,10 @@ class AWorld:
 
     def collect(self, request, *, session="a" * 64, ctx=None):
         return self.service.collect(ctx or self.w.owner, request["issue_request_id"],
-                                    session_hash=session)
+                                    chain_id=session)
 
     def issue_status(self, request, *, session="a" * 64):
-        return self.service.status(self.w.reader, request["issue_request_id"], session_hash=session)
+        return self.service.status(self.w.reader, request["issue_request_id"], chain_id=session)
 
     def issue_rows(self):
         if self.kind == "fake":

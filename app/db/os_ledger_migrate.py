@@ -17,6 +17,7 @@ MIGRATIONS = (
     "20261016_assaf_os_statements.sql",
     "20261016_assaf_os_assistant.sql",
     "20261024_assaf_os_issue_requests.sql",
+    "20261025_assaf_os_assistant_followups.sql",
 )
 OWNER_ROLE = "assaf_os_owner"
 # V2-15 must provision a separate NOINHERIT login and validate its exact grant map.

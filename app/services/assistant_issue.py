@@ -25,13 +25,13 @@ TTL = timedelta(minutes=10)
 _ID = re.compile(r"IR_[0-9a-f]{32}")
 
 
-def session_binding(settings: Any, session_hash: str) -> str:
+def session_binding(settings: Any, chain_id: str) -> str:
     raw = getattr(settings, "os_step_up_secret", "")
     if type(raw) is not str or len(raw.encode()) < 32:
         raise api.LedgerError("ledger_unavailable", reason="step_up_secret_unset")
-    if type(session_hash) is not str or not session_hash:
+    if type(chain_id) is not str or not chain_id:
         raise api.LedgerError("owner_auth_required", reason="session_missing")
-    return hmac.new(raw.encode(), session_hash.encode(), "sha256").hexdigest()
+    return hmac.new(raw.encode(), chain_id.encode(), "sha256").hexdigest()
 
 
 @dataclass(frozen=True, repr=False)
@@ -111,20 +111,36 @@ class IssueTables:
         if changed.rowcount != 1:
             raise api.LedgerError("ledger_unavailable", reason="issue_cas_failed")
 
+    def cancel_uncollected(self):
+        if self.tx.connection is None:
+            for id, row in list(self.memory().items()):
+                if row.workspace_id == self.tx.ctx.workspace and row.status in {
+                    "pending_approval", "approved"
+                }:
+                    self.update(row, status="cancelled")
+            return
+        self.tx.connection.execute(text(
+            "UPDATE assaf_os.os_assistant_issue_requests SET status = 'cancelled' "
+            "WHERE workspace_id = :ws AND status IN ('pending_approval', 'approved')"
+        ), {"ws": self.tx.ctx.workspace})
+
 
 class AssistantIssueService(keys.AssistantCredentialService):
     def __init__(self, *args, revoke_watermark=None, **kwargs):
         super().__init__(*args, **kwargs)
         self._watermark = revoke_watermark or db_revoke_watermark
 
+    def _revoke_all_in(self, tx):
+        IssueTables(tx).cancel_uncollected()
+
     def _live(self):
         if self._settings.kill_switch:
             raise api.LedgerError("kill_switch")
 
-    def issue(self, ctx, *, session_hash, label, kind, expires_in_days=None):
+    def issue(self, ctx, *, chain_id, label, kind, expires_in_days=None):
         self._admit(ctx, "manage_credentials")
         self._live()
-        bound = session_binding(self._settings, session_hash)
+        bound = session_binding(self._settings, chain_id)
         clean = keys._label(label)
         if type(kind) is not str or kind not in keys.KINDS:
             raise keys._invalid("invalid_kind")
@@ -148,10 +164,10 @@ class AssistantIssueService(keys.AssistantCredentialService):
             IssueTables(tx).insert(row)
         return self._body(ctx, row, row.status)
 
-    def _same(self, tables, id, session_hash):
+    def _same(self, tables, id, chain_id):
         row = tables.get(id) if type(id) is str and _ID.fullmatch(id) else None
         if row is None or not hmac.compare_digest(
-            row.session_binding, session_binding(self._settings, session_hash)
+            row.session_binding, session_binding(self._settings, chain_id)
         ):
             raise api.LedgerError("credential_unknown")
         return row
@@ -191,15 +207,15 @@ class AssistantIssueService(keys.AssistantCredentialService):
             "version": 1,
         }
 
-    def proposal(self, ctx, id, *, session_hash):
+    def proposal(self, ctx, id, *, chain_id):
         self._admit(ctx, "manage_credentials")
         with self._tx(ctx) as tx:
-            return self.envelope(self._same(IssueTables(tx), id, session_hash))
+            return self.envelope(self._same(IssueTables(tx), id, chain_id))
 
-    def status(self, ctx, id, *, session_hash):
+    def status(self, ctx, id, *, chain_id):
         self._admit(ctx, "read")
         with self._tx(ctx) as tx:
-            row = self._same(IssueTables(tx), id, session_hash)
+            row = self._same(IssueTables(tx), id, chain_id)
             return self._body(ctx, row, self._status(row, tx.now))
 
     def decide_issue(self, approval, *, decision):
@@ -222,6 +238,8 @@ class AssistantIssueService(keys.AssistantCredentialService):
             row = tables.get(envelope["parameters"].get("issue_request_id", ""))
             if row is None or self.envelope(row) != envelope or row.owner_id != approval.actor_id:
                 raise api.LedgerError("target_changed")
+            if row.status == "cancelled":
+                raise api.LedgerError("issue_cancelled")
             self._check_binding(row, ctx)
             self._not_revoked(row)
             desired = "approved" if decision == "approve" else "rejected"
@@ -251,12 +269,14 @@ class AssistantIssueService(keys.AssistantCredentialService):
         if mark is not None and mark >= row.created_at:
             raise api.LedgerError("authority_changed", reason="owner_revoked_all")
 
-    def collect(self, ctx, id, *, session_hash):
+    def collect(self, ctx, id, *, chain_id):
         self._admit(ctx, "manage_credentials")
         self._live()
         with self._tx(ctx) as tx:
             tables = IssueTables(tx)
-            row = self._same(tables, id, session_hash)  # FOR UPDATE before minting
+            row = self._same(tables, id, chain_id)  # FOR UPDATE before minting
+            if row.status == "cancelled":
+                raise api.LedgerError("issue_cancelled")
             self._check_binding(row, ctx)
             self._not_revoked(row)
             status = self._status(row, tx.now)
@@ -265,6 +285,7 @@ class AssistantIssueService(keys.AssistantCredentialService):
                 "rejected": "issue_rejected",
                 "expired": "issue_expired",
                 "collected": "issue_collected",
+                "cancelled": "issue_cancelled",
             }.get(status)
             if code:
                 raise api.LedgerError(code)

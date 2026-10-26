@@ -23,6 +23,7 @@ FILES = (
     "20261016_assaf_os_statements.sql",
     "20261016_assaf_os_assistant.sql",
     "20261024_assaf_os_issue_requests.sql",
+    "20261025_assaf_os_assistant_followups.sql",
 )
 V2_14_TABLES = frozenset({
     "os_workspaces", "os_authority", "os_leads", "os_clients", "os_works", "os_payments",
@@ -261,6 +262,13 @@ INDEXES = {
         "CREATE UNIQUE INDEX os_statement_lines_matched_expense_key ON assaf_os.os_statement_lines "
         "USING btree (workspace_id, matched_expense_id) WHERE (((state)::text = 'active'::text) "
         "AND (matched_expense_id IS NOT NULL))",
+    "os_assistant_audit_workspace_ip_occurred_idx":
+        "CREATE INDEX os_assistant_audit_workspace_ip_occurred_idx ON assaf_os.os_assistant_audit "
+        "USING btree (workspace_id, client_ip_hmac, occurred_at)",
+    "os_assistant_audit_workspace_operation_occurred_idx":
+        "CREATE INDEX os_assistant_audit_workspace_operation_occurred_idx "
+        "ON assaf_os.os_assistant_audit "
+        "USING btree (workspace_id, operation, occurred_at)",
     "os_assistant_audit_credential_occurred_idx":
         "CREATE INDEX os_assistant_audit_credential_occurred_idx ON assaf_os.os_assistant_audit "
         "USING btree (credential_id, occurred_at)",
@@ -626,6 +634,8 @@ def test_indexes_and_no_other_objects(addendum_db):
         assert {name for name, d in indexes.items()
                 if any(f"ON assaf_os.{t} " in d for t in NEW_TABLES)} == {
             "os_statement_lines_matched_expense_key", "os_assistant_audit_credential_occurred_idx",
+            "os_assistant_audit_workspace_ip_occurred_idx",
+            "os_assistant_audit_workspace_operation_occurred_idx",
         }
         assert set(c.scalars(text(
             "SELECT DISTINCT c.relkind FROM pg_class c JOIN pg_namespace n "
@@ -1084,3 +1094,35 @@ def test_addendum_is_atomic_and_requires_the_v214_constraint_names(addendum_db):
             c.execute(text(f"ALTER TABLE assaf_os.{table} RENAME CONSTRAINT v214b_moved TO {old}"))
     result = ledger.apply_ledger_migrations(engine)
     assert (result.applied, result.already) == (list(FILES), [V2_14])
+
+
+def test_assistant_followup_migration_expands_only_issue_status_and_adds_audit_indexes():
+    sql = _sql_without_comments("20261025_assaf_os_assistant_followups.sql")
+    assert "DROP CONSTRAINT os_issue_requests_status_check" in sql
+    assert "ADD CONSTRAINT os_issue_requests_status_check" in sql
+    assert "'cancelled'" in sql
+    assert len(re.findall(r"\bALTER TABLE\b", sql)) == 2
+    assert len(re.findall(r"\bCREATE INDEX\b", sql)) == 2
+    assert "(workspace_id, client_ip_hmac, occurred_at)" in sql
+    assert "(workspace_id, operation, occurred_at)" in sql
+
+
+@pytest.mark.parametrize("approved", [False, True])
+def test_issue_status_accepts_cancelled_and_still_rejects_unknown(db, approved):
+    values = {
+        "workspace_id": "one", "issue_request_id": "IR_" + "b" * 32,
+        "owner_id": "12345", "epoch": 1, "label": "Desktop", "kind": "claude",
+        "expires_in_days": 30, "session_binding": "b" * 64, "status": "cancelled",
+        "created_at": "2026-10-25T00:00:00Z", "approval_deadline": "2026-10-25T00:10:00Z",
+        "approved_at": "2026-10-25T00:01:00Z" if approved else None,
+    }
+    insert(db, "os_assistant_issue_requests", values)
+    assert db.scalar(text(
+        "SELECT status FROM assaf_os.os_assistant_issue_requests WHERE issue_request_id=:id"
+    ), {"id": values["issue_request_id"]}) == "cancelled"
+    with pytest.raises(SQLAlchemyError) as caught, db.begin_nested():
+        db.execute(text(
+            "UPDATE assaf_os.os_assistant_issue_requests SET status='unknown' "
+            "WHERE issue_request_id=:id"
+        ), {"id": values["issue_request_id"]})
+    assert caught.value.orig.sqlstate == CHECK

@@ -215,11 +215,11 @@ def test_revoking_twice_changes_nothing_the_second_time(aw):
 
 @pytest.mark.parametrize("bad", ["", "x", "AC_" + "A" * 32, "AC_" + "a" * 31, "ac_" + "a" * 32,
                                  "AC_" + "a" * 32 + "0", 5, None])
-def test_a_malformed_or_unknown_credential_id_is_a_validation_error(aw, bad):
-    assert refused(lambda: aw.revoke(bad), "validation_error").details == {
-        "reason": "credential_unknown"}
-    assert refused(lambda: aw.revoke("AC_" + "e" * 32), "validation_error").details == {
-        "reason": "credential_unknown"}
+def test_a_malformed_or_unknown_credential_id_is_404(aw, bad):
+    error = refused(lambda: aw.revoke(bad), "credential_unknown")
+    assert error.status == 404 and error.details == {}
+    error = refused(lambda: aw.revoke("AC_" + "e" * 32), "credential_unknown")
+    assert error.status == 404 and error.details == {}
 
 
 def test_revoke_rejects_that_keys_pending_batches_in_the_same_transaction(aw):

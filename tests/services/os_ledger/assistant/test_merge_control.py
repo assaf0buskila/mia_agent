@@ -112,8 +112,12 @@ def test_control_inside_three_saturated_bearer_slots_is_a_retryable_503(
         entered.wait(5)
         assert release.wait(6)
 
+    def held_request(caller):
+        with keys.bearer_request():
+            return aw.gateway.run(caller, "context", work)
+
     with ThreadPoolExecutor(max_workers=3) as pool:
-        held = [pool.submit(aw.gateway.run, caller, "context", work) for caller in callers]
+        held = [pool.submit(held_request, caller) for caller in callers]
         try:
             entered.wait(5)
             start = time.monotonic()
@@ -146,8 +150,12 @@ def test_control_releases_the_shared_guard_on_every_exit(aw, monkeypatch, failur
         aw.seed_audit(60, ip_hmac=caller.ip_hmac, operation="context", ok=True, reason="ok")
     if failure:
         with pytest.raises(ValueError if failure == "invalid_method" else LedgerError):
-            aw.gateway.control(caller, "raw payload" if failure == "invalid_method" else "ping")
+            with keys.bearer_request():
+                assert not semaphore.acquire(blocking=False)
+                aw.gateway.control(caller, "raw payload" if failure == "invalid_method" else "ping")
     else:
-        aw.gateway.control(caller, "ping")
+        with keys.bearer_request():
+            assert not semaphore.acquire(blocking=False)
+            aw.gateway.control(caller, "ping")
     assert semaphore.acquire(blocking=False)
     semaphore.release()
