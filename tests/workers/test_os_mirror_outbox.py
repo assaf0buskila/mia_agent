@@ -1,8 +1,7 @@
 """V2-29 outbox lease and ``os_mirror_state`` rules, on the fake and (when a disposable URL is
 set) on PostgreSQL 16 with the V2-14 table DDL taken verbatim from the merged migration.
 
-Shared "pg" cases are generated only when ``MIA_OS_LEDGER_TEST_POSTGRES_URL`` is set.
-The database-clock regression cases skip without that disposable URL.
+"pg" cases are generated only when ``MIA_OS_LEDGER_TEST_POSTGRES_URL`` is set; none skip.
 """
 
 from __future__ import annotations
@@ -19,12 +18,14 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
+from app.services.os_ledger import outbox
 from app.services.os_ledger.outbox import (
     LEASE_TTL,
     OutboxError,
     PgOutbox,
     backoff,
     destination_binding,
+    retry_delay,
 )
 
 from tests.workers.mirror_fakes import T0, Clock, FakeOutbox, TxCounter, outbox_body
@@ -161,8 +162,7 @@ def harness(request) -> Iterator[Any]:
 
 @pytest.fixture
 def pg() -> Iterator[PgHarness]:
-    if not PG_URL:
-        pytest.skip("MIA_OS_LEDGER_TEST_POSTGRES_URL is not set")
+    assert PG_URL, "PG cases must only be registered with a disposable URL"
     built = PgHarness()
     try:
         yield built
@@ -170,7 +170,7 @@ def pg() -> Iterator[PgHarness]:
         built.close()
 
 
-def test_pg_due_row_is_claimable_with_application_clock_behind(pg) -> None:
+def _pg_due_row_is_claimable_with_application_clock_behind(pg) -> None:
     before = pg.now()
     event_id = pg.add(1, outbox_body(), before)
     (event,) = pg.outbox().claim(1, "behind", before - timedelta(hours=1))
@@ -181,7 +181,7 @@ def test_pg_due_row_is_claimable_with_application_clock_behind(pg) -> None:
     assert row["updated_at"] >= row["created_at"]
 
 
-def test_pg_application_clock_ahead_does_not_bypass_backoff_or_stamp_future(pg) -> None:
+def _pg_application_clock_ahead_does_not_bypass_backoff_or_stamp_future(pg) -> None:
     before = pg.now()
     due = pg.add(1, outbox_body(), before)
     future = pg.add(2, outbox_body(), before)
@@ -198,7 +198,7 @@ def test_pg_application_clock_ahead_does_not_bypass_backoff_or_stamp_future(pg) 
     assert pg.row(future)["attempts"] == 0
 
 
-def test_pg_lease_takeover_uses_database_time_and_fences_stale_generation(pg) -> None:
+def _pg_lease_takeover_uses_database_time_and_fences_stale_generation(pg) -> None:
     before = pg.now()
     event_id = pg.add(1, outbox_body(), before)
     store = pg.outbox()
@@ -217,7 +217,7 @@ def test_pg_lease_takeover_uses_database_time_and_fences_stale_generation(pg) ->
     assert row["created_at"] <= row["updated_at"] <= pg.now()
 
 
-def test_pg_lease_is_not_reclaimed_at_exact_database_ttl_boundary(pg) -> None:
+def _pg_lease_is_not_reclaimed_at_exact_database_ttl_boundary(pg) -> None:
     before = pg.now()
     event_id = pg.add(1, outbox_body(), before)
     (first,) = pg.outbox().claim(1, "first", before)
@@ -238,11 +238,64 @@ def test_pg_lease_is_not_reclaimed_at_exact_database_ttl_boundary(pg) -> None:
         assert (second.lease_generation, second.attempts) == (2, 2)
 
 
+@pytest.mark.parametrize("status", ["pending", "unknown"])
+def _pg_claim_includes_exact_database_retry_boundary(pg, status) -> None:
+    before = pg.now()
+    event_id = pg.add(1, outbox_body(), before)
+    # Hold now() still for the deadline updates and both claims, as in the TTL test.
+    with pg.engine.begin() as conn:
+        scoped_engine = SimpleNamespace(begin=lambda: nullcontext(conn))
+        store = PgOutbox(scoped_engine, WS, schema=pg.schema)
+        conn.execute(pg.text(f"UPDATE {pg.schema}.os_outbox "
+                             "SET status=:status, next_attempt_at=now() WHERE event_id=:id"),
+                     {"id": event_id, "status": status})
+        (event,) = store.claim(1, "exact", before)
+        assert event.event_id == event_id
+        conn.execute(pg.text(f"UPDATE {pg.schema}.os_outbox "
+                             "SET status=:status, lease_owner=NULL, leased_at=NULL, "
+                             "next_attempt_at=now() + interval '1 microsecond' "
+                             "WHERE event_id=:id"), {"id": event_id, "status": status})
+        assert store.claim(1, "future", before) == []
+
+
+@pytest.mark.parametrize("status", ["pending", "unknown", "sent", "conflict"])
+@pytest.mark.parametrize("attempts", [1, 7])
+def test_publisher_and_pg_finish_use_the_shared_retry_delay(monkeypatch, status, attempts):
+    from app.workers import os_mirror
+
+    calls = []
+    delay = timedelta(seconds=123)
+
+    def policy(result_status, result_attempts):
+        calls.append((result_status, result_attempts))
+        return delay
+
+    monkeypatch.setattr(outbox, "retry_delay", policy)
+    fake = FakeOutbox(TxCounter(), Clock(), WS)
+    event_id = fake.add(1, outbox_body())
+    fake.row(event_id)["attempts"] = attempts - 1
+    (event,) = fake.claim(1, "worker", T0)
+    os_mirror._finish(SimpleNamespace(outbox=fake), event, status, None, T0)
+    assert fake.row(event_id)["next_attempt_at"] == T0 + delay
+
+    parameters = []
+
+    def execute(_statement, params):
+        parameters.append(params)
+        return SimpleNamespace(rowcount=1)
+
+    conn = SimpleNamespace(execute=execute)
+    store = PgOutbox(SimpleNamespace(begin=lambda: nullcontext(conn)), WS)
+    assert store.finish(event, event.lease_generation, status, None, T0)
+    assert parameters[0]["retry"] == delay
+    assert calls == [(status, attempts), (status, attempts)]
+
+
 @pytest.mark.parametrize("status", ["pending", "unknown", "sent", "conflict"])
 @pytest.mark.parametrize("attempts", [1, 2, 7, 20])
 @pytest.mark.parametrize("skew_hours", [-1, 1])
-def test_pg_finish_uses_database_clock_for_backoff_and_metadata(pg, status, attempts,
-                                                             skew_hours) -> None:
+def _pg_finish_uses_database_clock_for_backoff_and_metadata(pg, status, attempts,
+                                                        skew_hours) -> None:
     before = pg.now()
     event_id = pg.add(1, outbox_body(), before)
     with pg.engine.begin() as conn:
@@ -255,20 +308,20 @@ def test_pg_finish_uses_database_clock_for_backoff_and_metadata(pg, status, atte
         conn.execute(pg.text(f"UPDATE {pg.schema}.os_outbox "
                              "SET updated_at=now() + interval '1 hour' WHERE event_id=:id"),
                      {"id": event_id})
-    retry_delay = backoff(attempts) if status in {"pending", "unknown"} else timedelta(0)
-    app_retry = before + timedelta(hours=skew_hours) + retry_delay
+    delay = retry_delay(status, attempts)
+    app_retry = before + timedelta(hours=skew_hours) + delay
     assert store.finish(event, event.lease_generation, status, "mirror_timeout", app_retry)
     row = pg.row(event_id)
     assert row["status"] == status and row["last_error_code"] == "mirror_timeout"
     assert row["leased_at"] is None and row["lease_owner"] is None
     assert before <= row["updated_at"] <= pg.now()
     assert row["updated_at"] >= row["created_at"]
-    assert row["next_attempt_at"] == row["updated_at"] + retry_delay
+    assert row["next_attempt_at"] == row["updated_at"] + delay
     assert store.claim(1, "ahead", before + timedelta(hours=1)) == []
 
 
 @pytest.mark.parametrize("skew_hours", [-1, 1])
-def test_pg_mirror_state_stamps_use_database_clock(pg, skew_hours) -> None:
+def _pg_mirror_state_stamps_use_database_clock(pg, skew_hours) -> None:
     store = pg.outbox()
     before = pg.now()
     app_now = before + timedelta(hours=skew_hours)
@@ -521,6 +574,25 @@ def _pg_no_transaction_or_connection_is_held_during_a_transport_call() -> None:
 
 
 if PG_URL:  # generated only with a disposable URL, so the PG-less job never skips it
+    test_pg_due_row_is_claimable_with_application_clock_behind = (
+        _pg_due_row_is_claimable_with_application_clock_behind
+    )
+    test_pg_application_clock_ahead_does_not_bypass_backoff_or_stamp_future = (
+        _pg_application_clock_ahead_does_not_bypass_backoff_or_stamp_future
+    )
+    test_pg_lease_takeover_uses_database_time_and_fences_stale_generation = (
+        _pg_lease_takeover_uses_database_time_and_fences_stale_generation
+    )
+    test_pg_lease_is_not_reclaimed_at_exact_database_ttl_boundary = (
+        _pg_lease_is_not_reclaimed_at_exact_database_ttl_boundary
+    )
+    test_pg_claim_includes_exact_database_retry_boundary = (
+        _pg_claim_includes_exact_database_retry_boundary
+    )
+    test_pg_finish_uses_database_clock_for_backoff_and_metadata = (
+        _pg_finish_uses_database_clock_for_backoff_and_metadata
+    )
+    test_pg_mirror_state_stamps_use_database_clock = _pg_mirror_state_stamps_use_database_clock
     test_pg_no_transaction_or_connection_is_held_during_a_transport_call = (
         _pg_no_transaction_or_connection_is_held_during_a_transport_call
     )
