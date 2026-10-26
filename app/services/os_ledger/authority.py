@@ -137,6 +137,43 @@ class PgAuthorityAdmin:
                 raise _missing()
             return self._snapshot(conn, workspace_id)
 
+    def reset_mirror(self, workspace_id: str, *, expected_epoch: int, actor_owner_id: str,
+                     destination_binding: str, audit: Callable[[], None]) -> bool:
+        """Privileged CLI only, under a freeze. Never deletes or changes a destination pin.
+
+        The workspace lock serializes the epoch/core checks with activation and rearm. The
+        row lock serializes each publisher progress statement, not a whole tick: an in-flight
+        tick can record_attempt or record_result after this reset commits. That affects only
+        liveness; re-run the guarded reset. Audit failure aborts the tx.
+        """
+        with self._locked(workspace_id) as (conn, row):
+            if row is None:
+                raise _missing()
+            if row.owner_id != actor_owner_id or int(row.epoch) != expected_epoch:
+                raise _changed("epoch_mismatch")
+            if self._snapshot(conn, workspace_id).states["core"] == "active":
+                raise _changed("core_active")
+            mirror = conn.execute(text(
+                "SELECT destination_binding FROM assaf_os.os_mirror_state "
+                "WHERE workspace_id=:ws FOR UPDATE"
+            ), {"ws": workspace_id}).first()
+            if mirror is not None and mirror.destination_binding != destination_binding:
+                raise _changed("mirror_destination_changed")
+            audit()
+            if mirror is None:
+                return False
+            result = conn.execute(text(
+                "UPDATE assaf_os.os_mirror_state SET status='pending', projected_version=0, "
+                "verified_version=0, last_attempt_at=NULL, last_verified_at=NULL, "
+                "last_error_code=NULL, watermark='{}'::jsonb, scan_coverage='{}'::jsonb, "
+                "updated_at=GREATEST(updated_at, now()) WHERE workspace_id=:ws AND "
+                "(status, projected_version, verified_version, last_attempt_at, last_verified_at, "
+                "last_error_code, watermark, scan_coverage) IS DISTINCT FROM "
+                "('pending', 0::bigint, 0::bigint, NULL::timestamptz, NULL::timestamptz, "
+                "NULL::varchar, '{}'::jsonb, '{}'::jsonb)"
+            ), {"ws": workspace_id})
+            return result.rowcount == 1
+
     @staticmethod
     def _bump(conn: Connection, workspace_id: str, now: datetime) -> int:
         epoch = conn.execute(text(
