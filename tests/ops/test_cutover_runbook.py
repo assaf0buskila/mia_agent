@@ -35,6 +35,7 @@ from tests.workers.test_os_authority import (
 ROOT = Path(__file__).resolve().parents[2]
 RUNBOOK = (ROOT / "ops/assaf-os/CUTOVER_RUNBOOK.md").read_text(encoding="utf-8")
 PHONE = (ROOT / "docs/runbooks/OS_PHONE_ACCEPTANCE.md").read_text(encoding="utf-8")
+GO_NO_GO = (ROOT / "docs/runbooks/OS_CUTOVER_GO_NO_GO.md").read_text(encoding="utf-8")
 SCRIPT = (ROOT / "ops/gcp/vm/mia").read_text(encoding="utf-8")
 SCHEMA_JS = (ROOT / "ops/assaf-os/schema.js").read_text(encoding="utf-8")
 
@@ -151,7 +152,7 @@ def test_every_command_phase_flag_and_evidence_file_is_named():
         assert re.search(rf"os-authority {re.escape(command)}\b", RUNBOOK), command
     for phase in cli.PHASES:
         assert f"--phase {phase}" in RUNBOOK, phase
-    for flag in ("--drain", "--final-accept", "--rearm", "--approved-sha"):
+    for flag in ("--drain", "--final-accept", "--rearm", "--approved-sha", "--expected-epoch"):
         assert flag in RUNBOOK, flag
     for name in (cli.DRAIN, cli.PREFLIGHT, cli.ACTIVATION, cli.BACKUP, cli.DRILL, cli.FRONTEND,
                  cli.JOURNAL, cli.MANIFEST):
@@ -168,6 +169,24 @@ def test_the_freeze_stays_on_until_the_open_phase_in_the_text():
     assert "**The freeze stays on.**" in RUNBOOK
     assert "MIA_ASSAF_OS_FREEZE=false" in RUNBOOK.split("## 4. The first write", 1)[1]
     assert "MIA_ASSAF_OS_FREEZE=false" not in cli.plan_lines("switch", 1)
+
+
+def test_retry_mirror_cleanliness_and_reset_remedy_are_pinned():
+    flat = re.sub(r"\s+", " ", RUNBOOK)
+    for literal in (
+        "empty or a clean last projection that may lag", "fenced-clean",
+        "`projected_version == verified_version`", "`last_error_code=authority_fenced`",
+        "sudo mia os-authority mirror-reset --approved-sha S --expected-epoch E",
+        "freeze ON", "core authority NOT `active`", "state lock", "destination pin",
+        "never touches the workbook", "audit", "full rewrite plus readback",
+    ):
+        assert literal in flat, literal
+    for heading in ("## 5. ", "## 6. "):
+        assert "mirror-reset" in section_of(heading), heading
+    for heading in ("### T7", "## 4. The first write"):
+        assert "mirror: verified" in section_of(heading)
+    authority_case = SCRIPT.split("  os-authority)", 1)[1].split("  os-provision)", 1)[0]
+    assert "mirror-reset" in authority_case and "--expected-epoch)" in authority_case
 
 
 def test_every_owner_go_of_the_phone_acceptance_list_is_a_go_here():
@@ -212,7 +231,9 @@ GATED_COMMANDS = [
     ("### T6", r"sudo mia os-authority activate", "G13", False),
     ("## 5. ", r"sudo mia os-authority rollback", "G19", False),
     ("## 5. ", r"sudo mia os-authority init --rearm", "G23", True),
+    ("## 5. ", r"sudo mia os-authority mirror-reset", "G25", True),
     ("## 6. ", r"sudo mia os-authority fence", "G22", True),
+    ("## 7. Reason codes", r"sudo mia os-authority mirror-reset", "G25", False),
     ("## 6. ", r"sudo mia os-authority restore-begin", "G21", True),
     ("## 6. ", r"sudo mia os-authority restore-finish", "G21", True),
     ("## 6. ", r"sudo mia restore", "G21", True),
@@ -283,6 +304,53 @@ def test_copy_rehearsal_documents_are_kept_as_e36_reference_only(name):
     )
 
 
+def test_phone_acceptance_replaces_copy_rehearsal_with_e36_readiness():
+    text = re.sub(r"\s+", " ", PHONE)
+    assert "NOT_INCLUDED by contract §22 E36 (2026-10-24, Assaf)" in text
+    assert "CUTOVER_RUNBOOK.md step 6" in text and "four E36 conditions" in text
+    assert "init; E36 readiness (step 6); then wave-6 T1-T7" in text
+    assert "passed end to end" not in text and "passed rehearsal" not in text
+
+
+@pytest.mark.parametrize("label", [
+    "TEST copy, production pins, PG16, fresh HMAC / isolated harness",
+    "Full V2-35 rehearsal passed, including broken-precondition abort",
+    "Zero non-import receipt boundary; rehearsal rollback + forward",
+    "TEST deployment archived, copy deleted, data disposition recorded",
+])
+def test_go_no_go_marks_copy_rehearsal_evidence_not_included(label):
+    assert f"| {label} | NOT_INCLUDED (E36) |" in GO_NO_GO
+
+
+@pytest.mark.parametrize("label,pins", [
+    ("E36: fixes merged", ("WP1/E35 (#199)", "WP2 (#197)", "merged PR SHAs",
+                          "ancestors of `S`", "MERGED", "mergeCommit.oid")),
+    ("E36: CI green", ("os-cutover-postgres", "headSha == S", "conclusion == success",
+                      "run ID/URL", "tests/workers/test_os_cutover_sequence.py")),
+    ("E36: PC restore drill", ("Assaf's PC", "restore-drill.json", "< 7 days",
+                               "at activation", "started_utc", "passed: true",
+                               "rto_met: true", "RTO ≤ 2 h", "RPO ≤ 15 min")),
+    ("E36: live window and rollback", ("Assaf's", "explicit statement in chat", "`S`",
+                                      "UTC window", "section 5",
+                                      "before the first non-import receipt", "G10-G17",
+                                      "explicit go")),
+])
+def test_go_no_go_records_each_e36_condition(label, pins):
+    row = next(line for line in GO_NO_GO.splitlines() if line.startswith(f"| {label} |"))
+    assert "| NOT_RUN |" in row
+    for pin in pins:
+        assert pin in row, (label, pin)
+
+
+def test_rehearsal_evidence_state_is_reference_only_and_contract_separates_drift_proof():
+    assert "`REHEARSAL_VERIFIED` is retained for reference only (E36)." in RUNBOOK
+    contract = (ROOT / "docs/os-v2/V2_PG_CONTRACTS.md").read_text(encoding="utf-8")
+    e36 = re.sub(r"\s+", " ", contract.split("### E36", 1)[1].split("### E37", 1)[0])
+    assert "mirror verified under the freeze" in e36
+    assert "WP2's drift tests prove the workbook-level drift check" in e36
+    assert "mirror verified, zero drift" not in e36
+
+
 def bullet_with(section: str, command: str) -> str:
     """The top-level bullet of a section (its indented lines included) that runs a command."""
     for bullet in re.split(r"^(?=- )", section, flags=re.M):
@@ -308,12 +376,14 @@ def test_the_owner_gate_list_covers_every_gate_a_step_marks_and_the_three_added_
     rows = dict(re.findall(r"^\| (G\d\d) \| (.+) \|$", table, re.M))
     numbers = list(rows)
     assert numbers == [f"G{n:02d}" for n in range(1, len(numbers) + 1)], "contiguous, in order"
-    assert numbers[-1] == "G24", "G22 fence, G23 re-arm and G24 staging were added after G21"
+    assert numbers[-1] == "G25", "G22 fence, G23 re-arm, G24 staging and G25 mirror reset"
     assert set(GATE_MARK.findall(body)) <= set(numbers), "a step marks a gate the list lacks"
-    assert {"G22", "G23", "G24"} <= set(GATE_MARK.findall(body))
+    assert {"G22", "G23", "G24", "G25"} <= set(GATE_MARK.findall(body))
     assert "`fence`" in rows["G22"] and "`init --rearm`" in rows["G23"]
     assert "staging" in rows["G24"].lower() and "os-import" in rows["G24"]
-    assert "G10 to G24" in RUNBOOK and "G10 to G21" not in RUNBOOK
+    assert "`mirror-reset`" in rows["G25"] and "before activation" in rows["G25"]
+    assert "G10 to G25" in RUNBOOK
+    assert "G10 to G24" not in RUNBOOK and "G10 to G21" not in RUNBOOK
 
 
 def test_fence_is_not_a_standing_emergency_stop_unless_the_owner_wrote_it_down():

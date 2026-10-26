@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import json
 import shutil
+import subprocess
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -198,6 +199,82 @@ def test_runner_reports_failure_instead_of_raising(tmp_path):
     assert failing.returncode == 3 and failing.stderr == b"boom"
     slow = runner.run([sys.executable, "-c", "import time; time.sleep(5)"], timeout=0.2)
     assert slow.returncode == 124
+
+
+@pytest.mark.parametrize(
+    "available, executable, lookups, returncode",
+    [
+        (
+            {"gcloud.cmd": "C:/Google Cloud SDK/bin/gcloud.cmd"},
+            "C:/Google Cloud SDK/bin/gcloud.cmd",
+            ["gcloud", "gcloud.cmd"],
+            0,
+        ),
+        (
+            {"gcloud": "/snap/bin/gcloud", "gcloud.cmd": "/other/gcloud.cmd"},
+            "/snap/bin/gcloud",
+            ["gcloud"],
+            0,
+        ),
+        ({}, "gcloud", ["gcloud", "gcloud.cmd"], 127),
+    ],
+    ids=["windows-cmd", "linux-gcloud-preferred", "missing"],
+)
+def test_runner_resolves_gcloud_once_without_changing_arguments_or_stdin(
+    monkeypatch, available, executable, lookups, returncode
+):
+    searched, calls = [], []
+
+    def which(name):
+        searched.append(name)
+        return available.get(name)
+
+    def run(argv, **options):
+        calls.append((argv, options))
+        if not available:
+            raise FileNotFoundError
+        return subprocess.CompletedProcess(argv, 0, b"ok", b"")
+
+    monkeypatch.setattr(shutil, "which", which)
+    monkeypatch.setattr(subprocess, "run", run)
+    runner = backup_lib.Runner()
+    argv = ["gcloud", "secrets", "versions", "add", "mia-backup-key", "--data-file=-"]
+    for _ in range(2):
+        done = runner.run(argv, input_bytes=KEY.encode(), timeout=60)
+        assert done.returncode == returncode
+        if returncode == 127:
+            assert done == backup_lib.Result(127, b"", b"command or file not found: gcloud")
+        else:
+            assert done == backup_lib.Result(0, b"ok", b"")
+    assert searched == lookups
+    assert argv[0] == "gcloud"  # the caller's list is not mutated
+    assert calls == [
+        (
+            [executable, *argv[1:]],
+            {
+                "stderr": subprocess.PIPE,
+                "check": False,
+                "timeout": 60,
+                "input": KEY.encode(),
+                "stdout": subprocess.PIPE,
+            },
+        )
+    ] * 2
+
+
+@pytest.mark.parametrize("executable", ["/custom/gcloud", "C:/SDK/gcloud.cmd", "docker"])
+def test_runner_preserves_explicit_executables_and_other_tools(monkeypatch, executable):
+    def unexpected_lookup(name):
+        pytest.fail(f"unexpected executable lookup: {name}")
+
+    def run(argv, **options):
+        assert argv == [executable, "--version"]
+        assert not options.get("shell", False)
+        return subprocess.CompletedProcess(argv, 0, b"version", b"")
+
+    monkeypatch.setattr(shutil, "which", unexpected_lookup)
+    monkeypatch.setattr(subprocess, "run", run)
+    assert backup_lib.Runner().run([executable, "--version"]).stdout == b"version"
 
 
 def test_lifecycle_file_matches_the_owner_decision():

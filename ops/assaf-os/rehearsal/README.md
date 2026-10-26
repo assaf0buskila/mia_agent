@@ -1,5 +1,7 @@
 # Local rehearsal bootstrap
 
+Status: NOT_INCLUDED by contract §22 E36 (2026-10-24, Assaf); kept for reference only.
+
 Preparation for V2-35a/V2-35 only. The guard and launcher do not implement V2-31,
 make Google calls, migrate schemas, grant roles, change authority or enable jobs.
 Complete [the owner checklist](../../../docs/runbooks/OS_REHEARSAL_ENV.md) first.
