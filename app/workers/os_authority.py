@@ -1084,7 +1084,6 @@ def cmd_init(ctx: Context, *, rearm: bool = False) -> Result:
             snapshot = _state(ctx)
             if snapshot.states["core"] == "shadow":
                 # A repeat of a re-arm that already ran (or a ledger that was never fenced).
-                deps.evidence.set_aside(RESTORE_ATTEMPT, deps.now())
                 return Result(True, {"command": "init", "ok": True, "outcome": "already_shadow",
                                      **_snapshot_document(snapshot)})
             if snapshot.states["core"] != "fenced":
@@ -1095,9 +1094,14 @@ def cmd_init(ctx: Context, *, rearm: bool = False) -> Result:
                 deps.workspace, "core", "shadow", expected_epoch=snapshot.epoch,
                 actor_owner_id=deps.owner_id,
             )
-            deps.evidence.set_aside(RESTORE_ATTEMPT, deps.now())
-            return Result(True, {"command": "init", "ok": True, "outcome": "rearmed",
-                                 **_snapshot_document(after)})
+            document = {"command": "init", "ok": True, "outcome": "rearmed",
+                        **_snapshot_document(after)}
+            try:
+                deps.evidence.set_aside(RESTORE_ATTEMPT, deps.now())
+            except Refusal as error:
+                document["evidence_written"] = False
+                document["warnings"] = error.codes
+            return Result(True, document)
         try:
             existing = deps.admin.state(deps.workspace)
         except api.LedgerError as error:
@@ -1241,9 +1245,31 @@ def cmd_activate(ctx: Context) -> Result:
     snapshot = _state(ctx)
     core = snapshot.states["core"]
     if core == "active":
-        deps.evidence.set_aside(RESTORE_ATTEMPT, deps.now())
-        return Result(True, {"command": "activate", "ok": True, "outcome": "already_active",
-                             **_snapshot_document(snapshot)})
+        document = {"command": "activate", "ok": True, "outcome": "already_active",
+                    **_snapshot_document(snapshot)}
+        try:
+            activation = deps.evidence.read(ACTIVATION)
+            current = activation is not None and _strict_int(
+                activation.get("epoch")) == snapshot.epoch
+            activated_at = _time(activation.get("activated_at")) if current else None
+            attempt = deps.evidence.read(RESTORE_ATTEMPT)
+            recorded_at = _time(attempt.get("recorded_at")) if attempt else None
+            if not current:
+                # Observing active does not prove WHEN it activated (it may be a restored dump).
+                # Repair the file, but never manufacture timing proof for a later retry.
+                deps.evidence.write(ACTIVATION, {
+                    "v": 1, "kind": "activation", "activated_at": None, "epoch": snapshot.epoch,
+                    "release_sha": ctx.approved_sha,
+                })
+            if activated_at is not None and recorded_at is not None and activated_at >= recorded_at:
+                deps.evidence.set_aside(RESTORE_ATTEMPT, deps.now())
+        except EvidenceError:
+            document["evidence_written"] = False
+            document["warnings"] = ["restore_evidence_invalid"]
+        except Refusal as error:
+            document["evidence_written"] = False
+            document["warnings"] = error.codes
+        return Result(True, document)
     if core != "shadow":
         raise Refusal("authority_state_invalid")
     ctx.mode = "activate"
@@ -1266,9 +1292,6 @@ def cmd_activate(ctx: Context) -> Result:
         )
     except api.LedgerError as error:
         raise _ledger_refusal(error) from None
-    # Core is now active: a leftover attempt belongs to an earlier, closed restore window.
-    # Archive even on the already-active retry above, so an I/O failure is repairable.
-    deps.evidence.set_aside(RESTORE_ATTEMPT, deps.now())
     document = {"command": "activate", "ok": True, "outcome": "activated",
                 "checks": [check.as_dict() for check in checks],
                 "gates": [gate.as_dict() for gate in gates], **_snapshot_document(after)}
@@ -1277,8 +1300,11 @@ def cmd_activate(ctx: Context) -> Result:
             "v": 1, "kind": "activation", "activated_at": _iso(deps.now()), "epoch": after.epoch,
             "release_sha": ctx.approved_sha,
         })
-    except Refusal:
+        # Persist the activation time before archiving, so an archive failure is retryable.
+        deps.evidence.set_aside(RESTORE_ATTEMPT, deps.now())
+    except Refusal as error:
         document["evidence_written"] = False  # the ledger state is the authority, not this file
+        document["warnings"] = error.codes
     return Result(True, document)
 
 

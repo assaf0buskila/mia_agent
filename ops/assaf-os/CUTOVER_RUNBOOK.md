@@ -649,11 +649,38 @@ number.
   `restore-begin` pins the current attempt id (or its absence) in `restore-session.json`.
   Successful restore-finish archives only its matching attempt as `restore-attempt-superseded-<UTC>.json`;
   a retry at E+1 repairs an archive failure, without another bump or consuming a newer attempt.
-  Activation and `init --rearm`, including retries, archive outstanding attempts once core is active
-  or re-armed. An unreadable attempt record blocks evidence creation, never
+  A real shadow-to-active activation or fenced-to-shadow `init --rearm` archives outstanding attempts.
+  An already-active retry archives only with `activation.json` at the current epoch and
+  `activated_at` at or after its `recorded_at`; an already-shadow retry leaves the attempt
+  for the next real activation. Activation writes `activation.json` before archiving; archive
+  failure reports the committed outcome with `evidence_written=false` and warning `evidence_unwritable`.
+  An already-active retry repairs a missing/current-epoch-mismatched activation file with
+  `activated_at=null` (unknown), which cannot prove an attempt is stale, even on another retry.
+  An unreadable attempt record blocks evidence creation, never
   containment. `restore-begin` refuses `restore_evidence_invalid`; `restore-finish` also refuses
   and reports `rto_within_limit=null` and `rpo_within_limit=null` for that flagged session.
   The RTO/RPO booleans are meaningless in this case: post-restore timestamps prove neither limit.
+- **Manual attempt set-aside** (coordinator-verified bookkeeping, under `/var/lock/mia-state.lock`):
+  retain the file as `restore-attempt-superseded-<UTC>.json`, never delete it. Retain incident
+  containment. The coordinator must abandon the old attempt and confirm no restore or authority
+  operation is running before executing this step:
+
+  ```bash
+  sudo flock -n -E 75 /var/lock/mia-state.lock sh -euc '
+    dst=/var/lib/mia/os-authority/restore-attempt-superseded-$(date -u +%Y%m%dT%H%M%SZ).json
+    [ ! -e "$dst" ] && [ ! -L "$dst" ]
+    sudo mv -n /var/lib/mia/os-authority/restore-attempt.json "$dst"
+    [ ! -e /var/lib/mia/os-authority/restore-attempt.json ] && [ ! -L /var/lib/mia/os-authority/restore-attempt.json ]'
+  ```
+
+  **Verify**: source absent and archive retained; exit 75 means lock busy, wait and retry.
+  This does not authorize clearing a live recovery attempt or bypassing the STOP exception above.
+  A legacy attempt without `attempt_id` (the #202 wrapper) refuses `restore_evidence_invalid`:
+  use **Manual attempt set-aside** after abandoning that unusable attempt, then immediately
+  redo `sudo mia restore <dump>` with the current wrapper under a fresh explicit restore go.
+  An attempt from a restore aborted before `DROP DATABASE`, left after cutover with no later activation,
+  can flag the next ordinary incident: use **Manual attempt set-aside** only after independently
+  verifying that no recovery is live and that the attempt is stale.
 - **Verify**: run status after `mia restore` and compare the epoch with the incident E:
   `sudo mia os-authority status --approved-sha S`. If different, STOP and select a compatible dump.
 - **Go G22**, a separate post-restore fence go: `sudo mia os-authority fence --approved-sha S`.

@@ -473,11 +473,87 @@ def test_rearm_archives_stale_attempt_without_extra_bump(tmp_path, already_shado
     w.put(cli.RESTORE_ATTEMPT, old)
     assert w.run("init", "--rearm").code == 0
     assert w.state().epoch == 2 and w.state().states["core"] == "shadow"
+    if already_shadow:
+        # A no-op cannot close a new restore window; the next real activation does.
+        assert w.get(cli.RESTORE_ATTEMPT) == old
+        w.env.knobs.settings_epoch = 2
+        good_evidence(w)
+        for name in (cli.DRAIN, cli.PREFLIGHT):
+            w.put(name, {**w.get(name), "epoch": 2})
+        assert w.run("activate").out["outcome"] == "activated"
     assert not (w.dir / cli.RESTORE_ATTEMPT).exists()
     [archived] = w.dir.glob("restore-attempt-superseded-*.json")
     assert w.get(archived.name) == old
     assert w.run("fence").out["fence_record_minted_after_restore"] is False
     assert step(w, "restore-begin", epoch=2).code == 0
+
+
+@pytest.mark.parametrize("activation", ["missing", "older", "wrong_epoch", "invalid_time"])
+def test_already_active_preserves_live_attempt_and_flags_fence(tmp_path, activation):
+    w = World(tmp_path)
+    assert w.run("init").code == 0
+    w.env.transition(WORKSPACE, "core", "active", expected_epoch=1, actor_owner_id=OWNER_ID)
+    old = attempt_document()
+    w.put(cli.RESTORE_ATTEMPT, old)
+    if activation != "missing":
+        w.put(cli.ACTIVATION, {
+            "v": 1, "kind": "activation", "release_sha": SHA,
+            "epoch": 2 if activation == "wrong_epoch" else 1,
+            "activated_at": "invalid" if activation == "invalid_time" else stamp(
+                NOW - timedelta(seconds=1) if activation == "older" else NOW),
+        })
+    w.clock[0] += timedelta(minutes=90)
+    for _ in range(2):
+        assert w.run("activate").out["outcome"] == "already_active"
+        assert w.get(cli.RESTORE_ATTEMPT) == old
+    assert w.run("fence").out["fence_record_minted_after_restore"] is True
+    assert codes(step(w, "restore-begin")) == ["restore_evidence_invalid"]
+
+
+def test_already_active_repairs_missing_activation_without_inventing_time(tmp_path):
+    w = World(tmp_path)
+    assert w.run("init").code == 0
+    w.env.transition(WORKSPACE, "core", "active", expected_epoch=1, actor_owner_id=OWNER_ID)
+    assert w.run("activate").out["outcome"] == "already_active"
+    assert w.get(cli.ACTIVATION) == {
+        "v": 1, "kind": "activation", "epoch": 1, "release_sha": SHA,
+        "activated_at": None,
+    }
+
+
+@pytest.mark.parametrize("command", ["activate", "rearm"])
+def test_archive_failure_reports_committed_outcome_and_warning(tmp_path, monkeypatch, command):
+    w = World(tmp_path)
+    assert w.run("init").code == 0
+    if command == "activate":
+        good_evidence(w)
+        args, outcome, epoch = ("activate",), "activated", 1
+    else:
+        assert w.run("fence").code == 0
+        args, outcome, epoch = ("init", "--rearm"), "rearmed", 2
+    old = attempt_document()
+    w.put(cli.RESTORE_ATTEMPT, old)
+
+    def unwritable(*args):
+        if command == "activate":
+            assert w.get(cli.ACTIVATION)["epoch"] == epoch
+        raise cli.Refusal("evidence_unwritable")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(w.deps.evidence, "set_aside", unwritable)
+        result = w.run(*args)
+    assert result.code == 0 and result.out["outcome"] == outcome
+    assert result.out["evidence_written"] is False
+    assert result.out["warnings"] == ["evidence_unwritable"]
+    assert w.state().epoch == epoch
+    assert w.get(cli.RESTORE_ATTEMPT) == old
+    retry = w.run(*args)
+    assert retry.code == 0 and w.state().epoch == epoch
+    if command == "activate":
+        assert not (w.dir / cli.RESTORE_ATTEMPT).exists()
+        assert w.get(cli.ACTIVATION)["epoch"] == epoch
+    else:
+        assert w.get(cli.RESTORE_ATTEMPT) == old
 
 
 def test_restore_begin_pins_attempt_and_finish_archives_only_its_own(recovery):
@@ -581,10 +657,24 @@ def test_attempt_archive_failure_is_retryable_after_activation_or_rearm(
         def unwritable(*args):
             raise cli.Refusal("evidence_unwritable")
         patch.setattr(w.deps.evidence, "set_aside", unwritable)
-        assert codes(w.run(*args)) == ["evidence_unwritable"]
+        result = w.run(*args)
+        assert result.code == 0 and result.err == ""
+        assert result.out["outcome"] == ("activated" if command == "activate" else "rearmed")
+        assert result.out["evidence_written"] is False
+        assert result.out["warnings"] == ["evidence_unwritable"]
     assert w.state().epoch == epoch
     assert (w.dir / cli.RESTORE_ATTEMPT).exists()
     assert w.run(*args).code == 0
+    if command == "rearm":
+        # No-op rearm retains the failed archive; a real activation closes the window.
+        assert (w.dir / cli.RESTORE_ATTEMPT).exists()
+        w.env.knobs.settings_epoch = epoch
+        good_evidence(w)
+        for name in (cli.DRAIN, cli.PREFLIGHT):
+            w.put(name, {**w.get(name), "epoch": epoch})
+        assert w.run("activate").out["outcome"] == "activated"
+    else:
+        assert w.get(cli.ACTIVATION)["epoch"] == epoch
     assert w.state().epoch == epoch and not (w.dir / cli.RESTORE_ATTEMPT).exists()
 
 
