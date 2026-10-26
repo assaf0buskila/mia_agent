@@ -247,6 +247,8 @@ def run_arm(tmp_path, name, argv, **host_options):
     (["status", "--approved-sha", SHA], "os-authority status --approved-sha " + SHA),
     (["activate", "--approved-sha", SHA], "os-authority activate --approved-sha " + SHA),
     (["fence", "--approved-sha", SHA], "os-authority fence --approved-sha " + SHA),
+    (["mirror-reset", "--expected-epoch", "2", "--approved-sha", SHA],
+     "os-authority mirror-reset --expected-epoch 2 --approved-sha " + SHA),
     (["restore-begin", "--expected-epoch", "1", "--approved-sha", SHA],
      "os-authority restore-begin --expected-epoch 1 --approved-sha " + SHA),
     (["restore-finish", "--expected-epoch", "1", "--approved-sha", SHA],
@@ -374,11 +376,12 @@ def test_expected_epoch_is_refused_outside_restore_commands(tmp_path, command):
 
 
 @pytest.mark.parametrize("value", ["0", "-1", "bad", "1.5"])
-@pytest.mark.parametrize("command", ["restore-begin", "restore-finish"])
+@pytest.mark.parametrize("command", ["restore-begin", "restore-finish", "mirror-reset"])
 def test_malformed_restore_epoch_has_distinct_reason(tmp_path, value, command):
     code, output = run_arm(tmp_path, "os-authority", [
         command, "--expected-epoch", value, "--approved-sha", SHA])
-    assert code == 1 and "restore_epoch_invalid" in output and "compose" not in output
+    reason = "expected_epoch_invalid" if command == "mirror-reset" else "restore_epoch_invalid"
+    assert code == 1 and reason in output and "compose" not in output
 
 
 def test_restore_finish_uses_the_existing_marker_variable(tmp_path):
@@ -433,10 +436,13 @@ def test_authority_usage_keeps_restore_description_with_the_command():
             "                        restore-begin/restore-finish --expected-epoch <E>") in usage
 
 
-@pytest.mark.parametrize("command", ["restore-begin", "restore-finish"])
-def test_missing_restore_epoch_is_required(tmp_path, command):
-    code, output = run_arm(tmp_path, "os-authority", [command, "--approved-sha", SHA])
-    assert code == 1 and "restore_epoch_required" in output and "compose" not in output
+@pytest.mark.parametrize("command", ["restore-begin", "restore-finish", "mirror-reset"])
+@pytest.mark.parametrize("epoch_args", [[], ["--expected-epoch"]])
+def test_missing_restore_epoch_is_required(tmp_path, command, epoch_args):
+    code, output = run_arm(tmp_path, "os-authority", [
+        command, "--approved-sha", SHA, *epoch_args])
+    reason = "expected_epoch_required" if command == "mirror-reset" else "restore_epoch_required"
+    assert code == 1 and reason in output and "compose" not in output
 
 
 # --------------------------------------------------------------------------- mia os-provision

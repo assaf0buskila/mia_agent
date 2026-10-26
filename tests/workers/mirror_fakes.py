@@ -267,7 +267,7 @@ class FakeOutbox:
             assert state is not None
             state["projected_version"] = max(state["projected_version"], version)
             state["last_attempt_at"] = now
-            if state["status"] in ("synced", "pending", "delayed"):
+            if state["status"] in ("synced", "pending", "delayed", "fenced"):
                 state["status"] = "pending"
 
     def record_result(
@@ -279,13 +279,24 @@ class FakeOutbox:
         error_code: str | None,
         now: datetime,
         coverage: Mapping[str, Any] | None,
-    ) -> None:
+    ) -> str | None:
         with self.counter.tx():
             self.calls.append("record_result")
             state = self.state
             assert state is not None
             current = state["verified_version"]
             if version >= current:
+                if status == "fenced":
+                    clean = state["projected_version"] == current and (
+                        (state["status"] == "synced" and state["last_error_code"] is None)
+                        or (state["status"] == "fenced"
+                            and state["last_error_code"] == "authority_fenced")
+                        or (state["status"] == "pending" and state["projected_version"] == 0
+                            and state["last_error_code"] is None
+                            and state["last_attempt_at"] is None
+                            and state["last_verified_at"] is None)
+                    )
+                    error_code = "authority_fenced" if clean else "authority_fenced_unclean"
                 state["status"] = status
                 state["last_error_code"] = error_code
                 if coverage is not None:
@@ -296,6 +307,7 @@ class FakeOutbox:
                 state["verified_version"] = max(current, version)
                 state["projected_version"] = max(state["projected_version"], version)
             assert state["verified_version"] <= state["projected_version"]
+            return state["last_error_code"]
 
 
 # ---------------------------------------------------------------------------------------------
