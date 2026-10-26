@@ -309,12 +309,12 @@ def test_revoke_rejects_the_keys_pending_batches_and_returns_the_list(world):
     )
 
 
-def test_revoking_an_unknown_key_is_a_validation_error(world):
+def test_revoking_an_unknown_key_is_a_404(world):
     error = error_of(
-        world.call("POST", f"{KEYS}/AC_{'e' * 32}/revoke", body={}), 422, "validation_error"
+        world.call("POST", f"{KEYS}/AC_{'e' * 32}/revoke", body={}), 404, "credential_unknown"
     )
-    assert error["details"] == {"reason": "credential_unknown"}
-    error_of(world.call("POST", f"{KEYS}/not-a-key/revoke", body={}), 422, "validation_error")
+    assert "details" not in error
+    error_of(world.call("POST", f"{KEYS}/not-a-key/revoke", body={}), 404, "credential_unknown")
 
 
 def test_revoke_all_revokes_every_key_and_returns_the_list(world):
@@ -387,6 +387,125 @@ def test_request_waits_for_telegram_and_status_is_bound_to_the_same_session(worl
     assert world.collect(body, headers=no_origin).status_code == 403
     assert world.collect(body).status_code == 200
     error_of(world.collect(body), 409, "issue_collected")
+
+
+def test_request_refresh_status_approve_collect_keeps_login_chain(world):
+    import hashlib
+    import hmac
+
+    from app.api.owner_sessions import SESSION_COOKIE
+    from sqlalchemy import text
+
+    requested = world.request().json()
+    before = world.headers["Cookie"]
+    with world.owner.factory() as db:
+        chain = db.execute(text("SELECT chain_id FROM owner_os_sessions")).scalar_one()
+    assert world.aw.issue_rows()[0]["session_binding"] == hmac.new(
+        world.aw.config.os_step_up_secret.encode(), chain.encode(), hashlib.sha256
+    ).hexdigest()
+    refreshed = world.call("POST", "/v1/owner/auth/refresh", raw="")
+    assert refreshed.status_code == 200, refreshed.text
+    token = refreshed.cookies.get(SESSION_COOKIE)
+    world.headers = {**world.headers, "Cookie": f"{SESSION_COOKIE}={token}",
+                     "X-CSRF-Token": refreshed.json()["csrf_token"]}
+    assert world.headers["Cookie"] != before
+    path = KEYS + "/issue-requests/" + requested["issue_request_id"]
+    assert world.call("GET", path).status_code == 200
+    assert world.approve(requested).status == "approved"
+    other = world.fresh_headers()
+    error_of(world.collect(requested, headers=other), 404, "credential_unknown")
+    assert world.collect(requested).status_code == 200
+    error_of(world.collect(requested), 409, "issue_collected")
+
+
+@pytest.mark.parametrize("ending", ["logout", "revoke-all"])
+def test_collect_refused_after_login_chain_ends(world, ending):
+    requested = world.request().json()
+    assert world.approve(requested).status == "approved"
+    assert world.call("POST", "/v1/owner/auth/" + ending, body={}).status_code == 204
+    error_of(world.collect(requested), 401, "owner_auth_required")
+    assert world.aw.credential_rows() == []
+
+
+@pytest.mark.parametrize("approved", [False, True])
+def test_workspace_revoke_all_cancels_issue_and_card(world, approved):
+    requested = world.request().json()
+    if approved:
+        assert world.approve(requested).status == "approved"
+    assert world.call("POST", KEYS + "/revoke-all", body={}).status_code == 200
+    path = KEYS + "/issue-requests/" + requested["issue_request_id"]
+    assert world.call("GET", path).json()["status"] == "cancelled"
+    error_of(world.collect(requested), 409, "issue_cancelled")
+    outcome = world.approve(requested)
+    assert outcome.status == "cancelled"
+    assert outcome.text == "הבקשה להנפקת מפתח בוטלה. צריך להכין בקשה חדשה."
+    assert world.call("GET", path).json()["status"] == "cancelled"
+    assert world.aw.credential_rows() == []
+
+
+@pytest.mark.parametrize("code, status", [
+    ("issue_expired", "expired"), ("target_changed", "target_changed"),
+    ("authority_changed", "target_changed"), ("issue_rejected", "rejected"),
+    ("kill_switch", "policy_denied"), ("owner_approval_required", "unbound"),
+    ("operation_unavailable", "unbound"), ("ledger_unavailable", "not_started"),
+    ("unknown", "unknown"),
+])
+def test_issue_card_maps_permanent_refusals_to_terminal_text(world, monkeypatch, code, status):
+    requested = world.request().json()
+
+    def refuse(*args, **kwargs):
+        raise api.LedgerError(code)
+
+    monkeypatch.setattr(world.aw.service, "decide_issue", refuse)
+    outcome = world.approve(requested)
+    assert outcome.status == status
+    assert "אפשר לנסות שוב" not in outcome.text
+
+
+def test_missing_login_chain_fails_closed_before_issue(world):
+    from sqlalchemy import text
+
+    with world.owner.factory() as db:
+        db.execute(text("UPDATE owner_os_sessions SET chain_id = NULL"))
+        db.commit()
+    error_of(world.request(), 401, "owner_auth_required")
+    assert world.aw.issue_rows() == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("code, text", [
+    ("issue_expired", "האישור פג. צריך להכין בקשת אישור חדשה."),
+    ("target_changed", "היעד השתנה. צריך להכין בקשת אישור חדשה."),
+    ("authority_changed", "היעד השתנה. צריך להכין בקשת אישור חדשה."),
+    ("issue_rejected", "ההצעה כבר נדחתה ולא בוצעה."),
+    ("kill_switch", "מתג העצירה פעיל. הפעולה לא בוצעה."),
+    ("issue_cancelled", "הבקשה להנפקת מפתח בוטלה. צריך להכין בקשה חדשה."),
+    ("owner_approval_required", "הפעולה לא בוצעה."),
+    ("operation_unavailable", "הפעולה לא בוצעה."),
+])
+async def test_issue_callback_renders_permanent_refusal_text(world, monkeypatch, code, text):
+    from app.api import telegram
+    from app.db import session as db_session
+    from app.db.store import LeadStore
+
+    world.request()
+    with world.owner.factory() as db:
+        token = LeadStore(db).list_all_pending_approvals()[0].approval_id
+
+    def refuse(*args, **kwargs):
+        raise api.LedgerError(code)
+
+    monkeypatch.setattr(world.aw.service, "decide_issue", refuse)
+    monkeypatch.setattr(db_session, "get_session_factory", lambda: world.owner.factory)
+    with world.owner.factory() as db:
+        result = await telegram._handle_callback(
+            callback={"callback_query_id": "q-permanent", "from": OWNER,
+                      "data": "ok:" + token, "chat_id": OWNER,
+                      "chat_type": "private", "message_id": "71"},
+            port=world.port, owner_ids={OWNER}, db=db, settings=world.owner.settings)
+    assert result["decision"] == "approve"
+    assert world.port.sent[-1].text == text
+    assert "אפשר לנסות שוב" not in world.port.sent[-1].text
 
 
 def test_card_send_failure_keeps_committed_request_and_pending_card(world, monkeypatch, caplog):

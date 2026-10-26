@@ -12,7 +12,9 @@ import json
 import os
 import re
 import subprocess
+import sys
 import tomllib
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -414,13 +416,17 @@ def test_restore_records_pre_restore_fence_presence_before_drop(tmp_path):
         if present:
             (directory / "ledger-fence.json").write_text("{}")
         program = ('set -euo pipefail\nchown() { return 0; }\n'
+                   + f'python3() {{ "{Path(sys.executable).as_posix()}" "$@"; }}\n'
                    + function("record_restore_attempt").replace(
                        "/var/lib/mia", "./var-lib")
                    + '\nrecord_restore_attempt\n')
         result = _run_step(program, tmp_path)
         assert result.returncode == 0, result.stderr
         record = json.loads((directory / "restore-attempt.json").read_text())
-        assert record == {"v": 1, "pre_restore_fence_record_present": present}
+        assert re.fullmatch(r"[0-9a-f]{32}", record["attempt_id"])
+        assert datetime.fromisoformat(record["recorded_at"].replace("Z", "+00:00")).tzinfo
+        assert record == {"v": 1, "pre_restore_fence_record_present": present,
+                          "attempt_id": record["attempt_id"], "recorded_at": record["recorded_at"]}
 
 
 def test_authority_usage_keeps_restore_description_with_the_command():

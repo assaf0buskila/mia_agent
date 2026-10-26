@@ -1,10 +1,12 @@
 """V2-38: stateless transport and the propose-only security boundary, through the real app."""
 
+import ast
 import inspect
 import json
 
 import pytest
 import yaml
+from app.api.assistant import mcp
 from app.api.assistant import os as rest
 from app.services import assistant_keys as keys
 from app.services.os_ledger.core import PgLedger
@@ -172,7 +174,92 @@ def test_any_origin_refused_before_gateway_or_lookup(env, monkeypatch, origin):
     monkeypatch.setattr(rest, "gateway_for", forbidden)
     response = rpc(client, method="initialize", headers={"Origin": origin})
     assert response.status_code == 403 and response.json()["error"]["code"] == "origin_denied"
+    error = response.json()
+    assert error["api_version"] == "owner-os.v1" and error["request_id"]
+    assert error["error"] == {"code": "origin_denied", "retryable": False,
+                              "write_outcome": "not_started"}
     assert aw.audit() == []
+
+
+@pytest.mark.parametrize("version", ["unsupported", "2024-11-05", ""])
+def test_unsupported_protocol_header_is_standard_400_before_auth(env, monkeypatch, version):
+    aw, client = env
+    def forbidden(_settings):
+        pytest.fail("unsupported protocol reached bearer gateway")
+    monkeypatch.setattr(rest, "gateway_for", forbidden)
+    response = rpc(client, headers={"MCP-Protocol-Version": version})
+    assert response.status_code == 400
+    error = response.json()
+    assert error["api_version"] == "owner-os.v1" and error["request_id"]
+    assert error["error"] == {"code": "invalid_query", "retryable": False,
+                              "write_outcome": "not_started"}
+    assert aw.audit() == []
+
+
+@pytest.mark.parametrize("headers", [{}, {"MCP-Protocol-Version": "2025-06-18"}])
+def test_supported_or_absent_protocol_header_uses_default(env, headers):
+    aw, client = env
+    assert result(rpc(client, aw.issue()["secret"], headers=headers)) == {}
+
+
+def _statement_calls(source):
+    tree = ast.parse(source)
+    calls = [node.func.attr for node in ast.walk(tree)
+             if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+             and isinstance(node.func.value, ast.Attribute)
+             and node.func.value.attr == "statements"]
+    assert set(calls) == {"context_for_assistant", "submit", "status_for_credential"}
+    assert calls.count("submit") == 1
+    forbidden = {"approve", "reject", "decide", "commit", "save_draft", "draft"}
+    assert not [node for node in ast.walk(tree)
+                if isinstance(node, ast.Attribute) and node.attr in forbidden]
+    assert not [node for node in ast.walk(tree)
+                if isinstance(node, (ast.Import, ast.ImportFrom))
+                and "decision" in ast.unparse(node)]
+
+
+def test_mcp_ast_only_allowed_statement_methods_and_single_submit():
+    _statement_calls(inspect.getsource(mcp))
+
+
+@pytest.mark.parametrize("call_site", ["gateway.statements.submit(ctx, raw)",
+                                      "gateway.statements.approve(ctx)",
+                                      "gateway.decisions.decide(ctx)"])
+def test_mcp_ast_guard_rejects_extra_submit_and_decision_sites(call_site):
+    with pytest.raises(AssertionError):
+        _statement_calls(inspect.getsource(mcp) + "\n" + call_site)
+
+
+def test_failed_submit_keeps_safe_field_issues_without_any_submitted_values(env):
+    aw, client = env
+    submitted = {"schema": "private-schema-marker", "client_batch_id": "private-id-marker",
+                 "account_label": "private-label-marker", "charge_date": "private-date-marker",
+                 "lines": [{"merchant_display": "private-merchant-marker",
+                            "amount_minor": "private-amount-marker"}]}
+    response = call(client, aw.issue()["secret"], "submit_statement_batch", {"batch": submitted})
+    data = result(response)
+    assert data["isError"] is True
+    assert data["content"] == [{"type": "text", "text": "invalid_statement_batch"}]
+    issues = data["structuredContent"]["details"]["issues"]
+    assert issues and all(set(issue) == {"field", "code"} for issue in issues)
+    assert {"field": "client_batch_id", "code": "invalid_uuid"} in issues
+    assert {"field": "lines[0].amount_minor", "code": "invalid_amount"} in issues
+    for value in [*list(submitted.values())[:4], *submitted["lines"][0].values()]:
+        assert value not in response.text
+
+
+def test_schema_types_and_patterns_share_one_source():
+    from app.api.assistant import batch_schema as wire
+
+    props = mcp.BATCH_SCHEMA["properties"]
+    assert props["charge_date"] is wire.DATE
+    assert props["client_batch_id"] is wire.UUID
+    assert props["account_label"] is wire.ACCOUNT_LABEL
+    assert props["lines"]["items"]["properties"]["confidence"] is wire.CONFIDENCE
+    parsed = schema_from_format()["properties"]
+    for field in ("charge_date", "client_batch_id", "account_label"):
+        assert parsed[field] == props[field]
+    assert parsed["lines"]["items"]["properties"]["confidence"] == wire.CONFIDENCE
 
 
 def test_protocol_errors_notifications_and_methods(env):
@@ -255,7 +342,12 @@ def test_all_decision_services_are_unreachable(env, monkeypatch):
 def test_tool_errors_are_codes_only_and_audited_once(env, name, args, code):
     aw, client = env
     data = result(call(client, aw.issue()["secret"], name, args))
-    assert data == {"isError": True, "content": [{"type": "text", "text": code}]}
+    expected = {"isError": True, "content": [{"type": "text", "text": code}]}
+    if code == "invalid_statement_batch":
+        issues = data["structuredContent"]["details"]["issues"]
+        assert issues and all(set(issue) == {"field", "code"} for issue in issues)
+        expected["structuredContent"] = {"details": {"issues": issues}}
+    assert data == expected
     [row] = aw.audit()
     transport_error = code in {"method_not_found", "invalid_params"}
     assert row["ok"] is transport_error

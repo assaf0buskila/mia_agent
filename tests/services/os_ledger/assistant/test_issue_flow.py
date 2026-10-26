@@ -221,3 +221,78 @@ def test_binding_uses_hmac_and_request_update_grants_are_exact(aw):
         "collected_at",
         "credential_id",
     )
+
+
+@pytest.mark.parametrize("approved", [False, True])
+def test_workspace_revoke_all_cancels_uncollected_requests_atomically(aw, approved):
+    request = aw.request()
+    if approved:
+        aw.decide_issue(request)
+    aw.revoke_all()
+    assert aw.issue_status(request)["status"] == "cancelled"
+    assert refused(lambda: aw.collect(request), "issue_cancelled").status == 409
+    refused(lambda: aw.decide_issue(request), "issue_cancelled")
+    assert aw.credential_rows() == []
+
+
+def test_revoke_all_cancellation_rolls_back_with_key_revocation(aw, monkeypatch):
+    issued = aw.issue()
+    pending = aw.request()
+    original = aw.service._revoke_in
+
+    def fail(tx, tables, id):
+        original(tx, tables, id)
+        raise LedgerError("ledger_unavailable")
+
+    monkeypatch.setattr(aw.service, "_revoke_in", fail)
+    refused(aw.revoke_all, "ledger_unavailable")
+    assert aw.issue_status(pending)["status"] == "pending_approval"
+    assert aw.credential(issued["credential_id"])["revoked_at"] is None
+
+
+def test_revoke_all_preserves_terminal_requests_and_allows_a_new_request(aw):
+    collected = aw.request()
+    aw.decide_issue(collected)
+    key = aw.collect(collected)
+    rejected = aw.request()
+    aw.decide_issue(rejected, decision="reject")
+    aw.revoke_all()
+    assert aw.issue_status(collected)["status"] == "collected"
+    assert aw.issue_status(rejected)["status"] == "rejected"
+    assert aw.credential(key["credential_id"])["revoked_at"] is not None
+    fresh = aw.request()
+    aw.decide_issue(fresh)
+    assert aw.collect(fresh)["secret"].startswith("aosp_")
+
+
+def test_revoke_all_racing_collect_leaves_no_live_key_or_collectable_request(aw):
+    requested = aw.request()
+    aw.decide_issue(requested)
+    barrier = threading.Barrier(2)
+    outcomes = []
+
+    def collect():
+        barrier.wait(5)
+        try:
+            outcomes.append(aw.collect(requested)["credential_id"])
+        except LedgerError as exc:
+            outcomes.append(exc.code)
+
+    def revoke():
+        barrier.wait(5)
+        try:
+            aw.revoke_all()
+        except Exception as exc:
+            outcomes.append(exc)
+
+    threads = [threading.Thread(target=fn) for fn in (collect, revoke)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(6)
+        assert not thread.is_alive()
+    assert len(outcomes) == 1 and isinstance(outcomes[0], str)
+    assert aw.issue_status(requested)["status"] in {"cancelled", "collected"}
+    assert all(row["revoked_at"] is not None for row in aw.credential_rows())
+    refused(lambda: aw.collect(requested),
+            "issue_cancelled" if outcomes[0] == "issue_cancelled" else "issue_collected")

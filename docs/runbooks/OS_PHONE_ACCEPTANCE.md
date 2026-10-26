@@ -8,10 +8,16 @@ Use frozen `V2_PG_CONTRACTS.md` v1 §§0, 16, 18, 19 and V2-31's integrated
 
 ## Before the window and the first production write
 
-- [ ] [V2-35](OS_REHEARSAL_PLAN.md) passed end to end at the candidate release,
-  including a real `mia restore`, broken-precondition abort, pre-write rollback,
-  forward again, receipts, mirror readback and teardown evidence. A relevant
-  release change invalidates that rehearsal until rerun.
+- [ ] The [V2-35 copy rehearsal](OS_REHEARSAL_PLAN.md) is
+  NOT_INCLUDED by contract §22 E36 (2026-10-24, Assaf); kept for reference only.
+  Verify the four E36 conditions in
+  [CUTOVER_RUNBOOK.md step 6](../../ops/assaf-os/CUTOVER_RUNBOOK.md#step-6-e36-readiness-before-wave-6)
+  instead: merged WP1/E35 (#199) and WP2 (#197) SHAs are ancestors of `S`;
+  CI `os-cutover-postgres` is green at `headSha == S`; a passing PC
+  `restore-drill.json` is < 7 days old at activation; and Assaf's explicit chat
+  statement names `S` and the UTC quiet window, with section 5 rollback ready
+  before the first non-import receipt. Record the evidence and G09 statement in
+  [OS_CUTOVER_GO_NO_GO.md](OS_CUTOVER_GO_NO_GO.md).
 - [ ] Exact CI-green backend/FE/Script revisions, independent HEAVY PASS,
   Cloudflare version/bundle hash, backup/restore evidence and rollback operator
   are recorded. Phone checklist and action plan are frozen before the window.
@@ -23,10 +29,10 @@ Use frozen `V2_PG_CONTRACTS.md` v1 §§0, 16, 18, 19 and V2-31's integrated
   backup recovery point ___ and lost receipt interval/count ___. RTO includes
   readiness, role checks and usable owner access; RPO is failure time minus the
   dump's consistent recovery point, with actual lost-write evidence. The contract
-  requires a 15-minute backup cadence; it supplies no RTO acceptance number.
+  requires a 15-minute backup cadence; §22 E36 sets RTO ≤ 2 h and RPO ≤ 15 min.
 - [ ] In §19 production order: default-off integrated deploy including restore
   post-step; V2-14a demote; ledger migrations; provision + role validator; authority
-  init; passed rehearsal; then wave-6 T1-T7. Pause jobs and take a verified,
+  init; E36 readiness (step 6); then wave-6 T1-T7. Pause jobs and take a verified,
   nonempty whole-DB backup before each production step. Verify checksum/catalog,
   excluded statement detail, backup age <1 h and drill age <7 days at activation.
 - [ ] Cutover is **authority only**. Existing proposal/approve UX stays in use.
@@ -165,7 +171,8 @@ phone acceptance. A local test run or desktop browser is not phone acceptance.
 
 For **every** checkbox record Assaf's explicit statement, UTC, exact target,
 release SHA/evidence reference and operator. Blank means no authorization.
-Past approvals, the prepared checklist and a rehearsal PASS are not reusable go.
+Past approvals, the prepared checklist and a rehearsal PASS (reference only;
+NOT_INCLUDED by E36) are not reusable go.
 
 - [ ] GO: exact backend deployment (including default-off features).
 - [ ] GO: exact frontend deployment (reader compatibility; no new UX enabled).

@@ -3196,8 +3196,8 @@ therefore **NOT_INCLUDED**. No throwaway VM, workbook copy or TEST Script is cre
 1. **The blockers it found are fixed and merged:**
    - E35, the mirror deadlock (WP1);
    - the drift checker also compares `date_1904`, sheet `state` and the sheet set and order (WP2).
-2. **An automated cutover-sequence test in CI** proves T6→T7 under the freeze: mirror verified, zero drift. This is WP12, and
-   its exact scope is set at design time.
+2. **An automated cutover-sequence test in CI** proves T6→T7 with mirror verified under the freeze;
+   WP2's drift tests prove the workbook-level drift check. This is WP12, and its exact scope is set at design time.
 3. **A restore drill on Assaf's PC** (`ops/gcp/backup/restore_drill.py`) runs fewer than 7 days before activation, because the
    preflight's `restore_drill_too_old` still applies.
 4. **The live run** happens in a quiet window that Assaf names, with section 5's rollback ready before the first non-import
@@ -3257,3 +3257,25 @@ Design note: T2\v2-37b-telegram-step-up-design.md.
 | `issue_rejected` | 409 | The owner rejected it on Telegram. |
 | `issue_collected` | 409 | Already collected once. |
 | `issue_expired` | 410 | The approval deadline or the collection window passed. |
+
+
+### E37a (2026-10-25): collect binds to the login chain; revoke-all cancels uncollected issues
+
+`session_binding` is HMAC-SHA256(`os_step_up_secret`, `chain_id`). The login chain survives
+session renewal; another login chain cannot collect. Logout and owner-session revoke-all
+still invalidate collection through owner authentication.
+
+Assistant-key revoke-all marks every workspace issue request in `pending_approval` or
+`approved` as `cancelled` in the same ledger transaction. Status returns `cancelled`,
+collection refuses, and its Telegram card shows a permanent cancellation message.
+
+The bearer admission guard covers authentication and operation as one request. Audit
+admission counts use `(workspace_id, client_ip_hmac, occurred_at)` and
+`(workspace_id, operation, occurred_at)` indexes. MCP tool errors preserve only field
+paths and codes in `details.issues`, never submitted values.
+
+**Section 5.2 error-table addendum (E37a):**
+
+| Code | HTTP | Meaning |
+|---|---|---|
+| `issue_cancelled` | 409 | Revoke-all cancelled the uncollected issue request. |

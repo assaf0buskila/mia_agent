@@ -31,6 +31,7 @@ two seconds before refusing; owner requests do not acquire it.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hmac
 import ipaddress
@@ -41,7 +42,7 @@ import threading
 import unicodedata
 import uuid
 from collections.abc import Callable, Sequence
-from contextlib import AbstractContextManager, contextmanager
+from contextlib import AbstractContextManager, asynccontextmanager, contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
@@ -83,9 +84,43 @@ _FORBIDDEN_LABEL_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Co", "Cn", "Zl", "Zp
 _LOG = logging.getLogger("mia.os_assistant")
 # A bearer holds an accounting connection plus its work's ledger connection. The shared
 # ledger pool is 5 + 5: at most three bearers leaves capacity for owner reads and key lists.
-# This process-wide guard is bearer-only; acquisition fails before slot admission or work.
+# This process-wide guard is bearer-only; acquisition precedes authentication and all DB reads.
 _bearer_slots = threading.BoundedSemaphore(3)
 _BEARER_WAIT_SECONDS = 2
+
+
+@contextmanager
+def bearer_request():
+    """Reserve one pool slot for the entire bearer request; never nest this acquisition."""
+    if not _bearer_slots.acquire(timeout=_BEARER_WAIT_SECONDS):
+        _LOG.warning("os_assistant op=admit outcome=refused reason=bearer_busy")
+        raise api.LedgerError("ledger_unavailable", reason="bearer_busy")
+    try:
+        yield
+    finally:
+        _bearer_slots.release()
+
+
+@asynccontextmanager
+async def async_bearer_request():
+    """Reserve on the event loop so a cancelled waiter cannot acquire later in a worker.
+
+    Acquisition is nonblocking and the wait is bounded. There is no await between acquiring
+    the slot and installing its finally block; cancellation always releases synchronously.
+    """
+    slots = _bearer_slots
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _BEARER_WAIT_SECONDS
+    while not slots.acquire(blocking=False):
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            _LOG.warning("os_assistant op=admit outcome=refused reason=bearer_busy")
+            raise api.LedgerError("ledger_unavailable", reason="bearer_busy")
+        await asyncio.sleep(min(0.01, remaining))
+    try:
+        yield
+    finally:
+        slots.release()
 
 
 # ---------------------------------------------------------------------------------------------
@@ -354,11 +389,11 @@ class AssistantCredentialService:
     def revoke(self, ctx: api.TrustedOwnerContext, credential_id: Any) -> dict[str, Any]:
         self._admit(ctx, "manage_credentials")
         if type(credential_id) is not str or _CREDENTIAL_ID.fullmatch(credential_id) is None:
-            raise _invalid("credential_unknown")
+            raise api.LedgerError("credential_unknown")
         with self._tx(ctx) as tx:
             tables = credential_tables(tx)
             if tables.get(credential_id) is None:
-                raise _invalid("credential_unknown")
+                raise api.LedgerError("credential_unknown")
             self._revoke_in(tx, tables, credential_id)
             body = self._listing(ctx, tables)
         _LOG.info("os_assistant op=revoke outcome=ok reason=revoked")
@@ -368,12 +403,16 @@ class AssistantCredentialService:
         """Every key of the workspace, expired ones included, in one transaction."""
         self._admit(ctx, "manage_credentials")
         with self._tx(ctx) as tx:
+            self._revoke_all_in(tx)
             tables = credential_tables(tx)
             for row in tables.list():
                 self._revoke_in(tx, tables, row.credential_id)
             body = self._listing(ctx, tables)
         _LOG.info("os_assistant op=revoke_all outcome=ok reason=revoked_all")
         return body
+
+    def _revoke_all_in(self, tx: Any) -> None:
+        """Subclass workspace cancellation, in the same transaction as key revocation."""
 
 
 # ---------------------------------------------------------------------------------------------
@@ -668,15 +707,9 @@ class AssistantGateway:
             return exc.reason or "key_invalid", None
 
     def control(self, caller: Caller, method: str) -> None:
-        """Record a control in one short transaction inside the shared bearer pool guard."""
-        if not _bearer_slots.acquire(timeout=_BEARER_WAIT_SECONDS):
-            _LOG.warning("os_assistant op=admit outcome=refused reason=bearer_busy")
-            raise api.LedgerError("ledger_unavailable", reason="bearer_busy")
-        try:
-            self._store.control(caller.credential, ip_hmac=caller.ip_hmac, method=method,
-                                now=self._clock())
-        finally:
-            _bearer_slots.release()
+        """Record a control inside the caller's already reserved request slot."""
+        self._store.control(caller.credential, ip_hmac=caller.ip_hmac, method=method,
+                            now=self._clock())
 
     def run(self, caller: Caller, operation: str, work: Callable[[Facts], Any]) -> Any:
         """The per-address and per-key limits, ``work``, and the call's one audit row.
@@ -689,13 +722,7 @@ class AssistantGateway:
         gets. The cost is a rare missing audit row; a retry stays safe because a batch's request
         id is idempotent.
         """
-        if not _bearer_slots.acquire(timeout=_BEARER_WAIT_SECONDS):
-            _LOG.warning("os_assistant op=admit outcome=refused reason=bearer_busy")
-            raise api.LedgerError("ledger_unavailable", reason="bearer_busy")
-        try:
-            return self._run(caller, operation, work)
-        finally:
-            _bearer_slots.release()
+        return self._run(caller, operation, work)
 
     def _run(self, caller: Caller, operation: str, work: Callable[[Facts], Any]) -> Any:
         facts = Facts()
