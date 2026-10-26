@@ -399,6 +399,8 @@ class AssistantStore(Protocol):
     means nothing ran; an error from ``record`` or the commit means the work already did.
     """
 
+    def control(self, credential: StoredCredential, *, ip_hmac: str, method: str,
+                now: datetime) -> None: ...
     def ip_calls(self, ip_hmac: str, since: datetime) -> int: ...
     def find(self, secret_hash: str) -> StoredCredential | None: ...
     def invalid_lookup(self, *, ip_hmac: str, credential_id: str | None, reason: str,
@@ -521,6 +523,22 @@ class PgAssistantStore:
                          reason=reason, ok=False, facts=Facts(), ip_hmac=ip_hmac)
         return None
 
+    def control(self, credential: StoredCredential, *, ip_hmac: str, method: str,
+                now: datetime) -> None:
+        """S1/S1b under R2a: lock IP, recount, then insert one row without key usage."""
+        if method not in {"initialize", "ping", "tools_list", "notification", "invalid_request",
+                          "method_not_found", "invalid_params", "body_too_large",
+                          "unsupported_media"}:
+            raise ValueError("invalid_control_method")
+        with self._begin() as conn:
+            self._lock(conn, f"ip:{ip_hmac}")
+            if self._count(conn, "client_ip_hmac = :ip AND occurred_at >= :since", ip=ip_hmac,
+                           since=now - timedelta(seconds=IP_WINDOW_SECONDS)) >= IP_LIMIT:
+                raise _limited("ip_limit")
+            self._insert(conn, credential_id=credential.credential_id, moment=now,
+                         operation="mcp_control", reason=method, ok=True, facts=Facts(),
+                         ip_hmac=ip_hmac)
+
     @contextmanager
     def slot(self, credential: StoredCredential, *, ip_hmac: str, operation: str,
              now: Callable[[], datetime]):
@@ -541,7 +559,7 @@ class PgAssistantStore:
                            since=moment - timedelta(seconds=IP_WINDOW_SECONDS)) >= IP_LIMIT:
                 raise _limited("ip_limit")
             counted = ("credential_id = :cid AND reason NOT IN ('key_hour_limit', "
-                       "'key_day_limit') AND ")
+                       "'key_day_limit') AND operation <> 'mcp_control' AND ")
             hour = self._count(conn, counted + "occurred_at >= :since",
                                cid=credential.credential_id,
                                since=moment - timedelta(seconds=KEY_WINDOW_SECONDS))
@@ -648,6 +666,17 @@ class AssistantGateway:
             if exc.code != "assistant_auth_required":
                 raise
             return exc.reason or "key_invalid", None
+
+    def control(self, caller: Caller, method: str) -> None:
+        """Record a control in one short transaction inside the shared bearer pool guard."""
+        if not _bearer_slots.acquire(timeout=_BEARER_WAIT_SECONDS):
+            _LOG.warning("os_assistant op=admit outcome=refused reason=bearer_busy")
+            raise api.LedgerError("ledger_unavailable", reason="bearer_busy")
+        try:
+            self._store.control(caller.credential, ip_hmac=caller.ip_hmac, method=method,
+                                now=self._clock())
+        finally:
+            _bearer_slots.release()
 
     def run(self, caller: Caller, operation: str, work: Callable[[Facts], Any]) -> Any:
         """The per-address and per-key limits, ``work``, and the call's one audit row.

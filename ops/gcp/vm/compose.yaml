@@ -73,6 +73,10 @@ services:
     network_mode: host
     entrypoint: ["os-authority"]
     env_file: [/etc/mia/settings.env, /etc/mia/os-ledger-migrate.env, /etc/mia/runtime.env]
+    environment:
+      # The host mia wrapper checks the V2-10b marker while holding mia-state.lock.
+      # A direct Compose invocation has no assertion and restore-finish fails closed.
+      MIA_OS_RESTORE_COMPLETE: ${MIA_OS_RESTORE_COMPLETE:-false}
     volumes:
       # The evidence directory (drain, preflight and activation written by the job; backup, drill,
       # frontend, journal and manifest placed by the operator). Owned by the job's user.
