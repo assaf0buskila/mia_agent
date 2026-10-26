@@ -38,15 +38,15 @@ if pg_enabled():
     def mirror_row(connection, **values):
         row = {
             "ws": WORKSPACE, "binding": "mirror-book", "status": "synced", "projected": 3,
-            "verified": 3, "error": None,
+            "verified": 3, "error": None, "attempt": None,
         } | values
         connection.execute(text(
             "INSERT INTO assaf_os.os_mirror_state (workspace_id, destination_binding, status, "
-            "projected_version, verified_version, last_error_code) "
-            "VALUES (:ws, :binding, :status, :projected, :verified, :error) "
+            "projected_version, verified_version, last_error_code, last_attempt_at) "
+            "VALUES (:ws, :binding, :status, :projected, :verified, :error, :attempt) "
             "ON CONFLICT (workspace_id) DO UPDATE SET status = :status, "
             "projected_version = :projected, verified_version = :verified, "
-            "last_error_code = :error"
+            "last_error_code = :error, last_attempt_at = :attempt"
         ), row)
 
     def test_the_mirror_probe_reads_the_real_state_table():
@@ -57,23 +57,37 @@ if pg_enabled():
         try:
             assert probes.mirror(WORKSPACE, 3) == "empty"
             cases = [
-                ({"status": "synced", "projected": 3, "verified": 3, "error": None}, "verified"),
-                ({"status": "synced", "projected": 3, "verified": 2, "error": None}, "unverified"),
-                ({"status": "synced", "projected": 3, "verified": 3, "error": "x"}, "unverified"),
-                ({"status": "delayed", "projected": 3, "verified": 3, "error": None}, "unverified"),
-                ({"status": "unknown", "projected": 3, "verified": 3, "error": None}, "unverified"),
+                ({"status": "synced", "projected": 3, "verified": 3, "error": None},
+                 "verified", "verified"),
+                ({"status": "synced", "projected": 3, "verified": 2, "error": None},
+                 "unverified", "unverified"),
+                ({"status": "synced", "projected": 3, "verified": 3, "error": "x"},
+                 "unverified", "unverified"),
+                ({"status": "delayed", "projected": 3, "verified": 3, "error": None},
+                 "unverified", "unverified"),
+                ({"status": "unknown", "projected": 3, "verified": 3, "error": None},
+                 "unverified", "unverified"),
                 ({"status": "conflict", "projected": 3, "verified": 3, "error": None},
-                 "unverified"),
+                 "unverified", "unverified"),
                 ({"status": "pending", "projected": 0, "verified": 0, "error": None},
-                 "unverified"),
-                ({"status": "synced", "projected": 0, "verified": 0, "error": None}, "verified"),
+                 "unverified", "empty"),
+                ({"status": "pending", "projected": 0, "verified": 0, "attempt": NOW},
+                 "unverified", "unverified"),
+                ({"status": "synced", "projected": 0, "verified": 0, "error": None},
+                 "verified", "verified"),
+                ({"status": "fenced", "error": "authority_fenced"}, "unverified", "verified"),
+                ({"status": "fenced", "error": "authority_fenced_unclean"},
+                 "unverified", "unverified"),
+                ({"status": "fenced", "verified": 2, "error": "authority_fenced"},
+                 "unverified", "unverified"),
+                ({"status": "fenced", "error": "readback_failed"}, "unverified", "unverified"),
             ]
-            for values, expected in cases:
+            for values, expected, cleanliness in cases:
                 with engine.begin() as connection:
                     mirror_row(connection, **values)
-                version = values["projected"]
+                version = values.get("projected", 3)
                 assert probes.mirror(WORKSPACE, version) == expected, values
-                assert probes.mirror(WORKSPACE, None) == expected, values
+                assert probes.mirror(WORKSPACE, None) == cleanliness, values
                 assert probes.mirror(WORKSPACE, version + 1) == "unverified", values
             assert probes.mirror("another-workspace", 3) == "empty"
         finally:
