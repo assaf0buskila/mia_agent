@@ -1,4 +1,4 @@
-"""Owner step-up re-authentication: an empty stub from V2-16s. V2-37 fills it (§17.1)."""
+"""Retired by E37. Empty router retained for the main.py mount."""
 
 from fastapi import APIRouter
 

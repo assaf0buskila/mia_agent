@@ -678,6 +678,59 @@ CONSTRAINT_PINS: tuple[ConstraintPin, ...] = (
                   "CHECK (((credential_id)::text ~ '^AC_[0-9a-f]{32}$'::text))"),
     ConstraintPin("os_assistant_audit", "os_assistant_audit_line_count_check",
                   "CHECK ((line_count >= 0))"),
+    ConstraintPin(
+        "os_assistant_issue_requests", 'os_issue_requests_approval_check',
+        "CHECK ((approval_deadline = (created_at + '00:10:00'::interval)))"
+    ),
+    ConstraintPin(
+        "os_assistant_issue_requests", 'os_issue_requests_approved_check',
+        "CHECK (((status <> ALL (ARRAY['approved'::text, 'collected'::text]))"
+        ' OR (approved_at IS NOT NULL)))'
+    ),
+    ConstraintPin(
+        "os_assistant_issue_requests", 'os_issue_requests_binding_check',
+        "CHECK ((session_binding ~ '^[0-9a-f]{64}$'::text))"
+    ),
+    ConstraintPin(
+        "os_assistant_issue_requests", 'os_issue_requests_collected_check',
+        "CHECK (((status = 'collected'::text) = ((collected_at IS NOT NULL) A"
+        'ND (credential_id IS NOT NULL))))'
+    ),
+    ConstraintPin(
+        "os_assistant_issue_requests", 'os_issue_requests_days_check',
+        'CHECK (((expires_in_days >= 1) AND (expires_in_days <= 90)))'
+    ),
+    ConstraintPin(
+        "os_assistant_issue_requests", 'os_issue_requests_epoch_check',
+        'CHECK ((epoch > 0))'
+    ),
+    ConstraintPin(
+        "os_assistant_issue_requests", 'os_issue_requests_id_check',
+        "CHECK ((issue_request_id ~ '^IR_[0-9a-f]{32}$'::text))"
+    ),
+    ConstraintPin(
+        "os_assistant_issue_requests", 'os_issue_requests_key_fkey',
+        'FOREIGN KEY (workspace_id, credential_id) REFERENCES assaf_os.os_ass'
+        'istant_credentials(workspace_id, credential_id)'
+    ),
+    ConstraintPin(
+        "os_assistant_issue_requests", 'os_issue_requests_kind_check',
+        "CHECK ((kind = ANY (ARRAY['claude'::text, 'gpt'::text])))"
+    ),
+    ConstraintPin(
+        "os_assistant_issue_requests", 'os_issue_requests_pkey',
+        'PRIMARY KEY (workspace_id, issue_request_id)'
+    ),
+    ConstraintPin(
+        "os_assistant_issue_requests", 'os_issue_requests_status_check',
+        "CHECK ((status = ANY (ARRAY['pending_approval'::text, 'approved'::te"
+        "xt, 'rejected'::text, 'expired'::text, 'collected'::text])))"
+    ),
+    ConstraintPin(
+        "os_assistant_issue_requests", 'os_issue_requests_workspace_fkey',
+        'FOREIGN KEY (workspace_id) REFERENCES assaf_os.os_workspaces(workspa'
+        'ce_id)'
+    ),
     # schema_migrations
     ConstraintPin("schema_migrations", "schema_migrations_pkey", "PRIMARY KEY (filename)"),
 )
@@ -791,6 +844,7 @@ ADDENDUM_COLUMN_UPDATES: Mapping[str, tuple[str, ...]] = MappingProxyType({
     "os_statement_review_drafts": ("draft_revision", "overrides", "choices", "updated_at"),
     "os_statement_batch_lines": ("detail", "purged_at"),
     "os_assistant_credentials": ("revoked_at", "last_used_at", "use_count"),
+    "os_assistant_issue_requests": ("status", "approved_at", "collected_at", "credential_id"),
 })
 # Retention (LOGIN NOINHERIT): schema USAGE plus exactly these. The os-retention job uses
 # DELETE only for purged batch lines, batch lines whose proposal expired more than a day

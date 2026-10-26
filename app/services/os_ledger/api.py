@@ -102,6 +102,12 @@ ERROR_CODES: Mapping[str, ErrorSpec] = MappingProxyType({
     "proposal_not_found": _spec(404),
     "commit_not_found": _spec(404),
     "batch_not_found": _spec(404),
+    # E37 flow; these five codes also need explicit rows in the section 5.2 erratum.
+    "credential_unknown": _spec(404),
+    "issue_not_approved": _spec(409),
+    "issue_rejected": _spec(409),
+    "issue_collected": _spec(409),
+    "issue_expired": _spec(410),
     "idempotency_mismatch": _spec(409),
     "decision_request_mismatch": _spec(409),
     "already_decided": _spec(409),

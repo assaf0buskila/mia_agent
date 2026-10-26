@@ -32,16 +32,18 @@ from pathlib import Path
 
 import pytest
 from app.api import assaf_os as api
+from app.api.assistant import os as assistant_os
 from app.api.owner_os_boundary import OwnerOSBoundary, owner_http_error, owner_validation_error
 from app.capabilities.types import Principal
 from app.core import config as config_module
-from app.core.config import Settings
+from app.core.config import Settings, get_settings
 from app.db.base import Base
 from app.db.models import ApprovalRow
 from app.db.session import make_engine
 from app.db.store import LeadStore
 from app.domain.approvals import DECISION_APPROVED, DECISION_REJECTED
 from app.integrations.sheets import validate_owner_sheet_request
+from app.main import app as main_app
 from app.services import assaf_os as port
 from app.services.assaf_os_leads import prepare_selected_crm_lead
 from app.services.os_ledger import api as ledger_api
@@ -64,6 +66,7 @@ from tests.fakes.os_ledger_env import OWNER_ID as LEDGER_OWNER
 from tests.fakes.os_ledger_env import WORKSPACE as LEDGER_WORKSPACE
 from tests.services import os_v2_28_support as v228
 from tests.services import test_os_backend_pg as backend_pg
+from tests.services.os_ledger.assistant.support import AWorld
 from tests.services.os_ledger.statements.support import batch, encode, three_lines
 from tests.services.os_ledger.test_authorize_constructors import principal as session_principal
 from tests.services.os_ledger.test_authorize_constructors import proven
@@ -239,6 +242,12 @@ LEDGER_INTENT_SITES: dict[tuple[str, str, str], str] = {
     ("app/api/os_v2/commits.py", "run", "undo"): "POST /commits/{id}/undo (compensating undo)",
     ("app/api/os_v2/statements.py", "run", "submit"): (
         "POST /statement-batches (the owner's paste, ASSISTANT_PASTE)"),
+    # V2-37 (app/api/assistant/os.py): the bearer submit of an assistant key, ASSISTANT_CLAUDE or
+    # ASSISTANT_GPT. V2-26's ``submit`` refuses ``os_frozen`` first; driven below.
+    ("app/api/assistant/os.py", "run", "submit"): (
+        "POST /v1/assistant/os/statement-batches (an assistant key, propose-only)"),
+    ("app/api/assistant/mcp.py", "run", "submit"): (
+        "POST /v1/assistant/mcp tools/call submit_statement_batch (propose-only)"),
 }
 LEDGER_ALLOWED_SITES: dict[tuple[str, str, str], str] = {
     # abandon settles a lost request id: an abandoned receipt and one event, no business change and
@@ -246,6 +255,23 @@ LEDGER_ALLOWED_SITES: dict[tuple[str, str, str], str] = {
     ("app/api/os_v2/commits.py", "run", "abandon"): "POST /commits/{id}/abandon (V2-24)",
 }
 LEDGER_INTENT_VERBS = frozenset({"undo", "submit", "abandon"})
+
+# E37 key-management metadata, with no business mutation or Script transport. The request
+# cannot mint; Telegram only changes approval status; collect alone creates the key. These
+# sites are separate from statement submits, whose freeze behavior is driven below.
+ASSISTANT_KEY_SITES = {
+    ("app/api/os_v2/owner_keys.py", "run", "issue"): "OS session requests Telegram approval",
+    ("app/services/owner_actions.py", "execute_assistant_issue_decision", "decide_issue"): (
+        "committed numeric-owner Telegram decision, ledger CAS only"),
+    ("app/api/os_v2/owner_keys.py", "run", "collect"): "same-session one-time collection",
+}
+
+
+def test_every_assistant_issue_site_is_classified_separately_from_business_intents():
+    found = {(relative, function, method) for relative, source in app_sources()
+             for function, method, _ in method_sites(
+                 source, frozenset({"issue", "collect", "decide_issue"}))}
+    assert found == set(ASSISTANT_KEY_SITES)
 
 
 def ledger_intent_sites() -> set[tuple[str, str, str]]:
@@ -925,8 +951,79 @@ def drive_statement_submit(env: Env, freeze: bool) -> LedgerOutcome:
         return statement_outcome(state, response, before)
 
 
+def drive_assistant_submit(env: Env, freeze: bool) -> LedgerOutcome:
+    """One real bearer ``POST /v1/assistant/os/statement-batches`` through ``app.main`` over a
+    FakeLedger world with a key issued by the real service; no Script behind it."""
+    env.monkeypatch.setattr(port, "_post", no_script)
+    aw = AWorld("fake")
+    issued = aw.issue()
+    env.monkeypatch.setattr(assistant_os, "gateway_for", lambda _settings: aw.gateway)
+    main_app.dependency_overrides[get_settings] = lambda: aw.config
+    try:
+        aw.config.assaf_os_freeze = freeze
+
+        def rows() -> tuple:
+            tables = {k: v for k, v in aw.statement_tables().items() if k != "credentials"}
+            return (aw.w.rows("os_proposals"), aw.w.rows("os_receipts"), aw.w.rows("os_events"),
+                    aw.w.rows("os_outbox"), aw.w.rows("os_expenses"), tables)
+
+        before = rows()
+        client = TestClient(main_app, base_url="https://api.assafweb.test",
+                            client=("203.0.113.9", 50000))
+        response = client.post(
+            "/v1/assistant/os/statement-batches", content=encode(batch(three_lines())),
+            headers={"Authorization": f"Bearer {issued['secret']}",
+                     "Content-Type": "application/json"})
+        wrote = rows() != before
+    finally:
+        main_app.dependency_overrides.pop(get_settings, None)
+    if response.status_code == 200:
+        return LedgerOutcome(None, wrote)
+    error = response.json()["error"]
+    assert error["write_outcome"] == "not_started", error
+    if error["code"] == "os_frozen":
+        assert response.status_code == 503, response.text
+    return LedgerOutcome(error["code"], wrote)
+
+
+def drive_mcp_submit(env: Env, freeze: bool) -> LedgerOutcome:
+    """The real MCP tool call through app.main, the bearer gateway and V2-26's submit."""
+    env.monkeypatch.setattr(port, "_post", no_script)
+    aw = AWorld("fake")
+    issued = aw.issue()
+    env.monkeypatch.setattr(assistant_os, "gateway_for", lambda _settings: aw.gateway)
+    main_app.dependency_overrides[get_settings] = lambda: aw.config
+    try:
+        aw.config.assaf_os_freeze = freeze
+
+        def rows() -> tuple:
+            tables = {k: v for k, v in aw.statement_tables().items() if k != "credentials"}
+            return (aw.w.rows("os_proposals"), aw.w.rows("os_receipts"), aw.w.rows("os_events"),
+                    aw.w.rows("os_outbox"), aw.w.rows("os_expenses"), tables)
+
+        before = rows()
+        client = TestClient(main_app, base_url="https://api.assafweb.test",
+                            client=("203.0.113.9", 50000))
+        response = client.post(
+            "/v1/assistant/mcp", headers={"Authorization": f"Bearer {issued['secret']}"},
+            json={"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+                "name": "submit_statement_batch", "arguments": {"batch": batch(three_lines())}}})
+        wrote = rows() != before
+    finally:
+        main_app.dependency_overrides.pop(get_settings, None)
+    assert response.status_code == 200, response.text
+    result = response.json()["result"]
+    if result.get("isError"):
+        assert result["content"] == [{"type": "text", "text": "os_frozen"}], result
+        return LedgerOutcome("os_frozen", wrote)
+    assert result["structuredContent"]["status"] == "pending", result
+    return LedgerOutcome(None, wrote)
+
+
 LEDGER_INTENT_DRIVERS: dict[tuple[str, str, str], Callable[[Env, bool], LedgerOutcome]] = {
     ("app/api/os_v2/statements.py", "run", "submit"): drive_statement_submit,
+    ("app/api/assistant/os.py", "run", "submit"): drive_assistant_submit,
+    ("app/api/assistant/mcp.py", "run", "submit"): drive_mcp_submit,
 }
 
 
