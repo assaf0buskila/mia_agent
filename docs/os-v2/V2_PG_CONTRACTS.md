@@ -3258,6 +3258,24 @@ Design note: T2\v2-37b-telegram-step-up-design.md.
 | `issue_collected` | 409 | Already collected once. |
 | `issue_expired` | 410 | The approval deadline or the collection window passed. |
 
+### E38 (2026-10-24): the PostgreSQL outbox runs on database time only (§14 outbox SQL; #201)
+
+**The change.** §14's outbox SQL used the caller's `:now` everywhere. A Codex sweep found app-clock values mixed with DB
+`now()` in two places (line numbers as of the finding): claim eligibility against DB-derived `next_attempt_at`
+(`outbox.py:148`), and `GREATEST(now(), updated_at)` over app-stamped `updated_at` (`outbox.py:188`). Merged in #201
+(1dc3f0a), opus PASS_WITH_NITS.
+
+**Now:**
+- Every `PgOutbox` stamp and comparison uses PostgreSQL `now()`: claim eligibility (`next_attempt_at <= now()`,
+  inclusive), lease takeover (`leased_at < now() - lease_ttl`), the retry deadline, `updated_at`, `last_attempt` and
+  `last_verified`.
+- `PgOutbox.finish` derives `next_attempt_at` as `now()` plus the same backoff as the in-memory `_finish`, and **ignores
+  the caller's `retry_at`**, so there is no double backoff. Since #209 both take that delay from the shared
+  `retry_delay(status, attempts)` helper.
+- The `:now` parameters in §14's SQL listing read as `now()`.
+
+**Why.** Production shares one VM clock, so the risk was low, but a single time source removes skew between workers and
+the DB. The test-side lesson (a frozen-clock time bomb, #198) is the same: compare like with like.
 
 ### E37a (2026-10-25): collect binds to the login chain; revoke-all cancels uncollected issues
 
