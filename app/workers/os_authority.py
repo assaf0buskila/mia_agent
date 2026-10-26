@@ -20,6 +20,13 @@ window), and each sets ``drain.json`` aside: a drain belongs to one freeze. The 
 there (formats: ops/assaf-os/CUTOVER_RUNBOOK.md). The activation preconditions are the fixed table
 in ``PRECONDITIONS``; ``activate`` re-evaluates every one of them and moves ``core`` from
 ``shadow`` to ``active`` only when all pass. ``activate`` never bumps the epoch (section 5.4).
+
+WP4 adds ``restore-begin`` and ``restore-finish``, each with ``--expected-epoch E`` and its own
+G21. ``fence`` records the original incident outside the database in ``ledger-fence.json``;
+begin pins it in ``restore-session.json``. Finish checks operator ``restore.json`` evidence,
+the host wrapper's restore-complete assertion and the same role posture checks as preflight,
+then uses AuthorityAdmin's atomic restoring->active transition and epoch bump. RPO >15 minutes
+refuses; RTO >2 hours warns. Neither command starts a restore, changes settings or sends data.
 """
 
 from __future__ import annotations
@@ -49,7 +56,7 @@ from app.services.os_ledger import api
 _LOG = logging.getLogger("mia.os_authority")
 
 COMMANDS = ("init", "preflight", "freeze-plan", "activate", "fence", "rollback", "status",
-            "mirror-reset")
+            "mirror-reset", "restore-begin", "restore-finish")
 
 # Section 16: every activation precondition, in table order. Each is a refusal reason code.
 PRECONDITIONS = (
@@ -102,6 +109,12 @@ PEPPER_LABEL = b"assaf-os-statement-pepper-fingerprint.v1"
 DRAIN = "drain.json"
 PREFLIGHT = "preflight.json"
 ACTIVATION = "activation.json"
+LEDGER_FENCE = "ledger-fence.json"
+RESTORE_ATTEMPT = "restore-attempt.json"
+RESTORE_SESSION = "restore-session.json"
+RESTORE = "restore.json"
+RESTORE_RPO = timedelta(minutes=15)
+RESTORE_RTO = timedelta(hours=2)
 BACKUP = "backup.json"
 DRILL = "restore-drill.json"
 FRONTEND = "fe-v2.json"
@@ -588,6 +601,9 @@ class Deps:
     owner_id: str
     workspace: str
     build_sha: str
+    # Live wiring accepts only the host wrapper's assertion, made under mia-state.lock.
+    # Tests inject a path probe. Missing/unknown evidence always means incomplete.
+    restore_complete: Callable[[], bool] = lambda: False
 
 
 @dataclass
@@ -971,10 +987,12 @@ _CHECKS: dict[str, Callable[[Context, api.AuthoritySnapshot], Check]] = {
 assert tuple(_CHECKS) == PRECONDITIONS
 
 
-def run_checks(ctx: Context, snapshot: api.AuthoritySnapshot) -> list[Check]:
+def run_checks(
+    ctx: Context, snapshot: api.AuthoritySnapshot, codes: Sequence[str] = PRECONDITIONS,
+) -> list[Check]:
     """Every precondition, in table order. A probe or evidence failure is that check failing."""
     results: list[Check] = []
-    for code in PRECONDITIONS:
+    for code in codes:
         try:
             results.append(_CHECKS[code](ctx, snapshot))
         except EvidenceError:
@@ -1257,16 +1275,54 @@ def cmd_activate(ctx: Context) -> Result:
     return Result(True, document)
 
 
-def cmd_fence(ctx: Context) -> Result:
-    """Fence the ledger: ``core`` (and ``statements`` while active) to ``fenced``. Idempotent."""
+def _fence_ledger(
+    ctx: Context, snapshot: api.AuthoritySnapshot, domains: Sequence[str],
+) -> tuple[api.AuthoritySnapshot, dict[str, Any]]:
+    """One incident recorder for fence and rollback. Bookkeeping never vetoes containment."""
     deps = ctx.deps
-    snapshot = _state(ctx)
     changed: list[str] = []
+    warnings: list[str] = []
+    record = None
+    if any(snapshot.states[domain] == "restoring" for domain in domains):
+        raise Refusal("authority_state_invalid")
+    # Best effort BEFORE authority changes, then complete AFTER. If either write fails, the
+    # fence still commits; restore-begin requires complete evidence and otherwise stops.
     try:
-        for domain in ("core", "statements"):
+        record = deps.evidence.read(LEDGER_FENCE)
+        if record is not None and not (
+            type(record.get("v")) is int and record["v"] == 1
+            and record.get("workspace") == deps.workspace
+            and _strict_int(record.get("epoch")) is not None and record["epoch"] >= 1
+        ):
+            raise EvidenceError(LEDGER_FENCE)
+        if record is None or record["epoch"] < snapshot.epoch:
+            if snapshot.states["core"] == "fenced":
+                # Never invent an incident start for an already fenced ledger.
+                raise EvidenceError(LEDGER_FENCE)
+            attempt = deps.evidence.read(RESTORE_ATTEMPT)
+            if attempt is not None and not (
+                type(attempt.get("v")) is int and attempt["v"] == 1
+                and type(attempt.get("pre_restore_fence_record_present")) is bool
+            ):
+                raise EvidenceError(RESTORE_ATTEMPT)
+            minted_after_restore = attempt is not None
+            record = {
+                "v": 1, "workspace": deps.workspace, "epoch": snapshot.epoch,
+                "fence_started_at": _iso(deps.now()), "fenced_at": None,
+                # Any observed restore without surviving fence evidence is conservative:
+                # the attempt also records whether the file existed BEFORE database replacement.
+                "fence_record_minted_after_restore": minted_after_restore,
+            }
+            deps.evidence.write(LEDGER_FENCE, record)
+    except EvidenceError:
+        record = None
+        warnings.append("restore_evidence_invalid")
+    except Refusal:
+        record = None
+        warnings.append("evidence_unwritable")
+    try:
+        for domain in domains:
             state = snapshot.states[domain]
-            if state == "restoring":
-                raise Refusal("authority_state_invalid")
             wanted = state in ("shadow", "active") and (domain == "core" or state == "active")
             if wanted:
                 snapshot = deps.admin.transition(
@@ -1276,7 +1332,26 @@ def cmd_fence(ctx: Context) -> Result:
                 changed.append(domain)
     except api.LedgerError as error:
         raise _ledger_refusal(error) from None
-    return Result(True, {"command": "fence", "ok": True, "fenced": changed,
+    # This directory is outside the dump. The start never changes, even after a crash between
+    # committing the fence and this final write. Retrying an unfinished record uses the LATER
+    # completion time for RPO (conservative), and the original start for RTO.
+    if (snapshot.states["core"] == "fenced" and record is not None
+            and record["epoch"] == snapshot.epoch and record.get("fenced_at") is None):
+        try:
+            deps.evidence.write(LEDGER_FENCE, {**record, "fenced_at": _iso(deps.now())})
+        except Refusal:
+            warnings.append("evidence_unwritable")
+    return snapshot, {
+        "fenced": changed, "evidence_written": not warnings, "warnings": warnings,
+        "fence_record_minted_after_restore": bool(
+            record and record.get("fence_record_minted_after_restore") is True),
+    }
+
+
+def cmd_fence(ctx: Context) -> Result:
+    """Fence core and active statements, even if incident bookkeeping is unavailable."""
+    snapshot, evidence = _fence_ledger(ctx, _state(ctx), ("core", "statements"))
+    return Result(True, {"command": "fence", "ok": True, **evidence,
                          **_snapshot_document(snapshot)})
 
 
@@ -1309,6 +1384,183 @@ def cmd_mirror_reset(ctx: Context, *, expected_epoch: int | None) -> Result:
     )
     return Result(True, {"command": "mirror-reset", "ok": True,
                          "outcome": "reset" if changed else "already_empty", "audit": audit_name})
+
+
+def _restore_record(ctx: Context, name: str, epoch: int) -> dict[str, Any]:
+    try:
+        record = ctx.deps.evidence.read(name)
+    except EvidenceError:
+        record = None
+    if not (
+        record and type(record.get("v")) is int and record["v"] == 1
+        and record.get("workspace") == ctx.deps.workspace
+        and _strict_int(record.get("epoch")) is not None
+        and (name != RESTORE or record.get("release_sha") == ctx.approved_sha)
+        and type(record.get("fence_record_minted_after_restore", False)) is bool
+    ):
+        raise Refusal("restore_evidence_invalid")
+    if record["epoch"] != epoch:
+        raise Refusal("restore_epoch_mismatch")
+    return record
+
+
+def _restore_state(ctx: Context, expected_epoch: int | None) -> api.AuthoritySnapshot:
+    if expected_epoch is None:
+        raise Refusal("restore_epoch_required")
+    if expected_epoch < 1:
+        raise Refusal("restore_epoch_invalid")
+    snapshot = _state(ctx)
+    if not (snapshot.epoch == expected_epoch or (
+        snapshot.epoch == expected_epoch + 1 and snapshot.states["core"] == "active"
+    )):
+        raise Refusal("restore_epoch_mismatch")
+    return snapshot
+
+
+def _already_restored(ctx: Context, snapshot: api.AuthoritySnapshot, epoch: int) -> bool:
+    if snapshot.states["core"] != "active" or snapshot.epoch != epoch + 1:
+        return False
+    _restore_record(ctx, RESTORE_SESSION, epoch)
+    return True
+
+
+def _restore_result(command: str, snapshot: api.AuthoritySnapshot, outcome: str) -> Result:
+    return Result(True, {"command": command, "ok": True, "outcome": outcome,
+                         "fence_record_minted_after_restore": False,
+                         **_snapshot_document(snapshot)})
+
+
+def _late_fence_refusal(command: str, snapshot: api.AuthoritySnapshot) -> Result:
+    return Result(False, {
+        "command": command, "ok": False, "fence_record_minted_after_restore": True,
+        "rpo_evidence_recorded": False, "rpo_within_limit": None, "rto_within_limit": None,
+        **_snapshot_document(snapshot),
+    }, ["restore_evidence_invalid"])
+
+
+def _complete_restore_evidence(
+    ctx: Context, snapshot: api.AuthoritySnapshot, session: Mapping[str, Any],
+    document: dict[str, Any],
+) -> None:
+    """Repair the post-commit crash window without a second transition or epoch bump."""
+    started_at = _time(session.get("fence_started_at"))
+    if started_at is None:
+        raise Refusal("restore_evidence_invalid")
+    activated_at = ctx.deps.now()
+    evidence_warnings: list[str] = []
+    try:
+        activation = ctx.deps.evidence.read(ACTIVATION)
+        epoch = _strict_int(activation.get("epoch")) if activation else None
+        if epoch == snapshot.epoch and _time(activation.get("activated_at")) is not None:
+            activated_at = _time(activation["activated_at"])
+        if activation is None or (epoch is not None and epoch < snapshot.epoch):
+            ctx.deps.evidence.write(ACTIVATION, {
+                "v": 1, "kind": "activation", "activated_at": _iso(activated_at),
+                "epoch": snapshot.epoch, "release_sha": ctx.approved_sha,
+            })
+        # A successful recovery consumes the restore signal. Preserve its audit record and
+        # retry this bookkeeping at E+1 if archiving fails after authority has committed.
+        ctx.deps.evidence.set_aside(RESTORE_ATTEMPT, ctx.deps.now())
+    except EvidenceError:
+        document["evidence_written"] = False
+        evidence_warnings.append("restore_evidence_invalid")
+    except Refusal:
+        document["evidence_written"] = False
+        evidence_warnings.append("evidence_unwritable")
+    document["rto_within_limit"] = activated_at - started_at <= RESTORE_RTO
+    document["warnings"] = (
+        ([] if document["rto_within_limit"] else ["restore_rto_exceeded"]) + evidence_warnings)
+
+
+def cmd_restore_begin(ctx: Context, *, expected_epoch: int | None) -> Result:
+    """An explicit G21: fenced -> restoring; statements must already be non-active.
+
+    The session is persisted before the transition so a crash can never lose the incident time.
+    No dump, migration, settings, mirror or external system is changed by either restore command.
+    """
+    snapshot = _restore_state(ctx, expected_epoch)
+    assert expected_epoch is not None
+    if _already_restored(ctx, snapshot, expected_epoch):
+        return _restore_result("restore-begin", snapshot, "already_restored")
+    if (snapshot.states["core"] not in {"fenced", "restoring"}
+            or snapshot.states["statements"] not in {"shadow", "fenced"}):
+        raise Refusal("authority_state_invalid")
+    if snapshot.states["core"] == "restoring":
+        session = _restore_record(ctx, RESTORE_SESSION, expected_epoch)
+        if session.get("fence_record_minted_after_restore") is True:
+            return _late_fence_refusal("restore-begin", snapshot)
+        return _restore_result("restore-begin", snapshot, "already_restoring")
+    record = _restore_record(ctx, LEDGER_FENCE, expected_epoch)
+    if record.get("fence_record_minted_after_restore") is True:
+        return _late_fence_refusal("restore-begin", snapshot)
+    fenced_at = _time(record.get("fenced_at"))
+    started_at = _time(record.get("fence_started_at"))
+    if (started_at is None or fenced_at is None
+            or not started_at <= fenced_at <= ctx.now):
+        raise Refusal("restore_evidence_invalid")
+    ctx.deps.evidence.write(RESTORE_SESSION, {
+        key: value for key, value in record.items() if key != "release_sha"})
+    after = ctx.deps.admin.transition(
+        ctx.deps.workspace, "core", "restoring", expected_epoch=expected_epoch,
+        actor_owner_id=ctx.deps.owner_id,
+    )
+    return _restore_result("restore-begin", after, "restoring")
+
+
+def cmd_restore_finish(ctx: Context, *, expected_epoch: int | None) -> Result:
+    """An independent G21: validate the restored ledger, then atomically activate AND bump.
+
+    AuthorityAdmin.transition already implements the bump in the same locked transaction.
+    Calling bump_epoch separately would leave a crash window and could bump twice.
+    """
+    snapshot = _restore_state(ctx, expected_epoch)
+    assert expected_epoch is not None
+    if _already_restored(ctx, snapshot, expected_epoch):
+        session = _restore_record(ctx, RESTORE_SESSION, expected_epoch)
+        if session.get("fence_record_minted_after_restore") is True:
+            return _late_fence_refusal("restore-finish", snapshot)
+        result = _restore_result("restore-finish", snapshot, "already_restored")
+        result.document["fence_record_minted_after_restore"] = False
+        _complete_restore_evidence(ctx, snapshot, session, result.document)
+        return result
+    if (snapshot.states["core"] != "restoring"
+            or snapshot.states["statements"] not in {"shadow", "fenced"}):
+        raise Refusal("authority_state_invalid")
+    if ctx.deps.restore_complete() is not True:
+        raise Refusal("restore_incomplete")
+    session = _restore_record(ctx, RESTORE_SESSION, expected_epoch)
+    if session.get("fence_record_minted_after_restore") is True:
+        return _late_fence_refusal("restore-finish", snapshot)
+    restored = _restore_record(ctx, RESTORE, expected_epoch)
+    fenced_at = _time(session.get("fenced_at"))
+    started_at = _time(session.get("fence_started_at"))
+    dump_at = _time(restored.get("dump_created_at"))
+    if (started_at is None or fenced_at is None or dump_at is None
+            or not started_at <= fenced_at <= ctx.now or not dump_at <= fenced_at):
+        raise Refusal("restore_evidence_invalid")
+    rpo_ok = fenced_at - dump_at <= RESTORE_RPO
+    checks = run_checks(ctx, snapshot, ("main_role_unsafe", "ledger_role_unsafe"))
+    blocking = _blocking(checks, allow_pending=False)
+    if not rpo_ok:
+        blocking.append("restore_rpo_exceeded")
+    document = {
+        "command": "restore-finish", "ok": not blocking,
+        "fence_record_minted_after_restore": False,
+        "rpo_evidence_recorded": True, "rpo_within_limit": rpo_ok,
+        "rto_within_limit": ctx.now - started_at <= RESTORE_RTO,
+        "checks": [check.as_dict() for check in checks],
+        **_snapshot_document(snapshot),
+    }
+    if blocking:
+        return Result(False, document, blocking)
+    after = ctx.deps.admin.transition(
+        ctx.deps.workspace, "core", "active", expected_epoch=expected_epoch,
+        actor_owner_id=ctx.deps.owner_id,
+    )
+    document.update(_snapshot_document(after))
+    document["outcome"] = "restored"
+    _complete_restore_evidence(ctx, after, session, document)
+    return Result(True, document)
 
 
 def rollback_steps(epoch: int) -> list[str]:
@@ -1357,17 +1609,11 @@ def cmd_rollback(ctx: Context) -> Result:
         raise Refusal("authority_state_invalid")
     if deps.probes.non_import_receipts(deps.workspace, snapshot.epoch):
         raise _rollback_refused(core)
-    try:
-        if core != "fenced":
-            snapshot = deps.admin.transition(
-                deps.workspace, "core", "fenced", expected_epoch=snapshot.epoch,
-                actor_owner_id=deps.owner_id,
-            )
-    except api.LedgerError as error:
-        raise _ledger_refusal(error) from None
+    snapshot, evidence = _fence_ledger(ctx, snapshot, ("core",))
     if deps.probes.non_import_receipts(deps.workspace, snapshot.epoch):
         raise _rollback_refused("fenced")
     return Result(True, {"command": "rollback", "ok": True, "outcome": "fenced",
+                         **evidence,
                          "next_steps": rollback_steps(snapshot.epoch),
                          **_snapshot_document(snapshot)})
 
@@ -1514,7 +1760,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="preflight --drain: allow the one disclosed mutating snapshot (T2 final accept)",
     )
     parser.add_argument("--rearm", action="store_true", help="init: fenced to shadow, epoch + 1")
-    parser.add_argument("--expected-epoch", type=int, help="mirror-reset: exact current epoch")
+    parser.add_argument("--expected-epoch", type=int,
+                        help="mirror-reset: current epoch; restore: incident epoch E")
     parser.add_argument("--phase", choices=PHASES, default="drain", help="freeze-plan phase")
     return parser
 
@@ -1555,6 +1802,7 @@ def live_deps(env: Mapping[str, str]) -> Deps:
         settings=settings, admin=admin, probes=probes,
         evidence=EvidenceStore(Path(env.get(EVIDENCE_DIR_ENV, DEFAULT_EVIDENCE_DIR))),
         now=now, owner_id=owner_id, workspace=workspace, build_sha=env.get("MIA_BUILD_SHA", ""),
+        restore_complete=lambda: env.get("MIA_OS_RESTORE_COMPLETE") == "true",
     )
 
 
@@ -1574,6 +1822,10 @@ def _dispatch(ctx: Context, args: argparse.Namespace) -> Result:
         return cmd_fence(ctx)
     if command == "mirror-reset":
         return cmd_mirror_reset(ctx, expected_epoch=args.expected_epoch)
+    if command == "restore-begin":
+        return cmd_restore_begin(ctx, expected_epoch=args.expected_epoch)
+    if command == "restore-finish":
+        return cmd_restore_finish(ctx, expected_epoch=args.expected_epoch)
     return cmd_rollback(ctx)
 
 
@@ -1592,7 +1844,8 @@ def run(
 
     def finish(result: Result) -> int:
         outcome = "ok" if result.ok else "refused"
-        reason = "ok" if result.ok else (result.codes[0] if result.codes else "refused")
+        reasons = result.document.get("warnings", []) if result.ok else result.codes
+        reason = reasons[0] if reasons else ("ok" if result.ok else "refused")
         _LOG.info("os_authority op=%s outcome=%s reason=%s", args.command, outcome, reason)
         if result.text is not None and result.ok:
             stdout.write(result.text)

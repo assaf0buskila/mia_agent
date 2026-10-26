@@ -1,0 +1,447 @@
+openapi: 3.1.0
+info:
+  title: Assaf OS propose-only assistant API
+  version: 1.0.0
+  description: 'Private Custom GPT Action: set visibility to Only me. Use an owner-issued
+    bearer API key. This API never approves, rejects or books expenses.'
+servers:
+- url: https://mia.assafweb.com
+security:
+- assistantBearer: []
+paths:
+  /v1/assistant/os/context:
+    get:
+      operationId: getStatementContext
+      summary: Read business rules and the last 12 statement headers
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatementContext'
+        '401':
+          description: Uniform assistant_auth_required. A Cookie header is refused.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: rate_limited. Observe Retry-After.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Ledger unavailable or frozen.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Statements feature unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /v1/assistant/os/statement-batches:
+    post:
+      operationId: submitStatementBatch
+      summary: Propose a statement batch for Assaf to approve in the OS
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PendingBatch'
+        '401':
+          description: Uniform assistant_auth_required. A Cookie header is refused.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: rate_limited. Observe Retry-After.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Ledger unavailable or frozen.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Statements feature unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Idempotency mismatch or already decided.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Invalid batch, content type, or body over 128 KiB.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      description: Propose only. No expenses are booked. Assaf reviews and approves
+        in the OS. Use this Action with visibility Only me. Send compact UTF-8 JSON,
+        at most 131072 bytes; the statement service also validates cross-field dates,
+        installments and card-like text.
+      x-openai-isConsequential: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                schema:
+                  type: string
+                  const: statement-batch.v1
+                client_batch_id:
+                  type: string
+                  pattern: ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$
+                account_label:
+                  type: string
+                  minLength: 1
+                  maxLength: 40
+                  pattern: ^(?!.*\d{8}).*$
+                charge_date:
+                  type: string
+                  format: date
+                  pattern: ^\d{4}-\d{2}-\d{2}$
+                lines:
+                  type: array
+                  minItems: 1
+                  maxItems: 300
+                  items:
+                    type: object
+                    properties:
+                      txn_date:
+                        type: string
+                        format: date
+                        pattern: ^\d{4}-\d{2}-\d{2}$
+                      merchant_display:
+                        type: string
+                        minLength: 1
+                        maxLength: 80
+                      amount_minor:
+                        type: integer
+                        minimum: 1
+                      kind:
+                        type: string
+                        enum:
+                        - charge
+                        - credit
+                      currency:
+                        type: string
+                        const: ILS
+                      confidence:
+                        type: number
+                        minimum: 0
+                        maximum: 1
+                      suggested_tag:
+                        enum:
+                        - business
+                        - personal
+                        - null
+                      original_amount_minor:
+                        type: integer
+                        minimum: 1
+                      original_currency:
+                        type: string
+                        pattern: ^[A-Z]{3}$
+                        not:
+                          const: ILS
+                      installment:
+                        type: object
+                        properties:
+                          n:
+                            type: integer
+                            minimum: 1
+                          of:
+                            type: integer
+                            minimum: 1
+                        required:
+                        - n
+                        - of
+                        additionalProperties: false
+                      suggested_category:
+                        type: string
+                        maxLength: 40
+                      suggested_path:
+                        type: string
+                        enum:
+                        - לימוד
+                        - אוטומציה
+                        - משותף
+                      is_subscription:
+                        type: boolean
+                    required:
+                    - txn_date
+                    - merchant_display
+                    - amount_minor
+                    - kind
+                    - currency
+                    - confidence
+                    - suggested_tag
+                    additionalProperties: false
+                    dependentRequired:
+                      original_amount_minor:
+                      - original_currency
+                      original_currency:
+                      - original_amount_minor
+              required:
+              - schema
+              - client_batch_id
+              - account_label
+              - charge_date
+              - lines
+              additionalProperties: false
+  /v1/assistant/os/statement-batches/{id}:
+    get:
+      operationId: getStatementBatchStatus
+      summary: Read the status of this key's own batch
+      responses:
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchStatus'
+        '401':
+          description: Uniform assistant_auth_required. A Cookie header is refused.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: rate_limited. Observe Retry-After.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Ledger unavailable or frozen.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: batch_not_found, including another key's batch.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: ^PRO_[0-9a-f]{32}$
+components:
+  securitySchemes:
+    assistantBearer:
+      type: http
+      scheme: bearer
+  schemas:
+    StatementContext:
+      type: object
+      properties:
+        api_version:
+          type: string
+          const: assaf-os-assistant.v1
+        rules:
+          type: array
+          items:
+            type: object
+            properties:
+              merchant_key:
+                type: string
+              match:
+                type: string
+              category:
+                type: [string, 'null']
+              path:
+                type: [string, 'null']
+              platform:
+                type: [string, 'null']
+              label:
+                type: [string, 'null']
+              is_subscription:
+                type: [boolean, 'null']
+            required:
+            - merchant_key
+            - match
+            - category
+            - path
+            - platform
+            - label
+            - is_subscription
+            additionalProperties: false
+        statements:
+          type: array
+          maxItems: 12
+          items:
+            type: object
+            properties:
+              account_label:
+                type: string
+              charge_date:
+                type: string
+                format: date
+              status:
+                type: string
+                enum:
+                - imported
+                - pending
+                - not_imported
+              line_count:
+                type: integer
+                minimum: 0
+            required:
+            - account_label
+            - charge_date
+            - status
+            - line_count
+            additionalProperties: false
+        format:
+          type: object
+          properties:
+            schema:
+              const: statement-batch.v1
+            encoding:
+              const: utf-8
+            ensure_ascii:
+              const: false
+            separators:
+              type: array
+              const:
+              - ','
+              - ':'
+            max_bytes:
+              const: 131072
+            max_lines:
+              const: 300
+          required:
+          - schema
+          - encoding
+          - ensure_ascii
+          - separators
+          - max_bytes
+          - max_lines
+          additionalProperties: false
+      required:
+      - api_version
+      - rules
+      - statements
+      - format
+      additionalProperties: false
+    PendingBatch:
+      type: object
+      properties:
+        api_version:
+          type: string
+          const: assaf-os-assistant.v1
+        proposal_id:
+          type: string
+          pattern: ^PRO_[0-9a-f]{32}$
+        status:
+          type: string
+          const: pending
+        review_url:
+          type: string
+          format: uri
+        summary:
+          type: object
+          properties:
+            line_count:
+              type: integer
+              minimum: 0
+            business_count:
+              type: integer
+              minimum: 0
+            personal_count:
+              type: integer
+              minimum: 0
+            unassigned_count:
+              type: integer
+              minimum: 0
+          required:
+          - line_count
+          - business_count
+          - personal_count
+          - unassigned_count
+          additionalProperties: false
+      required:
+      - api_version
+      - proposal_id
+      - status
+      - review_url
+      - summary
+      additionalProperties: false
+    BatchStatus:
+      type: object
+      properties:
+        api_version:
+          type: string
+          const: assaf-os-assistant.v1
+        proposal_id:
+          type: string
+          pattern: ^PRO_[0-9a-f]{32}$
+        status:
+          type: string
+          enum:
+          - pending
+          - committed
+          - rejected
+          - expired
+          - superseded
+          - target_changed
+        updated_at:
+          type: string
+          format: date-time
+      required:
+      - api_version
+      - proposal_id
+      - status
+      - updated_at
+      additionalProperties: false
+    Error:
+      type: object
+      required:
+      - api_version
+      - request_id
+      - error
+      additionalProperties: false
+      properties:
+        api_version:
+          const: owner-os.v1
+        request_id:
+          type: string
+        error:
+          type: object
+          required:
+          - code
+          - retryable
+          properties:
+            code:
+              type: string
+            retryable:
+              type: boolean
+            write_outcome:
+              type: string
+              enum:
+              - not_started
+              - unknown
+            details:
+              type: object

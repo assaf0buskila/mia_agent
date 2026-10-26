@@ -22,6 +22,7 @@ FILES = (
     "20261016_assaf_os_ledger_core_v2.sql",
     "20261016_assaf_os_statements.sql",
     "20261016_assaf_os_assistant.sql",
+    "20261024_assaf_os_issue_requests.sql",
 )
 V2_14_TABLES = frozenset({
     "os_workspaces", "os_authority", "os_leads", "os_clients", "os_works", "os_payments",
@@ -293,7 +294,7 @@ def _sql_without_comments(name):
 
 def test_allowlist_is_exact_ordered_and_lf_only():
     assert ledger.MIGRATIONS == (V2_14, *FILES)
-    assert ledger.TABLES == V2_14_TABLES | NEW_TABLES
+    assert ledger.TABLES == V2_14_TABLES | NEW_TABLES | {"os_assistant_issue_requests"}
     assert {p.name for p in (ROOT / "migrations_assaf_os").glob("*.sql")} == set(ledger.MIGRATIONS)
     scripts = ledger.migration_scripts()
     assert [name for name, _, _ in scripts] == list(ledger.MIGRATIONS)
@@ -533,7 +534,7 @@ def test_applies_after_v214_in_order_and_rerun_is_a_noop(addendum_db):
         }
         assert set(c.scalars(text(
             "SELECT tablename FROM pg_tables WHERE schemaname='assaf_os'"
-        ))) == V2_14_TABLES | NEW_TABLES | {"schema_migrations"}
+        ))) == V2_14_TABLES | NEW_TABLES | {"os_assistant_issue_requests"} | {"schema_migrations"}
 
 
 def test_v214_constraint_names_are_read_before_they_are_replaced(addendum_db):
@@ -565,9 +566,11 @@ def test_v214_constraint_names_are_read_before_they_are_replaced(addendum_db):
         if k in before and k not in replaced
     }
     added = set(after) - set(before)
-    assert {k for k in added if after[k][0].split(".")[1] not in NEW_TABLES} == set().union(
-        *CORE_CONSTRAINTS.values()
-    ) - replaced
+    assert {
+        k
+        for k in added
+        if after[k][0].split(".")[1] not in NEW_TABLES | {"os_assistant_issue_requests"}
+    } == set().union(*CORE_CONSTRAINTS.values()) - replaced
 
 
 @pytest.mark.parametrize("table", sorted(NEW_TABLES))

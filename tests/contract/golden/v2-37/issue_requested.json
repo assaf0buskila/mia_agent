@@ -1,0 +1,9 @@
+{
+  "api_version": "assaf-os.v2",
+  "authority_epoch": 1,
+  "expires_at": "2026-10-16T12:10:00.000Z",
+  "issue_request_id": "IR_11111111111111111111111111111111",
+  "source": "postgresql",
+  "status": "pending_approval",
+  "workspace_id": "test"
+}

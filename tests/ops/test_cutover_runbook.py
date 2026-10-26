@@ -233,6 +233,9 @@ GATED_COMMANDS = [
     ("## 5. ", r"sudo mia os-authority mirror-reset", "G25", True),
     ("## 6. ", r"sudo mia os-authority fence", "G22", True),
     ("## 7. Reason codes", r"sudo mia os-authority mirror-reset", "G25", False),
+    ("## 6. ", r"sudo mia os-authority restore-begin", "G21", True),
+    ("## 6. ", r"sudo mia os-authority restore-finish", "G21", True),
+    ("## 6. ", r"sudo mia restore", "G21", True),
 ]
 
 
@@ -282,6 +285,38 @@ def test_the_owner_gate_list_covers_every_gate_a_step_marks_and_the_three_added_
 def test_fence_is_not_a_standing_emergency_stop_unless_the_owner_wrote_it_down():
     section = section_of("## 6. ")
     assert "not pre-approved" in section and "G22" in section
+
+
+def test_restore_procedure_pins_limits_epoch_and_refusals():
+    section = section_of("## 6. ")
+    assert "not an automated command" not in section
+    for text in ("--expected-epoch E", "restore.json", "ledger-fence.json",
+                 "restore_incomplete", "restore_rpo_exceeded", "restore_evidence_invalid",
+                 "restore_epoch_mismatch", "restore_epoch_required", "main_role_unsafe",
+                 "ledger_role_unsafe", "restore_rto_exceeded", "15 min", "2 h",
+                 "sudo mia os-authority status --approved-sha S"):
+        assert text in section, text
+    assert section.index("sudo mia restore") < section.index("os-authority restore-begin")
+    assert (section.index("os-authority restore-begin")
+            < section.index("os-authority restore-finish"))
+    # WP1/E35 allows publishing under freeze: containment must survive app restart after restore.
+    assert section.index("MIA_KILL_SWITCH=true") < section.index("sudo mia restore")
+    assert "WP1/E35" in section and "A freeze alone is insufficient" in section
+
+
+def test_restore_containment_order_exception_and_reason_table():
+    section = section_of("## 6. ")
+    assert section.index("MIA_KILL_SWITCH=true") < section.index("os-authority fence")
+    assert "first fence impossible / evidence directory lost" in section
+    assert "owner's explicit exception procedure" in section
+    assert "fence_record_minted_after_restore" in section and "null" in section
+    assert "restore-attempt.json" in section and "pre_restore_fence_record_present" in section
+    assert "run status after `mia restore` and compare the epoch" in section
+    table = RUNBOOK.split("Other refusals of the CLI:", 1)[1]
+    for code in ("restore_incomplete", "restore_rpo_exceeded", "restore_evidence_invalid",
+                 "restore_epoch_mismatch", "restore_epoch_required", "restore_epoch_invalid",
+                 "restore_rto_exceeded"):
+        assert re.search(rf"^\| `{code}` \|", table, re.M), code
 
 
 def test_every_sudo_mia_command_is_a_command_of_the_vm_script():

@@ -49,6 +49,15 @@ os-retention job runs only `role_policy.RETENTION_DELETE_SQL`, and a test shows 
 statements delete nothing outside them. `tests/db/test_assaf_os_ledger_addendum.py`
 pins every column, key, CHECK and index, with a rejecting case for every CHECK.
 
+## E37 issue requests
+
+E37 adds `20261024_assaf_os_issue_requests.sql` after the four existing migrations in
+the same allowlist and digest journal. `os_assistant_issue_requests` stores the immutable
+OS request and its HMAC session binding. `collect_deadline` is generated from `approved_at`
+in UTC, so the runtime gets only SELECT, INSERT and UPDATE of `status`, `approved_at`,
+`collected_at`, `credential_id`. Every new constraint is pinned in `role_policy.py`.
+The migration contains no grants or application-data writes.
+
 ## Explicit operator job and production gate
 
 **Do not run in production until V2-14a / issue #151 APP-ROLE-DEMOTE has landed and
