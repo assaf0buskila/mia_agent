@@ -186,6 +186,9 @@ def test_retry_mirror_cleanliness_and_reset_remedy_are_pinned():
         assert "mirror: verified" in section_of(heading)
     authority_case = SCRIPT.split("  os-authority)", 1)[1].split("  os-provision)", 1)[0]
     assert "mirror-reset" in authority_case and "--expected-epoch)" in authority_case
+    table = RUNBOOK.split("Other refusals of the CLI:", 1)[1]
+    for code in ("expected_epoch_required", "expected_epoch_invalid"):
+        assert re.search(rf"^\| `{code}` \|", table, re.M), code
 
 
 def test_every_owner_go_of_the_phone_acceptance_list_is_a_go_here():

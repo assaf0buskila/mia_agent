@@ -865,6 +865,38 @@ def test_fence_preserves_previous_cleanliness(
     assert world.sheets.writes == [] and world.sheets.reads == 0
 
 
+@pytest.mark.parametrize("interleave,expected", [
+    ("attempt", "authority_fenced_unclean"),
+    ("reset", "authority_fenced"),
+    ("reset_attempt", "authority_fenced_unclean"),
+])
+def test_fence_uses_state_changed_after_load(world: World, interleave, expected):
+    world.outbox.load_state(world.deps.destination_binding, world.clock())
+    world.outbox.state.update(
+        status="conflict" if interleave == "reset" else "synced",
+        projected_version=1, verified_version=1,
+        last_error_code="drift" if interleave == "reset" else None,
+        last_attempt_at=world.clock(), last_verified_at=world.clock(),
+    )
+    world.reader.states["core"] = "fenced"
+
+    def interleaved(_entity):
+        world.reader.on_page = None
+        if interleave.startswith("reset"):
+            world.outbox.state.update(
+                status="pending", projected_version=0, verified_version=0,
+                last_error_code=None, last_attempt_at=None, last_verified_at=None,
+                scan_coverage={},
+            )
+        if interleave != "reset":
+            world.outbox.record_attempt(world.reader.version, world.clock())
+
+    world.reader.on_page = interleaved
+    assert world.tick(anti_entropy=True) == os_mirror.TickResult("paused", expected, 0)
+    assert world.state().last_error_code == expected
+    assert world.sheets.writes == [] and world.sheets.reads == 0
+
+
 def test_not_sent_error_defers_with_backoff_and_reports_delayed(world: World) -> None:
     ids = world.seed()
     world.sheets.fail_next_write = "not_sent"

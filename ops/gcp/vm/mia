@@ -522,8 +522,10 @@ case "$cmd" in
             mirror-reset|restore-begin|restore-finish) ;;
             *) die "os-authority: option refused: --expected-epoch" ;;
           esac
-          [ "$#" -ge 2 ] || die "restore_epoch_required"
-          [[ "$2" =~ ^[1-9][0-9]*$ ]] || die "restore_epoch_invalid"
+          epoch_reason_prefix="restore_epoch"
+          [ "$os_authority_command" != "mirror-reset" ] || epoch_reason_prefix="expected_epoch"
+          [ "$#" -ge 2 ] || die "${epoch_reason_prefix}_required"
+          [[ "$2" =~ ^[1-9][0-9]*$ ]] || die "${epoch_reason_prefix}_invalid"
           os_restore_epoch="$2"; os_authority_args+=("$1" "$2"); shift 2 ;;
         *) die "os-authority: option refused: $1" ;;
       esac

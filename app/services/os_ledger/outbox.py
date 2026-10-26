@@ -87,7 +87,7 @@ class OutboxStore(Protocol):
         error_code: str | None,
         now: datetime,
         coverage: Mapping[str, Any] | None,
-    ) -> None: ...
+    ) -> str | None: ...
 
 
 def destination_binding(spreadsheet_id: str) -> str:
@@ -250,7 +250,8 @@ class PgOutbox:
                     "UPDATE {s}.os_mirror_state SET "
                     "projected_version=GREATEST(projected_version, CAST(:v AS bigint)), "
                     "last_attempt_at=now(), "
-                    "status=CASE WHEN status IN ('synced','pending','delayed') THEN 'pending' "
+                    "status=CASE WHEN status IN ('synced','pending','delayed','fenced') "
+                    "THEN 'pending' "
                     "ELSE status END, updated_at=now() "
                     "WHERE workspace_id=:ws"
                 ),
@@ -266,15 +267,29 @@ class PgOutbox:
         error_code: str | None,
         now: datetime,
         coverage: Mapping[str, Any] | None,
-    ) -> None:
+    ) -> str | None:
         """Monotonic: ``verified_version = GREATEST(verified_version, version)`` when verified,
-        and an observation older than the verified version changes nothing else."""
+        and an observation older than the verified version changes nothing else.
+
+        Fencing derives cleanliness from the current row in this same UPDATE, never from a
+        worker's earlier snapshot. Return the stored reason code for the tick's report.
+        """
         _check_result(status, verified)
         fresh = "CAST(:v AS bigint) >= verified_version"
+        fence_code = (
+            "CASE WHEN projected_version=verified_version AND ("
+            " (status='synced' AND last_error_code IS NULL)"
+            " OR (status='fenced' AND last_error_code='authority_fenced')"
+            " OR (status='pending' AND projected_version=0 AND last_error_code IS NULL"
+            "     AND last_attempt_at IS NULL AND last_verified_at IS NULL)"
+            ") THEN 'authority_fenced' ELSE 'authority_fenced_unclean' END"
+        )
         statement = self._text(
             "UPDATE {s}.os_mirror_state SET "
             f"status=CASE WHEN {fresh} THEN CAST(:status AS varchar) ELSE status END, "
-            f"last_error_code=CASE WHEN {fresh} THEN CAST(:code AS varchar) "
+            f"last_error_code=CASE WHEN {fresh} THEN "
+            f"CASE WHEN CAST(:status AS varchar)='fenced' THEN {fence_code} "
+            "ELSE CAST(:code AS varchar) END "
             "ELSE last_error_code END, "
             f"scan_coverage=CASE WHEN {fresh} AND CAST(:has_cov AS boolean) "
             "THEN CAST(:cov AS jsonb) ELSE scan_coverage END, "
@@ -285,10 +300,10 @@ class PgOutbox:
             "projected_version=CASE WHEN CAST(:verified AS boolean) "
             "THEN GREATEST(projected_version, CAST(:v AS bigint)) ELSE projected_version END, "
             "updated_at=now() "
-            "WHERE workspace_id=:ws"
+            "WHERE workspace_id=:ws RETURNING last_error_code"
         )
         with self._engine.begin() as conn:
-            conn.execute(
+            result = conn.execute(
                 statement,
                 {
                     "status": status,
@@ -300,3 +315,4 @@ class PgOutbox:
                     "ws": self._workspace_id,
                 },
             )
+            return result.scalar_one()

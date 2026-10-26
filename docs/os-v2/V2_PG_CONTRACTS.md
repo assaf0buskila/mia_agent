@@ -3170,6 +3170,9 @@ use `status`, which requires verification at the current ledger version.
   fenced-clean row, or never-attempted empty progress. Every other prior state is recorded as
   `authority_fenced_unclean` and fails the cleanliness probe, including drift or an uncertain
   rewrite at equal projected and verified versions; repeated fenced ticks keep it unclean.
+  This decision uses the current row in the same UPDATE that records the fence. A write attempt
+  moves even a fenced-clean row to `pending` and stamps `last_attempt_at` before the write, so a
+  crash before its result cannot leave it looking fenced-clean.
 - Uncertain `conflict`, `unknown`, `pending`, or a fenced row with unequal versions or another error
   remain unclean. Before activation, `os-authority mirror-reset --approved-sha S --expected-epoch E`
   requires the exact release SHA and epoch, freeze ON, and core authority NOT `active`. Under the

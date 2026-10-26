@@ -274,6 +274,28 @@ if pg_enabled():
         assert state["projected_version"] == state["verified_version"] == boundary["version"]
         assert len(sheets.writes) == 2 and sheets.reads == 3
 
+    def test_crash_after_fenced_clean_attempt_blocks_pre_activation_probe(cutover):
+        world, deps, sheets = cutover
+        activate_for_t7(world)
+        publisher = mirror_publisher(world, deps)
+        assert publisher.tick().outcome == "verified"
+        version = world.state().version
+        assert world.run("freeze-plan", "--phase", "open").code == 0
+        world.settings.assaf_os_freeze = world.env.knobs.freeze = False
+        assert world.run("rollback").code == 0
+        world.clock[0] += timedelta(seconds=900)
+        assert publisher.tick() == os_mirror.TickResult("paused", "authority_fenced", 0)
+        assert world.probes.mirror(WORKSPACE, None) == "verified"
+        writes, reads = len(sheets.writes), sheets.reads
+        deps.outbox.record_attempt(version, world.clock[0])
+        revert_and_reimport(world)
+        # Crash before record_result, even if this same-version write reached the workbook.
+        assert world.probes.mirror(WORKSPACE, None) == "unverified"
+        refused = world.run("preflight")
+        assert refused.code == 1 and codes(refused) == ["mirror_not_verified"]
+        assert world.run("activate").code == 1
+        assert (len(sheets.writes), sheets.reads) == (writes, reads)
+
     def test_drift_survives_open_rollback_tick_until_guarded_reset_and_t7(cutover):
         world, deps, sheets = cutover
         activate_for_t7(world)

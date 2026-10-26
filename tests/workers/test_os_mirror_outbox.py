@@ -402,6 +402,69 @@ def test_record_attempt_marks_pending_without_erasing_unknown_or_conflict(harnes
         assert state.last_attempt_at == T0
 
 
+@pytest.mark.parametrize("status,projected,verified,error,attempted,expected", [
+    ("synced", 3, 3, None, True, "authority_fenced"),
+    ("fenced", 3, 3, "authority_fenced", True, "authority_fenced"),
+    ("pending", 0, 0, None, False, "authority_fenced"),
+    ("synced", 4, 3, None, True, "authority_fenced_unclean"),
+    ("synced", 3, 3, "readback_failed", True, "authority_fenced_unclean"),
+    ("conflict", 3, 3, "drift", True, "authority_fenced_unclean"),
+    ("unknown", 3, 3, "mirror_timeout", True, "authority_fenced_unclean"),
+    ("pending", 3, 3, None, True, "authority_fenced_unclean"),
+    ("delayed", 3, 3, None, True, "authority_fenced_unclean"),
+    ("pending", 0, 0, None, True, "authority_fenced_unclean"),
+    ("pending", 0, 0, "mirror_timeout", False, "authority_fenced_unclean"),
+    ("fenced", 3, 3, "authority_fenced_unclean", True, "authority_fenced_unclean"),
+])
+def test_record_fence_decides_from_current_row(
+    harness, status, projected, verified, error, attempted, expected,
+):
+    store = harness.outbox()
+    store.load_state(BINDING, T0)  # The worker's earlier read is deliberately stale.
+    values = dict(
+        status=status, projected_version=projected, verified_version=verified,
+        last_error_code=error, last_attempt_at=T0 if attempted else None,
+        last_verified_at=T0 if verified else None,
+    )
+    if isinstance(harness, PgHarness):
+        with harness.engine.begin() as conn:
+            conn.execute(harness.text(
+                f"UPDATE {harness.schema}.os_mirror_state SET "
+                + ", ".join(f"{key}=:{key}" for key in values)
+                + " WHERE workspace_id=:ws"
+            ), {**values, "ws": WS})
+    else:
+        harness.store.state.update(values)
+    for _ in range(2):
+        code = store.record_result(
+            status="fenced", version=max(projected, 1), verified=False,
+            error_code=None, now=T0, coverage=None,
+        )
+        state = store.load_state(BINDING, T0)
+        assert (state.status, state.last_error_code) == ("fenced", expected)
+        assert code == expected
+        assert (state.projected_version, state.verified_version) == (projected, verified)
+
+
+def test_attempt_after_fenced_clean_is_pending_even_at_same_version(harness):
+    store = harness.outbox()
+    store.load_state(BINDING, T0)
+    store.record_result(status="synced", version=3, verified=True, error_code=None,
+                        now=T0, coverage=None)
+    store.record_result(status="fenced", version=3, verified=False,
+                        error_code="authority_fenced", now=T0, coverage=None)
+    assert store.load_state(BINDING, T0).status == "fenced"
+    before = harness.now() if isinstance(harness, PgHarness) else T0
+    store.record_attempt(3, T0)  # Simulated crash: no record_result follows.
+    state = store.load_state(BINDING, T0)
+    assert state.status == "pending"
+    assert state.projected_version == state.verified_version == 3
+    if isinstance(harness, PgHarness):
+        assert before <= state.last_attempt_at <= harness.now()
+    else:
+        assert state.last_attempt_at == T0
+
+
 def test_the_destination_binding_is_pinned(harness) -> None:
     store = harness.outbox()
     store.load_state(BINDING, T0)

@@ -281,25 +281,12 @@ def _tick(
     if core not in publishing:
         _finish_all(deps, events, "pending", "authority_not_publishing", now)
         if core == "fenced":
-            clean = (
-                state.projected_version == state.verified_version
-                and (
-                    (state.status == "synced" and state.last_error_code is None)
-                    or (state.status == "fenced" and state.last_error_code == "authority_fenced")
-                    or (
-                        state.status == "pending" and state.projected_version == 0
-                        and state.last_error_code is None and state.last_attempt_at is None
-                        and state.last_verified_at is None
-                    )
-                )
-            )
-            # Equal versions alone cannot distinguish drift or a same-version failed rewrite.
-            code = "authority_fenced" if clean else "authority_fenced_unclean"
-            deps.outbox.record_result(
+            # The outbox decides against the current row atomically with the fence write.
+            code = deps.outbox.record_result(
                 status="fenced", version=snapshot.observed_version, verified=False,
-                error_code=code, now=now, coverage=None,
+                error_code=None, now=now, coverage=None,
             )
-            return TickResult("paused", code, len(events))
+            return TickResult("paused", code or "authority_fenced_unclean", len(events))
         return TickResult("paused", "authority_not_publishing", len(events))
     deliver = []
     for event in events:
