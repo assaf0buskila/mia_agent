@@ -22,10 +22,11 @@ usage: sudo mia <command>
                         activate, fence, rollback, status,
                         restore-begin/restore-finish --expected-epoch <E>,
                         mirror-reset --expected-epoch <n>
-  os-provision <runtime|retention> --approved-sha <sha>
+  os-provision <runtime|retention|reapply> --approved-sha <sha>
                         give the ledger its database credentials: the runtime role and its DSN in
                         runtime.env (FORK-PROD-ORDER step 4), or the os-retention password and the
-                        job-only /etc/mia/os-retention.env (E8)
+                        job-only /etc/mia/os-retention.env (E8); reapply restores ledger grants
+                        after a table-adding migration without writing runtime.env
   os-job <os-import|os-verifier|os-retention> [args]
                         run one privileged OS job now (never a timer of this script)
   telegram-webhook     register https://<public url>/v1/telegram/webhook with Telegram
@@ -568,17 +569,22 @@ case "$cmd" in
       "$os_authority_command" "${os_authority_args[@]}"
     ;;
   os-provision)
-    # The two ledger credentials. `runtime` is FORK-PROD-ORDER step 4 (V2-15: the ledger runtime role and
+    # Ledger credentials and grants. `runtime` is FORK-PROD-ORDER step 4 (V2-15: the ledger runtime role and
     # MIA_OWNER_OS_LEDGER_DATABASE_URL in runtime.env). `retention` is E8 (the os-retention password and
     # its job-only env file). The scripts are the ones deployed with the running tag, mounted into that
-    # image as `restore` does for provision_ledger.py. /etc/mia is writable only here, because each
-    # script stages its DSN in a VM-owned file there before it commits.
+    # image as `restore` does for provision_ledger.py. Only credential provisioning writes /etc/mia;
+    # `reapply` uses restore's read-only mount and never stages a DSN or changes a password.
     [ "$#" -eq 3 ] && [ "$2" = --approved-sha ] \
-      || die "usage: mia os-provision <runtime|retention> --approved-sha <sha>"
+      || die "usage: mia os-provision <runtime|retention|reapply> --approved-sha <sha>"
+    provision_mount=(-v /etc/mia:/etc/mia)
     case "$1" in
       runtime)   provision_args=(provision_ledger.py --target mia-vm --mode provision --apply) ;;
       retention) provision_args=(provision_retention.py --target mia-vm --apply) ;;
-      *) die "usage: mia os-provision <runtime|retention> --approved-sha <sha>" ;;
+      reapply)
+        provision_args=(provision_ledger.py --target mia-vm --mode reapply --apply)
+        provision_mount=(-v /etc/mia:/etc/mia:ro)
+        ;;
+      *) die "usage: mia os-provision <runtime|retention|reapply> --approved-sha <sha>" ;;
     esac
     [[ "$3" =~ ^[0-9a-f]{40}$ ]] || die "exact approved SHA required"
     [ -f /opt/mia/tag.env ] || die "not deployed yet"
@@ -591,7 +597,7 @@ case "$cmd" in
       [ -f "$scripts/$name" ] && [ ! -L "$scripts/$name" ] || die "$name missing from the deployed tag"
     done
     compose --profile os-ledger run --rm --no-deps -T --user root \
-      -v "$scripts:/app/ops/assaf-os:ro" -v /etc/mia:/etc/mia \
+      -v "$scripts:/app/ops/assaf-os:ro" "${provision_mount[@]}" \
       --entrypoint sh os-ledger-migrate \
       -c 'exec python "$@"' \
       sh "/app/ops/assaf-os/${provision_args[0]}" "${provision_args[@]:1}" --approved-sha "$3"

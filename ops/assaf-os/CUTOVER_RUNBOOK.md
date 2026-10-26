@@ -173,6 +173,11 @@ Every production step above pauses the jobs and takes a verified backup first (s
   - It holds a superuser credential: root-only, mode 600, never in `mia-env`, never copied off
     the VM.
 - **Command**: `sudo mia os-ledger migrate --approved-sha S`.
+- **Upgrades with an existing ledger runtime role (Go G07)**: when a migration adds tables,
+  run `sudo mia os-ledger migrate --approved-sha S`, then immediately after it run
+  `sudo mia os-provision reapply --approved-sha S` to restore and validate the runtime grants.
+  Reapply is idempotent and leaves `runtime.env` untouched. The initial cutover still provisions
+  the roles in step 4 below.
 - **Verify**: exit 0; the job creates schema `assaf_os`, owned by `assaf_os_owner`.
 - **Rollback**: the migration is additive and creates no data. To undo it, restore the dump taken
   before the step (`sudo mia restore <dump>`, which re-applies every role posture); that is a

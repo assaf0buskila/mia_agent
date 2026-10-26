@@ -272,6 +272,13 @@ block a reapply.
   untouched): run `--mode provision`. If a DSN is already staged, the role is recreated
   with that password and the file is left as it is.
 
+**After a ledger migration that adds tables.** For an already provisioned ledger,
+run `sudo mia os-provision reapply --approved-sha S` right after
+`sudo mia os-ledger migrate --approved-sha S`, with owner approval for both steps.
+Migrations do not grant runtime access to new tables; reapply restores the exact
+grants and validates them. It is idempotent and mounts `/etc/mia` read-only because
+it never writes `runtime.env` or changes an existing password.
+
 **Runtime DSN (`mia-vm`).** When the runtime role is created, the password is 32
 random bytes (hex). Its DSN
 `MIA_OWNER_OS_LEDGER_DATABASE_URL=postgresql://assaf_os_ledger:<password>@127.0.0.1:5432/mia`

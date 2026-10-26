@@ -445,6 +445,7 @@ def test_missing_restore_epoch_is_required(tmp_path, command):
 @pytest.mark.parametrize("which,script,flags", [
     ("retention", "provision_retention.py", "--target mia-vm --apply"),
     ("runtime", "provision_ledger.py", "--target mia-vm --mode provision --apply"),
+    ("reapply", "provision_ledger.py", "--target mia-vm --mode reapply --apply"),
 ])
 def test_os_provision_runs_the_deployed_script_with_the_operators_sha(
     tmp_path, which, script, flags
@@ -456,6 +457,10 @@ def test_os_provision_runs_the_deployed_script_with_the_operators_sha(
     assert "/etc-mia:/etc/mia" in output.replace("-v " + tmp_path.as_posix(), "")
     assert "--entrypoint sh os-ledger-migrate" in output
     assert f"/app/ops/assaf-os/{script} {flags} --approved-sha {SHA}" in output
+    mount = "/etc-mia:/etc/mia" + (":ro" if which == "reapply" else "")
+    assert any(word.endswith(mount) for word in output.split())
+    assert output.rstrip().endswith(
+        f'sh /app/ops/assaf-os/{script} {flags} --approved-sha {SHA}')
     assert "secret" not in output
 
 
@@ -476,23 +481,85 @@ def test_os_provision_refuses_before_compose_runs(tmp_path, argv):
     assert code == 1 and "compose" not in output, output
 
 
-@pytest.mark.parametrize("which", ["retention", "runtime"])
-def test_os_provision_refuses_a_bad_tag_and_a_missing_or_linked_script(tmp_path, which):
+@pytest.mark.parametrize("argv,error", [
+    (["reapply"], "usage:"),
+    (["reapply", "--approved-sha"], "usage:"),
+    (["reapply", "--approved-sha", ""], "exact approved SHA required"),
+    (["reapply", "--approved-sha", "a" * 39], "exact approved SHA required"),
+    (["reapply", "--approved-sha", "a" * 41], "exact approved SHA required"),
+    (["reapply", "--approved-sha", "A" * 40], "exact approved SHA required"),
+    (["reapply", "--approved-sha", "g" * 40], "exact approved SHA required"),
+    (["reapply", "--sha", SHA], "usage:"),
+    (["reapply", "--approved-sha", SHA, "extra"], "usage:"),
+    (["unknown", "--approved-sha", SHA], "usage:"),
+])
+def test_os_provision_reapply_refuses_invalid_arguments_with_the_expected_error(
+    tmp_path, argv, error
+):
+    code, output = run_arm(tmp_path, "os-provision", argv)
+    assert code == 1 and "compose" not in output, output
+    assert error in output
+    if error == "usage:":
+        assert "usage: mia os-provision <runtime|retention|reapply> --approved-sha <sha>" in output
+
+
+@pytest.mark.parametrize("which", ["retention", "runtime", "reapply"])
+@pytest.mark.parametrize("migration", [
+    None, "", f"{KEY_MIGRATION}=x\n{KEY_MIGRATION}=y\n",
+    f"{KEY_MIGRATION}=x\nMIA_DATABASE_URL=secret\n",
+])
+def test_os_provision_needs_exactly_the_migration_key(tmp_path, which, migration):
+    code, output = run_arm(
+        tmp_path, "os-provision", [which, "--approved-sha", SHA], migration=migration)
+    assert code == 1 and "compose" not in output and "secret" not in output, output
+    assert "ledger migration env file required with exactly its one key" in output
+
+
+@pytest.mark.parametrize("which", ["retention", "runtime", "reapply"])
+@pytest.mark.parametrize("missing_script", ["provision_retention.py", "provision_ledger.py"])
+def test_os_provision_refuses_a_bad_tag_and_a_missing_or_linked_script(
+    tmp_path, which, missing_script
+):
     for tag in ("../x", "-x", "a b"):
         code, output = run_arm(tmp_path, "os-provision", [which, "--approved-sha", SHA], tag=tag)
         assert code == 1 and "compose" not in output, tag
     host(tmp_path, tag="v2")
-    (tmp_path / "src/v2/ops/assaf-os/provision_retention.py").unlink()
+    (tmp_path / "src/v2/ops/assaf-os" / missing_script).unlink()
     program = (stubs(tmp_path) + f"set -- {which} --approved-sha {SHA}\n"
                + redirected(arm("os-provision"), tmp_path))
     proc = _run_step(program, tmp_path)
-    assert proc.returncode == 1 and "provision_retention.py missing" in proc.stderr
+    assert proc.returncode == 1 and f"{missing_script} missing" in proc.stderr
+
+
+@pytest.mark.parametrize("which", ["retention", "runtime", "reapply"])
+def test_os_provision_refuses_an_undeployed_host(tmp_path, which):
+    host(tmp_path)
+    (tmp_path / "tag.env").unlink()
+    program = (stubs(tmp_path) + f"set -- {which} --approved-sha {SHA}\n"
+               + redirected(arm("os-provision"), tmp_path))
+    proc = _run_step(program, tmp_path)
+    assert proc.returncode == 1 and "not deployed yet" in proc.stderr
+    assert "compose" not in proc.stdout
 
 
 def test_os_provision_mounts_etc_mia_writable_nowhere_else():
-    # The restore reapply mounts /etc/mia read-only; only this arm lets the script write the file.
-    assert SCRIPT.count("-v /etc/mia:/etc/mia ") == 1
+    # Only credential provisioning may write; reapply uses restore's read-only mount.
+    assert SCRIPT.count("-v /etc/mia:/etc/mia)") == 1
+    assert "-v /etc/mia:/etc/mia " not in SCRIPT
     assert "-v /etc/mia:/etc/mia:ro" in SCRIPT
+
+
+def test_os_provision_reapply_matches_restores_invocation():
+    restore = function("restore_ledger_reapply")
+    provision = arm("os-provision")
+    for literal in (
+        "compose --profile os-ledger run --rm --no-deps -T --user root",
+        "--entrypoint sh os-ledger-migrate",
+        "-v /etc/mia:/etc/mia:ro",
+    ):
+        assert literal in restore and literal in provision
+    assert "provision_ledger.py --target mia-vm --mode reapply --apply" in restore
+    assert "provision_ledger.py --target mia-vm --mode reapply --apply" in provision
 
 
 # ------------------------------------------------------------------------------- mia os-job
