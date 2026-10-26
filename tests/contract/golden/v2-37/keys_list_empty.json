@@ -1,0 +1,7 @@
+{
+  "api_version": "assaf-os.v2",
+  "authority_epoch": 1,
+  "credentials": [],
+  "source": "postgresql",
+  "workspace_id": "test"
+}

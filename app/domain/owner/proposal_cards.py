@@ -803,6 +803,11 @@ def _card_business(parameters: Mapping[str, Any], target: Mapping[str, Any], kin
 
 
 _CARD_RENDERERS = {
+    "assistant_key.issue": lambda p, t: _card(
+        "הנפקת מפתח לעוזר",
+        f"לאשר הנפקת מפתח עבור {esc({'claude': 'Claude', 'gpt': 'GPT'}[p['kind']])}, "
+        f"תווית «{esc(p['label'])}», בתוקף ל-{int(p['expires_in_days'])} ימים?",
+        note="המפתח יוצג פעם אחת בלבד במסך ה-OS שביקש אותו."),
     "gmail.create_draft": _card_gmail_create_draft,
     "composio.write": _card_composio_write,
     "calendar.create": _card_calendar_create,

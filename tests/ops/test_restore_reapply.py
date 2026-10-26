@@ -278,6 +278,7 @@ def test_the_reason_codes_are_the_fixed_set_the_runbook_documents():
         "main_role_validation_failed",
         "owner_session_revoke_failed",
         "app_role_access_probe_failed",
+        "restore_evidence_invalid",
     }
     runbook = (ROOT / "ops/gcp/backup/README.md").read_text(encoding="utf-8")
     for code in emitted:
@@ -438,6 +439,7 @@ def vm_paths(t: Path) -> dict[str, str]:
         "/etc/mia/runtime.env": _posix(t / "runtime.env"),
         "/etc/mia/os-ledger-migrate.env": _posix(t / "migrate.env"),
         "/var/lib/mia/backups": _posix(t / "backups"),
+        "/var/lib/mia/os-authority": "./os-authority",
     }
 
 
@@ -609,6 +611,7 @@ def test_a_main_dsn_that_is_not_the_canonical_loopback_one_stops_the_restore(tmp
 RESTORE_MARKER = "/etc/mia/restore-incomplete"
 
 ARM_STUB = r"""
+chown() { [ "$STUB_FAIL" != evidence ]; }
 mark() { if [ -e "$MIA_RESTORE_INCOMPLETE" ]; then echo present; else echo absent; fi; }
 log() { printf '%s\n' "$*" >> "$STUB_LOG"; }
 compose() {
@@ -772,6 +775,7 @@ def test_the_probe_is_a_select_and_an_insert_that_is_rolled_back():
 # --- the drill on a real PostgreSQL -------------------------------------------------------------
 
 SHIM = r"""
+chown() { :; }
 export V210_ARGLOG="$STUB_LOG"
 flat() { printf '%s' "$*" | tr '\n' ' ' >> "$V210_ARGLOG"; printf '\n' >> "$V210_ARGLOG"; }
 python3() { "$V210_PYTHON" "$V210_DRIVER" "$@"; }
