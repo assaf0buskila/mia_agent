@@ -258,6 +258,18 @@ def _pg_claim_includes_exact_database_retry_boundary(pg, status) -> None:
         assert store.claim(1, "future", before) == []
 
 
+@pytest.mark.parametrize("status", ["pending", "unknown"])
+@pytest.mark.parametrize("attempts", [1, 2, 6, 7, 20])
+def test_retry_delay_retryable_outcomes_use_backoff(status, attempts) -> None:
+    assert retry_delay(status, attempts) == backoff(attempts)
+
+
+@pytest.mark.parametrize("status", ["sent", "conflict"])
+@pytest.mark.parametrize("attempts", [1, 2, 6, 7, 20])
+def test_retry_delay_terminal_outcomes_have_no_delay(status, attempts) -> None:
+    assert retry_delay(status, attempts) == timedelta(0)
+
+
 @pytest.mark.parametrize("status", ["pending", "unknown", "sent", "conflict"])
 @pytest.mark.parametrize("attempts", [1, 7])
 def test_publisher_and_pg_finish_use_the_shared_retry_delay(monkeypatch, status, attempts):
