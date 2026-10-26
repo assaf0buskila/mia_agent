@@ -11,7 +11,7 @@ V2_ROUTER_MODULES = (
     ("app.api.os_v2.reads", ""),
     ("app.api.os_v2.commits", ""),
     ("app.api.os_v2.statements", ""),
-    ("app.api.os_v2.credentials", ""),
+    ("app.api.os_v2.owner_keys", ""),
     ("app.api.owner_step_up", "/v1/owner/auth"),
     ("app.api.assistant.os", ""),
     ("app.api.assistant.mcp", ""),

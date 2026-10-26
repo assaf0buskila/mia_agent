@@ -1,0 +1,12 @@
+{
+  "api_version": "assaf-os-assistant.v1",
+  "proposal_id": "PRO_00000000000040008000000000002003",
+  "review_url": "https://owner.assafweb.test/#statements/PRO_00000000000040008000000000002003",
+  "status": "pending",
+  "summary": {
+    "business_count": 2,
+    "line_count": 3,
+    "personal_count": 1,
+    "unassigned_count": 0
+  }
+}
