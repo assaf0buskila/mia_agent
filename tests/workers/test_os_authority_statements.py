@@ -79,7 +79,7 @@ def test_a_finished_cutover_activates_statements_without_bumping_the_epoch(live)
     assert not batch_admitted(live)
     run = live.run(COMMAND)
     assert run.code == 0 and run.err == ""
-    assert run.out["outcome"] == "activated"
+    assert run.out["outcome"] == "activated" and run.out["pepper_pinned"] is True
     after = live.state()
     states = (after.epoch, after.states["core"], after.states["statements"])
     assert states == (1, "active", "active")
@@ -139,15 +139,85 @@ def test_the_switch_must_be_fully_applied(live, field):
         live.settings.assaf_os_ledger_enabled = False
     else:
         live.settings.assaf_os_authority_epoch = 2
+    before = untouched(live)
     run = live.run(COMMAND)
     assert run.code == 1 and codes(run) == ["switch_not_applied"]
-    assert live.state().states["statements"] == "shadow"
+    assert untouched(live) == before
 
 
 def test_a_missing_kill_switch_setting_fails_closed(live):
     del live.settings.kill_switch
+    before = untouched(live)
     run = live.run(COMMAND)
     assert run.code == 1 and codes(run) == ["kill_switch"]
+    assert untouched(live) == before
+
+
+def pinned_fingerprint(world: World):
+    (row,) = [r for r in world.env.rows("os_workspaces") if r["workspace_id"] == WORKSPACE]
+    return row["statement_pepper_fp"]
+
+
+def unpinned_live(tmp_path, case) -> World:
+    """A finished cutover whose ``init`` ran before the pepper was configured: nothing pinned."""
+    world = World(tmp_path, case)
+    assert world.run("init").code == 0
+    good_evidence(world)
+    assert world.run("activate").code == 0
+    after_open(world)
+    first_write(world)
+    world.settings.os_statement_pepper = PEPPER
+    assert pinned_fingerprint(world) is None
+    return world
+
+
+@pytest.mark.parametrize("case", CASES)
+@pytest.mark.parametrize("code", ["freeze_on", "no_first_write"])
+def test_a_refusal_before_the_pin_leaves_the_pepper_unpinned(tmp_path, case, code):
+    world = unpinned_live(tmp_path, case)
+    if code == "freeze_on":
+        world.settings.assaf_os_freeze = True
+    else:
+        world.probes.non_import_receipts = lambda workspace, epoch: 0
+    run = world.run(COMMAND)
+    assert run.code == 1 and codes(run) == [code]
+    assert pinned_fingerprint(world) is None
+
+
+@pytest.mark.parametrize("case", CASES)
+def test_a_pin_stays_when_the_transition_that_follows_is_refused(tmp_path, case, monkeypatch):
+    """E40: the pin is the one ``init`` would have made; a refused transition does not undo it."""
+    world = unpinned_live(tmp_path, case)
+
+    def refused(*args, **kwargs):
+        raise api.LedgerError("authority_changed", reason="epoch_mismatch")
+
+    monkeypatch.setattr(world.env, "transition", refused)
+    run = world.run(COMMAND)
+    assert run.code == 1 and codes(run) == ["authority_changed:epoch_mismatch"]
+    assert pinned_fingerprint(world) == cli.pepper_fingerprint(PEPPER)
+    assert world.state().states["statements"] == "shadow"
+    assert not (world.dir / cli.STATEMENTS_ACTIVATION).exists()
+
+
+def test_an_unwritable_evidence_file_after_the_transition_still_reports_the_activation(
+    live, monkeypatch,
+):
+    def unwritable(name, document):
+        raise cli.Refusal("evidence_unwritable")
+
+    monkeypatch.setattr(live.deps.evidence, "write", unwritable)
+    run = live.run(COMMAND)
+    assert run.code == 0 and run.out["outcome"] == "activated"
+    assert run.out["evidence_written"] is False and run.out["warnings"] == ["evidence_unwritable"]
+    assert live.state().states["statements"] == "active"
+
+
+def test_status_lists_the_statements_activation_evidence(live):
+    assert live.run("status").out["evidence"][cli.STATEMENTS_ACTIVATION] is None
+    assert live.run(COMMAND).code == 0
+    listed = live.run("status").out["evidence"][cli.STATEMENTS_ACTIVATION]
+    assert listed["epoch"] == 1 and listed["at"]
 
 
 @pytest.mark.parametrize("case", CASES)
@@ -171,24 +241,30 @@ def test_core_must_be_active(tmp_path, case):
     world = World(tmp_path, case)
     world.settings.os_statement_pepper = PEPPER
     assert world.run("init").code == 0
+    good_evidence(world)
     after_open(world)
+    before = untouched(world)
     run = world.run(COMMAND)
     assert run.code == 1 and codes(run) == ["core_not_active"]
     assert world.state().states == {"core": "shadow", "statements": "shadow"}
+    assert untouched(world) == before
 
 
 def test_a_fenced_statements_domain_is_refused(live):
     live.env.transition(WORKSPACE, "statements", "fenced", expected_epoch=1,
                         actor_owner_id=OWNER_ID)
+    before = untouched(live)
     run = live.run(COMMAND)
     assert run.code == 1 and codes(run) == ["authority_state_invalid"]
     assert live.state().states["statements"] == "fenced"
+    assert untouched(live) == before
 
 
 def test_a_wrong_release_sha_is_refused_before_anything(live):
+    before = untouched(live)
     run = live.run(COMMAND, approved=OTHER_SHA)
     assert run.code == 1 and codes(run) == ["release_sha_mismatch"]
-    assert live.state().states["statements"] == "shadow"
+    assert untouched(live) == before
 
 
 @pytest.mark.parametrize("case", CASES)
@@ -210,10 +286,12 @@ def test_an_unpinned_pepper_is_pinned_then_statements_activate(tmp_path, case):
 
 def test_a_short_pepper_is_refused_without_printing_it(live, caplog):
     live.settings.os_statement_pepper = "short"
+    before = untouched(live)
     with caplog.at_level(logging.DEBUG):
         run = live.run(COMMAND)
     assert run.code == 1 and codes(run) == ["pepper_invalid"]
     assert "short" not in json.dumps(run.out) + run.err
+    assert untouched(live) == before
 
 
 def test_nothing_printed_or_logged_carries_the_pepper_or_its_fingerprint(live, caplog):

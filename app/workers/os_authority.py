@@ -13,7 +13,8 @@ outcome=<ok|refused> reason=<code>``.
 Evidence lives in one VM-owned directory (``MIA_OS_AUTHORITY_DIR``, default
 ``/var/lib/mia/os-authority``). This job writes ``drain.json`` (``preflight --drain``),
 ``preflight.json`` (``preflight``, and ``preflight --drain`` once it has seen the Script live: that
-sighting ends the run of fenced probes) and ``activation.json`` (``activate``). ``freeze-plan
+sighting ends the run of fenced probes), ``activation.json`` (``activate``) and
+``statements-activation.json`` (``activate-statements``, V2-40). ``freeze-plan
 --phase drain`` starts a freeze and ``--phase revert`` ends one (the exit from every aborted
 window), and each sets ``drain.json`` aside: a drain belongs to one freeze. The operator places
 ``backup.json``, ``restore-drill.json``, ``fe-v2.json``, ``journal.json`` and ``manifest.json``
@@ -1131,7 +1132,7 @@ def cmd_status(ctx: Context) -> Result:
     settings = deps.settings
     configured = settings.assaf_os_authority_epoch
     evidence: dict[str, Any] = {}
-    for name in (DRAIN, PREFLIGHT, ACTIVATION):
+    for name in (DRAIN, PREFLIGHT, ACTIVATION, STATEMENTS_ACTIVATION):
         try:
             document = deps.evidence.read(name)
         except EvidenceError:
@@ -1319,7 +1320,9 @@ def cmd_activate_statements(ctx: Context) -> Result:
     receipt at this epoch. That last rule keeps an active ``statements`` away from RB-1, which
     fences only ``core`` and is allowed only before the first such receipt, and from the
     ``init --rearm`` bump after it. The configured pepper is then pinned exactly as ``init`` pins
-    it (write-once; a different pinned pepper refuses), so batches hash with the pinned one.
+    it (write-once; a different pinned pepper refuses), so batches hash with the pinned one. A pin
+    made here is permanent even if the transition that follows is refused; it is the same pin
+    ``init`` would have made, and ``pepper_pinned`` in the document says the pin holds.
     """
     deps = ctx.deps
     snapshot = _state(ctx)
@@ -1373,7 +1376,7 @@ def cmd_activate_statements(ctx: Context) -> Result:
             raise Refusal("pepper_mismatch") from None
         raise _ledger_refusal(error) from None
     document = {"command": "activate-statements", "ok": True, "outcome": "activated",
-                **_snapshot_document(after)}
+                "pepper_pinned": True, **_snapshot_document(after)}
     try:
         deps.evidence.write(STATEMENTS_ACTIVATION, {
             "v": 1, "kind": "statements_activation", "activated_at": _iso(deps.now()),
