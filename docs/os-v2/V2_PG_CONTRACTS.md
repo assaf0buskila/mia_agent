@@ -3420,3 +3420,55 @@ existing `assaf_os_workspace_id`, and verify its numeric owner and epoch on the 
 | `oauth_completed` | 409 | The one-time code was already issued or exchanged. |
 | `oauth_cancelled` | 409 | Revoke-all cancelled the unfinished grant. |
 | `oauth_expired` | 410 | The request or code window expired. |
+
+### E40 (2026-10-27): `mia os-authority activate-statements` moves the statements domain to `active` (V2-40)
+
+**The gap.** §5.4 allows `shadow→active` per domain, and every `statement_batch` needs `core=active` **and**
+`statements=active` (§5.3; `app/services/os_ledger/core.py`). That covers V2-26 batches and every assistant
+write: the assistant's only tools submit statement batches (§17, V2-38). But every authority transition in S
+targets `core` or fences. So after the cutover `statements` stayed `shadow`, and statements and the assistant
+could never run.
+
+**The command.** `mia os-authority activate-statements --approved-sha S` moves `statements` from `shadow` to
+`active` and never bumps the epoch. It runs under the same exact-SHA go and state lock as the other
+os-authority commands, and its runbook step is section 4 step 7 (G20, the statements release).
+
+In order, it:
+1. answers `already_active` if `statements` is already active, writing nothing new except
+   `statements-activation.json` for the current epoch with `activated_at: null`; it never invents a time;
+2. refuses `core_not_active` unless `core` is active;
+3. refuses `authority_state_invalid` when `statements` is fenced or restoring;
+4. refuses `switch_not_applied` unless the backend is `postgres`, the ledger is on and the configured epoch
+   equals the ledger's;
+5. refuses `freeze_on` unless the freeze is off;
+6. refuses `kill_switch` unless `MIA_KILL_SWITCH` is off (a malformed value already fails the settings
+   load, so the job ends `internal_error`; the code's fail-closed default only matters for fakes);
+7. refuses `no_first_write` unless there is at least one non-import receipt at this epoch;
+8. refuses `pepper_missing` unless the configured pepper is set. The settings load turns a pepper under 32
+   bytes into empty, so production sees `pepper_missing`; `pepper_invalid` is a defensive check only;
+9. pins the pepper exactly as `init` does (write-once; an equal pin is a no-op), refusing `pepper_mismatch`
+   if a different pepper is pinned. A pin made here stays even if step 10 is then refused
+   (`authority_changed:*`); it is the same pin `init` would have made;
+10. makes the transition and writes `statements-activation.json` (`kind: statements_activation`, epoch,
+    release SHA, time). The document carries `pepper_pinned: true`, and `status` lists the file.
+
+**Why `no_first_write`.** RB-1 (`rollback`) fences only `core` and is allowed only while there are zero
+non-import receipts. `init --rearm` then bumps the epoch of both domains. Requiring at least one receipt
+means an active `statements` and RB-1/rearm can never meet, so an active `statements` row is never carried
+to a new epoch.
+
+**Pepper.** The brief asked for a separate `pepper_not_pinned` refusal. Pinning the configured pepper write-once is
+what `init` already does with it, so that refusal would only add a step. The runtime refuses every statement
+operation while the pin is NULL (`statement_pepper_unpinned`), so no data hashed with another pepper can
+exist before this pin. **§12.2 is amended:** the pin is written by `mia os-authority init` **or**
+`activate-statements`, whichever runs first with the pepper configured; the write-once rule is unchanged.
+Because this step can make the permanent pin, keep the offline copy of the pepper first (runbook section 4
+step 7). The pepper and its fingerprint are never printed or logged.
+
+**Gate.** The runbook marks this step with the existing G20 (each later feature release), named in the
+G20 row. A separate "G20a" mark would be invisible to the runbook test's `G\d\d` patterns and its
+gated-command pin, so it could not be checked.
+
+**Known follow-up, not in V2-40.** `fence` fences both domains, and `restore-finish` returns only `core` to
+`active`. After a section-6 restore, `statements` stays fenced, and no command in S brings it back. A later
+chunk owns that path.

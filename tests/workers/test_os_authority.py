@@ -308,7 +308,7 @@ def test_the_precondition_table_is_the_contract_table():
     )
     assert cli.COMMANDS == (
         "init", "preflight", "freeze-plan", "activate", "fence", "rollback", "status",
-        "mirror-reset", "restore-begin", "restore-finish",
+        "mirror-reset", "restore-begin", "restore-finish", "activate-statements",
     )
 
 

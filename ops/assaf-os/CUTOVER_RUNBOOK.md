@@ -602,6 +602,24 @@ jobs paused and a verified backup before **each** of T1, T3, T5 and T6.
 6. One feature release at a time, each with its own go, deploy and acceptance, in this order:
    one-tap (V2-24 and V2-32), fast tasks (V2-33), statements (V2-26 and V2-27), assistant
    (V2-37, V2-38, V2-39). Those releases are not part of this runbook.
+7. **Go G20** (the statements release): the statements authority domain. `activate` moved only
+   `core`; every statement batch, and so every assistant write, also needs `statements` active
+   (contract §22 E40). After G17 and step 4, run
+   `sudo mia os-authority activate-statements --approved-sha S`.
+   - **Precondition:**
+     - `status` shows `core: active` and `statements: shadow`;
+     - the settings show backend `postgres`, the ledger on, the epoch matching and the freeze off;
+     - `non_import_receipts` is at least 1;
+     - the kill switch is off and `MIA_OS_STATEMENT_PEPPER` is set.
+     - **The pepper:** if `init` (G08) did not pin it, this step pins it **permanently** (write-once,
+       §12.2 as amended by E40). Keep the offline copy of the pepper first.
+   - **Verify:** exit 0, `outcome: activated`, `pepper_pinned: true`, `states.statements: active` and the
+     epoch unchanged. `status` lists `statements-activation.json`. A repeat answers `already_active`.
+   - **Rollback:** there is no return to `shadow`. The soft off switches are the feature flags:
+     `MIA_ASSAF_OS_STATEMENTS_ENABLED=false` and `MIA_ASSAF_OS_ASSISTANT_ENABLED=false`. `fence`
+     (section 6) fences both domains, `core` included, so it is an incident step, not a feature
+     rollback. `MIA_ASSAF_OS_STATEMENTS_ENABLED` (and later the assistant) only make sense after this
+     step, and each is its own G20 go.
 
 ## 5. Rollback before the first non-import receipt
 
@@ -827,11 +845,11 @@ Other refusals of the CLI:
 |---|---|
 | `import_not_promoted` | `activate` (and `preflight`, as a `gates` entry, `pending` until T5) found no committed import receipt at this epoch that binds the digest of the signed `manifest.json`: promote was skipped, ran for another manifest, or ran at an earlier epoch. Run T5 at this epoch with the signed digest |
 | `workspace_missing` | `init` has not run (step 5); `freeze-plan` needs the workspace for the epoch it prints (E29) |
-| `authority_state_invalid` | The command does not apply to the current `core` state (for example `freeze-plan --phase revert` before `rollback` has fenced it, or `--phase drain` once `core` is no longer `shadow`) |
+| `authority_state_invalid` | The command does not apply to the current `core` state (for example `freeze-plan --phase revert` before `rollback` has fenced it, or `--phase drain` once `core` is no longer `shadow`), or, for `activate-statements`, to the current `statements` state (fenced or restoring) |
 | `final_accept_flag_required` | `preflight --drain` needs `--final-accept` |
 | `drain_requires_live_sheet` | The drain snapshot needs a live Sheet; run it before T3 |
 | `drain_keys_not_applied` | `freeze-plan --phase switch` while `MIA_ASSAF_OS_LEDGER_ENABLED=true` and `MIA_ASSAF_OS_AUTHORITY_EPOCH=E` (set at T1) are not in the settings the job reads |
-| `switch_not_applied` | `freeze-plan --phase mirror` or `open` before the switch is in the settings |
+| `switch_not_applied` | `freeze-plan --phase mirror` or `open`, or `activate-statements`, before the switch is in the settings (backend `postgres`, the ledger on, the epoch matching) |
 | `rollback_after_first_write`, `rearm_after_first_write` | A non-import receipt exists at this epoch. Alone, `rollback_after_first_write` means nothing was changed and `core` is still live. `rollback` also counts again after it fences `core`: if a commit slipped in between, it adds `core_left_fenced` (below) and prints nothing else (section 5, then section 6) |
 | `core_left_fenced` | Always printed after `rollback_after_first_write`: `core` is **fenced** (`"core": "fenced"` in the JSON), the ledger refuses every OS write and the Sheet is NOT the record. Follow section 6; never return to Sheets |
 | `authority_changed:<reason>` | Another owner or epoch, or a transition the state machine does not allow |
@@ -849,6 +867,13 @@ Other refusals of the CLI:
 | `expected_epoch_required` | `mirror-reset` requires a positive `--expected-epoch` |
 | `expected_epoch_invalid` | `mirror-reset` received a malformed `--expected-epoch`; supply a positive integer |
 | `mirror_destination_missing` | `mirror-reset` needs a configured destination |
+| `core_not_active` | `activate-statements` before `core` is `active` (T6) |
+| `freeze_on` | `activate-statements` while `MIA_ASSAF_OS_FREEZE` is still true: run section 4 step 2 first |
+| `kill_switch` | `activate-statements` while `MIA_KILL_SWITCH` is on (a malformed value fails the settings load: `internal_error`) |
+| `no_first_write` | `activate-statements` before the first non-import receipt at this epoch, while RB-1 (G19) is still possible |
+| `pepper_missing` | `activate-statements` without `MIA_OS_STATEMENT_PEPPER`. The settings load turns a pepper under 32 bytes into empty, so a short one also reads as this; `pepper_invalid` is a defensive check only |
+| `pepper_mismatch` | The configured pepper differs from the pinned one (pinned by `init` or an earlier `activate-statements`). Never change the pepper |
+| `statements_activation_evidence_invalid` | Warning on `activate-statements` `already_active`: `statements-activation.json` is unreadable. The ledger state is the truth; inspect the file |
 
 For `mirror-reset`, `freeze_off` means apply T1 before retrying;
 `authority_changed:core_active` refuses a reset while core is active, and
@@ -881,7 +906,7 @@ Each needs its own explicit statement in chat, for that step only.
 | G17 | Phone acceptance, including p95 and restore RTO and RPO |
 | G18 | Removing the old workbook's `reconcileAssafOsEdit` onEdit trigger, after acceptance |
 | G19 | A rollback before the first non-import receipt |
-| G20 | Each later feature release |
+| G20 | Each later feature release; `activate-statements` (E40, section 4 step 7) is its own G20 go |
 | G21 | Each restore |
 | G22 | `fence`: stopping all ledger writes after the first non-import receipt (not pre-approved) |
 | G23 | `init --rearm`: `fenced` to `shadow` with one epoch bump, to try again after a rollback |
