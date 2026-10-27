@@ -565,8 +565,8 @@ jobs paused and a verified backup before **each** of T1, T3, T5 and T6.
   `uv run --offline python scripts/os_import.py <capture>.xlsx --workspace W --epoch E [--cancellations <cancellations>.json] --manifest-out <file>`
   printed on the same workbook and the same cancellations file: the manifest, and so its digest,
   includes the cancellations, so a dry run without them mismatches; `<file>`, a new file, is the
-  `manifest` object of `manifest.json`, re-written compact as section 2 says). The cancellations file
-  goes into `/var/lib/mia/os-import` like the captures (`root:10001`, mode 640, the directory is
+  `manifest` object of `manifest.json`, re-written compact as section 2 says). **Before the promote**,
+  the cancellations file goes into `/var/lib/mia/os-import` like the captures (`root:10001`, mode 640, the directory is
   closed to the SSH user): upload it to `/tmp`, then
   `sudo install -m 640 -o root -g 10001 /tmp/<cancellations>.json /var/lib/mia/os-import/<cancellations>.json`
   and `sudo rm -f /tmp/<cancellations>.json`. Promote runs in one transaction at
