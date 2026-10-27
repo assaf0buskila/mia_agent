@@ -413,6 +413,11 @@ async def test_a_delivered_reply_keeps_the_turns_work_even_when_it_drained_late(
     assert _approval_ids(factory) == ["apr_delivered"]
 
 
+# The turn must reach the model before its deadline. That takes ~0.08 s idle, but a loaded
+# whole-suite run once spent the old 0.3 s before the call and the test saw model.calls == 0.
+_LATE_TURN_DEADLINE_S = 2.0
+
+
 class _LateModel:
     """Answers once, after the turn deadline has already passed (review r1 MAJOR-1)."""
 
@@ -426,7 +431,8 @@ class _LateModel:
 
     def complete(self, **_kwargs) -> LlmResponse:
         self.calls += 1
-        time.sleep(0.6)
+        # The deadline was set before this call, so the answer is late however late it starts.
+        time.sleep(_LATE_TURN_DEADLINE_S + 0.5)
         return LlmResponse("late answer", (), "stop", "", 7, 5,
                            {"role": "assistant", "content": "late answer"})
 
@@ -438,7 +444,7 @@ async def test_a_drained_timeout_keeps_the_turns_ai_run(factory, monkeypatch):
         owner_agent_model="scripted-test-model",
         openai_api_key="test-only-not-a-credential",
         memory_write_enabled=False,
-        owner_turn_timeout_seconds=0.3,
+        owner_turn_timeout_seconds=_LATE_TURN_DEADLINE_S,
         owner_min_model_seconds=0.01,
         owner_final_reserve_seconds=0.01,
     )
@@ -469,4 +475,5 @@ async def test_a_drained_timeout_keeps_the_turns_ai_run(factory, monkeypatch):
     print(f"OS-RUNTIME F4e model_calls={model.calls} persist_calls={persisted} "
           f"committed_ai_runs={len(runs)}")
     assert model.calls == 1 and persisted, "the turn recorded its ai_run"
+    assert out.sent and "תם הזמן" in out.sent[0].text, "the turn never reached its deadline"
     assert len(runs) == 1, "the drained timeout rolled back the turn's ai_run row"
