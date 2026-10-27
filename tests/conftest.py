@@ -1,5 +1,6 @@
 """Isolate unit tests from the live-test .env Assaf fills locally."""
 
+import logging
 import os
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -171,5 +172,20 @@ def _assaf_os_schema_cache_is_per_test() -> None:
     assaf_os._clear_assaf_os_schema_cache()
     yield
     assaf_os._clear_assaf_os_schema_cache()
+
+
+@pytest.fixture(autouse=True)
+def _root_logging_is_per_test() -> None:
+    """A worker ``main()`` run inside a test calls ``configure_logging()``, which binds the root
+    handler to the current ``sys.stderr``. Under ``capsys`` that capture closes at teardown, and
+    every later record failed into another test's stderr. Restore what ``configure_logging()``
+    changes: the root handlers and level, and the ``uvicorn.access`` filters."""
+    root = logging.getLogger()
+    access = logging.getLogger("uvicorn.access")
+    handlers, level, filters = list(root.handlers), root.level, list(access.filters)
+    yield
+    root.handlers[:] = handlers
+    root.setLevel(level)
+    access.filters[:] = filters
 
 
