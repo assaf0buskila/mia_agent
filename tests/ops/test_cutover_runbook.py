@@ -278,6 +278,7 @@ GATED_COMMANDS = [
     ("## 6. ", r"sudo mia os-authority restore-begin", "G21", True),
     ("## 6. ", r"sudo mia os-authority restore-finish", "G21", True),
     ("## 6. ", r"sudo mia restore", "G21", True),
+    ("## 4. ", r"sudo mia os-authority activate-statements", "G20", False),
 ]
 
 

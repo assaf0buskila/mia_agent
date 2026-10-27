@@ -602,6 +602,17 @@ jobs paused and a verified backup before **each** of T1, T3, T5 and T6.
 6. One feature release at a time, each with its own go, deploy and acceptance, in this order:
    one-tap (V2-24 and V2-32), fast tasks (V2-33), statements (V2-26 and V2-27), assistant
    (V2-37, V2-38, V2-39). Those releases are not part of this runbook.
+7. **Go G20** (the statements release): the statements authority domain. `activate` moved only
+   `core`; every statement batch, and so every assistant write, also needs `statements` active
+   (contract §22 E40). After G17, with jobs resumed, run
+   `sudo mia os-authority activate-statements --approved-sha S`.
+   - **Precondition:** `status` shows `core: active` and `statements: shadow`; the settings show backend
+     `postgres`, the ledger on, the epoch matching and the freeze off; `non_import_receipts` is at least 1;
+     the kill switch is off and `MIA_OS_STATEMENT_PEPPER` is set.
+   - **Verify:** exit 0, `outcome: activated`, `states.statements: active`, the epoch unchanged, and
+     `statements-activation.json` written. A repeat answers `already_active`.
+   - **Rollback:** none to `shadow`. `fence` (section 6) fences both domains. Only after this step
+     does `MIA_ASSAF_OS_STATEMENTS_ENABLED` (and later the assistant) make sense; each is its own G20.
 
 ## 5. Rollback before the first non-import receipt
 
@@ -831,7 +842,7 @@ Other refusals of the CLI:
 | `final_accept_flag_required` | `preflight --drain` needs `--final-accept` |
 | `drain_requires_live_sheet` | The drain snapshot needs a live Sheet; run it before T3 |
 | `drain_keys_not_applied` | `freeze-plan --phase switch` while `MIA_ASSAF_OS_LEDGER_ENABLED=true` and `MIA_ASSAF_OS_AUTHORITY_EPOCH=E` (set at T1) are not in the settings the job reads |
-| `switch_not_applied` | `freeze-plan --phase mirror` or `open` before the switch is in the settings |
+| `switch_not_applied` | `freeze-plan --phase mirror` or `open`, or `activate-statements`, before the switch is in the settings (backend `postgres`, the ledger on, the epoch matching) |
 | `rollback_after_first_write`, `rearm_after_first_write` | A non-import receipt exists at this epoch. Alone, `rollback_after_first_write` means nothing was changed and `core` is still live. `rollback` also counts again after it fences `core`: if a commit slipped in between, it adds `core_left_fenced` (below) and prints nothing else (section 5, then section 6) |
 | `core_left_fenced` | Always printed after `rollback_after_first_write`: `core` is **fenced** (`"core": "fenced"` in the JSON), the ledger refuses every OS write and the Sheet is NOT the record. Follow section 6; never return to Sheets |
 | `authority_changed:<reason>` | Another owner or epoch, or a transition the state machine does not allow |
@@ -849,6 +860,12 @@ Other refusals of the CLI:
 | `expected_epoch_required` | `mirror-reset` requires a positive `--expected-epoch` |
 | `expected_epoch_invalid` | `mirror-reset` received a malformed `--expected-epoch`; supply a positive integer |
 | `mirror_destination_missing` | `mirror-reset` needs a configured destination |
+| `core_not_active` | `activate-statements` before `core` is `active` (T6) |
+| `freeze_on` | `activate-statements` while `MIA_ASSAF_OS_FREEZE` is still true: run section 4 step 2 first |
+| `kill_switch` | `activate-statements` while the kill switch is on, or when the setting is unreadable |
+| `no_first_write` | `activate-statements` before the first non-import receipt at this epoch, while RB-1 (G19) is still possible |
+| `pepper_missing`, `pepper_invalid` | `activate-statements` without `MIA_OS_STATEMENT_PEPPER`, or with one under the minimum length |
+| `pepper_mismatch` | The configured pepper differs from the one pinned at `init`. Never change the pepper |
 
 For `mirror-reset`, `freeze_off` means apply T1 before retrying;
 `authority_changed:core_active` refuses a reset while core is active, and

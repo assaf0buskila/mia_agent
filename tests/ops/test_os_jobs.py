@@ -246,6 +246,8 @@ def run_arm(tmp_path, name, argv, **host_options):
     (["init", "--approved-sha", SHA], "os-authority init --approved-sha " + SHA),
     (["status", "--approved-sha", SHA], "os-authority status --approved-sha " + SHA),
     (["activate", "--approved-sha", SHA], "os-authority activate --approved-sha " + SHA),
+    (["activate-statements", "--approved-sha", SHA],
+     "os-authority activate-statements --approved-sha " + SHA),
     (["fence", "--approved-sha", SHA], "os-authority fence --approved-sha " + SHA),
     (["mirror-reset", "--expected-epoch", "2", "--approved-sha", SHA],
      "os-authority mirror-reset --expected-epoch 2 --approved-sha " + SHA),
@@ -368,7 +370,7 @@ def test_restore_begin_never_forwards_an_inherited_completion_assertion(tmp_path
 
 
 @pytest.mark.parametrize("command", ["init", "status", "fence", "rollback", "activate",
-                                     "preflight", "freeze-plan"])
+                                     "preflight", "freeze-plan", "activate-statements"])
 def test_expected_epoch_is_refused_outside_restore_commands(tmp_path, command):
     code, output = run_arm(tmp_path, "os-authority", [
         command, "--expected-epoch", "1", "--approved-sha", SHA])

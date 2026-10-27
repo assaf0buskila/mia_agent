@@ -56,7 +56,7 @@ from app.services.os_ledger import api
 _LOG = logging.getLogger("mia.os_authority")
 
 COMMANDS = ("init", "preflight", "freeze-plan", "activate", "fence", "rollback", "status",
-            "mirror-reset", "restore-begin", "restore-finish")
+            "mirror-reset", "restore-begin", "restore-finish", "activate-statements")
 
 # Section 16: every activation precondition, in table order. Each is a refusal reason code.
 PRECONDITIONS = (
@@ -109,6 +109,7 @@ PEPPER_LABEL = b"assaf-os-statement-pepper-fingerprint.v1"
 DRAIN = "drain.json"
 PREFLIGHT = "preflight.json"
 ACTIVATION = "activation.json"
+STATEMENTS_ACTIVATION = "statements-activation.json"
 LEDGER_FENCE = "ledger-fence.json"
 RESTORE_ATTEMPT = "restore-attempt.json"
 RESTORE_SESSION = "restore-session.json"
@@ -1308,6 +1309,82 @@ def cmd_activate(ctx: Context) -> Result:
     return Result(True, document)
 
 
+def cmd_activate_statements(ctx: Context) -> Result:
+    """V2-40 (contract §22 E40): ``statements`` shadow to active. Never bumps the epoch.
+
+    ``activate`` moves only ``core``, and every statement batch (the assistant's only write, §17)
+    also needs ``statements`` active. Refused unless the cutover is finished and past its point of
+    no simple rollback: ``core`` active; the switch applied (backend postgres, ledger on, the
+    configured epoch equal); the freeze lifted; the kill switch off; at least one non-import
+    receipt at this epoch. That last rule keeps an active ``statements`` away from RB-1, which
+    fences only ``core`` and is allowed only before the first such receipt, and from the
+    ``init --rearm`` bump after it. The configured pepper is then pinned exactly as ``init`` pins
+    it (write-once; a different pinned pepper refuses), so batches hash with the pinned one.
+    """
+    deps = ctx.deps
+    snapshot = _state(ctx)
+    statements = snapshot.states["statements"]
+    if statements == "active":
+        document = {"command": "activate-statements", "ok": True, "outcome": "already_active",
+                    **_snapshot_document(snapshot)}
+        try:
+            recorded = deps.evidence.read(STATEMENTS_ACTIVATION)
+            if recorded is None or _strict_int(recorded.get("epoch")) != snapshot.epoch:
+                # Observing active does not prove when it happened: repair, never invent a time.
+                deps.evidence.write(STATEMENTS_ACTIVATION, {
+                    "v": 1, "kind": "statements_activation", "activated_at": None,
+                    "epoch": snapshot.epoch, "release_sha": ctx.approved_sha,
+                })
+        except EvidenceError:
+            document["evidence_written"] = False
+            document["warnings"] = ["statements_activation_evidence_invalid"]
+        except Refusal as error:
+            document["evidence_written"] = False
+            document["warnings"] = error.codes
+        return Result(True, document)
+    if snapshot.states["core"] != "active":
+        raise Refusal("core_not_active")
+    if statements != "shadow":
+        raise Refusal("authority_state_invalid")
+    settings = deps.settings
+    if not (
+        settings.assaf_os_backend == "postgres"
+        and settings.assaf_os_ledger_enabled is True
+        and settings.assaf_os_authority_epoch == snapshot.epoch
+    ):
+        raise Refusal("switch_not_applied")
+    if settings.assaf_os_freeze is not False:
+        raise Refusal("freeze_on")
+    if getattr(settings, "kill_switch", True) is not False:
+        raise Refusal("kill_switch")
+    if not deps.probes.non_import_receipts(deps.workspace, snapshot.epoch):
+        raise Refusal("no_first_write")
+    pepper = getattr(settings, "os_statement_pepper", "") or ""
+    if not pepper:
+        raise Refusal("pepper_missing")
+    try:
+        deps.admin.pin_statement_pepper(deps.workspace, pepper_fingerprint(pepper))
+        after = deps.admin.transition(
+            deps.workspace, "statements", "active", expected_epoch=snapshot.epoch,
+            actor_owner_id=deps.owner_id,
+        )
+    except api.LedgerError as error:
+        if error.reason == "statement_pepper_mismatch":
+            raise Refusal("pepper_mismatch") from None
+        raise _ledger_refusal(error) from None
+    document = {"command": "activate-statements", "ok": True, "outcome": "activated",
+                **_snapshot_document(after)}
+    try:
+        deps.evidence.write(STATEMENTS_ACTIVATION, {
+            "v": 1, "kind": "statements_activation", "activated_at": _iso(deps.now()),
+            "epoch": after.epoch, "release_sha": ctx.approved_sha,
+        })
+    except Refusal as error:
+        document["evidence_written"] = False  # the ledger state is the authority, not this file
+        document["warnings"] = error.codes
+    return Result(True, document)
+
+
 def _fence_ledger(
     ctx: Context, snapshot: api.AuthoritySnapshot, domains: Sequence[str],
 ) -> tuple[api.AuthoritySnapshot, dict[str, Any]]:
@@ -1877,6 +1954,8 @@ def _dispatch(ctx: Context, args: argparse.Namespace) -> Result:
         return cmd_freeze_plan(ctx, phase=args.phase)
     if command == "activate":
         return cmd_activate(ctx)
+    if command == "activate-statements":
+        return cmd_activate_statements(ctx)
     if command == "fence":
         return cmd_fence(ctx)
     if command == "mirror-reset":
