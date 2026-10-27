@@ -791,10 +791,11 @@ def test_rollback_needs_core_active_and_its_rearm_step_needs_the_sha():
         assert "no shadow guard" in flat_section(heading), heading
     rearm = bullet_with(section_of("## 5. "), r"sudo mia os-authority init --rearm")
     rearm = re.sub(r"\s+", " ", rearm)
-    assert "`rollback` prints give `mia os-authority init --rearm` without it" in rearm
+    caveat = "`rollback` prints give `mia os-authority init --rearm` without it" in rearm
+    omitted = not any("--approved-sha" in step for step in cli.rollback_steps(1))
+    # Section 5's caveat stands exactly while rollback_steps omits --approved-sha.
+    assert caveat == omitted, (caveat, omitted)
     assert "exact approved SHA required" in SCRIPT
-    # When rollback_steps prints --approved-sha itself, drop that caveat from section 5.
-    assert not any("--approved-sha" in step for step in cli.rollback_steps(1))
 
 
 def test_dry_preflight_offline_copies_and_the_e37_binding_key():

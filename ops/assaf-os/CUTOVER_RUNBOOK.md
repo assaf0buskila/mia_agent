@@ -78,7 +78,7 @@ fill) and [APP_ROLE_DEMOTE.md](../../docs/runbooks/APP_ROLE_DEMOTE.md) (step 2 i
 | 5 | `mia os-authority init` | G08 | Idempotent; nothing to undo before an import |
 | 6 | E36: merged PR SHAs for WP1/E35 (#199) and WP2 (#197); green CI `os-cutover-postgres` on `S`; PC `restore-drill.json` < 7 days before activation; Assaf's quiet window with section 5 rollback ready before the first non-import receipt | G09 | Stop before wave 6 if any condition fails |
 | 6 (reference only; NOT_INCLUDED by E36) | Rehearsal (V2-35a, V2-35) on a copy | Former G09; replaced by E36 above | The copy is thrown away |
-| 7 | Wave 6: T1 to T7, the first write, phone acceptance | G10 to G25 | Section 5 |
+| 7 | Wave 6: T1 to T7, the first write, phone acceptance | G10 to G25 | Section 5 (after `activate`; before it, T1/T3's revert) |
 
 Every production step above pauses the jobs and takes a verified backup first (section 0). Steps 1 to
 5 touch no business data: the OS stays on Sheets until T6.
@@ -290,11 +290,13 @@ Every production step above pauses the jobs and takes a verified backup first (s
   are copied to offline storage; the values are never shown. After the first non-import receipt a
   restore (section 6) is the only recovery and needs the backup key, and the pepper is write-once
   per workspace.
-- **Verify**: record all four evidence items and Assaf's G09 statement in `OS_CUTOVER_GO_NO_GO.md`.
-  Missing, stale or mismatched evidence stops wave 6. A release SHA or window change requires fresh
-  matching evidence and an explicit G09 statement.
-- **Rollback**: do not start wave 6 if any condition fails. Once the live run starts, section 5 applies
-  only before the first non-import receipt; after that boundary follow section 6.
+- **Verify**: record all four evidence items and Assaf's G09 statement in `OS_CUTOVER_GO_NO_GO.md`,
+  and, separately, Assaf's offline-copy confirmation (not an E36 condition). Missing, stale or
+  mismatched evidence stops wave 6. A release SHA or window change requires fresh matching evidence
+  and an explicit G09 statement.
+- **Rollback**: do not start wave 6 if any condition fails. Once the live run starts, section 5 (after
+  `activate`; before it, T1/T3's revert) applies only before the first non-import receipt; after that
+  boundary follow section 6.
 
 ## 2. The evidence directory
 
@@ -317,8 +319,9 @@ ISO-8601 with an offset (`2026-10-20T12:00:00Z`); a naive time proves nothing an
 | `manifest.json` | operator | `manifest_not_signed`, `capture_before_fence` | The import manifest and Assaf's sign-off |
 
 The operator files can be staged before the window. A dry
-`sudo mia os-authority preflight --approved-sha S` run then (the Sheet live, the freeze off, no
-`drain.json` yet) always refuses `sheets_not_fenced,freeze_off,sheets_pending_proposals` (details
+`sudo mia os-authority preflight --approved-sha S` run then, after step 5 (`init`; before it the
+command refuses `workspace_missing`), with the Sheet live, the freeze off and no `drain.json` yet,
+always refuses `sheets_not_fenced,freeze_off,sheets_pending_proposals` (details
 `live`, none and `no_drain_evidence`). That is the expected result, not a failure: read the checks of
 the staged files instead. Any further code is a real finding, except `sheets_unknown_receipts` and
 `approval_cards_open`, which T1 settles. The run only rewrites `preflight.json` (`sheets: live`, no
@@ -531,7 +534,9 @@ jobs paused and a verified backup before **each** of T1, T3, T5 and T6.
 
   Run it in a shell on the VM (or upload it and run it with `sudo bash`), never as a one-line
   `gcloud compute ssh --command` with a redirect or a glob: the SSH user's shell opens the redirect
-  and expands the glob before `sudo` runs. Both sha256 values must equal the recorded ones.
+  and expands the glob before `sudo` runs. Both sha256 values must equal the recorded ones. Once
+  they match, remove the business-data copies from `/tmp`:
+  `sudo rm -f /tmp/capture1.xlsx /tmp/capture2.xlsx`.
 - **Drift proof**: `uv run --offline python scripts/os_workbook_diff.py capture1.xlsx capture2.xlsx`
   (local, no network). It prints the number of changed cells and their `(sheet, cell)` refs, never the
   values. **It must be zero.** That count is `drift_changed_cells` in the sign-off.
@@ -557,9 +562,14 @@ jobs paused and a verified backup before **each** of T1, T3, T5 and T6.
   `sudo mia os-job os-import /var/lib/mia/os-import/<capture>.xlsx --workspace W --epoch E --promote <digest>`,
   plus `--cancellations /var/lib/mia/os-import/<cancellations>.json` when the manifest lists any (the
   digest is the one the dry run
-  `uv run --offline python scripts/os_import.py <capture>.xlsx --workspace W --epoch E --manifest-out <file>`
-  printed on the same workbook and cancellations; `<file>`, a new file, is the `manifest` object of
-  `manifest.json`, re-written compact as section 2 says). Promote runs in one transaction at
+  `uv run --offline python scripts/os_import.py <capture>.xlsx --workspace W --epoch E [--cancellations <cancellations>.json] --manifest-out <file>`
+  printed on the same workbook and the same cancellations file: the manifest, and so its digest,
+  includes the cancellations, so a dry run without them mismatches; `<file>`, a new file, is the
+  `manifest` object of `manifest.json`, re-written compact as section 2 says). The cancellations file
+  goes into `/var/lib/mia/os-import` like the captures (`root:10001`, mode 640, the directory is
+  closed to the SSH user): upload it to `/tmp`, then
+  `sudo install -m 640 -o root -g 10001 /tmp/<cancellations>.json /var/lib/mia/os-import/<cancellations>.json`
+  and `sudo rm -f /tmp/<cancellations>.json`. Promote runs in one transaction at
   `core=shadow`, writes every record with its Sheets revision, refuses orphans unless the manifest
   lists them under `cancellations`, and is idempotent within an epoch.
   Its refusals print `os_import op=promote outcome=refused reason=<code>` (plus `detail=` when there
@@ -568,13 +578,14 @@ jobs paused and a verified backup before **each** of T1, T3, T5 and T6.
   `ledger_integrity_failed`, `target_changed` (`import_target_deleted`, `import_revision_not_newer`),
   `authority_not_active`, `authority_changed`, `binding_mismatch` (`--workspace` or `--epoch` is not
   the job's own), `invalid_arguments` (a bad command line, printed as `op=stage`), and
-  `ledger_unavailable` with detail `epoch_unset` (the T1 keys are not applied).
+  `ledger_unavailable` with detail `epoch_unset` or `ledger_disabled` (the T1 keys are not applied).
 - **Verify**: `sudo mia os-authority status --approved-sha S`: `states.core: shadow`, epoch `E`,
   `non_import_receipts: 0`. Promote leaves one committed `import` receipt at epoch `E`, and its
   proposal carries the signed digest: `preflight` and `activate` look for exactly that, so a skipped
   promote cannot activate (`import_not_promoted`, T6).
 - **Rollback**: before activation nothing serves from the ledger. If the import is wrong, T6 does not
-  happen; fix the capture and re-stage (a new batch), or section 5.
+  happen; fix the capture and re-stage (a new batch), or T3's rollback (`freeze-plan --phase revert`,
+  which accepts `shadow`); never section 5 before `activate`.
 
 ### T6: activate, then switch the backend
 
