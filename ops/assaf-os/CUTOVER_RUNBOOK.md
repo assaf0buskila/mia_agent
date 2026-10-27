@@ -16,7 +16,8 @@ fill) and [APP_ROLE_DEMOTE.md](../../docs/runbooks/APP_ROLE_DEMOTE.md) (step 2 i
 ## How to read this
 
 - **Operator** runs commands. On the VM that is `sudo mia ...`. Deploys and settings pushes run from a
-  clean checkout at the approved SHA on Assaf's PC (`ops/gcp/deploy.ps1`, `ops/gcp/push-settings.ps1`).
+  clean checkout at the approved SHA on Assaf's PC (`ops/gcp/deploy.ps1`, `ops/gcp/push-settings.ps1`;
+  section 0 rule 5 gives the push's one full form).
 - **Assaf** is the owner. **Every line marked `GO` needs his explicit statement in chat for that one
   step**, with the exact target and SHA. A go is per step and per session. A past approval, a passed
   rehearsal (reference only; NOT_INCLUDED by E36), a green preflight and this document are not a go.
@@ -38,7 +39,12 @@ fill) and [APP_ROLE_DEMOTE.md](../../docs/runbooks/APP_ROLE_DEMOTE.md) (step 2 i
    only if they were running before the window (step 7 end). `mia os-import` runs while paused.
 2. **Take a verified backup first.** `sudo mia backup` writes a dump under `/var/lib/mia/backups`;
    validate it with `pg_restore --list` through the postgres container and discard the listing. Also
-   run the off-host status (below): it must exit 0 and its dump must be under one hour old.
+   run the off-host status, `sudo python3 /opt/mia/backup/backup_offsite.py --status` (section 2). It
+   prints one JSON line and exits 1 (`healthy: false`) when no off-host dump is recorded or the last
+   one is more than 45 minutes old (`age_minutes`). Exit 0 is not enough on its own: a failed slot
+   after a good one still exits 0 with `last_failure_code` set, and that also stops the step. The
+   CLI's own bound is looser: `backup_too_old` accepts a `backup.json` whose `last_success_utc` is
+   under 1 h old when `activate` runs.
 3. **Exact SHA.** Deploy only from a clean checkout at `S`, with CI green on that exact head.
    After every deploy or `sudo mia settings`, `/health` must show `deployment.commit_sha == S` and
    `/health/ready` must answer 200.
@@ -47,8 +53,13 @@ fill) and [APP_ROLE_DEMOTE.md](../../docs/runbooks/APP_ROLE_DEMOTE.md) (step 2 i
    Never run two at once and never work around the lock.
 5. **Keys that matter**: `MIA_ASSAF_OS_FREEZE`, `MIA_ASSAF_OS_BACKEND`, `MIA_ASSAF_OS_LEDGER_ENABLED`,
    `MIA_ASSAF_OS_AUTHORITY_EPOCH` and `MIA_ASSAF_OS_MIRROR_ENABLED` change only in the step that names
-   them, through `freeze-plan`, then `ops/gcp/push-settings.ps1 -PatchSecret -Set @{ KEY = "value" }`,
-   then `sudo mia settings`. All start off (`sheets`, `false`, `0`, `false`, `false`). **When**
+   them, through `freeze-plan`, then a settings push, then `sudo mia settings`. **The push is always
+   this full form** (PowerShell, clean checkout at `S` on Assaf's PC):
+   `powershell -NoProfile -Command "& .\ops\gcp\push-settings.ps1 -ProjectId mia-assafweb -PatchSecret -Set @{ KEY = 'value' }"`.
+   `-ProjectId` is mandatory (`ops/gcp/push-settings.ps1`); run it through `-Command "& ..."`, not
+   `-File`, or the `-Set @{}` hashtable does not bind; quote each value with single quotes, and put
+   several keys in one hashtable separated by `;`. Every later "set the key(s)" in this runbook means
+   this form. The five keys start off (`sheets`, `false`, `0`, `false`, `false`). **When**
    (contract section 22 E29): T1 sets `FREEZE`, `LEDGER_ENABLED` and `AUTHORITY_EPOCH` (the import of
    T4 and T5 needs the last two), T6 sets `BACKEND` only, T7 sets `MIRROR_ENABLED`, and the `open`
    phase clears `FREEZE`.
@@ -274,6 +285,11 @@ Every production step above pauses the jobs and takes a verified backup first (s
   4. **Live window and rollback**: record Assaf's quiet window as his explicit statement in chat,
      naming `S` and the UTC window, with section 5's rollback ready before the first non-import receipt.
      Every G10-G17 gate keeps its explicit go; the window statement and G09 do not approve those steps.
+- **Offline copies, before the window** (not an E36 condition, but wave 6 does not start without it):
+  Assaf confirms in chat that `mia-backup.key` and the statement pepper (`MIA_OS_STATEMENT_PEPPER`)
+  are copied to offline storage; the values are never shown. After the first non-import receipt a
+  restore (section 6) is the only recovery and needs the backup key, and the pepper is write-once
+  per workspace.
 - **Verify**: record all four evidence items and Assaf's G09 statement in `OS_CUTOVER_GO_NO_GO.md`.
   Missing, stale or mismatched evidence stops wave 6. A release SHA or window change requires fresh
   matching evidence and an explicit G09 statement.
@@ -285,9 +301,9 @@ Every production step above pauses the jobs and takes a verified backup first (s
 The job reads and writes one VM-owned directory, `/var/lib/mia/os-authority` (the CLI's
 `MIA_OS_AUTHORITY_DIR`, mounted into the container). The wrapper creates it owned by the job's user and
 re-owns its contents at each run, so operator-placed files need no special mode. A symbolic link, a
-non-file or a file over 1 MB is refused, and a present file the CLI cannot use fails **its** check
-closed (`evidence_unreadable`). Timestamps are ISO-8601 with an offset (`2026-10-20T12:00:00Z`); a naive
-time proves nothing and fails.
+non-file or a file over 1 MiB (1,048,576 bytes, the CLI's `MAX_EVIDENCE_BYTES`) is refused, and a
+present file the CLI cannot use fails **its** check closed (`evidence_unreadable`). Timestamps are
+ISO-8601 with an offset (`2026-10-20T12:00:00Z`); a naive time proves nothing and fails.
 
 | File | Written by | Used by | Notes |
 |---|---|---|---|
@@ -300,12 +316,25 @@ time proves nothing and fails.
 | `journal.json` | operator | `journal_capacity` | V2-00 measure of the `_assaf_os_*` tabs |
 | `manifest.json` | operator | `manifest_not_signed`, `capture_before_fence` | The import manifest and Assaf's sign-off |
 
-The shapes below are tested against the CLI itself (`tests/ops/test_cutover_runbook.py`), with the
-bracketed values replaced. Keys are exact: an extra or missing key fails the check.
+The operator files can be staged before the window. A dry
+`sudo mia os-authority preflight --approved-sha S` run then (the Sheet live, the freeze off, no
+`drain.json` yet) always refuses `sheets_not_fenced,freeze_off,sheets_pending_proposals` (details
+`live`, none and `no_drain_evidence`). That is the expected result, not a failure: read the checks of
+the staged files instead. Any further code is a real finding, except `sheets_unknown_receipts` and
+`approval_cards_open`, which T1 settles. The run only rewrites `preflight.json` (`sheets: live`, no
+fence recorded).
 
-`backup.json`: the output of `sudo python3 <installed path>/backup_offsite.py --status > backup.json`
-on the VM (exit 0 means healthy). The CLI reads `last_success_utc`: the dump must be under one hour old
-when `activate` runs, so run it again right before.
+The shapes below are tested against the CLI itself (`tests/ops/test_cutover_runbook.py`), with the
+bracketed values replaced. For `fe-v2.json`, `journal.json` and `manifest.json` the keys are exact: an
+extra or missing key fails the check. `backup.json` and `restore-drill.json` are read leniently: the
+CLI reads only `last_success_utc`, and `started_utc` and `passed`, and ignores every other key. Every
+evidence file must be at most 1 MiB.
+
+`backup.json`: the output of `sudo python3 /opt/mia/backup/backup_offsite.py --status > backup.json`
+on the VM (the path `ops/gcp/backup/install_on_vm.py` installs). Exit 0 means its own 45-minute bound
+held; check that the line carries no `last_failure_code` (section 0 rule 2). The CLI reads
+`last_success_utc`: the dump must be under one hour old when `activate` runs, so run it again right
+before.
 
 <!-- evidence:backup.json -->
 ```json
@@ -349,7 +378,11 @@ statement in chat, written down by the operator, and the CLI verifies every bind
 the same digest `promote` is given); the sign-off names the same digest and the same capture time; it
 names Assaf's numeric Telegram owner id; it was made **after** the capture and not in the future; and
 the drift proof (capture #1 against capture #2, zero changed cells) is in it. `manifest` is the object
-V2-30 prints for the staged batch.
+that the dry run of `scripts/os_import.py` (no `--stage`, no `--promote`; T5) writes with
+`--manifest-out <file>`; `--stage` prints only counts, never the object. The dry run writes that file
+with `indent=2`. Write `manifest.json` compact (for example
+`json.dumps(doc, ensure_ascii=False, separators=(",", ":"))`, UTF-8) and check before placing it that
+it is at most 1 MiB; a larger file fails `manifest_not_signed` with `evidence_unreadable`.
 
 <!-- evidence:manifest.json -->
 ```json
@@ -369,7 +402,8 @@ jobs paused and a verified backup before **each** of T1, T3, T5 and T6.
 - **Go G10** drain/freeze and final reconcile in the approved window.
 - **Command**: `sudo mia os-authority freeze-plan --phase drain --approved-sha S` prints
   `MIA_ASSAF_OS_FREEZE=true`, `MIA_ASSAF_OS_LEDGER_ENABLED=true` and `MIA_ASSAF_OS_AUTHORITY_EPOCH=E`,
-  with the backend still `sheets`. Set them with `push-settings.ps1`, then `sudo mia settings`. It
+  with the backend still `sheets`. Set them with `push-settings.ps1` (section 0 rule 5's full form,
+  the three keys in one `-Set`), then `sudo mia settings`. It
   names `E` from the ledger, so `init` (step 5) has run, and it refuses (`authority_state_invalid`) once
   `core` is no longer `shadow`.
   **Why the ledger keys come now, not at T6** (contract section 22 E29): the import (G24 stage at T4,
@@ -383,7 +417,9 @@ jobs paused and a verified backup before **each** of T1, T3, T5 and T6.
   **Each freeze starts a new drain**: the command also renames an existing `drain.json` (the drain of
   an earlier freeze, for example an aborted window) to `drain-superseded-<UTC>.json` and refuses
   (`evidence_unwritable`) if it cannot. Run it once, at the start of T1: running it again after T2
-  voids that T2 and T2 must be redone.
+  voids that T2 and T2 must be redone. **Always pass `--phase`**: a bare `freeze-plan` with no
+  `--phase` is `--phase drain` (the CLI's default), so after T2, while `core` is `shadow`, it too
+  sets `drain.json` aside.
 - **What the freeze does**: it refuses every **new** intent on both backends with 503 `os_frozen` (a
   proposal from the OS screen or from Mia, a lead card). Approve and reject stay allowed, so every
   pending item can settle. The OS workbook leaves Mia's Sheets allow-list. Proved path by path in
@@ -419,7 +455,8 @@ jobs paused and a verified backup before **each** of T1, T3, T5 and T6.
   still live, i.e. before T3.
 - **Verify**: exit 0, and `drain.json` records `sheets_pending: 0`, `sheets_unknown_receipts: 0`,
   `cards_open: 0`, `freeze: true`. A nonzero count refuses with the matching code; settle it and run it
-  again (another snapshot is allowed).
+  again (another snapshot is allowed). From here on, never run `freeze-plan` without `--phase`: the
+  default is `--phase drain`, which sets this `drain.json` aside and voids T2.
 - **Rollback**: none needed; unfreeze as in T1 if you stop here. **A retry redoes T2**: `drain.json`
   belongs to the freeze it was taken under, and the retry's `freeze-plan --phase drain` (T1) sets it
   aside. Go on to T3 promptly after a good T2 (see `drain_stale` in section 7).
@@ -480,6 +517,21 @@ jobs paused and a verified backup before **each** of T1, T3, T5 and T6.
 - **Capture #1 and #2**: download the archive workbook as `.xlsx` (hidden journals included), twice,
   a few minutes apart, both **after** `fence_probe_at`. Record UTC, size and sha256 of each. Copy them
   into `/var/lib/mia/os-import` as `root:10001`, mode 640 (the import job mounts it read-only).
+  That directory exists only after the wrapper's `os-import` arm has run once (`ops/gcp/vm/mia`
+  creates it there), and it is closed to the SSH user. Upload both files to the VM's `/tmp` (for
+  example with `gcloud compute scp`), then create the directory and install them as root, in one
+  script that names each file:
+
+  ```bash
+  sudo sh -euc '
+    install -d -m 750 -o root -g 10001 /var/lib/mia/os-import
+    install -m 640 -o root -g 10001 /tmp/capture1.xlsx /tmp/capture2.xlsx /var/lib/mia/os-import/
+    sha256sum /var/lib/mia/os-import/capture1.xlsx /var/lib/mia/os-import/capture2.xlsx'
+  ```
+
+  Run it in a shell on the VM (or upload it and run it with `sudo bash`), never as a one-line
+  `gcloud compute ssh --command` with a redirect or a glob: the SSH user's shell opens the redirect
+  and expands the glob before `sudo` runs. Both sha256 values must equal the recorded ones.
 - **Drift proof**: `uv run --offline python scripts/os_workbook_diff.py capture1.xlsx capture2.xlsx`
   (local, no network). It prints the number of changed cells and their `(sheet, cell)` refs, never the
   values. **It must be zero.** That count is `drift_changed_cells` in the sign-off.
@@ -491,8 +543,10 @@ jobs paused and a verified backup before **each** of T1, T3, T5 and T6.
   id-less rows are quarantined, never dropped. Resolve every quarantined row without a bypass.
 - **Verify**: zero unresolved quarantine; the manifest counts, ids, revisions, per-currency totals,
   refund chains and references equal the capture.
-- **Rollback**: nothing is promoted; a staged batch is inert. Re-staging an unchanged workbook after a
-  rollback is a new batch (unique per epoch).
+- **Rollback**: nothing is promoted; a staged batch is inert. Re-staging the same workbook makes a new
+  batch only at a new epoch (after `init --rearm`, G23): the batch key includes the epoch. At the same
+  epoch it answers `already_staged`, with the exit status the first staging had (`batch=` names what
+  that batch can be: `validated_or_imported`, `quarantined` or `failed`).
 
 ### T5: sign the manifest, promote the import
 
@@ -502,11 +556,19 @@ jobs paused and a verified backup before **each** of T1, T3, T5 and T6.
   `manifest.json` (section 2) with his sign-off, and the exact digest is passed to promote:
   `sudo mia os-job os-import /var/lib/mia/os-import/<capture>.xlsx --workspace W --epoch E --promote <digest>`,
   plus `--cancellations /var/lib/mia/os-import/<cancellations>.json` when the manifest lists any (the
-  digest is the one `uv run --offline python scripts/os_import.py <capture>.xlsx --workspace W --epoch E`
-  printed on the same workbook and cancellations). Promote runs in one transaction at `core=shadow`, writes every record with its Sheets revision, refuses orphans unless
-  the manifest lists them under `cancellations`, and is idempotent within an epoch.
-  `import_quarantine_unresolved`, `manifest_digest_mismatch`, `import_orphan_rows` and
-  `authority_not_active` are its refusals.
+  digest is the one the dry run
+  `uv run --offline python scripts/os_import.py <capture>.xlsx --workspace W --epoch E --manifest-out <file>`
+  printed on the same workbook and cancellations; `<file>`, a new file, is the `manifest` object of
+  `manifest.json`, re-written compact as section 2 says). Promote runs in one transaction at
+  `core=shadow`, writes every record with its Sheets revision, refuses orphans unless the manifest
+  lists them under `cancellations`, and is idempotent within an epoch.
+  Its refusals print `os_import op=promote outcome=refused reason=<code>` (plus `detail=` when there
+  is one): `import_quarantine_unresolved`, `manifest_digest_mismatch`, `import_orphan_rows`,
+  `validation_error` (for example `cancellation_not_live`), `idempotency_mismatch`,
+  `ledger_integrity_failed`, `target_changed` (`import_target_deleted`, `import_revision_not_newer`),
+  `authority_not_active`, `authority_changed`, `binding_mismatch` (`--workspace` or `--epoch` is not
+  the job's own), `invalid_arguments` (a bad command line, printed as `op=stage`), and
+  `ledger_unavailable` with detail `epoch_unset` (the T1 keys are not applied).
 - **Verify**: `sudo mia os-authority status --approved-sha S`: `states.core: shadow`, epoch `E`,
   `non_import_receipts: 0`. Promote leaves one committed `import` receipt at epoch `E`, and its
   proposal carries the signed digest: `preflight` and `activate` look for exactly that, so a skipped
@@ -519,7 +581,9 @@ jobs paused and a verified backup before **each** of T1, T3, T5 and T6.
 - **Preflight**: put the fresh `backup.json`, `restore-drill.json`, `fe-v2.json` and `journal.json` in the
   evidence directory (section 2) and run `sudo mia os-authority preflight --approved-sha S`. It must
   print `ready_to_activate: true` with all 15 checks `pass` and the one entry of `gates`
-  (`import_not_promoted`) `pass`. A check whose operator evidence is not there
+  (`import_not_promoted`) `pass`. **An empty `gates` list is not a pass**: the gate is left out when
+  `manifest.json` is missing, unusable or not signed (`manifest_not_signed` says which), so the
+  promote was not checked at all. A check whose operator evidence is not there
   yet shows `pending` here and **still refuses `activate`**; the gate shows `pending` (detail
   `no_import_receipt`) until T5's promote has run at this epoch. If this preflight prints `sheets: unknown`
   (a timeout or a transport error on the probe), run it again: an `unknown` probe carries the recorded
@@ -537,7 +601,9 @@ jobs paused and a verified backup before **each** of T1, T3, T5 and T6.
 - **Switch**: `sudo mia os-authority freeze-plan --phase switch --approved-sha S` prints exactly
   `MIA_ASSAF_OS_BACKEND=postgres` and nothing else: `MIA_ASSAF_OS_LEDGER_ENABLED=true` and
   `MIA_ASSAF_OS_AUTHORITY_EPOCH=E` were set at T1 and are not repeated (contract section 22 E29). It
-  refuses `drain_keys_not_applied` if they are not in the settings the job reads.
+  refuses `drain_keys_not_applied` if they are not in the settings the job reads,
+  `authority_state_invalid` unless `core` is `active` (run `activate` first), and `freeze_off` if the
+  freeze is not on.
   **The freeze stays on.** Set the key, then `sudo mia settings` (T6 is `mia settings` and then `/health`;
   there is no task to replace on the VM).
 - **Verify**: `/health` shows `deployment.commit_sha == S`; `/health/ready` is 200;
@@ -545,7 +611,11 @@ jobs paused and a verified backup before **each** of T1, T3, T5 and T6.
   `settings.epoch_matches: true`, `settings.freeze: true`. This release's `/health` reports the SHA and
   not the epoch, so the epoch is read from `status` and from the v2 read binding of the OS screen
   (`source: postgresql`, `authority_epoch: E`). Assaf opens the OS on his phone: it loads, read-only.
-- **Rollback**: before the first non-import receipt, section 5.
+- **Rollback**: read `status` first. With `core: shadow` (stopped before `activate`, or at a refused
+  one) the way back is T3's rollback, with `freeze-plan --phase revert` (it accepts `shadow`). Never
+  `rollback` there: it has no shadow guard, fences the shadow core, and a retry then
+  needs `init --rearm` (G23) and an epoch bump. With `core: active`, before the first non-import
+  receipt, section 5.
 
 ### T7: mirror and the third capture
 
@@ -576,7 +646,9 @@ jobs paused and a verified backup before **each** of T1, T3, T5 and T6.
   access.
 - **Command**: `sudo mia os-authority freeze-plan --phase mirror --approved-sha S` prints
   `MIA_ASSAF_OS_MIRROR_ENABLED=true`. Set it, `sudo mia settings`. The worker projects the whole import
-  (an `import` event is a full projection) and reads it back.
+  (an `import` event is a full projection) and reads it back. It refuses `authority_state_invalid`
+  unless `core` is `active`, `freeze_off` if the freeze is not on, and `switch_not_applied` until the
+  T6 switch is in the settings.
 - **Verify**: `sudo mia os-authority status --approved-sha S` shows `mirror: verified`; the OS screen shows
   "Sheet verified HH:MM (vN)". A mirror that stays `unverified` or `unknown` is not a pass.
 - **Third capture**: download the **archive** workbook once more as `.xlsx` and diff it against capture
@@ -591,7 +663,8 @@ jobs paused and a verified backup before **each** of T1, T3, T5 and T6.
    and `mirror: verified`. Record it.
 2. **Go G16** admitting the first non-import PG write and performing the planned phone actions. Then
    `sudo mia os-authority freeze-plan --phase open --approved-sha S` prints `MIA_ASSAF_OS_FREEZE=false`
-   (it refuses `switch_not_applied` until the switch is in the settings). Set it, `sudo mia settings`.
+   (it refuses `switch_not_applied` until the switch is in the settings, and `authority_state_invalid`
+   unless `core` is `active`). Set it, `sudo mia settings`.
    **From the first non-import receipt, including a rejected decision, there is no simple rollback.**
 3. **Go G17** phone acceptance, including the p95 and the restore RTO and RPO:
    `docs/runbooks/OS_PHONE_ACCEPTANCE.md` (twenty real actions, p95 under 4000 ms, receipts matching).
@@ -626,6 +699,12 @@ jobs paused and a verified backup before **each** of T1, T3, T5 and T6.
 Allowed **only** while `non_import_receipts` is 0 at the current epoch. After that the CLI refuses
 (`rollback_after_first_write`) and nothing here applies.
 
+**Not before `activate`.** This section starts from `core: active`. While `status` shows
+`core: shadow` (T1 up to a refused `activate` at T6), never run `rollback`: it has no shadow guard, so
+it fences the shadow core, and a retry then needs `init --rearm` (G23) and an epoch bump. The way back
+before activation is `freeze-plan --phase revert`, which accepts `shadow`: T1's rollback, or T3's once
+the Script has been fenced.
+
 - **Go G19** the rollback itself.
 - **Command**: `sudo mia os-authority rollback --approved-sha S`. It sets `core` to `fenced` (the ledger
   then refuses every write) and prints the steps. It is idempotent. It counts the non-import receipts
@@ -651,7 +730,9 @@ Allowed **only** while `non_import_receipts` is 0 at the current epoch. After th
 - **Go G23** the re-arm. **Try again later**: `sudo mia os-authority init --rearm --approved-sha S` moves
   `core` from `fenced` to `shadow` with **one** epoch bump (idempotent; it refuses after a business
   write). It flips the authority state on production, so it needs its own go even though the rollback
-  that came before it had one. Then repeat T1 to T7 from a fresh drain, a fresh fence and new captures:
+  that came before it had one. Use exactly this form, with `--approved-sha S`: the `next_steps` that
+  `rollback` prints give `mia os-authority init --rearm` without it, and the VM wrapper refuses that
+  (`exact approved SHA required`). Then repeat T1 to T7 from a fresh drain, a fresh fence and new captures:
   the import request id and batch key include the epoch, so the same workbook imports again at the new
   epoch. There is no `fenced` to `active`.
   Before activation on the retry, use the E35a mirror rule in section 7: empty or a clean last
@@ -845,7 +926,7 @@ Other refusals of the CLI:
 |---|---|
 | `import_not_promoted` | `activate` (and `preflight`, as a `gates` entry, `pending` until T5) found no committed import receipt at this epoch that binds the digest of the signed `manifest.json`: promote was skipped, ran for another manifest, or ran at an earlier epoch. Run T5 at this epoch with the signed digest |
 | `workspace_missing` | `init` has not run (step 5); `freeze-plan` needs the workspace for the epoch it prints (E29) |
-| `authority_state_invalid` | The command does not apply to the current `core` state (for example `freeze-plan --phase revert` before `rollback` has fenced it, or `--phase drain` once `core` is no longer `shadow`), or, for `activate-statements`, to the current `statements` state (fenced or restoring) |
+| `authority_state_invalid` | The command does not apply to the current `core` state (for example `freeze-plan --phase revert` before `rollback` has fenced it, `--phase drain` once `core` is no longer `shadow`, or `--phase switch`, `mirror` or `open` while `core` is not `active`), or, for `activate-statements`, to the current `statements` state (fenced or restoring) |
 | `final_accept_flag_required` | `preflight --drain` needs `--final-accept` |
 | `drain_requires_live_sheet` | The drain snapshot needs a live Sheet; run it before T3 |
 | `drain_keys_not_applied` | `freeze-plan --phase switch` while `MIA_ASSAF_OS_LEDGER_ENABLED=true` and `MIA_ASSAF_OS_AUTHORITY_EPOCH=E` (set at T1) are not in the settings the job reads |
@@ -875,6 +956,8 @@ Other refusals of the CLI:
 | `pepper_mismatch` | The configured pepper differs from the pinned one (pinned by `init` or an earlier `activate-statements`). Never change the pepper |
 | `statements_activation_evidence_invalid` | Warning on `activate-statements` `already_active`: `statements-activation.json` is unreadable. The ledger state is the truth; inspect the file |
 
+`freeze-plan --phase switch` and `--phase mirror` also refuse `freeze_off` while the freeze is not on:
+the freeze stays on until the `open` phase.
 For `mirror-reset`, `freeze_off` means apply T1 before retrying;
 `authority_changed:core_active` refuses a reset while core is active, and
 `authority_changed:epoch_mismatch` means the owner or epoch no longer matches. Re-read status and

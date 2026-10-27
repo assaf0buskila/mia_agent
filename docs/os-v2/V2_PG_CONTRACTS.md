@@ -3226,8 +3226,10 @@ proposal (`kind="assistant_key.issue"`). The numeric Telegram owner approves it 
 2. After the DB commit, the card is sent. It's approvable for 10 min.
 3. Approval only CAS-marks the request `approved`. It sends no secret.
 4. `POST …/issue-requests/{id}/collect`, by the **same OS session** (cookie, Origin and CSRF; `session_binding` =
-   HMAC(pepper, session_hash), never the raw hash) within 10 min of approval, mints the credential. In **one ledger
-   transaction** it stores only the hash, flips the request to `collected`, and returns the plaintext exactly once.
+   HMAC-SHA256(`os_step_up_secret`, `chain_id`), never the raw id (corrected 2026-10-27: the code keys it on
+   os_step_up_secret, `app/services/assistant_issue.py:28-34`, not the pepper; see E37a)) within 10 min of approval,
+   mints the credential. In **one ledger transaction** it stores only the hash, flips the request to `collected`,
+   and returns the plaintext exactly once.
 
 **The two factors.** Neither the OS session alone nor Telegram alone can issue a key. Another session gets 404.
 
