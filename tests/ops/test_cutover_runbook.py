@@ -712,3 +712,101 @@ def test_every_step_names_its_verification_and_a_rollback():
 
 def test_the_fixed_clock_of_the_examples_matches_the_world():
     assert at() == NOW
+
+
+# ---------------------------------------------------- the doc-vs-code review of 2026-10-27
+
+
+def flat_section(heading: str) -> str:
+    return re.sub(r"\s+", " ", section_of(heading))
+
+
+def test_settings_push_has_one_full_form_with_the_mandatory_project_id():
+    rule = RUNBOOK.split("5. **Keys that matter**", 1)[1].split("6. **", 1)[0]
+    rule = re.sub(r"\s+", " ", rule)
+    push = ('powershell -NoProfile -Command "& .\\ops\\gcp\\push-settings.ps1 -ProjectId '
+            "mia-assafweb -PatchSecret -Set @{ KEY = 'value' }\"")
+    assert push in rule and "not `-File`" in rule
+    script = (ROOT / "ops/gcp/push-settings.ps1").read_text(encoding="utf-8")
+    assert "[Parameter(Mandatory = $true)] [string]$ProjectId" in script
+
+
+def test_a_bare_freeze_plan_is_the_drain_phase_and_the_text_warns_at_t1_and_t2():
+    assert cli.build_parser().parse_args(["freeze-plan", "--approved-sha", SHA]).phase == "drain"
+    assert "a bare `freeze-plan` with no `--phase` is `--phase drain`" in flat_section("### T1")
+    assert "never run `freeze-plan` without `--phase`" in flat_section("### T2")
+
+
+def test_evidence_size_leniency_and_the_backup_bounds_are_the_codes_own():
+    flat = re.sub(r"\s+", " ", RUNBOOK)
+    assert cli.MAX_EVIDENCE_BYTES == 1_048_576 and "1,048,576 bytes" in flat
+    assert "`backup.json` and `restore-drill.json` are read leniently" in flat
+    assert "<installed path>" not in RUNBOOK
+    installer = (ROOT / "ops/gcp/backup/install_on_vm.py").read_text(encoding="utf-8")
+    assert "/opt/mia/backup" in installer
+    offsite = (ROOT / "ops/gcp/backup/backup_offsite.py").read_text(encoding="utf-8")
+    assert "max_age_minutes: int = 45" in offsite and 'report["last_failure_code"]' in offsite
+    assert cli.BACKUP_MAX_AGE == timedelta(hours=1)
+    rule = RUNBOOK.split("2. **Take a verified backup first.**", 1)[1].split("3. **", 1)[0]
+    rule = re.sub(r"\s+", " ", rule)
+    for text in ("sudo python3 /opt/mia/backup/backup_offsite.py --status",
+                 "more than 45 minutes old", "`last_failure_code`", "under 1 h old"):
+        assert text in rule, text
+
+
+def test_the_import_steps_name_the_importers_own_paths_and_refusals():
+    importer = (ROOT / "scripts/os_import.py").read_text(encoding="utf-8")
+    assert '"--manifest-out"' in importer and "indent=2" in importer
+    assert '"already_staged"' in importer
+    flat = re.sub(r"\s+", " ", RUNBOOK)
+    assert "--manifest-out <file>" in flat_section("### T5")
+    assert "Write `manifest.json` compact" in flat and "`--stage` prints only counts" in flat
+    mkdir = "install -d -m 750 -o root -g 10001 /var/lib/mia/os-import"
+    assert mkdir in SCRIPT and mkdir in section_of("### T4")
+    assert "`already_staged`" in flat_section("### T4")
+    promote = (ROOT / "app/services/os_ledger/promote.py").read_text(encoding="utf-8")
+    codes = set(re.findall(r'LedgerError\(\s*"([a-z_]+)"', promote))
+    t5 = flat_section("### T5")
+    assert codes and not [code for code in codes if f"`{code}`" not in t5], codes
+    for code in ("binding_mismatch", "invalid_arguments", "authority_not_active",
+                 "authority_changed", "epoch_unset"):
+        assert f"`{code}`" in t5, code
+
+
+def test_the_t6_gates_and_the_switch_mirror_and_open_refusals_are_named():
+    t6 = flat_section("### T6")
+    assert "An empty `gates` list is not a pass" in t6
+    switch = t6.split("- **Switch**", 1)[1].split("- **Verify**", 1)[0]
+    for code in ("drain_keys_not_applied", "authority_state_invalid", "freeze_off"):
+        assert f"`{code}`" in switch, code
+    mirror = re.sub(r"\s+", " ", bullet_with(section_of("### T7"), r"--phase mirror"))
+    for code in ("authority_state_invalid", "freeze_off", "switch_not_applied"):
+        assert f"`{code}`" in mirror, code
+    assert ("`switch_not_applied` until the switch is in the settings, and "
+            "`authority_state_invalid`") in flat_section("## 4. ")
+
+
+def test_rollback_needs_core_active_and_its_rearm_step_needs_the_sha():
+    for heading in ("## 5. ", "### T6"):
+        assert "no shadow guard" in flat_section(heading), heading
+    rearm = bullet_with(section_of("## 5. "), r"sudo mia os-authority init --rearm")
+    rearm = re.sub(r"\s+", " ", rearm)
+    caveat = "`rollback` prints give `mia os-authority init --rearm` without it" in rearm
+    omitted = not any("--approved-sha" in step for step in cli.rollback_steps(1))
+    # Section 5's caveat stands exactly while rollback_steps omits --approved-sha.
+    assert caveat == omitted, (caveat, omitted)
+    assert "exact approved SHA required" in SCRIPT
+
+
+def test_dry_preflight_offline_copies_and_the_e37_binding_key():
+    trio = ["sheets_not_fenced", "freeze_off", "sheets_pending_proposals"]
+    assert sorted(trio, key=cli.PRECONDITIONS.index) == trio
+    assert f"always refuses `{','.join(trio)}`" in flat_section("## 2. ")
+    step = flat_section("### Step 6")
+    assert "`mia-backup.key`" in step and "write-once" in step
+    issue = (ROOT / "app/services/assistant_issue.py").read_text(encoding="utf-8")
+    assert 'getattr(settings, "os_step_up_secret", "")' in issue
+    contract = (ROOT / "docs/os-v2/V2_PG_CONTRACTS.md").read_text(encoding="utf-8")
+    e37 = re.sub(r"\s+", " ", contract.split("### E37 (", 1)[1].split("### E38", 1)[0])
+    assert "HMAC-SHA256(`os_step_up_secret`, `chain_id`)" in e37
+    assert "HMAC(pepper" not in e37
